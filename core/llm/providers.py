@@ -53,12 +53,13 @@ def is_gpt_5_6_model(model_name):
 
 class LLMProvider(ABC):
     @abstractmethod
-    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         """
         Yields chunks of response.
         Each chunk should be a dict with:
         - type: 'content' | 'reasoning' | 'tool_call' | 'usage' | 'error'
-          | 'response_items' | 'server_tool_status'
+          | 'response_items' | 'server_tool_status' | 'provider_request'
+          | 'provider_terminal'
         - content: str (for content/reasoning)
         - tool_call: dict (for tool_call, partial or complete)
         `response_items` carries provider output items needed for stateless replay;
@@ -265,11 +266,36 @@ class OpenAIProvider(LLMProvider):
             else "OpenAI Chat Completions"
         )
 
-    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+    @staticmethod
+    def _stream_request_metadata(stream, client_request_id=""):
+        response = getattr(stream, "response", None) or getattr(stream, "_response", None)
+        headers = getattr(response, "headers", None)
+        provider_request_id = ""
+        if headers is not None:
+            try:
+                provider_request_id = str(headers.get("x-request-id") or "")
+            except Exception:
+                provider_request_id = ""
+        return {
+            "client_request_id": str(client_request_id or ""),
+            "provider_request_id": provider_request_id,
+        }
+
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         try:
-            ensure_tool_call_sequence(messages, context=f"{self.provider_name} request")
+            request_context = request_context if isinstance(request_context, dict) else {}
+            client_request_id = str(request_context.get("client_request_id") or "")[:512]
+            provider_name = str(
+                getattr(self, "provider_name", "") or "OpenAI Chat Completions"
+            )
+            ensure_tool_call_sequence(messages, context=f"{provider_name} request")
             if self.api_protocol == API_PROTOCOL_RESPONSES:
-                yield from self._responses_stream(messages, tools=tools, prompt_cache_key=prompt_cache_key)
+                yield from self._responses_stream(
+                    messages,
+                    tools=tools,
+                    prompt_cache_key=prompt_cache_key,
+                    request_context=request_context,
+                )
                 return
             # Clean messages for OpenAI (remove internal keys if any)
             clean_messages = self._prepare_messages(messages)
@@ -285,6 +311,8 @@ class OpenAIProvider(LLMProvider):
             }
             if api_tools:
                 params["tools"] = api_tools
+            if client_request_id:
+                params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
             if prompt_cache_key:
                 self._apply_prompt_cache_key(params, prompt_cache_key)
             self._apply_stream_usage_options(params)
@@ -299,7 +327,12 @@ class OpenAIProvider(LLMProvider):
                 params["reasoning_effort"] = self.reasoning_effort
 
             stream = self._create_chat_completion_stream(params)
+            yield {
+                "type": "provider_request",
+                **self._stream_request_metadata(stream, client_request_id),
+            }
 
+            terminal_seen = False
             for chunk in stream:
                 usage_payload = self._usage_payload(chunk)
                 if usage_payload:
@@ -308,7 +341,8 @@ class OpenAIProvider(LLMProvider):
                 if not choices:
                     continue
                     
-                delta = choices[0].delta
+                choice = choices[0]
+                delta = choice.delta
                 
                 # 1. Reasoning (DeepSeek style)
                 if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
@@ -351,6 +385,20 @@ class OpenAIProvider(LLMProvider):
                         if tool_call_id:
                             tool_call_payload["id"] = str(tool_call_id)
                         yield tool_call_payload
+                finish_reason = getattr(choice, "finish_reason", None)
+                if finish_reason is not None:
+                    terminal_seen = True
+                    yield {
+                        "type": "provider_terminal",
+                        "status": "completed" if str(finish_reason) in {"stop", "tool_calls"} else "incomplete",
+                        "finish_reason": str(finish_reason),
+                    }
+            if not terminal_seen:
+                yield {
+                    "type": "error",
+                    "code": "chat_stream_missing_terminal",
+                    "content": "Chat Completions stream ended without a finish_reason.",
+                }
                         
         except Exception as e:
             yield {"type": "error", "content": str(e)}
@@ -534,7 +582,9 @@ class OpenAIProvider(LLMProvider):
             normalized.append(item)
         return normalized
 
-    def _responses_stream(self, messages, tools=None, prompt_cache_key=None):
+    def _responses_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
+        request_context = request_context if isinstance(request_context, dict) else {}
+        client_request_id = str(request_context.get("client_request_id") or "")[:512]
         params = {
             "model": self.model_name,
             "input": self._prepare_responses_input(messages),
@@ -547,16 +597,37 @@ class OpenAIProvider(LLMProvider):
             params["reasoning"] = {"effort": self.reasoning_effort}
         if prompt_cache_key and not self.requires_deepseek_responses_replay:
             params["prompt_cache_key"] = str(prompt_cache_key)
+        if client_request_id:
+            params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
 
         stream = self.client.responses.create(**params)
+        yield {
+            "type": "provider_request",
+            **self._stream_request_metadata(stream, client_request_id),
+        }
         tool_indexes = {}
+        tool_states = {}
         next_tool_index = 0
+        streamed_output_text = ""
+        terminal_seen = False
         for event in stream:
             event_type = str(self._object_value(event, "type", "") or "")
+            provider_sequence = self._object_value(event, "sequence_number")
+            if event_type == "response.created":
+                response = self._object_value(event, "response")
+                yield {
+                    "type": "provider_request",
+                    "client_request_id": client_request_id,
+                    "response_id": str(self._object_value(response, "id", "") or ""),
+                    "provider_sequence": provider_sequence,
+                }
+                continue
             if event_type in {"response.output_text.delta", "response.refusal.delta"}:
                 delta = self._object_value(event, "delta", "")
                 if delta:
-                    yield {"type": "content", "content": str(delta)}
+                    text_delta = str(delta)
+                    streamed_output_text += text_delta
+                    yield {"type": "content", "content": text_delta}
                 continue
             if event_type in {
                 "response.reasoning_summary_text.delta",
@@ -600,14 +671,19 @@ class OpenAIProvider(LLMProvider):
                     tool_indexes[item_id] = index
                 call_id = str(self._object_value(item, "call_id", "") or item_id)
                 name = str(self._object_value(item, "name", "") or "")
+                initial_arguments = str(self._object_value(item, "arguments", "") or "")
+                tool_states[index] = {
+                    "id": call_id,
+                    "name": name,
+                    "arguments": initial_arguments,
+                }
                 payload = {"type": "tool_call", "index": index, "function": {}}
                 if call_id:
                     payload["id"] = call_id
                 if name:
                     payload["function"]["name"] = name
-                arguments = self._object_value(item, "arguments")
-                if arguments:
-                    payload["function"]["arguments"] = str(arguments)
+                if initial_arguments:
+                    payload["function"]["arguments"] = initial_arguments
                 yield payload
                 continue
             if event_type == "response.function_call_arguments.delta":
@@ -620,6 +696,11 @@ class OpenAIProvider(LLMProvider):
                 index = tool_indexes.get(item_id, fallback_index)
                 delta = self._object_value(event, "delta", "")
                 if delta:
+                    state = tool_states.setdefault(
+                        index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    state["arguments"] = str(state.get("arguments") or "") + str(delta)
                     yield {
                         "type": "tool_call",
                         "index": index,
@@ -631,6 +712,82 @@ class OpenAIProvider(LLMProvider):
                 replay_items = self._normalize_responses_replay_items(
                     self._object_value(response, "output"),
                 )
+                completed_text_parts = []
+                for item in replay_items:
+                    if item.get("type") != "message":
+                        continue
+                    for part in item.get("content") or []:
+                        if not isinstance(part, dict):
+                            continue
+                        part_type = str(part.get("type") or "")
+                        if part_type == "output_text":
+                            completed_text_parts.append(str(part.get("text") or ""))
+                        elif part_type == "refusal":
+                            completed_text_parts.append(
+                                str(part.get("refusal") or part.get("text") or "")
+                            )
+                completed_output_text = "".join(completed_text_parts)
+                if streamed_output_text and not completed_output_text.startswith(streamed_output_text):
+                    raise RuntimeError(
+                        "Responses output text diverged before completion."
+                    )
+                missing_output_text = completed_output_text[len(streamed_output_text):]
+                if missing_output_text:
+                    streamed_output_text += missing_output_text
+                    yield {"type": "content", "content": missing_output_text}
+                for item in replay_items:
+                    if item.get("type") != "function_call":
+                        continue
+                    call_id = str(item.get("call_id") or "")
+                    name = str(item.get("name") or "")
+                    arguments = str(item.get("arguments") or "")
+                    matching_index = next(
+                        (
+                            index
+                            for index, state in tool_states.items()
+                            if str(state.get("id") or "") == call_id
+                        ),
+                        None,
+                    )
+                    if matching_index is None:
+                        matching_index = next_tool_index
+                        next_tool_index += 1
+                        tool_states[matching_index] = {
+                            "id": call_id,
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                        yield {
+                            "type": "tool_call",
+                            "index": matching_index,
+                            "id": call_id,
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                        continue
+                    streamed = tool_states[matching_index]
+                    streamed_name = str(streamed.get("name") or "")
+                    streamed_arguments = str(streamed.get("arguments") or "")
+                    if streamed_name and streamed_name != name:
+                        raise RuntimeError(
+                            f"Responses function_call name changed before completion: {call_id}."
+                        )
+                    if not arguments.startswith(streamed_arguments):
+                        raise RuntimeError(
+                            f"Responses function_call arguments diverged before completion: {call_id}."
+                        )
+                    missing_arguments = arguments[len(streamed_arguments):]
+                    function_patch = {}
+                    if not streamed_name:
+                        function_patch["name"] = name
+                    if missing_arguments:
+                        function_patch["arguments"] = missing_arguments
+                    if function_patch:
+                        yield {
+                            "type": "tool_call",
+                            "index": matching_index,
+                            "id": call_id,
+                            "function": function_patch,
+                        }
                 yield {"type": "response_items", "items": replay_items}
                 if self.requires_deepseek_responses_replay:
                     for item in replay_items:
@@ -650,12 +807,30 @@ class OpenAIProvider(LLMProvider):
                 usage_payload = self._usage_payload(response)
                 if usage_payload:
                     yield {"type": "usage", "usage": usage_payload}
+                terminal_seen = True
+                yield {
+                    "type": "provider_terminal",
+                    "status": "completed",
+                    "response_id": str(self._object_value(response, "id", "") or ""),
+                    "provider_sequence": provider_sequence,
+                }
                 continue
             if event_type in {"response.failed", "response.incomplete", "error"}:
                 response = self._object_value(event, "response")
                 error = self._object_value(event, "error") or self._object_value(response, "error")
                 message = self._object_value(error, "message", "") or self._object_value(response, "incomplete_details", "")
+                terminal_seen = True
+                yield {
+                    "type": "provider_terminal",
+                    "status": "incomplete" if event_type == "response.incomplete" else "failed",
+                    "event_type": event_type,
+                    "response_id": str(self._object_value(response, "id", "") or ""),
+                    "provider_sequence": provider_sequence,
+                    "error": str(message or ""),
+                }
                 raise RuntimeError(str(message or f"Responses API stream ended with {event_type}."))
+        if not terminal_seen:
+            raise RuntimeError("Responses API stream ended without a terminal event.")
 
     def _prepare_responses_tools(self, tools):
         prepared = []
@@ -805,29 +980,7 @@ class OpenAIProvider(LLMProvider):
         params["stream_options"] = stream_options
 
     def _create_chat_completion_stream(self, params):
-        try:
-            return self.client.chat.completions.create(**params)
-        except Exception as exc:
-            if "stream_options" not in params or not self._should_retry_without_stream_options(exc):
-                raise
-            fallback = dict(params)
-            fallback.pop("stream_options", None)
-            return self.client.chat.completions.create(**fallback)
-
-    def _should_retry_without_stream_options(self, exc):
-        text = str(exc or "").lower()
-        if "stream_options" in text:
-            return True
-        retry_markers = (
-            "unknown parameter",
-            "unsupported parameter",
-            "invalid parameter",
-            "unrecognized",
-            "not supported",
-            "bad request",
-            "400",
-        )
-        return any(marker in text for marker in retry_markers)
+        return self.client.chat.completions.create(**params)
 
     def _usage_payload(self, chunk):
         usage = getattr(chunk, "usage", None)
@@ -1047,7 +1200,7 @@ class AnthropicProvider(LLMProvider):
         text = str(base_url or "").strip().lower().rstrip("/")
         return text.endswith("/coding/anthropic") or "/coding/anthropic/" in text
 
-    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         try:
             system_prompt, api_messages = self._prepare_messages(messages)
             
@@ -1079,7 +1232,6 @@ class AnthropicProvider(LLMProvider):
                                     "arguments": getattr(event.delta, "partial_json", "") or ""
                                 }
                             }
-                            
                     elif event.type == "content_block_start":
                         if event.content_block.type == "tool_use":
                             yield {
@@ -1091,6 +1243,7 @@ class AnthropicProvider(LLMProvider):
                                     "arguments": "" # Start
                                 }
                             }
+                yield {"type": "provider_terminal", "status": "completed", "finish_reason": "end_turn"}
 
         except Exception as e:
             yield {"type": "error", "content": str(e)}

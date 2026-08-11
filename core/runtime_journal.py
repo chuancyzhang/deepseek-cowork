@@ -1,0 +1,525 @@
+import hashlib
+import json
+import os
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
+
+
+RUNTIME_JOURNAL_VERSION = 2
+
+
+class RuntimeJournalError(RuntimeError):
+    pass
+
+
+class RuntimeJournal:
+    """Versioned sidecar state for active chat runs.
+
+    The journal deliberately lives outside chat_history.sqlite so older
+    application versions can continue to read the conversation database.
+    """
+
+    _thread_locks_guard = threading.Lock()
+    _thread_locks = {}
+
+    def __init__(self, history_dir):
+        self.root = os.path.join(os.path.abspath(history_dir), "runtime_journal_v2")
+        os.makedirs(self.root, exist_ok=True)
+
+    @staticmethod
+    def _session_key(session_id):
+        text = str(session_id or "").strip()
+        if not text:
+            raise ValueError("session_id is required")
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _safe_id(value, name):
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError(f"{name} is required")
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _canonical_json(value):
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def checksum(cls, value):
+        return hashlib.sha256(cls._canonical_json(value).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def messages_hash(cls, messages):
+        normalized = []
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            meta = message.get("meta")
+            if isinstance(meta, dict):
+                meta = dict(meta)
+                meta.pop("sequence", None)
+                if not meta:
+                    meta = None
+            normalized.append(
+                {
+                    "id": str(message.get("id") or ""),
+                    "role": str(message.get("role") or ""),
+                    "content": message.get("content"),
+                    "tool_calls": message.get("tool_calls"),
+                    "reasoning_content": (
+                        message.get("reasoning_content")
+                        if message.get("reasoning_content") is not None
+                        else message.get("reasoning")
+                    ),
+                    "content_parts": message.get("content_parts"),
+                    "meta": meta,
+                    "result_obj": message.get("result_obj"),
+                    "token_count": message.get("token_count"),
+                    "tool_call_id": message.get("tool_call_id"),
+                }
+            )
+        return cls.checksum(normalized)
+
+    def _session_dir(self, session_id):
+        path = os.path.join(self.root, "sessions", self._session_key(session_id))
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _category_dir(self, session_id, category):
+        path = os.path.join(self._session_dir(session_id), category)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _manifest_path(self, session_id):
+        return os.path.join(self._session_dir(session_id), "manifest.json")
+
+    def _record_path(self, session_id, category, record_id):
+        return os.path.join(
+            self._category_dir(session_id, category),
+            f"{self._safe_id(record_id, f'{category}_id')}.json",
+        )
+
+    @staticmethod
+    def _envelope(payload):
+        return {
+            "journal_version": RUNTIME_JOURNAL_VERSION,
+            "checksum": RuntimeJournal.checksum(payload),
+            "payload": payload,
+        }
+
+    def _atomic_write(self, path, payload):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        envelope = self._envelope(payload)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".runtime-",
+            suffix=".tmp",
+            dir=os.path.dirname(path),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(envelope, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
+    def _read(self, path, default=None):
+        if not os.path.isfile(path):
+            return default
+        with open(path, "r", encoding="utf-8") as handle:
+            envelope = json.load(handle)
+        if int(envelope.get("journal_version") or 0) != RUNTIME_JOURNAL_VERSION:
+            raise RuntimeJournalError(f"unsupported runtime journal version: {path}")
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeJournalError(f"invalid runtime journal payload: {path}")
+        if envelope.get("checksum") != self.checksum(payload):
+            raise RuntimeJournalError(f"runtime journal checksum mismatch: {path}")
+        return payload
+
+    @classmethod
+    def _thread_lock(cls, path):
+        with cls._thread_locks_guard:
+            lock = cls._thread_locks.get(path)
+            if lock is None:
+                lock = threading.RLock()
+                cls._thread_locks[path] = lock
+            return lock
+
+    @staticmethod
+    def _lock_file(handle):
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if not handle.read(1):
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _unlock_file(handle):
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def session_lock(self, session_id):
+        lock_path = os.path.join(self._session_dir(session_id), "session.lock")
+        thread_lock = self._thread_lock(lock_path)
+        with thread_lock:
+            with open(lock_path, "a+b") as handle:
+                self._lock_file(handle)
+                try:
+                    yield
+                finally:
+                    self._unlock_file(handle)
+
+    def load_manifest(self, session_id):
+        payload = self._read(self._manifest_path(session_id), default=None)
+        if payload is not None:
+            return payload
+        return {
+            "session_id": str(session_id),
+            "revision": 0,
+            "writer_owner": "",
+            "sqlite_messages_hash": "",
+            "pending_commit_run_id": "",
+            "excluded_message_ids": [],
+            "updated_at": 0.0,
+        }
+
+    def list_manifests(self):
+        sessions_dir = os.path.join(self.root, "sessions")
+        if not os.path.isdir(sessions_dir):
+            return []
+        manifests = []
+        for name in sorted(os.listdir(sessions_dir)):
+            path = os.path.join(sessions_dir, name, "manifest.json")
+            if not os.path.isfile(path):
+                continue
+            manifests.append(self._read(path))
+        return manifests
+
+    def update_manifest(self, session_id, patch=None, *, expected_revision=None):
+        with self.session_lock(session_id):
+            manifest = self.load_manifest(session_id)
+            current_revision = int(manifest.get("revision") or 0)
+            if expected_revision is not None and current_revision != int(expected_revision):
+                raise RuntimeJournalError(
+                    f"runtime manifest revision conflict for {session_id}: "
+                    f"expected {int(expected_revision)}, got {current_revision}"
+                )
+            if isinstance(patch, dict):
+                manifest.update(patch)
+            manifest["session_id"] = str(session_id)
+            manifest["revision"] = current_revision + 1
+            manifest["updated_at"] = time.time()
+            self._atomic_write(self._manifest_path(session_id), manifest)
+            return manifest
+
+    def begin_run(
+        self,
+        session_id,
+        run_id,
+        *,
+        turn_id="",
+        writer_owner="",
+        base_messages=None,
+        status="running",
+        extra=None,
+    ):
+        now = time.time()
+        record = {
+            "session_id": str(session_id),
+            "run_id": str(run_id),
+            "turn_id": str(turn_id or ""),
+            "status": str(status or "running"),
+            "writer_owner": str(writer_owner or ""),
+            "base_messages_hash": self.messages_hash(base_messages or []),
+            "last_event_sequence": 0,
+            "draft_content": "",
+            "draft_reasoning": "",
+            "created_at": now,
+            "updated_at": now,
+            "finished_at": None,
+        }
+        if isinstance(extra, dict):
+            record.update(extra)
+        with self.session_lock(session_id):
+            manifest = self.load_manifest(session_id)
+            active_run_id = str(manifest.get("active_run_id") or "")
+            if active_run_id and active_run_id != str(run_id):
+                active_record = self._read(
+                    self._record_path(session_id, "runs", active_run_id),
+                    default=None,
+                )
+                active_status = str((active_record or {}).get("status") or "")
+                if active_status not in {"completed", "failed", "interrupted", "cancelled"}:
+                    raise RuntimeJournalError(
+                        f"session {session_id} already has active run {active_run_id}"
+                    )
+            current_owner = str(manifest.get("writer_owner") or "")
+            requested_owner = str(writer_owner or current_owner)
+            if current_owner and requested_owner and current_owner != requested_owner:
+                if str(manifest.get("pending_commit_run_id") or ""):
+                    raise RuntimeJournalError(
+                        f"writer owner transfer blocked by pending commit for session {session_id}"
+                    )
+                if active_run_id:
+                    active_record = self._read(
+                        self._record_path(session_id, "runs", active_run_id),
+                        default=None,
+                    )
+                    if str((active_record or {}).get("status") or "") not in {
+                        "completed",
+                        "failed",
+                        "interrupted",
+                        "cancelled",
+                    }:
+                        raise RuntimeJournalError(
+                            f"writer owner transfer blocked for active session {session_id}"
+                        )
+            record["writer_owner"] = requested_owner
+            self._atomic_write(self._record_path(session_id, "runs", run_id), record)
+            active_manifest_run_id = (
+                ""
+                if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}
+                else str(run_id)
+            )
+            manifest.update({
+                "active_run_id": active_manifest_run_id,
+                "writer_owner": requested_owner,
+                "sqlite_messages_hash": record["base_messages_hash"],
+            })
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = now
+            self._atomic_write(self._manifest_path(session_id), manifest)
+        return record
+
+    def get_run(self, session_id, run_id):
+        return self._read(self._record_path(session_id, "runs", run_id), default=None)
+
+    def update_run(self, session_id, run_id, patch):
+        with self.session_lock(session_id):
+            path = self._record_path(session_id, "runs", run_id)
+            record = self._read(path, default=None)
+            if record is None:
+                raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            record.update(dict(patch or {}))
+            record["updated_at"] = time.time()
+            if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+                record["finished_at"] = record.get("finished_at") or time.time()
+            self._atomic_write(path, record)
+            if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+                manifest = self.load_manifest(session_id)
+                if str(manifest.get("active_run_id") or "") == str(run_id):
+                    manifest["active_run_id"] = ""
+                    manifest["revision"] = int(manifest.get("revision") or 0) + 1
+                    manifest["updated_at"] = time.time()
+                    self._atomic_write(self._manifest_path(session_id), manifest)
+            return record
+
+    def append_event(self, session_id, run_id, event_type, payload=None, provider_sequence=None):
+        with self.session_lock(session_id):
+            run_path = self._record_path(session_id, "runs", run_id)
+            record = self._read(run_path, default=None)
+            if record is None:
+                raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            sequence = int(record.get("last_event_sequence") or 0) + 1
+            event = {
+                "sequence": sequence,
+                "type": str(event_type or "event"),
+                "payload": payload if isinstance(payload, dict) else {"value": payload},
+                "provider_sequence": provider_sequence,
+                "created_at": time.time(),
+            }
+            event_path = os.path.join(
+                self._category_dir(session_id, "events"),
+                f"{self._safe_id(run_id, 'run_id')}.jsonl",
+            )
+            with open(event_path, "a", encoding="utf-8") as handle:
+                handle.write(self._canonical_json(self._envelope(event)) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            record["last_event_sequence"] = sequence
+            record["updated_at"] = time.time()
+            self._atomic_write(run_path, record)
+            return event
+
+    def read_events(self, session_id, run_id, starting_after=0):
+        with self.session_lock(session_id):
+            return self._read_events_unlocked(session_id, run_id, starting_after)
+
+    def _read_events_unlocked(self, session_id, run_id, starting_after=0):
+        path = os.path.join(
+            self._category_dir(session_id, "events"),
+            f"{self._safe_id(run_id, 'run_id')}.jsonl",
+        )
+        if not os.path.isfile(path):
+            return []
+        events = []
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                envelope = json.loads(line)
+                if int(envelope.get("journal_version") or 0) != RUNTIME_JOURNAL_VERSION:
+                    raise RuntimeJournalError(f"unsupported runtime event version: {path}")
+                event = envelope.get("payload")
+                if not isinstance(event, dict) or envelope.get("checksum") != self.checksum(event):
+                    raise RuntimeJournalError(f"runtime event checksum mismatch: {path}")
+                if int(event.get("sequence") or 0) > int(starting_after or 0):
+                    events.append(event)
+        return events
+
+    def record_attempt(self, session_id, attempt_id, payload):
+        record = dict(payload or {})
+        record.update({
+            "session_id": str(session_id),
+            "attempt_id": str(attempt_id),
+            "updated_at": time.time(),
+        })
+        path = self._record_path(session_id, "attempts", attempt_id)
+        with self.session_lock(session_id):
+            existing = self._read(path, default={}) or {}
+            existing.update(record)
+            existing.setdefault("created_at", time.time())
+            self._atomic_write(path, existing)
+        return existing
+
+    def get_attempt(self, session_id, attempt_id):
+        return self._read(
+            self._record_path(session_id, "attempts", attempt_id),
+            default=None,
+        )
+
+    def record_tool(self, session_id, execution_id, payload):
+        record = dict(payload or {})
+        record.update({
+            "session_id": str(session_id),
+            "execution_id": str(execution_id),
+            "updated_at": time.time(),
+        })
+        path = self._record_path(session_id, "tools", execution_id)
+        with self.session_lock(session_id):
+            existing = self._read(path, default={}) or {}
+            existing.update(record)
+            existing.setdefault("created_at", time.time())
+            self._atomic_write(path, existing)
+        return existing
+
+    def get_tool(self, session_id, execution_id):
+        return self._read(self._record_path(session_id, "tools", execution_id), default=None)
+
+    def find_tool_execution(
+        self,
+        session_id,
+        *,
+        name,
+        args_hash,
+        statuses=None,
+        committed=None,
+    ):
+        directory = self._category_dir(session_id, "tools")
+        allowed = {str(item) for item in (statuses or []) if str(item)}
+        newest = None
+        for filename in os.listdir(directory):
+            if not filename.endswith(".json"):
+                continue
+            path = os.path.join(directory, filename)
+            record = self._read(path, default=None)
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("name") or "") != str(name or ""):
+                continue
+            if str(record.get("args_hash") or "") != str(args_hash or ""):
+                continue
+            if allowed and str(record.get("status") or "") not in allowed:
+                continue
+            if committed is not None and bool(record.get("committed")) != bool(committed):
+                continue
+            if newest is None or float(record.get("updated_at") or 0) > float(newest.get("updated_at") or 0):
+                newest = record
+        return newest
+
+    def mark_pending_commit(self, session_id, run_id, messages, *, title="", status="active", meta=None):
+        payload = {
+            "pending_commit": {
+                "run_id": str(run_id),
+                "messages": [item for item in (messages or []) if isinstance(item, dict)],
+                "title": str(title or ""),
+                "status": str(status or "active"),
+                "meta": dict(meta or {}),
+                "messages_hash": self.messages_hash(messages or []),
+                "created_at": time.time(),
+            },
+            "pending_commit_run_id": str(run_id),
+        }
+        return self.update_manifest(session_id, payload)
+
+    def acknowledge_commit(self, session_id, run_id, sqlite_messages):
+        with self.session_lock(session_id):
+            manifest = self.load_manifest(session_id)
+            pending_run_id = str(manifest.get("pending_commit_run_id") or "")
+            if pending_run_id and pending_run_id != str(run_id or ""):
+                return False
+            pending = manifest.get("pending_commit")
+            sqlite_messages_hash = self.messages_hash(sqlite_messages or [])
+            if isinstance(pending, dict):
+                expected_messages_hash = str(pending.get("messages_hash") or "")
+                if expected_messages_hash and expected_messages_hash != sqlite_messages_hash:
+                    return False
+            manifest.pop("pending_commit", None)
+            manifest["pending_commit_run_id"] = ""
+            manifest["sqlite_messages_hash"] = sqlite_messages_hash
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = time.time()
+            self._atomic_write(self._manifest_path(session_id), manifest)
+            tools_dir = self._category_dir(session_id, "tools")
+            for filename in os.listdir(tools_dir):
+                if not filename.endswith(".json"):
+                    continue
+                path = os.path.join(tools_dir, filename)
+                record = self._read(path, default=None)
+                if not isinstance(record, dict):
+                    continue
+                if str(record.get("run_id") or "") != str(run_id or ""):
+                    continue
+                record["committed"] = True
+                record["committed_at"] = time.time()
+                record["updated_at"] = time.time()
+                self._atomic_write(path, record)
+            event_path = os.path.join(
+                self._category_dir(session_id, "events"),
+                f"{self._safe_id(run_id, 'run_id')}.jsonl",
+            )
+            try:
+                os.unlink(event_path)
+            except FileNotFoundError:
+                pass
+            return True

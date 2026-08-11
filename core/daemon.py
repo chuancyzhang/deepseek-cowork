@@ -10,7 +10,7 @@ from PySide6.QtCore import QEventLoop, QTimer, Qt, QThread
 from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
-from core.chat_storage import ChatStorage
+from core.chat_storage import ChatStorage, ConversationWriteConflict
 from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir, get_base_dir
 from core.im_session_key import parse_im_session_key
@@ -19,6 +19,7 @@ from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
+from core.runtime_journal import RuntimeJournal
 from core.conversation_integrity import merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
@@ -82,6 +83,7 @@ class DaemonState:
         history_dir = config_manager.get_chat_history_dir()
         db_path = os.path.join(history_dir, "chat_history.sqlite")
         self.chat_storage = ChatStorage(db_path)
+        self.runtime_journal = RuntimeJournal(history_dir)
         self.sessions = {}
         self.active_workers = {}
         self.detached_workers = {}
@@ -109,20 +111,44 @@ class DaemonState:
         if self.suspended:
             self.suspended = False
 
+    def ensure_runtime_run(self, session_id, run_id, turn_id, writer_owner, base_messages):
+        existing = self.runtime_journal.get_run(session_id, run_id)
+        if existing is not None:
+            existing_owner = str(existing.get("writer_owner") or "")
+            if existing_owner and existing_owner != str(writer_owner or ""):
+                raise RuntimeError(
+                    f"runtime writer owner mismatch for {session_id}: "
+                    f"{existing_owner} != {writer_owner}"
+                )
+            return existing
+        run = self.runtime_journal.begin_run(
+            session_id,
+            run_id,
+            turn_id=turn_id,
+            writer_owner=writer_owner,
+            base_messages=base_messages,
+            extra={"execution_backend": "daemon"},
+        )
+        self.runtime_journal.append_event(
+            session_id,
+            run_id,
+            "run_started",
+            {
+                "turn_id": str(turn_id or ""),
+                "writer_owner": str(writer_owner or ""),
+                "snapshot_hash": RuntimeJournal.messages_hash(base_messages),
+            },
+        )
+        return run
+
     def maybe_suspend(self):
         if self.suspended:
             return
         if time.time() - self.last_activity < self.idle_timeout:
             return
         with self.lock:
-            for session_id, messages in list(self.sessions.items()):
-                messages = self._normalize_persistable_messages(
-                    session_id,
-                    messages,
-                    source="idle_suspend",
-                )
-                title = _compute_session_title(messages)
-                self.chat_storage.save_conversation(session_id, messages, title=title)
+            if self.active_workers or self.detached_workers:
+                return
             self.sessions = {}
             self.suspended = True
 
@@ -257,6 +283,19 @@ class DaemonState:
         return normalized_messages
 
     def append_worker_result_messages(self, session_id, messages, result, source):
+        if "error" in result:
+            _log_daemon(
+                "provider_error_without_ledger_append "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "source": source,
+                        "error": str(result.get("error") or ""),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
         generated_messages = result.get("generated_messages", [])
         if generated_messages:
             persistable_messages = filter_persistable_messages(generated_messages)
@@ -277,19 +316,6 @@ class DaemonState:
                 )
             messages[:] = merge_messages_by_id(messages, persistable_messages)
             return
-        if "error" in result:
-            _log_daemon(
-                "provider_error_without_ledger_append "
-                + json.dumps(
-                    {
-                        "session_id": session_id,
-                        "source": source,
-                        "error": str(result.get("error") or ""),
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return
         fallback = {
             "id": str(result.get("message_id") or uuid.uuid4().hex),
             "role": result.get("role", "assistant"),
@@ -305,22 +331,64 @@ class DaemonState:
             fallback["meta"] = fallback_meta
         messages[:] = merge_messages_by_id(messages, [fallback])
 
-    def save_session(self, session_id):
+    def save_session(self, session_id, run_id="", *, acknowledge=True):
         with self.lock:
+            if session_id not in self.sessions:
+                _log_daemon(
+                    f"daemon_save_session skipped_missing_session session_id={session_id}"
+                )
+                return False
             messages = self._normalize_persistable_messages(
                 session_id,
-                self.sessions.get(session_id, []),
+                self.sessions[session_id],
                 source="daemon_save_session",
             )
             self.sessions[session_id] = messages
         title = _compute_session_title(messages)
-        self.chat_storage.save_conversation(session_id, messages, title=title)
+        try:
+            result = self.chat_storage.save_conversation_safely(
+                session_id,
+                messages,
+                title=title,
+            )
+        except ConversationWriteConflict as exc:
+            _log_daemon(
+                "daemon_save_session conflict "
+                f"session_id={session_id} run_id={run_id} error={exc}"
+            )
+            if run_id:
+                self.runtime_journal.append_event(
+                    session_id,
+                    run_id,
+                    "sqlite_conflict",
+                    {
+                        "error": str(exc),
+                        "snapshot_hash": RuntimeJournal.messages_hash(messages),
+                    },
+                )
+                self.runtime_journal.mark_pending_commit(
+                    session_id,
+                    run_id,
+                    messages,
+                    title=title,
+                    meta={"sqlite_conflict": str(exc)},
+                )
+            return False
+        _log_daemon(
+            "daemon_save_session committed "
+            f"session_id={session_id} outcome={result.get('outcome')} "
+            f"message_count={result.get('message_count')}"
+        )
+        if run_id and acknowledge:
+            self.runtime_journal.acknowledge_commit(session_id, run_id, messages)
+        return True
     
-    def set_active_worker(self, session_id, worker, turn_id=None):
+    def set_active_worker(self, session_id, worker, turn_id=None, run_id=None):
         with self.lock:
             self.active_workers[session_id] = {
                 "worker": worker,
                 "turn_id": str(turn_id or getattr(worker, "turn_id", "") or ""),
+                "run_id": str(run_id or getattr(worker, "request_id", "") or ""),
             }
     
     def clear_active_worker(self, session_id):
@@ -517,7 +585,12 @@ class DaemonState:
             dependency_coordinator=self.dependency_coordinator,
         )
         worker.finished_signal.connect(on_finished)
-        self.set_active_worker(session_id, worker)
+        self.set_active_worker(
+            session_id,
+            worker,
+            turn_id=turn_id,
+            run_id=request_id,
+        )
         worker.start()
         loop.exec()
         return result_holder.get("result") or {"error": "No response"}
@@ -809,6 +882,7 @@ class DaemonState:
         turn_id=None,
         request_id=None,
         user_message_id=None,
+        writer_owner=None,
     ):
         self.touch()
         try:
@@ -818,6 +892,11 @@ class DaemonState:
         idle_minutes = self.config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.request_messages(session_id, messages_snapshot)
+        sqlite_baseline = (
+            self.chat_storage.get_messages(session_id)
+            if self.chat_storage.has_conversation(session_id)
+            else []
+        )
         normalized_run_context = normalize_run_context(run_context)
         turn_id = str(turn_id or uuid.uuid4().hex)
         request_id = str(request_id or uuid.uuid4().hex)
@@ -827,6 +906,14 @@ class DaemonState:
             message_id=user_message_id,
             turn_id=turn_id,
             request_id=request_id,
+        )
+        effective_writer_owner = str(writer_owner or f"daemon:{os.getpid()}")
+        self.ensure_runtime_run(
+            session_id,
+            request_id,
+            turn_id,
+            effective_writer_owner,
+            sqlite_baseline,
         )
         worker_messages = (
             self._build_overflow_retry_messages(
@@ -887,7 +974,35 @@ class DaemonState:
             messages,
             source="daemon_sync_finalize",
         )
-        self.save_session(session_id)
+        terminal_status = "interrupted" if "error" in result else "completed"
+        self.runtime_journal.append_event(
+            session_id,
+            request_id,
+            "run_finished" if terminal_status == "completed" else "run_interrupted",
+            {
+                "status": terminal_status,
+                "error": str(result.get("error") or ""),
+            },
+        )
+        self.runtime_journal.update_run(
+            session_id,
+            request_id,
+            {
+                "status": terminal_status,
+                "terminal_error": str(result.get("error") or ""),
+                "final_result": result,
+            },
+        )
+        if effective_writer_owner.startswith("ui:"):
+            if terminal_status == "completed":
+                self.runtime_journal.mark_pending_commit(
+                    session_id,
+                    request_id,
+                    messages,
+                    title=_compute_session_title(messages),
+                )
+        else:
+            self.save_session(session_id, run_id=request_id)
         self.touch()
         return result
 
@@ -914,8 +1029,62 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "suspended": state.suspended,
                     "last_activity": state.last_activity,
                     "sessions": len(state.sessions),
+                    "active_runs": len(state.active_workers) + len(state.detached_workers),
                     "pid": os.getpid(),
                     "signature": get_runtime_signature(),
+                }
+            )
+            return
+        if action == "attach_run":
+            session_id = str(data.get("session_id") or "")
+            run_id = str(data.get("run_id") or "")
+            if not session_id or not run_id:
+                self._send({"status": "error", "error": "Missing session_id or run_id"})
+                return
+            run = self.server.state.runtime_journal.get_run(session_id, run_id)
+            if run is None:
+                self._send({"status": "error", "error": "Run not found"})
+                return
+            with self.server.state.lock:
+                active = self.server.state.active_workers.get(session_id)
+                active_worker = active.get("worker") if isinstance(active, dict) else active
+                active_run_id = str(
+                    (active.get("run_id") if isinstance(active, dict) else "")
+                    or getattr(active_worker, "request_id", "")
+                    or ""
+                )
+            worker_active = bool(active_worker and active_run_id == run_id)
+            run_age = max(0.0, time.time() - float(run.get("updated_at") or 0.0))
+            if (
+                str(run.get("status") or "") == "running"
+                and not worker_active
+                and run_age >= 5.0
+            ):
+                self.server.state.runtime_journal.append_event(
+                    session_id,
+                    run_id,
+                    "run_interrupted",
+                    {"reason": "daemon_worker_missing"},
+                )
+                run = self.server.state.runtime_journal.update_run(
+                    session_id,
+                    run_id,
+                    {
+                        "status": "interrupted",
+                        "terminal_error": "The daemon worker is no longer active.",
+                    },
+                )
+            events = self.server.state.runtime_journal.read_events(
+                session_id,
+                run_id,
+                starting_after=data.get("starting_after") or 0,
+            )
+            self._send(
+                {
+                    "status": "ok",
+                    "run": run,
+                    "events": events,
+                    "worker_active": worker_active,
                 }
             )
             return
@@ -939,6 +1108,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 turn_id=turn_id,
                 request_id=request_id,
                 user_message_id=user_message_id,
+                writer_owner=str(data.get("writer_owner") or f"daemon:{os.getpid()}"),
             )
             self._send({"status": "ok", "session_id": session_id, "result": result})
             return
@@ -946,6 +1116,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             session_id = data.get("session_id") or uuid.uuid4().hex
             turn_id = str(data.get("turn_id") or uuid.uuid4().hex)
             request_id = str(data.get("request_id") or uuid.uuid4().hex)
+            writer_owner = str(data.get("writer_owner") or f"daemon:{os.getpid()}")
+            ui_owned_history = writer_owner.startswith("ui:")
             user_message_id = str(data.get("user_message_id") or "")
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
@@ -967,12 +1139,24 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             idle_minutes = state.config_manager.get("daemon_idle_minutes", 10)
             state.idle_timeout = max(int(idle_minutes), 1) * 60
             messages = state.request_messages(session_id, data.get("messages"))
+            sqlite_baseline = (
+                state.chat_storage.get_messages(session_id)
+                if state.chat_storage.has_conversation(session_id)
+                else []
+            )
             state.append_user_message_if_needed(
                 messages,
                 content,
                 message_id=user_message_id,
                 turn_id=turn_id,
                 request_id=request_id,
+            )
+            state.ensure_runtime_run(
+                session_id,
+                request_id,
+                turn_id,
+                writer_owner,
+                sqlite_baseline,
             )
             _log_daemon(
                 f"send_message_stream prepared_messages session_id={session_id} "
@@ -982,56 +1166,55 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             stream_closed = threading.Event()
             worker_holder = {}
 
-            def cancel_stream_due_to_disconnect(reason):
+            def detach_stream_due_to_disconnect(reason):
                 if stream_closed.is_set():
                     return
                 stream_closed.set()
                 _log_daemon(f"send_message_stream client disconnected session_id={session_id} reason={reason}")
-                try:
-                    interaction_service.cancel_session_requests(session_id, reason="client_disconnected")
-                except Exception as e:
-                    _log_daemon(f"client disconnect cancel interactions failed session_id={session_id} error={e}")
-                try:
-                    state._close_live_subagents(session_id, force=True)
-                except Exception as e:
-                    _log_daemon(f"client disconnect close sub-agents failed session_id={session_id} error={e}")
-                worker = worker_holder.get("worker")
-                if worker:
-                    try:
-                        worker.stop()
-                    except Exception as e:
-                        _log_daemon(f"client disconnect worker.stop failed session_id={session_id} error={e}")
-                state.clear_active_worker(session_id)
-                result_holder["result"] = {
-                    "error": "Daemon stream client disconnected.",
-                    "_streamed": True,
-                }
-                done.set()
+                state.runtime_journal.append_event(
+                    session_id,
+                    request_id,
+                    "subscriber_detached",
+                    {"reason": str(reason or "socket_closed")},
+                )
 
             def send_stream(payload):
+                event = state.runtime_journal.append_event(
+                    session_id,
+                    request_id,
+                    str(payload.get("type") or "stream_event"),
+                    payload,
+                )
                 if stream_closed.is_set():
                     return False
                 try:
                     with stream_lock:
                         if stream_closed.is_set():
                             return False
-                        raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+                        wire_payload = dict(payload)
+                        wire_payload["sequence"] = event["sequence"]
+                        raw = (json.dumps(wire_payload, ensure_ascii=False) + "\n").encode("utf-8")
                         self.wfile.write(raw)
                         self.wfile.flush()
                     return True
                 except Exception as e:
                     _log_daemon(f"send_stream write failed session_id={session_id} payload_type={payload.get('type')} error={e}")
-                    cancel_stream_due_to_disconnect(str(e))
+                    detach_stream_due_to_disconnect(str(e))
                     return False
 
             result_holder = {}
             done = threading.Event()
             def on_finished(result):
-                result_holder["result"] = result
-                if not stream_closed.is_set():
-                    send_stream({"type": "final", "result": result})
-                state.clear_active_worker(session_id)
-                done.set()
+                try:
+                    result_holder["result"] = result
+                except Exception as exc:
+                    _log_daemon(
+                        f"send_message_stream final capture failed session_id={session_id} "
+                        f"run_id={request_id} error={exc}"
+                    )
+                finally:
+                    state.clear_active_worker(session_id)
+                    done.set()
 
             worker = LLMWorker(
                 messages,
@@ -1062,7 +1245,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 send_stream({"type": "interaction_request", "data": request_payload})
 
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
-            state.set_active_worker(session_id, worker, turn_id=turn_id)
+            state.set_active_worker(
+                session_id,
+                worker,
+                turn_id=turn_id,
+                run_id=request_id,
+            )
             try:
                 _log_daemon(f"send_message_stream worker_starting session_id={session_id} turn_id={turn_id}")
                 send_stream({"type": "turn_started", "turn_id": turn_id})
@@ -1100,7 +1288,42 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 messages,
                 source="daemon_stream_finalize",
             )
-            state.save_session(session_id)
+            daemon_commit_succeeded = False
+            if ui_owned_history:
+                if not (isinstance(result, dict) and "error" in result):
+                    state.runtime_journal.mark_pending_commit(
+                        session_id,
+                        request_id,
+                        messages,
+                        title=_compute_session_title(messages),
+                    )
+                    _log_daemon(
+                        f"send_message_stream pending_commit session_id={session_id} "
+                        f"run_id={request_id} writer_owner={writer_owner}"
+                    )
+            else:
+                daemon_commit_succeeded = state.save_session(
+                    session_id,
+                    run_id=request_id,
+                    acknowledge=False,
+                )
+            terminal_status = "interrupted" if isinstance(result, dict) and "error" in result else "completed"
+            state.runtime_journal.update_run(
+                session_id,
+                request_id,
+                {
+                    "status": terminal_status,
+                    "terminal_error": str(result.get("error") or "") if isinstance(result, dict) else "",
+                    "final_result": result if isinstance(result, dict) else {},
+                },
+            )
+            send_stream({"type": "final", "result": result})
+            if daemon_commit_succeeded:
+                state.runtime_journal.acknowledge_commit(
+                    session_id,
+                    request_id,
+                    messages,
+                )
             state.touch()
             return
         if action == "stop_session":
@@ -1235,7 +1458,15 @@ class DaemonClient:
         except Exception:
             return None
 
-    def send_message(self, session_id, content, workspace_dir=None, run_context=None, messages=None):
+    def send_message(
+        self,
+        session_id,
+        content,
+        workspace_dir=None,
+        run_context=None,
+        messages=None,
+        writer_owner=None,
+    ):
         payload = {
             "action": "send_message",
             "session_id": session_id,
@@ -1243,6 +1474,8 @@ class DaemonClient:
             "workspace_dir": workspace_dir,
             "run_context": normalize_run_context(run_context),
         }
+        if writer_owner:
+            payload["writer_owner"] = str(writer_owner)
         if messages:
             payload["messages"] = messages
         return self._request(
@@ -1250,7 +1483,15 @@ class DaemonClient:
             timeout=self.send_timeout
         )
 
-    def send_message_stream(self, session_id, content, workspace_dir=None, run_context=None, messages=None):
+    def send_message_stream(
+        self,
+        session_id,
+        content,
+        workspace_dir=None,
+        run_context=None,
+        messages=None,
+        writer_owner=None,
+    ):
         sock = socket.create_connection((self.host, self.port), timeout=self.send_timeout)
         try:
             payload = {
@@ -1260,6 +1501,8 @@ class DaemonClient:
                 "workspace_dir": workspace_dir,
                 "run_context": normalize_run_context(run_context),
             }
+            if writer_owner:
+                payload["writer_owner"] = str(writer_owner)
             if messages:
                 payload["messages"] = messages
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -1288,6 +1531,16 @@ class DaemonClient:
             return self._request({"action": "stop_session", "session_id": session_id})
         except Exception:
             return None
+
+    def attach_run(self, session_id, run_id, starting_after=0):
+        return self._request(
+            {
+                "action": "attach_run",
+                "session_id": str(session_id or ""),
+                "run_id": str(run_id or ""),
+                "starting_after": int(starting_after or 0),
+            }
+        )
 
     def steer_message(self, session_id, expected_turn_id, message):
         try:

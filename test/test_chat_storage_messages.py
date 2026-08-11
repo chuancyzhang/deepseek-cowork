@@ -2,12 +2,13 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 import json
 from contextlib import closing
 from unittest.mock import patch
 
-from core.chat_storage import ChatStorage
+from core.chat_storage import ChatStorage, ConversationWriteConflict
 from core.llm.deepseek import DEEPSEEK_RESPONSES_REPLAY_META_KEY
 from core.llm.responses_replay import RESPONSES_REPLAY_META_KEY
 
@@ -34,6 +35,156 @@ class TestChatStorageMessages(unittest.TestCase):
                     title="Atomic",
                 )
         self.assertIsNone(storage.get_conversation_record("atomic-conversation"))
+
+    def test_safe_save_only_appends_and_rejects_divergent_snapshots(self):
+        storage = ChatStorage(self.db_path)
+        first = {"id": "u1", "role": "user", "content": "hello"}
+        second = {"id": "a1", "role": "assistant", "content": "world"}
+
+        created = storage.save_conversation_safely("safe", [first], title="Safe")
+        appended = storage.save_conversation_safely("safe", [first, second], title="Safe")
+        stale = storage.save_conversation_safely("safe", [first], title="Stale")
+
+        self.assertEqual(created["outcome"], "created")
+        self.assertEqual(appended["outcome"], "appended")
+        self.assertEqual(stale["outcome"], "stale")
+        self.assertEqual([item["id"] for item in storage.get_messages("safe")], ["u1", "a1"])
+        self.assertEqual(storage.get_conversation_record("safe")["title"], "Safe")
+
+        with self.assertRaises(ConversationWriteConflict):
+            storage.save_conversation_safely(
+                "safe",
+                [{"id": "u1", "role": "user", "content": "edited"}, second],
+            )
+        self.assertEqual(
+            [item["content"] for item in storage.get_messages("safe")],
+            ["hello", "world"],
+        )
+
+    def test_safe_save_never_replaces_existing_history_with_empty_snapshot(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation_safely(
+            "non-empty",
+            [{"id": "u1", "role": "user", "content": "keep"}],
+        )
+
+        result = storage.save_conversation_safely("non-empty", [])
+
+        self.assertEqual(result["outcome"], "stale")
+        self.assertEqual(
+            [item["content"] for item in storage.get_messages("non-empty")],
+            ["keep"],
+        )
+
+    def test_safe_save_does_not_change_sqlite_schema(self):
+        storage = ChatStorage(self.db_path)
+
+        def schema_snapshot():
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                master = conn.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                ).fetchall()
+                tables = {
+                    row[1]: conn.execute(f'PRAGMA table_info("{row[1]}")').fetchall()
+                    for row in master
+                    if row[0] == "table"
+                }
+                indexes = conn.execute("PRAGMA index_list(messages)").fetchall()
+                user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            return master, tables, indexes, user_version
+
+        before = schema_snapshot()
+        storage.save_conversation_safely(
+            "schema-stable",
+            [{"id": "u1", "role": "user", "content": "hello"}],
+        )
+        storage.save_conversation_safely(
+            "schema-stable",
+            [
+                {"id": "u1", "role": "user", "content": "hello"},
+                {"id": "a1", "role": "assistant", "content": "done"},
+            ],
+        )
+
+        self.assertEqual(schema_snapshot(), before)
+
+    def test_reading_legacy_rows_does_not_rewrite_them_and_safe_append_still_works(self):
+        storage = ChatStorage(self.db_path)
+        storage.upsert_conversation("legacy-read-only", title="Legacy")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO messages "
+                "(id, conversation_id, role, content, position, created_at) "
+                "VALUES (NULL, ?, 'user', 'legacy message', 0, 1)",
+                ("legacy-read-only",),
+            )
+            conn.commit()
+            before = conn.execute(
+                "SELECT rowid, id, role, content, position, created_at "
+                "FROM messages WHERE conversation_id = ?",
+                ("legacy-read-only",),
+            ).fetchall()
+
+        messages = storage.get_messages("legacy-read-only")
+        self.assertTrue(messages[0].get("id"))
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            after_read = conn.execute(
+                "SELECT rowid, id, role, content, position, created_at "
+                "FROM messages WHERE conversation_id = ?",
+                ("legacy-read-only",),
+            ).fetchall()
+        self.assertEqual(after_read, before)
+
+        storage.save_conversation_safely(
+            "legacy-read-only",
+            messages + [{"id": "a1", "role": "assistant", "content": "new answer"}],
+            title="Legacy",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT id, content FROM messages WHERE conversation_id = ? ORDER BY position",
+                ("legacy-read-only",),
+            ).fetchall()
+        self.assertIsNone(rows[0][0])
+        self.assertEqual(rows[1], ("a1", "new answer"))
+
+    def test_concurrent_divergent_appends_preserve_the_winning_branch(self):
+        storage = ChatStorage(self.db_path)
+        base = {"id": "u1", "role": "user", "content": "base"}
+        storage.save_conversation_safely("concurrent", [base])
+        barrier = threading.Barrier(3)
+        outcomes = []
+
+        def save_branch(message):
+            barrier.wait()
+            try:
+                result = storage.save_conversation_safely("concurrent", [base, message])
+                outcomes.append(result["outcome"])
+            except ConversationWriteConflict:
+                outcomes.append("conflict")
+
+        threads = [
+            threading.Thread(
+                target=save_branch,
+                args=({"id": "a1", "role": "assistant", "content": "branch-a"},),
+            ),
+            threading.Thread(
+                target=save_branch,
+                args=({"id": "a2", "role": "assistant", "content": "branch-b"},),
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(2)
+
+        self.assertCountEqual(outcomes, ["appended", "conflict"])
+        stored = storage.get_messages("concurrent")
+        self.assertEqual(len(stored), 2)
+        self.assertIn(stored[-1]["content"], {"branch-a", "branch-b"})
 
     def test_cross_conversation_message_id_conflict_is_remapped(self):
         storage = ChatStorage(self.db_path)

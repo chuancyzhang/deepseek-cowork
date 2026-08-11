@@ -2,8 +2,11 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import uuid
 from dataclasses import asdict
+
+from .runtime_journal import RuntimeJournal
 
 
 JOURNAL_VERSION = 1
@@ -12,9 +15,10 @@ JOURNAL_VERSION = 1
 class ChatRecoveryJournal:
     """Durable latest-snapshot journal for chat saves awaiting SQLite acknowledgement."""
 
-    def __init__(self, history_dir):
+    def __init__(self, history_dir, runtime_journal=None):
         self.directory = os.path.join(os.path.abspath(history_dir), "pending_chat_saves")
         os.makedirs(self.directory, exist_ok=True)
+        self.runtime_journal = runtime_journal or RuntimeJournal(history_dir)
 
     @staticmethod
     def _safe_session_name(session_id):
@@ -98,6 +102,63 @@ class ChatRecoveryJournal:
     def recover_into(self, storage):
         recovered = []
         errors = []
+        try:
+            manifests = self.runtime_journal.list_manifests()
+        except Exception as exc:
+            manifests = []
+            errors.append(
+                {
+                    "path": self.runtime_journal.root,
+                    "error": f"runtime manifest scan failed: {exc}",
+                }
+            )
+        for manifest in manifests:
+            pending = manifest.get("pending_commit") if isinstance(manifest, dict) else None
+            if not isinstance(pending, dict):
+                continue
+            session_id = str(manifest.get("session_id") or "").strip()
+            run_id = str(pending.get("run_id") or "").strip()
+            try:
+                if not session_id or not run_id:
+                    raise ValueError("runtime pending commit has no session_id or run_id")
+                messages = [
+                    item for item in (pending.get("messages") or []) if isinstance(item, dict)
+                ]
+                expected_hash = str(pending.get("messages_hash") or "")
+                actual_hash = RuntimeJournal.messages_hash(messages)
+                if not expected_hash or expected_hash != actual_hash:
+                    raise ValueError("runtime pending commit checksum mismatch")
+                storage.save_conversation_safely(
+                    session_id,
+                    messages,
+                    title=pending.get("title") or "新任务",
+                    status=pending.get("status") or "active",
+                    meta=pending.get("meta") or {},
+                )
+                acknowledged = self.runtime_journal.acknowledge_commit(
+                    session_id,
+                    run_id,
+                    storage.get_messages(session_id),
+                )
+                if not acknowledged:
+                    raise RuntimeError(
+                        "runtime pending commit did not match the recovered SQLite snapshot"
+                    )
+                recovered.append(session_id)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "path": os.path.join(
+                            self.runtime_journal.root,
+                            "sessions",
+                            hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+                            if session_id
+                            else "unknown",
+                            "manifest.json",
+                        ),
+                        "error": str(exc),
+                    }
+                )
         for name in sorted(os.listdir(self.directory)):
             if not name.endswith(".json"):
                 continue
@@ -146,16 +207,38 @@ class ChatRecoveryJournal:
                         else {}
                     )
                     if last_meta.get("recovery_checkpoint"):
-                        content = str(last_message.get("content") or "").rstrip()
-                        notice = "⚠️ 应用异常退出，以上为已恢复的未完成回复。"
-                        last_message["content"] = f"{content}\n\n{notice}" if content else notice
-                        last_meta["recovered_interrupted"] = True
-                        last_message["meta"] = last_meta
-                        messages[-1] = last_message
+                        messages = messages[:-1]
+                        run_id = str(last_message.get("id") or uuid.uuid4().hex)
+                        self.runtime_journal.begin_run(
+                            session_id,
+                            run_id,
+                            turn_id=last_meta.get("active_turn_id") or "",
+                            writer_owner="recovery:v1",
+                            base_messages=messages,
+                            status="interrupted",
+                            extra={
+                                "draft_content": str(last_message.get("content") or ""),
+                                "draft_reasoning": str(
+                                    last_message.get("reasoning")
+                                    or last_message.get("reasoning_content")
+                                    or ""
+                                ),
+                                "legacy_recovery_checkpoint": True,
+                                "finished_at": time.time(),
+                            },
+                        )
+                        self.runtime_journal.append_event(
+                            session_id,
+                            run_id,
+                            "legacy_checkpoint_recovered",
+                            {
+                                "content_length": len(str(last_message.get("content") or "")),
+                            },
+                        )
                 status = str(payload.get("status") or "draft")
                 if status == "running":
                     status = "interrupted"
-                storage.save_conversation(
+                storage.save_conversation_safely(
                     session_id,
                     messages,
                     title=payload.get("title") or "新任务",
@@ -163,7 +246,8 @@ class ChatRecoveryJournal:
                     meta=payload.get("meta") or {},
                 )
                 os.unlink(path)
-                recovered.append(session_id)
+                if session_id not in recovered:
+                    recovered.append(session_id)
             except Exception as exc:
                 errors.append({"path": path, "error": str(exc)})
         return recovered, errors

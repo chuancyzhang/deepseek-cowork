@@ -48,6 +48,35 @@ class _State:
 
 
 class TestChatWorkspaceHelpers(unittest.TestCase):
+    def test_im_bound_session_save_is_metadata_only_in_desktop_ui(self):
+        state = _State("im-session")
+        window = MainWindow.__new__(MainWindow)
+        window.chat_storage = MagicMock()
+        window.chat_storage.get_im_session_binding_by_conversation.return_value = {
+            "conversation_id": state.session_id
+        }
+        window.get_session = MagicMock(return_value=state)
+        request = MagicMock(
+            session_id=state.session_id,
+            title="IM",
+            status="active",
+            meta={"source": "im"},
+            revision=1,
+        )
+        window._build_chat_save_request = MagicMock(return_value=request)
+        window._stage_chat_save_request = MagicMock()
+        window.update_skill_capture_button_state = MagicMock()
+
+        self.assertTrue(MainWindow.save_chat_history(window, state.session_id))
+
+        window.chat_storage.upsert_conversation.assert_called_once_with(
+            state.session_id,
+            title="IM",
+            status="active",
+            meta={"source": "im"},
+        )
+        window._stage_chat_save_request.assert_not_called()
+
     def test_grill_metadata_ignores_legacy_clarification_count(self):
         state = _State()
         state.grill_mode_state = GRILL_MODE_ARMED

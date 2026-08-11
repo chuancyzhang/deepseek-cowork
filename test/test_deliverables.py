@@ -1619,6 +1619,15 @@ class TestDeliverableScanning(unittest.TestCase):
             window.update_session_tab_title = MagicMock()
             window.add_system_toast = MagicMock()
             window._rebuild_session_render_spans = MagicMock()
+            window.chat_storage = MagicMock()
+            window.chat_storage.get_im_session_binding_by_conversation.return_value = None
+            window.chat_storage.has_conversation.return_value = False
+            window.runtime_journal = MagicMock()
+            staged_request = MagicMock()
+            staged_request.revision = 1
+            window._stage_chat_save_request = MagicMock(return_value=staged_request)
+            window._enqueue_staged_chat_save = MagicMock(return_value=True)
+            window._ensure_session_visible_in_history = MagicMock()
             window._last_submit_text = ""
             window._last_submit_ts = 0
 

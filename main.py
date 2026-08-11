@@ -60,6 +60,7 @@ from core.single_instance import (
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
 from core.chat_recovery_journal import ChatRecoveryJournal
+from core.runtime_journal import RuntimeJournal
 from core.conversation_render import (
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
@@ -68,6 +69,7 @@ from core.conversation_render import (
 from core.message_persistence import (
     filter_persistable_messages,
     is_auto_query_skill_context_message,
+    project_provider_messages,
 )
 from core.conversation_integrity import (
     ensure_tool_call_sequence,
@@ -504,7 +506,6 @@ def build_form_row_label(text):
     )
     return label
 
-HISTORY_MIGRATION_VERSION = 3
 CONTENT_FLUSH_INTERVAL_MS = 120
 THINKING_FLUSH_INTERVAL_MS = 140
 SCROLL_FLUSH_INTERVAL_MS = 24
@@ -14378,6 +14379,7 @@ class DaemonRequestWorker(QThread):
                 self.workspace_dir,
                 run_context=self.run_context,
                 messages=self.messages,
+                writer_owner=f"ui:{os.getpid()}",
             )
         except Exception:
             resp = None
@@ -14416,6 +14418,7 @@ class DaemonStreamWorker(QThread):
         turn_id=None,
         request_id=None,
         user_message_id=None,
+        writer_owner=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -14428,8 +14431,10 @@ class DaemonStreamWorker(QThread):
         self.turn_id = str(turn_id or "")
         self.request_id = str(request_id or "")
         self.user_message_id = str(user_message_id or "")
+        self.writer_owner = str(writer_owner or f"ui:{os.getpid()}")
         self._aborted = False
         self._sock = None
+        self._last_sequence = 0
 
     def _abort_remote_session(self):
         log_sub_agent_runtime(
@@ -14458,6 +14463,128 @@ class DaemonStreamWorker(QThread):
             except Exception:
                 pass
 
+    def detach(self):
+        self._aborted = True
+        log_sub_agent_runtime(
+            "daemon_stream_worker_detach",
+            session_id=self.session_id,
+        )
+        if self._sock:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+
+    def _dispatch_stream_message(self, msg):
+        try:
+            self._last_sequence = max(self._last_sequence, int(msg.get("sequence") or 0))
+        except (TypeError, ValueError):
+            pass
+        message_type = msg.get("type")
+        if message_type == "thinking":
+            self.thinking_signal.emit(msg.get("delta", ""))
+        elif message_type == "turn_started":
+            self.turn_started_signal.emit(str(msg.get("turn_id") or ""))
+        elif message_type == "content":
+            self.content_signal.emit(msg.get("delta", ""))
+        elif message_type == "tool_call":
+            self.tool_call_signal.emit(msg.get("data") or {})
+        elif message_type == "tool_result":
+            self.tool_result_signal.emit(msg.get("data") or {})
+        elif message_type == "observability":
+            data = msg.get("data") or {}
+            if isinstance(data, dict):
+                self.observability_signal.emit(data)
+        elif message_type == "agent_state":
+            data = msg.get("data") or {}
+            if isinstance(data, dict):
+                self.agent_state_signal.emit(data)
+        elif message_type == "interaction_request":
+            data = msg.get("data") or {}
+            if isinstance(data, dict) and data.get("request_id"):
+                self.interaction_signal.emit(data)
+        elif message_type == "log":
+            self.output_signal.emit(str(msg.get("data") or ""))
+        elif message_type == "final":
+            result = msg.get("result") or {"error": "No response"}
+            if isinstance(result, dict):
+                result["_streamed"] = True
+            log_sub_agent_runtime(
+                "daemon_stream_worker_final",
+                session_id=self.session_id,
+                result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+            )
+            self.finished_signal.emit(result, self.session_id)
+            return True
+        elif message_type == "error" or msg.get("status") == "error":
+            result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
+            log_sub_agent_runtime(
+                "daemon_stream_worker_error_message",
+                session_id=self.session_id,
+                error=result.get("error"),
+            )
+            self.finished_signal.emit(result, self.session_id)
+            return True
+        elif msg.get("status") == "ok" and "result" in msg:
+            result = msg.get("result") or {"error": "No response"}
+            if isinstance(result, dict):
+                result["_streamed"] = True
+            self.finished_signal.emit(result, self.session_id)
+            return True
+        return False
+
+    def _reattach_until_terminal(self):
+        consecutive_failures = 0
+        while not self._aborted:
+            try:
+                response = self.client.attach_run(
+                    self.session_id,
+                    self.request_id,
+                    starting_after=self._last_sequence,
+                )
+            except Exception as exc:
+                response = {"status": "error", "error": str(exc)}
+            if isinstance(response, dict) and response.get("status") == "ok":
+                consecutive_failures = 0
+                for event in response.get("events") or []:
+                    if not isinstance(event, dict):
+                        continue
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    replay = dict(payload)
+                    replay["sequence"] = event.get("sequence")
+                    if self._dispatch_stream_message(replay):
+                        return True
+                run = response.get("run") or {}
+                status = str(run.get("status") or "")
+                if status in {"completed", "failed", "interrupted", "cancelled"}:
+                    final_result = run.get("final_result")
+                    if isinstance(final_result, dict):
+                        return self._dispatch_stream_message(
+                            {"type": "final", "result": final_result}
+                        )
+                    self.finished_signal.emit(
+                        {
+                            "error": run.get("terminal_error")
+                            or "Daemon run ended without a replayable final event.",
+                            "_streamed": True,
+                            "_runtime_terminal": status,
+                        },
+                        self.session_id,
+                    )
+                    return True
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= 20:
+                    return False
+            self.msleep(250)
+        return True
+
     def run(self):
         log_sub_agent_runtime(
             "daemon_stream_worker_run_begin",
@@ -14477,6 +14604,7 @@ class DaemonStreamWorker(QThread):
                     "turn_id": self.turn_id,
                     "request_id": self.request_id,
                     "user_message_id": self.user_message_id,
+                    "writer_owner": self.writer_owner,
                 }
                 if self.messages:
                     payload["messages"] = self.messages
@@ -14492,88 +14620,41 @@ class DaemonStreamWorker(QThread):
                         msg = json.loads(line)
                     except Exception:
                         continue
-                    if msg.get("type") == "thinking":
-                        self.thinking_signal.emit(msg.get("delta", ""))
-                    elif msg.get("type") == "turn_started":
-                        self.turn_started_signal.emit(str(msg.get("turn_id") or ""))
-                    elif msg.get("type") == "content":
-                        self.content_signal.emit(msg.get("delta", ""))
-                    elif msg.get("type") == "tool_call":
-                        data = msg.get("data") or {}
-                        self.tool_call_signal.emit(data)
-                    elif msg.get("type") == "tool_result":
-                        data = msg.get("data") or {}
-                        self.tool_result_signal.emit(data)
-                    elif msg.get("type") == "observability":
-                        data = msg.get("data") or {}
-                        if isinstance(data, dict):
-                            self.observability_signal.emit(data)
-                    elif msg.get("type") == "agent_state":
-                        data = msg.get("data") or {}
-                        if isinstance(data, dict):
-                            self.agent_state_signal.emit(data)
-                    elif msg.get("type") == "interaction_request":
-                        data = msg.get("data") or {}
-                        if isinstance(data, dict) and data.get("request_id"):
-                            self.interaction_signal.emit(data)
-                    elif msg.get("type") == "final":
-                        result = msg.get("result") or {"error": "No response"}
-                        if isinstance(result, dict):
-                            result["_streamed"] = True
-                        log_sub_agent_runtime(
-                            "daemon_stream_worker_final",
-                            session_id=self.session_id,
-                            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
-                        )
-                        self.finished_signal.emit(result, self.session_id)
-                        return
-                    elif msg.get("type") == "error":
-                        result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
-                        log_sub_agent_runtime(
-                            "daemon_stream_worker_error_message",
-                            session_id=self.session_id,
-                            error=result.get("error"),
-                        )
-                        self.finished_signal.emit(result, self.session_id)
-                        return
-                    elif msg.get("status") == "error":
-                        result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
-                        log_sub_agent_runtime(
-                            "daemon_stream_worker_status_error",
-                            session_id=self.session_id,
-                            error=result.get("error"),
-                        )
-                        self.finished_signal.emit(result, self.session_id)
-                        return
-                    elif msg.get("status") == "ok" and "result" in msg:
-                        result = msg.get("result") or {"error": "No response"}
-                        if isinstance(result, dict):
-                            result["_streamed"] = True
-                        log_sub_agent_runtime(
-                            "daemon_stream_worker_ok_result",
-                            session_id=self.session_id,
-                            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
-                        )
-                        self.finished_signal.emit(result, self.session_id)
+                    if self._dispatch_stream_message(msg):
                         return
                 if not self._aborted:
                     log_sub_agent_runtime(
                         "daemon_stream_worker_reader_eof",
                         session_id=self.session_id,
                     )
-                    self.finished_signal.emit({"error": "Daemon stream closed", "_streamed": True}, self.session_id)
+                    if self._reattach_until_terminal():
+                        return
+                    self.finished_signal.emit(
+                        {
+                            "error": "Daemon stream closed and the run could not be reattached.",
+                            "_streamed": True,
+                            "_transport_disconnected": True,
+                        },
+                        self.session_id,
+                    )
         except Exception as e:
             if not self._aborted:
                 text = str(e)
-                if "timed out" in text.lower() or "timeout" in text.lower():
-                    self._abort_remote_session()
-                    text = "Confirmation timed out. Conversation interrupted."
                 log_sub_agent_runtime(
                     "daemon_stream_worker_exception",
                     session_id=self.session_id,
                     error=text,
                 )
-                self.finished_signal.emit({"error": text, "_streamed": True}, self.session_id)
+                if self._reattach_until_terminal():
+                    return
+                self.finished_signal.emit(
+                    {
+                        "error": text,
+                        "_streamed": True,
+                        "_transport_disconnected": True,
+                    },
+                    self.session_id,
+                )
         finally:
             log_sub_agent_runtime(
                 "daemon_stream_worker_run_end",
@@ -14581,6 +14662,42 @@ class DaemonStreamWorker(QThread):
                 aborted=self._aborted,
             )
             self._sock = None
+
+
+class DaemonAttachWorker(DaemonStreamWorker):
+    def __init__(self, client, session_id, run_id, turn_id="", parent=None):
+        super().__init__(
+            client,
+            session_id,
+            "",
+            turn_id=turn_id,
+            request_id=run_id,
+            parent=parent,
+        )
+
+    def run(self):
+        log_sub_agent_runtime(
+            "daemon_attach_worker_run_begin",
+            session_id=self.session_id,
+            request_id=self.request_id,
+        )
+        try:
+            if not self._reattach_until_terminal() and not self._aborted:
+                self.finished_signal.emit(
+                    {
+                        "error": "Daemon run could not be reattached.",
+                        "_streamed": True,
+                        "_transport_disconnected": True,
+                    },
+                    self.session_id,
+                )
+        finally:
+            log_sub_agent_runtime(
+                "daemon_attach_worker_run_end",
+                session_id=self.session_id,
+                request_id=self.request_id,
+                aborted=self._aborted,
+            )
 
 
 class DaemonSteerWorker(QThread):
@@ -14684,13 +14801,15 @@ class DaemonConnectWorker(QThread):
         ping_payload = client.ping()
         connected = bool(ping_payload)
         if connected and not self._signature_matches(ping_payload):
-            try:
-                client.shutdown()
-            except Exception:
-                pass
-            time.sleep(0.2)
+            payload.update(
+                {
+                    "signature_mismatch": True,
+                    "remote_signature": str(ping_payload.get("signature") or ""),
+                    "error": "已有不同版本的守护进程正在运行，请先关闭旧守护进程。",
+                }
+            )
             connected = False
-        if not connected and self.allow_start:
+        if not connected and self.allow_start and not payload.get("signature_mismatch"):
             launch_lock = acquire_process_singleton(
                 build_process_singleton_lock_path(get_app_data_dir(), f"daemon-launch-{self.port}")
             )
@@ -14740,11 +14859,13 @@ class DaemonStatusWorker(QThread):
         ping_payload = client.ping()
         connected = bool(ping_payload)
         if connected and not self._signature_matches(ping_payload):
-            try:
-                client.shutdown()
-            except Exception:
-                pass
-            time.sleep(0.2)
+            payload.update(
+                {
+                    "signature_mismatch": True,
+                    "remote_signature": str(ping_payload.get("signature") or ""),
+                    "status_text": "守护进程版本不匹配，请关闭旧守护进程后重试",
+                }
+            )
             connected = False
         if connected:
             status = client.status()
@@ -24100,7 +24221,11 @@ class MainWindow(QMainWindow):
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
-        self.chat_recovery_journal = ChatRecoveryJournal(self.chat_history_dir)
+        self.runtime_journal = RuntimeJournal(self.chat_history_dir)
+        self.chat_recovery_journal = ChatRecoveryJournal(
+            self.chat_history_dir,
+            runtime_journal=self.runtime_journal,
+        )
         (
             self.recovered_chat_session_ids,
             self.chat_recovery_errors,
@@ -28616,6 +28741,19 @@ class MainWindow(QMainWindow):
             self.daemon_process = process
         self.daemon_available = bool(payload.get("connected"))
         self.daemon_connect_worker = None
+        if payload.get("signature_mismatch"):
+            if not getattr(self, "_daemon_signature_mismatch_notified", False):
+                self._daemon_signature_mismatch_notified = True
+                self.add_system_toast(
+                    "检测到旧版本守护进程。请先退出旧版本，再重试后台连接。",
+                    "warning",
+                    auto_close_ms=8000,
+                )
+        else:
+            self._daemon_signature_mismatch_notified = False
+            if self.daemon_available:
+                for state in list(self.sessions.values()):
+                    self.attach_active_daemon_run_if_needed(state)
         self._drain_daemon_connection_queue()
 
     def start_daemon_monitor(self):
@@ -28627,7 +28765,35 @@ class MainWindow(QMainWindow):
         self.daemon_timer.start()
 
     def ensure_daemon_connection(self):
+        self.recover_runtime_pending_commits()
         self.queue_daemon_connection(allow_start=True, retries=0)
+
+    def recover_runtime_pending_commits(self):
+        journal = getattr(self, "chat_recovery_journal", None)
+        storage = getattr(self, "chat_storage", None)
+        if journal is None or storage is None:
+            return []
+        recovered, errors = journal.recover_into(storage)
+        for item in errors:
+            self.append_log(
+                f"运行提交恢复失败: {item.get('path')} | {item.get('error')}"
+            )
+        if not recovered:
+            return []
+        self.refresh_history_list()
+        for session_id in recovered:
+            state = self.get_session(session_id)
+            if not state or getattr(state, "live_activity", False) or state.daemon_running:
+                continue
+            state.history_loaded = False
+            state.history_loading = False
+            self.queue_session_history_load(session_id)
+        log_ui_navigation(
+            "runtime_pending_commits_recovered",
+            recovered_count=len(recovered),
+            error_count=len(errors),
+        )
+        return recovered
 
     def start_automation_scheduler(self):
         if self.automation_timer:
@@ -28876,14 +29042,19 @@ class MainWindow(QMainWindow):
             )
         ping_payload = self.daemon_client.ping()
         connected = bool(ping_payload)
-        if connected and not self._daemon_signature_matches(ping_payload):
-            try:
-                self.daemon_client.shutdown()
-            except Exception:
-                pass
-            time.sleep(0.2)
+        signature_mismatch = bool(
+            connected and not self._daemon_signature_matches(ping_payload)
+        )
+        if signature_mismatch:
             connected = False
-        if not connected and allow_start:
+            if not getattr(self, "_daemon_signature_mismatch_notified", False):
+                self._daemon_signature_mismatch_notified = True
+                self.add_system_toast(
+                    "检测到旧版本守护进程。请先退出旧版本，再重试后台连接。",
+                    "warning",
+                    auto_close_ms=8000,
+                )
+        if not connected and allow_start and not signature_mismatch:
             self.start_daemon_process()
             for _ in range(max(retries, 0)):
                 time.sleep(0.2)
@@ -28891,6 +29062,8 @@ class MainWindow(QMainWindow):
                 if retry_ping and self._daemon_signature_matches(retry_ping):
                     connected = True
                     break
+        if connected:
+            self._daemon_signature_mismatch_notified = False
         self.daemon_available = connected
         self.refresh_context_badges()
 
@@ -29081,10 +29254,11 @@ class MainWindow(QMainWindow):
     def quit_app(self):
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
-        self.shutdown_workers()
-        if self.daemon_client:
-            self.daemon_client.shutdown()
-        self.stop_daemon_process()
+        preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
+        if not preserved_daemon_runs:
+            if self.daemon_client and self.daemon_available:
+                self.daemon_client.shutdown()
+            self.stop_daemon_process()
         self.stop_gateway_process()
         if self.tray_icon:
             self.tray_icon.hide()
@@ -29096,7 +29270,8 @@ class MainWindow(QMainWindow):
         self._terminate_process(self.daemon_process)
         self.daemon_process = None
 
-    def shutdown_workers(self):
+    def shutdown_workers(self, preserve_daemon_runs=False):
+        preserved_daemon_runs = False
         if not self.flush_pending_chat_saves(timeout_ms=3000):
             self.append_log("会话保存队列在关闭前未能完全 flush，应用将继续退出。")
         deliverable_scan_worker = getattr(self, "deliverable_scan_worker", None)
@@ -29116,15 +29291,22 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             state.guidance_workers = []
-            self._stop_live_subagents(state, force=True)
-            if self.daemon_client and state.daemon_running and state.session_id:
+            preserve_session_run = bool(preserve_daemon_runs and state.daemon_running)
+            if preserve_session_run:
+                preserved_daemon_runs = True
+            if not preserve_session_run:
+                self._stop_live_subagents(state, force=True)
+            if self.daemon_client and state.daemon_running and state.session_id and not preserve_session_run:
                 try:
                     self.daemon_client.stop_session(state.session_id)
                 except Exception:
                     pass
             if state.daemon_worker and state.daemon_worker.isRunning():
                 self._disconnect_worker_signals(state.daemon_worker)
-                state.daemon_worker.abort()
+                if preserve_session_run:
+                    state.daemon_worker.detach()
+                else:
+                    state.daemon_worker.abort()
                 state.daemon_worker.wait(1000)
             if state.llm_worker and state.llm_worker.isRunning():
                 self._disconnect_worker_signals(state.llm_worker)
@@ -29144,6 +29326,7 @@ class MainWindow(QMainWindow):
             if not self.chat_save_worker.stop_worker(timeout_ms=3000):
                 self.append_log("会话保存线程未在超时内退出。")
             self.chat_save_worker = None
+        return preserved_daemon_runs
 
     def _terminate_process(self, proc):
         if not proc:
@@ -29180,8 +29363,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self.skill_catalog_service.stop_watching()
-            self.shutdown_workers()
-            self.stop_daemon_process()
+            preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
+            if not preserved_daemon_runs:
+                self.stop_daemon_process()
             self.stop_gateway_process()
             event.accept()
 
@@ -30495,7 +30679,6 @@ class MainWindow(QMainWindow):
             state.messages = self._normalize_and_persist_session_messages(
                 session_id,
                 state.messages,
-                existing_meta=conversation_meta
             )
         state.render_items = build_conversation_render_spans(state.messages)
         span_max_end = max(
@@ -30564,6 +30747,7 @@ class MainWindow(QMainWindow):
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
+        self.attach_active_daemon_run_if_needed(state)
 
     def _finish_session_history_load(self, state):
         if not state:
@@ -33350,50 +33534,33 @@ class MainWindow(QMainWindow):
             state.last_agent_bubble = backup_last_agent
         return inserted_count
 
-    def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False, existing_meta=None):
+    def _normalize_and_persist_session_messages(self, session_id, messages):
+        """Register provider exclusions while leaving the SQLite ledger untouched."""
         source_messages = messages if isinstance(messages, list) else []
-        meta = existing_meta if isinstance(existing_meta, dict) else {}
+        provider_projection, excluded_ids = project_provider_messages(source_messages)
         try:
-            current_version = int(meta.get("history_migration_version") or 0)
-        except Exception:
-            current_version = 0
-        if not force_persist and current_version >= HISTORY_MIGRATION_VERSION:
-            return source_messages
-        normalized_messages = filter_persistable_messages(source_messages)
-
-        changed = False
-        try:
-            changed = json.dumps(source_messages, ensure_ascii=False, sort_keys=True) != json.dumps(normalized_messages, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            changed = normalized_messages != source_messages
-
-        if force_persist or changed or current_version < HISTORY_MIGRATION_VERSION:
-            merged_meta = dict(meta)
-            session_state = self.sessions.get(session_id)
-            if merged_meta.get("manual_title"):
-                existing_record = self.chat_storage.get_conversation_record(session_id) or {}
-                title = str(existing_record.get("title") or "").strip() or self._compute_session_title(normalized_messages)
-            else:
-                title = self._compute_session_title(normalized_messages)
-            workspace_dir = self._workspace_dir_for_state(session_state)
-            if workspace_dir:
-                merged_meta["workspace_dir"] = workspace_dir
-                merged_meta["workspace_source"] = self._session_workspace_source(session_state) or (
-                    "chat" if self._is_chat_workspace_path(workspace_dir, session_id) else "project"
-                )
-            else:
-                merged_meta.pop("workspace_dir", None)
-                merged_meta.pop("workspace_source", None)
-            merged_meta["history_migration_version"] = HISTORY_MIGRATION_VERSION
-            if session_id in self.sessions:
-                merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
-                merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
-            try:
-                self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
-            except Exception as e:
-                print(f"Error migrating session messages: {e}")
-
-        return normalized_messages
+            manifest = self.runtime_journal.load_manifest(session_id)
+            existing_excluded = [
+                str(value)
+                for value in (manifest.get("excluded_message_ids") or [])
+                if str(value)
+            ]
+            self.runtime_journal.update_manifest(
+                session_id,
+                {
+                    "excluded_message_ids": list(dict.fromkeys(existing_excluded + excluded_ids)),
+                    "current_context_segment": {
+                        "source_messages_hash": RuntimeJournal.messages_hash(source_messages),
+                        "provider_messages_hash": RuntimeJournal.messages_hash(provider_projection),
+                        "provider_message_count": len(provider_projection),
+                    },
+                },
+            )
+        except Exception as exc:
+            self.append_log(
+                f"会话投影诊断写入失败({session_id}): {exc}"
+            )
+        return source_messages
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -33624,6 +33791,13 @@ class MainWindow(QMainWindow):
             meta.pop("ui_timeline_v1", None)
         return meta
 
+    def _history_writer_owner_for_session(self, session_id):
+        storage = getattr(self, "chat_storage", None)
+        if storage is None:
+            return f"ui:{os.getpid()}"
+        binding = storage.get_im_session_binding_by_conversation(session_id)
+        return "daemon" if binding else f"ui:{os.getpid()}"
+
     def _build_chat_save_request(
         self,
         state,
@@ -33723,7 +33897,7 @@ class MainWindow(QMainWindow):
                 )
             return accepted
         try:
-            self.chat_storage.save_conversation(
+            self.chat_storage.save_conversation_safely(
                 request.session_id,
                 request.messages,
                 title=request.title,
@@ -33752,22 +33926,46 @@ class MainWindow(QMainWindow):
         if now - last < 1.0:
             return False
         state.last_chat_recovery_checkpoint_at = now
-        checkpoint = {
-            "id": f"recovery-{state.session_id}-{int(getattr(state, 'active_turn_id', 0) or 0)}",
-            "role": "assistant",
-            "content": content,
-            "reasoning": reasoning,
-            "meta": {
-                "recovery_checkpoint": True,
-                "active_turn_id": int(getattr(state, "active_turn_id", 0) or 0),
-            },
-        }
-        request = self._stage_chat_save_request(
-            state,
-            messages=list(state.messages) + [checkpoint],
-            status="running",
-        )
-        return request is not None
+        run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
+        if not run_id:
+            return False
+        try:
+            if self.runtime_journal.get_run(state.session_id, run_id) is None:
+                self.runtime_journal.begin_run(
+                    state.session_id,
+                    run_id,
+                    turn_id=getattr(state, "active_turn_id", ""),
+                    writer_owner=f"ui:{os.getpid()}",
+                    base_messages=(
+                        self.chat_storage.get_messages(state.session_id)
+                        if self.chat_storage.has_conversation(state.session_id)
+                        else []
+                    ),
+                )
+            self.runtime_journal.update_run(
+                state.session_id,
+                run_id,
+                {
+                    "status": "running",
+                    "draft_content": content,
+                    "draft_reasoning": reasoning,
+                },
+            )
+            self.runtime_journal.append_event(
+                state.session_id,
+                run_id,
+                "checkpoint",
+                {
+                    "content_length": len(content),
+                    "reasoning_length": len(reasoning),
+                },
+            )
+            return True
+        except Exception as exc:
+            self.append_log(
+                f"运行恢复记录写入失败({state.session_id}, run={run_id}): {exc}"
+            )
+            return False
 
     def flush_pending_chat_saves(self, session_id=None, timeout_ms=3000):
         worker = getattr(self, "chat_save_worker", None)
@@ -33805,6 +34003,28 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"会话恢复记录确认失败({session_id}, revision={int(revision or 0)}): {exc}"
             )
+        try:
+            manifest = self.runtime_journal.load_manifest(session_id)
+            pending_run_id = str(manifest.get("pending_commit_run_id") or "")
+            if pending_run_id:
+                self.runtime_journal.acknowledge_commit(
+                    session_id,
+                    pending_run_id,
+                    self.chat_storage.get_messages(session_id),
+                )
+            else:
+                self.runtime_journal.update_manifest(
+                    session_id,
+                    {
+                        "sqlite_messages_hash": RuntimeJournal.messages_hash(
+                            self.chat_storage.get_messages(session_id)
+                        )
+                    },
+                )
+        except Exception as exc:
+            self.append_log(
+                f"运行提交记录确认失败({session_id}, revision={int(revision or 0)}): {exc}"
+            )
         optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
         if acknowledged and isinstance(optimistic_ids, set) and session_id in optimistic_ids:
             optimistic_ids.discard(session_id)
@@ -33818,6 +34038,33 @@ class MainWindow(QMainWindow):
 
     def save_chat_history(self, session_id=None, flush=False):
         state = self.get_session(session_id)
+        if state and self._history_writer_owner_for_session(state.session_id) == "daemon":
+            request = self._build_chat_save_request(
+                state,
+                revision=getattr(state, "chat_save_revision", 0),
+            )
+            if request:
+                try:
+                    self.chat_storage.upsert_conversation(
+                        request.session_id,
+                        title=request.title,
+                        status=request.status,
+                        meta=request.meta,
+                    )
+                    log_ui_navigation(
+                        "chat_metadata_saved",
+                        session_id=request.session_id,
+                        writer_owner="daemon",
+                    )
+                except Exception as exc:
+                    self.handle_chat_save_failed(
+                        request.session_id,
+                        request.revision,
+                        str(exc),
+                    )
+                    return False
+            self.update_skill_capture_button_state()
+            return True
         if state:
             request = self._stage_chat_save_request(state)
             if request:
@@ -33872,6 +34119,7 @@ class MainWindow(QMainWindow):
                 self.memory_update_dialog.close_btn.clicked.disconnect()
             except Exception:
                 pass
+
             self.memory_update_dialog.background_btn.clicked.connect(self.handle_memory_update_backgrounded)
             self.memory_update_dialog.close_btn.clicked.connect(self._show_settings_from_memory_update)
             self.main_page_stack.addWidget(self.memory_update_dialog)
@@ -38426,6 +38674,7 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state: return
         stopped_turn_id = state.active_turn_id
+        stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
@@ -38475,6 +38724,28 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        if stopped_run_id:
+            try:
+                self.runtime_journal.update_run(
+                    state.session_id,
+                    stopped_run_id,
+                    {
+                        "status": "cancelled",
+                        "terminal_error": "cancelled by user",
+                        "draft_content": str(state.current_content_buffer or ""),
+                        "draft_reasoning": str(state.current_thinking_buffer or ""),
+                    },
+                )
+                self.runtime_journal.append_event(
+                    state.session_id,
+                    stopped_run_id,
+                    "cancelled",
+                    {"reason": "user_stop"},
+                )
+            except Exception as exc:
+                self.append_log(
+                    f"运行停止状态写入恢复日志失败({state.session_id}, run={stopped_run_id}): {exc}"
+                )
         self._finish_grill_mode(state, "stopped")
         self._reject_unapplied_guidance(state, restore_input=True)
         self._timeline_close_open_events(state, status="interrupted")
@@ -38507,9 +38778,16 @@ class MainWindow(QMainWindow):
             }
             if stopped_bubble is not None:
                 stop_message["meta"] = {
+                    "ui_only": True,
                     "ui_turn_id": str(stopped_turn_id),
                     "ui_turn_group_id": str(getattr(stopped_bubble, "ui_turn_group_id", "")),
                     "ui_stage_id": str(getattr(stopped_bubble, "ui_stage_id", "")),
+                    "ui_reply_kind": "interrupted",
+                }
+            else:
+                stop_message["meta"] = {
+                    "ui_only": True,
+                    "ui_turn_id": str(stopped_turn_id),
                     "ui_reply_kind": "interrupted",
                 }
             state.messages.append(stop_message)
@@ -40033,24 +40311,38 @@ class MainWindow(QMainWindow):
                 )
                 self.normalize_session_ui(state)
             return False
+        history_writer_owner = self._history_writer_owner_for_session(state.session_id)
+        daemon_owned_history = history_writer_owner == "daemon"
+        if daemon_owned_history and not self.daemon_available:
+            self.queue_daemon_connection(allow_start=True, retries=4)
+            return False
         try:
+            provider_projection, excluded_ids = project_provider_messages(
+                getattr(state, "messages", []) or []
+            )
             ensure_tool_call_sequence(
-                getattr(state, "messages", []) or [],
+                provider_projection,
                 context="当前会话提交前检查",
             )
+            if excluded_ids:
+                manifest = self.runtime_journal.load_manifest(state.session_id)
+                self.runtime_journal.update_manifest(
+                    state.session_id,
+                    {
+                        "excluded_message_ids": list(
+                            dict.fromkeys(
+                                list(manifest.get("excluded_message_ids") or [])
+                                + excluded_ids
+                            )
+                        )
+                    },
+                )
         except Exception as exc:
             log_ppt_agent_debug(
                 "submit_session_tool_history_invalid",
                 session_id=state.session_id,
                 error=str(exc),
             )
-            if state.session_id == self.current_session_id:
-                self.add_system_toast(
-                    f"当前会话无法继续：{exc}",
-                    "error",
-                    session_id=state.session_id,
-                    auto_close_ms=0,
-                )
             return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._session_is_busy(state):
@@ -40273,11 +40565,23 @@ class MainWindow(QMainWindow):
             state.grill_execution_confirmed = False
         if message_meta:
             message_payload["meta"] = message_meta
-        staged_save_request = self._stage_chat_save_request(
-            state,
-            messages=list(state.messages) + [message_payload],
-            status="running",
-        )
+        if daemon_owned_history:
+            state.chat_save_revision = max(
+                0,
+                int(getattr(state, "chat_save_revision", 0) or 0),
+            ) + 1
+            staged_save_request = self._build_chat_save_request(
+                state,
+                messages=list(state.messages) + [message_payload],
+                status="running",
+                revision=state.chat_save_revision,
+            )
+        else:
+            staged_save_request = self._stage_chat_save_request(
+                state,
+                messages=list(state.messages) + [message_payload],
+                status="running",
+            )
         if staged_save_request is None:
             if grill_started:
                 state.grill_mode_state = GRILL_MODE_ARMED
@@ -40294,6 +40598,52 @@ class MainWindow(QMainWindow):
                     session_id=state.session_id,
                     auto_close_ms=0,
                 )
+            return False
+        try:
+            self.runtime_journal.begin_run(
+                state.session_id,
+                submit_request_id,
+                turn_id=next_turn_id,
+                writer_owner=history_writer_owner,
+                base_messages=(
+                    self.chat_storage.get_messages(state.session_id)
+                    if self.chat_storage.has_conversation(state.session_id)
+                    else []
+                ),
+                status="running",
+                extra={
+                    "model_id": str(turn_model_id or ""),
+                    "protocol": str(message_meta.get("protocol") or ""),
+                    "user_message_id": user_message_id,
+                    "pending_user_message": message_payload if daemon_owned_history else None,
+                },
+            )
+            self.runtime_journal.append_event(
+                state.session_id,
+                submit_request_id,
+                "submit",
+                {
+                    "turn_id": str(next_turn_id),
+                    "user_message_id": user_message_id,
+                },
+            )
+        except Exception as exc:
+            if not daemon_owned_history:
+                try:
+                    self.chat_recovery_journal.acknowledge(
+                        state.session_id,
+                        staged_save_request.revision,
+                    )
+                except Exception as journal_exc:
+                    self.append_log(
+                        "未启动请求的恢复快照清理失败"
+                        f"({state.session_id}, revision={staged_save_request.revision}): {journal_exc}"
+                    )
+            self.handle_chat_save_failed(
+                state.session_id,
+                staged_save_request.revision,
+                f"运行恢复日志写入失败：{exc}",
+            )
             return False
         is_first_submit = bool(
             state.session_id == self.current_session_id
@@ -40372,6 +40722,7 @@ class MainWindow(QMainWindow):
         state.active_turn_id = next_turn_id
         state.active_turn_request_id = submit_request_id
         state.active_turn_user_message_id = user_message_id
+        state.active_history_writer_owner = history_writer_owner
         if is_first_submit:
             state.first_submit_diagnostic_turn_id = state.active_turn_id
             log_ui_navigation(
@@ -40391,7 +40742,26 @@ class MainWindow(QMainWindow):
             previous_render_count,
             previous_render_total,
         )
-        if not self._enqueue_staged_chat_save(staged_save_request):
+        if not daemon_owned_history and not self._enqueue_staged_chat_save(staged_save_request):
+            try:
+                self.runtime_journal.update_run(
+                    state.session_id,
+                    submit_request_id,
+                    {
+                        "status": "cancelled",
+                        "terminal_error": "chat save queue rejected the staged user message",
+                    },
+                )
+                self.runtime_journal.append_event(
+                    state.session_id,
+                    submit_request_id,
+                    "cancelled",
+                    {"reason": "chat_save_queue_rejected"},
+                )
+            except Exception as exc:
+                self.append_log(
+                    f"运行取消状态写入恢复日志失败({state.session_id}, run={submit_request_id}): {exc}"
+                )
             if grill_started:
                 state.grill_mode_state = GRILL_MODE_ARMED
                 self.refresh_grill_mode_controls(state.session_id)
@@ -40482,6 +40852,11 @@ class MainWindow(QMainWindow):
             daemon_available=bool(self.daemon_available),
             daemon_bootstrapping=bool(getattr(self, "daemon_bootstrapping", False)),
         )
+        self.runtime_journal.update_run(
+            state.session_id,
+            submit_request_id,
+            {"execution_backend": "daemon" if self.daemon_available else "local"},
+        )
         if self.daemon_available:
             if is_first_submit:
                 log_ui_navigation(
@@ -40500,6 +40875,7 @@ class MainWindow(QMainWindow):
                     user_message_id=user_message_id,
                     run_context=run_context,
                     session_id=state.session_id,
+                    writer_owner=history_writer_owner,
                 )
             except Exception as exc:
                 self._finish_grill_mode(state, "error")
@@ -40851,6 +41227,22 @@ class MainWindow(QMainWindow):
             return
 
         card = state.tool_cards[tool_id]
+        if isinstance(meta, dict) and meta.get("silent_repair"):
+            state.tool_cards.pop(tool_id, None)
+            state.step_records = [
+                record
+                for record in state.step_records
+                if str(record.get("tool_id") or "") != str(tool_id)
+            ]
+            state.ui_timeline_events = [
+                event
+                for event in state.ui_timeline_events
+                if str(event.get("tool_call_id") or "") != str(tool_id)
+            ]
+            card.hide()
+            card.setParent(None)
+            self.refresh_step_list(state.session_id)
+            return
         card.set_result(result, result_obj=data.get("result_obj"))
         timeline_event = self._timeline_find_event(state, kind="tool", tool_call_id=tool_id)
         if timeline_event is not None:
@@ -41443,6 +41835,114 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
              self.normalize_session_ui(state)
 
+    def _connect_daemon_worker_signals(self, state, worker, turn_id):
+        worker.finished_signal.connect(
+            lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid),
+            Qt.QueuedConnection,
+        )
+        worker.thinking_signal.connect(
+            lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid),
+            Qt.QueuedConnection,
+        )
+        worker.content_signal.connect(
+            lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid),
+            Qt.QueuedConnection,
+        )
+        worker.tool_call_signal.connect(
+            lambda data, sid=state.session_id: self.add_tool_card(data, sid),
+            Qt.QueuedConnection,
+        )
+        worker.tool_result_signal.connect(
+            lambda data, sid=state.session_id: self.update_tool_card(data, sid),
+            Qt.QueuedConnection,
+        )
+        worker.observability_signal.connect(
+            lambda data, sid=state.session_id: self.handle_observability_event(data, sid),
+            Qt.QueuedConnection,
+        )
+        worker.agent_state_signal.connect(
+            lambda data, sid=state.session_id: self.handle_agent_state(data, sid),
+            Qt.QueuedConnection,
+        )
+        worker.interaction_signal.connect(
+            lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid),
+            Qt.QueuedConnection,
+        )
+        worker.turn_started_signal.connect(
+            lambda daemon_turn_id, sid=state.session_id, tid=turn_id: self.handle_daemon_turn_started(
+                daemon_turn_id,
+                sid,
+                tid,
+            ),
+            Qt.QueuedConnection,
+        )
+
+    def attach_active_daemon_run_if_needed(self, state):
+        if not state or (state.daemon_worker and state.daemon_worker.isRunning()):
+            return False
+        try:
+            manifest = self.runtime_journal.load_manifest(state.session_id)
+            run_id = str(manifest.get("active_run_id") or "")
+            run = self.runtime_journal.get_run(state.session_id, run_id) if run_id else None
+        except Exception as exc:
+            self.append_log(f"后台运行恢复检查失败({state.session_id}): {exc}")
+            return False
+        if not isinstance(run, dict) or str(run.get("status") or "") != "running":
+            return False
+        if str(run.get("execution_backend") or "") != "daemon":
+            self.runtime_journal.update_run(
+                state.session_id,
+                run_id,
+                {
+                    "status": "interrupted",
+                    "terminal_error": "The local UI worker did not survive the application restart.",
+                },
+            )
+            return False
+        raw_turn_id = str(run.get("turn_id") or "")
+        try:
+            turn_id = int(raw_turn_id)
+        except (TypeError, ValueError):
+            turn_id = raw_turn_id
+        state.active_turn_id = turn_id
+        state.active_turn_request_id = run_id
+        state.active_turn_user_message_id = str(run.get("user_message_id") or "")
+        state.daemon_running = True
+        state.turn_steerable = False
+        self.set_session_status("running", state.session_id)
+        self.set_session_phase("Reconnecting", state.session_id)
+        if not self.daemon_available or self.daemon_client is None:
+            return True
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
+        state.temp_thinking_bubble = self._create_agent_chat_bubble(
+            state,
+            thinking="...",
+            workspace_dir=self._ensure_session_workspace(state),
+        )
+        self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
+        state.temp_thinking_bubble.apply_dynamic_widths(
+            self.dynamic_message_width,
+            self.dynamic_user_bubble_width,
+        )
+        self._attach_live_agent_stage(state, state.temp_thinking_bubble, create_group=True)
+        state.daemon_worker = DaemonAttachWorker(
+            self.daemon_client,
+            state.session_id,
+            run_id,
+            turn_id=turn_id,
+        )
+        self._connect_daemon_worker_signals(state, state.daemon_worker, turn_id)
+        state.daemon_worker.start()
+        log_sub_agent_runtime(
+            "ui_daemon_run_reattached",
+            session_id=state.session_id,
+            request_id=run_id,
+            turn_id=turn_id,
+        )
+        return True
+
     def process_daemon_logic(
         self,
         user_text,
@@ -41451,6 +41951,7 @@ class MainWindow(QMainWindow):
         user_message_id=None,
         run_context=None,
         session_id=None,
+        writer_owner=None,
     ):
         state = self.get_session(session_id)
         if not state:
@@ -41508,23 +42009,9 @@ class MainWindow(QMainWindow):
             turn_id=turn_id,
             request_id=request_id,
             user_message_id=user_message_id,
+            writer_owner=writer_owner,
         )
-        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)
-        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
-        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid), Qt.QueuedConnection)
-        state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid), Qt.QueuedConnection)
-        state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid), Qt.QueuedConnection)
-        state.daemon_worker.observability_signal.connect(lambda data, sid=state.session_id: self.handle_observability_event(data, sid), Qt.QueuedConnection)
-        state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
-        state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid), Qt.QueuedConnection)
-        state.daemon_worker.turn_started_signal.connect(
-            lambda daemon_turn_id, sid=state.session_id, tid=turn_id: self.handle_daemon_turn_started(
-                daemon_turn_id,
-                sid,
-                tid,
-            ),
-            Qt.QueuedConnection,
-        )
+        self._connect_daemon_worker_signals(state, state.daemon_worker, turn_id)
         state.daemon_worker.start()
         log_ppt_agent_debug(
             "process_daemon_worker_started",
@@ -41596,9 +42083,6 @@ class MainWindow(QMainWindow):
 
     def handle_worker_output(self, text, session_id=None):
         self.append_log(f"[Worker] {text}")
-        # If it looks like an error, show a toast
-        if "error" in text.lower() or "exception" in text.lower() or "fail" in text.lower():
-            self.add_system_toast(text, "error", session_id=session_id)
 
     def _record_sub_agent_event(self, state, data, content):
         if not state or not isinstance(data, dict):
@@ -42321,6 +42805,21 @@ class MainWindow(QMainWindow):
         if not state:
             log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
+        if isinstance(result, dict) and "error" not in result:
+            has_final_content = bool(str(result.get("content") or "").strip())
+            if not has_final_content:
+                for message in reversed(result.get("generated_messages") or []):
+                    if (
+                        isinstance(message, dict)
+                        and message.get("role") == "assistant"
+                        and not message.get("tool_calls")
+                        and str(message.get("content") or "").strip()
+                    ):
+                        has_final_content = True
+                        break
+            if not has_final_content:
+                result = dict(result)
+                result["error"] = "Provider completed without final assistant content."
         is_first_submit_turn = bool(
             getattr(state, "first_submit_diagnostic_turn_id", 0)
             and str(getattr(state, "first_submit_diagnostic_turn_id", 0)) == str(turn_id or state.active_turn_id)
@@ -42392,6 +42891,37 @@ class MainWindow(QMainWindow):
             self.temp_thinking_bubble = state.temp_thinking_bubble
 
         if "error" in result:
+            daemon_owned_history = (
+                self._history_writer_owner_for_session(state.session_id) == "daemon"
+            )
+            run_id = str(
+                result.get("request_id")
+                or getattr(state, "active_turn_request_id", "")
+                or ""
+            ).strip()
+            if run_id:
+                try:
+                    self.runtime_journal.update_run(
+                        state.session_id,
+                        run_id,
+                        {
+                            "status": "interrupted",
+                            "error": str(result.get("error") or "未知错误"),
+                            "draft_content": str(getattr(state, "current_content_buffer", "") or ""),
+                            "draft_reasoning": str(getattr(state, "current_thinking_buffer", "") or ""),
+                            "final_result": result,
+                        },
+                    )
+                    self.runtime_journal.append_event(
+                        state.session_id,
+                        run_id,
+                        "error",
+                        {"error": str(result.get("error") or "未知错误")},
+                    )
+                except Exception as exc:
+                    self.append_log(
+                        f"运行失败状态写入恢复日志失败({state.session_id}, run={run_id}): {exc}"
+                    )
             if is_first_submit_turn:
                 log_ui_navigation(
                     "first_submit_error",
@@ -42402,67 +42932,18 @@ class MainWindow(QMainWindow):
                 )
                 state.first_submit_diagnostic_turn_id = 0
             self._reject_unapplied_guidance(state, restore_input=True)
-            self._timeline_close_open_events(state, status="failed")
-            self._timeline_append_event(
-                state,
-                "error",
-                status="failed",
-                text=str(result.get("error") or "未知错误"),
-                reply_kind="error",
-                finished_at=time.time(),
-            )
+            self._timeline_close_open_events(state, status="interrupted")
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
-            self.add_system_toast(f"任务执行失败：{result['error']}", "error", session_id=state.session_id)
             bubble.stop_thinking_timers()
-            bubble.update_thinking(duration=None, is_final=True)
-            bubble.set_message_actions_enabled(False)
-            error_text = f"⚠️ Error: {result['error']}"
-            bubble.set_main_content(error_text, final=True)
-            generated_on_error = self._merge_generated_messages(
-                state.messages,
-                filter_persistable_messages(result.get("generated_messages") or []),
-            )
-            if generated_on_error:
-                try:
-                    ensure_tool_call_sequence(
-                        list(state.messages) + generated_on_error,
-                        context="保存 Provider 错误前的会话账本",
-                    )
-                except Exception as exc:
-                    log_sub_agent_runtime(
-                        "ui_error_generated_messages_rejected",
-                        session_id=state.session_id,
-                        turn_id=str(turn_id or state.active_turn_id),
-                        error=str(exc),
-                        generated_message_count=len(generated_on_error),
-                    )
-                    generated_on_error = []
-                if generated_on_error:
-                    self._annotate_generated_messages_for_unified_turn(state, generated_on_error)
-                    state.messages.extend(generated_on_error)
-            error_message_id = self._new_message_id()
-            state.messages.append({
-                "id": error_message_id,
-                "role": "assistant",
-                "content": error_text,
-                "reasoning": "",
-                "content_parts": [{"type": "text", "text": error_text}],
-                "meta": {
-                    "ui_only": True,
-                    "ui_turn_id": str(getattr(state, "active_turn_id", "")),
-                    "ui_turn_group_id": str(getattr(bubble, "ui_turn_group_id", "")),
-                    "ui_stage_id": str(getattr(bubble, "ui_stage_id", "")),
-                    "ui_reply_kind": "error",
-                },
-            })
             state.messages = self.chat_storage.normalize_messages(
                 state.messages,
                 conversation_id=state.session_id,
             )
             self._rebuild_session_render_spans(state)
             self._finish_grill_mode(state, "error")
-            self.save_chat_history(session_id=state.session_id)
+            if not daemon_owned_history:
+                self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
                 "ui_assistant_turn_failed",
                 session_id=state.session_id,
@@ -42471,13 +42952,18 @@ class MainWindow(QMainWindow):
                 stage_id=str(getattr(bubble, "ui_stage_id", "")),
                 error=str(result.get("error") or "未知错误"),
             )
-            self._finish_office_draft_task_card(state, failed_message=self._office_task_failed_title(state))
-            self.request_session_scroll_to_bottom(state.session_id, force=False)
+            if state.last_agent_bubble is bubble:
+                state.last_agent_bubble = None
+            if is_current and self.last_agent_bubble is bubble:
+                self.last_agent_bubble = None
+            bubble.hide()
+            bubble.setParent(None)
+            bubble.deleteLater()
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
             state.last_flushed_content_buffer = ""
-            self.set_session_phase("Error", state.session_id)
-            self.set_session_status("error", state.session_id, save=True)
+            self.set_session_phase("Ready", state.session_id)
+            self.set_session_status("draft", state.session_id, save=True)
             if is_current: self.normalize_session_ui(state)
             return
 
@@ -42693,7 +43179,47 @@ class MainWindow(QMainWindow):
             previous_render_count,
             previous_render_total,
         )
-        self.save_chat_history(session_id=state.session_id)
+        run_id = str(
+            result.get("request_id")
+            or getattr(state, "active_turn_request_id", "")
+            or ""
+        ).strip()
+        if run_id:
+            try:
+                self.runtime_journal.update_run(
+                    state.session_id,
+                    run_id,
+                    {
+                        "status": "completed",
+                        "draft_content": str(content or ""),
+                        "draft_reasoning": str(reasoning or ""),
+                        "final_result": result,
+                    },
+                )
+                self.runtime_journal.append_event(
+                    state.session_id,
+                    run_id,
+                    "finish",
+                    {
+                        "content_length": len(str(content or "")),
+                        "generated_message_count": len(generated_messages),
+                    },
+                )
+                if self._history_writer_owner_for_session(state.session_id) != "daemon":
+                    self.runtime_journal.mark_pending_commit(
+                        state.session_id,
+                        run_id,
+                        filter_persistable_messages(state.messages),
+                        title=self._resolved_session_title(state, state.messages),
+                        status="completed",
+                        meta=self._compose_session_meta(state),
+                    )
+            except Exception as exc:
+                self.append_log(
+                    f"运行完成状态写入恢复日志失败({state.session_id}, run={run_id}): {exc}"
+                )
+        if self._history_writer_owner_for_session(state.session_id) != "daemon":
+            self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""

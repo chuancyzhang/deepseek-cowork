@@ -100,7 +100,7 @@ class TestChatRecoveryJournal(unittest.TestCase):
                 "shared-id",
             )
 
-    def test_stream_checkpoint_is_restored_as_interrupted_content(self):
+    def test_stream_checkpoint_is_moved_to_v2_without_entering_sqlite_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
             journal = ChatRecoveryJournal(temp_dir)
@@ -122,9 +122,46 @@ class TestChatRecoveryJournal(unittest.TestCase):
             recovered, errors = journal.recover_into(storage)
             self.assertEqual(recovered, ["session-recovery"])
             self.assertEqual(errors, [])
-            partial = storage.get_messages("session-recovery")[-1]
-            self.assertIn("已恢复的未完成回复", partial.get("content") or "")
-            self.assertTrue((partial.get("meta") or {}).get("recovered_interrupted"))
+            self.assertEqual(
+                [item.get("content") for item in storage.get_messages("session-recovery")],
+                ["继续执行"],
+            )
+            run = journal.runtime_journal.get_run("session-recovery", "partial")
+            self.assertEqual(run["status"], "interrupted")
+            self.assertEqual(run["draft_content"], "已经完成前半部分")
+
+    def test_v2_pending_commit_is_recovered_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            journal = ChatRecoveryJournal(temp_dir)
+            messages = [
+                {"id": "u1", "role": "user", "content": "question"},
+                {"id": "a1", "role": "assistant", "content": "answer"},
+            ]
+            journal.runtime_journal.begin_run(
+                "session-v2",
+                "run-v2",
+                writer_owner="ui:1",
+                base_messages=[],
+                status="completed",
+                extra={"finished_at": 1},
+            )
+            journal.runtime_journal.mark_pending_commit(
+                "session-v2",
+                "run-v2",
+                messages,
+                title="Recovered v2",
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, ["session-v2"])
+            self.assertEqual(errors, [])
+            self.assertEqual(storage.get_messages("session-v2"), storage.normalize_messages(messages))
+            manifest = journal.runtime_journal.load_manifest("session-v2")
+            self.assertEqual(manifest.get("pending_commit_run_id"), "")
+            self.assertNotIn("pending_commit", manifest)
+            self.assertEqual(journal.recover_into(storage), ([], []))
 
 
 if __name__ == "__main__":

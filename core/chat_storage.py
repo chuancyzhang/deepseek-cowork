@@ -12,6 +12,10 @@ from .conversation_integrity import normalize_message_ids
 
 logger = logging.getLogger(__name__)
 
+
+class ConversationWriteConflict(RuntimeError):
+    """Raised when a normal save would rewrite an existing conversation ledger."""
+
 AGENT_TERMINAL_STATUSES = {
     "completed",
     "failed",
@@ -452,6 +456,17 @@ class ChatStorage:
             if current.get("id") != incoming.get("id"):
                 return False
             if self._message_signature(current) != self._message_signature(incoming):
+                return False
+        return True
+
+    def _messages_are_prefix(self, prefix_messages, messages):
+        if len(prefix_messages) > len(messages):
+            return False
+        for index, prefix_message in enumerate(prefix_messages):
+            message = messages[index]
+            if prefix_message.get("id") != message.get("id"):
+                return False
+            if self._message_signature(prefix_message) != self._message_signature(message):
                 return False
         return True
 
@@ -1055,6 +1070,95 @@ class ChatStorage:
             )
             self._replace_messages_in_connection(conn, conversation_id, normalized_messages)
 
+    def save_conversation_safely(
+        self,
+        conversation_id,
+        messages,
+        title=None,
+        status="active",
+        meta=None,
+    ):
+        """Append a compatible snapshot without rewriting existing messages.
+
+        This method intentionally uses only the existing SQLite schema.  A
+        stale snapshot is acknowledged as a no-op; a divergent snapshot is
+        rejected so callers can preserve it in the runtime sidecar instead of
+        deleting already committed history.
+        """
+        normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            normalized_messages = self._remap_cross_conversation_message_ids(
+                conn,
+                conversation_id,
+                normalized_messages,
+            )
+            rows = conn.execute(
+                """
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id, created_at
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY position ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+            existing_messages = [self._message_row_to_dict(row) for row in rows]
+            comparison_messages = self.normalize_messages(
+                existing_messages,
+                conversation_id=conversation_id,
+            )
+
+            if comparison_messages and self._messages_are_prefix(
+                normalized_messages,
+                comparison_messages,
+            ):
+                if len(comparison_messages) == len(normalized_messages):
+                    self._upsert_conversation_in_connection(
+                        conn,
+                        conversation_id,
+                        title=title,
+                        status=status,
+                        meta=meta,
+                    )
+                return {
+                    "outcome": "unchanged" if len(comparison_messages) == len(normalized_messages) else "stale",
+                    "message_count": len(comparison_messages),
+                }
+
+            if comparison_messages and not self._messages_are_prefix(
+                comparison_messages,
+                normalized_messages,
+            ):
+                raise ConversationWriteConflict(
+                    f"conversation {conversation_id} diverged from the committed SQLite history"
+                )
+
+            self._upsert_conversation_in_connection(
+                conn,
+                conversation_id,
+                title=title,
+                status=status,
+                meta=meta,
+            )
+            start = len(existing_messages)
+            now = int(time.time())
+            for index, message in enumerate(normalized_messages[start:], start=start):
+                self._insert_message_row(
+                    conn,
+                    "messages",
+                    "conversation_id",
+                    conversation_id,
+                    message,
+                    index,
+                    now,
+                )
+            return {
+                "outcome": "appended" if start else "created",
+                "message_count": len(normalized_messages),
+                "appended_count": len(normalized_messages) - start,
+            }
+
     def _conversation_rows_to_dicts(self, rows):
         conversations = []
         for row in rows:
@@ -1528,18 +1632,7 @@ class ChatStorage:
         messages = []
         for row in rows:
             messages.append(self._message_row_to_dict(row))
-        normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
-        try:
-            changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
-                normalized_messages,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        except Exception:
-            changed = messages != normalized_messages
-        if changed:
-            self.replace_messages(conversation_id, normalized_messages)
-        return normalized_messages
+        return self.normalize_messages(messages, conversation_id=conversation_id)
 
     def delete_conversation(self, conversation_id):
         artifact_paths = []

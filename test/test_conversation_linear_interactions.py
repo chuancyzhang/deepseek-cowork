@@ -1898,7 +1898,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_error_finishes_current_group_without_message_actions_and_persists_status(self):
+    def test_error_silently_removes_current_group_without_persisting_chat_error(self):
         window = MainWindow()
         try:
             state = window.get_current_session()
@@ -1907,18 +1907,33 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state.active_turn_id = 1
             bubble = window._append_live_thinking_segment(state)
             window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
-            self.assertIn("provider failed", bubble.main_content_text)
-            self.assertTrue(bubble.copy_result_btn.isHidden())
-            self.assertTrue(bubble.office_draft_btn.isHidden())
+            self.assertIsNone(bubble.parent())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
-            error_message = state.messages[-1]
-            self.assertTrue(error_message["meta"]["ui_only"])
-            self.assertEqual(error_message["meta"]["ui_reply_kind"], "error")
-            self.assertFalse(any(message.get("id") == error_message["id"] for message in window._messages_for_worker(state, {})))
+            self.assertFalse(
+                any(
+                    (message.get("meta") or {}).get("ui_reply_kind") == "error"
+                    for message in state.messages
+                    if isinstance(message, dict)
+                )
+            )
         finally:
             window.close()
             window.deleteLater()
+
+    def test_worker_error_output_is_logged_without_user_toast(self):
+        window = MainWindow.__new__(MainWindow)
+        window.append_log = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        MainWindow.handle_worker_output(
+            window,
+            "Provider Error: network disconnected",
+            "session-1",
+        )
+
+        window.append_log.assert_called_once()
+        window.add_system_toast.assert_not_called()
 
     def test_tool_rounds_append_stages_inside_one_assistant_turn_group(self):
         window = MainWindow()
@@ -2147,12 +2162,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
-            self.assertIn("未收到最终答复", bubble.main_content_text)
-            self.assertNotIn("阶段内容不能成为最终答复", bubble.main_content_text)
-            self.assertTrue(bubble.copy_result_btn.isHidden())
-            self.assertTrue(bubble.office_draft_btn.isHidden())
+            self.assertIsNone(bubble.parent())
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
-            self.assertEqual(assistants[-1]["meta"]["ui_reply_kind"], "error")
+            self.assertEqual(assistants, [])
         finally:
             window.close()
             window.deleteLater()

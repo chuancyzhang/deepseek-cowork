@@ -11,6 +11,7 @@ import shutil
 import uuid
 import threading
 import hashlib
+import inspect
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
@@ -24,6 +25,8 @@ from core.im_gateway_registry import (
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
+from core.message_persistence import project_provider_messages
+from core.runtime_journal import RuntimeJournal
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
     GRILL_CHECKPOINT_PURPOSE,
@@ -424,7 +427,7 @@ def drop_invalid_tool_call_rounds_without_reasoning(messages):
 
         if has_tool_calls:
             for offset in assistant_indices:
-                if not _reasoning_text_from_message(turn[offset]):
+                if not str(turn[offset].get("reasoning_content") or "").strip():
                     missing_reasoning = True
                     break
 
@@ -619,8 +622,6 @@ def sanitize_llm_messages(
     strict_reasoning_replay=False,
     project_responses_replay_to_chat=False,
 ):
-    if strict_reasoning_replay:
-        _validate_deepseek_responses_tool_results(messages)
     ledger_messages = [
         json_copy(message, {})
         for message in (messages or [])
@@ -628,16 +629,21 @@ def sanitize_llm_messages(
     ]
     if project_responses_replay_to_chat:
         ledger_messages = project_responses_replay_to_chat_messages(ledger_messages)
-    ensure_tool_call_sequence(ledger_messages, context="LLM provider request")
     dropped_rounds = []
     if require_reasoning_replay:
-        _unused_messages, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(ledger_messages)
-        if dropped_rounds:
-            dropped_calls = sum(len(item.get("tool_call_ids") or []) for item in dropped_rounds)
-            raise ValueError(
-                "DeepSeek 工具调用历史缺少 reasoning_text，无法按原序安全续接"
-                f"（{dropped_calls} 个工具调用）。请新建任务后重试；原历史不会被静默裁剪。"
-            )
+        ledger_messages, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(
+            ledger_messages
+        )
+    if strict_reasoning_replay:
+        _validate_deepseek_responses_tool_results(ledger_messages)
+    ensure_tool_call_sequence(
+        ledger_messages,
+        context=(
+            "LLM provider request after reasoning projection"
+            if dropped_rounds
+            else "LLM provider request"
+        ),
+    )
     cleaned = _clean_reasoning_content_by_turn(
         ledger_messages,
         drop_meta=True,
@@ -681,7 +687,7 @@ class LLMWorker(QThread):
         request_id=None,
     ):
         super().__init__()
-        self.messages = messages
+        self.messages, self.excluded_provider_message_ids = project_provider_messages(messages)
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
         self.workspace_dir = workspace_dir
@@ -726,13 +732,18 @@ class LLMWorker(QThread):
         # Per-run filesystem read/write state used by filesystem tools.
         self.file_state_cache = {"reads": {}}
         self.chat_storage = None
+        self.runtime_journal = None
+        self.runtime_journal_init_error = ""
         self.agent_manager = None
         try:
             history_dir = self.config_manager.get_chat_history_dir()
             db_path = os.path.join(history_dir, "chat_history.sqlite")
             self.chat_storage = ChatStorage(db_path)
-        except Exception:
+            self.runtime_journal = RuntimeJournal(history_dir)
+        except Exception as exc:
             self.chat_storage = None
+            self.runtime_journal = None
+            self.runtime_journal_init_error = str(exc)
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
         self._stable_system_prompt = None
@@ -1295,6 +1306,34 @@ class LLMWorker(QThread):
         if isinstance(generated_messages, list):
             generated_messages[:] = [message for message in generated_messages if keep(message)]
         return removed
+
+    @staticmethod
+    def _mark_tool_round_runtime_only(current_messages, generated_messages, tool_round):
+        if not isinstance(tool_round, dict):
+            return 0
+        assistant_id = str(tool_round.get("assistant_message_id") or "").strip()
+        tool_call_ids = {
+            str(value or "").strip()
+            for value in (tool_round.get("tool_call_ids") or [])
+            if str(value or "").strip()
+        }
+        marked_ids = set()
+        for collection in (current_messages, generated_messages):
+            for message in collection if isinstance(collection, list) else []:
+                if not isinstance(message, dict):
+                    continue
+                is_assistant = assistant_id and str(message.get("id") or "").strip() == assistant_id
+                is_tool = (
+                    message.get("role") == "tool"
+                    and str(message.get("tool_call_id") or "").strip() in tool_call_ids
+                )
+                if not (is_assistant or is_tool):
+                    continue
+                meta = dict(message.get("meta") or {}) if isinstance(message.get("meta"), dict) else {}
+                meta["runtime_repair_only"] = True
+                message["meta"] = meta
+                marked_ids.add(str(message.get("id") or id(message)))
+        return len(marked_ids)
 
     def _skill_context_hash(self, content):
         return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
@@ -1953,7 +1992,11 @@ class LLMWorker(QThread):
         return appended
 
     def _build_request_messages(self, current_messages):
-        return [json_copy(msg, {}) if isinstance(msg, dict) else msg for msg in current_messages]
+        projected, _excluded_ids = project_provider_messages(
+            current_messages,
+            include_runtime_repairs=True,
+        )
+        return [json_copy(msg, {}) for msg in projected]
 
     def _verify_request_prefix(self, previous_messages, current_messages, protocol):
         previous = previous_messages or []
@@ -1985,8 +2028,16 @@ class LLMWorker(QThread):
             )
         return json_copy(current, [])
 
-    def _previous_request_prefix_from_ledger(self, request_messages, sanitized_messages):
+    def _previous_request_prefix_from_ledger(
+        self,
+        request_messages,
+        sanitized_messages,
+        *,
+        allow_projection=False,
+    ):
         if len(request_messages or []) != len(sanitized_messages or []):
+            if allow_projection:
+                return []
             raise RuntimeError(
                 "Provider message sanitization changed the append-only ledger length."
             )
@@ -2095,15 +2146,119 @@ class LLMWorker(QThread):
             self._last_tool_exposure_signature = exposure_signature
             self.observability_signal.emit(exposure_event)
 
-    def _provider_chat_stream(self, provider, messages, tools, prompt_cache_key):
+    def _provider_chat_stream(
+        self,
+        provider,
+        messages,
+        tools,
+        prompt_cache_key,
+        request_context=None,
+    ):
+        parameters = inspect.signature(provider.chat_stream).parameters
+        kwargs = {"tools": tools}
+        if "prompt_cache_key" in parameters:
+            kwargs["prompt_cache_key"] = prompt_cache_key
+        if "request_context" in parameters:
+            kwargs["request_context"] = request_context or {}
+        return provider.chat_stream(messages, **kwargs)
+
+    def _record_provider_attempt(self, attempt_id, payload):
+        if not self.runtime_journal or not self.session_id:
+            return None
         try:
-            return provider.chat_stream(
-                messages,
-                tools=tools,
-                prompt_cache_key=prompt_cache_key,
+            return self.runtime_journal.record_attempt(
+                self.session_id,
+                attempt_id,
+                payload,
             )
-        except TypeError:
-            return provider.chat_stream(messages, tools=tools)
+        except Exception as exc:
+            self.observability_signal.emit({
+                "type": "runtime_journal_error",
+                "stage": "provider_attempt",
+                "attempt_id": str(attempt_id or ""),
+                "error": str(exc),
+                "timestamp": time.time(),
+            })
+            raise RuntimeError(f"provider attempt journal write failed: {exc}") from exc
+
+    def _tool_execution_policy(self, name):
+        getter = getattr(self.skill_manager, "get_tool_record", None)
+        record = getter(name) if callable(getter) else None
+        record = record if isinstance(record, dict) else {}
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        read_only = bool(record.get("read_only")) and not bool(record.get("destructive"))
+        idempotent = bool(
+            metadata.get("idempotent")
+            or metadata.get("supports_idempotency_key")
+            or record.get("idempotent")
+        )
+        return {
+            "read_only": read_only,
+            "destructive": bool(record.get("destructive")),
+            "idempotent": idempotent,
+            "safe_retry": bool(read_only or idempotent),
+        }
+
+    def _tool_execution_identity(self, tool, args, checkpoint_ordinal):
+        args_hash = RuntimeJournal.checksum(args if isinstance(args, dict) else {"value": args})
+        raw = "|".join([
+            str(self.session_id or self.conversation_id or ""),
+            str(self.request_id or self.turn_id or ""),
+            str(checkpoint_ordinal or 0),
+            str(getattr(tool, "id", "") or ""),
+            args_hash,
+        ])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest(), args_hash
+
+    @staticmethod
+    def _tool_result_failure_kind(result):
+        """Classify tool failures that SkillManager returns instead of raising."""
+        if isinstance(result, dict):
+            status = str(result.get("status") or "").strip().lower()
+            if status in {"unknown", "partial_apply"}:
+                return "unknown"
+            if (
+                result.get("ok") is False
+                or status in {"denied", "error", "failed", "invalid_tool_call"}
+            ):
+                return "failed"
+            if (
+                str(result.get("error") or "").strip()
+                and result.get("ok") is not True
+                and status not in {"ok", "success", "succeeded", "completed", "complete"}
+            ):
+                return "failed"
+            return ""
+        if isinstance(result, str):
+            text = result.strip().lower()
+            if text.startswith("error:") or text.startswith("error executing "):
+                return "failed"
+        return ""
+
+    @staticmethod
+    def _tool_result_error_text(result):
+        if isinstance(result, dict):
+            return str(result.get("error") or result.get("content") or result)
+        return str(result or "Tool execution failed.")
+
+    def _record_tool_execution(self, execution_id, payload):
+        if not self.runtime_journal or not self.session_id:
+            return None
+        try:
+            return self.runtime_journal.record_tool(
+                self.session_id,
+                execution_id,
+                payload,
+            )
+        except Exception as exc:
+            self.observability_signal.emit({
+                "type": "runtime_journal_error",
+                "stage": "tool_execution",
+                "execution_id": str(execution_id or ""),
+                "error": str(exc),
+                "timestamp": time.time(),
+            })
+            raise RuntimeError(f"tool execution journal write failed: {exc}") from exc
 
     def run(self):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is
@@ -2130,6 +2285,7 @@ class LLMWorker(QThread):
         last_turn_reasoning = None
         reasoning_repetition_count = 0
         force_reply_attempted = False
+        tool_failure_repair_count = 0
         previous_provider_messages = None
         grill_checkpoint_prompt_attempts = 0
         
@@ -2184,10 +2340,28 @@ class LLMWorker(QThread):
                         model_profile=self.run_context.get("selected_model_profile"),
                     )
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
+                    attempt_id = f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}"
+                    attempt_record = self._record_provider_attempt(attempt_id, {
+                        "run_id": self.request_id or self.turn_id or self.session_id,
+                        "turn_id": self.turn_id,
+                        "ordinal": turn_count,
+                        "status": "running",
+                        "client_request_id": attempt_id,
+                        "provider": provider_name,
+                        "model": getattr(provider, "model_name", ""),
+                        "base_url": getattr(provider, "base_url", ""),
+                        "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                        "started_at": start_time,
+                    })
+                    if self.session_id and attempt_record is None:
+                        raise RuntimeError(
+                            "Provider attempt journal is unavailable: "
+                            + (self.runtime_journal_init_error or "sidecar write failed")
+                        )
                     self.step_signal.emit(f"Provider Start: {provider_name}")
                     self.observability_signal.emit({
                         "type": "provider_request_start",
-                        "request_id": f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                        "request_id": attempt_id,
                         "turn_id": self.turn_id,
                         "provider": provider_name,
                         "model": getattr(provider, "model_name", ""),
@@ -2210,9 +2384,10 @@ class LLMWorker(QThread):
                     preserve_deepseek_responses = bool(
                         getattr(provider, "requires_deepseek_responses_replay", False)
                     )
-                    sanitized_messages = sanitize_llm_messages(
+                    sanitized_messages, sanitization_meta = sanitize_llm_messages(
                         request_messages,
                         require_reasoning_replay=require_reasoning_replay,
+                        return_metadata=True,
                         preserve_all_reasoning=preserve_deepseek_responses,
                         preserve_responses_replay=preserve_responses,
                         preserve_legacy_deepseek_replay=preserve_deepseek_responses,
@@ -2222,10 +2397,24 @@ class LLMWorker(QThread):
                             == "chat_completions"
                         ),
                     )
+                    dropped_reasoning_rounds = sanitization_meta.get(
+                        "dropped_incomplete_reasoning_rounds"
+                    ) or []
+                    if dropped_reasoning_rounds:
+                        self._record_provider_attempt(
+                            attempt_id,
+                            {"reasoning_projection": dropped_reasoning_rounds},
+                        )
+                        self.observability_signal.emit({
+                            "type": "reasoning_history_projected",
+                            "dropped_round_count": len(dropped_reasoning_rounds),
+                            "timestamp": time.time(),
+                        })
                     if previous_provider_messages is None:
                         previous_provider_messages = self._previous_request_prefix_from_ledger(
                             request_messages,
                             sanitized_messages,
+                            allow_projection=bool(dropped_reasoning_rounds),
                         )
                     previous_provider_messages = self._verify_request_prefix(
                         previous_provider_messages,
@@ -2238,6 +2427,7 @@ class LLMWorker(QThread):
                     tool_calls_buffer = {} # Index -> ToolCall object (dict)
                     response_items_buffer = []
                     provider_error_message = None
+                    provider_terminal_status = ""
                     protocol_locked = False
                     tool_round_context = None
 
@@ -2255,6 +2445,11 @@ class LLMWorker(QThread):
                             sanitized_messages,
                             tools=self._tools_for_messages(sanitized_messages),
                             prompt_cache_key=self.conversation_id or self.session_id,
+                            request_context={
+                                "client_request_id": attempt_id,
+                                "run_id": self.request_id or self.turn_id or self.session_id,
+                                "turn_id": self.turn_id,
+                            },
                         )
 
                         for chunk in stream:
@@ -2325,6 +2520,37 @@ class LLMWorker(QThread):
                                 provider_error_message = chunk.get("content") or "Unknown error"
                                 self.step_signal.emit(f"Provider Error: {provider_error_message}")
                                 self.output_signal.emit(f"Provider Error: {provider_error_message}")
+                            elif type_ == "provider_request":
+                                attempt_patch = {}
+                                provider_request_id = str(
+                                    chunk.get("provider_request_id") or ""
+                                )
+                                response_id = str(chunk.get("response_id") or "")
+                                if provider_request_id:
+                                    attempt_patch["provider_request_id"] = provider_request_id
+                                if response_id:
+                                    attempt_patch["response_id"] = response_id
+                                if chunk.get("provider_sequence") is not None:
+                                    attempt_patch["last_provider_sequence"] = chunk.get(
+                                        "provider_sequence"
+                                    )
+                                if attempt_patch:
+                                    self._record_provider_attempt(attempt_id, attempt_patch)
+                            elif type_ == "provider_terminal":
+                                provider_terminal_status = str(chunk.get("status") or "")
+                                terminal_error = str(chunk.get("error") or "")
+                                self._record_provider_attempt(attempt_id, {
+                                    "status": provider_terminal_status or "invalid_terminal",
+                                    "finish_reason": str(chunk.get("finish_reason") or ""),
+                                    "response_id": str(chunk.get("response_id") or ""),
+                                    "last_provider_sequence": chunk.get("provider_sequence"),
+                                    "error": terminal_error,
+                                })
+                                if provider_terminal_status and provider_terminal_status != "completed":
+                                    provider_error_message = terminal_error or (
+                                        "Provider returned an incomplete terminal state: "
+                                        f"{chunk.get('finish_reason') or chunk.get('event_type') or provider_terminal_status}."
+                                    )
                             elif type_ == "usage":
                                 usage_payload = dict(chunk.get("usage") or {})
                                 usage_payload.setdefault("prompt_cache_key", self.conversation_id or self.session_id)
@@ -2435,25 +2661,29 @@ class LLMWorker(QThread):
                         "duration": duration,
                         "timestamp": time.time(),
                     })
+                    self._record_provider_attempt(attempt_id, {
+                        "status": (
+                            provider_terminal_status
+                            or ("failed" if provider_error_message else "completed")
+                        ),
+                        "error": str(provider_error_message or ""),
+                        "finished_at": end_time,
+                        "duration": duration,
+                    })
 
                     if preserve_responses and not response_items_buffer:
                         if self.is_stopped:
-                            stop_prompt = (
-                                "用户已停止上一轮 Responses 生成；未完成的流式文本仅保留在界面中，"
-                                "不得把它当作 provider 已完成的 output item。"
-                            )
-                            self._append_ledger_message(current_messages, generated_messages, {
-                                "role": "system",
-                                "content": stop_prompt,
-                                "meta": {
-                                    "kind": "runtime_instruction",
-                                    "hidden": True,
-                                    "source": "responses_generation_stopped",
-                                    "content_hash": self._skill_context_hash(stop_prompt),
-                                },
-                            })
                             final_content = chunk_content or "⚠️ Operation stopped by user."
                             break
+                        if provider_error_message:
+                            self._append_pending_guidance(current_messages, generated_messages, close=True)
+                            self.finished_signal.emit({
+                                "error": str(provider_error_message),
+                                "generated_messages": generated_messages,
+                                "turn_id": self.turn_id,
+                                "request_id": self.request_id,
+                            })
+                            return
                         raise RuntimeError(
                             "Responses provider ended without completed output items; "
                             "the append-only conversation was not extended."
@@ -2553,6 +2783,17 @@ class LLMWorker(QThread):
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills, generated_messages)
 
                     if (not tool_calls) and (not (content or "").strip()) and (not provider_error_message):
+                        if preserve_responses and response_items_buffer:
+                            self.finished_signal.emit({
+                                "error": (
+                                    "Responses completed without actionable assistant content or "
+                                    "a local function call."
+                                ),
+                                "generated_messages": generated_messages,
+                                "turn_id": self.turn_id,
+                                "request_id": self.request_id,
+                            })
+                            return
                         if not force_reply_attempted:
                             force_reply_attempted = True
                             self.step_signal.emit("System: Empty content detected, requesting a forced final answer.")
@@ -2624,6 +2865,74 @@ class LLMWorker(QThread):
                         }
                     
                     if tool_calls:
+                        prepared_tool_executions = {}
+                        for tool in tool_calls:
+                            prepared_name = str(tool.function.name or "").strip()
+                            prepared_raw_args = tool.function.arguments
+                            if isinstance(prepared_raw_args, dict):
+                                prepared_args = prepared_raw_args
+                            elif isinstance(prepared_raw_args, str) and prepared_raw_args.strip():
+                                try:
+                                    prepared_args = json.loads(prepared_raw_args)
+                                except Exception:
+                                    prepared_args = {"_invalid_json": prepared_raw_args}
+                            else:
+                                prepared_args = {}
+                            execution_id, args_hash = self._tool_execution_identity(
+                                tool,
+                                prepared_args,
+                                turn_count,
+                            )
+                            policy = self._tool_execution_policy(prepared_name)
+                            existing_execution = (
+                                self.runtime_journal.get_tool(self.session_id, execution_id)
+                                if self.runtime_journal and self.session_id
+                                else None
+                            )
+                            if (
+                                not existing_execution
+                                and self.runtime_journal
+                                and self.session_id
+                            ):
+                                existing_execution = self.runtime_journal.find_tool_execution(
+                                    self.session_id,
+                                    name=prepared_name,
+                                    args_hash=args_hash,
+                                    statuses={"succeeded"},
+                                    committed=False,
+                                )
+                            equivalent_unknown = None
+                            if self.runtime_journal and self.session_id and not policy["safe_retry"]:
+                                equivalent_unknown = self.runtime_journal.find_tool_execution(
+                                    self.session_id,
+                                    name=prepared_name,
+                                    args_hash=args_hash,
+                                    statuses={"unknown"},
+                                )
+                            prepared_tool_executions[str(tool.id or "")] = {
+                                "execution_id": execution_id,
+                                "args_hash": args_hash,
+                                "policy": policy,
+                                "existing": existing_execution,
+                                "equivalent_unknown": equivalent_unknown,
+                            }
+                            if not existing_execution:
+                                prepared_record = self._record_tool_execution(execution_id, {
+                                    "run_id": self.request_id or self.turn_id or self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "provider_attempt_id": attempt_id,
+                                    "tool_call_id": str(tool.id or ""),
+                                    "name": prepared_name,
+                                    "args": prepared_args,
+                                    "args_hash": args_hash,
+                                    **policy,
+                                    "status": "prepared",
+                                    "committed": False,
+                                })
+                                if self.session_id and prepared_record is None:
+                                    raise RuntimeError(
+                                        "Tool execution journal is unavailable; the tool batch was not started."
+                                    )
                         # --- Loop Detection ---
                         try:
                             current_signature = json.dumps(
@@ -2640,6 +2949,26 @@ class LLMWorker(QThread):
                                 repeated_tools = ", ".join(
                                     sorted({str(t.function.name or "unknown") for t in tool_calls})
                                 )
+                                removed_count = self._discard_incomplete_tool_round(
+                                    current_messages,
+                                    generated_messages,
+                                    tool_round_context,
+                                )
+                                tool_round_context = None
+                                if tool_failure_repair_count:
+                                    self.observability_signal.emit({
+                                        "type": "tool_repair_budget_exhausted",
+                                        "repeated_tools": repeated_tools,
+                                        "removed_message_count": removed_count,
+                                        "timestamp": time.time(),
+                                    })
+                                    self.finished_signal.emit({
+                                        "error": "Tool repair budget exhausted.",
+                                        "generated_messages": generated_messages,
+                                        "turn_id": self.turn_id,
+                                        "request_id": self.request_id,
+                                    })
+                                    return
                                 self.step_signal.emit("系统: 🛑 检测到循环 (重复的工具调用)。自动停止。")
                                 final_content = (
                                     "⚠️ 操作已停止: 检测到连续 3 次重复的工具调用"
@@ -2653,7 +2982,9 @@ class LLMWorker(QThread):
 
                         self.step_signal.emit(f"Tool Calls Detected: {len(tool_calls)}")
                         successful_tool_results = []
+                        failed_tool_results = []
                         completed_tool_call_ids = set()
+                        unknown_tool_execution = False
                         for tool in tool_calls:
                             # Check Control Flags inside tool loop
                             while self.is_paused:
@@ -2672,6 +3003,11 @@ class LLMWorker(QThread):
                                 except Exception:
                                     args = {}
                                     self.output_signal.emit(f"Tool Args Parse Fallback: {name} received invalid JSON arguments.")
+                            execution_info = prepared_tool_executions.get(str(tool.id or ""), {})
+                            execution_id = str(execution_info.get("execution_id") or "")
+                            execution_policy = execution_info.get("policy") or self._tool_execution_policy(name)
+                            existing_execution = execution_info.get("existing")
+                            equivalent_unknown = execution_info.get("equivalent_unknown")
                             missing_tool_name = not name
                             missing_tool_name_message = (
                                 "Provider returned a tool call without function.name; "
@@ -2726,6 +3062,10 @@ class LLMWorker(QThread):
                                 "agent_state_signal": self.agent_state_signal,
                                 "observability_signal": self.observability_signal,
                                 "tool_call_id": tool.id,
+                                "logical_execution_id": execution_id,
+                                "idempotency_key": (
+                                    execution_id if execution_policy.get("idempotent") else ""
+                                ),
                                 "abort_signal": self.abort_signal,
                                 "current_agent_id": self.agent_id or (self.parent_agent_id or ""),
                                 "parent_agent_id": self.parent_agent_id or "",
@@ -2741,6 +3081,24 @@ class LLMWorker(QThread):
                                     "status": "invalid_tool_call",
                                     "content": "模型返回了缺少函数名的工具调用，已跳过执行。",
                                 }
+                            elif unknown_tool_execution:
+                                result = {
+                                    "error": (
+                                        "A preceding side-effecting tool in this batch has an unknown outcome; "
+                                        "this tool was not executed."
+                                    ),
+                                    "blocked_tool": name,
+                                    "status": "unknown",
+                                    "content": (
+                                        "同一批次中已有副作用工具结果未知，本工具未执行。"
+                                        "请改用只读验证或其他安全路径重新规划。"
+                                    ),
+                                }
+                                self._record_tool_execution(execution_id, {
+                                    "status": "unknown",
+                                    "unknown_reason": "preceding tool in batch has unknown outcome",
+                                    "attempt_count": 0,
+                                })
                             elif self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
                                 result = {
                                     "error": "sub-agents cannot manage other agents",
@@ -2821,22 +3179,120 @@ class LLMWorker(QThread):
                                     "content": "澄清问题必须提供可选择的选项；请改用 questionnaire 选项卡片。",
                                 }
                             else:
-                                try:
-                                    result = self.skill_manager.call_tool(
-                                        name,
-                                        args,
-                                        context=tool_context,
-                                    )
-                                except Exception as exc:
+                                if isinstance(existing_execution, dict) and str(existing_execution.get("status") or "") == "succeeded":
+                                    result = existing_execution.get("result_obj")
+                                    if result is None:
+                                        result = existing_execution.get("result_text") or ""
+                                    self._record_tool_execution(execution_id, {
+                                        "run_id": self.request_id or self.turn_id or self.session_id,
+                                        "turn_id": self.turn_id,
+                                        "tool_call_id": str(tool.id or ""),
+                                        "name": name,
+                                        "args": args,
+                                        "args_hash": execution_info.get("args_hash") or "",
+                                        **execution_policy,
+                                        "status": "succeeded",
+                                        "committed": False,
+                                        "reused_from_execution_id": existing_execution.get("execution_id") or "",
+                                        "result_obj": existing_execution.get("result_obj"),
+                                        "result_text": existing_execution.get("result_text") or "",
+                                    })
+                                    self.observability_signal.emit({
+                                        "type": "tool_result_reused",
+                                        "id": tool.id,
+                                        "execution_id": execution_id,
+                                        "name": name,
+                                        "timestamp": time.time(),
+                                    })
+                                elif equivalent_unknown and not execution_policy.get("safe_retry"):
+                                    self._record_tool_execution(execution_id, {
+                                        "status": "unknown",
+                                        "unknown_reason": "equivalent side-effecting execution has unknown outcome",
+                                        "blocked_by_execution_id": equivalent_unknown.get("execution_id") or "",
+                                    })
+                                    unknown_tool_execution = True
                                     result = {
-                                        "error": str(exc),
-                                        "status": "error",
+                                        "error": (
+                                            "A matching side-effecting tool execution has an unknown outcome; "
+                                            "the duplicate execution was blocked."
+                                        ),
+                                        "status": "unknown",
                                         "blocked_tool": name,
-                                        "content": f"工具 {name} 执行失败：{exc}",
+                                        "content": (
+                                            "该副作用工具的既有执行结果未知，已阻止重复执行。"
+                                            "请改用只读验证或其他安全路径重新规划。"
+                                        ),
                                     }
-                                    self.output_signal.emit(
-                                        f"Tool Error: {name} 执行失败，已写入明确工具错误结果：{exc}"
-                                    )
+                                else:
+                                    self._record_tool_execution(execution_id, {
+                                        "status": "started",
+                                        "started_at": start_tool_time,
+                                    })
+                                    result = None
+                                    max_tool_attempts = 3 if execution_policy.get("safe_retry") else 1
+                                    for tool_attempt in range(1, max_tool_attempts + 1):
+                                        try:
+                                            result = self.skill_manager.call_tool(
+                                                name,
+                                                args,
+                                                context=tool_context,
+                                            )
+                                        except Exception as exc:
+                                            if not execution_policy.get("safe_retry"):
+                                                self._record_tool_execution(execution_id, {
+                                                    "status": "unknown",
+                                                    "unknown_reason": str(exc),
+                                                    "attempt_count": tool_attempt,
+                                                })
+                                                unknown_tool_execution = True
+                                                result = {
+                                                    "error": str(exc),
+                                                    "status": "unknown",
+                                                    "blocked_tool": name,
+                                                    "content": (
+                                                        f"工具 {name} 的执行结果未知；禁止自动重复执行。"
+                                                        "请改用只读验证或其他安全路径重新规划。"
+                                                    ),
+                                                }
+                                                break
+                                            result = {
+                                                "error": str(exc),
+                                                "status": "error",
+                                                "blocked_tool": name,
+                                                "content": f"工具 {name} 执行失败：{exc}",
+                                            }
+                                        failure_kind = self._tool_result_failure_kind(result)
+                                        if (
+                                            failure_kind == "failed"
+                                            and execution_policy.get("safe_retry")
+                                            and tool_attempt < max_tool_attempts
+                                        ):
+                                            self._record_tool_execution(execution_id, {
+                                                "status": "started",
+                                                "attempt_count": tool_attempt,
+                                                "last_error": self._tool_result_error_text(result),
+                                            })
+                                            continue
+                                        if failure_kind and not isinstance(result, dict):
+                                            error_text = self._tool_result_error_text(result)
+                                            ambiguous_side_effect = bool(
+                                                not execution_policy.get("safe_retry")
+                                                and error_text.strip().lower().startswith("error executing ")
+                                            )
+                                            if ambiguous_side_effect:
+                                                failure_kind = "unknown"
+                                                unknown_tool_execution = True
+                                            result = {
+                                                "error": error_text,
+                                                "status": failure_kind,
+                                                "blocked_tool": name,
+                                                "content": (
+                                                    f"工具 {name} 的执行结果未知；禁止自动重复执行。"
+                                                    if failure_kind == "unknown"
+                                                    else f"工具 {name} 执行失败：{error_text}"
+                                                ),
+                                            }
+                                        break
                                 if name == "request_user_input" and self._is_grilling_mode():
                                     if self._is_grill_checkpoint_args(args):
                                         result = self._apply_grill_checkpoint_result(args, result)
@@ -2885,6 +3341,31 @@ class LLMWorker(QThread):
                                     result_text = str(result)
                             else:
                                 result_text = str(result)
+                            structured_failure = bool(
+                                self._tool_result_failure_kind(result_obj)
+                            )
+                            if structured_failure and str(result_obj.get("status") or "").lower() == "partial_apply" and not execution_policy.get("safe_retry"):
+                                self._record_tool_execution(execution_id, {
+                                    "status": "unknown",
+                                    "unknown_reason": str(result_obj.get("error") or result_obj.get("content") or "partial_apply"),
+                                    "result_text": result_text,
+                                    "result_obj": result_obj,
+                                })
+                                unknown_tool_execution = True
+                                break
+                            result_status = str(
+                                result_obj.get("status") or ""
+                            ).lower() if isinstance(result_obj, dict) else ""
+                            self._record_tool_execution(execution_id, {
+                                "status": (
+                                    "unknown"
+                                    if result_status == "unknown"
+                                    else ("failed" if structured_failure else "succeeded")
+                                ),
+                                "finished_at": end_tool_time,
+                                "result_text": result_text,
+                                "result_obj": result_obj,
+                            })
                             
                             # Emit Tool Result Signal
                             self.tool_result_signal.emit({
@@ -2896,7 +3377,8 @@ class LLMWorker(QThread):
                                 "meta": {
                                     "start_time": start_tool_time,
                                     "end_time": end_tool_time,
-                                    "duration": duration_tool
+                                    "duration": duration_tool,
+                                    "silent_repair": bool(structured_failure),
                                 }
                             })
                             self.observability_signal.emit({
@@ -2932,13 +3414,10 @@ class LLMWorker(QThread):
                                 tool_msg,
                             )
                             completed_tool_call_ids.add(str(tool.id or "").strip())
-                            structured_failure = isinstance(result_obj, dict) and (
-                                result_obj.get("ok") is False
-                                or str(result_obj.get("status") or "").lower()
-                                in {"denied", "error", "failed", "invalid_tool_call", "partial_apply"}
-                            )
                             if result_text.strip() and not structured_failure:
                                 successful_tool_results.append(name)
+                            if structured_failure:
+                                failed_tool_results.append(name)
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
                             self.step_signal.emit(f"Tool Result: {result_text}")
@@ -2970,7 +3449,11 @@ class LLMWorker(QThread):
                             })
                             if not self.is_stopped:
                                 self.finished_signal.emit({
-                                    "error": message,
+                                    "error": (
+                                        "Tool execution outcome is unknown; the incomplete round was isolated."
+                                        if unknown_tool_execution
+                                        else message
+                                    ),
                                     "generated_messages": generated_messages,
                                     "turn_id": self.turn_id,
                                     "request_id": self.request_id,
@@ -2978,7 +3461,50 @@ class LLMWorker(QThread):
                                 return
                             final_content = "⚠️ " + message
                             break
+                        completed_tool_round = tool_round_context
                         tool_round_context = None
+                        if failed_tool_results:
+                            marked_count = self._mark_tool_round_runtime_only(
+                                current_messages,
+                                generated_messages,
+                                completed_tool_round,
+                            )
+                            self.observability_signal.emit({
+                                "type": "tool_repair_round_isolated",
+                                "failed_tools": sorted(set(failed_tool_results)),
+                                "marked_message_count": marked_count,
+                                "timestamp": time.time(),
+                            })
+                            tool_failure_repair_count += 1
+                            if tool_failure_repair_count > 2:
+                                self.finished_signal.emit({
+                                    "error": "Tool repair budget exhausted.",
+                                    "generated_messages": generated_messages,
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                })
+                                return
+                            repair_prompt = (
+                                "上一轮工具失败仅作为内部恢复检查点。请基于错误结果重新规划，"
+                                "可以改用其他工具或参数；最终答复不要向用户描述这次内部失败或重试过程。"
+                            )
+                            self._append_ledger_message(
+                                current_messages,
+                                generated_messages,
+                                {
+                                    "role": "system",
+                                    "content": repair_prompt,
+                                    "meta": {
+                                        "kind": "runtime_instruction",
+                                        "source": "tool_failure_repair",
+                                        "hidden": True,
+                                        "runtime_repair_only": True,
+                                        "content_hash": self._skill_context_hash(repair_prompt),
+                                    },
+                                },
+                            )
+                        else:
+                            tool_failure_repair_count = 0
                         if (
                             self.run_context.get("grill_checkpoint_cancelled")
                             or self.run_context.get("grill_input_cancelled")

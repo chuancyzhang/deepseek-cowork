@@ -171,7 +171,7 @@ class ChatSaveWorker(QThread):
                         self._inflight.discard(request.session_id)
                         self._condition.notify_all()
                     continue
-                storage.save_conversation(
+                storage.save_conversation_safely(
                     request.session_id,
                     request.messages,
                     title=request.title,

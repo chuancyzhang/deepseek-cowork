@@ -169,13 +169,23 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             SimpleNamespace(
                 type="response.completed",
                 response=SimpleNamespace(
-                    output=[{
-                        "id": "msg-standard-1",
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [{"type": "output_text", "text": "完成", "annotations": []}],
-                    }],
+                    output=[
+                        {
+                            "id": "fc_item_1",
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "lookup",
+                            "arguments": '{"q":"hi"}',
+                            "status": "completed",
+                        },
+                        {
+                            "id": "msg-standard-1",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "完成", "annotations": []}],
+                        },
+                    ],
                     usage=SimpleNamespace(
                         input_tokens=100,
                         output_tokens=20,
@@ -201,12 +211,16 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(params["reasoning"], {"effort": "max"})
         self.assertEqual(params["input"][0]["content"][0]["type"], "input_text")
         self.assertEqual(params["tools"][0]["name"], "lookup")
-        self.assertEqual(chunks[0]["id"], "call-1")
-        self.assertEqual(chunks[1]["function"]["arguments"], '{"q":"hi"}')
-        self.assertEqual(chunks[2], {"type": "reasoning", "content": "检查资料"})
-        self.assertEqual(chunks[3], {"type": "content", "content": "完成"})
+        data_chunks = [
+            chunk for chunk in chunks
+            if chunk["type"] not in {"provider_request", "provider_terminal"}
+        ]
+        self.assertEqual(data_chunks[0]["id"], "call-1")
+        self.assertEqual(data_chunks[1]["function"]["arguments"], '{"q":"hi"}')
+        self.assertEqual(data_chunks[2], {"type": "reasoning", "content": "检查资料"})
+        self.assertEqual(data_chunks[3], {"type": "content", "content": "完成"})
         replay_chunk = next(chunk for chunk in chunks if chunk["type"] == "response_items")
-        self.assertEqual(replay_chunk["items"][0]["id"], "msg-standard-1")
+        self.assertEqual(replay_chunk["items"][1]["id"], "msg-standard-1")
         usage_chunk = next(chunk for chunk in chunks if chunk["type"] == "usage")
         self.assertEqual(usage_chunk["usage"]["cached_input_tokens"], 60)
 
@@ -225,6 +239,125 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         params = client.responses.create.call_args.kwargs
         self.assertEqual(params["prompt_cache_key"], "conv-1")
+
+    def test_responses_completed_output_repairs_missing_function_call_stream_events(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    id="resp-complete-tool",
+                    output=[
+                        {
+                            "id": "fc-complete-tool",
+                            "type": "function_call",
+                            "call_id": "call-complete-tool",
+                            "name": "lookup",
+                            "arguments": '{"q":"complete"}',
+                            "status": "completed",
+                        }
+                    ],
+                    usage=None,
+                ),
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        tool_call = next(chunk for chunk in chunks if chunk["type"] == "tool_call")
+        self.assertEqual(tool_call["id"], "call-complete-tool")
+        self.assertEqual(tool_call["function"]["name"], "lookup")
+        self.assertEqual(tool_call["function"]["arguments"], '{"q":"complete"}')
+        self.assertEqual(
+            next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")["status"],
+            "completed",
+        )
+
+    def test_responses_completed_output_repairs_missing_text_stream_events(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    id="resp-complete-text",
+                    output=[
+                        {
+                            "id": "msg-complete-text",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "completed text",
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ],
+                    usage=None,
+                ),
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(
+            "".join(chunk["content"] for chunk in chunks if chunk["type"] == "content"),
+            "completed text",
+        )
+        self.assertEqual(
+            next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")["status"],
+            "completed",
+        )
+
+    def test_responses_completed_output_rejects_divergent_streamed_text(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(type="response.output_text.delta", delta="partial"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    id="resp-divergent-text",
+                    output=[
+                        {
+                            "id": "msg-divergent-text",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "different",
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ],
+                    usage=None,
+                ),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertIn(
+            "diverged before completion",
+            next(chunk for chunk in chunks if chunk["type"] == "error")["content"],
+        )
+        self.assertFalse(any(chunk["type"] == "provider_terminal" for chunk in chunks))
 
     def test_responses_protocol_omits_empty_prompt_cache_key(self):
         provider, client = self._build_provider(
@@ -730,6 +863,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             SimpleNamespace(
                 choices=[
                     SimpleNamespace(
+                        finish_reason=None,
                         delta=SimpleNamespace(
                             content=None,
                             tool_calls=[
@@ -746,6 +880,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             SimpleNamespace(
                 choices=[
                     SimpleNamespace(
+                        finish_reason="tool_calls",
                         delta=SimpleNamespace(
                             content=None,
                             tool_calls=[
@@ -763,10 +898,11 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "read"}]))
 
-        self.assertEqual(len(chunks), 2)
-        self.assertNotIn("arguments", chunks[0]["function"])
-        self.assertEqual(chunks[1]["function"]["arguments"], '{"path":"a.txt"}')
-        for chunk in chunks:
+        tool_chunks = [chunk for chunk in chunks if chunk["type"] == "tool_call"]
+        self.assertEqual(len(tool_chunks), 2)
+        self.assertNotIn("arguments", tool_chunks[0]["function"])
+        self.assertEqual(tool_chunks[1]["function"]["arguments"], '{"path":"a.txt"}')
+        for chunk in tool_chunks:
             if "arguments" in chunk["function"]:
                 self.assertIsNot(chunk["function"]["arguments"], None)
 
@@ -790,8 +926,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertEqual(chunks[0]["type"], "usage")
-        usage = chunks[0]["usage"]
+        usage = next(chunk["usage"] for chunk in chunks if chunk["type"] == "usage")
         self.assertEqual(usage["input_tokens"], 100)
         self.assertEqual(usage["cached_input_tokens"], 75)
         self.assertEqual(usage["uncached_input_tokens"], 25)
@@ -818,7 +953,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        usage = chunks[0]["usage"]
+        usage = next(chunk["usage"] for chunk in chunks if chunk["type"] == "usage")
         self.assertEqual(usage["cached_input_tokens"], 8_576)
         self.assertEqual(usage["uncached_input_tokens"], 1_424)
         self.assertAlmostEqual(usage["cache_hit_rate"], 0.8576)
@@ -844,7 +979,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         list(provider.chat_stream([{"role": "user", "content": "hello"}], prompt_cache_key="conv-1"))
         self.assertEqual(captured["prompt_cache_key"], "conv-1")
 
-    def test_stream_usage_retries_without_stream_options_on_generic_bad_request(self):
+    def test_stream_usage_bad_request_is_not_retried_with_a_new_request(self):
         provider, client = self._build_provider(
             base_url="https://compatible.example/v1",
             model_name="compatible-model",
@@ -853,17 +988,165 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         def create(**kwargs):
             calls.append(kwargs)
-            if len(calls) == 1:
-                raise Exception("400 Bad Request: unknown parameter")
-            return []
+            raise Exception("400 Bad Request: unknown parameter")
 
         client.chat.completions.create.side_effect = create
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertEqual(chunks, [])
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(any(chunk["type"] == "error" for chunk in chunks))
         self.assertIn("stream_options", calls[0])
-        self.assertNotIn("stream_options", calls[1])
+
+    def test_chat_stream_marks_length_finish_as_incomplete(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+        client.chat.completions.create.return_value = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        delta=SimpleNamespace(content="partial", tool_calls=None),
+                    )
+                ]
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        terminal = next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")
+        self.assertEqual(terminal["status"], "incomplete")
+        self.assertEqual(terminal["finish_reason"], "length")
+
+    def test_chat_stream_marks_content_filter_finish_as_incomplete(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+        client.chat.completions.create.return_value = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="content_filter",
+                        delta=SimpleNamespace(content="", tool_calls=None),
+                    )
+                ]
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        terminal = next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")
+        self.assertEqual(terminal["status"], "incomplete")
+        self.assertEqual(terminal["finish_reason"], "content_filter")
+
+    def test_request_ids_are_sent_and_exposed_for_diagnostics(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+
+        class _Stream(list):
+            response = SimpleNamespace(headers={"x-request-id": "provider-request-1"})
+
+        client.chat.completions.create.return_value = _Stream(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            delta=SimpleNamespace(content="done", tool_calls=None),
+                        )
+                    ]
+                )
+            ]
+        )
+
+        chunks = list(
+            provider.chat_stream(
+                [{"role": "user", "content": "hello"}],
+                request_context={"client_request_id": "client-request-1"},
+            )
+        )
+
+        self.assertEqual(
+            client.chat.completions.create.call_args.kwargs["extra_headers"],
+            {"X-Client-Request-Id": "client-request-1"},
+        )
+        request = next(chunk for chunk in chunks if chunk["type"] == "provider_request")
+        self.assertEqual(request["client_request_id"], "client-request-1")
+        self.assertEqual(request["provider_request_id"], "provider-request-1")
+
+    def test_responses_network_eof_without_terminal_is_an_error(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(type="response.output_text.delta", delta="partial")
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertIn({"type": "content", "content": "partial"}, chunks)
+        error = next(chunk for chunk in chunks if chunk["type"] == "error")
+        self.assertIn("without a terminal event", error["content"])
+        self.assertNotIn("background", client.responses.create.call_args.kwargs)
+
+    def test_responses_incomplete_records_terminal_before_error(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.incomplete",
+                sequence_number=7,
+                response=SimpleNamespace(
+                    id="resp-1",
+                    error=None,
+                    incomplete_details="max_output_tokens",
+                ),
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        terminal = next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")
+        self.assertEqual(terminal["status"], "incomplete")
+        self.assertEqual(terminal["response_id"], "resp-1")
+        self.assertEqual(terminal["provider_sequence"], 7)
+        self.assertTrue(any(chunk["type"] == "error" for chunk in chunks))
+
+    def test_responses_failed_records_terminal_before_error(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.failed",
+                sequence_number=8,
+                response=SimpleNamespace(
+                    id="resp-failed",
+                    error=SimpleNamespace(message="upstream unavailable"),
+                ),
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        terminal = next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")
+        self.assertEqual(terminal["status"], "failed")
+        self.assertEqual(terminal["response_id"], "resp-failed")
+        self.assertEqual(terminal["provider_sequence"], 8)
+        self.assertEqual(terminal["error"], "upstream unavailable")
+        self.assertTrue(any(chunk["type"] == "error" for chunk in chunks))
 
     def test_prepare_messages_converts_input_image_parts_when_vision_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1087,28 +1370,31 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
         self.assertEqual(sanitized[0][RESPONSES_REPLAY_INPUT_KEY], replay_items)
         self.assertNotIn(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY, sanitized[0])
 
-    def test_sanitize_deepseek_responses_rejects_missing_tool_reasoning_in_strict_mode(self):
-        with self.assertRaisesRegex(ValueError, "不会被静默裁剪"):
-            sanitize_llm_messages(
-                [
-                    {"role": "user", "content": "use tool"},
-                    {
-                        "id": "assistant-1",
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "demo", "arguments": "{}"},
-                        }],
-                    },
-                    {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
-                ],
-                require_reasoning_replay=True,
-                preserve_all_reasoning=True,
-                preserve_responses_replay=True,
-                strict_reasoning_replay=True,
-            )
+    def test_sanitize_deepseek_responses_projects_missing_reasoning_round(self):
+        sanitized, metadata = sanitize_llm_messages(
+            [
+                {"role": "user", "content": "use tool"},
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "demo", "arguments": "{}"},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            ],
+            require_reasoning_replay=True,
+            return_metadata=True,
+            preserve_all_reasoning=True,
+            preserve_responses_replay=True,
+            strict_reasoning_replay=True,
+        )
+
+        self.assertEqual(sanitized, [{"role": "user", "content": "use tool"}])
+        self.assertEqual(metadata["dropped_incomplete_reasoning_rounds"][0]["tool_call_ids"], ["call-1"])
 
     def test_sanitize_deepseek_responses_rejects_missing_function_result(self):
         replay_items = [
@@ -1178,9 +1464,8 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
         self.assertEqual(len(dropped_rounds), 1)
         self.assertEqual(dropped_rounds[0]["tool_call_ids"], ["call-1"])
 
-    def test_sanitize_llm_messages_rejects_invalid_deepseek_replay_rounds(self):
-        with self.assertRaisesRegex(ValueError, "不会被静默裁剪"):
-            sanitize_llm_messages([
+    def test_sanitize_llm_messages_projects_ui_only_reasoning_rounds(self):
+        sanitized, metadata = sanitize_llm_messages([
                 {"role": "user", "content": "hi"},
                 {
                     "role": "assistant",
@@ -1197,6 +1482,18 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
                 {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
                 {"role": "assistant", "content": "final"},
             ], require_reasoning_replay=True, return_metadata=True)
+
+        self.assertEqual(
+            sanitized,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "final"},
+            ],
+        )
+        self.assertEqual(
+            metadata["dropped_incomplete_reasoning_rounds"][0]["tool_call_ids"],
+            ["call-1"],
+        )
 
     def test_sanitize_llm_messages_does_not_prune_when_reasoning_replay_not_required(self):
         sanitized = sanitize_llm_messages([

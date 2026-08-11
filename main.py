@@ -21290,6 +21290,7 @@ class FileWorkbench(QWidget):
         self.navigator_width = int(getattr(DesignTokens, "file_navigator_width", 320))
         self.navigator_min_width = int(getattr(DesignTokens, "file_navigator_min_width", 240))
         self.content_min_width = int(getattr(DesignTokens, "file_workbench_content_min_width", 280))
+        self.navigator_preferred_height = None
         self._effective_mode = "overlay"
         self.setMinimumSize(0, 0)
         self.content.show()
@@ -21319,6 +21320,13 @@ class FileWorkbench(QWidget):
             self.update_layout()
             return
         self.editor_focus = enabled
+        self.update_layout()
+
+    def set_navigator_preferred_height(self, height):
+        preferred = None if height is None else max(1, int(height))
+        if self.navigator_preferred_height == preferred:
+            return
+        self.navigator_preferred_height = preferred
         self.update_layout()
 
     def pinned_layout_metrics(self):
@@ -21351,10 +21359,17 @@ class FileWorkbench(QWidget):
             self.content.setGeometry(nav_width + 1, 0, max(0, width - nav_width - 1), height)
         else:
             self.content.setGeometry(0, 0, width, height)
-            self.navigator.setGeometry(0, 0, nav_width, height)
+            nav_height = (
+                height
+                if self.navigator_preferred_height is None
+                else min(height, self.navigator_preferred_height)
+            )
+            self.navigator.setGeometry(0, 0, nav_width, nav_height)
+        bottom_border = "none" if pinned else f"1px solid {DesignTokens.separator}"
         self.navigator.setStyleSheet(
             f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
-            f"border: none; border-right: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
+            f"border: none; border-right: 1px solid {DesignTokens.separator}; "
+            f"border-bottom: {bottom_border}; border-radius: 0px; }}"
         )
         self.content.show()
         if show_nav:
@@ -23193,6 +23208,12 @@ class MainWindow(QMainWindow):
         self.file_tree.setIconSize(QSize(18, 18))
         self.file_tree.setStyleSheet(apple_tree_style())
         self.file_tree.clicked.connect(self.on_file_clicked)
+        self.file_tree.expanded.connect(
+            lambda _index: QTimer.singleShot(0, self._sync_file_navigator_layout)
+        )
+        self.file_tree.collapsed.connect(
+            lambda _index: QTimer.singleShot(0, self._sync_file_navigator_layout)
+        )
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.show_file_context_menu)
 
@@ -24855,6 +24876,76 @@ class MainWindow(QMainWindow):
                 nav_button.setToolTip("隐藏文件导航")
             else:
                 nav_button.setToolTip("显示文件导航")
+        workbench.set_navigator_preferred_height(self._file_navigator_preferred_height())
+
+    def _visible_workspace_file_row_count(self, limit=1000):
+        tree = getattr(self, "file_tree", None)
+        model = getattr(self, "file_filter_model", None)
+        if tree is None or model is None:
+            return 0
+        root = tree.rootIndex()
+
+        def count_rows(parent, remaining):
+            total = 0
+            for row in range(min(model.rowCount(parent), remaining)):
+                index = model.index(row, 0, parent)
+                if not index.isValid():
+                    continue
+                total += 1
+                if total >= remaining:
+                    break
+                if tree.isExpanded(index):
+                    total += count_rows(index, remaining - total)
+                    if total >= remaining:
+                        break
+            return total
+
+        return count_rows(root, max(1, int(limit)))
+
+    def _file_navigator_preferred_height(self):
+        panel = getattr(self, "file_navigator_panel", None)
+        if panel is None or panel.layout() is None:
+            return None
+        layout = panel.layout()
+        margins = layout.contentsMargins()
+        block_heights = [int(getattr(DesignTokens, "control_height_sm", 28)) + 2]
+
+        notice = getattr(self, "file_navigator_pin_notice", None)
+        if notice is not None and not notice.isHidden():
+            available_width = max(1, int(getattr(self, "file_navigator_width", 320)) - 24)
+            notice_height = notice.heightForWidth(available_width)
+            block_heights.append(max(notice.sizeHint().height(), notice_height))
+
+        block_heights.append(int(getattr(DesignTokens, "control_height", 32)))
+        current = getattr(self, "file_navigator_current_frame", None)
+        if current is not None and not current.isHidden():
+            block_heights.append(max(1, current.sizeHint().height()))
+
+        empty = getattr(self, "file_browser_empty_state", None)
+        if empty is not None and not empty.isHidden():
+            content_height = max(120, empty.sizeHint().height())
+        else:
+            scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
+            if scope == self.FILE_SCOPE_DELIVERABLES:
+                rows = getattr(getattr(self, "deliverables_list", None), "count", lambda: 0)()
+                row_height = 48
+            else:
+                row_height = int(getattr(DesignTokens, "row_height", 36))
+                workbench_height = int(
+                    getattr(getattr(self, "file_workbench", None), "height", lambda: 0)()
+                )
+                visible_row_limit = max(1, workbench_height // max(1, row_height) + 1)
+                rows = self._visible_workspace_file_row_count(limit=visible_row_limit)
+            content_height = max(row_height, int(rows) * row_height + 8)
+        block_heights.append(content_height)
+
+        spacing = max(0, layout.spacing())
+        return (
+            margins.top()
+            + margins.bottom()
+            + sum(block_heights)
+            + spacing * max(0, len(block_heights) - 1)
+        )
 
     @staticmethod
     def _file_tab_path_key(path):
@@ -25149,6 +25240,7 @@ class MainWindow(QMainWindow):
             filter_button.setToolTip("类型与排序（已筛选）" if filter_active else "类型与排序")
         self._sync_current_file_filter_notice()
         self._sync_file_browser_empty_state()
+        self._sync_file_navigator_layout()
 
     def clear_deliverable_filters(self):
         search = getattr(self, "file_search_input", None)

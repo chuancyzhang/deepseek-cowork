@@ -71,6 +71,62 @@ class FileWorkbenchTest(unittest.TestCase):
         self.assertTrue(workbench.navigator_pinned)
         workbench.close()
 
+    def test_overlay_navigator_uses_content_height_and_pinned_mode_stays_full_height(self):
+        navigator = QFrame()
+        navigator.setObjectName("FileNavigatorPanel")
+        content = QWidget()
+        workbench = FileWorkbench(navigator, content)
+        workbench.resize(860, 520)
+        workbench.set_navigator_preferred_height(176)
+        workbench.set_navigator_state(visible=True, pinned=False, width=300)
+        workbench.show()
+        self.app.processEvents()
+
+        self.assertEqual(navigator.height(), 176)
+        self.assertEqual(content.height(), workbench.height())
+        self.assertIn("border-bottom: 1px solid", navigator.styleSheet())
+
+        workbench.set_navigator_state(pinned=True)
+        self.app.processEvents()
+        self.assertTrue(workbench.is_effectively_pinned())
+        self.assertEqual(navigator.height(), workbench.height())
+        self.assertIn("border-bottom: none", navigator.styleSheet())
+
+        workbench.resize(500, 520)
+        self.app.processEvents()
+        self.assertFalse(workbench.is_effectively_pinned())
+        self.assertEqual(navigator.height(), 176)
+        workbench.close()
+
+    def test_preferred_overlay_height_tracks_visible_workspace_rows(self):
+        panel = QFrame()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        host = type("_FileNavigatorHost", (), {})()
+        host.FILE_SCOPE_DELIVERABLES = "deliverables"
+        host.FILE_SCOPE_WORKSPACE = "workspace"
+        host.file_navigator_panel = panel
+        host.file_navigator_scope = host.FILE_SCOPE_WORKSPACE
+        host.file_navigator_pin_notice = QLabel()
+        host.file_navigator_pin_notice.hide()
+        host.file_navigator_current_frame = QFrame()
+        host.file_navigator_current_frame.hide()
+        host.file_browser_empty_state = QFrame()
+        host.file_browser_empty_state.hide()
+        host.file_workbench = QWidget()
+        host.file_workbench.resize(700, 520)
+        host._visible_workspace_file_row_count = lambda limit=1000: 1
+
+        one_row_height = MainWindow._file_navigator_preferred_height(host)
+        host._visible_workspace_file_row_count = lambda limit=1000: 6
+        six_row_height = MainWindow._file_navigator_preferred_height(host)
+
+        self.assertEqual(
+            six_row_height - one_row_height,
+            5 * DesignTokens.row_height,
+        )
+
 
 class FileTabStripTest(unittest.TestCase):
     @classmethod

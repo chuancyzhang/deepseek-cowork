@@ -1424,6 +1424,68 @@ class DaemonServer(socketserver.ThreadingTCPServer):
         self.shutdown_requested = False
 
 
+def request_idle_daemon_shutdown(client, expected_ping, wait_timeout=2.0):
+    """Gracefully stop one proven-idle mismatched daemon instance.
+
+    The PID and signature are checked again through ``status`` immediately
+    before shutdown so a port ownership change cannot stop a different process.
+    Unknown activity state is treated as busy rather than guessed safe.
+    """
+    expected_ping = expected_ping if isinstance(expected_ping, dict) else {}
+    expected_pid = int(expected_ping.get("pid") or 0)
+    expected_signature = str(expected_ping.get("signature") or "").strip()
+    result = {
+        "stopped": False,
+        "reason": "",
+        "remote_pid": expected_pid,
+        "remote_signature": expected_signature,
+        "active_runs": None,
+    }
+    status = client.status()
+    if not isinstance(status, dict) or status.get("status") != "ok":
+        result["reason"] = "status_unavailable"
+        return result
+    status_pid = int(status.get("pid") or 0)
+    status_signature = str(status.get("signature") or "").strip()
+    result["remote_pid"] = status_pid or expected_pid
+    result["remote_signature"] = status_signature or expected_signature
+    if not expected_pid or status_pid != expected_pid:
+        result["reason"] = "identity_changed"
+        return result
+    if not expected_signature or status_signature != expected_signature:
+        result["reason"] = "identity_changed"
+        return result
+    if "active_runs" not in status:
+        result["reason"] = "activity_unknown"
+        return result
+    try:
+        active_runs = int(status.get("active_runs"))
+    except (TypeError, ValueError):
+        result["reason"] = "activity_unknown"
+        return result
+    result["active_runs"] = active_runs
+    if active_runs != 0:
+        result["reason"] = "active_runs"
+        return result
+    response = client.shutdown()
+    if not isinstance(response, dict) or response.get("status") != "ok":
+        result["reason"] = "shutdown_rejected"
+        return result
+    deadline = time.monotonic() + max(0.1, float(wait_timeout or 0.0))
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        current_ping = client.ping()
+        current_pid = int(
+            (current_ping.get("pid") if isinstance(current_ping, dict) else 0) or 0
+        )
+        if current_ping is None or current_pid != expected_pid:
+            result["stopped"] = True
+            result["reason"] = "stopped"
+            return result
+    result["reason"] = "shutdown_timeout"
+    return result
+
+
 class DaemonClient:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=3, send_timeout=600):
         self.host = host
@@ -1455,6 +1517,12 @@ class DaemonClient:
     def status(self):
         try:
             return self._request({"action": "status"})
+        except Exception:
+            return None
+
+    def shutdown(self):
+        try:
+            return self._request({"action": "shutdown"})
         except Exception:
             return None
 

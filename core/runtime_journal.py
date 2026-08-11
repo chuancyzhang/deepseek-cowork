@@ -214,16 +214,30 @@ class RuntimeJournal:
         }
 
     def list_manifests(self):
+        manifests, errors = self.scan_manifests()
+        if errors:
+            first = errors[0]
+            raise RuntimeJournalError(
+                f"runtime manifest scan failed: {first['path']} | {first['error']}"
+            )
+        return manifests
+
+    def scan_manifests(self):
+        """Read every manifest independently and retain exact per-file failures."""
         sessions_dir = os.path.join(self.root, "sessions")
         if not os.path.isdir(sessions_dir):
-            return []
+            return [], []
         manifests = []
+        errors = []
         for name in sorted(os.listdir(sessions_dir)):
             path = os.path.join(sessions_dir, name, "manifest.json")
             if not os.path.isfile(path):
                 continue
-            manifests.append(self._read(path))
-        return manifests
+            try:
+                manifests.append(self._read(path))
+            except Exception as exc:
+                errors.append({"path": path, "error": str(exc), "source": "runtime_manifest"})
+        return manifests, errors
 
     def update_manifest(self, session_id, patch=None, *, expected_revision=None):
         with self.session_lock(session_id):

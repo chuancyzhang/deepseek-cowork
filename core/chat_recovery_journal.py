@@ -103,13 +103,15 @@ class ChatRecoveryJournal:
         recovered = []
         errors = []
         try:
-            manifests = self.runtime_journal.list_manifests()
+            manifests, manifest_errors = self.runtime_journal.scan_manifests()
+            errors.extend(manifest_errors)
         except Exception as exc:
             manifests = []
             errors.append(
                 {
                     "path": self.runtime_journal.root,
                     "error": f"runtime manifest scan failed: {exc}",
+                    "source": "runtime_manifest_scan",
                 }
             )
         for manifest in manifests:
@@ -157,6 +159,7 @@ class ChatRecoveryJournal:
                             "manifest.json",
                         ),
                         "error": str(exc),
+                        "source": "runtime_pending_commit",
                     }
                 )
         for name in sorted(os.listdir(self.directory)):
@@ -249,5 +252,7 @@ class ChatRecoveryJournal:
                 if session_id not in recovered:
                     recovered.append(session_id)
             except Exception as exc:
-                errors.append({"path": path, "error": str(exc)})
+                errors.append(
+                    {"path": path, "error": str(exc), "source": "pending_chat_save"}
+                )
         return recovered, errors

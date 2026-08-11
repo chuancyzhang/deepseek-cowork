@@ -148,7 +148,14 @@ from ui.theme_workspace import (
     WorkspaceThemeController,
     apply_theme_component_visibility,
 )
-from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
+from core.daemon import (
+    DaemonClient,
+    run_daemon,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    get_runtime_signature,
+    request_idle_daemon_shutdown,
+)
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
 from core.process_utils import (
@@ -541,6 +548,7 @@ CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
 FAVORITES_LOG_FILENAME = "favorites_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
+CHAT_RECOVERY_LOG_FILENAME = "chat_recovery.log"
 WINDOWS_APP_USER_MODEL_ID = "deepseek.cowork"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
@@ -594,6 +602,15 @@ def log_startup_stage(stage, **fields):
     for key, value in fields.items():
         parts.append(f"{key}={value}")
     append_background_process_log(STARTUP_LOG_FILENAME, " ".join(parts))
+
+
+def log_chat_recovery(stage, **fields):
+    payload = {"stage": str(stage or "recovery")}
+    payload.update(fields or {})
+    append_background_process_log(
+        CHAT_RECOVERY_LOG_FILENAME,
+        json.dumps(payload, ensure_ascii=False, default=str),
+    )
 
 
 def log_ppt_agent_debug(stage, **fields):
@@ -14617,14 +14634,25 @@ class DaemonConnectWorker(QThread):
         ping_payload = client.ping()
         connected = bool(ping_payload)
         if connected and not self._signature_matches(ping_payload):
-            payload.update(
-                {
-                    "signature_mismatch": True,
-                    "remote_signature": str(ping_payload.get("signature") or ""),
-                    "error": "已有不同版本的守护进程正在运行，请先关闭旧守护进程。",
-                }
-            )
+            payload.update({
+                "signature_mismatch": True,
+                "remote_signature": str(ping_payload.get("signature") or ""),
+                "remote_pid": int(ping_payload.get("pid") or 0),
+            })
             connected = False
+            if self.allow_start:
+                reconciliation = request_idle_daemon_shutdown(client, ping_payload)
+                payload["mismatch_reconciliation"] = reconciliation
+                payload["remote_active_runs"] = reconciliation.get("active_runs")
+                if reconciliation.get("stopped"):
+                    payload["signature_mismatch"] = False
+                    payload["replaced_mismatched_daemon"] = True
+                else:
+                    reason = str(reconciliation.get("reason") or "unknown")
+                    payload["error"] = (
+                        "后台进程版本不匹配，且当前不能安全替换"
+                        f"（PID {payload['remote_pid']}，原因 {reason}）。"
+                    )
         if not connected and self.allow_start and not payload.get("signature_mismatch"):
             launch_lock = acquire_process_singleton(
                 build_process_singleton_lock_path(get_app_data_dir(), f"daemon-launch-{self.port}")
@@ -24062,6 +24090,11 @@ class MainWindow(QMainWindow):
             recovered=len(self.recovered_chat_session_ids),
             errors=len(self.chat_recovery_errors),
         )
+        log_chat_recovery(
+            "startup_scan_done",
+            recovered_session_ids=list(self.recovered_chat_session_ids),
+            error_count=len(self.chat_recovery_errors),
+        )
         self._cleanup_orphan_attachment_dirs()
         self.chat_save_worker = ChatSaveWorker(self.chat_storage.db_path, parent=self)
         self.chat_save_worker.save_failed.connect(self.handle_chat_save_failed)
@@ -24078,11 +24111,18 @@ class MainWindow(QMainWindow):
             )
         if self.chat_recovery_errors:
             self.add_system_toast(
-                "部分对话恢复记录无法读取，原文件已保留。请查看日志。",
+                f"{len(self.chat_recovery_errors)} 条对话恢复记录无法读取；"
+                f"原文件已保留，详情见 {CHAT_RECOVERY_LOG_FILENAME}。",
                 "error",
-                auto_close_ms=0,
+                auto_close_ms=10000,
             )
             for item in self.chat_recovery_errors:
+                log_chat_recovery(
+                    "startup_record_failed",
+                    path=str(item.get("path") or ""),
+                    source=str(item.get("source") or "unknown"),
+                    error=str(item.get("error") or "unknown error"),
+                )
                 self.append_log(
                     f"会话恢复记录读取失败: {item.get('path')} | {item.get('error')}"
                 )
@@ -28482,10 +28522,25 @@ class MainWindow(QMainWindow):
             return
         self._background_services_started = True
         self._schedule_background_service_start(40, self.start_background_skill_load)
+        if not self._external_background_services_allowed():
+            log_startup_stage(
+                "external_background_services_skipped",
+                platform=QApplication.platformName(),
+            )
+            return
         self._schedule_background_service_start(BACKGROUND_TRAY_START_DELAY_MS, self.setup_tray)
         self._schedule_background_service_start(BACKGROUND_DAEMON_PREWARM_DELAY_MS, self._start_background_daemon_prewarm)
         self._schedule_background_service_start(BACKGROUND_DAEMON_MONITOR_DELAY_MS, self.start_daemon_monitor)
         self._schedule_background_service_start(BACKGROUND_FAVORITES_START_DELAY_MS, self.start_favorites_scheduler)
+
+    @staticmethod
+    def _external_background_services_allowed():
+        explicit = str(os.environ.get("COWORK_EXTERNAL_BACKGROUND_SERVICES") or "").strip().lower()
+        if explicit in {"1", "true", "yes", "on"}:
+            return True
+        if explicit in {"0", "false", "no", "off"}:
+            return False
+        return str(QApplication.platformName() or "").strip().lower() != "offscreen"
 
     def _schedule_background_service_start(self, delay_ms, callback):
         QTimer.singleShot(max(int(delay_ms or 0), 0), callback)
@@ -28611,11 +28666,34 @@ class MainWindow(QMainWindow):
             self.daemon_process = process
         self.daemon_available = bool(payload.get("connected"))
         self.daemon_connect_worker = None
+        log_ui_navigation(
+            "daemon_connect_finished",
+            connected=self.daemon_available,
+            signature_mismatch=bool(payload.get("signature_mismatch")),
+            replaced_mismatched_daemon=bool(payload.get("replaced_mismatched_daemon")),
+            remote_pid=int(payload.get("remote_pid") or 0),
+            remote_signature=str(payload.get("remote_signature") or ""),
+            local_signature=str(self.daemon_runtime_signature or ""),
+            remote_active_runs=payload.get("remote_active_runs"),
+            error=str(payload.get("error") or ""),
+        )
         if payload.get("signature_mismatch"):
             if not getattr(self, "_daemon_signature_mismatch_notified", False):
                 self._daemon_signature_mismatch_notified = True
+                active_runs = payload.get("remote_active_runs")
+                remote_pid = int(payload.get("remote_pid") or 0)
+                if isinstance(active_runs, int) and active_runs > 0:
+                    message = (
+                        f"后台进程 PID {remote_pid} 仍在执行 {active_runs} 个任务；"
+                        "任务结束后将自动切换到当前版本。"
+                    )
+                else:
+                    message = (
+                        f"后台进程 PID {remote_pid} 与当前版本不匹配，"
+                        "但无法确认它已空闲；请查看 ui_navigation.log。"
+                    )
                 self.add_system_toast(
-                    "检测到旧版本守护进程。请先退出旧版本，再重试后台连接。",
+                    message,
                     "warning",
                     auto_close_ms=8000,
                 )
@@ -28645,6 +28723,12 @@ class MainWindow(QMainWindow):
             return []
         recovered, errors = journal.recover_into(storage)
         for item in errors:
+            log_chat_recovery(
+                "runtime_record_failed",
+                path=str(item.get("path") or ""),
+                source=str(item.get("source") or "unknown"),
+                error=str(item.get("error") or "unknown error"),
+            )
             self.append_log(
                 f"运行提交恢复失败: {item.get('path')} | {item.get('error')}"
             )
@@ -28995,13 +29079,40 @@ class MainWindow(QMainWindow):
         )
         if signature_mismatch:
             connected = False
-            if not getattr(self, "_daemon_signature_mismatch_notified", False):
-                self._daemon_signature_mismatch_notified = True
-                self.add_system_toast(
-                    "检测到旧版本守护进程。请先退出旧版本，再重试后台连接。",
-                    "warning",
-                    auto_close_ms=8000,
+            reconciliation = None
+            if allow_start:
+                reconciliation = request_idle_daemon_shutdown(
+                    self.daemon_client,
+                    ping_payload,
                 )
+                if reconciliation.get("stopped"):
+                    signature_mismatch = False
+                    log_ui_navigation(
+                        "daemon_mismatch_replaced",
+                        remote_pid=int(reconciliation.get("remote_pid") or 0),
+                        remote_signature=str(reconciliation.get("remote_signature") or ""),
+                        local_signature=str(self.daemon_runtime_signature or ""),
+                    )
+            if not getattr(self, "_daemon_signature_mismatch_notified", False):
+                if signature_mismatch:
+                    self._daemon_signature_mismatch_notified = True
+                    active_runs = (
+                        reconciliation.get("active_runs")
+                        if isinstance(reconciliation, dict)
+                        else None
+                    )
+                    remote_pid = int((ping_payload or {}).get("pid") or 0)
+                    if isinstance(active_runs, int) and active_runs > 0:
+                        message = (
+                            f"后台进程 PID {remote_pid} 仍在执行 {active_runs} 个任务；"
+                            "任务结束后将自动切换到当前版本。"
+                        )
+                    else:
+                        message = (
+                            f"后台进程 PID {remote_pid} 与当前版本不匹配，"
+                            "但无法确认它已空闲；请查看 ui_navigation.log。"
+                        )
+                    self.add_system_toast(message, "warning", auto_close_ms=8000)
         if not connected and allow_start and not signature_mismatch:
             self.start_daemon_process()
             for _ in range(max(retries, 0)):

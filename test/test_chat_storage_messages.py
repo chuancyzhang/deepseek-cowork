@@ -61,6 +61,63 @@ class TestChatStorageMessages(unittest.TestCase):
             ["hello", "world"],
         )
 
+    def test_safe_save_reconciles_legacy_ui_only_rows_before_append(self):
+        storage = ChatStorage(self.db_path)
+        first = {"id": "u1", "role": "user", "content": "hello"}
+        interrupted = {
+            "id": "ui-interrupted",
+            "role": "assistant",
+            "content": "任务已停止",
+            "meta": {"ui_only": True, "ui_reply_kind": "interrupted"},
+        }
+        next_user = {"id": "u2", "role": "user", "content": "continue"}
+        storage.save_conversation("legacy-ui", [first, interrupted], title="Legacy UI")
+
+        result = storage.save_conversation_safely(
+            "legacy-ui",
+            [first, next_user],
+            title="Reconciled",
+        )
+
+        self.assertEqual(result["outcome"], "appended")
+        self.assertEqual(
+            [item["id"] for item in storage.get_messages("legacy-ui")],
+            ["u1", "u2"],
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            positions = conn.execute(
+                "SELECT position FROM messages WHERE conversation_id = ? ORDER BY position",
+                ("legacy-ui",),
+            ).fetchall()
+        self.assertEqual(positions, [(0,), (1,)])
+
+    def test_safe_save_does_not_remove_ui_rows_when_content_still_diverges(self):
+        storage = ChatStorage(self.db_path)
+        stored = [
+            {"id": "u1", "role": "user", "content": "original"},
+            {
+                "id": "ui-error",
+                "role": "assistant",
+                "content": "local error",
+                "meta": {"ui_only": True, "ui_reply_kind": "error"},
+            },
+        ]
+        storage.save_conversation("real-conflict", stored, title="Conflict")
+
+        with self.assertRaises(ConversationWriteConflict):
+            storage.save_conversation_safely(
+                "real-conflict",
+                [
+                    {"id": "u1", "role": "user", "content": "edited"},
+                    {"id": "u2", "role": "user", "content": "continue"},
+                ],
+            )
+
+        self.assertEqual(
+            [item["id"] for item in storage.get_messages("real-conflict")],
+            ["u1", "ui-error"],
+        )
+
     def test_safe_save_never_replaces_existing_history_with_empty_snapshot(self):
         storage = ChatStorage(self.db_path)
         storage.save_conversation_safely(

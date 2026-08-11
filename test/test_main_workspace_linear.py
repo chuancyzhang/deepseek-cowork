@@ -276,6 +276,52 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertEqual(bar.sizeHint().width(), 18)
         bar.close()
 
+    def test_question_navigator_hides_on_product_pages_and_restores_for_chat(self):
+        self.window.show()
+        self.app.processEvents()
+        state = self.window.get_current_session()
+        state.messages = [
+            {"id": "question-1", "role": "user", "content": "第一问"},
+            {"id": "answer-1", "role": "assistant", "content": "答复一"},
+            {"id": "question-2", "role": "user", "content": "第二问"},
+            {"id": "answer-2", "role": "assistant", "content": "答复二"},
+        ]
+        self.window._sync_question_navigator(state.session_id)
+        self.app.processEvents()
+        self.assertTrue(self.window.question_navigator_rail.isVisible())
+
+        product_page = QWidget()
+        product_page.refresh_list = lambda: None
+        self.window.main_page_stack.addWidget(product_page)
+        with patch.object(self.window, "_ensure_product_page", return_value=product_page):
+            self.assertTrue(self.window.show_product_page(self.window.PAGE_CAPABILITIES))
+        self.app.processEvents()
+
+        self.assertFalse(self.window.question_navigator_theme_host.isVisible())
+        self.assertFalse(self.window.question_navigator_rail.isVisible())
+        self.assertEqual(self.window.question_navigator_theme_host.geometry().width(), 0)
+        self.assertTrue(self.window.show_conversation_page())
+        self.app.processEvents()
+        self.app.processEvents()
+        self.assertTrue(self.window.question_navigator_theme_host.isVisible())
+        self.assertTrue(self.window.question_navigator_rail.isVisible())
+
+        self.window.main_page_stack.removeWidget(product_page)
+        product_page.deleteLater()
+
+    def test_repeated_chat_save_failure_notifies_once_until_success(self):
+        state = self.window.get_current_session()
+        with patch.object(self.window, "add_system_toast") as toast:
+            self.window.handle_chat_save_failed(state.session_id, 3, "conflict")
+            self.window.handle_chat_save_failed(state.session_id, 3, "conflict")
+            self.window.handle_chat_save_failed(state.session_id, 4, "conflict")
+
+        toast.assert_called_once()
+        self.assertEqual(
+            self.window._chat_save_failure_notified_at[state.session_id]["revision"],
+            3,
+        )
+
     def test_pending_skill_draft_is_owned_by_its_session(self):
         first = self.window.get_current_session()
         second_id = self.window.create_new_session(make_current=True)

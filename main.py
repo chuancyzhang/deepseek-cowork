@@ -21344,10 +21344,20 @@ class QuestionNavigatorThemeHost(QFrame):
         super().__init__(parent)
         self.setObjectName("QuestionNavigatorThemeHost")
         self.setStyleSheet("QFrame#QuestionNavigatorThemeHost { background: transparent; border: none; }")
+        self._theme_visible = True
+        self._route_visible = True
 
     def setVisible(self, visible):
-        super().setVisible(bool(visible))
-        self.visibilityChanged.emit(bool(visible))
+        self._theme_visible = bool(visible)
+        effective_visible = self._theme_visible and self._route_visible
+        super().setVisible(effective_visible)
+        self.visibilityChanged.emit(effective_visible)
+
+    def set_route_visible(self, visible):
+        self._route_visible = bool(visible)
+        effective_visible = self._theme_visible and self._route_visible
+        super().setVisible(effective_visible)
+        self.visibilityChanged.emit(effective_visible)
 
 
 class QuestionNavigatorPreviewCard(QFrame):
@@ -25644,6 +25654,12 @@ class MainWindow(QMainWindow):
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if rail is None or state is None or not getattr(state, "chat_scroll", None):
             return
+        if (
+            getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION
+            or self.main_page_stack.currentWidget() is not self.conversation_page
+        ):
+            self._set_question_navigator_route_visible(False)
+            return
         viewport = state.chat_scroll.viewport()
         if not _qt_object_alive(viewport) or not viewport.isVisible():
             rail.set_feature_visible(False)
@@ -25665,6 +25681,19 @@ class MainWindow(QMainWindow):
         rail.raise_()
         if self.question_navigator_preview.isVisible():
             self.question_navigator_preview.raise_()
+
+    def _set_question_navigator_route_visible(self, visible):
+        host = getattr(self, "question_navigator_theme_host", None)
+        rail = getattr(self, "question_navigator_rail", None)
+        preview = getattr(self, "question_navigator_preview", None)
+        if preview is not None:
+            preview.hide()
+        if host is not None:
+            host.set_route_visible(bool(visible))
+            if not visible:
+                host.setGeometry(0, 0, 0, 0)
+        if rail is not None and not visible:
+            rail.set_feature_visible(False)
 
     def _sync_question_navigator(self, session_id=None):
         rail = getattr(self, "question_navigator_rail", None)
@@ -33897,15 +33926,22 @@ class MainWindow(QMainWindow):
         self.append_log(
             f"会话保存失败({session_id or 'unknown'}, revision={int(revision or 0)}): {error}"
         )
+        log_ui_navigation(
+            "chat_save_failed",
+            session_id=session_id or "unknown",
+            revision=int(revision or 0),
+            error=str(error or "unknown error"),
+        )
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if not isinstance(notified, dict):
             self._chat_save_failure_notified_at = {}
             notified = self._chat_save_failure_notified_at
-        now = time.monotonic()
-        last_notified_at = float(notified.get(session_id, 0.0))
-        if now - last_notified_at < 5.0:
+        if session_id in notified:
             return
-        notified[session_id] = now
+        notified[session_id] = {
+            "revision": int(revision or 0),
+            "error": str(error or ""),
+        }
         state = self.get_session(session_id)
         if state:
             self.add_system_toast("会话保存失败，稍后自动重试。", "warning", session_id=session_id, auto_close_ms=3500)
@@ -36719,6 +36755,7 @@ class MainWindow(QMainWindow):
         self.product_back_btn.show()
         self.ws_container.hide()
         self.context_rail.hide()
+        self._set_question_navigator_route_visible(False)
         self.main_page_stack.setCurrentWidget(page)
         self.current_product_route = route
         self.current_product_subroute = ""
@@ -36749,6 +36786,7 @@ class MainWindow(QMainWindow):
         self.current_product_route = self.PAGE_CONVERSATION
         self.current_product_subroute = ""
         self.main_page_stack.setCurrentWidget(self.conversation_page)
+        self._set_question_navigator_route_visible(True)
         self.product_back_btn.hide()
         self.ws_container.show()
         self.context_rail.show()
@@ -36758,6 +36796,8 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
         self.update_conversation_header()
+        self._sync_question_navigator()
+        QTimer.singleShot(0, self._sync_question_navigator)
         snapshot = dict(self._conversation_navigation_snapshot or {})
         if snapshot.get("drawer_open"):
             QTimer.singleShot(0, lambda: self.show_context_drawer(snapshot.get("drawer_tab", self.RIGHT_TAB_FILES)))

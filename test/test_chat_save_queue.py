@@ -12,6 +12,14 @@ from core.chat_storage import ChatStorage
 
 
 class TestChatSaveQueue(unittest.TestCase):
+    def test_retry_delay_uses_bounded_exponential_backoff(self):
+        worker = ChatSaveWorker("unused.sqlite", debounce_ms=100)
+
+        self.assertEqual(
+            [worker._retry_delay_seconds(count) for count in (1, 2, 3, 7, 8)],
+            [0.5, 1.0, 2.0, 30.0, 30.0],
+        )
+
     def test_worker_coalesces_same_session(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as temp_dir:

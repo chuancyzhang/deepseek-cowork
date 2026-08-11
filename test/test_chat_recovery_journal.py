@@ -59,6 +59,43 @@ class TestChatRecoveryJournal(unittest.TestCase):
             self.assertEqual(recovered_again, [])
             self.assertEqual(errors_again, [])
 
+    def test_recovery_reconciles_legacy_interrupted_projection_before_append(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            storage.save_conversation(
+                "session-recovery",
+                [
+                    {"id": "u1", "role": "user", "content": "开始"},
+                    {
+                        "id": "legacy-interrupted",
+                        "role": "assistant",
+                        "content": "任务已停止",
+                        "meta": {"ui_reply_kind": "interrupted"},
+                    },
+                ],
+                title="旧会话",
+            )
+            journal = ChatRecoveryJournal(temp_dir)
+            journal.record(
+                self._request(
+                    4,
+                    messages=[
+                        {"id": "u1", "role": "user", "content": "开始"},
+                        {"id": "u2", "role": "user", "content": "总结下"},
+                    ],
+                )
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, ["session-recovery"])
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [item.get("id") for item in storage.get_messages("session-recovery")],
+                ["u1", "u2"],
+            )
+            self.assertFalse(os.path.exists(journal._path_for_session("session-recovery")))
+
     def test_corrupt_journal_is_preserved_and_reported(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             journal = ChatRecoveryJournal(temp_dir)

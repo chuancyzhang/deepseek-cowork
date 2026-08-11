@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from .conversation_integrity import normalize_message_ids
+from .message_persistence import filter_persistable_messages
 
 
 logger = logging.getLogger(__name__)
@@ -469,6 +470,66 @@ class ChatStorage:
             if self._message_signature(prefix_message) != self._message_signature(message):
                 return False
         return True
+
+    def _remove_nonpersistable_messages_in_connection(
+        self,
+        conn,
+        conversation_id,
+        existing_messages,
+        normalized_messages,
+    ):
+        """Remove legacy UI-only rows only when the remaining ledger is compatible.
+
+        Older releases committed interrupted/error projection rows to SQLite.
+        Current saves intentionally filter those rows, so an otherwise append-only
+        snapshot appears divergent.  Repair only that exact, classified difference
+        and leave every genuine content divergence to the normal conflict path.
+        """
+        persistable_messages = filter_persistable_messages(existing_messages)
+        if len(persistable_messages) == len(existing_messages):
+            return existing_messages, 0
+        compatible = self._messages_are_prefix(
+            persistable_messages,
+            normalized_messages,
+        ) or self._messages_are_prefix(
+            normalized_messages,
+            persistable_messages,
+        )
+        if not compatible:
+            return existing_messages, 0
+
+        persistable_ids = {
+            str(message.get("id") or "").strip()
+            for message in persistable_messages
+            if isinstance(message, dict) and str(message.get("id") or "").strip()
+        }
+        removed_ids = [
+            str(message.get("id") or "").strip()
+            for message in existing_messages
+            if isinstance(message, dict)
+            and str(message.get("id") or "").strip()
+            and str(message.get("id") or "").strip() not in persistable_ids
+        ]
+        if not removed_ids:
+            return existing_messages, 0
+        for message_id in removed_ids:
+            conn.execute(
+                "DELETE FROM messages WHERE conversation_id = ? AND id = ?",
+                (conversation_id, message_id),
+            )
+        for position, message in enumerate(persistable_messages):
+            conn.execute(
+                "UPDATE messages SET position = ? WHERE conversation_id = ? AND id = ?",
+                (position, conversation_id, message.get("id")),
+            )
+        logger.info(
+            "conversation_nonpersistable_rows_reconciled",
+            extra={
+                "conversation_id": str(conversation_id or ""),
+                "removed_count": len(removed_ids),
+            },
+        )
+        return persistable_messages, len(removed_ids)
 
     def _message_signature(self, message):
         if not isinstance(message, dict):
@@ -1108,6 +1169,13 @@ class ChatStorage:
                 existing_messages,
                 conversation_id=conversation_id,
             )
+            comparison_messages, _removed_count = self._remove_nonpersistable_messages_in_connection(
+                conn,
+                conversation_id,
+                comparison_messages,
+                normalized_messages,
+            )
+            existing_messages = comparison_messages
 
             if comparison_messages and self._messages_are_prefix(
                 normalized_messages,

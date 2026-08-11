@@ -34,6 +34,7 @@ class ChatSaveWorker(QThread):
         self._inflight = set()
         self._highest_revision = {}
         self._accepted_signature = {}
+        self._failure_counts = {}
         self._stop_requested = False
 
     @staticmethod
@@ -49,6 +50,11 @@ class ChatSaveWorker(QThread):
         except Exception:
             encoded = repr(payload)
         return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()
+
+    def _retry_delay_seconds(self, failure_count):
+        base_delay = max(0.5, self.debounce_seconds)
+        exponent = min(max(0, int(failure_count or 0) - 1), 6)
+        return min(30.0, base_delay * (2 ** exponent))
 
     def enqueue(self, request):
         if not isinstance(request, ChatSaveRequest):
@@ -184,13 +190,17 @@ class ChatSaveWorker(QThread):
                     self._inflight.discard(request.session_id)
                     current = self._pending.get(request.session_id)
                     if current is None or current.ready_at <= request.ready_at:
-                        request.ready_at = time.monotonic() + self.debounce_seconds
+                        failure_count = int(self._failure_counts.get(request.session_id, 0) or 0) + 1
+                        self._failure_counts[request.session_id] = failure_count
+                        retry_delay = self._retry_delay_seconds(failure_count)
+                        request.ready_at = time.monotonic() + retry_delay
                         self._pending[request.session_id] = request
                     self._condition.notify_all()
                 self.save_failed.emit(request.session_id, int(request.revision or 0), str(exc))
                 continue
 
             with self._condition:
+                self._failure_counts.pop(request.session_id, None)
                 self._inflight.discard(request.session_id)
                 self._condition.notify_all()
             self.save_completed.emit(request.session_id, int(request.revision or 0))

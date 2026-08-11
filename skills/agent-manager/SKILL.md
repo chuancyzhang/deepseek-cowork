@@ -27,5 +27,5 @@ This skill exposes dedicated tools to manage persisted sub-agents in the current
 - Agent records and transcripts are persisted in `ChatStorage` (`agents` and `agent_messages` tables).
 - Agent profiles in Settings can define reusable names, descriptions, system prompts, and selected skill scopes for session-level mentions.
 - Mentioning a configured agent from the prompt toolbar injects that profile into the current run context; the same selected-skill scope is enforced by tool visibility and tool calls.
-- Automation tasks may reference an Agent profile; when triggered, the task prompt runs through that profile with its selected skill scope.
+- Favorites always launch through the main agent. Agent profiles remain scoped to explicit mentions in the current conversation.
 - Agent-management tools are not read-only and must not be invoked through `parallel_tools`.

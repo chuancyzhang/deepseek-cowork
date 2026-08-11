@@ -51,7 +51,7 @@ COMPONENT_CATALOG = {
     "left.projects",
     "left.history",
     "left.capabilities",
-    "left.automation",
+    "left.favorites",
     "left.settings",
     "header.back",
     "header.title",
@@ -116,6 +116,7 @@ LEGACY_HOME_CARD_COMPONENT_ALIASES = {
     "home.card.files": "home.card.finance",
     "home.card.images": "home.card.data",
     "home.card.office": "home.card.browser",
+    "left.automation": "left.favorites",
 }
 LEGACY_HOME_CARD_CONTENT_ALIASES = {
     "home.card.files.title": "home.card.finance.title",

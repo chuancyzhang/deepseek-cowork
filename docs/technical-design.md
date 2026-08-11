@@ -10,7 +10,7 @@
 
 Cowork 的技术设计围绕五个不变量：
 
-1. **单一循环**：本地对话、daemon、自动化、子 Agent 和企业消息最终都创建同一种 `LLMWorker`。
+1. **单一循环**：本地对话、daemon、常用计划、子 Agent 和企业消息最终都创建同一种 `LLMWorker`。
 2. **单一执行面**：所有模型动作通过 Tool Registry 注册、校验、执行并回填。
 3. **明确上下文**：模型、工作区、能力、记忆和运行模式在提交时形成不可混淆的 run context。
 4. **先记录再投影**：协议消息、恢复日志和 SQLite 是事实；聊天卡片、观测和文件抽屉是 UI 投影。
@@ -18,7 +18,7 @@ Cowork 的技术设计围绕五个不变量：
 
 ```mermaid
 flowchart TB
-    E["PySide6 UI / 自动化 / 企业消息"] --> RC["Run Context"]
+    E["PySide6 UI / 常用计划 / 企业消息"] --> RC["Run Context"]
     RC --> W["LLMWorker / Agent Loop"]
     CAT["Skill Catalog Snapshot"] --> W
     MEM["记忆与经验"] --> W
@@ -353,17 +353,19 @@ Observability 与协议历史分离：稳定提示、动态上下文、Skill 披
 
 ## 9. 后台运行时与外部连接
 
-### 9.1 daemon、自动化与子 Agent
+### 9.1 daemon、常用计划与子 Agent
 
 daemon 负责后台连接、流式事件与跨页面存活，任务仍创建同一种 `LLMWorker`。
 
 ```text
 计划触发
-  → prompt + skill_names + agent_profile
+  → favorite(prompt + skill_names + execution_mode)
   → run context
   → Agent Loop
   → 运行历史
 ```
+
+常用项本身是可手动启动的工作模式；`schedule` 只是最多一个附加触发器。聊天模式只使用会话内部目录，不携带项目；工作区模式必须引用仍存在的项目目录。计划依赖桌面应用运行，错过的触发写入历史并跳过。AI 通过可发现的 `favorites-manager` Skill 修改同一份配置，启动动作以客户端事件回到 Qt UI 线程执行。
 
 `SessionAgentManager` 为子任务维护独立 run context 与事件流，底层复用同一 Tool、
 模型和持久化协议。主会话只接收需要汇总的结果，完整过程留在观测与诊断中。

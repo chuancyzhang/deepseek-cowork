@@ -1044,7 +1044,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(calls["legacy_api"]["timeout"], 18)
         self.assertEqual(calls["legacy_api"]["sse_read_timeout"], 18)
 
-    def test_legacy_sop_templates_are_cleared_and_tasks_are_parked(self):
+    def test_legacy_sop_templates_are_cleared_and_automations_become_favorites(self):
         cm = self._create_config_manager(
             {
                 "sop_templates": [
@@ -1057,11 +1057,12 @@ class TestConfigManager(unittest.TestCase):
         )
 
         self.assertEqual(cm.config.get("sop_templates"), [])
-        tasks = cm.get_automation_tasks()
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["id"], "task-1")
-        self.assertFalse(tasks[0]["enabled"])
-        self.assertIn("旧版 SOP", tasks[0]["migration_note"])
+        favorites = cm.get_favorites()
+        self.assertEqual(len(favorites), 1)
+        self.assertEqual(favorites[0]["id"], "task-1")
+        self.assertFalse(favorites[0]["schedule"]["enabled"])
+        self.assertIn("旧版自动化迁移", favorites[0]["prompt"])
+        self.assertNotIn("automation_tasks", cm.config)
 
     def test_migrates_legacy_deepseek_model_name(self):
         cm = self._create_config_manager({"model_name": "deepseek-reasoner"})

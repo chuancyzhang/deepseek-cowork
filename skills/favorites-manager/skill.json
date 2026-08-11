@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "name": "favorites-manager",
+  "display_name": "常用库管理",
+  "kind": "knowledge",
+  "capability_group": "memory-meta",
+  "default_enabled": true,
+  "description": "Manage reusable favorite prompts, capability combinations, execution locations, optional schedules, launches, and run history.",
+  "description_cn": "让 AI 创建、整理、定时运行并启动常用提示词与能力组合。",
+  "presentation": {
+    "category": "productivity",
+    "short_name": "常用库",
+    "summary": "让 AI 帮你保存和启动常用工作模式，并按需附加定时计划。",
+    "examples": ["保存这段提示词", "把这些能力设为常用", "每周一运行这个常用项"],
+    "access_note": "会读写本机常用库；启动和删除操作需要确认。"
+  },
+  "tags": ["favorites", "prompt library", "skills", "schedule", "常用", "提示词", "能力组合", "定时"],
+  "triggers": ["保存为常用", "常用提示词", "常用能力", "常用工作模式", "运行常用", "定时运行常用", "favorite prompt", "saved workflow"],
+  "anti_triggers": ["浏览器自动化", "网页自动化"],
+  "tool_refs": [
+    "list_favorites",
+    "upsert_favorite",
+    "configure_favorite_schedule",
+    "delete_favorite",
+    "launch_favorite",
+    "list_favorite_run_history"
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "List favorites first when the saved state is unclear.",
+    "Store prompt, skills, and execution location on the favorite itself.",
+    "Treat a schedule as an optional child of one favorite.",
+    "Request approval before launching or deleting."
+  ]
+}

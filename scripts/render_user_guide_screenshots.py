@@ -629,6 +629,61 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "favorites":
+            project_dir = TEMP_ROOT / "weekly-report-project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            window.config_manager.set_skill_enabled("document-reader", True)
+            window.skill_manager.load_skills()
+            window.skill_manager_ready = True
+            window.config_manager.upsert_project(str(project_dir), name="产品周报")
+            window.config_manager.set_favorites(
+                [
+                    {
+                        "id": "fav-weekly-report",
+                        "name": "产品周报",
+                        "description": "汇总本周进展、风险与下周计划。",
+                        "prompt": "读取项目中的本周资料，生成结构清晰的产品周报。",
+                        "skill_names": ["document-reader"],
+                        "execution_mode": "workspace",
+                        "workspace_dir": str(project_dir),
+                        "schedule": {
+                            "enabled": True,
+                            "prompt_mode": "inherit",
+                            "schedule_type": "weekly",
+                            "time_of_day": "09:00",
+                            "weekdays": [0],
+                        },
+                    },
+                    {
+                        "id": "fav-research",
+                        "name": "快速研究",
+                        "description": "在独立聊天中直接开始主题研究。",
+                        "prompt": "研究我接下来输入的主题，并给出来源清晰的结论。",
+                        "skill_names": ["web-search"],
+                        "execution_mode": "chat",
+                    },
+                    {
+                        "id": "fav-visual",
+                        "name": "数据可视化模式",
+                        "description": "加载可视化能力，等待输入具体数据和目标。",
+                        "skill_names": ["visualize"],
+                        "execution_mode": "chat",
+                    },
+                ]
+            )
+            window.open_favorites()
+            window.resize(1280, 760)
+            save_widget(window, "s40-favorites-library.png", 220)
+            window.show_favorite_editor(favorite_id="fav-weekly-report")
+            save_widget(window, "s41-favorite-editor.png", 220)
+            editor = window.product_pages["favorite_editor"]
+            editor_scroll = editor.findChild(main.QScrollArea)
+            editor_scroll.verticalScrollBar().setValue(editor_scroll.verticalScrollBar().maximum())
+            save_widget(window, "s42-favorite-schedule.png", 180)
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                window.resize(760, 720)
+                save_widget(window, "favorites-editor-narrow.png", 180)
+            return
         if SCREENSHOT_SCOPE == "browser-skill":
             render_browser_skill_setup(window, app)
             return
@@ -1318,10 +1373,18 @@ def main_run():
             save_widget(window, "s29-capability-settings.png")
         window.show_conversation_page()
 
-        window.open_automation_center()
-        save_widget(window, "24-automation-center.png")
-        window.show_automation_task_editor()
-        save_widget(window, "32-automation-task-editor.png")
+        window.config_manager.upsert_favorite(
+            {
+                "id": "guide-favorite",
+                "name": "产品周报",
+                "prompt": "汇总本周产品进展并生成周报。",
+                "execution_mode": "chat",
+            }
+        )
+        window.open_favorites()
+        save_widget(window, "s40-favorites-library.png")
+        window.show_favorite_editor(favorite_id="guide-favorite")
+        save_widget(window, "s41-favorite-editor.png")
         window.handle_product_back()
         window.show_conversation_page()
 

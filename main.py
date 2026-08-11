@@ -221,29 +221,31 @@ from core.skill_from_conversation import (
     validate_conversation_skill_draft,
     validate_impl_py,
 )
-from core.automation_manager import (
-    AUTOMATION_HISTORY_STATUS_COMPLETED,
-    AUTOMATION_HISTORY_STATUS_ERROR,
-    AUTOMATION_HISTORY_STATUS_INTERRUPTED,
-    AUTOMATION_HISTORY_STATUS_MISSED,
-    AUTOMATION_HISTORY_STATUS_RUNNING,
-    AUTOMATION_SCHEDULE_CRON,
-    AUTOMATION_RUN_GRACE_SECONDS,
-    AUTOMATION_SCHEDULE_DAILY,
-    AUTOMATION_SCHEDULE_INTERVAL,
-    AUTOMATION_SCHEDULE_MONTHLY,
-    AUTOMATION_SCHEDULE_ONCE,
-    AUTOMATION_SCHEDULE_WEEKLY,
-    DEFAULT_AUTOMATION_TIMER_INTERVAL_MS,
-    advance_task_to_next_run,
-    build_automation_execution_prompt,
-    compute_next_cron_run_at,
-    compute_next_run_at,
-    cron_expression_from_legacy_schedule,
-    describe_schedule,
-    make_automation_history_record,
-    normalize_cron_expression,
-    validate_cron_expression,
+from core.favorites_manager import (
+    FAVORITE_EXECUTION_CHAT,
+    FAVORITE_EXECUTION_WORKSPACE,
+    FAVORITE_PROMPT_CUSTOM,
+    FAVORITE_PROMPT_INHERIT,
+    FAVORITE_RUN_GRACE_SECONDS,
+    FAVORITE_RUN_STATUS_COMPLETED,
+    FAVORITE_RUN_STATUS_ERROR,
+    FAVORITE_RUN_STATUS_INTERRUPTED,
+    FAVORITE_RUN_STATUS_MISSED,
+    FAVORITE_RUN_STATUS_RUNNING,
+    FAVORITE_SCHEDULE_CRON,
+    FAVORITE_SCHEDULE_DAILY,
+    FAVORITE_SCHEDULE_INTERVAL,
+    FAVORITE_SCHEDULE_MONTHLY,
+    FAVORITE_SCHEDULE_ONCE,
+    FAVORITE_SCHEDULE_WEEKLY,
+    DEFAULT_FAVORITES_TIMER_INTERVAL_MS,
+    advance_favorite_schedule,
+    compute_next_run_at as compute_next_favorite_run_at,
+    describe_schedule as describe_favorite_schedule,
+    favorite_effective_prompt,
+    make_favorite_run_record,
+    normalize_favorite,
+    validate_cron_expression as validate_favorite_cron_expression,
 )
 from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
@@ -528,7 +530,7 @@ CHAT_BUBBLE_VIRTUALIZATION_OVERSCAN_PX = 1800
 BACKGROUND_TRAY_START_DELAY_MS = 120
 BACKGROUND_DAEMON_PREWARM_DELAY_MS = 480
 BACKGROUND_DAEMON_MONITOR_DELAY_MS = 1800
-BACKGROUND_AUTOMATION_START_DELAY_MS = 2400
+BACKGROUND_FAVORITES_START_DELAY_MS = 2400
 GATEWAY_START_SETTLE_DELAY_MS = 1200
 STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
@@ -537,7 +539,7 @@ NATIVE_CRASH_LOG_FILENAME = "native_crash.log"
 PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
 CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
-AUTOMATION_LOG_FILENAME = "automation_runtime.log"
+FAVORITES_LOG_FILENAME = "favorites_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
 WINDOWS_APP_USER_MODEL_ID = "deepseek.cowork"
 STARTUP_STAGE_CLOCK = time.monotonic()
@@ -648,14 +650,14 @@ def log_memory_update(stage, **fields):
         pass
 
 
-def log_automation_runtime(stage, **fields):
+def log_favorites_runtime(stage, **fields):
     if not runtime_debug_logging_enabled():
         return
     try:
         payload = {"stage": stage}
         payload.update(fields or {})
         append_background_process_log(
-            AUTOMATION_LOG_FILENAME,
+            FAVORITES_LOG_FILENAME,
             json.dumps(payload, ensure_ascii=False, default=str),
         )
     except Exception:
@@ -6041,140 +6043,100 @@ class AgentProfileManager(QWidget):
         return profiles
 
 
-class AutomationTaskDialog(QDialog):
-    def __init__(self, skills=None, agent_profiles=None, task=None, parent=None):
+class FavoriteEditorPage(QDialog):
+    def __init__(self, skills=None, projects=None, favorite=None, history=None, prefill=None, parent=None):
         super().__init__(parent)
-        self.setObjectName("AutomationTaskDialog")
-        self.setWindowTitle("自动化任务")
-        self.resize(760, 680)
+        self.setObjectName("FavoriteEditorPage")
+        self.setWindowTitle("常用")
+        self.resize(820, 760)
         self.skills = list(skills or [])
-        self.agent_profiles = list(agent_profiles or [])
-        self.task = dict(task or {})
-        apply_product_dialog(self, "AutomationTaskDialog")
+        self.projects = list(projects or [])
+        self.favorite = dict(favorite or prefill or {})
+        self.history = list(history or [])
+        self.submit_callback = None
+        self.run_schedule_callback = None
+        self.open_history_callback = None
+        apply_product_dialog(self, "FavoriteEditorPage")
 
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        root_layout.addWidget(scroll, 1)
-
+        root.addWidget(scroll, 1)
         content = QWidget()
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(14)
 
-        title = QLabel("新建定时任务" if not self.task else "编辑定时任务")
+        title = QLabel("编辑常用" if favorite else "新建常用")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("定时任务会按计划提交提示词，并按指定 Agent 与引用能力执行。")
+        subtitle = QLabel("保存常用提示词、能力组合和执行位置；需要时再附加定时运行。")
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        self.summary_widget = QWidget()
-        summary_row = QHBoxLayout(self.summary_widget)
-        summary_row.setContentsMargins(0, 0, 0, 0)
-        summary_row.setSpacing(10)
-        status_card = QFrame()
-        status_card.setProperty("uiSurface", True)
-        status_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        status_layout = QVBoxLayout(status_card)
-        status_layout.setContentsMargins(14, 12, 14, 12)
-        status_layout.setSpacing(2)
-        status_kicker = QLabel("任务状态")
-        status_kicker.setStyleSheet(apple_section_kicker_style())
-        status_layout.addWidget(status_kicker)
-        self.status_summary_label = QLabel("启用后会按计划自动创建新任务。")
-        self.status_summary_label.setStyleSheet(apple_caption_style())
-        self.status_summary_label.setWordWrap(True)
-        status_layout.addWidget(self.status_summary_label)
-        enabled_row = QHBoxLayout()
-        enabled_label = QLabel("启用该自动化任务")
-        enabled_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
-        self.enabled_check = AppleSwitch()
-        self.enabled_check.setChecked(True)
-        self.enabled_check.toggled.connect(self._refresh_status_summary)
-        enabled_row.addWidget(enabled_label)
-        enabled_row.addStretch()
-        enabled_row.addWidget(self.enabled_check)
-        status_layout.addLayout(enabled_row)
-        summary_row.addWidget(status_card, 1)
-
-        guidance_card = QFrame()
-        guidance_card.setProperty("uiSurface", True)
-        guidance_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.info_bg))
-        guidance_layout = QVBoxLayout(guidance_card)
-        guidance_layout.setContentsMargins(14, 12, 14, 12)
-        guidance_layout.setSpacing(2)
-        guidance_kicker = QLabel("执行方式")
-        guidance_kicker.setStyleSheet(apple_section_kicker_style())
-        guidance_layout.addWidget(guidance_kicker)
-        guidance_text = QLabel("提示词决定任务目标；能力和 Agent 只限定这次自动化的执行上下文。")
-        guidance_text.setStyleSheet(apple_caption_style())
-        guidance_text.setWordWrap(True)
-        guidance_layout.addWidget(guidance_text)
-        summary_row.addWidget(guidance_card, 1)
-        layout.addWidget(self.summary_widget)
-
-        basics_card = QFrame()
-        basics_card.setProperty("uiSurface", True)
-        basics_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        basics_layout = QVBoxLayout(basics_card)
+        basics = QFrame()
+        basics.setProperty("uiSurface", True)
+        basics.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        basics_layout = QVBoxLayout(basics)
         basics_layout.setContentsMargins(16, 16, 16, 16)
         basics_layout.setSpacing(12)
-        basics_kicker = QLabel("基础信息")
-        basics_kicker.setStyleSheet(apple_section_kicker_style())
-        basics_layout.addWidget(basics_kicker)
+        basics_layout.addWidget(self._kicker("基础信息"))
         form = QFormLayout()
-        form.setSpacing(12)
         configure_responsive_form_layout(form)
+        form.setSpacing(12)
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("例如：每日 AI 新闻简报")
-        form.addRow("任务名称", self.name_input)
-        self.agent_combo = QComboBox()
-        self.agent_combo.addItem("默认主助手", "")
-        for profile in self.agent_profiles:
-            self.agent_combo.addItem(profile.get("name") or "未命名 Agent", profile.get("id") or "")
-        form.addRow("指定 Agent", self.agent_combo)
+        self.name_input.setPlaceholderText("例如：产品周报")
+        self.description_input = QLineEdit()
+        self.description_input.setPlaceholderText("简要说明这个常用项的用途（可选）")
+        form.addRow("名称", self.name_input)
+        form.addRow("说明", self.description_input)
         basics_layout.addLayout(form)
-        layout.addWidget(basics_card)
+        layout.addWidget(basics)
 
-        skills_card = QFrame()
-        skills_card.setProperty("uiSurface", True)
-        skills_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        skills_layout = QVBoxLayout(skills_card)
-        skills_layout.setContentsMargins(16, 16, 16, 16)
-        skills_layout.setSpacing(10)
-        skills_label = QLabel("引用能力")
-        skills_label.setStyleSheet(apple_section_kicker_style())
-        skills_layout.addWidget(skills_label)
-        self.skill_search_input = QLineEdit()
-        self.skill_search_input.setPlaceholderText("搜索能力")
-        self.skill_search_input.setClearButtonEnabled(True)
-        self.skill_search_input.textChanged.connect(self._filter_skill_list)
-        skills_layout.addWidget(self.skill_search_input)
-        self.skill_list = QListWidget()
-        self.skill_list.setMinimumHeight(140)
-        self.skill_list.setMaximumHeight(220)
-        apply_apple_checkable_list_behavior(self.skill_list, radius=14, bg=DesignTokens.bg_main, padding=4)
-        for skill in self.skills:
-            name = str(skill.get("name") or "").strip()
-            if not name:
+        execution = QFrame()
+        execution.setProperty("uiSurface", True)
+        execution.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        execution_layout = QVBoxLayout(execution)
+        execution_layout.setContentsMargins(16, 16, 16, 16)
+        execution_layout.setSpacing(10)
+        execution_layout.addWidget(self._kicker("执行位置"))
+        execution_hint = QLabel("聊天不会携带项目工作区；指定工作区会在新会话中自动带入该项目。")
+        execution_hint.setWordWrap(True)
+        execution_hint.setProperty("favoriteCaption", True)
+        execution_hint.setStyleSheet(apple_caption_style())
+        execution_layout.addWidget(execution_hint)
+        execution_form = QFormLayout()
+        configure_responsive_form_layout(execution_form)
+        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo.addItem("聊天（不使用项目）", FAVORITE_EXECUTION_CHAT)
+        self.execution_mode_combo.addItem("指定工作区", FAVORITE_EXECUTION_WORKSPACE)
+        self.execution_mode_combo.currentIndexChanged.connect(self._refresh_execution_mode)
+        self.workspace_combo = QComboBox()
+        self.workspace_combo.addItem("请选择工作区", "")
+        known_paths = set()
+        for project in self.projects:
+            path = os.path.normpath(str(project.get("path") or "").strip())
+            if not path or path in known_paths:
                 continue
-            item = QListWidgetItem(skill.get("display_name") or skill.get("label") or name)
-            item.setData(Qt.UserRole, name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            item.setToolTip(str(skill.get("description") or ""))
-            self.skill_list.addItem(item)
-        skills_layout.addWidget(self.skill_list)
-        layout.addWidget(skills_card)
+            known_paths.add(path)
+            name = str(project.get("name") or "").strip() or os.path.basename(path.rstrip(os.sep)) or path
+            self.workspace_combo.addItem(name, path)
+            self.workspace_combo.setItemData(self.workspace_combo.count() - 1, path, Qt.ToolTipRole)
+        favorite_workspace = os.path.normpath(str(self.favorite.get("workspace_dir") or "").strip()) if self.favorite.get("workspace_dir") else ""
+        if favorite_workspace and favorite_workspace not in known_paths:
+            self.workspace_combo.addItem(f"不可用 · {favorite_workspace}", favorite_workspace)
+            self.workspace_combo.setItemData(self.workspace_combo.count() - 1, favorite_workspace, Qt.ToolTipRole)
+        execution_form.addRow("模式", self.execution_mode_combo)
+        self.workspace_label = QLabel("工作区")
+        execution_form.addRow(self.workspace_label, self.workspace_combo)
+        execution_layout.addLayout(execution_form)
+        layout.addWidget(execution)
 
         prompt_card = QFrame()
         prompt_card.setProperty("uiSurface", True)
@@ -6182,218 +6144,301 @@ class AutomationTaskDialog(QDialog):
         prompt_layout = QVBoxLayout(prompt_card)
         prompt_layout.setContentsMargins(16, 16, 16, 16)
         prompt_layout.setSpacing(10)
-        prompt_label = QLabel("提示词")
-        prompt_label.setStyleSheet(apple_section_kicker_style())
-        prompt_layout.addWidget(prompt_label)
-        prompt_hint = QLabel("写清楚自动化每次触发时要完成的目标、输入来源、输出格式和验收要求。")
-        prompt_hint.setStyleSheet(apple_caption_style())
+        prompt_layout.addWidget(self._kicker("常用提示词"))
+        prompt_hint = QLabel("可留空；留空后点击常用项只会加载能力并等待你输入。")
         prompt_hint.setWordWrap(True)
+        prompt_hint.setProperty("favoriteCaption", True)
+        prompt_hint.setStyleSheet(apple_caption_style())
         prompt_layout.addWidget(prompt_hint)
         self.prompt_edit = QTextEdit()
-        self.prompt_edit.setPlaceholderText("例如：汇总今天 AI 行业重要新闻，按标题、来源、影响、后续动作输出。")
-        self.prompt_edit.setFixedHeight(180)
+        self.prompt_edit.setPlaceholderText("描述要直接执行的任务（可选）")
+        self.prompt_edit.setFixedHeight(150)
         prompt_layout.addWidget(self.prompt_edit)
-        layout.addWidget(prompt_card, 1)
+        layout.addWidget(prompt_card)
 
-        schedule_card = QFrame()
-        schedule_card.setProperty("uiSurface", True)
-        schedule_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        schedule_card_layout = QVBoxLayout(schedule_card)
-        schedule_card_layout.setContentsMargins(16, 16, 16, 16)
-        schedule_card_layout.setSpacing(12)
-        schedule_kicker = QLabel("触发计划")
-        schedule_kicker.setStyleSheet(apple_section_kicker_style())
-        schedule_card_layout.addWidget(schedule_kicker)
+        skills_card = QFrame()
+        skills_card.setProperty("uiSurface", True)
+        skills_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        skills_layout = QVBoxLayout(skills_card)
+        skills_layout.setContentsMargins(16, 16, 16, 16)
+        skills_layout.setSpacing(10)
+        skills_layout.addWidget(self._kicker("能力组合"))
+        self.skill_search_input = QLineEdit()
+        self.skill_search_input.setPlaceholderText("搜索能力")
+        self.skill_search_input.setClearButtonEnabled(True)
+        self.skill_search_input.textChanged.connect(self._filter_skills)
+        skills_layout.addWidget(self.skill_search_input)
+        self.skill_list = QListWidget()
+        self.skill_list.setMinimumHeight(130)
+        self.skill_list.setMaximumHeight(210)
+        apply_apple_checkable_list_behavior(self.skill_list, radius=8, bg=DesignTokens.bg_main, padding=4)
+        available_names = set()
+        for skill in self.skills:
+            name = str(skill.get("name") or "").strip()
+            if not name:
+                continue
+            available_names.add(name)
+            item = QListWidgetItem(readable_skill_name(skill) or name)
+            item.setData(Qt.UserRole, name)
+            item.setData(Qt.UserRole + 1, f"{readable_skill_name(skill)} {name} {skill.get('description') or ''}".casefold())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setToolTip(str(skill.get("description") or ""))
+            self.skill_list.addItem(item)
+        for missing in normalize_selected_skill_names(self.favorite.get("skill_names")):
+            if missing in available_names:
+                continue
+            item = QListWidgetItem(f"能力不可用 · {missing}")
+            item.setData(Qt.UserRole, missing)
+            item.setData(Qt.UserRole + 1, missing.casefold())
+            item.setData(Qt.UserRole + 2, True)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Checked)
+            item.setToolTip("该能力已被删除或停用，请先恢复能力或从常用项中移除。")
+            self.skill_list.addItem(item)
+        skills_layout.addWidget(self.skill_list)
+        layout.addWidget(skills_card)
 
-        self.schedule_mode_combo = QComboBox()
-        self.schedule_mode_combo.addItem("快捷配置", "quick")
-        self.schedule_mode_combo.addItem("Cron 表达式", "cron")
-        self.schedule_mode_combo.currentIndexChanged.connect(self._on_schedule_mode_changed)
-        self.schedule_mode_combo.hide()
+        schedule_toggle_row = QHBoxLayout()
+        schedule_toggle_row.setContentsMargins(2, 2, 2, 2)
+        schedule_title_box = QVBoxLayout()
+        schedule_title_box.setSpacing(2)
+        schedule_title = QLabel("定时运行")
+        schedule_title.setProperty("favoriteSectionTitle", True)
+        schedule_title.setStyleSheet(apple_section_title_style(size=15))
+        schedule_hint = QLabel("可选；计划继承上面的能力和执行位置。")
+        schedule_hint.setProperty("favoriteCaption", True)
+        schedule_hint.setStyleSheet(apple_caption_style())
+        schedule_title_box.addWidget(schedule_title)
+        schedule_title_box.addWidget(schedule_hint)
+        schedule_toggle_row.addLayout(schedule_title_box, 1)
+        self.schedule_attached_check = AppleSwitch()
+        self.schedule_attached_check.toggled.connect(self._refresh_schedule_visibility)
+        schedule_toggle_row.addWidget(self.schedule_attached_check)
+        layout.addLayout(schedule_toggle_row)
 
-        mode_bar = QFrame()
-        mode_bar.setProperty("uiSurface", True)
-        mode_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        mode_layout = QHBoxLayout(mode_bar)
-        mode_layout.setContentsMargins(4, 4, 4, 4)
-        mode_layout.setSpacing(4)
-        self.schedule_mode_buttons = {}
-        for label, value in (("快捷配置", "quick"), ("Cron", "cron")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(30)
-            btn.setStyleSheet(apple_segmented_button_style())
-            btn.clicked.connect(lambda checked=False, data=value: self._set_schedule_mode(data))
-            mode_layout.addWidget(btn)
-            self.schedule_mode_buttons[value] = btn
-        schedule_card_layout.addWidget(mode_bar)
+        self.schedule_card = QFrame()
+        self.schedule_card.setProperty("uiSurface", True)
+        self.schedule_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        schedule_layout = QVBoxLayout(self.schedule_card)
+        schedule_layout.setContentsMargins(16, 16, 16, 16)
+        schedule_layout.setSpacing(12)
+        state_row = QHBoxLayout()
+        state_row.addWidget(QLabel("启用计划"))
+        state_row.addStretch()
+        self.schedule_enabled_check = AppleSwitch()
+        state_row.addWidget(self.schedule_enabled_check)
+        schedule_layout.addLayout(state_row)
 
+        prompt_mode_form = QFormLayout()
+        configure_responsive_form_layout(prompt_mode_form)
+        self.schedule_prompt_mode_combo = QComboBox()
+        self.schedule_prompt_mode_combo.addItem("继承常用提示词", FAVORITE_PROMPT_INHERIT)
+        self.schedule_prompt_mode_combo.addItem("使用计划专用提示词", FAVORITE_PROMPT_CUSTOM)
+        self.schedule_prompt_mode_combo.currentIndexChanged.connect(self._refresh_schedule_prompt_mode)
+        prompt_mode_form.addRow("计划提示词", self.schedule_prompt_mode_combo)
+        schedule_layout.addLayout(prompt_mode_form)
+        self.schedule_prompt_edit = QTextEdit()
+        self.schedule_prompt_edit.setPlaceholderText("写清楚定时触发后要完成的目标、输入和输出要求")
+        self.schedule_prompt_edit.setFixedHeight(120)
+        schedule_layout.addWidget(self.schedule_prompt_edit)
+
+        schedule_form = QFormLayout()
+        configure_responsive_form_layout(schedule_form)
         self.schedule_type_combo = QComboBox()
-        self.schedule_type_combo.addItem("每天", AUTOMATION_SCHEDULE_DAILY)
-        self.schedule_type_combo.addItem("每周", AUTOMATION_SCHEDULE_WEEKLY)
-        self.schedule_type_combo.addItem("每月", AUTOMATION_SCHEDULE_MONTHLY)
-        self.schedule_type_combo.addItem("间隔执行", AUTOMATION_SCHEDULE_INTERVAL)
-        self.schedule_type_combo.addItem("单次", AUTOMATION_SCHEDULE_ONCE)
-        self.schedule_type_combo.currentIndexChanged.connect(self._on_schedule_type_changed)
-        self.schedule_type_combo.hide()
+        for label, value in (
+            ("每天", FAVORITE_SCHEDULE_DAILY),
+            ("每周", FAVORITE_SCHEDULE_WEEKLY),
+            ("每月", FAVORITE_SCHEDULE_MONTHLY),
+            ("间隔执行", FAVORITE_SCHEDULE_INTERVAL),
+            ("单次", FAVORITE_SCHEDULE_ONCE),
+            ("Cron", FAVORITE_SCHEDULE_CRON),
+        ):
+            self.schedule_type_combo.addItem(label, value)
+        self.schedule_type_combo.currentIndexChanged.connect(self._refresh_schedule_type)
+        schedule_form.addRow("频率", self.schedule_type_combo)
+        schedule_layout.addLayout(schedule_form)
 
         self.schedule_stack = QStackedWidget()
-        daily_page = QWidget()
-        daily_layout = QHBoxLayout(daily_page)
-        daily_layout.setContentsMargins(0, 0, 0, 0)
-        daily_layout.setSpacing(8)
-        self.daily_time_input = QLineEdit()
-        self.daily_time_input.setPlaceholderText("07:00")
-        self.daily_time_input.textChanged.connect(self._refresh_cron_preview)
-        daily_layout.addWidget(self.daily_time_input)
-        daily_layout.addStretch()
-        self.schedule_stack.addWidget(daily_page)
-
+        self.daily_time_input = QLineEdit("09:00")
+        self.schedule_stack.addWidget(self._field_page("执行时间", self.daily_time_input))
         weekly_page = QWidget()
         weekly_layout = QVBoxLayout(weekly_page)
         weekly_layout.setContentsMargins(0, 0, 0, 0)
-        weekly_layout.setSpacing(8)
         weekday_row = QHBoxLayout()
-        weekday_row.setContentsMargins(0, 0, 0, 0)
-        weekday_row.setSpacing(6)
         self.weekday_checks = []
         for index, label in enumerate(("一", "二", "三", "四", "五", "六", "日")):
             check = QCheckBox(f"周{label}")
             check.setProperty("weekdayIndex", index)
-            check.toggled.connect(self._refresh_cron_preview)
             self.weekday_checks.append(check)
             weekday_row.addWidget(check)
         weekday_row.addStretch()
         weekly_layout.addLayout(weekday_row)
-        self.weekly_time_input = QLineEdit()
-        self.weekly_time_input.setPlaceholderText("07:00")
-        self.weekly_time_input.textChanged.connect(self._refresh_cron_preview)
+        self.weekly_time_input = QLineEdit("09:00")
         weekly_layout.addWidget(self.weekly_time_input)
         self.schedule_stack.addWidget(weekly_page)
-
         monthly_page = QWidget()
         monthly_layout = QHBoxLayout(monthly_page)
         monthly_layout.setContentsMargins(0, 0, 0, 0)
-        monthly_layout.setSpacing(8)
         self.monthly_day_spin = QSpinBox()
         self.monthly_day_spin.setRange(1, 31)
-        self.monthly_day_spin.setValue(1)
-        self.monthly_day_spin.valueChanged.connect(self._refresh_cron_preview)
-        self.monthly_time_input = QLineEdit()
-        self.monthly_time_input.setPlaceholderText("09:00")
-        self.monthly_time_input.textChanged.connect(self._refresh_cron_preview)
+        self.monthly_time_input = QLineEdit("09:00")
+        monthly_layout.addWidget(QLabel("每月"))
         monthly_layout.addWidget(self.monthly_day_spin)
+        monthly_layout.addWidget(QLabel("日"))
         monthly_layout.addWidget(self.monthly_time_input)
         monthly_layout.addStretch()
         self.schedule_stack.addWidget(monthly_page)
-
         interval_page = QWidget()
         interval_layout = QHBoxLayout(interval_page)
         interval_layout.setContentsMargins(0, 0, 0, 0)
-        interval_layout.setSpacing(8)
         self.interval_minutes_spin = QSpinBox()
-        self.interval_minutes_spin.setRange(1, 24 * 60)
+        self.interval_minutes_spin.setRange(1, 1440)
         self.interval_minutes_spin.setValue(60)
-        self.interval_minutes_spin.valueChanged.connect(self._refresh_cron_preview)
+        interval_layout.addWidget(QLabel("每隔"))
         interval_layout.addWidget(self.interval_minutes_spin)
         interval_layout.addWidget(QLabel("分钟"))
         interval_layout.addStretch()
         self.schedule_stack.addWidget(interval_page)
-
         once_page = QWidget()
         once_layout = QHBoxLayout(once_page)
         once_layout.setContentsMargins(0, 0, 0, 0)
-        once_layout.setSpacing(8)
-        self.once_datetime_edit = QDateTimeEdit()
+        self.once_datetime_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
         self.once_datetime_edit.setCalendarPopup(True)
         self.once_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.once_datetime_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))
-        self.once_datetime_edit.dateTimeChanged.connect(self._refresh_cron_preview)
         once_layout.addWidget(self.once_datetime_edit)
         once_layout.addStretch()
         self.schedule_stack.addWidget(once_page)
+        self.cron_expression_input = QLineEdit("0 9 * * *")
+        self.schedule_stack.addWidget(self._field_page("Cron 表达式", self.cron_expression_input))
+        schedule_layout.addWidget(self.schedule_stack)
+        self.schedule_preview_label = QLabel("")
+        self.schedule_preview_label.setWordWrap(True)
+        self.schedule_preview_label.setProperty("favoriteCaption", True)
+        self.schedule_preview_label.setStyleSheet(apple_caption_style())
+        schedule_layout.addWidget(self.schedule_preview_label)
+        layout.addWidget(self.schedule_card)
 
-        self.schedule_mode_stack = QStackedWidget()
-        quick_page = QWidget()
-        quick_layout = QVBoxLayout(quick_page)
-        quick_layout.setContentsMargins(0, 0, 0, 0)
-        quick_layout.setSpacing(10)
-        type_bar = QFrame()
-        type_bar.setProperty("uiSurface", True)
-        type_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        type_layout = QGridLayout(type_bar)
-        type_layout.setContentsMargins(4, 4, 4, 4)
-        type_layout.setHorizontalSpacing(4)
-        type_layout.setVerticalSpacing(4)
-        self.schedule_type_buttons = {}
-        for index, (label, value) in enumerate((("每天", AUTOMATION_SCHEDULE_DAILY), ("每周", AUTOMATION_SCHEDULE_WEEKLY), ("每月", AUTOMATION_SCHEDULE_MONTHLY), ("间隔执行", AUTOMATION_SCHEDULE_INTERVAL), ("单次", AUTOMATION_SCHEDULE_ONCE))):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(30)
-            btn.setStyleSheet(apple_segmented_button_style())
-            btn.clicked.connect(lambda checked=False, data=value: self._set_schedule_type(data))
-            row = 0 if index < 3 else 1
-            col = index if index < 3 else index - 3
-            type_layout.addWidget(btn, row, col)
-            self.schedule_type_buttons[value] = btn
-        quick_layout.addWidget(type_bar)
-        quick_layout.addWidget(self.schedule_stack)
-        self.schedule_mode_stack.addWidget(quick_page)
-
-        cron_page = QWidget()
-        cron_layout = QVBoxLayout(cron_page)
-        cron_layout.setContentsMargins(0, 0, 0, 0)
-        cron_layout.setSpacing(8)
-        self.cron_expression_input = QLineEdit()
-        self.cron_expression_input.setPlaceholderText("例如：15 8 * * 1-5")
-        self.cron_expression_input.textChanged.connect(self._refresh_cron_preview)
-        self.cron_preview_label = QLabel("")
-        self.cron_preview_label.setWordWrap(True)
-        self.cron_preview_label.setStyleSheet(apple_caption_style())
-        cron_layout.addWidget(self.cron_expression_input)
-        cron_layout.addWidget(self.cron_preview_label)
-        self.schedule_mode_stack.addWidget(cron_page)
-        schedule_card_layout.addWidget(self.schedule_mode_stack)
-
-        self.schedule_preview_card = QFrame()
-        self.schedule_preview_card.setProperty("uiSurface", True)
-        self.schedule_preview_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        preview_meta_layout = QVBoxLayout(self.schedule_preview_card)
-        preview_meta_layout.setContentsMargins(14, 12, 14, 12)
-        preview_meta_layout.setSpacing(4)
-        preview_meta_kicker = QLabel("计划预览")
-        preview_meta_kicker.setStyleSheet(apple_section_kicker_style())
-        preview_meta_layout.addWidget(preview_meta_kicker)
-        preview_meta_layout.addWidget(self.cron_preview_label)
-        schedule_card_layout.addWidget(self.schedule_preview_card)
-        layout.addWidget(schedule_card)
+        matching_history = [item for item in self.history if str(item.get("favorite_id") or "") == str(self.favorite.get("id") or "")]
+        if matching_history:
+            history_card = QFrame()
+            history_card.setProperty("uiSurface", True)
+            history_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+            history_layout = QVBoxLayout(history_card)
+            history_layout.setContentsMargins(16, 16, 16, 16)
+            history_layout.addWidget(self._kicker("最近运行"))
+            for record in matching_history[:5]:
+                when = int(record.get("started_at") or record.get("scheduled_at") or 0)
+                when_text = datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M") if when else "时间未知"
+                row = QHBoxLayout()
+                label = QLabel(f"{when_text} · {record.get('status') or 'unknown'}" + (f" · {record.get('error')}" if record.get("error") else ""))
+                label.setWordWrap(True)
+                label.setProperty("favoriteCaption", True)
+                label.setStyleSheet(apple_caption_style())
+                row.addWidget(label, 1)
+                if record.get("session_id"):
+                    open_btn = QPushButton("打开任务")
+                    open_btn.setProperty("favoriteGhostButton", True)
+                    open_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+                    open_btn.clicked.connect(
+                        lambda checked=False, sid=record.get("session_id"): self._open_history_session(sid)
+                    )
+                    row.addWidget(open_btn)
+                history_layout.addLayout(row)
+            layout.addWidget(history_card)
 
         actions = ProductActionBar()
-        cancel_btn = QPushButton("取消")
-        self.cancel_btn = cancel_btn
-        cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("保存")
-        self.save_btn = save_btn
-        save_btn.setObjectName("PrimaryBtn")
-        save_btn.clicked.connect(self._handle_accept)
-        actions.layout.addWidget(cancel_btn)
-        actions.layout.addWidget(save_btn)
-        root_layout.addWidget(actions)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setObjectName("SecondaryBtn")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.save_btn = QPushButton("保存")
+        self.save_btn.setObjectName("PrimaryBtn")
+        self.save_btn.clicked.connect(self._handle_save)
+        self.run_schedule_btn = QPushButton("立即运行计划")
+        self.run_schedule_btn.setObjectName("SecondaryBtn")
+        self.run_schedule_btn.setVisible(bool(self.favorite.get("id") and self.favorite.get("schedule")))
+        self.run_schedule_btn.clicked.connect(self._handle_run_schedule)
+        actions.layout.addWidget(self.run_schedule_btn)
+        actions.layout.addWidget(self.cancel_btn)
+        actions.layout.addWidget(self.save_btn)
+        root.addWidget(actions)
 
-        self._load_task()
-        self._on_schedule_type_changed()
-        self._task_baseline = self._task_state_signature()
-        self._connect_task_dirty_tracking()
-        self._refresh_task_dirty_state()
+        self._load()
+        self._baseline = self._signature()
+        self._connect_dirty_tracking()
+        self._refresh_dirty()
+        bind_theme(self, self.refresh_theme, surface="management")
 
-    def _task_state_signature(self):
-        return json.dumps(self.task_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    def _kicker(self, text):
+        label = QLabel(text)
+        label.setProperty("favoriteKicker", True)
+        label.setStyleSheet(apple_section_kicker_style())
+        return label
 
-    def _connect_task_dirty_tracking(self):
-        callback = lambda *_args: self._refresh_task_dirty_state()
+    def refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "FavoriteEditorPage")
+        for surface in self.findChildren(QFrame):
+            if surface.property("uiSurface"):
+                surface.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        for label in self.findChildren(QLabel):
+            if label.property("favoriteKicker"):
+                label.setStyleSheet(apple_section_kicker_style())
+            elif label.property("favoriteSectionTitle"):
+                label.setStyleSheet(apple_section_title_style(size=15))
+            elif label.property("favoriteCaption"):
+                label.setStyleSheet(apple_caption_style())
+        for button in self.findChildren(QPushButton):
+            if button.property("favoriteGhostButton"):
+                button.setStyleSheet(apple_button_style("ghost", radius=7))
+        apply_apple_checkable_list_behavior(self.skill_list, radius=8, bg=DesignTokens.bg_main, padding=4)
+
+    def _field_page(self, label, field):
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel(label))
+        row.addWidget(field, 1)
+        return page
+
+    def _load(self):
+        self.name_input.setText(str(self.favorite.get("name") or ""))
+        self.description_input.setText(str(self.favorite.get("description") or ""))
+        self.prompt_edit.setPlainText(str(self.favorite.get("prompt") or ""))
+        mode = str(self.favorite.get("execution_mode") or FAVORITE_EXECUTION_CHAT)
+        mode_index = self.execution_mode_combo.findData(mode)
+        self.execution_mode_combo.setCurrentIndex(max(0, mode_index))
+        workspace_index = self.workspace_combo.findData(str(self.favorite.get("workspace_dir") or ""))
+        self.workspace_combo.setCurrentIndex(max(0, workspace_index))
+        selected = set(normalize_selected_skill_names(self.favorite.get("skill_names")))
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            item.setCheckState(Qt.Checked if str(item.data(Qt.UserRole) or "") in selected else Qt.Unchecked)
+        schedule = dict(self.favorite.get("schedule") or {})
+        self.schedule_attached_check.setChecked(bool(schedule))
+        self.schedule_enabled_check.setChecked(bool(schedule.get("enabled")))
+        prompt_mode_index = self.schedule_prompt_mode_combo.findData(schedule.get("prompt_mode") or FAVORITE_PROMPT_INHERIT)
+        self.schedule_prompt_mode_combo.setCurrentIndex(max(0, prompt_mode_index))
+        self.schedule_prompt_edit.setPlainText(str(schedule.get("custom_prompt") or ""))
+        schedule_type_index = self.schedule_type_combo.findData(schedule.get("schedule_type") or FAVORITE_SCHEDULE_DAILY)
+        self.schedule_type_combo.setCurrentIndex(max(0, schedule_type_index))
+        self.daily_time_input.setText(str(schedule.get("time_of_day") or "09:00"))
+        self.weekly_time_input.setText(str(schedule.get("time_of_day") or "09:00"))
+        weekdays = set(schedule.get("weekdays") or [0])
+        for index, check in enumerate(self.weekday_checks):
+            check.setChecked(index in weekdays)
+        self.monthly_day_spin.setValue(int(schedule.get("day_of_month") or 1))
+        self.monthly_time_input.setText(str(schedule.get("time_of_day") or "09:00"))
+        self.interval_minutes_spin.setValue(int(schedule.get("interval_minutes") or 60))
+        if schedule.get("one_time_at"):
+            self.once_datetime_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(schedule.get("one_time_at"))))
+        self.cron_expression_input.setText(str(schedule.get("cron_expression") or "0 9 * * *"))
+        self._refresh_execution_mode()
+        self._refresh_schedule_visibility()
+        self._refresh_schedule_prompt_mode()
+        self._refresh_schedule_type()
+
+    def _connect_dirty_tracking(self):
+        callback = lambda *_args: self._refresh_dirty()
         for editor in self.findChildren(QLineEdit):
             editor.textChanged.connect(callback)
         for editor in self.findChildren(QTextEdit):
@@ -6402,624 +6447,384 @@ class AutomationTaskDialog(QDialog):
             combo.currentIndexChanged.connect(callback)
         for check in self.findChildren(QCheckBox):
             check.toggled.connect(callback)
+        for switch in self.findChildren(AppleSwitch):
+            switch.toggled.connect(callback)
         for spin in self.findChildren(QSpinBox):
             spin.valueChanged.connect(callback)
-        for date_edit in self.findChildren(QDateTimeEdit):
-            date_edit.dateTimeChanged.connect(callback)
-
-    def _refresh_task_dirty_state(self):
-        self._task_dirty = self._task_state_signature() != self._task_baseline
-        self.save_btn.setEnabled(self._task_dirty)
-
-    def is_dirty(self):
-        return bool(getattr(self, "_task_dirty", False))
-
-    def _set_schedule_mode(self, value):
-        index = self.schedule_mode_combo.findData(value)
-        if index >= 0 and self.schedule_mode_combo.currentIndex() != index:
-            self.schedule_mode_combo.setCurrentIndex(index)
-
-    def _set_schedule_type(self, value):
-        index = self.schedule_type_combo.findData(value)
-        if index >= 0 and self.schedule_type_combo.currentIndex() != index:
-            self.schedule_type_combo.setCurrentIndex(index)
-
-    def _sync_schedule_mode_buttons(self):
-        current = str(self.schedule_mode_combo.currentData() or "quick")
-        for value, btn in self.schedule_mode_buttons.items():
-            btn.setChecked(value == current)
-
-    def _sync_schedule_type_buttons(self):
-        current = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
-        for value, btn in self.schedule_type_buttons.items():
-            btn.setChecked(value == current)
-
-    def _refresh_status_summary(self):
-        if self.enabled_check.isChecked():
-            self.status_summary_label.setText("任务会持续按计划执行，你也可以在中心里随时手动暂停。")
-        else:
-            self.status_summary_label.setText("先保存为停用状态，等规则确认后再启用也没问题。")
-
-    def _set_time_value(self, editor, value, fallback="09:00"):
-        editor.setText(str(value or fallback).strip() or fallback)
-
-    def _selected_weekdays(self):
-        weekdays = []
+        self.once_datetime_edit.dateTimeChanged.connect(callback)
+        for editor in (self.daily_time_input, self.weekly_time_input, self.monthly_time_input, self.cron_expression_input):
+            editor.textChanged.connect(self._refresh_schedule_type)
         for check in self.weekday_checks:
-            if check.isChecked():
-                weekdays.append(int(check.property("weekdayIndex")))
-        return weekdays or [0]
+            check.toggled.connect(self._refresh_schedule_type)
+        self.monthly_day_spin.valueChanged.connect(self._refresh_schedule_type)
+        self.interval_minutes_spin.valueChanged.connect(self._refresh_schedule_type)
+        self.once_datetime_edit.dateTimeChanged.connect(self._refresh_schedule_type)
 
     def _selected_skill_names(self):
-        names = []
-        for index in range(self.skill_list.count()):
-            item = self.skill_list.item(index)
-            if item.checkState() == Qt.Checked:
-                names.append(str(item.data(Qt.UserRole) or ""))
-        return normalize_selected_skill_names(names)
+        return normalize_selected_skill_names([
+            self.skill_list.item(index).data(Qt.UserRole)
+            for index in range(self.skill_list.count())
+            if self.skill_list.item(index).checkState() == Qt.Checked
+        ])
 
-    def _filter_skill_list(self, text):
+    def _schedule_payload(self):
+        schedule_type = str(self.schedule_type_combo.currentData() or FAVORITE_SCHEDULE_DAILY)
+        time_of_day = self.daily_time_input.text().strip()
+        if schedule_type == FAVORITE_SCHEDULE_WEEKLY:
+            time_of_day = self.weekly_time_input.text().strip()
+        elif schedule_type == FAVORITE_SCHEDULE_MONTHLY:
+            time_of_day = self.monthly_time_input.text().strip()
+        previous = dict(self.favorite.get("schedule") or {})
+        return {
+            "enabled": self.schedule_enabled_check.isChecked(),
+            "prompt_mode": str(self.schedule_prompt_mode_combo.currentData() or FAVORITE_PROMPT_INHERIT),
+            "custom_prompt": self.schedule_prompt_edit.toPlainText().strip(),
+            "schedule_type": schedule_type,
+            "time_of_day": time_of_day or "09:00",
+            "weekdays": [index for index, check in enumerate(self.weekday_checks) if check.isChecked()],
+            "day_of_month": self.monthly_day_spin.value(),
+            "interval_minutes": self.interval_minutes_spin.value(),
+            "interval_anchor_at": int(previous.get("interval_anchor_at") or time.time()),
+            "one_time_at": int(self.once_datetime_edit.dateTime().toSecsSinceEpoch()),
+            "cron_expression": self.cron_expression_input.text().strip(),
+            "created_at": previous.get("created_at") or int(time.time()),
+            "last_run_at": previous.get("last_run_at") or 0,
+            "last_missed_at": previous.get("last_missed_at") or 0,
+            "last_history_id": previous.get("last_history_id") or "",
+        }
+
+    def favorite_payload(self):
+        mode = str(self.execution_mode_combo.currentData() or FAVORITE_EXECUTION_CHAT)
+        payload = {
+            "id": self.favorite.get("id"),
+            "name": self.name_input.text().strip(),
+            "description": self.description_input.text().strip(),
+            "prompt": self.prompt_edit.toPlainText().strip(),
+            "skill_names": self._selected_skill_names(),
+            "execution_mode": mode,
+            "workspace_dir": str(self.workspace_combo.currentData() or "") if mode == FAVORITE_EXECUTION_WORKSPACE else "",
+            "schedule": self._schedule_payload() if self.schedule_attached_check.isChecked() else None,
+            "created_at": self.favorite.get("created_at") or int(time.time()),
+            "updated_at": int(time.time()),
+        }
+        return normalize_favorite(payload)
+
+    def _signature(self):
+        payload = {
+            "name": self.name_input.text(),
+            "description": self.description_input.text(),
+            "prompt": self.prompt_edit.toPlainText(),
+            "skills": self._selected_skill_names(),
+            "mode": self.execution_mode_combo.currentData(),
+            "workspace": self.workspace_combo.currentData(),
+            "schedule_attached": self.schedule_attached_check.isChecked(),
+            "schedule_enabled": self.schedule_enabled_check.isChecked(),
+            "schedule_prompt_mode": self.schedule_prompt_mode_combo.currentData(),
+            "schedule_prompt": self.schedule_prompt_edit.toPlainText(),
+            "schedule_type": self.schedule_type_combo.currentData(),
+            "daily_time": self.daily_time_input.text(),
+            "weekly_time": self.weekly_time_input.text(),
+            "weekdays": [index for index, check in enumerate(self.weekday_checks) if check.isChecked()],
+            "monthly_day": self.monthly_day_spin.value(),
+            "monthly_time": self.monthly_time_input.text(),
+            "interval_minutes": self.interval_minutes_spin.value(),
+            "one_time_at": int(self.once_datetime_edit.dateTime().toSecsSinceEpoch()),
+            "cron_expression": self.cron_expression_input.text(),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _refresh_dirty(self):
+        self._dirty = self._signature() != self._baseline
+        self.save_btn.setEnabled(self._dirty)
+
+    def is_dirty(self):
+        return bool(getattr(self, "_dirty", False))
+
+    def _refresh_execution_mode(self):
+        is_workspace = self.execution_mode_combo.currentData() == FAVORITE_EXECUTION_WORKSPACE
+        self.workspace_label.setVisible(is_workspace)
+        self.workspace_combo.setVisible(is_workspace)
+
+    def _refresh_schedule_visibility(self):
+        self.schedule_card.setVisible(self.schedule_attached_check.isChecked())
+
+    def _refresh_schedule_prompt_mode(self):
+        custom = self.schedule_prompt_mode_combo.currentData() == FAVORITE_PROMPT_CUSTOM
+        self.schedule_prompt_edit.setVisible(custom)
+
+    def _refresh_schedule_type(self):
+        value = str(self.schedule_type_combo.currentData() or FAVORITE_SCHEDULE_DAILY)
+        mapping = {
+            FAVORITE_SCHEDULE_DAILY: 0,
+            FAVORITE_SCHEDULE_WEEKLY: 1,
+            FAVORITE_SCHEDULE_MONTHLY: 2,
+            FAVORITE_SCHEDULE_INTERVAL: 3,
+            FAVORITE_SCHEDULE_ONCE: 4,
+            FAVORITE_SCHEDULE_CRON: 5,
+        }
+        self.schedule_stack.setCurrentIndex(mapping[value])
+        try:
+            preview = describe_favorite_schedule(self._schedule_payload())
+        except Exception as exc:
+            preview = f"计划无效：{exc}"
+        self.schedule_preview_label.setText(preview)
+
+    def _filter_skills(self, text):
         query = str(text or "").strip().casefold()
         for index in range(self.skill_list.count()):
             item = self.skill_list.item(index)
-            haystack = f"{item.text()} {item.toolTip()}".casefold()
-            item.setHidden(bool(query and query not in haystack))
+            item.setHidden(bool(query) and query not in str(item.data(Qt.UserRole + 1) or ""))
 
-    def _load_task(self):
-        self.name_input.setText(str(self.task.get("name") or "").strip())
-        self.prompt_edit.setPlainText(str(self.task.get("prompt") or "").strip())
-        self.enabled_check.setChecked(bool(self.task.get("enabled", True)))
-        agent_index = self.agent_combo.findData(str(self.task.get("agent_profile_id") or ""))
-        if agent_index >= 0:
-            self.agent_combo.setCurrentIndex(agent_index)
-        selected_skills = set(normalize_selected_skill_names(self.task.get("skill_names")))
-        for index in range(self.skill_list.count()):
-            item = self.skill_list.item(index)
-            item.setCheckState(Qt.Checked if str(item.data(Qt.UserRole) or "") in selected_skills else Qt.Unchecked)
-        schedule_type = str(self.task.get("schedule_type") or AUTOMATION_SCHEDULE_DAILY).strip()
-        self.schedule_mode_combo.setCurrentIndex(1 if schedule_type == AUTOMATION_SCHEDULE_CRON else 0)
-        combo_index = self.schedule_type_combo.findData(schedule_type)
-        if combo_index >= 0:
-            self.schedule_type_combo.setCurrentIndex(combo_index)
-        self._set_time_value(self.daily_time_input, self.task.get("time_of_day"), "07:00")
-        self._set_time_value(self.weekly_time_input, self.task.get("time_of_day"), "07:00")
-        self.monthly_day_spin.setValue(int(self.task.get("day_of_month") or 1))
-        self._set_time_value(self.monthly_time_input, self.task.get("time_of_day"), "09:00")
-        self.interval_minutes_spin.setValue(max(1, int(self.task.get("interval_minutes") or 60)))
-        if self.task.get("one_time_at"):
-            self.once_datetime_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(self.task.get("one_time_at") or 0)))
-        weekdays = set(self.task.get("weekdays") or [])
-        for check in self.weekday_checks:
-            check.setChecked(int(check.property("weekdayIndex")) in weekdays)
-        self.cron_expression_input.setText(str(self.task.get("cron_expression") or cron_expression_from_legacy_schedule(self.task)).strip())
-        self._on_schedule_mode_changed()
-        self._refresh_cron_preview()
-        self._refresh_status_summary()
-
-    def _on_schedule_mode_changed(self):
-        cron_mode = str(self.schedule_mode_combo.currentData() or "quick") == "cron"
-        self.schedule_mode_stack.setCurrentIndex(1 if cron_mode else 0)
-        self._sync_schedule_mode_buttons()
-        self._refresh_cron_preview()
-
-    def _on_schedule_type_changed(self):
-        schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
-        page_index = {AUTOMATION_SCHEDULE_DAILY: 0, AUTOMATION_SCHEDULE_WEEKLY: 1, AUTOMATION_SCHEDULE_MONTHLY: 2, AUTOMATION_SCHEDULE_INTERVAL: 3, AUTOMATION_SCHEDULE_ONCE: 4}.get(schedule_type, 0)
-        self.schedule_stack.setCurrentIndex(page_index)
-        self._sync_schedule_type_buttons()
-        self._refresh_cron_preview()
-
-    def _quick_schedule_payload(self):
-        payload = {}
-        schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
-        payload["schedule_type"] = schedule_type
-        if schedule_type == AUTOMATION_SCHEDULE_DAILY:
-            payload["time_of_day"] = self.daily_time_input.text().strip() or "07:00"
-        elif schedule_type == AUTOMATION_SCHEDULE_WEEKLY:
-            payload["time_of_day"] = self.weekly_time_input.text().strip() or "07:00"
-            payload["weekdays"] = self._selected_weekdays()
-        elif schedule_type == AUTOMATION_SCHEDULE_MONTHLY:
-            payload["time_of_day"] = self.monthly_time_input.text().strip() or "09:00"
-            payload["day_of_month"] = int(self.monthly_day_spin.value())
-        elif schedule_type == AUTOMATION_SCHEDULE_INTERVAL:
-            payload["interval_minutes"] = int(self.interval_minutes_spin.value())
-        elif schedule_type == AUTOMATION_SCHEDULE_ONCE:
-            payload["one_time_at"] = int(self.once_datetime_edit.dateTime().toSecsSinceEpoch())
-        payload["cron_expression"] = "" if schedule_type == AUTOMATION_SCHEDULE_ONCE else cron_expression_from_legacy_schedule(payload)
-        return payload
-
-    def _refresh_cron_preview(self):
-        cron_mode = str(self.schedule_mode_combo.currentData() or "quick") == "cron"
-        if cron_mode:
-            raw_expression = self.cron_expression_input.text().strip()
-            if not validate_cron_expression(raw_expression):
-                self.cron_preview_label.setText("Cron 表达式暂时无效，需要 5 段 crontab 语法。")
-                return
-            expression = raw_expression
+    def _handle_save(self):
+        try:
+            payload = self.favorite_payload()
+            missing = [
+                self.skill_list.item(index).data(Qt.UserRole)
+                for index in range(self.skill_list.count())
+                if self.skill_list.item(index).checkState() == Qt.Checked
+                and bool(self.skill_list.item(index).data(Qt.UserRole + 2))
+            ]
+            if missing:
+                raise ValueError("以下能力不可用：" + "、".join(str(item) for item in missing))
+            if payload.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE and not os.path.isdir(payload.get("workspace_dir") or ""):
+                raise ValueError("选择的工作区不存在，请重新选择。")
+            if payload.get("schedule") and payload["schedule"].get("enabled"):
+                if payload.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE and not os.path.isdir(payload.get("workspace_dir") or ""):
+                    raise ValueError("启用定时运行前必须选择有效工作区。")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法保存常用", str(exc))
+            return
+        if callable(self.submit_callback):
+            self.submit_callback(payload)
         else:
-            quick_payload = self._quick_schedule_payload()
-            if quick_payload.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
-                when = self.once_datetime_edit.dateTime().toString("yyyy-MM-dd HH:mm")
-                self.cron_preview_label.setText(f"单次执行\n{when}")
-                return
-            expression = str(quick_payload.get("cron_expression") or "").strip()
-        next_run_at = compute_next_cron_run_at(expression)
-        next_run_text = datetime.fromtimestamp(int(next_run_at)).strftime("%Y-%m-%d %H:%M")
-        lead = "自定义 Cron" if cron_mode else "下次执行"
-        self.cron_preview_label.setText(f"{lead}\n{next_run_text}\n{expression}")
+            self.favorite = payload
+            self.accept()
 
-    def _handle_accept(self):
-        if not self.name_input.text().strip():
-            QMessageBox.warning(self, "自动化任务", "请填写任务名称。")
+    def _handle_run_schedule(self):
+        if self.is_dirty():
+            QMessageBox.information(self, "请先保存", "请先保存当前修改，再立即运行计划。")
             return
-        if not self.prompt_edit.toPlainText().strip():
-            QMessageBox.warning(self, "自动化任务", "请填写提示词。")
-            return
-        if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
-            if not validate_cron_expression(self.cron_expression_input.text().strip()):
-                QMessageBox.warning(self, "自动化任务", "请填写有效的 5 段 crontab 表达式。")
-                return
-        if self.property("embeddedProductPage") and callable(getattr(self, "submit_callback", None)):
-            self.submit_callback(self.task_payload())
-            return
-        self.accept()
+        favorite_id = str(self.favorite.get("id") or "").strip()
+        if favorite_id and callable(self.run_schedule_callback):
+            self.run_schedule_callback(favorite_id)
 
-    def task_payload(self):
-        payload = dict(self.task)
-        for key in ("time_of_day", "weekdays", "day_of_month", "interval_minutes", "interval_anchor_at", "one_time_at", "cron_expression", "template_id"):
-            payload.pop(key, None)
-        payload["name"] = self.name_input.text().strip()
-        payload["prompt"] = self.prompt_edit.toPlainText().strip()
-        payload["skill_names"] = self._selected_skill_names()
-        payload["agent_profile_id"] = str(self.agent_combo.currentData() or "").strip()
-        payload["enabled"] = self.enabled_check.isChecked()
-        if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
-            payload["schedule_type"] = AUTOMATION_SCHEDULE_CRON
-            payload["cron_expression"] = normalize_cron_expression(self.cron_expression_input.text().strip())
-        else:
-            payload.update(self._quick_schedule_payload())
-        return payload
+    def _open_history_session(self, session_id):
+        if callable(self.open_history_callback):
+            self.open_history_callback(str(session_id or ""))
 
 
-class AutomationDialog(QDialog):
+class FavoritesPage(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
-        self.setObjectName("AutomationDialog")
+        self.setObjectName("FavoritesPage")
         self.config_manager = config_manager
         self._main = parent
-        self.tasks = list(self.config_manager.get_automation_tasks())
-        self.history = list(self.config_manager.get_automation_run_history())
-        self.setWindowTitle("自动化")
-        self.resize(980, 720)
-        self.setMinimumSize(860, 620)
-        apply_product_dialog(self, "AutomationDialog")
-
+        self.favorites = list(config_manager.get_favorites())
+        self._filter_scheduled = False
+        self._grid_columns = 0
+        apply_product_dialog(self, "FavoritesPage")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        title_box.setSpacing(4)
-        title = QLabel("自动化")
+        title = QLabel("常用")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("按计划提交提示词，并为每个任务指定可用能力和 Agent。")
+        subtitle = QLabel("保存经常使用的提示词和能力组合，需要时一键开始。")
         subtitle.setProperty("roleSubtitle", True)
-        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        self.create_task_btn = QPushButton("新建定时任务")
-        self.create_task_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_inverse))
-        self.create_task_btn.setObjectName("PrimaryBtn")
-        self.create_task_btn.clicked.connect(self.create_task)
-        header.addWidget(self.create_task_btn)
+        self.create_btn = QPushButton("新建常用")
+        self.create_btn.setObjectName("PrimaryBtn")
+        self.create_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_inverse))
+        self.create_btn.clicked.connect(self.create_favorite)
+        header.addWidget(self.create_btn)
         layout.addLayout(header)
 
+        toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索自动化任务")
+        self.search_input.setPlaceholderText("搜索名称、提示词或能力")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setStyleSheet(apple_search_field_style())
-        self.search_input.textChanged.connect(self.refresh_task_cards)
-        layout.addWidget(self.search_input)
+        self.search_input.textChanged.connect(self.refresh_cards)
+        toolbar.addWidget(self.search_input, 1)
+        self.all_btn = QPushButton("全部")
+        self.scheduled_btn = QPushButton("有定时")
+        for button in (self.all_btn, self.scheduled_btn):
+            button.setCheckable(True)
+            button.setStyleSheet(apple_segmented_button_style())
+        self.all_btn.clicked.connect(lambda: self._set_filter(False))
+        self.scheduled_btn.clicked.connect(lambda: self._set_filter(True))
+        toolbar.addWidget(self.all_btn)
+        toolbar.addWidget(self.scheduled_btn)
+        layout.addLayout(toolbar)
 
-        self.summary_widget = QWidget()
-        summary_row = QHBoxLayout(self.summary_widget)
-        summary_row.setContentsMargins(0, 0, 0, 0)
-        summary_row.setSpacing(10)
-        self.configured_summary_card = self._build_overview_card("已配置任务", "0")
-        self.active_summary_card = self._build_overview_card("正在启用", "0")
-        summary_row.addWidget(self.configured_summary_card, 1)
-        summary_row.addWidget(self.active_summary_card, 1)
-        layout.addWidget(self.summary_widget)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.container = QWidget()
+        self.grid = QGridLayout(self.container)
+        self.grid.setContentsMargins(0, 4, 0, 0)
+        self.grid.setSpacing(10)
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll, 1)
+        self._set_filter(False)
+        bind_theme(self, self.refresh_theme, surface="management")
 
-        tab_bar = QFrame()
-        tab_bar.setProperty("uiSurface", True)
-        tab_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        tab_bar_layout = QHBoxLayout(tab_bar)
-        tab_bar_layout.setContentsMargins(4, 4, 4, 4)
-        tab_bar_layout.setSpacing(4)
-        self.tab_buttons = []
-        for index, label in enumerate(("已配置", "执行历史")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(32)
-            btn.setStyleSheet(apple_segmented_button_style())
-            btn.clicked.connect(lambda checked=False, idx=index: self._set_tab_index(idx))
-            tab_bar_layout.addWidget(btn)
-            self.tab_buttons.append(btn)
-        layout.addWidget(tab_bar)
+    def refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "FavoritesPage")
+        self.search_input.setStyleSheet(apple_search_field_style())
+        for button in (self.all_btn, self.scheduled_btn):
+            button.setStyleSheet(apple_segmented_button_style())
+        self.refresh_cards()
 
-        self.tabs = QStackedWidget()
-        self.tabs.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
-        layout.addWidget(self.tabs, 1)
+    def _set_filter(self, scheduled):
+        self._filter_scheduled = bool(scheduled)
+        self.all_btn.setChecked(not self._filter_scheduled)
+        self.scheduled_btn.setChecked(self._filter_scheduled)
+        self.refresh_cards()
 
-        configured_tab = QWidget()
-        configured_layout = QVBoxLayout(configured_tab)
-        configured_layout.setContentsMargins(0, 12, 0, 0)
-        configured_layout.setSpacing(12)
-        self.tasks_scroll = QScrollArea()
-        self.tasks_scroll.setWidgetResizable(True)
-        self.tasks_scroll.setFrameShape(QFrame.NoFrame)
-        self.tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.tasks_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.tasks_scroll.viewport().setStyleSheet("background: transparent; border: none;")
-        self.tasks_container = QWidget()
-        self.tasks_container.setStyleSheet("background: transparent; border: none;")
-        self.tasks_layout = QVBoxLayout(self.tasks_container)
-        self.tasks_layout.setContentsMargins(0, 0, 0, 0)
-        self.tasks_layout.setSpacing(10)
-        self.tasks_scroll.setWidget(self.tasks_container)
-        configured_hint = QLabel("每个任务由提示词、引用能力、Agent 和触发计划组成。")
-        configured_hint.setStyleSheet(apple_caption_style())
-        configured_hint.setWordWrap(True)
-        configured_layout.addWidget(configured_hint)
-        configured_layout.addWidget(self.tasks_scroll, 1)
-        self.tabs.addWidget(configured_tab)
+    def _clear_grid(self):
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        history_tab = QWidget()
-        history_layout = QHBoxLayout(history_tab)
-        history_layout.setContentsMargins(0, 12, 0, 0)
-        history_layout.setSpacing(12)
-        self.history_list = QListWidget()
-        self.history_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=16, padding=6))
-        self.history_list.currentRowChanged.connect(self.refresh_history_details)
-        history_layout.addWidget(self.history_list, 1)
-        history_detail_card = QFrame()
-        history_detail_card.setProperty("uiSurface", True)
-        history_detail_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        history_detail_card.setMinimumWidth(280)
-        history_detail_layout = QVBoxLayout(history_detail_card)
-        history_detail_layout.setContentsMargins(16, 16, 16, 16)
-        history_detail_layout.setSpacing(8)
-        history_kicker = QLabel("执行详情")
-        history_kicker.setStyleSheet(apple_section_kicker_style())
-        history_detail_layout.addWidget(history_kicker)
-        self.history_detail_title = QLabel("选择一条执行记录")
-        self.history_detail_title.setStyleSheet(apple_section_title_style(size=15))
-        history_detail_layout.addWidget(self.history_detail_title)
-        self.history_detail_label = QLabel("选择一条执行记录查看详情。")
-        self.history_detail_label.setWordWrap(True)
-        self.history_detail_label.setStyleSheet(apple_caption_style())
-        history_detail_layout.addWidget(self.history_detail_label)
-        history_detail_layout.addStretch()
-        history_actions = QHBoxLayout()
-        history_actions.addStretch()
-        self.open_history_session_btn = QPushButton("打开关联任务")
-        self.open_history_session_btn.setObjectName("SecondaryBtn")
-        self.open_history_session_btn.clicked.connect(self.open_selected_history_session)
-        history_actions.addWidget(self.open_history_session_btn)
-        history_detail_layout.addLayout(history_actions)
-        history_layout.addWidget(history_detail_card)
-        self.tabs.addWidget(history_tab)
+    def refresh(self):
+        self.favorites = list(self.config_manager.get_favorites())
+        self.refresh_cards()
 
-        action_bar = ProductActionBar()
-        close_btn = QPushButton("关闭")
-        close_btn.setObjectName("SecondaryBtn")
-        close_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("保存")
-        save_btn.setObjectName("PrimaryBtn")
-        save_btn.clicked.connect(self.save_and_accept)
-        action_bar.layout.addWidget(close_btn)
-        action_bar.layout.addWidget(save_btn)
-        layout.addWidget(action_bar)
+    def refresh_cards(self):
+        self._clear_grid()
+        query = self.search_input.text().strip().casefold() if hasattr(self, "search_input") else ""
+        visible = []
+        for favorite in self.favorites:
+            if self._filter_scheduled and not favorite.get("schedule"):
+                continue
+            haystack = " ".join([
+                str(favorite.get("name") or ""),
+                str(favorite.get("description") or ""),
+                str(favorite.get("prompt") or ""),
+                " ".join(favorite.get("skill_names") or []),
+                str(favorite.get("workspace_dir") or ""),
+            ]).casefold()
+            if query and query not in haystack:
+                continue
+            visible.append(favorite)
+        if not visible:
+            if self.favorites and (query or self._filter_scheduled):
+                empty = ProductEmptyState("没有匹配的常用项", "调整搜索词或筛选条件后再试。")
+            else:
+                empty = ProductEmptyState("还没有常用项", "保存提示词、能力组合或两者组合，之后可以一键开始。", "新建常用")
+                empty.action_button.clicked.connect(self.create_favorite)
+            self.grid.addWidget(empty, 0, 0, 1, 2)
+            return
+        columns = 2 if self.scroll.viewport().width() >= 880 else 1
+        self._grid_columns = columns
+        for index, favorite in enumerate(visible):
+            self.grid.addWidget(self._build_card(favorite), index // columns, index % columns)
+        self.grid.setRowStretch((len(visible) + columns - 1) // columns, 1)
 
-        self.refresh_task_cards()
-        self.refresh_history_list()
-        self._refresh_overview_cards()
-        self._set_tab_index(0)
-
-    def _available_skills(self):
-        if self._main and hasattr(self._main, "_available_session_skills"):
-            return list(self._main._available_session_skills() or [])
-        return []
-
-    def _available_agent_profiles(self):
-        if self._main and hasattr(self._main, "_available_agent_profiles"):
-            return list(self._main._available_agent_profiles() or [])
-        return list(self.config_manager.get_agent_profiles())
-
-    def _agent_name(self, profile_id):
-        identifier = str(profile_id or "").strip()
-        if not identifier:
-            return "默认主助手"
-        for profile in self._available_agent_profiles():
-            if str(profile.get("id") or "") == identifier:
-                return profile.get("name") or "未命名 Agent"
-        return "Agent 已删除"
-
-    def _build_overview_card(self, title, value):
+    def _build_card(self, favorite):
         card = QFrame()
-        card.setProperty("overviewMetric", True)
-        card.setStyleSheet(
-            f"QFrame[overviewMetric=\"true\"] {{ background: transparent; border: none; "
-            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
-        )
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(4, 8, 4, 10)
-        card_layout.setSpacing(2)
-        kicker = QLabel(title)
-        kicker.setStyleSheet(apple_section_kicker_style())
-        card_layout.addWidget(kicker)
-        value_label = QLabel(value)
-        value_label.setProperty("summaryValue", True)
-        value_label.setStyleSheet(apple_metric_value_style())
-        card_layout.addWidget(value_label)
+        card.setObjectName("FavoriteCard")
+        card.setProperty("uiSurface", True)
+        card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        title_row = QHBoxLayout()
+        title = QLabel(str(favorite.get("name") or "未命名常用"))
+        title.setStyleSheet(apple_section_title_style(size=15))
+        title_row.addWidget(title)
+        title_row.addStretch()
+        if favorite.get("schedule"):
+            schedule = favorite.get("schedule") or {}
+            badge = QLabel("定时已启用" if schedule.get("enabled") else "定时已暂停")
+            badge.setStyleSheet(apple_status_chip_style("running" if schedule.get("enabled") else "pending", subtle=not schedule.get("enabled")))
+            title_row.addWidget(badge)
+        layout.addLayout(title_row)
+        prompt = str(favorite.get("prompt") or "").strip()
+        skills = normalize_selected_skill_names(favorite.get("skill_names"))
+        kind = "提示词 + 能力" if prompt and skills else ("提示词" if prompt else "能力组合")
+        execution = "聊天" if favorite.get("execution_mode") == FAVORITE_EXECUTION_CHAT else (os.path.basename(str(favorite.get("workspace_dir") or "").rstrip(os.sep)) or "工作区")
+        meta_parts = [kind, execution]
+        if skills:
+            meta_parts.append(f"{len(skills)} 个能力")
+        if favorite.get("schedule"):
+            meta_parts.append(str((favorite.get("schedule") or {}).get("schedule_summary") or "有定时"))
+        meta = QLabel(" · ".join(meta_parts))
+        meta.setStyleSheet(apple_caption_style())
+        meta.setWordWrap(True)
+        layout.addWidget(meta)
+        summary = str(favorite.get("description") or prompt or "点击后加载能力并开始新的聊天。").strip()
+        summary_label = QLabel(re.sub(r"\s+", " ", summary)[:180])
+        summary_label.setWordWrap(True)
+        summary_label.setStyleSheet(apple_caption_style())
+        layout.addWidget(summary_label, 1)
+        actions = QHBoxLayout()
+        edit_btn = QPushButton("编辑")
+        edit_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        edit_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.edit_favorite(fid))
+        delete_btn = QToolButton()
+        delete_btn.setToolTip("删除常用")
+        delete_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
+        delete_btn.setStyleSheet(apple_icon_action_button_style("danger"))
+        delete_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.delete_favorite(fid))
+        start_btn = QPushButton("开始" if prompt else "使用")
+        start_btn.setObjectName("PrimaryBtn")
+        start_btn.setStyleSheet(apple_button_style("primary", radius=7))
+        start_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.launch_favorite(fid))
+        actions.addWidget(edit_btn)
+        actions.addWidget(delete_btn)
+        actions.addStretch()
+        actions.addWidget(start_btn)
+        layout.addLayout(actions)
         return card
 
-    def _set_summary_card_value(self, card, value):
-        labels = card.findChildren(QLabel)
-        if len(labels) >= 2:
-            labels[1].setText(str(value))
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        expected = 2 if self.scroll.viewport().width() >= 880 else 1
+        if self._grid_columns and expected != self._grid_columns:
+            QTimer.singleShot(0, self.refresh_cards)
 
-    def _refresh_overview_cards(self):
-        self._set_summary_card_value(self.configured_summary_card, len(self.tasks))
-        self._set_summary_card_value(self.active_summary_card, len([task for task in self.tasks if task.get("enabled")]))
-        if hasattr(self, "summary_widget"):
-            self.summary_widget.setVisible(bool(self.tasks))
-        if hasattr(self, "create_task_btn"):
-            self.create_task_btn.setVisible(bool(self.tasks))
+    def _find(self, favorite_id):
+        return next((item for item in self.favorites if str(item.get("id") or "") == str(favorite_id or "")), None)
 
-    def _set_tab_index(self, index):
-        self.tabs.setCurrentIndex(index)
-        for btn_index, btn in enumerate(self.tab_buttons):
-            btn.setChecked(btn_index == index)
+    def create_favorite(self):
+        if self._main and hasattr(self._main, "show_favorite_editor"):
+            self._main.show_favorite_editor()
 
-    def _task_time_text(self, ts):
-        try:
-            if not ts:
-                return "未设置"
-            return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            return "未设置"
+    def edit_favorite(self, favorite_id):
+        if self._main and hasattr(self._main, "show_favorite_editor"):
+            self._main.show_favorite_editor(favorite_id=favorite_id)
 
-    def _task_card_meta(self, task):
-        next_run_text = self._task_time_text(task.get("next_run_at"))
-        skill_count = len(normalize_selected_skill_names(task.get("skill_names")))
-        return f"{describe_schedule(task)} · {self._agent_name(task.get('agent_profile_id'))} · {skill_count} 个能力\n下次执行：{next_run_text}"
+    def launch_favorite(self, favorite_id):
+        if self._main and hasattr(self._main, "launch_favorite"):
+            self._main.launch_favorite(favorite_id, source="ui")
 
-    def _build_task_action_button(self, icon_name, tooltip, callback, kind="neutral"):
-        btn = QToolButton()
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setFixedSize(30, 30)
-        btn.setToolTip(tooltip)
-        btn.setStyleSheet(apple_icon_action_button_style(kind))
-        icon_color = DesignTokens.text_secondary
-        if kind == "primary":
-            icon_color = DesignTokens.primary
-        elif kind == "danger":
-            icon_color = DesignTokens.error_text
-        btn.setIcon(qta.icon(icon_name, color=icon_color))
-        btn.clicked.connect(callback)
-        return btn
-
-    def refresh_task_cards(self):
-        while self.tasks_layout.count():
-            item = self.tasks_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        if not self.tasks:
-            empty_card = ProductEmptyState(
-                "还没有自动化任务",
-                "创建日报、巡检、同步或清理任务，Cowork 会按计划提交提示词并记录结果。",
-                "新建定时任务",
-            )
-            empty_card.action_button.clicked.connect(self.create_task)
-            self.tasks_layout.addWidget(empty_card)
-            self.tasks_layout.addStretch()
-            self._refresh_overview_cards()
+    def delete_favorite(self, favorite_id):
+        favorite = self._find(favorite_id)
+        if not favorite:
             return
-        query = self.search_input.text().strip().casefold() if hasattr(self, "search_input") else ""
-        visible_tasks = [
-            task for task in self.tasks
-            if not query or query in f"{task.get('name') or ''} {task.get('prompt') or ''} {describe_schedule(task)}".casefold()
-        ]
-        if self.tasks and not visible_tasks:
-            empty_card = ProductEmptyState("没有匹配的自动化任务", "调整关键词后再试。")
-            self.tasks_layout.addWidget(empty_card)
-            self.tasks_layout.addStretch()
-            return
-        for task in visible_tasks:
-            card = QFrame()
-            card.setProperty("uiSurface", True)
-            card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(12)
-            title_row = QHBoxLayout()
-            title_row.setContentsMargins(0, 0, 0, 0)
-            title_row.setSpacing(8)
-            title = QLabel(task.get("name") or "未命名自动化")
-            title.setStyleSheet(apple_section_title_style(size=15))
-            badge = QLabel("已启用" if task.get("enabled") else "已暂停")
-            badge_style = apple_status_chip_style("running" if task.get("enabled") else "pending", subtle=not task.get("enabled"))
-            badge.setStyleSheet(badge_style)
-            title_row.addWidget(title)
-            title_row.addWidget(badge)
-            title_row.addStretch()
-            run_btn = QPushButton("立即执行")
-            run_btn.setStyleSheet(apple_button_style("primary" if task.get("enabled") else "secondary", radius=15))
-            run_btn.setMinimumHeight(30)
-            run_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.run_task_now(task_id))
-            title_row.addWidget(run_btn)
-            card_layout.addLayout(title_row)
-            meta = QLabel(self._task_card_meta(task))
-            meta.setWordWrap(True)
-            meta.setStyleSheet(apple_caption_style())
-            card_layout.addWidget(meta)
-            prompt = QLabel(task.get("prompt") or "")
-            prompt.setWordWrap(True)
-            prompt.setStyleSheet(apple_caption_style())
-            card_layout.addWidget(prompt)
-            actions = QHBoxLayout()
-            actions.setContentsMargins(0, 0, 0, 0)
-            actions.setSpacing(8)
-            actions.addWidget(self._build_task_action_button("fa5s.pen", "编辑任务", lambda checked=False, task_id=task.get("id"): self.edit_task(task_id)))
-            actions.addWidget(self._build_task_action_button("fa5s.pause" if task.get("enabled") else "fa5s.play", "暂停任务" if task.get("enabled") else "启用任务", lambda checked=False, task_id=task.get("id"): self.toggle_task(task_id), kind="primary" if not task.get("enabled") else "neutral"))
-            actions.addStretch()
-            actions.addWidget(self._build_task_action_button("fa5s.trash-alt", "删除任务", lambda checked=False, task_id=task.get("id"): self.delete_task(task_id), kind="danger"))
-            card_layout.addLayout(actions)
-            self.tasks_layout.addWidget(card)
-        self.tasks_layout.addStretch()
-        self._refresh_overview_cards()
-
-    def refresh_history_list(self):
-        self.history = list(self.config_manager.get_automation_run_history())
-        self.history_list.clear()
-        status_labels = {
-            AUTOMATION_HISTORY_STATUS_RUNNING: "运行中",
-            AUTOMATION_HISTORY_STATUS_COMPLETED: "已完成",
-            AUTOMATION_HISTORY_STATUS_ERROR: "失败",
-            AUTOMATION_HISTORY_STATUS_INTERRUPTED: "已中断",
-            AUTOMATION_HISTORY_STATUS_MISSED: "已错过",
-        }
-        for record in self.history:
-            when_text = self._task_time_text(record.get("started_at") or record.get("scheduled_at"))
-            status = record.get("status")
-            icon_name = "fa5s.clock"
-            if status == AUTOMATION_HISTORY_STATUS_COMPLETED:
-                icon_name = "fa5s.check-circle"
-            elif status == AUTOMATION_HISTORY_STATUS_ERROR:
-                icon_name = "fa5s.exclamation-circle"
-            elif status == AUTOMATION_HISTORY_STATUS_RUNNING:
-                icon_name = "fa5s.play-circle"
-            item = QListWidgetItem(qta.icon(icon_name, color=status_color(status or "")), f"{record.get('task_name') or '未命名任务'} · {status_labels.get(record.get('status'), record.get('status') or '未知')}\n{when_text}")
-            item.setData(Qt.UserRole, record.get("id"))
-            self.history_list.addItem(item)
-        if self.history_list.count():
-            self.history_list.setCurrentRow(0)
-        else:
-            self.history_detail_title.setText("还没有执行记录")
-            self.history_detail_label.setText("还没有执行记录。")
-            self.open_history_session_btn.setEnabled(False)
-        self._refresh_overview_cards()
-
-    def refresh_history_details(self, index):
-        record = self.history[index] if 0 <= index < len(self.history) else {}
-        if not record:
-            self.history_detail_title.setText("选择一条执行记录")
-            self.history_detail_label.setText("选择一条执行记录查看详情。")
-            self.open_history_session_btn.setEnabled(False)
-            return
-        self.history_detail_title.setText(record.get("task_name") or "未命名任务")
-        lines = [
-            f"任务：{record.get('task_name') or '未命名任务'}",
-            f"Agent：{record.get('agent_profile_name') or '默认主助手'}",
-            f"触发方式：{'定时触发' if record.get('trigger_source') == 'scheduler' else '手动触发'}",
-            f"计划时间：{self._task_time_text(record.get('scheduled_at'))}",
-            f"开始时间：{self._task_time_text(record.get('started_at'))}",
-            f"结束时间：{self._task_time_text(record.get('finished_at'))}",
-        ]
-        if record.get("summary"):
-            lines.append(f"摘要：{record.get('summary')}")
-        if record.get("error"):
-            lines.append(f"错误：{record.get('error')}")
-        self.history_detail_label.setText("\n".join(lines))
-        self.open_history_session_btn.setEnabled(bool(record.get("session_id")) and self._main is not None)
-
-    def _find_task_index(self, task_id):
-        identifier = str(task_id or "").strip()
-        for index, task in enumerate(self.tasks):
-            if str(task.get("id") or "").strip() == identifier:
-                return index
-        return -1
-
-    def create_task(self):
-        if self._main and hasattr(self._main, "show_automation_task_editor"):
-            self._main.show_automation_task_editor()
-            return
-        dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), parent=self)
-        if dialog.exec():
-            payload = dialog.task_payload()
-            payload["next_run_at"] = compute_next_run_at(payload)
-            payload["schedule_summary"] = describe_schedule(payload)
-            self.tasks.append(payload)
-            self.save_changes()
-            self.refresh_task_cards()
-
-    def edit_task(self, task_id):
-        index = self._find_task_index(task_id)
-        if index < 0:
-            return
-        if self._main and hasattr(self._main, "show_automation_task_editor"):
-            self._main.show_automation_task_editor(task_id)
-            return
-        dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), task=self.tasks[index], parent=self)
-        if dialog.exec():
-            payload = dialog.task_payload()
-            payload["id"] = self.tasks[index].get("id")
-            payload["created_at"] = self.tasks[index].get("created_at")
-            payload["next_run_at"] = compute_next_run_at(payload)
-            payload["schedule_summary"] = describe_schedule(payload)
-            self.tasks[index] = payload
-            self.save_changes()
-            self.refresh_task_cards()
-
-    def toggle_task(self, task_id):
-        index = self._find_task_index(task_id)
-        if index < 0:
-            return
-        self.tasks[index]["enabled"] = not bool(self.tasks[index].get("enabled"))
-        if self.tasks[index]["enabled"]:
-            self.tasks[index]["next_run_at"] = compute_next_run_at(self.tasks[index])
-        self.tasks[index]["schedule_summary"] = describe_schedule(self.tasks[index])
-        self.save_changes()
-        self.refresh_task_cards()
-
-    def delete_task(self, task_id):
-        index = self._find_task_index(task_id)
-        if index < 0:
-            return
-        reply = QMessageBox.question(self, "删除自动化", "确定删除这个自动化任务吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(
+            self,
+            "删除常用",
+            "将删除这个常用项、附加计划和运行记录；已经创建的聊天会保留。确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
         if reply != QMessageBox.Yes:
             return
-        del self.tasks[index]
-        self.save_changes()
-        self.refresh_task_cards()
-
-    def run_task_now(self, task_id):
-        self.save_changes()
-        if self._main and hasattr(self._main, "run_automation_task_now"):
-            self._main.run_automation_task_now(task_id)
-        self.refresh_history_list()
-
-    def open_selected_history_session(self):
-        row = self.history_list.currentRow()
-        record = self.history[row] if 0 <= row < len(self.history) else {}
-        session_id = str(record.get("session_id") or "").strip()
-        if not session_id or not self._main or not hasattr(self._main, "activate_session"):
-            return
-        self._main.activate_session(session_id)
-
-    def save_changes(self):
-        self.config_manager.set_automation_tasks(self.tasks)
-        self.tasks = list(self.config_manager.get_automation_tasks())
-
-    def save_and_accept(self):
-        self.save_changes()
-        self.accept()
+        self.config_manager.set_favorites([item for item in self.favorites if item.get("id") != favorite_id])
+        self.config_manager.set_favorite_run_history([
+            item for item in self.config_manager.get_favorite_run_history()
+            if item.get("favorite_id") != favorite_id
+        ])
+        self.refresh()
 
 
 class McpConnectionWorker(QThread):
@@ -12528,6 +12333,17 @@ class ComposerActionPopover(ProductPopover):
                       qta.icon("fa5s.puzzle-piece", color=DesignTokens.text_secondary), window.open_session_skill_picker,
                       enabled=ready and not busy,
                       tooltip="当前任务结束后可调整" if busy else (window.skill_load_error or "能力加载中"))
+        current_prompt = window.input_field.toPlainText().strip() if state else ""
+        can_save_favorite = bool(current_prompt or selected)
+        self._add_row(
+            layout,
+            "存为常用",
+            "保存当前输入、能力和执行位置",
+            qta.icon("fa5s.star", color=DesignTokens.text_secondary),
+            window.save_composer_as_favorite,
+            enabled=can_save_favorite and not busy,
+            tooltip="请先输入提示词或指定能力" if not can_save_favorite else "当前任务结束后可保存",
+        )
         grill_state = normalize_grill_mode_state(
             getattr(state, "grill_mode_state", GRILL_MODE_DISABLED) if state else GRILL_MODE_DISABLED
         )
@@ -20424,6 +20240,7 @@ class SessionState:
         self.tool_cards = {}
         self.step_records = []
         self.pending_tool_results = {}
+        self.processed_client_action_tool_ids = set()
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
         self.last_flushed_content_buffer = ""
@@ -20524,9 +20341,9 @@ class SessionState:
         self.ppt_agent_template_file = ""
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
-        self.automation_task_id = ""
-        self.automation_run_id = ""
-        self.automation_trigger_source = ""
+        self.favorite_id = ""
+        self.favorite_run_id = ""
+        self.favorite_trigger_source = ""
         self.selected_deliverable_path = ""
         self.open_file_paths = []
         self.deliverable_preview_rendered = False
@@ -22610,7 +22427,7 @@ class MainWindow(QMainWindow):
     FILE_SCOPE_DELIVERABLES = "deliverables"
     PAGE_CONVERSATION = "conversation"
     PAGE_CAPABILITIES = "capabilities"
-    PAGE_AUTOMATION = "automation"
+    PAGE_FAVORITES = "favorites"
     PAGE_SETTINGS = "settings"
 
     def __init__(self, config_manager=None, theme_manager=None):
@@ -22887,13 +22704,13 @@ class MainWindow(QMainWindow):
         self.gateway_log_file = None
         self.tray_icon = None
         self.daemon_timer = None
-        self.automation_timer = None
+        self.favorites_timer = None
         self.single_instance_server = None
         self._background_services_started = False
         self._background_services_scheduled = False
         self._startup_hydration_scheduled = False
         self._startup_hydration_completed = False
-        self._running_automation_history_ids = set()
+        self._running_favorite_history_ids = set()
         self._chat_save_failure_notified_at = {}
         
         # Animation Throttling
@@ -23043,14 +22860,14 @@ class MainWindow(QMainWindow):
         self.product_nav_buttons[self.PAGE_CAPABILITIES] = sidebar_skills_btn
         sidebar_layout.addWidget(sidebar_skills_btn)
 
-        sidebar_automation_btn = QPushButton(" 自动化")
-        sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color=DesignTokens.text_secondary))
-        sidebar_automation_btn.setCursor(Qt.PointingHandCursor)
-        sidebar_automation_btn.setStyleSheet(sidebar_btn_style)
-        sidebar_automation_btn.setCheckable(True)
-        sidebar_automation_btn.clicked.connect(lambda checked=False: self.open_automation_center())
-        self.product_nav_buttons[self.PAGE_AUTOMATION] = sidebar_automation_btn
-        sidebar_layout.addWidget(sidebar_automation_btn)
+        sidebar_favorites_btn = QPushButton(" 常用")
+        sidebar_favorites_btn.setIcon(qta.icon('fa5s.star', color=DesignTokens.text_secondary))
+        sidebar_favorites_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_favorites_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_favorites_btn.setCheckable(True)
+        sidebar_favorites_btn.clicked.connect(lambda checked=False: self.open_favorites())
+        self.product_nav_buttons[self.PAGE_FAVORITES] = sidebar_favorites_btn
+        sidebar_layout.addWidget(sidebar_favorites_btn)
 
         sidebar_settings_btn = QPushButton(" 系统设置")
         sidebar_settings_btn.setText(" 设置")
@@ -24315,7 +24132,7 @@ class MainWindow(QMainWindow):
         controller.register_component("left.projects", self.project_header, self.sidebar_layout)
         controller.register_component("left.history", self.history_scroll, self.sidebar_layout)
         controller.register_component("left.capabilities", self.product_nav_buttons[self.PAGE_CAPABILITIES], self.sidebar_layout)
-        controller.register_component("left.automation", self.product_nav_buttons[self.PAGE_AUTOMATION], self.sidebar_layout)
+        controller.register_component("left.favorites", self.product_nav_buttons[self.PAGE_FAVORITES], self.sidebar_layout)
         controller.register_component("left.settings", self.product_nav_buttons[self.PAGE_SETTINGS], self.sidebar_layout)
 
         controller.register_component("header.back", self.product_back_btn, self.top_bar_layout)
@@ -24458,7 +24275,7 @@ class MainWindow(QMainWindow):
             button.setStyleSheet(sidebar_btn_style)
         nav_icons = {
             self.PAGE_CAPABILITIES: "fa5s.puzzle-piece",
-            self.PAGE_AUTOMATION: "fa5s.tasks",
+            self.PAGE_FAVORITES: "fa5s.star",
             self.PAGE_SETTINGS: "fa5s.cog",
         }
         for route, icon_name in nav_icons.items():
@@ -24736,8 +24553,8 @@ class MainWindow(QMainWindow):
                     page.manual_refresh()
                     event.accept()
                     return
-                if self.current_product_route == self.PAGE_AUTOMATION and page is not None:
-                    page.refresh_history_list()
+                if self.current_product_route == self.PAGE_FAVORITES and page is not None:
+                    page.refresh()
                     event.accept()
                     return
         drawer_open = getattr(self, "right_drawer_open", False)
@@ -27352,6 +27169,30 @@ class MainWindow(QMainWindow):
         )
         popover.show_for(self.tool_menu_btn, prefer_above=True)
 
+    def save_composer_as_favorite(self):
+        state = self.get_current_session()
+        if not state:
+            return False
+        prompt = self.input_field.toPlainText().strip()
+        skills = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        if not prompt and not skills:
+            self.add_system_toast("请先输入提示词或指定能力", "info", session_id=state.session_id)
+            return False
+        source = self._session_workspace_source(state)
+        workspace_dir = self._workspace_dir_for_state(state) if source == "project" else ""
+        first_line = re.sub(r"\s+", " ", prompt.splitlines()[0] if prompt else "").strip()
+        name = first_line[:36] if first_line else f"{len(skills)} 个能力组合"
+        prefill = {
+            "name": name,
+            "prompt": prompt,
+            "skill_names": skills,
+            "execution_mode": FAVORITE_EXECUTION_WORKSPACE if workspace_dir else FAVORITE_EXECUTION_CHAT,
+            "workspace_dir": workspace_dir,
+        }
+        if not self.show_product_page(self.PAGE_FAVORITES):
+            return False
+        return self.show_favorite_editor(prefill=prefill)
+
     def _model_id_for_state(self, state=None):
         state = state or self.get_current_session()
         model_id = str(getattr(state, "selected_model_id", "") or "").strip() if state else ""
@@ -28193,7 +28034,7 @@ class MainWindow(QMainWindow):
         indicator.setToolTip(labels.get(phase, ""))
         indicator.setAccessibleName(labels.get(phase, ""))
 
-    def set_session_status(self, status, session_id=None, save=False):
+    def set_session_status(self, status, session_id=None, save=False, error=""):
         state = self.get_session(session_id)
         if not state:
             return
@@ -28204,7 +28045,7 @@ class MainWindow(QMainWindow):
             state.live_activity = False
             self._finalize_live_turn_process_groups(state)
         if status in {"completed", "error", "interrupted"}:
-            self._mark_session_automation_completed(state, status)
+            self._mark_session_favorite_run_completed(state, status, error=error)
         if save and state.messages:
             self.save_chat_history(session_id=state.session_id)
         self.refresh_session_activity_indicator(state.session_id)
@@ -28615,7 +28456,7 @@ class MainWindow(QMainWindow):
         self._schedule_background_service_start(BACKGROUND_TRAY_START_DELAY_MS, self.setup_tray)
         self._schedule_background_service_start(BACKGROUND_DAEMON_PREWARM_DELAY_MS, self._start_background_daemon_prewarm)
         self._schedule_background_service_start(BACKGROUND_DAEMON_MONITOR_DELAY_MS, self.start_daemon_monitor)
-        self._schedule_background_service_start(BACKGROUND_AUTOMATION_START_DELAY_MS, self.start_automation_scheduler)
+        self._schedule_background_service_start(BACKGROUND_FAVORITES_START_DELAY_MS, self.start_favorites_scheduler)
 
     def _schedule_background_service_start(self, delay_ms, callback):
         QTimer.singleShot(max(int(delay_ms or 0), 0), callback)
@@ -28795,47 +28636,47 @@ class MainWindow(QMainWindow):
         )
         return recovered
 
-    def start_automation_scheduler(self):
-        if self.automation_timer:
+    def start_favorites_scheduler(self):
+        if self.favorites_timer:
             return
-        self.automation_timer = QTimer(self)
-        self.automation_timer.setInterval(DEFAULT_AUTOMATION_TIMER_INTERVAL_MS)
-        self.automation_timer.timeout.connect(self.check_automation_schedules)
-        self.automation_timer.start()
-        QTimer.singleShot(0, self.check_automation_schedules)
+        self.favorites_timer = QTimer(self)
+        self.favorites_timer.setInterval(DEFAULT_FAVORITES_TIMER_INTERVAL_MS)
+        self.favorites_timer.timeout.connect(self.check_favorite_schedules)
+        self.favorites_timer.start()
+        log_favorites_runtime(
+            "favorite_scheduler_start",
+            interval_ms=DEFAULT_FAVORITES_TIMER_INTERVAL_MS,
+        )
+        QTimer.singleShot(0, self.check_favorite_schedules)
 
-    def _workspace_for_automation(self):
-        current = str(self._active_workspace_dir() or "").strip()
-        if current and os.path.isdir(current):
-            return current
-        default_dir = str(self.config_manager.get("default_workspace", "") or "").strip()
-        return default_dir if default_dir and os.path.isdir(default_dir) else ""
+    def _favorite_validation_error(self, favorite):
+        available = {
+            str(item.get("name") or "").strip()
+            for item in self._available_session_skills()
+            if str(item.get("name") or "").strip()
+        }
+        missing = [name for name in normalize_selected_skill_names(favorite.get("skill_names")) if name not in available]
+        if missing:
+            return "以下能力不可用：" + "、".join(missing)
+        if favorite.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE:
+            workspace_dir = str(favorite.get("workspace_dir") or "").strip()
+            if not workspace_dir or not os.path.isdir(workspace_dir):
+                return "指定工作区不存在，请编辑常用项后重新选择。"
+        return ""
 
-    def _update_automation_task_record(self, updated_task):
-        if not updated_task:
-            return
-        tasks = self.config_manager.get_automation_tasks()
-        target_id = str(updated_task.get("id") or "").strip()
-        changed = False
-        for index, task in enumerate(tasks):
-            if str(task.get("id") or "").strip() != target_id:
-                continue
-            tasks[index] = updated_task
-            changed = True
-            break
-        if changed:
-            self.config_manager.set_automation_tasks(tasks)
+    def _update_favorite_record(self, updated):
+        if updated:
+            self.config_manager.upsert_favorite(updated)
 
-    def _append_automation_history(self, record):
-        saved = self.config_manager.append_automation_run_history(record)
-        if saved and saved.get("status") == AUTOMATION_HISTORY_STATUS_RUNNING:
-            self._running_automation_history_ids.add(saved.get("id"))
+    def _append_favorite_history(self, record):
+        saved = self.config_manager.append_favorite_run_history(record)
+        if saved and saved.get("status") == FAVORITE_RUN_STATUS_RUNNING:
+            self._running_favorite_history_ids.add(saved.get("id"))
         return saved
 
-    def _finalize_automation_history_record(self, history_id, status, summary="", error=""):
-        history = self.config_manager.get_automation_run_history()
+    def _finalize_favorite_history_record(self, history_id, status, summary="", error=""):
+        history = self.config_manager.get_favorite_run_history()
         target_id = str(history_id or "").strip()
-        changed = False
         for record in history:
             if str(record.get("id") or "").strip() != target_id:
                 continue
@@ -28845,186 +28686,264 @@ class MainWindow(QMainWindow):
                 record["summary"] = summary
             if error:
                 record["error"] = error
-            changed = True
+            self.config_manager.set_favorite_run_history(history)
             break
-        if changed:
-            self.config_manager.set_automation_run_history(history)
-        self._running_automation_history_ids.discard(target_id)
+        self._running_favorite_history_ids.discard(target_id)
 
-    def _automation_summary_from_state(self, state):
+    def _favorite_summary_from_state(self, state):
         if not state:
             return ""
         for message in reversed(getattr(state, "messages", [])):
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                continue
-            content = str(self._message_display_content(message) or "").strip()
-            if content:
-                single_line = re.sub(r"\s+", " ", content)
-                return single_line[:240]
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                content = str(self._message_display_content(message) or "").strip()
+                if content:
+                    return re.sub(r"\s+", " ", content)[:240]
         return ""
 
-    def _mark_session_automation_completed(self, state, status, error=""):
-        if not state or not getattr(state, "automation_run_id", ""):
+    def _mark_session_favorite_run_completed(self, state, status, error=""):
+        if not state or not getattr(state, "favorite_run_id", ""):
             return
-        summary = self._automation_summary_from_state(state)
         mapped_status = {
-            "completed": AUTOMATION_HISTORY_STATUS_COMPLETED,
-            "error": AUTOMATION_HISTORY_STATUS_ERROR,
-            "interrupted": AUTOMATION_HISTORY_STATUS_INTERRUPTED,
+            "completed": FAVORITE_RUN_STATUS_COMPLETED,
+            "error": FAVORITE_RUN_STATUS_ERROR,
+            "interrupted": FAVORITE_RUN_STATUS_INTERRUPTED,
         }.get(status)
         if not mapped_status:
             return
-        self._finalize_automation_history_record(state.automation_run_id, mapped_status, summary=summary, error=error)
-        log_automation_runtime(
-            "finish" if mapped_status == AUTOMATION_HISTORY_STATUS_COMPLETED else "error",
-            task_id=str(state.automation_task_id or ""),
-            run_id=str(state.automation_run_id or ""),
+        run_id = str(state.favorite_run_id or "")
+        favorite_id = str(state.favorite_id or "")
+        self._finalize_favorite_history_record(
+            run_id,
+            mapped_status,
+            summary=self._favorite_summary_from_state(state),
+            error=error,
+        )
+        log_favorites_runtime(
+            "favorite_finish" if mapped_status == FAVORITE_RUN_STATUS_COMPLETED else "favorite_error",
+            favorite_id=favorite_id,
+            run_id=run_id,
             status=mapped_status,
             error=error,
         )
-        task_id = str(state.automation_task_id or "").strip()
-        if task_id:
-            task = self.config_manager.get_automation_task(task_id)
-            if task:
-                task["last_run_at"] = int(time.time())
-                if state.automation_run_id:
-                    task["last_history_id"] = state.automation_run_id
-                self._update_automation_task_record(task)
-        state.automation_run_id = ""
-        state.automation_task_id = ""
-        state.automation_trigger_source = ""
+        favorite = self.config_manager.get_favorite(favorite_id)
+        if favorite and favorite.get("schedule"):
+            favorite["schedule"]["last_run_at"] = int(time.time())
+            favorite["schedule"]["last_history_id"] = run_id
+            self._update_favorite_record(favorite)
+        state.favorite_run_id = ""
+        state.favorite_id = ""
+        state.favorite_trigger_source = ""
 
-    def run_automation_task_now(self, task_id):
-        self._trigger_automation_task(task_id, trigger_source="manual", scheduled_at=0)
+    def _create_favorite_session(self, favorite):
+        workspace_dir = ""
+        if favorite.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE:
+            workspace_dir = str(favorite.get("workspace_dir") or "")
+        session_id = self.create_new_session(
+            title=favorite.get("name") or "常用任务",
+            make_current=False,
+            workspace_dir=workspace_dir,
+        )
+        state = self.get_session(session_id)
+        if state:
+            state.selected_skill_names = normalize_selected_skill_names(favorite.get("skill_names"))
+        return session_id, state
 
-    def _trigger_automation_task(self, task_id, trigger_source="scheduler", scheduled_at=0):
-        log_automation_runtime("submit", task_id=task_id, trigger_source=trigger_source, scheduled_at=scheduled_at)
-        task = self.config_manager.get_automation_task(task_id)
-        if not task:
-            log_automation_runtime("error", task_id=task_id, error="task_not_found")
+    def launch_favorite(self, favorite_id, source="ui"):
+        favorite = self.config_manager.get_favorite(favorite_id)
+        if not favorite:
+            self.add_system_toast("未找到这个常用项", "error")
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, source=source, error="favorite_not_found")
             return False
-        agent_profile = self.config_manager.get_agent_profile(task.get("agent_profile_id"))
-        workspace_dir = self._workspace_for_automation()
-        if not workspace_dir:
-            record = make_automation_history_record(
-                task,
-                agent_profile,
-                status=AUTOMATION_HISTORY_STATUS_ERROR,
+        validation_error = self._favorite_validation_error(favorite)
+        if validation_error:
+            self.add_system_toast(validation_error, "error", auto_close_ms=7000)
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, source=source, error=validation_error)
+            return False
+        if not self.show_conversation_page():
+            log_favorites_runtime("favorite_navigation_cancelled", favorite_id=favorite_id, source=source)
+            return False
+        session_id, state = self._create_favorite_session(favorite)
+        if not state:
+            self.add_system_toast("无法创建常用会话", "error")
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, source=source, error="session_creation_failed")
+            return False
+        self.activate_session(session_id)
+        prompt = str(favorite.get("prompt") or "").strip()
+        log_favorites_runtime(
+            "favorite_submit",
+            favorite_id=favorite_id,
+            source=source,
+            session_id=session_id,
+            has_prompt=bool(prompt),
+            skill_count=len(state.selected_skill_names),
+        )
+        if not prompt:
+            self.refresh_selected_skill_controls(session_id)
+            self.refresh_context_badges(session_id)
+            self.input_field.setFocus()
+            self.add_system_toast("已加载常用能力，可以开始输入", "success", session_id=session_id)
+            log_favorites_runtime("favorite_start", favorite_id=favorite_id, source=source, session_id=session_id)
+            return True
+        submitted = self._submit_session_request(
+            state,
+            prompt,
+            [],
+            check_duplicates=False,
+            clear_current_input=False,
+        )
+        if not submitted:
+            self.input_field.setPlainText(prompt)
+            self.add_system_toast("常用提示词未能提交，已保留在输入框中", "error", session_id=session_id, auto_close_ms=7000)
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, source=source, error="submission_failed")
+            return False
+        log_favorites_runtime("favorite_start", favorite_id=favorite_id, source=source, session_id=session_id)
+        return True
+
+    def run_favorite_schedule_now(self, favorite_id):
+        return self._trigger_favorite_schedule(favorite_id, trigger_source="manual", scheduled_at=0)
+
+    def _trigger_favorite_schedule(self, favorite_id, trigger_source="scheduler", scheduled_at=0):
+        favorite = self.config_manager.get_favorite(favorite_id)
+        if not favorite or not favorite.get("schedule"):
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, error="schedule_not_found")
+            return False
+        error = self._favorite_validation_error(favorite)
+        prompt = favorite_effective_prompt(favorite)
+        if not prompt:
+            error = "定时计划没有可执行的提示词。"
+        if error:
+            self._append_favorite_history(make_favorite_run_record(
+                favorite,
+                status=FAVORITE_RUN_STATUS_ERROR,
                 trigger_source=trigger_source,
                 scheduled_at=scheduled_at,
-                error="未找到可用工作区，请先配置默认工作区。",
-            )
-            self._append_automation_history(record)
-            log_automation_runtime("error", task_id=task_id, error="workspace_unavailable")
+                error=error,
+            ))
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, trigger_source=trigger_source, error=error)
             return False
-        session_title = task.get("name") or "自动化任务"
-        session_id = self.create_new_session(title=session_title, make_current=False, workspace_dir=workspace_dir)
-        state = self.get_session(session_id)
+        if trigger_source == "manual" and not self.show_conversation_page():
+            log_favorites_runtime("favorite_navigation_cancelled", favorite_id=favorite_id, source=trigger_source)
+            return False
+        session_id, state = self._create_favorite_session(favorite)
         if not state:
-            log_automation_runtime("error", task_id=task_id, error="session_creation_failed")
+            error = "无法创建定时运行会话。"
+            self._append_favorite_history(make_favorite_run_record(
+                favorite,
+                status=FAVORITE_RUN_STATUS_ERROR,
+                trigger_source=trigger_source,
+                scheduled_at=scheduled_at,
+                error=error,
+            ))
             return False
-        state.selected_skill_names = normalize_selected_skill_names(task.get("skill_names"))
-        prompt = build_automation_execution_prompt(task)
-        history_record = make_automation_history_record(
-            task,
-            agent_profile,
-            status=AUTOMATION_HISTORY_STATUS_RUNNING,
+        saved = self._append_favorite_history(make_favorite_run_record(
+            favorite,
+            status=FAVORITE_RUN_STATUS_RUNNING,
             trigger_source=trigger_source,
             session_id=session_id,
             scheduled_at=scheduled_at,
+        ))
+        state.favorite_run_id = str((saved or {}).get("id") or "")
+        state.favorite_id = str(favorite.get("id") or "")
+        state.favorite_trigger_source = trigger_source
+        if trigger_source == "manual":
+            self.activate_session(session_id)
+        log_favorites_runtime(
+            "favorite_submit",
+            favorite_id=favorite_id,
+            run_id=state.favorite_run_id,
+            trigger_source=trigger_source,
+            scheduled_at=scheduled_at,
         )
-        saved_record = self._append_automation_history(history_record)
-        if saved_record:
-            state.automation_run_id = saved_record.get("id") or ""
-        state.automation_task_id = str(task.get("id") or "")
-        state.automation_trigger_source = trigger_source
-        self.activate_session(session_id)
-        if agent_profile and bool(agent_profile.get("enabled", True)):
-            self._dispatch_agent_profiles(state, prompt, prompt, [agent_profile], summon_source="automation_task")
-            submitted = True
-        else:
-            submitted = self._submit_session_request(
-                state,
-                prompt,
-                [],
-                check_duplicates=False,
-                clear_current_input=False,
+        submitted = self._submit_session_request(
+            state,
+            prompt,
+            [],
+            check_duplicates=False,
+            clear_current_input=False,
+        )
+        if not submitted:
+            self._finalize_favorite_history_record(
+                state.favorite_run_id,
+                FAVORITE_RUN_STATUS_ERROR,
+                error="定时计划未能成功提交。",
             )
-        if not submitted and state.automation_run_id:
-            self._finalize_automation_history_record(
-                state.automation_run_id,
-                AUTOMATION_HISTORY_STATUS_ERROR,
-                error="自动化任务未能成功提交。",
-            )
-            state.automation_run_id = ""
-            state.automation_task_id = ""
-            state.automation_trigger_source = ""
-            log_automation_runtime("error", task_id=task_id, error="submission_failed")
+            state.favorite_run_id = ""
+            state.favorite_id = ""
+            state.favorite_trigger_source = ""
+            log_favorites_runtime("favorite_error", favorite_id=favorite_id, error="submission_failed")
             return False
-        log_automation_runtime(
-            "start",
-            task_id=task_id,
-            run_id=state.automation_run_id,
+        log_favorites_runtime(
+            "favorite_start",
+            favorite_id=favorite_id,
+            run_id=state.favorite_run_id,
             session_id=session_id,
+            trigger_source=trigger_source,
         )
         if trigger_source == "manual":
-            self.add_system_toast("自动化任务已启动", "success", session_id=session_id, auto_close_ms=3200)
+            self.add_system_toast("定时计划已立即启动", "success", session_id=session_id)
         return True
 
-    def check_automation_schedules(self):
-        tasks = self.config_manager.get_automation_tasks()
-        if not tasks:
+    def check_favorite_schedules(self):
+        favorites = self.config_manager.get_favorites()
+        if not favorites:
             return
         now_ts = int(time.time())
-        updated_tasks = []
+        updated = []
         changed = False
-        for task in tasks:
-            current = dict(task)
-            if not current.get("enabled"):
-                updated_tasks.append(current)
+        for favorite in favorites:
+            current = dict(favorite)
+            current["schedule"] = dict(favorite.get("schedule") or {}) if favorite.get("schedule") else None
+            schedule = current.get("schedule")
+            if not schedule or not schedule.get("enabled"):
+                updated.append(current)
                 continue
-            next_run_at = int(current.get("next_run_at") or 0)
+            next_run_at = int(schedule.get("next_run_at") or 0)
             if not next_run_at:
-                current["next_run_at"] = compute_next_run_at(current, now_ts=now_ts)
-                current["schedule_summary"] = describe_schedule(current)
+                schedule["next_run_at"] = compute_next_favorite_run_at(schedule, now_ts=now_ts)
+                schedule["schedule_summary"] = describe_favorite_schedule(schedule)
                 changed = True
-                updated_tasks.append(current)
+                updated.append(current)
                 continue
-            if next_run_at + AUTOMATION_RUN_GRACE_SECONDS < now_ts:
-                skipped_count = 0
-                while current.get("next_run_at") and int(current.get("next_run_at") or 0) + AUTOMATION_RUN_GRACE_SECONDS < now_ts:
-                    skipped_count += 1
-                    current["last_missed_at"] = int(current.get("next_run_at") or 0)
-                    current = advance_task_to_next_run(current, now_ts=now_ts, after_ts=int(current.get("next_run_at") or now_ts))
-                    if current.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
-                        current["enabled"] = False
+            if next_run_at + FAVORITE_RUN_GRACE_SECONDS < now_ts:
+                skipped = 0
+                while int((current.get("schedule") or {}).get("next_run_at") or 0) + FAVORITE_RUN_GRACE_SECONDS < now_ts:
+                    skipped += 1
+                    current["schedule"]["last_missed_at"] = int(current["schedule"].get("next_run_at") or 0)
+                    if current["schedule"].get("schedule_type") == FAVORITE_SCHEDULE_ONCE:
+                        current["schedule"]["enabled"] = False
                         break
-                agent_profile = self.config_manager.get_agent_profile(current.get("agent_profile_id"))
-                summary = f"应用未运行，已跳过 {skipped_count} 次计划触发。"
-                missed_record = make_automation_history_record(
+                    current = advance_favorite_schedule(
+                        current,
+                        now_ts=now_ts,
+                        after_ts=int(current["schedule"].get("next_run_at") or now_ts),
+                    )
+                self._append_favorite_history(make_favorite_run_record(
                     current,
-                    agent_profile,
-                    status=AUTOMATION_HISTORY_STATUS_MISSED,
+                    status=FAVORITE_RUN_STATUS_MISSED,
                     trigger_source="scheduler",
                     scheduled_at=next_run_at,
-                    summary=summary,
+                    summary=f"应用未运行，已跳过 {skipped} 次计划触发。",
+                ))
+                log_favorites_runtime(
+                    "favorite_missed",
+                    favorite_id=current.get("id"),
+                    scheduled_at=next_run_at,
+                    skipped=skipped,
                 )
-                self._append_automation_history(missed_record)
-                current["schedule_summary"] = describe_schedule(current)
                 changed = True
-                updated_tasks.append(current)
+                updated.append(current)
                 continue
             if next_run_at <= now_ts:
-                triggered = self._trigger_automation_task(current.get("id"), trigger_source="scheduler", scheduled_at=next_run_at)
-                current["last_run_at"] = now_ts if triggered else int(current.get("last_run_at") or 0)
-                current = advance_task_to_next_run(current, now_ts=now_ts, after_ts=max(now_ts, next_run_at))
-                if current.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
-                    current["enabled"] = False
-                current["schedule_summary"] = describe_schedule(current)
+                triggered = self._trigger_favorite_schedule(current.get("id"), "scheduler", next_run_at)
+                current["schedule"]["last_run_at"] = now_ts if triggered else int(current["schedule"].get("last_run_at") or 0)
+                if current["schedule"].get("schedule_type") == FAVORITE_SCHEDULE_ONCE:
+                    current["schedule"]["enabled"] = False
+                else:
+                    current = advance_favorite_schedule(current, now_ts=now_ts, after_ts=max(now_ts, next_run_at))
                 changed = True
-            updated_tasks.append(current)
+            updated.append(current)
         if changed:
-            self.config_manager.set_automation_tasks(updated_tasks)
+            self.config_manager.set_favorites(updated)
 
     def _daemon_signature_matches(self, payload):
         if not isinstance(payload, dict):
@@ -29850,9 +29769,9 @@ class MainWindow(QMainWindow):
         state.office_task_result_paths = []
         state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
-        state.automation_task_id = ""
-        state.automation_run_id = ""
-        state.automation_trigger_source = ""
+        state.favorite_id = ""
+        state.favorite_run_id = ""
+        state.favorite_trigger_source = ""
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -36449,10 +36368,7 @@ class MainWindow(QMainWindow):
             if label.property("roleTitle") or label.property("roleSubtitle"):
                 label.hide()
         hidden_texts = {"关闭", "完成"}
-        if route == self.PAGE_AUTOMATION:
-            hidden_texts.add("保存")
-            if hasattr(page, "summary_widget"):
-                page.summary_widget.hide()
+        if route == self.PAGE_FAVORITES:
             for action_bar in page.findChildren(ProductActionBar):
                 action_bar.hide()
         for button in page.findChildren(QPushButton):
@@ -36472,8 +36388,8 @@ class MainWindow(QMainWindow):
                 self.add_system_toast(message, "error" if self.skill_load_error else "info", auto_close_ms=5000)
                 return None
             page = SkillsCenterDialog(self.skill_manager, self.config_manager, self)
-        elif route == self.PAGE_AUTOMATION:
-            page = AutomationDialog(self.config_manager, self)
+        elif route == self.PAGE_FAVORITES:
+            page = FavoritesPage(self.config_manager, self)
         elif route == self.PAGE_SETTINGS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section)
         else:
@@ -36481,19 +36397,19 @@ class MainWindow(QMainWindow):
         return self._prepare_embedded_product_page(page, route)
 
     def _confirm_leave_product_page(self):
-        if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
-            editor = self.product_pages.get("automation_task_editor")
+        if self.current_product_route == self.PAGE_FAVORITES and self.current_product_subroute == "favorite_editor":
+            editor = self.product_pages.get("favorite_editor")
             if editor is not None and editor.is_dirty():
                 reply = QMessageBox.question(
                     self,
-                    "还有未保存的自动化任务",
+                    "还有未保存的常用项",
                     "离开后将丢弃尚未保存的修改，确定继续吗？",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No,
                 )
                 if reply != QMessageBox.Yes:
                     return False
-            self._close_automation_task_editor()
+            self._close_favorite_editor()
             return True
         if self.current_product_route != self.PAGE_SETTINGS:
             return True
@@ -36538,19 +36454,19 @@ class MainWindow(QMainWindow):
                 self.workspace_title_label.setText("AI 能力商城")
                 self.workspace_subtitle_label.setText("按想完成的任务，为 Cowork 开启新能力。")
                 return True
-        if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
-            editor = self.product_pages.get("automation_task_editor")
+        if self.current_product_route == self.PAGE_FAVORITES and self.current_product_subroute == "favorite_editor":
+            editor = self.product_pages.get("favorite_editor")
             if editor is not None and editor.is_dirty():
                 reply = QMessageBox.question(
                     self,
-                    "还有未保存的自动化任务",
+                    "还有未保存的常用项",
                     "返回后将丢弃尚未保存的修改，确定继续吗？",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No,
                 )
                 if reply != QMessageBox.Yes:
                     return False
-            self._close_automation_task_editor()
+            self._close_favorite_editor()
             return True
         if self.current_product_route == self.PAGE_SETTINGS and self.current_product_subroute == "memory_update":
             self._show_settings_from_memory_update()
@@ -36582,31 +36498,30 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _close_automation_task_editor(self):
-        editor = self.product_pages.pop("automation_task_editor", None)
+    def _close_favorite_editor(self):
+        editor = self.product_pages.pop("favorite_editor", None)
         if editor is not None:
             self.main_page_stack.removeWidget(editor)
             editor.deleteLater()
         self.current_product_subroute = ""
-        page = self.product_pages.get(self.PAGE_AUTOMATION)
+        page = self.product_pages.get(self.PAGE_FAVORITES)
         if page is not None:
-            page.tasks = list(self.config_manager.get_automation_tasks())
-            page.refresh_task_cards()
-            page.refresh_history_list()
+            page.refresh()
             self.main_page_stack.setCurrentWidget(page)
-        self.workspace_title_label.setText("自动化")
-        self.workspace_subtitle_label.setText("管理计划任务、运行状态和执行历史。")
+        self.workspace_title_label.setText("常用")
+        self.workspace_subtitle_label.setText("保存常用提示词和能力组合，需要时一键开始。")
 
-    def show_automation_task_editor(self, task_id=None):
-        page = self.product_pages.get(self.PAGE_AUTOMATION)
+    def show_favorite_editor(self, favorite_id=None, prefill=None):
+        page = self.product_pages.get(self.PAGE_FAVORITES)
         if page is None:
             return False
-        task_index = page._find_task_index(task_id) if task_id else -1
-        task = page.tasks[task_index] if task_index >= 0 else None
-        editor = AutomationTaskDialog(
-            page._available_skills(),
-            page._available_agent_profiles(),
-            task=task,
+        favorite = self.config_manager.get_favorite(favorite_id) if favorite_id else None
+        editor = FavoriteEditorPage(
+            [skill for skill in self._available_session_skills() if session_skill_is_selectable(skill)],
+            self.config_manager.get_projects(include_hidden=False),
+            favorite=favorite,
+            history=self.config_manager.get_favorite_run_history(),
+            prefill=prefill,
             parent=self,
         )
         editor.setParent(self.main_page_stack)
@@ -36625,24 +36540,34 @@ class MainWindow(QMainWindow):
         editor.cancel_btn.clicked.connect(self.handle_product_back)
 
         def submit(payload):
-            payload["next_run_at"] = compute_next_run_at(payload)
-            payload["schedule_summary"] = describe_schedule(payload)
-            if task_index >= 0:
-                payload["id"] = page.tasks[task_index].get("id")
-                payload["created_at"] = page.tasks[task_index].get("created_at")
-                page.tasks[task_index] = payload
-            else:
-                page.tasks.append(payload)
-            page.save_changes()
-            self.add_system_toast("自动化任务已保存", "success", auto_close_ms=3200)
-            self._close_automation_task_editor()
+            self.config_manager.upsert_favorite(payload)
+            log_favorites_runtime(
+                "favorite_save",
+                favorite_id=str(payload.get("id") or ""),
+                has_prompt=bool(payload.get("prompt")),
+                skill_count=len(payload.get("skill_names") or []),
+                execution_mode=payload.get("execution_mode"),
+                has_schedule=bool(payload.get("schedule")),
+            )
+            self.add_system_toast("常用项已保存", "success", auto_close_ms=3200)
+            self._close_favorite_editor()
 
         editor.submit_callback = submit
+        editor.run_schedule_callback = self.run_favorite_schedule_now
+
+        def open_history(session_id):
+            if not session_id:
+                self.add_system_toast("这条记录没有关联任务", "error", auto_close_ms=5000)
+                return False
+            self.activate_session(session_id)
+            return True
+
+        editor.open_history_callback = open_history
         self.main_page_stack.addWidget(editor)
-        self.product_pages["automation_task_editor"] = editor
-        self.current_product_subroute = "task_editor"
-        self.workspace_title_label.setText("编辑自动化" if task else "新建自动化")
-        self.workspace_subtitle_label.setText("设置任务目标、执行上下文和触发计划。")
+        self.product_pages["favorite_editor"] = editor
+        self.current_product_subroute = "favorite_editor"
+        self.workspace_title_label.setText("编辑常用" if favorite else "新建常用")
+        self.workspace_subtitle_label.setText("设置提示词、能力组合、执行位置和可选定时计划。")
         self.main_page_stack.setCurrentWidget(editor)
         return True
 
@@ -36752,7 +36677,7 @@ class MainWindow(QMainWindow):
         )
         if route == self.PAGE_CONVERSATION:
             return self.show_conversation_page()
-        if route not in {self.PAGE_CAPABILITIES, self.PAGE_AUTOMATION, self.PAGE_SETTINGS}:
+        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS}:
             raise ValueError(f"未知产品页面：{route}")
         if self.current_product_route != route and not self._confirm_leave_product_page():
             return False
@@ -36785,7 +36710,7 @@ class MainWindow(QMainWindow):
             self.hide_context_drawer(reason="product_page")
         titles = {
             self.PAGE_CAPABILITIES: ("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力。"),
-            self.PAGE_AUTOMATION: ("自动化", "管理计划任务、运行状态和执行历史。"),
+            self.PAGE_FAVORITES: ("常用", "保存常用提示词和能力组合，需要时一键开始。"),
             self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
         }
         title, subtitle = titles[route]
@@ -36803,10 +36728,9 @@ class MainWindow(QMainWindow):
             page.select_initial_page(section)
         elif route == self.PAGE_CAPABILITIES:
             page.refresh_list()
-        elif route == self.PAGE_AUTOMATION:
-            page.tasks = list(self.config_manager.get_automation_tasks())
-            page.refresh_task_cards()
-            page.refresh_history_list()
+        elif route == self.PAGE_FAVORITES:
+            page.refresh()
+            QTimer.singleShot(0, page.refresh_cards)
         log_ui_navigation("product_page_open_done", route=route, section=str(section or ""))
         return True
 
@@ -36896,8 +36820,8 @@ class MainWindow(QMainWindow):
         else:
             self.add_system_toast(message, "info")
 
-    def open_automation_center(self):
-        return self.show_product_page(self.PAGE_AUTOMATION)
+    def open_favorites(self):
+        return self.show_product_page(self.PAGE_FAVORITES)
 
     def open_skills_center(self):
         return self.show_product_page(self.PAGE_CAPABILITIES)
@@ -39260,7 +39184,7 @@ class MainWindow(QMainWindow):
                 "id": self._new_message_id(),
                 "role": "user",
                 "content": str(original_text or task_text or "").strip(),
-                "meta": {"automation_task": summon_source == "automation_task"},
+                "meta": {},
             }
             state.messages.append(parent_message)
             self._rebuild_session_render_spans(state)
@@ -39419,7 +39343,7 @@ class MainWindow(QMainWindow):
     def _append_summoned_agent_result(self, state, data):
         if not state or not isinstance(data, dict):
             return
-        if data.get("summon_source") not in {"mention", "automation_task"}:
+        if data.get("summon_source") != "mention":
             return
         agent_id = str(data.get("agent_id") or "").strip()
         if not agent_id or agent_id in getattr(state, "completed_agent_result_ids", set()):
@@ -39434,8 +39358,6 @@ class MainWindow(QMainWindow):
             detail = error or content or "任务未成功完成。"
             text = f"[{profile_name}] {detail}"
         state.completed_agent_result_ids.add(agent_id)
-        if data.get("summon_source") == "automation_task":
-            text = f"[自动化任务] {text}"
         try:
             agent_parent_message_id = str(
                 (self.chat_storage.get_agent(agent_id) or {}).get("parent_message_id") or ""
@@ -41251,6 +41173,27 @@ class MainWindow(QMainWindow):
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
+        client_action = result_obj.get("client_action") if isinstance(result_obj, dict) else None
+        if (
+            isinstance(client_action, dict)
+            and tool_id not in state.processed_client_action_tool_ids
+        ):
+            state.processed_client_action_tool_ids.add(tool_id)
+            action_type = str(client_action.get("type") or "").strip()
+            favorite_id = str(client_action.get("favorite_id") or "").strip()
+            log_favorites_runtime(
+                "favorite_client_action",
+                action_type=action_type,
+                favorite_id=favorite_id,
+                source_session_id=state.session_id,
+                tool_id=tool_id,
+            )
+            if action_type == "launch_favorite" and favorite_id:
+                QTimer.singleShot(0, lambda fid=favorite_id: self.launch_favorite(fid, source="ai"))
+            elif action_type == "run_favorite_schedule" and favorite_id:
+                QTimer.singleShot(0, lambda fid=favorite_id: self.run_favorite_schedule_now(fid))
+            else:
+                self.add_system_toast("无法执行常用操作：客户端动作无效", "error", session_id=state.session_id)
         if isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
             state.pending_clarify_questions = []
             state.clarify_mode_state = CLARIFY_MODE_EXPLORING
@@ -41802,7 +41745,6 @@ class MainWindow(QMainWindow):
             self._messages_for_worker(state, run_context),
             self.config_manager,
             effective_workspace_dir,
-            automation_runner=self.run_automation_task_now,
             session_id=state.session_id,
             run_context=run_context,
             turn_id=turn_id,
@@ -41810,7 +41752,7 @@ class MainWindow(QMainWindow):
             skill_catalog_service=self.skill_catalog_service,
             dependency_coordinator=self.skill_dependency_coordinator,
         )
-        state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
+        state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
         session_id = state.session_id
@@ -42041,7 +41983,7 @@ class MainWindow(QMainWindow):
                 expected_turn_id=turn_id,
             )
             return
-        state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
+        state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
         log_ppt_agent_debug(
             "daemon_turn_started",
             session_id=session_id,
@@ -42555,7 +42497,7 @@ class MainWindow(QMainWindow):
         try:
             _log_stage("chat_process_projection", "ui_agent_state_stage_begin", session_id=state.session_id)
             projected = self._project_summoned_agent_event(state, payload)
-            if not projected and payload.get("summon_source") in {"mention", "automation_task"} and agent_id:
+            if not projected and payload.get("summon_source") == "mention" and agent_id:
                 pending_by_agent = getattr(state, "summoned_agent_pending_events", {})
                 pending = pending_by_agent.setdefault(str(agent_id), [])
                 pending.append(dict(payload))
@@ -42962,8 +42904,13 @@ class MainWindow(QMainWindow):
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
             state.last_flushed_content_buffer = ""
-            self.set_session_phase("Ready", state.session_id)
-            self.set_session_status("draft", state.session_id, save=True)
+            error_text = str(result.get("error") or "未知错误")
+            if getattr(state, "favorite_run_id", ""):
+                self.set_session_phase("Error", state.session_id)
+                self.set_session_status("error", state.session_id, save=True, error=error_text)
+            else:
+                self.set_session_phase("Ready", state.session_id)
+                self.set_session_status("draft", state.session_id, save=True)
             if is_current: self.normalize_session_ui(state)
             return
 

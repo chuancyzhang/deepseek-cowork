@@ -291,7 +291,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             },
             "components": {
                 "left.capabilities": {"visible": False},
-                "left.automation": {"icon": {"source": "builtin", "name": "fa5s.clock"}},
+                "left.favorites": {"icon": {"source": "builtin", "name": "fa5s.star"}},
             },
             "content": {
                 "brand.title": "My Cowork",

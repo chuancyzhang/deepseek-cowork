@@ -28,4 +28,4 @@ Vector search over message embeddings.
 ## Current Runtime Notes
 - Use history search when the user asks to recall prior discussions, previous decisions, or past task outcomes.
 - Keyword queries and vector queries are read-only and can be combined with other independent read-only lookups through `parallel_tools` when the current mode exposes them.
-- History records may include session metadata such as pending clarification questions, selected skills, automation task context, and IM provider bindings.
+- History records may include session metadata such as pending clarification questions, selected skills, favorite launch context, and IM provider bindings.

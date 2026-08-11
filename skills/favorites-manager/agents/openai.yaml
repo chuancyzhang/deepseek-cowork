@@ -1,0 +1,7 @@
+interface:
+  display_name: "常用库管理"
+  short_description: "让 AI 创建、整理、定时运行并启动常用工作模式。"
+  default_prompt: "使用 $favorites-manager 帮我配置或运行常用提示词与能力组合。"
+
+policy:
+  allow_implicit_invocation: true

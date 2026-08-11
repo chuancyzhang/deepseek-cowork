@@ -31,14 +31,14 @@ class LinearManagementNavigationTests(unittest.TestCase):
     def test_sidebar_only_exposes_three_management_routes(self):
         self.assertEqual(
             set(self.window.product_nav_buttons),
-            {"capabilities", "automation", "settings"},
+            {"capabilities", "favorites", "settings"},
         )
         self.assertFalse(hasattr(self.window, "sidebar_agent_module_btn"))
         self.assertFalse(hasattr(self.window, "sidebar_memory_btn"))
         self.assertFalse(hasattr(self.window, "sidebar_skill_capture_btn"))
         self.assertTrue(hasattr(self.window, "agent_picker_btn"))
 
-    def test_settings_and_automation_use_main_page_stack_without_exec(self):
+    def test_settings_and_favorites_use_main_page_stack_without_exec(self):
         with patch.object(QDialog, "exec", side_effect=AssertionError("large modal opened")):
             self.assertTrue(self.window.open_settings("个性与记忆"))
             self.assertEqual(self.window.current_product_route, "settings")
@@ -47,8 +47,8 @@ class LinearManagementNavigationTests(unittest.TestCase):
                 self.window.product_pages["settings"],
             )
             self.assertTrue(self.window.show_conversation_page())
-            self.assertTrue(self.window.open_automation_center())
-            self.assertEqual(self.window.current_product_route, "automation")
+            self.assertTrue(self.window.open_favorites())
+            self.assertEqual(self.window.current_product_route, "favorites")
             self.window.show_conversation_page()
             self.window.skill_manager_ready = True
             self.assertTrue(self.window.open_skills_center())
@@ -90,11 +90,11 @@ class LinearManagementNavigationTests(unittest.TestCase):
                 self.window.product_pages["settings"],
             )
 
-    def test_automation_editor_is_embedded_and_dirty_aware(self):
-        self.window.open_automation_center()
-        self.assertTrue(self.window.show_automation_task_editor())
-        editor = self.window.product_pages["automation_task_editor"]
-        self.assertEqual(self.window.current_product_subroute, "task_editor")
+    def test_favorite_editor_is_embedded_and_dirty_aware(self):
+        self.window.open_favorites()
+        self.assertTrue(self.window.show_favorite_editor())
+        editor = self.window.product_pages["favorite_editor"]
+        self.assertEqual(self.window.current_product_subroute, "favorite_editor")
         self.assertFalse(editor.save_btn.isEnabled())
         editor.name_input.setText("日报")
         self.app.processEvents()

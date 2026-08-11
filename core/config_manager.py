@@ -20,10 +20,12 @@ from .llm.providers import (
     API_PROTOCOL_CHAT_COMPLETIONS,
     normalize_openai_api_protocol,
 )
-from .automation_manager import (
-    AUTOMATION_HISTORY_LIMIT,
-    normalize_automation_history,
-    normalize_automation_tasks,
+from .favorites_manager import (
+    FAVORITE_RUN_HISTORY_LIMIT,
+    migrate_automation_task,
+    normalize_favorite,
+    normalize_favorite_run_history,
+    normalize_favorites,
 )
 from .mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
@@ -279,8 +281,8 @@ class ConfigManager:
             "enabled_skills": [],
             "skill_dependency_install_timeout_seconds": 300,
             "agent_profiles": self._default_agent_profiles(),
-            "automation_tasks": [],
-            "automation_run_history": [],
+            "favorites": [],
+            "favorite_run_history": [],
             "mcp_servers": [],
             "skill_configs": {},
             "projects": [],
@@ -398,18 +400,37 @@ class ConfigManager:
         if self.config.get("sop_templates"):
             self.config["sop_templates"] = []
             updated = True
-        normalized_automation_tasks = self._normalize_automation_tasks(
-            self.config.get("automation_tasks"),
-            valid_agent_profile_ids=[item.get("id") for item in normalized_agent_profiles],
+        legacy_automation_present = any(
+            key in self._loaded_config_keys
+            for key in ("automation_tasks", "automation_run_history")
         )
-        if normalized_automation_tasks != self.config.get("automation_tasks"):
-            self.config["automation_tasks"] = normalized_automation_tasks
+        if "favorites" not in self._loaded_config_keys and legacy_automation_present:
+            default_workspace = str(self.config.get("default_workspace") or "").strip()
+            migration_workspace = default_workspace if os.path.isdir(default_workspace) else ""
+            migrated_favorites = [
+                migrate_automation_task(item, workspace_dir=migration_workspace)
+                for item in self.config.get("automation_tasks") or []
+            ]
+            self.config["favorites"] = normalize_favorites(migrated_favorites)
+            self.config["favorite_run_history"] = normalize_favorite_run_history(
+                self.config.get("automation_run_history") or []
+            )
+            self.config.pop("automation_tasks", None)
+            self.config.pop("automation_run_history", None)
             updated = True
-        normalized_automation_history = self._normalize_automation_history(
-            self.config.get("automation_run_history")
+        elif legacy_automation_present:
+            self.config.pop("automation_tasks", None)
+            self.config.pop("automation_run_history", None)
+            updated = True
+        normalized_favorites = self._normalize_favorites(self.config.get("favorites"))
+        if normalized_favorites != self.config.get("favorites"):
+            self.config["favorites"] = normalized_favorites
+            updated = True
+        normalized_favorite_history = self._normalize_favorite_run_history(
+            self.config.get("favorite_run_history")
         )
-        if normalized_automation_history != self.config.get("automation_run_history"):
-            self.config["automation_run_history"] = normalized_automation_history
+        if normalized_favorite_history != self.config.get("favorite_run_history"):
+            self.config["favorite_run_history"] = normalized_favorite_history
             updated = True
         normalized_mcp_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
         if normalized_mcp_servers != self.config.get("mcp_servers"):
@@ -557,11 +578,11 @@ class ConfigManager:
                 normalized.append(entry)
         return normalized
 
-    def _normalize_automation_tasks(self, value, valid_agent_profile_ids=None):
-        return normalize_automation_tasks(value, valid_agent_profile_ids=valid_agent_profile_ids)
+    def _normalize_favorites(self, value):
+        return normalize_favorites(value)
 
-    def _normalize_automation_history(self, value):
-        return normalize_automation_history(value)
+    def _normalize_favorite_run_history(self, value):
+        return normalize_favorite_run_history(value)
 
     def _normalize_mcp_env_or_headers(self, value):
         return normalize_mcp_env_or_headers(value)
@@ -1151,57 +1172,65 @@ class ConfigManager:
                 return profile
         return None
 
-    def get_automation_tasks(self):
-        valid_agent_profile_ids = [item.get("id") for item in self.get_agent_profiles()]
-        tasks = self._normalize_automation_tasks(
-            self.config.get("automation_tasks"),
-            valid_agent_profile_ids=valid_agent_profile_ids,
-        )
-        if tasks != self.config.get("automation_tasks"):
-            self.config["automation_tasks"] = tasks
+    def get_favorites(self):
+        favorites = self._normalize_favorites(self.config.get("favorites"))
+        if favorites != self.config.get("favorites"):
+            self.config["favorites"] = favorites
             self.save_config()
-        return json.loads(json.dumps(tasks, ensure_ascii=False))
+        return json.loads(json.dumps(favorites, ensure_ascii=False))
 
-    def set_automation_tasks(self, tasks):
-        valid_agent_profile_ids = [item.get("id") for item in self.get_agent_profiles()]
-        normalized = self._normalize_automation_tasks(tasks, valid_agent_profile_ids=valid_agent_profile_ids)
-        if normalized == self.config.get("automation_tasks"):
+    def set_favorites(self, favorites):
+        normalized = self._normalize_favorites(favorites)
+        if normalized == self.config.get("favorites"):
             return
-        self.config["automation_tasks"] = normalized
+        self.config["favorites"] = normalized
         self.save_config()
 
-    def get_automation_task(self, task_id_or_name):
-        identifier = str(task_id_or_name or "").strip()
+    def get_favorite(self, favorite_id_or_name):
+        identifier = str(favorite_id_or_name or "").strip()
         if not identifier:
             return None
-        tasks = self.get_automation_tasks()
-        for task in tasks:
-            if task.get("id") == identifier:
-                return task
-        for task in tasks:
-            if task.get("name") == identifier:
-                return task
+        favorites = self.get_favorites()
+        for favorite in favorites:
+            if favorite.get("id") == identifier:
+                return favorite
+        for favorite in favorites:
+            if favorite.get("name") == identifier:
+                return favorite
         return None
 
-    def get_automation_run_history(self):
-        history = self._normalize_automation_history(self.config.get("automation_run_history"))
-        if history != self.config.get("automation_run_history"):
-            self.config["automation_run_history"] = history
+    def upsert_favorite(self, favorite):
+        normalized = normalize_favorite(favorite)
+        favorites = self.get_favorites()
+        identifier = normalized.get("id")
+        for index, item in enumerate(favorites):
+            if item.get("id") == identifier:
+                favorites[index] = normalized
+                break
+        else:
+            favorites.insert(0, normalized)
+        self.set_favorites(favorites)
+        return self.get_favorite(identifier)
+
+    def get_favorite_run_history(self):
+        history = self._normalize_favorite_run_history(self.config.get("favorite_run_history"))
+        if history != self.config.get("favorite_run_history"):
+            self.config["favorite_run_history"] = history
             self.save_config()
         return json.loads(json.dumps(history, ensure_ascii=False))
 
-    def set_automation_run_history(self, history):
-        normalized = self._normalize_automation_history(history)
-        if normalized == self.config.get("automation_run_history"):
+    def set_favorite_run_history(self, history):
+        normalized = self._normalize_favorite_run_history(history)
+        if normalized == self.config.get("favorite_run_history"):
             return
-        self.config["automation_run_history"] = normalized
+        self.config["favorite_run_history"] = normalized
         self.save_config()
 
-    def append_automation_run_history(self, record):
-        history = self.get_automation_run_history()
+    def append_favorite_run_history(self, record):
+        history = self.get_favorite_run_history()
         history.insert(0, record)
-        normalized = self._normalize_automation_history(history)[:AUTOMATION_HISTORY_LIMIT]
-        self.config["automation_run_history"] = normalized
+        normalized = self._normalize_favorite_run_history(history)[:FAVORITE_RUN_HISTORY_LIMIT]
+        self.config["favorite_run_history"] = normalized
         self.save_config()
         return normalized[0] if normalized else None
 

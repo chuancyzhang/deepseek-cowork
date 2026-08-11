@@ -3,7 +3,7 @@
 [中文](README_CN.md) | [English](README.md) | [Documentation](docs/index.md)
 
 DeepSeek Cowork is a local Windows desktop workspace for agentic work. It brings
-chat, project files, Tool execution, capability extensions, automation, and
+chat, project files, Tool execution, capability extensions, reusable favorites, and
 deliverables into one observable, steerable, and recoverable workflow.
 
 This is a personal exploration project and is not affiliated with DeepSeek.
@@ -23,7 +23,7 @@ Current app version: **5.1.0** · [Read the release notes](docs/releases/5.1.0.m
 2. Describe the outcome and attach or paste the files, images, and references the task needs.
 3. Follow reasoning, Tools, stage results, and the final answer in one stream; steer or stop the run when needed.
 4. Inspect observability, files, and deliverables in the right drawer, then edit or convert the result.
-5. Store durable preferences as memory, validated methods as experience or a Skill, and repeatable schedules as automation.
+5. Store durable preferences as memory, validated methods as experience or a Skill, and repeatable work modes as favorites with optional schedules.
 
 ## Capability map
 
@@ -31,14 +31,14 @@ Current app version: **5.1.0** · [Read the release notes](docs/releases/5.1.0.m
 | --- | --- |
 | Workspace | Standalone chat directories, explicit project boundaries, history recovery, background runs, and grouped pagination |
 | Files & deliverables | File/image paste, Markdown/HTML/image/PDF/DOCX/PPTX/XLSX preview, safe editing, and Office conversion |
-| Agent runtime | Streaming reasoning and Tools, mid-run guidance, structured observability, sub-agents, daemon, and automation |
+| Agent runtime | Streaming reasoning and Tools, mid-run guidance, structured observability, sub-agents, daemon, and scheduled favorites |
 | Extensions | Built-in, optional, and user Skills; `stdio` and Streamable HTTP MCP; on-demand dependencies and remote Skill installation |
 | Connections | Browser automation, web search, finance and data capabilities, plus Feishu/DingTalk/WeCom/QQ/WeChat |
 | Personalization | Global and workspace memory, the Experience System, safe `.cowork-theme` themes, and Visualize |
 
 ## Three design principles
 
-- **Everything is Tool:** every executable action shares the same Tool schema, permissions, observability, and result protocol. Skills provide guidance, Agents provide roles, and automation provides triggers.
+- **Everything is Tool:** every executable action shares the same Tool schema, permissions, observability, and result protocol. Skills provide guidance, Agents provide roles, and an optional favorite schedule provides the trigger.
 - **AI-designed UI:** AI can configure theme tokens, the workspace scene, and constrained components, but it cannot rewrite the component tree, protected actions, or recovery controls. Themes require validation, isolated preview, and user confirmation.
 - **Experience System:** history preserves evidence, memory keeps durable facts, experience improves methods, and Skills package reusable capability. This is not model fine-tuning.
 

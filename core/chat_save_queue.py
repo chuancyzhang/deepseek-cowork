@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QThread, Signal
 
-from .chat_storage import ChatStorage
+from .chat_storage import ChatStorage, ConversationWriteConflict
 
 
 @dataclass
@@ -23,6 +23,7 @@ class ChatSaveRequest:
 
 class ChatSaveWorker(QThread):
     save_failed = Signal(str, int, str)
+    save_blocked = Signal(str, int, str)
     save_completed = Signal(str, int)
 
     def __init__(self, db_path, debounce_ms=500, parent=None):
@@ -184,6 +185,18 @@ class ChatSaveWorker(QThread):
                     status=request.status,
                     meta=request.meta,
                 )
+            except ConversationWriteConflict as exc:
+                storage = None
+                with self._condition:
+                    self._failure_counts.pop(request.session_id, None)
+                    self._inflight.discard(request.session_id)
+                    self._condition.notify_all()
+                self.save_blocked.emit(
+                    request.session_id,
+                    int(request.revision or 0),
+                    str(exc),
+                )
+                continue
             except Exception as exc:
                 storage = None
                 with self._condition:

@@ -57,7 +57,7 @@ from core.single_instance import (
     notify_existing_ui,
     notify_existing_ui_with_retries,
 )
-from core.chat_storage import ChatStorage
+from core.chat_storage import ChatStorage, ConversationWriteConflict
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.runtime_journal import RuntimeJournal
@@ -2530,9 +2530,11 @@ def session_status_text(status, im_provider=None):
         return ("来自飞书", DesignTokens.info_text, DesignTokens.info_bg)
     mapping = {
         "running": ("进行中", DesignTokens.info_text, DesignTokens.info_bg),
+        "finalizing": ("收尾中", DesignTokens.info_text, DesignTokens.info_bg),
         "completed": ("已完成", DesignTokens.success_text, DesignTokens.success_bg),
         "interrupted": ("中断", DesignTokens.warning_text, DesignTokens.warning_bg),
         "error": ("异常", DesignTokens.error_text, DesignTokens.error_bg),
+        "failed": ("失败", DesignTokens.error_text, DesignTokens.error_bg),
         "draft": ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary),
     }
     return mapping.get(status or "draft", ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary))
@@ -2857,9 +2859,11 @@ def session_status_text(status, im_provider=None):
         return ("Feishu", DesignTokens.info_text, DesignTokens.info_bg)
     mapping = {
         "running": ("In Progress", DesignTokens.info_text, DesignTokens.info_bg),
+        "finalizing": ("Finalizing", DesignTokens.info_text, DesignTokens.info_bg),
         "completed": ("Completed", DesignTokens.success_text, DesignTokens.success_bg),
         "interrupted": ("Interrupted", DesignTokens.warning_text, DesignTokens.warning_bg),
         "error": ("Error", DesignTokens.error_text, DesignTokens.error_bg),
+        "failed": ("Failed", DesignTokens.error_text, DesignTokens.error_bg),
         "draft": ("New", DesignTokens.text_secondary, DesignTokens.bg_secondary),
     }
     return mapping.get(status or "draft", ("New", DesignTokens.text_secondary, DesignTokens.bg_secondary))
@@ -20081,13 +20085,18 @@ class SessionActivityIndicator(QWidget):
 
     def setState(self, state):
         state = str(state or "idle")
-        running = state == "running"
+        running = state in {"running", "finalizing"}
         if self._state == state and self._running == running:
             return
         self._state = state
         self._running = running
         self.setVisible(state != "idle")
-        labels = {"running": "运行中", "waiting": "等待输入", "error": "失败"}
+        labels = {
+            "running": "运行中",
+            "finalizing": "收尾中",
+            "waiting": "等待输入",
+            "error": "失败",
+        }
         label = labels.get(state, "")
         self.setToolTip(label)
         self.setAccessibleName(label)
@@ -20164,6 +20173,7 @@ class SidebarActivityStatus(QWidget):
         self.indicator.setState(state)
         labels = {
             "running": "运行中" if self._count <= 1 else f"{self._count} 个运行中",
+            "finalizing": "收尾中" if self._count <= 1 else f"{self._count} 个收尾中",
             "waiting": "待输入" if self._count <= 1 else f"{self._count} 个待输入",
             "error": "失败",
         }
@@ -20584,6 +20594,8 @@ class SessionState:
         self.summoned_agent_projections = {}
         self.summoned_agent_pending_events = {}
         self.observability_events = []
+        self.provider_retry_attempt = 0
+        self.provider_retry_max = 0
         self.system_prompt_text = ""
         self.runtime_context_text = ""
         self.prompt_cache_meta = {}
@@ -24366,6 +24378,7 @@ class MainWindow(QMainWindow):
         self._cleanup_orphan_attachment_dirs()
         self.chat_save_worker = ChatSaveWorker(self.chat_storage.db_path, parent=self)
         self.chat_save_worker.save_failed.connect(self.handle_chat_save_failed)
+        self.chat_save_worker.save_blocked.connect(self.handle_chat_save_blocked)
         self.chat_save_worker.save_completed.connect(self.handle_chat_save_completed)
         self.chat_save_worker.start()
         self.refresh_model_selector()
@@ -27045,6 +27058,11 @@ class MainWindow(QMainWindow):
         return bool(
             state
             and (
+                str(getattr(state, "session_status", "") or "") in {
+                    "running",
+                    "finalizing",
+                }
+                or
                 (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
                 or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
                 or getattr(state, "daemon_running", False)
@@ -27256,6 +27274,71 @@ class MainWindow(QMainWindow):
             if _qt_object_alive(widget):
                 widget.deleteLater()
 
+    def _history_rewrite_guard(self, state):
+        committed_messages = self.chat_storage.get_messages(state.session_id)
+        committed_meta = self.chat_storage.get_conversation_meta(state.session_id)
+        return {
+            "messages_hash": RuntimeJournal.messages_hash(committed_messages),
+            "revision": max(0, int(committed_meta.get("history_save_revision") or 0)),
+        }
+
+    def _persist_history_rewrite(self, state, guard, *, operation):
+        if not state or not isinstance(guard, dict):
+            raise ValueError("历史改写缺少 revision/hash 校验信息")
+        next_meta = self._compose_session_meta(state)
+        result = self.chat_storage.rewrite_conversation_safely(
+            state.session_id,
+            filter_persistable_messages(state.messages),
+            expected_messages_hash=guard.get("messages_hash"),
+            expected_revision=guard.get("revision"),
+            title=self._resolved_session_title(state, state.messages),
+            status=getattr(state, "session_status", "draft"),
+            meta=next_meta,
+        )
+        state.chat_save_revision = int(result.get("revision") or 0)
+        state.persisted_conversation_meta = copy.deepcopy(result.get("meta") or next_meta)
+        try:
+            pending_path = self.chat_recovery_journal._path_for_session(state.session_id)
+            if os.path.exists(pending_path):
+                envelope = self.chat_recovery_journal._read_envelope(pending_path)
+                payload = envelope.get("payload") or {}
+                self.chat_recovery_journal.acknowledge(
+                    state.session_id,
+                    int(payload.get("revision") or 0),
+                )
+        except Exception as exc:
+            self.append_log(
+                f"历史改写旧保存快照清理失败({state.session_id}, operation={operation}): {exc}"
+            )
+        manifest = self.runtime_journal.load_manifest(state.session_id)
+        pending_run_id = str(manifest.get("pending_commit_run_id") or "")
+        if pending_run_id:
+            self.runtime_journal.quarantine_pending_commit(
+                state.session_id,
+                pending_run_id,
+                reason=f"history rewrite committed: {operation}",
+                committed_messages=self.chat_storage.get_messages(state.session_id),
+            )
+        self.runtime_journal.update_manifest(
+            state.session_id,
+            {
+                "sqlite_messages_hash": result.get("messages_hash") or "",
+                "history_rewrite_revision": state.chat_save_revision,
+                "history_rewrite_operation": str(operation or "rewrite"),
+                "history_rewrite_at": time.time(),
+            },
+        )
+        log_ui_navigation(
+            "history_rewrite_persisted",
+            session_id=state.session_id,
+            operation=str(operation or "rewrite"),
+            revision=state.chat_save_revision,
+            previous_messages_hash=str(result.get("previous_messages_hash") or ""),
+            messages_hash=str(result.get("messages_hash") or ""),
+            message_count=int(result.get("message_count") or 0),
+        )
+        return result
+
     def edit_user_message_inline(self, session_id, message_id, edited_text):
         session_id = str(session_id or "").strip()
         message_id = str(message_id or "").strip()
@@ -27278,6 +27361,7 @@ class MainWindow(QMainWindow):
             return False
 
         self.save_chat_history(session_id=session_id, flush=True)
+        rewrite_guard = self._history_rewrite_guard(state)
         messages = list(getattr(state, "messages", []) or [])
         target_index = next(
             (index for index, item in enumerate(messages) if str(item.get("id") or "").strip() == message_id),
@@ -27338,15 +27422,48 @@ class MainWindow(QMainWindow):
             downstream_count=downstream_count,
         )
         log_ui_navigation("history_rewrite_submit_started", session_id=session_id, target_index=target_index)
-        submitted = self._submit_session_request(
-            state,
-            edited_text,
-            prompt_files,
-            check_duplicates=False,
-            clear_current_input=False,
-        )
+        rewrite_result = None
+        try:
+            rewrite_result = self._persist_history_rewrite(
+                state,
+                rewrite_guard,
+                operation="edit_branch_base",
+            )
+            submitted = self._submit_session_request(
+                state,
+                edited_text,
+                prompt_files,
+                check_duplicates=False,
+                clear_current_input=False,
+                user_message_meta={"edited": True},
+            )
+        except Exception as exc:
+            submitted = False
+            self.add_system_toast(
+                f"编辑分支提交失败：{exc}",
+                "error",
+                session_id=session_id,
+                auto_close_ms=0,
+            )
         if not submitted:
             self._restore_history_rewrite(state, rewrite_snapshot)
+            if rewrite_result:
+                try:
+                    self._persist_history_rewrite(
+                        state,
+                        {
+                            "messages_hash": rewrite_result.get("messages_hash"),
+                            "revision": rewrite_result.get("revision"),
+                        },
+                        operation="edit_branch_rollback",
+                    )
+                except Exception as rollback_exc:
+                    self.add_system_toast(
+                        f"编辑分支回滚冲突：{rollback_exc}。请重新打开会话后恢复。",
+                        "error",
+                        session_id=session_id,
+                        auto_close_ms=0,
+                    )
             self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=session_id, auto_close_ms=3200)
             log_ui_navigation("history_edit_failed", session_id=session_id, downstream_count=downstream_count)
             log_ui_navigation("history_rewrite_rolled_back", session_id=session_id, target_index=target_index)
@@ -27363,8 +27480,6 @@ class MainWindow(QMainWindow):
         for agent_id in removed_agent_ids:
             self.chat_storage.delete_agent(agent_id, hard=True)
         self._commit_history_rewrite(rewrite_snapshot)
-        if state.messages and (state.messages[-1].get("role") or "") == "user":
-            state.messages[-1].setdefault("meta", {})["edited"] = True
         edited_message_id = str((state.messages[-1] if state.messages else {}).get("id") or "")
         edited_node = state.render_node_by_message_id.get(edited_message_id)
         edited_widget = (edited_node or {}).get("widget") if isinstance(edited_node, dict) else None
@@ -27379,7 +27494,6 @@ class MainWindow(QMainWindow):
             0,
             lambda s=state, snap=rewrite_snapshot, mid=edited_message_id: self._restore_rewrite_viewport(s, snap, mid),
         )
-        self.save_chat_history(session_id=session_id)
         self.refresh_history_list()
         self.add_system_toast("已从此处重新生成", "success", session_id=session_id, auto_close_ms=3200)
         log_ui_navigation("history_edit_done", session_id=session_id, downstream_count=downstream_count)
@@ -27415,6 +27529,7 @@ class MainWindow(QMainWindow):
             return False
 
         self.save_chat_history(session_id=session_id, flush=True)
+        rewrite_guard = self._history_rewrite_guard(state)
         messages = list(getattr(state, "messages", []) or [])
         target_index = next(
             (
@@ -27508,7 +27623,11 @@ class MainWindow(QMainWindow):
                     ) or 0
                 )
         try:
-            self.save_chat_history(session_id=session_id, flush=True)
+            self._persist_history_rewrite(
+                state,
+                rewrite_guard,
+                operation="delete_message",
+            )
         except Exception as exc:
             state.messages = messages
             for _ in range(replacement_widget_count):
@@ -27866,6 +27985,11 @@ class MainWindow(QMainWindow):
         phase = "Idle"
         if state:
             phase = getattr(state, "run_phase", "Idle") or "Idle"
+            if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
+                phase = (
+                    f"正在重试 {int(state.provider_retry_attempt)}/"
+                    f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
+                )
         self.phase_badge.setText(f"状态：{display_run_phase(phase)}")
 
         has_workspace = bool(self._workspace_dir_for_state(state))
@@ -28364,7 +28488,10 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return False
-        return bool(getattr(state, "live_activity", False))
+        return str(getattr(state, "session_status", "") or "") in {
+            "running",
+            "finalizing",
+        }
 
     def refresh_session_activity_indicator(self, session_id):
         indicators = getattr(self, "history_activity_indicators", {})
@@ -28373,9 +28500,23 @@ class MainWindow(QMainWindow):
         if indicator or status_widget:
             state = self.get_session(session_id)
             waiting = bool(state and getattr(state, "pending_interactions", {}))
-            failed = bool(state and getattr(state, "session_status", "") == "error")
+            failed = bool(
+                state
+                and getattr(state, "session_status", "") in {"error", "failed"}
+            )
             running = self._session_has_live_activity(session_id)
-            status = "waiting" if waiting else ("error" if failed else ("running" if running else "idle"))
+            finalizing = bool(
+                state and getattr(state, "session_status", "") == "finalizing"
+            )
+            status = (
+                "waiting"
+                if waiting
+                else (
+                    "error"
+                    if failed
+                    else ("finalizing" if finalizing else ("running" if running else "idle"))
+                )
+            )
             if status_widget:
                 status_widget.setState(status)
             elif indicator:
@@ -28391,6 +28532,7 @@ class MainWindow(QMainWindow):
     def _project_activity_summary(self, path):
         project_key = self._project_key(path)
         running = 0
+        finalizing = 0
         waiting = 0
         for state in (getattr(self, "sessions", {}) or {}).values():
             if self._session_workspace_source(state) != "project":
@@ -28399,10 +28541,14 @@ class MainWindow(QMainWindow):
                 continue
             if getattr(state, "pending_interactions", {}):
                 waiting += 1
+            elif getattr(state, "session_status", "") == "finalizing":
+                finalizing += 1
             elif self._session_has_live_activity(state.session_id):
                 running += 1
         if waiting:
             return "waiting", waiting
+        if finalizing:
+            return "finalizing", finalizing
         if running:
             return "running", running
         return "idle", 0
@@ -28446,19 +28592,68 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        status = str(status or "draft")
+        allowed = {"draft", "running", "finalizing", "completed", "error", "failed", "interrupted"}
+        if status not in allowed:
+            raise ValueError(f"不支持的会话运行状态：{status}")
         state.session_status = status
-        if status == "running":
+        if status in {"running", "finalizing"}:
             state.live_activity = True
-        elif status in {"completed", "error", "interrupted", "draft"}:
+        else:
             state.live_activity = False
-            self._finalize_live_turn_process_groups(state)
-        if status in {"completed", "error", "interrupted"}:
-            self._mark_session_favorite_run_completed(state, status, error=error)
-        if save and state.messages:
-            self.save_chat_history(session_id=state.session_id)
+            state.turn_steerable = False
+            state.daemon_running = False
+        if status != "running":
+            state.provider_retry_attempt = 0
+            state.provider_retry_max = 0
+        log_sub_agent_runtime(
+            "ui_session_lifecycle_transition",
+            session_id=state.session_id,
+            lifecycle_status=status,
+            save_requested=bool(save),
+            error=str(error or ""),
+        )
+        # The authoritative lifecycle state must reach both sidebar surfaces
+        # before any presentation finalizer or asynchronous persistence work.
         self.refresh_session_activity_indicator(state.session_id)
+        log_sub_agent_runtime(
+            "ui_sidebar_lifecycle_refreshed",
+            session_id=state.session_id,
+            lifecycle_status=status,
+            sidebar_running=self._session_has_live_activity(state.session_id),
+        )
         if state.session_id == self.current_session_id:
             self.refresh_context_badges(state.session_id)
+        if status in {"completed", "error", "failed", "interrupted", "draft"}:
+            try:
+                self._finalize_live_turn_process_groups(state)
+            except Exception as exc:
+                self.append_log(
+                    f"运行终态过程视图收尾失败({state.session_id}, status={status}): {exc}"
+                )
+                log_sub_agent_runtime(
+                    "ui_terminal_process_finalize_failed",
+                    session_id=state.session_id,
+                    terminal_status=status,
+                    error=str(exc),
+                    traceback=traceback.format_exc(),
+                )
+                self.add_system_toast(
+                    f"任务已结束，但过程视图收尾失败：{exc}",
+                    "warning",
+                    session_id=state.session_id,
+                    auto_close_ms=6000,
+                )
+        if status in {"completed", "error", "failed", "interrupted"}:
+            self._mark_session_favorite_run_completed(state, status, error=error)
+        if save and state.messages:
+            saved = self.save_chat_history(session_id=state.session_id)
+            if not saved:
+                log_sub_agent_runtime(
+                    "ui_terminal_save_not_queued",
+                    session_id=state.session_id,
+                    lifecycle_status=status,
+                )
 
     def _finalize_live_turn_process_groups(self, state):
         groups = list(getattr(state, "live_agent_turn_groups", []) or [])
@@ -28803,6 +28998,21 @@ class MainWindow(QMainWindow):
                 self.apply_token_usage_event(
                     state,
                     event.get("usage") if isinstance(event.get("usage"), dict) else {},
+                )
+            elif event_type == "provider_retry":
+                retry_attempt = max(1, int(event.get("attempt") or 1))
+                retry_max = max(retry_attempt, int(event.get("max_retries") or retry_attempt))
+                state.provider_retry_attempt = retry_attempt
+                state.provider_retry_max = retry_max
+                log_sub_agent_runtime(
+                    "ui_provider_retry",
+                    session_id=state.session_id,
+                    turn_id=str(event.get("turn_id") or ""),
+                    request_id=str(event.get("request_id") or ""),
+                    attempt=retry_attempt,
+                    max_retries=retry_max,
+                    delay_seconds=float(event.get("delay_seconds") or 0.0),
+                    reason=str(event.get("reason") or ""),
                 )
             elif event_type == "guidance":
                 message_id = str(event.get("message_id") or "")
@@ -29972,10 +30182,24 @@ class MainWindow(QMainWindow):
         if not state:
             return
         history_ready = session_history_ready(state)
-        running = state.llm_worker and state.llm_worker.isRunning()
-        paused = running and state.llm_worker.is_paused
-        running_code = state.code_worker and state.code_worker.isRunning()
-        running_daemon = getattr(state, "daemon_running", False)
+        lifecycle_running = str(
+            getattr(state, "session_status", "") or ""
+        ) in {"running", "finalizing"}
+        worker_running = bool(
+            lifecycle_running
+            and state.llm_worker
+            and state.llm_worker.isRunning()
+        )
+        running = lifecycle_running
+        paused = worker_running and state.llm_worker.is_paused
+        running_code = bool(
+            lifecycle_running
+            and state.code_worker
+            and state.code_worker.isRunning()
+        )
+        running_daemon = bool(
+            lifecycle_running and getattr(state, "daemon_running", False)
+        )
 
         if running or running_code or running_daemon:
             steerable = bool(getattr(state, "turn_steerable", False) and not running_code)
@@ -29989,9 +30213,16 @@ class MainWindow(QMainWindow):
             if steerable:
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             self.pause_btn.setVisible(bool(running))
-            loop_text = display_run_phase(
-                getattr(state, "run_phase", "") or ("Running" if (running_daemon or running_code) else "")
-            )
+            if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
+                loop_text = (
+                    f"正在重试 {int(state.provider_retry_attempt)}/"
+                    f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
+                )
+            else:
+                loop_text = display_run_phase(
+                    getattr(state, "run_phase", "")
+                    or ("Running" if (running_daemon or running_code) else "")
+                )
             self.loop_hint.setText(loop_text or "处理中")
             self.loop_hint.setToolTip(loop_text or "处理中")
             self.loop_hint.setVisible(bool(running_daemon or running_code or loop_text))
@@ -31193,7 +31424,8 @@ class MainWindow(QMainWindow):
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
-        self.attach_active_daemon_run_if_needed(state)
+        if not self.attach_active_daemon_run_if_needed(state):
+            self._restore_terminal_runtime_run_if_needed(state)
 
     def _finish_session_history_load(self, state):
         if not state:
@@ -34473,7 +34705,50 @@ class MainWindow(QMainWindow):
         }
         state = self.get_session(session_id)
         if state:
-            self.add_system_toast("会话保存失败，稍后自动重试。", "warning", session_id=session_id, auto_close_ms=3500)
+            self.add_system_toast(
+                "会话保存失败，正在等待下一次保存重试。",
+                "warning",
+                session_id=session_id,
+                auto_close_ms=3500,
+            )
+
+    def handle_chat_save_blocked(self, session_id, revision, error):
+        """Surface a permanent history conflict instead of retrying forever."""
+
+        session_id = str(session_id or "").strip()
+        self.append_log(
+            f"会话保存冲突({session_id or 'unknown'}, revision={int(revision or 0)}): {error}"
+        )
+        log_ui_navigation(
+            "chat_save_conflict",
+            session_id=session_id or "unknown",
+            revision=int(revision or 0),
+            error=str(error or "unknown conflict"),
+            recovery="reopen_and_create_branch",
+        )
+        try:
+            quarantine_path = self.chat_recovery_journal.quarantine_pending_save(
+                session_id,
+                f"history save conflict at revision {int(revision or 0)}: {error}",
+            )
+            log_chat_recovery(
+                "pending_chat_save_quarantined",
+                session_id=session_id,
+                revision=int(revision or 0),
+                path=str(quarantine_path or ""),
+                error=str(error or ""),
+            )
+        except Exception as quarantine_exc:
+            self.append_log(
+                f"会话冲突快照隔离失败({session_id or 'unknown'}): {quarantine_exc}"
+            )
+        self.add_system_toast(
+            "会话历史已在其他版本或窗口中变化，本次保存已停止重试。"
+            "请重新打开该会话，并从当前历史重新提交。",
+            "error",
+            session_id=session_id,
+            auto_close_ms=0,
+        )
 
     def handle_chat_save_completed(self, session_id, revision):
         session_id = str(session_id or "").strip()
@@ -34519,6 +34794,14 @@ class MainWindow(QMainWindow):
             revision=int(revision or 0),
             journal_cleared=bool(acknowledged),
         )
+        state = self.get_session(session_id)
+        if state:
+            log_sub_agent_runtime(
+                "ui_commit_completed",
+                session_id=session_id,
+                revision=int(revision or 0),
+                lifecycle_status=str(getattr(state, "session_status", "") or ""),
+            )
 
     def save_chat_history(self, session_id=None, flush=False):
         state = self.get_session(session_id)
@@ -38797,7 +39080,8 @@ class MainWindow(QMainWindow):
         if not state or not hasattr(self, "action_btn"):
             return
         running = bool(
-            (state.llm_worker and state.llm_worker.isRunning())
+            self._session_has_live_activity(state.session_id)
+            or (state.llm_worker and state.llm_worker.isRunning())
             or (state.code_worker and state.code_worker.isRunning())
             or getattr(state, "daemon_running", False)
         )
@@ -40873,6 +41157,7 @@ class MainWindow(QMainWindow):
         ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
         ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
         ppt_agent_template_file="",
+        user_message_meta=None,
     ):
         log_ppt_agent_debug(
             "submit_session_request_begin",
@@ -41110,6 +41395,8 @@ class MainWindow(QMainWindow):
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
         message_meta = dict(payload.get("meta") or {})
+        if isinstance(user_message_meta, dict):
+            message_meta.update(user_message_meta)
         message_meta["turn_id"] = str(next_turn_id)
         message_meta["request_id"] = submit_request_id
         existing_sequences = []
@@ -42501,12 +42788,22 @@ class MainWindow(QMainWindow):
             manifest = self.runtime_journal.load_manifest(state.session_id)
             run_id = str(manifest.get("active_run_id") or "")
             run = self.runtime_journal.get_run(state.session_id, run_id) if run_id else None
+            if not run_id:
+                return self._restore_terminal_runtime_run_if_needed(state)
         except Exception as exc:
             self.append_log(f"后台运行恢复检查失败({state.session_id}): {exc}")
             return False
-        if not isinstance(run, dict) or str(run.get("status") or "") != "running":
+        if not isinstance(run, dict) or str(run.get("status") or "") not in {
+            "running",
+            "finalizing",
+        }:
             return False
         if str(run.get("execution_backend") or "") != "daemon":
+            if str(run.get("status") or "") == "finalizing":
+                self.append_log(
+                    f"本地运行停留在收尾状态({state.session_id}, run={run_id})，"
+                    "未发现可重连的 daemon worker。"
+                )
             checkpoint_count = 0
             try:
                 checkpoint_count = self._merge_runtime_ledger_checkpoint(
@@ -42616,6 +42913,106 @@ class MainWindow(QMainWindow):
             request_id=run_id,
             turn_id=turn_id,
         )
+        return True
+
+    def _restore_terminal_runtime_run_if_needed(self, state):
+        """Reconcile a terminal sidecar that is newer than SQLite UI history."""
+
+        manifest = self.runtime_journal.load_manifest(state.session_id)
+        pending = manifest.get("pending_commit") if isinstance(manifest, dict) else None
+        if isinstance(pending, dict):
+            return False
+        runs = self.runtime_journal.list_runs(state.session_id)
+        terminal_run = next(
+            (
+                run
+                for run in runs
+                if str(run.get("status") or "")
+                in {"completed", "failed", "interrupted", "cancelled"}
+            ),
+            None,
+        )
+        if not isinstance(terminal_run, dict):
+            return False
+        run_id = str(terminal_run.get("run_id") or "").strip()
+        final_result = terminal_run.get("final_result")
+        if not run_id or not isinstance(final_result, dict):
+            return False
+        existing_request_ids = {
+            str((message.get("meta") or {}).get("request_id") or "")
+            for message in state.messages
+            if (
+                isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and isinstance(message.get("meta"), dict)
+            )
+        }
+        if run_id in existing_request_ids:
+            return False
+        terminal_status = str(terminal_run.get("status") or "failed")
+        result = dict(final_result)
+        result["request_id"] = run_id
+        result["_runtime_terminal"] = terminal_status
+        generated = filter_persistable_messages(result.get("generated_messages") or [])
+        if terminal_status == "completed":
+            recovered = self._merge_generated_messages(state.messages, generated)
+            if not recovered and str(result.get("content") or "").strip():
+                recovered = [{
+                    "id": self._new_message_id(),
+                    "role": result.get("role") or "assistant",
+                    "content": str(result.get("content") or ""),
+                    "reasoning_content": str(result.get("reasoning") or ""),
+                    "meta": {"request_id": run_id},
+                }]
+            if not recovered:
+                return False
+            state.messages = self.chat_storage.normalize_messages(
+                merge_messages_by_id(state.messages, recovered),
+                conversation_id=state.session_id,
+            )
+        else:
+            draft_content = str(terminal_run.get("draft_content") or "").strip()
+            reason = "本轮已中断" if terminal_status in {"interrupted", "cancelled"} else "本轮执行失败"
+            visible_text = f"⚠️ {reason}，以上内容可能不完整。"
+            if draft_content:
+                visible_text = f"{draft_content}\n\n{visible_text}"
+            recovered_message = {
+                "id": uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"terminal-run-recovery:{state.session_id}:{run_id}",
+                ).hex,
+                "role": "assistant",
+                "content": visible_text,
+                "content_parts": [{"type": "text", "text": visible_text}],
+                "meta": {
+                    "request_id": run_id,
+                    "turn_id": str(terminal_run.get("turn_id") or ""),
+                    "ui_reply_kind": "interrupted" if reason == "本轮已中断" else "error",
+                    "context_visible_interruption": True,
+                    "run_outcome": terminal_status,
+                },
+            }
+            state.messages = self.chat_storage.normalize_messages(
+                merge_messages_by_id(state.messages, generated + [recovered_message]),
+                conversation_id=state.session_id,
+            )
+        self._rebuild_session_render_spans(state)
+        state.session_status = terminal_status if terminal_status != "cancelled" else "interrupted"
+        state.run_phase = "Completed" if terminal_status == "completed" else (
+            "Interrupted" if terminal_status in {"interrupted", "cancelled"} else "Error"
+        )
+        saved = self.save_chat_history(session_id=state.session_id, flush=True)
+        log_sub_agent_runtime(
+            "ui_terminal_runtime_recovered",
+            session_id=state.session_id,
+            request_id=run_id,
+            terminal_status=terminal_status,
+            saved=bool(saved),
+        )
+        if saved and getattr(state, "history_loaded", False):
+            state.history_loaded = False
+            state.history_loading = False
+            self.queue_session_history_load(state.session_id)
         return True
 
     def process_daemon_logic(
@@ -43329,6 +43726,10 @@ class MainWindow(QMainWindow):
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        if getattr(state, "provider_retry_attempt", 0):
+            state.provider_retry_attempt = 0
+            state.provider_retry_max = 0
+            self.set_session_phase("Analyzing", state.session_id)
         self._ensure_live_agent_stage(state)
         state.current_content_buffer += text
         self._timeline_append_text_delta(state, "content_fragment", text)
@@ -43344,6 +43745,9 @@ class MainWindow(QMainWindow):
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        if getattr(state, "provider_retry_attempt", 0):
+            state.provider_retry_attempt = 0
+            state.provider_retry_max = 0
         self._ensure_live_agent_stage(state)
         delta = text or ""
         if delta.strip():
@@ -43480,21 +43884,122 @@ class MainWindow(QMainWindow):
         if not state:
             log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
-        if isinstance(result, dict) and "error" not in result:
+        if turn_id is not None and (
+            turn_id != state.active_turn_id
+            or turn_id <= state.completed_turn_id
+        ):
+            log_ppt_agent_debug(
+                "llm_response_ignored_before_terminal",
+                session_id=session_id,
+                turn_id=turn_id,
+                active_turn_id=state.active_turn_id,
+                completed_turn_id=state.completed_turn_id,
+            )
+            return
+        result = dict(result) if isinstance(result, dict) else {
+            "error": "Provider returned an invalid result payload."
+        }
+        provider_succeeded = "error" not in result
+        if provider_succeeded:
             has_final_content = bool(str(result.get("content") or "").strip())
             if not has_final_content:
-                for message in reversed(result.get("generated_messages") or []):
-                    if (
-                        isinstance(message, dict)
-                        and message.get("role") == "assistant"
-                        and not message.get("tool_calls")
-                        and str(message.get("content") or "").strip()
-                    ):
-                        has_final_content = True
-                        break
+                has_final_content = any(
+                    isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    and not message.get("tool_calls")
+                    and bool(str(message.get("content") or "").strip())
+                    for message in reversed(result.get("generated_messages") or [])
+                )
             if not has_final_content:
-                result = dict(result)
-                result["error"] = "Provider completed without final assistant content."
+                result["error"] = (
+                    "Provider completed without final assistant content."
+                )
+                provider_succeeded = False
+        run_id = str(
+            result.get("request_id")
+            or getattr(state, "active_turn_request_id", "")
+            or ""
+        ).strip()
+        if provider_succeeded:
+            self.set_session_status("finalizing", state.session_id)
+            self.set_session_phase("Wrapping up", state.session_id)
+            if run_id:
+                try:
+                    run_record = self.runtime_journal.get_run(state.session_id, run_id) or {}
+                    run_status = str(run_record.get("status") or "running")
+                    if run_status == "running":
+                        self.runtime_journal.update_run(
+                            state.session_id,
+                            run_id,
+                            {"status": "finalizing", "final_result": result},
+                        )
+                        self.runtime_journal.append_event(
+                            state.session_id,
+                            run_id,
+                            "finalizing",
+                            {"source": "ui_response"},
+                        )
+                        run_status = "finalizing"
+                    if run_status == "finalizing":
+                        self.runtime_journal.update_run(
+                            state.session_id,
+                            run_id,
+                            {
+                                "status": "completed",
+                                "terminal_error": "",
+                                "final_result": result,
+                            },
+                        )
+                        self.runtime_journal.append_event(
+                            state.session_id,
+                            run_id,
+                            "terminal",
+                            {"status": "completed", "source": "ui_response"},
+                        )
+                except Exception as exc:
+                    self.append_log(
+                        f"模型成功终态确认失败({state.session_id}, run={run_id}): {exc}"
+                    )
+        try:
+            return self._handle_llm_response_impl(result, session_id, turn_id)
+        except Exception as exc:
+            log_ppt_agent_debug(
+                "llm_response_finalize_failed",
+                session_id=state.session_id,
+                turn_id=turn_id,
+                provider_succeeded=provider_succeeded,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            self.append_log(
+                f"模型答复收尾失败({state.session_id}, run={run_id or 'unknown'}): {exc}"
+            )
+            if provider_succeeded:
+                self.set_session_phase("Completed", state.session_id)
+                self.set_session_status("completed", state.session_id, save=False)
+                self.add_system_toast(
+                    f"回答已完成，但界面收尾失败：{exc}",
+                    "warning",
+                    session_id=state.session_id,
+                    auto_close_ms=0,
+                )
+            else:
+                self.set_session_phase("Error", state.session_id)
+                self.set_session_status(
+                    "failed",
+                    state.session_id,
+                    save=False,
+                    error=str((result or {}).get("error") or exc),
+                )
+            if state.session_id == self.current_session_id:
+                self.normalize_session_ui(state)
+            return None
+
+    def _handle_llm_response_impl(self, result, session_id=None, turn_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
+            return
         is_first_submit_turn = bool(
             getattr(state, "first_submit_diagnostic_turn_id", 0)
             and str(getattr(state, "first_submit_diagnostic_turn_id", 0)) == str(turn_id or state.active_turn_id)
@@ -43571,14 +44076,22 @@ class MainWindow(QMainWindow):
                 or getattr(state, "active_turn_request_id", "")
                 or ""
             ).strip()
+            runtime_terminal = str(result.get("_runtime_terminal") or "").strip().lower()
+            error_text = str(result.get("error") or "未知错误")
+            interrupted = bool(
+                runtime_terminal in {"interrupted", "cancelled"}
+                or "interrupted by user" in error_text.lower()
+                or "stopped by user" in error_text.lower()
+            )
+            failure_status = "interrupted" if interrupted else "failed"
             if run_id:
                 try:
                     self.runtime_journal.update_run(
                         state.session_id,
                         run_id,
                         {
-                            "status": "interrupted",
-                            "error": str(result.get("error") or "未知错误"),
+                            "status": failure_status,
+                            "error": error_text,
                             "draft_content": str(getattr(state, "current_content_buffer", "") or ""),
                             "draft_reasoning": str(getattr(state, "current_thinking_buffer", "") or ""),
                             "final_result": result,
@@ -43587,8 +44100,8 @@ class MainWindow(QMainWindow):
                     self.runtime_journal.append_event(
                         state.session_id,
                         run_id,
-                        "error",
-                        {"error": str(result.get("error") or "未知错误")},
+                        "interrupted" if interrupted else "failed",
+                        {"error": error_text, "status": failure_status},
                     )
                 except Exception as exc:
                     self.append_log(
@@ -43644,8 +44157,8 @@ class MainWindow(QMainWindow):
                 turn_id=turn_id or state.active_turn_id,
                 run_id=run_id,
                 bubble=bubble,
-                reason_text="本轮因异常中断",
-                outcome="error",
+                reason_text="本轮已中断" if interrupted else "本轮执行失败",
+                outcome=failure_status,
             )
             self._finish_grill_mode(state, "error")
             self.save_chat_history(session_id=state.session_id)
@@ -43661,13 +44174,15 @@ class MainWindow(QMainWindow):
                 state.last_agent_bubble = None
             if is_current and self.last_agent_bubble is bubble:
                 self.last_agent_bubble = None
-            error_text = str(result.get("error") or "未知错误")
             if getattr(state, "favorite_run_id", ""):
                 self.set_session_phase("Error", state.session_id)
                 self.set_session_status("error", state.session_id, save=True, error=error_text)
-            else:
-                self.set_session_phase("Ready", state.session_id)
+            elif interrupted:
+                self.set_session_phase("Interrupted", state.session_id)
                 self.set_session_status("interrupted", state.session_id, save=True)
+            else:
+                self.set_session_phase("Error", state.session_id)
+                self.set_session_status("failed", state.session_id, save=True, error=error_text)
             if is_current: self.normalize_session_ui(state)
             return
 

@@ -7,10 +7,15 @@ import uuid
 from dataclasses import asdict
 
 from .conversation_integrity import merge_messages_by_id
+from .chat_storage import ConversationWriteConflict
 from .runtime_journal import PENDING_COMMIT_FORMAT_APPEND_V1, RuntimeJournal
 
 
 JOURNAL_VERSION = 1
+
+
+class PendingCommitDivergence(RuntimeError):
+    """A legacy pending commit cannot be reconciled with current history."""
 
 
 class ChatRecoveryJournal:
@@ -99,6 +104,27 @@ class ChatRecoveryJournal:
         if envelope.get("checksum") != self._checksum(payload):
             raise ValueError("recovery journal checksum mismatch")
         return envelope
+
+    def _quarantine_pending_chat_save(self, path, reason):
+        quarantine_dir = os.path.join(self.directory, "quarantine")
+        os.makedirs(quarantine_dir, exist_ok=True)
+        base_name = os.path.basename(path)
+        target = os.path.join(
+            quarantine_dir,
+            f"{base_name}.{int(time.time() * 1000)}.quarantined",
+        )
+        os.replace(path, target)
+        with open(target + ".reason.txt", "w", encoding="utf-8") as handle:
+            handle.write(str(reason or "history divergence"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return target
+
+    def quarantine_pending_save(self, session_id, reason):
+        path = self._path_for_session(session_id)
+        if not os.path.exists(path):
+            return None
+        return self._quarantine_pending_chat_save(path, reason)
 
     def _recover_pending_chat_save(self, storage, path, skip_session_ids):
         payload = self._read_envelope(path)["payload"]
@@ -210,6 +236,17 @@ class ChatRecoveryJournal:
                 )
                 if session_id and session_id not in recovered:
                     recovered.append(session_id)
+            except (ConversationWriteConflict, ValueError) as exc:
+                quarantine_path = self._quarantine_pending_chat_save(path, exc)
+                errors.append(
+                    {
+                        "path": path,
+                        "error": str(exc),
+                        "source": "pending_chat_save_quarantined",
+                        "quarantine_path": quarantine_path,
+                        "recovery": "已隔离旧版本未提交快照；当前 SQLite 历史保持不变。",
+                    }
+                )
             except Exception as exc:
                 errors.append(
                     {"path": path, "error": str(exc), "source": "pending_chat_save"}
@@ -230,13 +267,16 @@ class ChatRecoveryJournal:
             pending = manifest.get("pending_commit") if isinstance(manifest, dict) else None
             if not isinstance(pending, dict):
                 continue
+            manifest_path = str(manifest.get("_runtime_manifest_path") or "")
             session_id = str(manifest.get("session_id") or "").strip()
             run_id = str(pending.get("run_id") or "").strip()
             if session_id in skip_session_ids:
                 continue
             try:
                 if not session_id or not run_id:
-                    raise ValueError("runtime pending commit has no session_id or run_id")
+                    raise PendingCommitDivergence(
+                        "runtime pending commit has no session_id or run_id"
+                    )
                 pending_format = str(pending.get("format") or "legacy_snapshot_v2")
                 if pending_format == PENDING_COMMIT_FORMAT_APPEND_V1:
                     base_message_ids = [
@@ -256,10 +296,12 @@ class ChatRecoveryJournal:
                         or expected_append_hash
                         != RuntimeJournal.messages_hash(append_messages)
                     ):
-                        raise ValueError("runtime append commit checksum mismatch")
+                        raise PendingCommitDivergence(
+                            "runtime append commit checksum mismatch"
+                        )
                     committed_messages = storage.get_messages(session_id)
                     if len(committed_messages) < len(base_message_ids):
-                        raise ValueError(
+                        raise PendingCommitDivergence(
                             "runtime append base is newer than committed SQLite history"
                         )
                     committed_base = committed_messages[:len(base_message_ids)]
@@ -269,13 +311,13 @@ class ChatRecoveryJournal:
                         if isinstance(message, dict)
                     ]
                     if committed_base_ids != base_message_ids:
-                        raise ValueError(
+                        raise PendingCommitDivergence(
                             "runtime append base message IDs diverged from SQLite history"
                         )
                     if RuntimeJournal.messages_hash(committed_base) != str(
                         pending.get("base_messages_hash") or ""
                     ):
-                        raise ValueError(
+                        raise PendingCommitDivergence(
                             "runtime append base checksum diverged from SQLite history"
                         )
                     expected_messages = merge_messages_by_id(
@@ -295,10 +337,12 @@ class ChatRecoveryJournal:
                     expected_hash = str(pending.get("messages_hash") or "")
                     actual_hash = RuntimeJournal.legacy_snapshot_messages_hash(messages)
                     if not expected_hash or expected_hash != actual_hash:
-                        raise ValueError("legacy runtime snapshot checksum mismatch")
+                        raise PendingCommitDivergence(
+                            "legacy runtime snapshot checksum mismatch"
+                        )
                     expected_messages = messages
                 else:
-                    raise ValueError(
+                    raise PendingCommitDivergence(
                         f"unsupported runtime pending commit format: {pending_format}"
                     )
                 save_result = storage.save_conversation_safely(
@@ -330,11 +374,83 @@ class ChatRecoveryJournal:
                         )
                     )
                     if not acknowledged:
-                        raise RuntimeError(
+                        raise PendingCommitDivergence(
                             "runtime pending commit did not match the recovered SQLite snapshot"
                         )
                 if session_id not in recovered:
                     recovered.append(session_id)
+            except (ConversationWriteConflict, PendingCommitDivergence) as exc:
+                committed_messages = storage.get_messages(session_id) if session_id else []
+                quarantine_reason = (
+                    f"pending snapshot was superseded by a rewritten history: {exc}"
+                )
+                quarantined = None
+                quarantined_manifest_path = ""
+                if session_id and run_id:
+                    quarantined = self.runtime_journal.quarantine_pending_commit(
+                        session_id,
+                        run_id,
+                        reason=quarantine_reason,
+                        committed_messages=committed_messages,
+                    )
+                elif not session_id and manifest_path:
+                    quarantined_manifest_path = (
+                        self.runtime_journal.quarantine_manifest_file(
+                            manifest_path,
+                            reason=quarantine_reason,
+                        )
+                    )
+                if quarantined is None:
+                    quarantined = self.runtime_journal.record_quarantined_commit(
+                        session_id or "unknown",
+                        run_id or "unknown",
+                        pending,
+                        reason=quarantine_reason,
+                        committed_messages=committed_messages,
+                    )
+                    try:
+                        active_manifest_path = self.runtime_journal._manifest_path(
+                            session_id or "unknown"
+                        )
+                        if session_id and os.path.exists(active_manifest_path):
+                            current_manifest = self.runtime_journal.load_manifest(session_id)
+                            if current_manifest.get("pending_commit") == pending:
+                                current_manifest.pop("pending_commit", None)
+                                current_manifest["pending_commit_run_id"] = ""
+                                self.runtime_journal.update_manifest(
+                                    session_id,
+                                    current_manifest,
+                                    expected_revision=current_manifest.get("revision"),
+                                )
+                    except Exception as clear_exc:
+                        errors.append(
+                            {
+                                "path": self.runtime_journal.root,
+                                "error": str(clear_exc),
+                                "source": "runtime_pending_commit_quarantine_cleanup",
+                            }
+                        )
+                errors.append(
+                    {
+                        "path": manifest_path or os.path.join(
+                            self.runtime_journal.root,
+                            "sessions",
+                            hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+                            if session_id
+                            else "unknown",
+                            "manifest.json",
+                        ),
+                        "error": str(exc),
+                        "source": "runtime_pending_commit_quarantined",
+                        "run_id": run_id,
+                        "quarantine_path": quarantined_manifest_path,
+                        "recovery": (
+                            "已隔离旧版本未提交快照；当前 SQLite 历史保持不变。"
+                            if quarantined
+                            else "快照已由其他进程处理。"
+                        ),
+                    }
+                )
             except Exception as exc:
                 errors.append(
                     {

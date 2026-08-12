@@ -2,6 +2,8 @@ import os
 import sys
 import unittest
 import tempfile
+import threading
+import time
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +21,13 @@ from core.llm.deepseek import (
     DEEPSEEK_RESPONSES_REPLAY_META_KEY,
     is_official_deepseek_api,
 )
-from core.llm.providers import API_PROTOCOL_RESPONSES, OpenAIProvider
+from core.llm.providers import (
+    API_PROTOCOL_RESPONSES,
+    OpenAIProvider,
+    ProviderStreamError,
+    _wait_before_model_retry,
+    is_transient_model_api_error,
+)
 from core.llm.responses_replay import (
     RESPONSES_REPLAY_INPUT_KEY,
     RESPONSES_REPLAY_META_KEY,
@@ -921,7 +929,20 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
                     prompt_tokens_details=SimpleNamespace(cached_tokens=75),
                 ),
                 choices=[],
-            )
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            reasoning_content=None,
+                            content=None,
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+            ),
         ]
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
@@ -948,7 +969,20 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
                     prompt_cache_miss_tokens=1_424,
                 ),
                 choices=[],
-            )
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            reasoning_content=None,
+                            content=None,
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+            ),
         ]
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
@@ -1091,10 +1125,201 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertIn({"type": "content", "content": "partial"}, chunks)
+        self.assertNotIn({"type": "content", "content": "partial"}, chunks)
         error = next(chunk for chunk in chunks if chunk["type"] == "error")
         self.assertIn("without a terminal event", error["content"])
         self.assertNotIn("background", client.responses.create.call_args.kwargs)
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_chat_completions_retries_five_times_then_succeeds_without_partial_leak(
+        self,
+        _wait,
+    ):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+
+        def failed_stream(index):
+            yield SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content=f"partial-{index}",
+                        tool_calls=None,
+                    ),
+                    finish_reason=None,
+                )],
+            )
+            raise ConnectionError("connection reset")
+
+        success_stream = [
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content="final",
+                        tool_calls=None,
+                    ),
+                    finish_reason=None,
+                )],
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content=None,
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+            ),
+        ]
+        client.chat.completions.create.side_effect = [
+            failed_stream(index) for index in range(1, 6)
+        ] + [success_stream]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.chat.completions.create.call_count, 6)
+        self.assertEqual(
+            [chunk["attempt"] for chunk in chunks if chunk["type"] == "provider_retry"],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertEqual(
+            [
+                chunk["next_request_attempt"]
+                for chunk in chunks
+                if chunk["type"] == "provider_retry"
+            ],
+            [2, 3, 4, 5, 6],
+        )
+        self.assertTrue(
+            all(
+                chunk["max_request_attempts"] == 6
+                for chunk in chunks
+                if chunk["type"] == "provider_retry"
+            )
+        )
+        self.assertEqual(
+            [chunk["content"] for chunk in chunks if chunk["type"] == "content"],
+            ["final"],
+        )
+        request_messages = [
+            call.kwargs["messages"] for call in client.chat.completions.create.call_args_list
+        ]
+        self.assertTrue(all(messages == request_messages[0] for messages in request_messages))
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_model_api_retry_exhaustion_reports_one_final_error(self, _wait):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+        client.chat.completions.create.side_effect = ConnectionError("network error")
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.chat.completions.create.call_count, 6)
+        self.assertEqual(len([chunk for chunk in chunks if chunk["type"] == "provider_retry"]), 5)
+        errors = [chunk for chunk in chunks if chunk["type"] == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("network error", errors[0]["content"])
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=False)
+    def test_model_api_retry_wait_stops_without_final_error(self, _wait):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+        client.chat.completions.create.side_effect = TimeoutError("request timeout")
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.chat.completions.create.call_count, 1)
+        self.assertEqual([chunk["type"] for chunk in chunks], ["provider_retry"])
+
+    def test_model_retry_backoff_is_cancelled_promptly(self):
+        stopped = threading.Event()
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(
+                _wait_before_model_retry(
+                    30,
+                    {"abort_check": stopped.is_set},
+                )
+            )
+        )
+        started_at = time.monotonic()
+        thread.start()
+        time.sleep(0.05)
+        stopped.set()
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [False])
+        self.assertLess(time.monotonic() - started_at, 0.5)
+
+    def test_model_retry_classification_excludes_request_and_context_errors(self):
+        self.assertTrue(is_transient_model_api_error(ConnectionError("connection reset")))
+        self.assertTrue(
+            is_transient_model_api_error(
+                ProviderStreamError("upstream unavailable")
+            )
+        )
+        self.assertFalse(is_transient_model_api_error(ValueError("invalid messages")))
+        self.assertFalse(
+            is_transient_model_api_error(
+                RuntimeError("maximum context length exceeded")
+            )
+        )
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_retry_after_header_takes_priority_over_backoff(self, wait):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+
+        class RateLimitError(RuntimeError):
+            status_code = 429
+            headers = {"Retry-After": "3"}
+
+        success_stream = [
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content="done",
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+            )
+        ]
+        client.chat.completions.create.side_effect = [
+            RateLimitError("rate limited"),
+            success_stream,
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        retry = next(chunk for chunk in chunks if chunk["type"] == "provider_retry")
+        self.assertEqual(retry["delay_seconds"], 3.0)
+        wait.assert_called_once_with(3.0, {})
 
     def test_responses_incomplete_records_terminal_before_error(self):
         provider, client = self._build_provider(

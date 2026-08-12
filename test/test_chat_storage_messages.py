@@ -11,6 +11,7 @@ from unittest.mock import patch
 from core.chat_storage import ChatStorage, ConversationWriteConflict
 from core.llm.deepseek import DEEPSEEK_RESPONSES_REPLAY_META_KEY
 from core.llm.responses_replay import RESPONSES_REPLAY_META_KEY
+from core.runtime_journal import RuntimeJournal
 
 
 class TestChatStorageMessages(unittest.TestCase):
@@ -60,6 +61,41 @@ class TestChatStorageMessages(unittest.TestCase):
             [item["content"] for item in storage.get_messages("safe")],
             ["hello", "world"],
         )
+
+    def test_explicit_history_rewrite_requires_matching_hash_and_revision(self):
+        storage = ChatStorage(self.db_path)
+        original = [
+            {"id": "u1", "role": "user", "content": "one"},
+            {"id": "a1", "role": "assistant", "content": "two"},
+        ]
+        storage.save_conversation_safely(
+            "rewrite",
+            original,
+            meta={"history_save_revision": 3},
+        )
+        original_hash = RuntimeJournal.messages_hash(storage.get_messages("rewrite"))
+
+        result = storage.rewrite_conversation_safely(
+            "rewrite",
+            [{"id": "u2", "role": "user", "content": "replacement"}],
+            expected_messages_hash=original_hash,
+            expected_revision=3,
+            meta={"history_save_revision": 3},
+        )
+
+        self.assertEqual(result["revision"], 4)
+        self.assertEqual(
+            [item["content"] for item in storage.get_messages("rewrite")],
+            ["replacement"],
+        )
+        self.assertEqual(storage.get_conversation_meta("rewrite")["history_save_revision"], 4)
+        with self.assertRaises(ConversationWriteConflict):
+            storage.rewrite_conversation_safely(
+                "rewrite",
+                original,
+                expected_messages_hash=original_hash,
+                expected_revision=3,
+            )
 
     def test_safe_save_reconciles_legacy_ui_only_rows_before_append(self):
         storage = ChatStorage(self.db_path)

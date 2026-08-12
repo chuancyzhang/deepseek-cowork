@@ -108,7 +108,9 @@ class TestChatRecoveryJournal(unittest.TestCase):
             recovered, errors = journal.recover_into(storage)
             self.assertEqual(recovered, [])
             self.assertEqual(len(errors), 1)
-            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(errors[0]["source"], "pending_chat_save_quarantined")
+            self.assertTrue(os.path.exists(errors[0]["quarantine_path"]))
 
     def test_recovery_remaps_message_id_owned_by_another_conversation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -292,6 +294,88 @@ class TestChatRecoveryJournal(unittest.TestCase):
                 journal.runtime_journal.load_manifest("session-legacy-stale")["pending_commit_run_id"],
                 "",
             )
+
+    def test_distributed_legacy_snapshot_is_quarantined_after_history_rewrite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            current_messages = [{"id": "u-new", "role": "user", "content": "new branch"}]
+            storage.save_conversation(
+                "session-legacy-diverged",
+                current_messages,
+                title="Current",
+            )
+            journal = ChatRecoveryJournal(temp_dir)
+            old_messages = [{"id": "u-old", "role": "user", "content": "old branch"}]
+            journal.runtime_journal.begin_run(
+                "session-legacy-diverged",
+                "run-legacy-diverged",
+                writer_owner="ui:old",
+                base_messages=[],
+                status="completed",
+            )
+            journal.runtime_journal.update_manifest(
+                "session-legacy-diverged",
+                {
+                    "pending_commit_run_id": "run-legacy-diverged",
+                    "pending_commit": {
+                        "run_id": "run-legacy-diverged",
+                        "messages": old_messages,
+                        "messages_hash": RuntimeJournal.legacy_snapshot_messages_hash(
+                            old_messages
+                        ),
+                        "title": "Old",
+                        "status": "completed",
+                    },
+                },
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["source"], "runtime_pending_commit_quarantined")
+            self.assertEqual(storage.get_messages("session-legacy-diverged"), storage.normalize_messages(current_messages))
+            manifest = journal.runtime_journal.load_manifest("session-legacy-diverged")
+            self.assertFalse(manifest.get("pending_commit_run_id"))
+            self.assertNotIn("pending_commit", manifest)
+            self.assertEqual(journal.recover_into(storage), ([], []))
+
+    def test_malformed_distributed_manifest_is_quarantined_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            journal = ChatRecoveryJournal(temp_dir)
+            session_dir = os.path.join(
+                journal.runtime_journal.root,
+                "sessions",
+                "legacy-missing-session-id",
+            )
+            os.makedirs(session_dir, exist_ok=True)
+            manifest_path = os.path.join(session_dir, "manifest.json")
+            legacy_messages = [
+                {"id": "u-old", "role": "user", "content": "legacy branch"}
+            ]
+            journal.runtime_journal._atomic_write(
+                manifest_path,
+                {
+                    "pending_commit_run_id": "run-legacy",
+                    "pending_commit": {
+                        "run_id": "run-legacy",
+                        "messages": legacy_messages,
+                        "messages_hash": RuntimeJournal.legacy_snapshot_messages_hash(
+                            legacy_messages
+                        ),
+                    },
+                },
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["source"], "runtime_pending_commit_quarantined")
+            self.assertTrue(os.path.isfile(errors[0]["quarantine_path"]))
+            self.assertFalse(os.path.exists(manifest_path))
+            self.assertEqual(journal.recover_into(storage), ([], []))
 
     def test_periodic_recovery_skips_live_session_without_consuming_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:

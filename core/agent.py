@@ -2667,6 +2667,7 @@ class LLMWorker(QThread):
                                 "client_request_id": attempt_id,
                                 "run_id": self.request_id or self.turn_id or self.session_id,
                                 "turn_id": self.turn_id,
+                                "abort_check": lambda: self.is_stopped,
                             },
                         )
 
@@ -2754,6 +2755,54 @@ class LLMWorker(QThread):
                                     )
                                 if attempt_patch:
                                     self._record_provider_attempt(attempt_id, attempt_patch)
+                            elif type_ == "provider_retry":
+                                retry_number = max(1, int(chunk.get("attempt") or 1))
+                                max_retries = max(
+                                    retry_number,
+                                    int(chunk.get("max_retries") or retry_number),
+                                )
+                                retry_event = {
+                                    "type": "provider_retry",
+                                    "request_id": attempt_id,
+                                    "run_id": self.request_id or self.turn_id or self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "provider": provider_name,
+                                    "model": getattr(provider, "model_name", ""),
+                                    "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                                    "attempt": retry_number,
+                                    "request_attempt": int(
+                                        chunk.get("request_attempt") or retry_number
+                                    ),
+                                    "next_request_attempt": int(
+                                        chunk.get("next_request_attempt")
+                                        or retry_number + 1
+                                    ),
+                                    "max_request_attempts": int(
+                                        chunk.get("max_request_attempts")
+                                        or max_retries + 1
+                                    ),
+                                    "max_retries": max_retries,
+                                    "delay_seconds": float(chunk.get("delay_seconds") or 0.0),
+                                    "reason": str(chunk.get("reason") or ""),
+                                    "timestamp": time.time(),
+                                }
+                                self._record_provider_attempt(
+                                    attempt_id,
+                                    {
+                                        "status": "retrying",
+                                        "retry_attempt": retry_number,
+                                        "max_retries": max_retries,
+                                        "request_attempt": retry_event["request_attempt"],
+                                        "next_request_attempt": retry_event["next_request_attempt"],
+                                        "max_request_attempts": retry_event["max_request_attempts"],
+                                        "last_retry_reason": retry_event["reason"],
+                                        "last_retry_at": retry_event["timestamp"],
+                                    },
+                                )
+                                self.observability_signal.emit(retry_event)
+                                self.step_signal.emit(
+                                    f"Provider Retry: {retry_number}/{max_retries}"
+                                )
                             elif type_ == "provider_terminal":
                                 provider_terminal_status = str(chunk.get("status") or "")
                                 terminal_error = str(chunk.get("error") or "")

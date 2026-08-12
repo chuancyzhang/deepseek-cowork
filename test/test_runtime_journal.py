@@ -222,6 +222,112 @@ class TestRuntimeJournal(unittest.TestCase):
                     base + [{"id": "a1", "role": "assistant", "content": "late"}],
                 )
 
+    def test_completed_terminal_cannot_be_reclassified_or_interrupted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-terminal", "run-terminal", writer_owner="ui:1")
+            journal.update_run("session-terminal", "run-terminal", {"status": "finalizing"})
+            journal.update_run("session-terminal", "run-terminal", {"status": "completed"})
+
+            with self.assertRaisesRegex(RuntimeJournalError, "cannot be replaced"):
+                journal.update_run(
+                    "session-terminal",
+                    "run-terminal",
+                    {"status": "interrupted", "terminal_error": "late reaper"},
+                )
+            preserved = journal.interrupt_run(
+                "session-terminal",
+                "run-terminal",
+                reason="late user stop",
+            )
+            self.assertEqual(preserved["status"], "completed")
+            self.assertFalse(preserved.get("stop_requested"))
+
+    def test_finalizing_cannot_regress_to_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-finalizing", "run-finalizing", writer_owner="ui:1")
+            journal.update_run(
+                "session-finalizing",
+                "run-finalizing",
+                {"status": "finalizing"},
+            )
+            with self.assertRaisesRegex(RuntimeJournalError, "cannot regress"):
+                journal.update_run(
+                    "session-finalizing",
+                    "run-finalizing",
+                    {"status": "running"},
+                )
+
+    def test_list_runs_returns_newest_first(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-list", "run-old", writer_owner="ui:1")
+            journal.update_run("session-list", "run-old", {"status": "failed"})
+            journal.begin_run("session-list", "run-new", writer_owner="ui:1")
+
+            runs = journal.list_runs("session-list")
+
+            self.assertEqual([run["run_id"] for run in runs], ["run-new", "run-old"])
+
+    def test_quarantine_pending_commit_removes_it_from_recovery_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            messages = [{"id": "u1", "role": "user", "content": "old"}]
+            journal.begin_run(
+                "session-quarantine",
+                "run-quarantine",
+                writer_owner="ui:old",
+                base_messages=[],
+                status="completed",
+            )
+            journal.mark_pending_commit(
+                "session-quarantine",
+                "run-quarantine",
+                messages,
+            )
+
+            record = journal.quarantine_pending_commit(
+                "session-quarantine",
+                "run-quarantine",
+                reason="history rewrite committed",
+                committed_messages=[{"id": "u2", "role": "user", "content": "new"}],
+            )
+
+            self.assertEqual(record["run_id"], "run-quarantine")
+            manifest = journal.load_manifest("session-quarantine")
+            self.assertFalse(manifest.get("pending_commit_run_id"))
+            self.assertNotIn("pending_commit", manifest)
+            self.assertEqual(
+                manifest["last_quarantined_commit"]["reason"],
+                "history rewrite committed",
+            )
+
+    def test_quarantine_manifest_file_removes_malformed_manifest_from_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            session_dir = os.path.join(journal.root, "sessions", "legacy-broken")
+            os.makedirs(session_dir, exist_ok=True)
+            manifest_path = os.path.join(session_dir, "manifest.json")
+            journal._atomic_write(
+                manifest_path,
+                {"pending_commit": {"run_id": "legacy-run"}},
+            )
+
+            manifests, errors = journal.scan_manifests()
+            self.assertEqual(errors, [])
+            self.assertEqual(manifests[0]["_runtime_manifest_path"], manifest_path)
+
+            quarantined_path = journal.quarantine_manifest_file(
+                manifest_path,
+                reason="missing distributed session id",
+            )
+
+            self.assertFalse(os.path.exists(manifest_path))
+            self.assertTrue(os.path.isfile(quarantined_path))
+            self.assertTrue(os.path.isfile(f"{quarantined_path}.meta.json"))
+            self.assertEqual(journal.scan_manifests(), ([], []))
+
 
 if __name__ == "__main__":
     unittest.main()

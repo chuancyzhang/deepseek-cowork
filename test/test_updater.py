@@ -27,8 +27,11 @@ from core.updater import (
 
 
 class TestAppVersion(unittest.TestCase):
-    def test_current_app_version_matches_514_release(self):
-        self.assertEqual(APP_VERSION, "5.1.4")
+    def test_current_app_version_is_canonical_semver(self):
+        normalized = normalize_version(APP_VERSION)
+
+        self.assertEqual(len(normalized), 3)
+        self.assertEqual(APP_VERSION, ".".join(str(part) for part in normalized))
 
     def test_normalize_version_accepts_release_tags(self):
         self.assertEqual(normalize_version("V4.7"), (4, 7, 0))

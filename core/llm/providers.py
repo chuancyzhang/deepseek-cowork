@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 import base64
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import mimetypes
 import os
 import json
@@ -30,8 +32,16 @@ DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES = {
     "web_search_call",
 }
 TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "network_error",
+    "network error",
+    "fetch failed",
+    "temporary failure in name resolution",
+    "name resolution",
+    "connection refused",
     "concurrency limit exceeded",
     "upstream request failed",
+    "upstream unavailable",
+    "stream ended without",
     "temporarily unavailable",
     "service unavailable",
     "server overloaded",
@@ -42,6 +52,10 @@ TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "connection reset",
     "connection aborted",
     "connection closed",
+    "connection error",
+    "remote protocol error",
+    "server disconnected",
+    "ssl error",
     "bad gateway",
     "gateway timeout",
     "http 429",
@@ -49,12 +63,164 @@ TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "status code: 502",
     "status code: 503",
     "status code: 504",
+    "status code: 500",
+    "http 500",
 )
-RESPONSES_TRANSIENT_MAX_RETRIES = 2
+MODEL_API_TRANSIENT_MAX_RETRIES = 5
+MODEL_API_RETRY_BASE_DELAY_SECONDS = 0.5
+MODEL_API_RETRY_MAX_DELAY_SECONDS = 8.0
+MODEL_API_RETRY_AFTER_MAX_SECONDS = 30.0
 RESPONSES_WEB_SEARCH_TOOL_TYPES = {
     "web_search",
     "web_search_2025_08_26",
 }
+
+
+class ProviderStreamError(RuntimeError):
+    """Error reported as a provider stream chunk before a valid terminal."""
+
+
+def _exception_status_code(error):
+    for value in (
+        getattr(error, "status_code", None),
+        getattr(getattr(error, "response", None), "status_code", None),
+    ):
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def is_transient_model_api_error(error):
+    """Return whether an API transport/upstream failure is safe to retry."""
+
+    status_code = _exception_status_code(error)
+    if status_code in {408, 425, 429, 500, 502, 503, 504}:
+        return True
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    text = str(error or "").strip().lower()
+    if text and any(marker in text for marker in TRANSIENT_PROVIDER_ERROR_MARKERS):
+        return True
+    cause = getattr(error, "__cause__", None) or getattr(error, "__context__", None)
+    return bool(cause is not None and cause is not error and is_transient_model_api_error(cause))
+
+
+def _retry_after_seconds(error):
+    headers = getattr(error, "headers", None)
+    response = getattr(error, "response", None)
+    if headers is None and response is not None:
+        headers = getattr(response, "headers", None)
+    raw = None
+    if headers is not None:
+        try:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+        except Exception:
+            raw = None
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(raw).strip())
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, min(float(seconds), MODEL_API_RETRY_AFTER_MAX_SECONDS))
+
+
+def _retry_cancelled(request_context):
+    callback = (request_context or {}).get("abort_check")
+    if not callable(callback):
+        return False
+    try:
+        return bool(callback())
+    except Exception:
+        return False
+
+
+def _wait_before_model_retry(delay_seconds, request_context):
+    deadline = time.monotonic() + max(0.0, float(delay_seconds or 0.0))
+    while True:
+        if _retry_cancelled(request_context):
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, 0.1))
+
+
+def retry_model_api_stream(stream_factory, request_context=None):
+    """Stage one provider attempt and publish it only after a valid completion.
+
+    Retry notifications are yielded immediately as runtime-only events. All
+    other chunks from a failed attempt are discarded so content and tool calls
+    cannot be duplicated after a reconnect.
+    """
+
+    context = request_context if isinstance(request_context, dict) else {}
+    for attempt_index in range(MODEL_API_TRANSIENT_MAX_RETRIES + 1):
+        if _retry_cancelled(context):
+            return
+        staged_chunks = []
+        reported_error = None
+        try:
+            for chunk in stream_factory(attempt_index):
+                if not isinstance(chunk, dict):
+                    continue
+                if str(chunk.get("type") or "") == "error":
+                    reported_error = ProviderStreamError(
+                        str(chunk.get("content") or "Unknown provider stream error")
+                    )
+                    break
+                staged_chunks.append(chunk)
+            if reported_error is not None:
+                raise reported_error
+            for chunk in staged_chunks:
+                yield chunk
+            return
+        except Exception as exc:
+            can_retry = bool(
+                attempt_index < MODEL_API_TRANSIENT_MAX_RETRIES
+                and is_transient_model_api_error(exc)
+            )
+            if not can_retry:
+                terminal_chunks = [
+                    chunk
+                    for chunk in staged_chunks
+                    if str(chunk.get("type") or "") == "provider_terminal"
+                ]
+                for chunk in terminal_chunks:
+                    yield chunk
+                yield {"type": "error", "content": str(exc)}
+                return
+            retry_number = attempt_index + 1
+            retry_after = _retry_after_seconds(exc)
+            delay_seconds = (
+                retry_after
+                if retry_after is not None
+                else min(
+                    MODEL_API_RETRY_BASE_DELAY_SECONDS * (2 ** attempt_index),
+                    MODEL_API_RETRY_MAX_DELAY_SECONDS,
+                )
+            )
+            yield {
+                "type": "provider_retry",
+                "attempt": retry_number,
+                "request_attempt": attempt_index + 1,
+                "next_request_attempt": attempt_index + 2,
+                "max_request_attempts": MODEL_API_TRANSIENT_MAX_RETRIES + 1,
+                "max_retries": MODEL_API_TRANSIENT_MAX_RETRIES,
+                "reason": str(exc),
+                "delay_seconds": delay_seconds,
+            }
+            if not _wait_before_model_retry(delay_seconds, context):
+                return
 
 
 def normalize_openai_api_protocol(value):
@@ -304,126 +470,128 @@ class OpenAIProvider(LLMProvider):
         }
 
     def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
+        request_context = request_context if isinstance(request_context, dict) else {}
+        provider_name = str(
+            getattr(self, "provider_name", "") or "OpenAI Chat Completions"
+        )
         try:
-            request_context = request_context if isinstance(request_context, dict) else {}
-            client_request_id = str(request_context.get("client_request_id") or "")[:512]
-            provider_name = str(
-                getattr(self, "provider_name", "") or "OpenAI Chat Completions"
-            )
             ensure_tool_call_sequence(messages, context=f"{provider_name} request")
-            if self.api_protocol == API_PROTOCOL_RESPONSES:
-                yield from self._responses_stream_with_retry(
-                    messages,
-                    tools=tools,
-                    prompt_cache_key=prompt_cache_key,
-                    request_context=request_context,
-                )
-                return
-            # Clean messages for OpenAI (remove internal keys if any)
-            clean_messages = self._prepare_messages(messages)
-            
-            # Prepare tools
-            api_tools = tools if tools else None
-            
-            # Common params
-            params = {
-                "model": self.model_name,
-                "messages": clean_messages,
-                "stream": True
-            }
-            if api_tools:
-                params["tools"] = api_tools
-            if client_request_id:
-                params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
-            if prompt_cache_key:
-                self._apply_prompt_cache_key(params, prompt_cache_key)
-            self._apply_stream_usage_options(params)
-            if is_deepseek_request(self.model_name, self.base_url):
-                params.update(build_deepseek_request_options(
-                    self.model_name,
-                    self.base_url,
-                    thinking_enabled=self.thinking_enabled,
-                    reasoning_effort=self.reasoning_effort,
-                ))
-            elif self.reasoning_effort:
-                params["reasoning_effort"] = self.reasoning_effort
+        except Exception as exc:
+            yield {"type": "error", "content": str(exc)}
+            return
+        if self.api_protocol == API_PROTOCOL_RESPONSES:
+            stream_factory = lambda _attempt: self._responses_stream(
+                messages,
+                tools=tools,
+                prompt_cache_key=prompt_cache_key,
+                request_context=request_context,
+            )
+        else:
+            stream_factory = lambda _attempt: self._chat_completions_stream(
+                messages,
+                tools=tools,
+                prompt_cache_key=prompt_cache_key,
+                request_context=request_context,
+            )
+        yield from retry_model_api_stream(stream_factory, request_context=request_context)
 
-            stream = self._create_chat_completion_stream(params)
-            yield {
-                "type": "provider_request",
-                **self._stream_request_metadata(stream, client_request_id),
-            }
+    def _chat_completions_stream(
+        self,
+        messages,
+        tools=None,
+        prompt_cache_key=None,
+        request_context=None,
+    ):
+        request_context = request_context if isinstance(request_context, dict) else {}
+        client_request_id = str(request_context.get("client_request_id") or "")[:512]
+        clean_messages = self._prepare_messages(messages)
+        params = {
+            "model": self.model_name,
+            "messages": clean_messages,
+            "stream": True,
+        }
+        if tools:
+            params["tools"] = tools
+        if client_request_id:
+            params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
+        if prompt_cache_key:
+            self._apply_prompt_cache_key(params, prompt_cache_key)
+        self._apply_stream_usage_options(params)
+        if is_deepseek_request(self.model_name, self.base_url):
+            params.update(build_deepseek_request_options(
+                self.model_name,
+                self.base_url,
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=self.reasoning_effort,
+            ))
+        elif self.reasoning_effort:
+            params["reasoning_effort"] = self.reasoning_effort
 
-            terminal_seen = False
-            for chunk in stream:
-                usage_payload = self._usage_payload(chunk)
-                if usage_payload:
-                    yield {"type": "usage", "usage": usage_payload}
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                    
-                choice = choices[0]
-                delta = choice.delta
-                
-                # 1. Reasoning (DeepSeek style)
-                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                    yield {"type": "reasoning", "content": delta.reasoning_content}
-                
-                # 2. Content
-                delta_content = getattr(delta, "content", None)
-                if delta_content:
-                    yield {"type": "content", "content": delta_content}
-                
-                # 3. Tool Calls
-                delta_tool_calls = getattr(delta, "tool_calls", None)
-                if delta_tool_calls:
-                    for tc in delta_tool_calls:
-                        function = getattr(tc, "function", None)
-                        raw_arguments = getattr(function, "arguments", None) if function else None
-                        if raw_arguments is None:
-                            arguments = None
-                        elif isinstance(raw_arguments, str):
-                            arguments = raw_arguments
-                        else:
-                            try:
-                                arguments = json.dumps(raw_arguments, ensure_ascii=False)
-                            except Exception:
-                                arguments = str(raw_arguments)
-
-                        function_payload = {}
-                        name = getattr(function, "name", None) if function else None
-                        if name:
-                            function_payload["name"] = str(name)
-                        if arguments is not None:
-                            function_payload["arguments"] = arguments
-
-                        tool_call_payload = {
-                            "type": "tool_call",
-                            "index": getattr(tc, "index", 0),
-                            "function": function_payload,
-                        }
-                        tool_call_id = getattr(tc, "id", None)
-                        if tool_call_id:
-                            tool_call_payload["id"] = str(tool_call_id)
-                        yield tool_call_payload
-                finish_reason = getattr(choice, "finish_reason", None)
-                if finish_reason is not None:
-                    terminal_seen = True
-                    yield {
-                        "type": "provider_terminal",
-                        "status": "completed" if str(finish_reason) in {"stop", "tool_calls"} else "incomplete",
-                        "finish_reason": str(finish_reason),
+        stream = self._create_chat_completion_stream(params)
+        yield {
+            "type": "provider_request",
+            **self._stream_request_metadata(stream, client_request_id),
+        }
+        terminal_seen = False
+        for chunk in stream:
+            usage_payload = self._usage_payload(chunk)
+            if usage_payload:
+                yield {"type": "usage", "usage": usage_payload}
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.delta
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                yield {"type": "reasoning", "content": delta.reasoning_content}
+            delta_content = getattr(delta, "content", None)
+            if delta_content:
+                yield {"type": "content", "content": delta_content}
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                for tc in delta_tool_calls:
+                    function = getattr(tc, "function", None)
+                    raw_arguments = getattr(function, "arguments", None) if function else None
+                    if raw_arguments is None:
+                        arguments = None
+                    elif isinstance(raw_arguments, str):
+                        arguments = raw_arguments
+                    else:
+                        try:
+                            arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                        except Exception:
+                            arguments = str(raw_arguments)
+                    function_payload = {}
+                    name = getattr(function, "name", None) if function else None
+                    if name:
+                        function_payload["name"] = str(name)
+                    if arguments is not None:
+                        function_payload["arguments"] = arguments
+                    tool_call_payload = {
+                        "type": "tool_call",
+                        "index": getattr(tc, "index", 0),
+                        "function": function_payload,
                     }
-            if not terminal_seen:
+                    tool_call_id = getattr(tc, "id", None)
+                    if tool_call_id:
+                        tool_call_payload["id"] = str(tool_call_id)
+                    yield tool_call_payload
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason is not None:
+                terminal_seen = True
                 yield {
-                    "type": "error",
-                    "code": "chat_stream_missing_terminal",
-                    "content": "Chat Completions stream ended without a finish_reason.",
+                    "type": "provider_terminal",
+                    "status": (
+                        "completed"
+                        if str(finish_reason) in {"stop", "tool_calls"}
+                        else "incomplete"
+                    ),
+                    "finish_reason": str(finish_reason),
                 }
-                        
-        except Exception as e:
-            yield {"type": "error", "content": str(e)}
+        if not terminal_seen:
+            raise ProviderStreamError(
+                "Chat Completions stream ended without a finish_reason."
+            )
 
     def test_connection(self, timeout=20):
         if self.api_protocol == API_PROTOCOL_RESPONSES:
@@ -560,59 +728,6 @@ class OpenAIProvider(LLMProvider):
             normalized.append(item)
 
         return normalized
-
-    @staticmethod
-    def _is_transient_provider_error(error):
-        text = str(error or "").strip().lower()
-        return bool(text) and any(marker in text for marker in TRANSIENT_PROVIDER_ERROR_MARKERS)
-
-    def _responses_stream_with_retry(
-        self,
-        messages,
-        tools=None,
-        prompt_cache_key=None,
-        request_context=None,
-    ):
-        for retry_count in range(RESPONSES_TRANSIENT_MAX_RETRIES + 1):
-            emitted_actionable_output = False
-            failed_terminal = None
-            try:
-                for chunk in self._responses_stream(
-                    messages,
-                    tools=tools,
-                    prompt_cache_key=prompt_cache_key,
-                    request_context=request_context,
-                ):
-                    chunk_type = str(chunk.get("type") or "") if isinstance(chunk, dict) else ""
-                    if chunk_type in {"content", "tool_call"}:
-                        emitted_actionable_output = True
-                    if (
-                        chunk_type == "provider_terminal"
-                        and str(chunk.get("status") or "") != "completed"
-                    ):
-                        failed_terminal = chunk
-                        continue
-                    yield chunk
-                return
-            except Exception as exc:
-                can_retry = bool(
-                    retry_count < RESPONSES_TRANSIENT_MAX_RETRIES
-                    and not emitted_actionable_output
-                    and self._is_transient_provider_error(exc)
-                )
-                if can_retry:
-                    next_retry = retry_count + 1
-                    yield {
-                        "type": "provider_retry",
-                        "attempt": next_retry,
-                        "max_retries": RESPONSES_TRANSIENT_MAX_RETRIES,
-                        "reason": str(exc),
-                    }
-                    time.sleep(min(0.5 * (2 ** retry_count), 2.0))
-                    continue
-                if failed_terminal is not None:
-                    yield failed_terminal
-                raise
 
     def _normalize_responses_replay_items(self, raw_items, source="response"):
         if self.requires_deepseek_responses_replay:
@@ -1258,52 +1373,63 @@ class AnthropicProvider(LLMProvider):
         return text.endswith("/coding/anthropic") or "/coding/anthropic/" in text
 
     def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
-        try:
-            system_prompt, api_messages = self._prepare_messages(messages)
-            
-            # Convert tools to Anthropic format
-            api_tools = self._convert_tools(tools) if tools else None
-            
-            # Anthropic parameters
-            kwargs = {
-                "model": self.model_name,
-                "messages": api_messages,
-                "max_tokens": 8192 # Required by Anthropic
+        request_context = request_context if isinstance(request_context, dict) else {}
+        stream_factory = lambda _attempt: self._anthropic_stream(
+            messages,
+            tools=tools,
+            request_context=request_context,
+        )
+        yield from retry_model_api_stream(stream_factory, request_context=request_context)
+
+    def _anthropic_stream(self, messages, tools=None, request_context=None):
+        system_prompt, api_messages = self._prepare_messages(messages)
+        api_tools = self._convert_tools(tools) if tools else None
+        kwargs = {
+            "model": self.model_name,
+            "messages": api_messages,
+            "max_tokens": 8192,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        if api_tools:
+            kwargs["tools"] = api_tools
+
+        with self.client.messages.stream(**kwargs) as stream:
+            yield {
+                "type": "provider_request",
+                "client_request_id": str(
+                    (request_context or {}).get("client_request_id") or ""
+                ),
             }
-            if system_prompt:
-                kwargs["system"] = system_prompt
-            if api_tools:
-                kwargs["tools"] = api_tools
-
-            with self.client.messages.stream(**kwargs) as stream:
-                for event in stream:
-                    if event.type == "content_block_delta":
-                        delta_type = getattr(event.delta, "type", "")
-                        if delta_type == "text_delta":
-                            yield {"type": "content", "content": event.delta.text}
-                        elif delta_type == "input_json_delta":
-                            yield {
-                                "type": "tool_call",
-                                "index": event.index,
-                                "function": {
-                                    "arguments": getattr(event.delta, "partial_json", "") or ""
-                                }
-                            }
-                    elif event.type == "content_block_start":
-                        if event.content_block.type == "tool_use":
-                            yield {
-                                "type": "tool_call",
-                                "index": event.index,
-                                "id": event.content_block.id,
-                                "function": {
-                                    "name": event.content_block.name,
-                                    "arguments": "" # Start
-                                }
-                            }
-                yield {"type": "provider_terminal", "status": "completed", "finish_reason": "end_turn"}
-
-        except Exception as e:
-            yield {"type": "error", "content": str(e)}
+            for event in stream:
+                if event.type == "content_block_delta":
+                    delta_type = getattr(event.delta, "type", "")
+                    if delta_type == "text_delta":
+                        yield {"type": "content", "content": event.delta.text}
+                    elif delta_type == "input_json_delta":
+                        yield {
+                            "type": "tool_call",
+                            "index": event.index,
+                            "function": {
+                                "arguments": getattr(event.delta, "partial_json", "") or ""
+                            },
+                        }
+                elif event.type == "content_block_start":
+                    if event.content_block.type == "tool_use":
+                        yield {
+                            "type": "tool_call",
+                            "index": event.index,
+                            "id": event.content_block.id,
+                            "function": {
+                                "name": event.content_block.name,
+                                "arguments": "",
+                            },
+                        }
+            yield {
+                "type": "provider_terminal",
+                "status": "completed",
+                "finish_reason": "end_turn",
+            }
 
     def test_connection(self, timeout=20):
         response = self.client.messages.create(

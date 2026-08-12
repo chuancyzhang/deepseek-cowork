@@ -7,7 +7,11 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
-from .conversation_integrity import canonical_ledger_message, normalize_message_ids
+from .conversation_integrity import (
+    canonical_ledger_message,
+    canonical_ledger_messages_hash,
+    normalize_message_ids,
+)
 from .message_persistence import filter_persistable_messages
 
 
@@ -971,6 +975,106 @@ class ChatStorage:
                 normalized_messages,
             )
             self._replace_messages_in_connection(conn, conversation_id, normalized_messages)
+
+    def rewrite_conversation_safely(
+        self,
+        conversation_id,
+        messages,
+        *,
+        expected_messages_hash,
+        expected_revision,
+        title=None,
+        status="active",
+        meta=None,
+    ):
+        """Atomically replace one explicitly selected history revision.
+
+        Normal saves remain append-only. This entry point is reserved for
+        user-authorized edit/delete branch changes and rejects stale UI state.
+        """
+
+        normalized_messages = self.normalize_messages(
+            messages,
+            conversation_id=conversation_id,
+        )
+        expected_hash = str(expected_messages_hash or "").strip()
+        if not expected_hash:
+            raise ValueError("expected_messages_hash is required for history rewrite")
+        expected_revision = max(0, int(expected_revision or 0))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conversation_row = conn.execute(
+                "SELECT meta FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if conversation_row is None:
+                raise ConversationWriteConflict(
+                    f"conversation {conversation_id} no longer exists"
+                )
+            rows = conn.execute(
+                """
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id, created_at
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY position ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+            current_messages = self.normalize_messages(
+                [self._message_row_to_dict(row) for row in rows],
+                conversation_id=conversation_id,
+            )
+            current_hash = canonical_ledger_messages_hash(current_messages)
+            if current_hash != expected_hash:
+                raise ConversationWriteConflict(
+                    f"conversation {conversation_id} changed before history rewrite"
+                )
+            current_meta = self._parse_json_dict(conversation_row["meta"])
+            current_revision = max(
+                0,
+                int(current_meta.get("history_save_revision") or 0),
+            )
+            if current_revision != expected_revision:
+                raise ConversationWriteConflict(
+                    f"conversation {conversation_id} revision changed before history rewrite: "
+                    f"expected {expected_revision}, got {current_revision}"
+                )
+            next_revision = current_revision + 1
+            next_meta = dict(meta) if isinstance(meta, dict) else dict(current_meta)
+            next_meta["history_save_revision"] = next_revision
+            normalized_messages = self._remap_cross_conversation_message_ids(
+                conn,
+                conversation_id,
+                normalized_messages,
+            )
+            self._upsert_conversation_in_connection(
+                conn,
+                conversation_id,
+                title=title,
+                status=status,
+                meta=next_meta,
+            )
+            conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            now = int(time.time())
+            for index, message in enumerate(normalized_messages):
+                self._insert_message_row(
+                    conn,
+                    "messages",
+                    "conversation_id",
+                    conversation_id,
+                    message,
+                    index,
+                    now,
+                )
+            return {
+                "outcome": "rewritten",
+                "previous_messages_hash": current_hash,
+                "messages_hash": canonical_ledger_messages_hash(normalized_messages),
+                "message_count": len(normalized_messages),
+                "revision": next_revision,
+                "meta": next_meta,
+            }
 
     def _remap_cross_conversation_message_ids(
         self,

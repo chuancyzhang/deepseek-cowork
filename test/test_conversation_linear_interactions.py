@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSiz
 from core.chat_storage import ChatStorage
 from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
 from core.conversation_render import is_legacy_skill_change_notice_message
+from core.runtime_journal import RuntimeJournal
 from core.theme import DesignTokens
 
 from main import (
@@ -220,6 +221,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             open_session_skill_picker=lambda: hits.append("skill"),
             toggle_grill_mode=lambda: hits.append("grill"),
             start_conversation_skill_flow=lambda: hits.append("capture"),
+            input_field=SimpleNamespace(toPlainText=lambda: ""),
+            save_composer_as_favorite=lambda: hits.append("favorite"),
         )
         popover = ComposerActionPopover(window, host)
         rows = popover.findChildren(ProductActionRow)
@@ -235,7 +238,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         second_popover = ComposerActionPopover(window, host)
         second_rows = second_popover.findChildren(ProductActionRow)
         second_popover.show_for(anchor, prefer_above=True)
-        QTest.mouseClick(second_rows[2].title_label, Qt.LeftButton)
+        QTest.mouseClick(second_rows[3].title_label, Qt.LeftButton)
         self.app.processEvents()
         self.assertEqual(hits, ["file", "grill"])
 
@@ -792,6 +795,216 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(group.process_disclosure.isChecked())
             self.assertTrue(bubble.thinking_widget.isHidden())
             self.assertEqual(bubble.main_content_text, "最终结果")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_completed_lifecycle_clears_sidebar_activity_without_worker_state(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [{"id": "u1", "role": "user", "content": "hello"}]
+            window.set_session_status("running", state.session_id)
+            self.assertTrue(window._session_has_live_activity(state.session_id))
+
+            window.set_session_status("finalizing", state.session_id)
+            self.assertTrue(window._session_has_live_activity(state.session_id))
+
+            window.set_session_status("completed", state.session_id)
+            self.assertFalse(window._session_has_live_activity(state.session_id))
+            self.assertFalse(state.live_activity)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_completed_lifecycle_ignores_stale_worker_and_daemon_flags(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            stale_worker = SimpleNamespace(
+                isRunning=lambda: True,
+                is_paused=False,
+            )
+            state.llm_worker = stale_worker
+            state.daemon_running = True
+            state.turn_steerable = True
+
+            window.set_session_status("completed", state.session_id)
+            window.normalize_session_ui(state)
+
+            self.assertFalse(state.daemon_running)
+            self.assertFalse(state.turn_steerable)
+            self.assertFalse(window.stop_btn.isVisible())
+            self.assertEqual(window.action_btn.text(), "开始")
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+
+    def test_provider_retry_is_runtime_only_and_does_not_change_messages(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [{"id": "u1", "role": "user", "content": "hello"}]
+            state.active_turn_id = 1
+            window.set_session_status("running", state.session_id)
+            before_messages = list(state.messages)
+            before_phase = state.run_phase
+
+            window.handle_observability_event(
+                {
+                    "type": "provider_retry",
+                    "attempt": 3,
+                    "max_retries": 5,
+                    "reason": "connection reset",
+                    "delay_seconds": 1.0,
+                },
+                state.session_id,
+            )
+
+            self.assertEqual(state.messages, before_messages)
+            self.assertEqual(state.run_phase, before_phase)
+            self.assertEqual(state.provider_retry_attempt, 3)
+            self.assertEqual(state.provider_retry_max, 5)
+            window.normalize_session_ui(state)
+            self.assertEqual(window.loop_hint.text(), "正在重试 3/5")
+            self.assertEqual(state.observability_events[-1]["type"], "provider_retry")
+            session_meta = str(window._compose_session_meta(state))
+            self.assertNotIn("provider_retry", session_meta)
+            self.assertNotIn("正在重试", session_meta)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_normal_completion_has_no_interruption_warning_and_clears_activity(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_normal_terminal")
+            state.messages = [{
+                "id": "u-normal",
+                "role": "user",
+                "content": "你好",
+                "meta": {"turn_id": "1", "request_id": "request-normal"},
+            }]
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-normal"
+            window.set_session_status("running", state.session_id)
+            bubble = window._append_live_thinking_segment(state)
+
+            window.handle_llm_response(
+                {
+                    "request_id": "request-normal",
+                    "role": "assistant",
+                    "content": "正常完成。",
+                    "generated_messages": [{
+                        "id": "a-normal",
+                        "role": "assistant",
+                        "content": "正常完成。",
+                        "meta": {"turn_id": "1", "request_id": "request-normal"},
+                    }],
+                },
+                state.session_id,
+                turn_id=1,
+            )
+
+            self.assertEqual(state.session_status, "completed")
+            self.assertFalse(window._session_has_live_activity(state.session_id))
+            self.assertEqual(bubble.main_content_text, "正常完成。")
+            self.assertNotIn("异常中断", bubble.main_content_text)
+            self.assertFalse(
+                any(
+                    (message.get("meta") or {}).get("context_visible_interruption")
+                    for message in state.messages
+                    if isinstance(message, dict)
+                )
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_terminal_runtime_result_recovers_once_after_reopen(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                state = window.get_current_session()
+                state.messages = [{
+                    "id": "u-runtime",
+                    "role": "user",
+                    "content": "恢复结果",
+                    "meta": {"turn_id": "1", "request_id": "request-runtime"},
+                }]
+                state.history_loaded = False
+                window.runtime_journal = RuntimeJournal(root)
+                window.runtime_journal.begin_run(
+                    state.session_id,
+                    "request-runtime",
+                    turn_id="1",
+                    writer_owner="ui:test",
+                    base_messages=state.messages,
+                )
+                final_result = {
+                    "request_id": "request-runtime",
+                    "role": "assistant",
+                    "content": "恢复后的完整回答。",
+                    "generated_messages": [{
+                        "id": "a-runtime",
+                        "role": "assistant",
+                        "content": "恢复后的完整回答。",
+                        "meta": {"turn_id": "1", "request_id": "request-runtime"},
+                    }],
+                }
+                window.runtime_journal.update_run(
+                    state.session_id,
+                    "request-runtime",
+                    {"status": "finalizing", "final_result": final_result},
+                )
+                window.runtime_journal.update_run(
+                    state.session_id,
+                    "request-runtime",
+                    {"status": "completed", "final_result": final_result},
+                )
+
+                self.assertTrue(window._restore_terminal_runtime_run_if_needed(state))
+                self.assertEqual(state.session_status, "completed")
+                self.assertEqual(
+                    [message["content"] for message in state.messages if message.get("role") == "assistant"],
+                    ["恢复后的完整回答。"],
+                )
+                self.assertFalse(window._restore_terminal_runtime_run_if_needed(state))
+            finally:
+                window.close()
+                window.deleteLater()
+
+    def test_render_failure_after_provider_success_keeps_completed_terminal(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-render-failure"
+            window.set_session_status("running", state.session_id)
+            with (
+                patch.object(
+                    window,
+                    "_handle_llm_response_impl",
+                    side_effect=RuntimeError("visualization render failed"),
+                ),
+                patch.object(window, "add_system_toast") as toast,
+            ):
+                window.handle_llm_response(
+                    {
+                        "request_id": "request-render-failure",
+                        "role": "assistant",
+                        "content": "模型已经正常完成。",
+                    },
+                    state.session_id,
+                    turn_id=1,
+                )
+
+            self.assertEqual(state.session_status, "completed")
+            self.assertFalse(window._session_has_live_activity(state.session_id))
+            toast.assert_called()
+            self.assertIn("界面收尾失败", toast.call_args.args[0])
         finally:
             window.close()
             window.deleteLater()
@@ -1917,7 +2130,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 and (message.get("meta") or {}).get("context_visible_interruption")
             ]
             self.assertEqual(len(interrupted), 1)
-            self.assertIn("本轮因异常中断", interrupted[0]["content"])
+            self.assertIn("本轮执行失败", interrupted[0]["content"])
             self.assertNotIn("reasoning", interrupted[0])
         finally:
             window.close()
@@ -2165,7 +2378,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=1,
             )
             self.assertIsNotNone(bubble.parent())
-            self.assertIn("本轮因异常中断", bubble.main_content_text)
+            self.assertIn("本轮执行失败", bubble.main_content_text)
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
             self.assertEqual(len(assistants), 3)
             self.assertFalse(

@@ -11,6 +11,9 @@ from .conversation_integrity import canonical_ledger_messages_hash
 
 RUNTIME_JOURNAL_VERSION = 2
 PENDING_COMMIT_FORMAT_APPEND_V1 = "ledger_append_v1"
+RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+RUN_NONTERMINAL_STATUSES = {"running", "finalizing"}
+RUN_STATUSES = RUN_NONTERMINAL_STATUSES | RUN_TERMINAL_STATUSES
 
 
 class RuntimeJournalError(RuntimeError):
@@ -227,7 +230,14 @@ class RuntimeJournal:
             raise RuntimeJournalError(
                 f"runtime manifest scan failed: {first['path']} | {first['error']}"
             )
-        return manifests
+        return [
+            {
+                key: value
+                for key, value in manifest.items()
+                if key != "_runtime_manifest_path"
+            }
+            for manifest in manifests
+        ]
 
     def scan_manifests(self):
         """Read every manifest independently and retain exact per-file failures."""
@@ -241,10 +251,50 @@ class RuntimeJournal:
             if not os.path.isfile(path):
                 continue
             try:
-                manifests.append(self._read(path))
+                manifest = self._read(path)
+                if not isinstance(manifest, dict):
+                    raise RuntimeJournalError("runtime manifest must be a JSON object")
+                manifest = dict(manifest)
+                manifest["_runtime_manifest_path"] = path
+                manifests.append(manifest)
             except Exception as exc:
                 errors.append({"path": path, "error": str(exc), "source": "runtime_manifest"})
         return manifests, errors
+
+    def quarantine_manifest_file(self, manifest_path, *, reason):
+        """Atomically remove a malformed manifest from the active recovery scan."""
+
+        source = os.path.abspath(str(manifest_path or ""))
+        sessions_root = os.path.abspath(os.path.join(self.root, "sessions"))
+        if (
+            not source
+            or os.path.basename(source) != "manifest.json"
+            or os.path.dirname(os.path.dirname(source)) != sessions_root
+        ):
+            raise RuntimeJournalError(
+                f"refusing to quarantine unexpected runtime manifest path: {source}"
+            )
+        if not os.path.isfile(source):
+            return ""
+        quarantined_at = time.time()
+        quarantine_dir = os.path.join(self.root, "quarantined_manifests")
+        os.makedirs(quarantine_dir, exist_ok=True)
+        source_key = os.path.basename(os.path.dirname(source))
+        destination = os.path.join(
+            quarantine_dir,
+            f"{source_key}.{int(quarantined_at * 1000)}.manifest.json.quarantined",
+        )
+        os.replace(source, destination)
+        self._atomic_write(
+            f"{destination}.meta.json",
+            {
+                "source_path": source,
+                "quarantine_path": destination,
+                "reason": str(reason or "malformed_runtime_manifest"),
+                "quarantined_at": quarantined_at,
+            },
+        )
+        return destination
 
     def update_manifest(self, session_id, patch=None, *, expected_revision=None):
         with self.session_lock(session_id):
@@ -305,7 +355,7 @@ class RuntimeJournal:
                     default=None,
                 )
                 active_status = str((active_record or {}).get("status") or "")
-                if active_status not in {"completed", "failed", "interrupted", "cancelled"}:
+                if active_status not in RUN_TERMINAL_STATUSES:
                     raise RuntimeJournalError(
                         f"session {session_id} already has active run {active_run_id}"
                     )
@@ -321,12 +371,7 @@ class RuntimeJournal:
                         self._record_path(session_id, "runs", active_run_id),
                         default=None,
                     )
-                    if str((active_record or {}).get("status") or "") not in {
-                        "completed",
-                        "failed",
-                        "interrupted",
-                        "cancelled",
-                    }:
+                    if str((active_record or {}).get("status") or "") not in RUN_TERMINAL_STATUSES:
                         raise RuntimeJournalError(
                             f"writer owner transfer blocked for active session {session_id}"
                         )
@@ -334,7 +379,7 @@ class RuntimeJournal:
             self._atomic_write(self._record_path(session_id, "runs", run_id), record)
             active_manifest_run_id = (
                 ""
-                if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}
+                if record.get("status") in RUN_TERMINAL_STATUSES
                 else str(run_id)
             )
             manifest.update({
@@ -350,6 +395,23 @@ class RuntimeJournal:
     def get_run(self, session_id, run_id):
         return self._read(self._record_path(session_id, "runs", run_id), default=None)
 
+    def list_runs(self, session_id):
+        """Return runtime records newest-first for terminal reconciliation."""
+
+        directory = self._category_dir(session_id, "runs")
+        records = []
+        for filename in os.listdir(directory):
+            if not filename.endswith(".json"):
+                continue
+            record = self._read(os.path.join(directory, filename), default=None)
+            if isinstance(record, dict):
+                records.append(record)
+        return sorted(
+            records,
+            key=lambda item: float(item.get("updated_at") or 0.0),
+            reverse=True,
+        )
+
     def update_run(self, session_id, run_id, patch):
         with self.session_lock(session_id):
             path = self._record_path(session_id, "runs", run_id)
@@ -361,12 +423,28 @@ class RuntimeJournal:
                 incoming.pop("status", None)
                 incoming.pop("terminal_error", None)
                 incoming.pop("finished_at", None)
+            current_status = str(record.get("status") or "running")
+            incoming_status = str(incoming.get("status") or "").strip()
+            if incoming_status:
+                if incoming_status not in RUN_STATUSES:
+                    raise RuntimeJournalError(
+                        f"invalid runtime status transition target: {incoming_status}"
+                    )
+                if current_status in RUN_TERMINAL_STATUSES and incoming_status != current_status:
+                    raise RuntimeJournalError(
+                        f"terminal runtime status cannot be replaced: "
+                        f"{current_status} -> {incoming_status}"
+                    )
+                if current_status == "finalizing" and incoming_status == "running":
+                    raise RuntimeJournalError(
+                        "runtime status cannot regress from finalizing to running"
+                    )
             record.update(incoming)
             record["updated_at"] = time.time()
-            if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+            if record.get("status") in RUN_TERMINAL_STATUSES:
                 record["finished_at"] = record.get("finished_at") or time.time()
             self._atomic_write(path, record)
-            if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
+            if record.get("status") in RUN_TERMINAL_STATUSES:
                 manifest = self.load_manifest(session_id)
                 if str(manifest.get("active_run_id") or "") == str(run_id):
                     manifest["active_run_id"] = ""
@@ -383,6 +461,8 @@ class RuntimeJournal:
             record = self._read(path, default=None)
             if record is None:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            if str(record.get("status") or "") in RUN_TERMINAL_STATUSES:
+                return record
             record.update(dict(patch or {}))
             record.update({
                 "status": "interrupted",
@@ -688,3 +768,83 @@ class RuntimeJournal:
             manifest["updated_at"] = time.time()
             self._atomic_write(self._manifest_path(session_id), manifest)
             return True
+
+    def quarantine_pending_commit(
+        self,
+        session_id,
+        run_id,
+        *,
+        reason,
+        committed_messages=None,
+    ):
+        """Move an irreconcilable pending snapshot out of the active manifest."""
+
+        with self.session_lock(session_id):
+            manifest = self.load_manifest(session_id)
+            if str(manifest.get("pending_commit_run_id") or "") != str(run_id or ""):
+                return None
+            pending = manifest.get("pending_commit")
+            if not isinstance(pending, dict):
+                return None
+            quarantined_at = time.time()
+            quarantine_id = f"{run_id}:{int(quarantined_at * 1000)}"
+            record = {
+                "session_id": str(session_id),
+                "run_id": str(run_id),
+                "reason": str(reason or "history_divergence"),
+                "pending_commit": pending,
+                "committed_messages_hash": self.messages_hash(committed_messages or []),
+                "quarantined_at": quarantined_at,
+            }
+            self._atomic_write(
+                self._record_path(
+                    session_id,
+                    "quarantined_commits",
+                    quarantine_id,
+                ),
+                record,
+            )
+            manifest.pop("pending_commit", None)
+            manifest["pending_commit_run_id"] = ""
+            manifest["last_quarantined_commit"] = {
+                "run_id": str(run_id),
+                "reason": record["reason"],
+                "quarantined_at": quarantined_at,
+            }
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = quarantined_at
+            self._atomic_write(self._manifest_path(session_id), manifest)
+            return record
+
+    def record_quarantined_commit(
+        self,
+        session_id,
+        run_id,
+        pending_commit,
+        *,
+        reason,
+        committed_messages=None,
+    ):
+        """Quarantine a malformed legacy commit that lacks a usable manifest key."""
+
+        quarantined_at = time.time()
+        quarantine_id = f"{run_id or 'unknown'}:{int(quarantined_at * 1000)}"
+        record = {
+            "session_id": str(session_id or "unknown"),
+            "run_id": str(run_id or "unknown"),
+            "reason": str(reason or "history_divergence"),
+            "pending_commit": (
+                dict(pending_commit) if isinstance(pending_commit, dict) else {}
+            ),
+            "committed_messages_hash": self.messages_hash(committed_messages or []),
+            "quarantined_at": quarantined_at,
+        }
+        self._atomic_write(
+            self._record_path(
+                session_id or "unknown",
+                "quarantined_commits",
+                quarantine_id,
+            ),
+            record,
+        )
+        return record

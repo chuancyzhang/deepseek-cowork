@@ -547,7 +547,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
     def test_history_batches_always_include_running_and_waiting_sessions(self):
         live_state = self.window.get_current_session()
-        live_state.live_activity = True
+        live_state.session_status = "running"
         waiting_id = self.window.create_new_session(make_current=False)
         waiting_state = self.window.get_session(waiting_id)
         waiting_state.pending_interactions = {"request": object()}
@@ -718,7 +718,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
                 workspace_dir=project_dir,
             )
             live_state = self.window.get_session(live_id)
-            live_state.live_activity = True
+            live_state.session_status = "running"
             sessions = [
                 {"id": f"recent-{index}", "title": f"最近 {index}", "updated_at": 100 - index}
                 for index in range(6)
@@ -737,7 +737,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
     def test_sidebar_running_status_survives_long_title_min_width_hover_and_theme_refresh(self):
         state = self.window.get_current_session()
-        state.live_activity = True
+        state.session_status = "running"
         self.window.history_rows = {}
         self.window.history_buttons = {}
         self.window.history_age_labels = {}

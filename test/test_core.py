@@ -1501,6 +1501,66 @@ class TestDaemonState(unittest.TestCase):
         saved_messages = self.state.chat_storage.get_messages(session_id)
         self.assertEqual([msg.get("content") for msg in saved_messages], ["first", "reply", "continue", "done"])
 
+    def test_run_llm_sync_classifies_provider_error_as_failed(self):
+        session_id = "desktop-provider-failed"
+        self.state._run_worker_once = lambda *_args, **_kwargs: {
+            "error": "upstream unavailable",
+            "generated_messages": [],
+        }
+
+        result = self.state.run_llm_sync(
+            session_id,
+            "hello",
+            workspace_dir=self.temp_dir,
+            request_id="run-provider-failed",
+            turn_id="turn-provider-failed",
+        )
+
+        self.assertEqual(result["_runtime_terminal"], "failed")
+        run = self.state.runtime_journal.get_run(
+            session_id,
+            "run-provider-failed",
+        )
+        self.assertEqual(run["status"], "failed")
+        self.assertNotEqual(run["status"], "interrupted")
+
+    def test_run_llm_sync_stop_wins_over_late_success(self):
+        session_id = "desktop-stop-wins"
+        run_id = "run-stop-wins"
+
+        def late_success(*_args, **_kwargs):
+            self.state.runtime_journal.interrupt_run(
+                session_id,
+                run_id,
+                reason="interrupted by user",
+            )
+            return {
+                "content": "late success must not win",
+                "generated_messages": [{
+                    "id": "late-assistant",
+                    "role": "assistant",
+                    "content": "late success must not win",
+                }],
+            }
+
+        self.state._run_worker_once = late_success
+
+        result = self.state.run_llm_sync(
+            session_id,
+            "stop this run",
+            workspace_dir=self.temp_dir,
+            request_id=run_id,
+            turn_id="turn-stop-wins",
+            writer_owner="ui:test",
+        )
+
+        self.assertEqual(result["_runtime_terminal"], "interrupted")
+        self.assertIn("interrupted", result["error"].lower())
+        run = self.state.runtime_journal.get_run(session_id, run_id)
+        self.assertEqual(run["status"], "interrupted")
+        manifest = self.state.runtime_journal.load_manifest(session_id)
+        self.assertFalse(manifest.get("pending_commit_run_id"))
+
     def test_save_session_uses_shared_persistence_filter(self):
         session_id = "daemon-persistence-filter"
         self.state.sessions[session_id] = [
@@ -1577,7 +1637,7 @@ class TestDaemonState(unittest.TestCase):
             ["keep"],
         )
 
-    def test_daemon_sqlite_conflict_preserves_full_snapshot_in_sidecar(self):
+    def test_daemon_sqlite_conflict_records_explicit_commit_conflict(self):
         session_id = "daemon-conflict-session"
         run_id = "daemon-conflict-run"
         baseline = [{"id": "u1", "role": "user", "content": "committed"}]
@@ -1597,11 +1657,10 @@ class TestDaemonState(unittest.TestCase):
             ["committed"],
         )
         manifest = self.state.runtime_journal.load_manifest(session_id)
-        self.assertEqual(manifest.get("pending_commit_run_id"), run_id)
-        self.assertEqual(
-            [item.get("content") for item in manifest["pending_commit"]["messages"]],
-            ["different"],
-        )
+        self.assertFalse(manifest.get("pending_commit_run_id"))
+        run = self.state.runtime_journal.get_run(session_id, run_id)
+        self.assertEqual(run.get("commit_status"), "conflict")
+        self.assertIn("diverged", run.get("commit_error") or "")
 
     def test_deepseek_v4_uses_large_context_budget(self):
         state = DaemonState(
@@ -3493,6 +3552,92 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(rejected["accepted"])
         self.assertEqual(rejected["error"], "turn_mismatch")
 
+    def test_reconnect_completes_old_daemon_finalizing_result(self):
+        session_id = "old-finalizing-session"
+        run_id = "old-finalizing-run"
+        self.state.runtime_journal.begin_run(
+            session_id,
+            run_id,
+            turn_id="turn-old-finalizing",
+            writer_owner="daemon:old",
+            base_messages=[],
+            extra={
+                "execution_backend": "daemon",
+                "daemon_instance_id": "old-daemon-instance",
+            },
+        )
+        self.state.runtime_journal.update_run(
+            session_id,
+            run_id,
+            {
+                "status": "finalizing",
+                "updated_at": time.time() - 10,
+                "final_result": {
+                    "content": "durable answer",
+                    "generated_messages": [{
+                        "id": "old-final-answer",
+                        "role": "assistant",
+                        "content": "durable answer",
+                    }],
+                },
+            },
+        )
+        run_path = self.state.runtime_journal._record_path(
+            session_id,
+            "runs",
+            run_id,
+        )
+        run = self.state.runtime_journal._read(run_path)
+        run["updated_at"] = time.time() - 10
+        self.state.runtime_journal._atomic_write(run_path, run)
+
+        attached = self.client.attach_run(session_id, run_id, starting_after=0)
+
+        self.assertEqual(attached["status"], "ok")
+        self.assertEqual(attached["run"]["status"], "completed")
+        self.assertEqual(
+            attached["run"]["recovered_by_daemon_instance_id"],
+            self.state.daemon_instance_id,
+        )
+
+    def test_stop_session_atomically_interrupts_runtime_before_worker_stop(self):
+        class _Worker:
+            request_id = "stop-runtime-run"
+
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        session_id = "stop-runtime-session"
+        worker = _Worker()
+        self.state.runtime_journal.begin_run(
+            session_id,
+            worker.request_id,
+            turn_id="stop-runtime-turn",
+            writer_owner="daemon:test",
+            base_messages=[],
+            extra={
+                "execution_backend": "daemon",
+                "daemon_instance_id": self.state.daemon_instance_id,
+            },
+        )
+        self.state.set_active_worker(
+            session_id,
+            worker,
+            turn_id="stop-runtime-turn",
+            run_id=worker.request_id,
+        )
+
+        stopped = self.state.stop_session(session_id)
+
+        self.assertTrue(stopped)
+        self.assertTrue(worker.stopped)
+        run = self.state.runtime_journal.get_run(session_id, worker.request_id)
+        self.assertEqual(run["status"], "interrupted")
+        self.assertTrue(run["stop_requested"])
+
     def test_guidance_mutation_roundtrip(self):
         class _Worker:
             turn_id = "turn-8"
@@ -3636,11 +3781,10 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertEqual(manifest.get("pending_commit_run_id"), run_id)
         run = self.state.runtime_journal.get_run(session_id, run_id)
         self.assertEqual(run.get("status"), "completed")
+        pending = manifest.get("pending_commit") or {}
+        self.assertEqual(pending.get("format"), "ledger_append_v1")
         self.assertEqual(
-            [
-                item.get("content")
-                for item in (manifest.get("pending_commit") or {}).get("messages") or []
-            ],
+            [item.get("content") for item in pending.get("append_messages") or []],
             ["hello", "daemon answer"],
         )
 

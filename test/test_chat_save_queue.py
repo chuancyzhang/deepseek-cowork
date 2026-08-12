@@ -2,13 +2,14 @@ import os
 import tempfile
 import unittest
 import gc
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
-from core.chat_storage import ChatStorage
+from core.chat_storage import ChatStorage, ConversationWriteConflict
 
 
 class TestChatSaveQueue(unittest.TestCase):
@@ -169,6 +170,57 @@ class TestChatSaveQueue(unittest.TestCase):
                 app.processEvents()
 
         self.assertEqual([message["content"] for message in messages], ["new"])
+
+    def test_history_divergence_stops_retry_and_reports_blocked_save(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = ChatSaveWorker(
+                os.path.join(temp_dir, "chat_history.sqlite"),
+                debounce_ms=0,
+            )
+            blocked = []
+            retryable = []
+            worker.save_blocked.connect(
+                lambda session_id, revision, error: blocked.append(
+                    (session_id, revision, error)
+                )
+            )
+            worker.save_failed.connect(
+                lambda session_id, revision, error: retryable.append(
+                    (session_id, revision, error)
+                )
+            )
+            request = ChatSaveRequest(
+                session_id="session-diverged",
+                messages=[{"id": "u1", "role": "user", "content": "new"}],
+                title="Diverged",
+                status="completed",
+                meta={},
+                ready_at=0.0,
+                revision=2,
+            )
+            with patch.object(
+                ChatStorage,
+                "save_conversation_safely",
+                side_effect=ConversationWriteConflict("history diverged"),
+            ):
+                worker.start()
+                try:
+                    self.assertTrue(worker.enqueue(request))
+                    self.assertTrue(
+                        worker.flush(session_id="session-diverged", timeout_ms=2000)
+                    )
+                    app.processEvents()
+                finally:
+                    self.assertTrue(worker.stop_worker(timeout_ms=2000))
+                    del worker
+                    gc.collect()
+                    app.processEvents()
+
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0][:2], ("session-diverged", 2))
+        self.assertIn("history diverged", blocked[0][2])
+        self.assertEqual(retryable, [])
 
 
 if __name__ == "__main__":

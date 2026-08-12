@@ -258,13 +258,24 @@ class HistoryPerformanceTests(unittest.TestCase):
             {"id": "a2", "role": "assistant", "content": "第二答"},
         ]
         self.state.messages = messages
+        self.window.chat_storage.save_conversation_safely(
+            self.state.session_id,
+            messages,
+            title="历史编辑测试",
+            meta={"history_save_revision": 0},
+        )
         self.state.render_items = build_conversation_render_spans(messages)
         self.state.displayed_render_count = len(self.state.render_items)
         self.window._render_session_history_spans(self.state, self.state.render_items)
         prefix_widget = self.state.render_node_by_message_id["u1"]["widget"]
 
         def submit(state, text, prompt_files, **_kwargs):
-            message = {"id": "u2-new", "role": "user", "content": text}
+            message = {
+                "id": "u2-new",
+                "role": "user",
+                "content": text,
+                "meta": dict(_kwargs.get("user_message_meta") or {}),
+            }
             state.messages.append(message)
             self.window.add_chat_bubble(
                 "User",
@@ -298,6 +309,12 @@ class HistoryPerformanceTests(unittest.TestCase):
             {"id": "a2", "role": "assistant", "content": "第二答"},
         ]
         self.state.messages = messages
+        self.window.chat_storage.save_conversation_safely(
+            self.state.session_id,
+            messages,
+            title="历史回滚测试",
+            meta={"history_save_revision": 0},
+        )
         self.state.render_items = build_conversation_render_spans(messages)
         self.state.displayed_render_count = len(self.state.render_items)
         self.window._render_session_history_spans(self.state, self.state.render_items)
@@ -328,6 +345,12 @@ class HistoryPerformanceTests(unittest.TestCase):
             {"id": "u2", "role": "user", "content": "第二问"},
         ]
         self.state.messages = messages
+        self.window.chat_storage.save_conversation_safely(
+            self.state.session_id,
+            messages,
+            title="历史删除测试",
+            meta={"history_save_revision": 0},
+        )
         self.state.render_items = build_conversation_render_spans(messages)
         self.state.displayed_render_count = len(self.state.render_items)
         self.window._render_session_history_spans(self.state, self.state.render_items)

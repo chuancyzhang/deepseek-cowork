@@ -88,6 +88,7 @@ class DaemonState:
         self.active_workers = {}
         self.detached_workers = {}
         self.lock = threading.Lock()
+        self.daemon_instance_id = uuid.uuid4().hex
         self.suspended = False
         self.last_activity = time.time()
         idle_minutes = config_manager.get("daemon_idle_minutes", 10)
@@ -120,14 +121,26 @@ class DaemonState:
                     f"runtime writer owner mismatch for {session_id}: "
                     f"{existing_owner} != {writer_owner}"
                 )
-            return existing
+            return self.runtime_journal.update_run(
+                session_id,
+                run_id,
+                {
+                    "execution_backend": "daemon",
+                    "daemon_instance_id": self.daemon_instance_id,
+                    "daemon_pid": os.getpid(),
+                },
+            )
         run = self.runtime_journal.begin_run(
             session_id,
             run_id,
             turn_id=turn_id,
             writer_owner=writer_owner,
             base_messages=base_messages,
-            extra={"execution_backend": "daemon"},
+            extra={
+                "execution_backend": "daemon",
+                "daemon_instance_id": self.daemon_instance_id,
+                "daemon_pid": os.getpid(),
+            },
         )
         self.runtime_journal.append_event(
             session_id,
@@ -357,21 +370,25 @@ class DaemonState:
                 f"session_id={session_id} run_id={run_id} error={exc}"
             )
             if run_id:
+                conflict_payload = {
+                    "error": str(exc),
+                    "snapshot_hash": RuntimeJournal.messages_hash(messages),
+                    "recovery": "重新打开会话并从当前历史创建新分支。",
+                }
                 self.runtime_journal.append_event(
                     session_id,
                     run_id,
                     "sqlite_conflict",
-                    {
-                        "error": str(exc),
-                        "snapshot_hash": RuntimeJournal.messages_hash(messages),
-                    },
+                    conflict_payload,
                 )
-                self.runtime_journal.mark_pending_commit(
+                self.runtime_journal.update_run(
                     session_id,
                     run_id,
-                    messages,
-                    title=title,
-                    meta={"sqlite_conflict": str(exc)},
+                    {
+                        "commit_status": "conflict",
+                        "commit_error": str(exc),
+                        "conflicting_snapshot_hash": conflict_payload["snapshot_hash"],
+                    },
                 )
             return False
         _log_daemon(
@@ -413,6 +430,7 @@ class DaemonState:
             self.detached_workers[key] = {
                 "session_id": session_id,
                 "worker": worker,
+                "run_id": str(getattr(worker, "request_id", "") or ""),
                 "reason": reason,
                 "created_at": time.time(),
             }
@@ -437,11 +455,44 @@ class DaemonState:
         with self.lock:
             active = self.active_workers.get(session_id)
             worker = active.get("worker") if isinstance(active, dict) else active
-            detached = [
-                item.get("worker")
+            active_run_id = str(
+                (active.get("run_id") if isinstance(active, dict) else "")
+                or getattr(worker, "request_id", "")
+                or ""
+            )
+            detached_entries = [
+                item
                 for item in self.detached_workers.values()
                 if item.get("session_id") == session_id
             ]
+            detached = [item.get("worker") for item in detached_entries]
+            run_ids = {
+                run_id
+                for run_id in [
+                    active_run_id,
+                    *[
+                        str(
+                            item.get("run_id")
+                            or getattr(item.get("worker"), "request_id", "")
+                            or ""
+                        )
+                        for item in detached_entries
+                    ],
+                ]
+                if run_id
+            }
+        for run_id in run_ids:
+            try:
+                self.runtime_journal.interrupt_run(
+                    session_id,
+                    run_id,
+                    reason="interrupted by user",
+                )
+            except RuntimeJournalError as exc:
+                _log_daemon(
+                    f"stop_session runtime interrupt failed session_id={session_id} "
+                    f"run_id={run_id} error={exc}"
+                )
         interaction_service.cancel_session_requests(session_id, reason="cancelled")
         self._close_live_subagents(session_id, force=True)
         if worker:
@@ -963,48 +1014,107 @@ class DaemonState:
                     )
                 )
                 result = retry_result
-        self.append_worker_result_messages(
-            session_id,
-            messages,
-            result,
-            source="daemon_sync_result",
-        )
-        messages[:] = self._normalize_persistable_messages(
-            session_id,
-            messages,
-            source="daemon_sync_finalize",
-        )
-        terminal_status = "interrupted" if "error" in result else "completed"
         latest_run = self.runtime_journal.get_run(session_id, request_id) or {}
         if latest_run.get("stop_requested"):
-            terminal_status = "interrupted"
             result = {
                 "error": "Run interrupted by user.",
                 "generated_messages": result.get("generated_messages", []),
                 "turn_id": turn_id,
                 "request_id": request_id,
             }
-        self.runtime_journal.append_event(
-            session_id,
-            request_id,
-            "run_finished" if terminal_status == "completed" else "run_interrupted",
-            {
-                "status": terminal_status,
-                "error": str(result.get("error") or ""),
-            },
+        provider_succeeded = "error" not in result
+        terminal_status = (
+            "completed"
+            if provider_succeeded
+            else ("interrupted" if latest_run.get("stop_requested") else "failed")
         )
-        if not latest_run.get("stop_requested"):
-            self.runtime_journal.update_run(
+        if provider_succeeded:
+            finalizing_record = self.runtime_journal.update_run(
                 session_id,
                 request_id,
                 {
-                    "status": terminal_status,
-                    "terminal_error": str(result.get("error") or ""),
+                    "status": "finalizing",
+                    "terminal_error": "",
                     "final_result": result,
                 },
             )
-        if effective_writer_owner.startswith("ui:"):
-            if terminal_status == "completed":
+            if str(finalizing_record.get("status") or "") == "interrupted":
+                result = {
+                    "error": "Run interrupted by user.",
+                    "generated_messages": result.get("generated_messages", []),
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                }
+                provider_succeeded = False
+                terminal_status = "interrupted"
+            else:
+                self.runtime_journal.append_event(
+                    session_id,
+                    request_id,
+                    "finalizing",
+                    {"source": "daemon_sync"},
+                )
+        postprocess_error = ""
+        try:
+            self.append_worker_result_messages(
+                session_id,
+                messages,
+                result,
+                source="daemon_sync_result",
+            )
+            messages[:] = self._normalize_persistable_messages(
+                session_id,
+                messages,
+                source="daemon_sync_finalize",
+            )
+        except Exception as exc:
+            postprocess_error = str(exc)
+            _log_daemon(
+                f"daemon_sync postprocess failed session_id={session_id} "
+                f"run_id={request_id} error={exc}"
+            )
+        terminal_record = self.runtime_journal.update_run(
+            session_id,
+            request_id,
+            {
+                "status": terminal_status,
+                "terminal_error": str(result.get("error") or ""),
+                "final_result": result,
+            },
+        )
+        terminal_status = str(terminal_record.get("status") or terminal_status)
+        if terminal_status == "interrupted" and "error" not in result:
+            result = {
+                "error": "Run interrupted by user.",
+                "generated_messages": result.get("generated_messages", []),
+                "turn_id": turn_id,
+                "request_id": request_id,
+            }
+            provider_succeeded = False
+        self.runtime_journal.append_event(
+            session_id,
+            request_id,
+            "terminal",
+            {
+                "status": terminal_status,
+                "error": str(result.get("error") or ""),
+                "source": "daemon_sync",
+            },
+        )
+        if isinstance(result, dict):
+            result["_runtime_terminal"] = terminal_status
+        self.runtime_journal.update_run(
+            session_id,
+            request_id,
+            {
+                "postprocess_status": "failed" if postprocess_error else "completed",
+                "postprocess_error": postprocess_error,
+            },
+        )
+        commit_error = postprocess_error
+        daemon_commit_succeeded = False
+        if not postprocess_error and effective_writer_owner.startswith("ui:"):
+            if provider_succeeded:
                 try:
                     self.runtime_journal.mark_pending_commit(
                         session_id,
@@ -1012,16 +1122,56 @@ class DaemonState:
                         messages,
                         title=_compute_session_title(messages),
                     )
-                except RuntimeJournalError:
+                except RuntimeJournalError as exc:
                     stopped_run = self.runtime_journal.get_run(session_id, request_id) or {}
                     if not stopped_run.get("stop_requested"):
-                        raise
-                    _log_daemon(
-                        f"daemon_sync pending_commit rejected_interrupted "
-                        f"session_id={session_id} run_id={request_id}"
+                        commit_error = str(exc)
+                    else:
+                        _log_daemon(
+                            f"daemon_sync pending_commit rejected_interrupted "
+                            f"session_id={session_id} run_id={request_id}"
+                        )
+        elif not postprocess_error and not effective_writer_owner.startswith("ui:"):
+            try:
+                daemon_commit_succeeded = self.save_session(
+                    session_id,
+                    run_id=request_id,
+                    acknowledge=False,
+                )
+                if not daemon_commit_succeeded:
+                    commit_error = "SQLite conversation save did not commit."
+            except Exception as exc:
+                commit_error = str(exc)
+        if commit_error:
+            self.runtime_journal.update_run(
+                session_id,
+                request_id,
+                {"commit_status": "failed", "commit_error": commit_error},
+            )
+            self.runtime_journal.append_event(
+                session_id,
+                request_id,
+                "commit_failed",
+                {"error": commit_error},
+            )
+        elif provider_succeeded:
+            self.runtime_journal.update_run(
+                session_id,
+                request_id,
+                {
+                    "commit_status": (
+                        "pending"
+                        if effective_writer_owner.startswith("ui:")
+                        else "completed"
                     )
-        else:
-            self.save_session(session_id, run_id=request_id)
+                },
+            )
+        if daemon_commit_succeeded:
+            self.runtime_journal.acknowledge_commit(
+                session_id,
+                request_id,
+                messages,
+            )
         self.touch()
         return result
 
@@ -1074,23 +1224,64 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 )
             worker_active = bool(active_worker and active_run_id == run_id)
             run_age = max(0.0, time.time() - float(run.get("updated_at") or 0.0))
+            old_daemon_instance = bool(
+                str(run.get("daemon_instance_id") or "")
+                and str(run.get("daemon_instance_id") or "")
+                != str(self.server.state.daemon_instance_id)
+            )
+            if (
+                str(run.get("status") or "") == "finalizing"
+                and not worker_active
+                and old_daemon_instance
+                and isinstance(run.get("final_result"), dict)
+                and run_age >= 5.0
+            ):
+                run = self.server.state.runtime_journal.update_run(
+                    session_id,
+                    run_id,
+                    {
+                        "status": "completed",
+                        "terminal_error": "",
+                        "recovered_by_daemon_instance_id": (
+                            self.server.state.daemon_instance_id
+                        ),
+                    },
+                )
+                self.server.state.runtime_journal.append_event(
+                    session_id,
+                    run_id,
+                    "terminal",
+                    {
+                        "status": "completed",
+                        "source": "daemon_finalizing_recovery",
+                    },
+                )
             if (
                 str(run.get("status") or "") == "running"
                 and not worker_active
+                and old_daemon_instance
                 and run_age >= 5.0
             ):
                 self.server.state.runtime_journal.append_event(
                     session_id,
                     run_id,
                     "run_interrupted",
-                    {"reason": "daemon_worker_missing"},
+                    {
+                        "reason": "daemon_instance_replaced",
+                        "previous_daemon_instance_id": str(
+                            run.get("daemon_instance_id") or ""
+                        ),
+                        "current_daemon_instance_id": str(
+                            self.server.state.daemon_instance_id
+                        ),
+                    },
                 )
                 run = self.server.state.runtime_journal.update_run(
                     session_id,
                     run_id,
                     {
                         "status": "interrupted",
-                        "terminal_error": "The daemon worker is no longer active.",
+                        "terminal_error": "The daemon process that owned this run was replaced.",
                     },
                 )
             events = self.server.state.runtime_journal.read_events(
@@ -1232,7 +1423,6 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         f"run_id={request_id} error={exc}"
                     )
                 finally:
-                    state.clear_active_worker(session_id)
                     done.set()
 
             worker = LLMWorker(
@@ -1301,25 +1491,114 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "turn_id": turn_id,
                     "request_id": request_id,
                 }
+            provider_succeeded = not (isinstance(result, dict) and "error" in result)
+            terminal_status = (
+                "completed"
+                if provider_succeeded
+                else ("interrupted" if latest_run.get("stop_requested") else "failed")
+            )
             _log_daemon(
                 f"send_message_stream result session_id={session_id} turn_id={turn_id} "
                 f"keys={sorted(list(result.keys())) if isinstance(result, dict) else []} "
                 f"has_error={isinstance(result, dict) and 'error' in result}"
             )
-            state.append_worker_result_messages(
+            if provider_succeeded:
+                finalizing_record = state.runtime_journal.update_run(
+                    session_id,
+                    request_id,
+                    {
+                        "status": "finalizing",
+                        "terminal_error": "",
+                        "final_result": result if isinstance(result, dict) else {},
+                    },
+                )
+                if str(finalizing_record.get("status") or "") == "interrupted":
+                    result = {
+                        "error": "Run interrupted by user.",
+                        "generated_messages": result.get("generated_messages", [])
+                        if isinstance(result, dict)
+                        else [],
+                        "turn_id": turn_id,
+                        "request_id": request_id,
+                    }
+                    provider_succeeded = False
+                    terminal_status = "interrupted"
+                else:
+                    state.runtime_journal.append_event(
+                        session_id,
+                        request_id,
+                        "finalizing",
+                        {"source": "daemon_stream"},
+                    )
+
+            terminal_record = state.runtime_journal.update_run(
                 session_id,
-                messages,
-                result,
-                source="daemon_stream_result",
+                request_id,
+                {
+                    "status": terminal_status,
+                    "terminal_error": (
+                        str(result.get("error") or "")
+                        if isinstance(result, dict) and not provider_succeeded
+                        else ""
+                    ),
+                    "final_result": result if isinstance(result, dict) else {},
+                },
             )
-            messages[:] = state._normalize_persistable_messages(
+            terminal_status = str(terminal_record.get("status") or terminal_status)
+            if terminal_status == "interrupted" and not (
+                isinstance(result, dict) and "error" in result
+            ):
+                result = {
+                    "error": "Run interrupted by user.",
+                    "generated_messages": result.get("generated_messages", [])
+                    if isinstance(result, dict)
+                    else [],
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                }
+                provider_succeeded = False
+            state.runtime_journal.append_event(
                 session_id,
-                messages,
-                source="daemon_stream_finalize",
+                request_id,
+                "terminal",
+                {"status": terminal_status, "source": "daemon_stream"},
+            )
+            if isinstance(result, dict):
+                result["_runtime_terminal"] = terminal_status
+            state.clear_active_worker(session_id)
+
+            postprocess_error = ""
+            try:
+                state.append_worker_result_messages(
+                    session_id,
+                    messages,
+                    result,
+                    source="daemon_stream_result",
+                )
+                messages[:] = state._normalize_persistable_messages(
+                    session_id,
+                    messages,
+                    source="daemon_stream_finalize",
+                )
+            except Exception as exc:
+                postprocess_error = str(exc)
+                _log_daemon(
+                    f"send_message_stream postprocess failed session_id={session_id} "
+                    f"run_id={request_id} error={exc}"
+                )
+
+            state.runtime_journal.update_run(
+                session_id,
+                request_id,
+                {
+                    "postprocess_status": "failed" if postprocess_error else "completed",
+                    "postprocess_error": postprocess_error,
+                },
             )
             daemon_commit_succeeded = False
-            if ui_owned_history:
-                if not (isinstance(result, dict) and "error" in result):
+            commit_error = postprocess_error
+            if not postprocess_error and ui_owned_history:
+                if provider_succeeded:
                     try:
                         state.runtime_journal.mark_pending_commit(
                             session_id,
@@ -1331,41 +1610,57 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                             f"send_message_stream pending_commit session_id={session_id} "
                             f"run_id={request_id} writer_owner={writer_owner}"
                         )
-                    except RuntimeJournalError:
+                    except RuntimeJournalError as exc:
                         stopped_run = state.runtime_journal.get_run(
                             session_id,
                             request_id,
                         ) or {}
                         if not stopped_run.get("stop_requested"):
-                            raise
-                        result = {
-                            "error": "Run interrupted by user.",
-                            "generated_messages": result.get("generated_messages", [])
-                            if isinstance(result, dict)
-                            else [],
-                            "turn_id": turn_id,
-                            "request_id": request_id,
-                        }
-                        _log_daemon(
-                            f"send_message_stream pending_commit rejected_interrupted "
-                            f"session_id={session_id} run_id={request_id}"
-                        )
-            else:
-                daemon_commit_succeeded = state.save_session(
-                    session_id,
-                    run_id=request_id,
-                    acknowledge=False,
-                )
-            terminal_status = "interrupted" if isinstance(result, dict) and "error" in result else "completed"
-            if not latest_run.get("stop_requested"):
+                            commit_error = str(exc)
+                            _log_daemon(
+                                f"send_message_stream pending_commit failed "
+                                f"session_id={session_id} run_id={request_id} error={exc}"
+                            )
+                        else:
+                            _log_daemon(
+                                f"send_message_stream pending_commit rejected_interrupted "
+                                f"session_id={session_id} run_id={request_id}"
+                            )
+            elif not postprocess_error and not ui_owned_history:
+                try:
+                    daemon_commit_succeeded = state.save_session(
+                        session_id,
+                        run_id=request_id,
+                        acknowledge=False,
+                    )
+                    if not daemon_commit_succeeded:
+                        commit_error = "SQLite conversation save did not commit."
+                except Exception as exc:
+                    commit_error = str(exc)
+                    _log_daemon(
+                        f"send_message_stream sqlite commit failed session_id={session_id} "
+                        f"run_id={request_id} error={exc}"
+                    )
+            if commit_error:
                 state.runtime_journal.update_run(
                     session_id,
                     request_id,
                     {
-                        "status": terminal_status,
-                        "terminal_error": str(result.get("error") or "") if isinstance(result, dict) else "",
-                        "final_result": result if isinstance(result, dict) else {},
+                        "commit_status": "failed",
+                        "commit_error": commit_error,
                     },
+                )
+                state.runtime_journal.append_event(
+                    session_id,
+                    request_id,
+                    "commit_failed",
+                    {"error": commit_error},
+                )
+            elif provider_succeeded:
+                state.runtime_journal.update_run(
+                    session_id,
+                    request_id,
+                    {"commit_status": "pending" if ui_owned_history else "completed"},
                 )
             send_stream({"type": "final", "result": result})
             if daemon_commit_succeeded:

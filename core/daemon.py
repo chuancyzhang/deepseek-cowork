@@ -19,7 +19,7 @@ from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
-from core.runtime_journal import RuntimeJournal
+from core.runtime_journal import RuntimeJournal, RuntimeJournalError
 from core.conversation_integrity import merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
@@ -975,6 +975,15 @@ class DaemonState:
             source="daemon_sync_finalize",
         )
         terminal_status = "interrupted" if "error" in result else "completed"
+        latest_run = self.runtime_journal.get_run(session_id, request_id) or {}
+        if latest_run.get("stop_requested"):
+            terminal_status = "interrupted"
+            result = {
+                "error": "Run interrupted by user.",
+                "generated_messages": result.get("generated_messages", []),
+                "turn_id": turn_id,
+                "request_id": request_id,
+            }
         self.runtime_journal.append_event(
             session_id,
             request_id,
@@ -984,23 +993,33 @@ class DaemonState:
                 "error": str(result.get("error") or ""),
             },
         )
-        self.runtime_journal.update_run(
-            session_id,
-            request_id,
-            {
-                "status": terminal_status,
-                "terminal_error": str(result.get("error") or ""),
-                "final_result": result,
-            },
-        )
+        if not latest_run.get("stop_requested"):
+            self.runtime_journal.update_run(
+                session_id,
+                request_id,
+                {
+                    "status": terminal_status,
+                    "terminal_error": str(result.get("error") or ""),
+                    "final_result": result,
+                },
+            )
         if effective_writer_owner.startswith("ui:"):
             if terminal_status == "completed":
-                self.runtime_journal.mark_pending_commit(
-                    session_id,
-                    request_id,
-                    messages,
-                    title=_compute_session_title(messages),
-                )
+                try:
+                    self.runtime_journal.mark_pending_commit(
+                        session_id,
+                        request_id,
+                        messages,
+                        title=_compute_session_title(messages),
+                    )
+                except RuntimeJournalError:
+                    stopped_run = self.runtime_journal.get_run(session_id, request_id) or {}
+                    if not stopped_run.get("stop_requested"):
+                        raise
+                    _log_daemon(
+                        f"daemon_sync pending_commit rejected_interrupted "
+                        f"session_id={session_id} run_id={request_id}"
+                    )
         else:
             self.save_session(session_id, run_id=request_id)
         self.touch()
@@ -1272,6 +1291,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 except Exception as e:
                     _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
             result = result_holder.get("result") or {"error": "No response"}
+            latest_run = state.runtime_journal.get_run(session_id, request_id) or {}
+            if latest_run.get("stop_requested"):
+                result = {
+                    "error": "Run interrupted by user.",
+                    "generated_messages": result.get("generated_messages", [])
+                    if isinstance(result, dict)
+                    else [],
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                }
             _log_daemon(
                 f"send_message_stream result session_id={session_id} turn_id={turn_id} "
                 f"keys={sorted(list(result.keys())) if isinstance(result, dict) else []} "
@@ -1291,16 +1320,36 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             daemon_commit_succeeded = False
             if ui_owned_history:
                 if not (isinstance(result, dict) and "error" in result):
-                    state.runtime_journal.mark_pending_commit(
-                        session_id,
-                        request_id,
-                        messages,
-                        title=_compute_session_title(messages),
-                    )
-                    _log_daemon(
-                        f"send_message_stream pending_commit session_id={session_id} "
-                        f"run_id={request_id} writer_owner={writer_owner}"
-                    )
+                    try:
+                        state.runtime_journal.mark_pending_commit(
+                            session_id,
+                            request_id,
+                            messages,
+                            title=_compute_session_title(messages),
+                        )
+                        _log_daemon(
+                            f"send_message_stream pending_commit session_id={session_id} "
+                            f"run_id={request_id} writer_owner={writer_owner}"
+                        )
+                    except RuntimeJournalError:
+                        stopped_run = state.runtime_journal.get_run(
+                            session_id,
+                            request_id,
+                        ) or {}
+                        if not stopped_run.get("stop_requested"):
+                            raise
+                        result = {
+                            "error": "Run interrupted by user.",
+                            "generated_messages": result.get("generated_messages", [])
+                            if isinstance(result, dict)
+                            else [],
+                            "turn_id": turn_id,
+                            "request_id": request_id,
+                        }
+                        _log_daemon(
+                            f"send_message_stream pending_commit rejected_interrupted "
+                            f"session_id={session_id} run_id={request_id}"
+                        )
             else:
                 daemon_commit_succeeded = state.save_session(
                     session_id,
@@ -1308,15 +1357,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     acknowledge=False,
                 )
             terminal_status = "interrupted" if isinstance(result, dict) and "error" in result else "completed"
-            state.runtime_journal.update_run(
-                session_id,
-                request_id,
-                {
-                    "status": terminal_status,
-                    "terminal_error": str(result.get("error") or "") if isinstance(result, dict) else "",
-                    "final_result": result if isinstance(result, dict) else {},
-                },
-            )
+            if not latest_run.get("stop_requested"):
+                state.runtime_journal.update_run(
+                    session_id,
+                    request_id,
+                    {
+                        "status": terminal_status,
+                        "terminal_error": str(result.get("error") or "") if isinstance(result, dict) else "",
+                        "final_result": result if isinstance(result, dict) else {},
+                    },
+                )
             send_stream({"type": "final", "result": result})
             if daemon_commit_succeeded:
                 state.runtime_journal.acknowledge_commit(
@@ -1595,10 +1645,7 @@ class DaemonClient:
                 _log_daemon(f"send_message_stream socket close failed session_id={session_id} error={e}")
     
     def stop_session(self, session_id):
-        try:
-            return self._request({"action": "stop_session", "session_id": session_id})
-        except Exception:
-            return None
+        return self._request({"action": "stop_session", "session_id": session_id})
 
     def attach_run(self, session_id, run_id, starting_after=0):
         return self._request(

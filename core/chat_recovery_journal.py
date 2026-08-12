@@ -6,7 +6,8 @@ import time
 import uuid
 from dataclasses import asdict
 
-from .runtime_journal import RuntimeJournal
+from .conversation_integrity import merge_messages_by_id
+from .runtime_journal import PENDING_COMMIT_FORMAT_APPEND_V1, RuntimeJournal
 
 
 JOURNAL_VERSION = 1
@@ -99,9 +100,120 @@ class ChatRecoveryJournal:
             raise ValueError("recovery journal checksum mismatch")
         return envelope
 
-    def recover_into(self, storage):
+    def _recover_pending_chat_save(self, storage, path, skip_session_ids):
+        payload = self._read_envelope(path)["payload"]
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("recovery journal has no session_id")
+        if session_id in skip_session_ids:
+            return ""
+        messages = list(payload.get("messages") or [])
+        owners = storage.get_message_owners(
+            [
+                message.get("id")
+                for message in messages
+                if isinstance(message, dict)
+            ]
+        )
+        remapped_messages = []
+        for message in messages:
+            if not isinstance(message, dict):
+                remapped_messages.append(message)
+                continue
+            normalized_message = dict(message)
+            message_id = str(normalized_message.get("id") or "").strip()
+            owner = owners.get(message_id)
+            if message_id and owner and owner != session_id:
+                replacement = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"deepseek-cowork-recovery:{session_id}:{message_id}",
+                ).hex
+                meta = (
+                    dict(normalized_message.get("meta") or {})
+                    if isinstance(normalized_message.get("meta"), dict)
+                    else {}
+                )
+                meta["recovered_original_message_id"] = message_id
+                normalized_message["meta"] = meta
+                normalized_message["id"] = replacement
+            remapped_messages.append(normalized_message)
+        messages = remapped_messages
+        if messages and isinstance(messages[-1], dict):
+            last_message = dict(messages[-1])
+            last_meta = (
+                dict(last_message.get("meta") or {})
+                if isinstance(last_message.get("meta"), dict)
+                else {}
+            )
+            if last_meta.get("recovery_checkpoint"):
+                messages = messages[:-1]
+                run_id = str(last_message.get("id") or uuid.uuid4().hex)
+                self.runtime_journal.begin_run(
+                    session_id,
+                    run_id,
+                    turn_id=last_meta.get("active_turn_id") or "",
+                    writer_owner="recovery:v1",
+                    base_messages=messages,
+                    status="interrupted",
+                    extra={
+                        "draft_content": str(last_message.get("content") or ""),
+                        "draft_reasoning": str(
+                            last_message.get("reasoning")
+                            or last_message.get("reasoning_content")
+                            or ""
+                        ),
+                        "legacy_recovery_checkpoint": True,
+                        "finished_at": time.time(),
+                    },
+                )
+                self.runtime_journal.append_event(
+                    session_id,
+                    run_id,
+                    "legacy_checkpoint_recovered",
+                    {
+                        "content_length": len(str(last_message.get("content") or "")),
+                    },
+                )
+        status = str(payload.get("status") or "draft")
+        if status == "running":
+            status = "interrupted"
+        storage.save_conversation_safely(
+            session_id,
+            messages,
+            title=payload.get("title") or "新任务",
+            status=status,
+            meta=payload.get("meta") or {},
+        )
+        os.unlink(path)
+        return session_id
+
+    def recover_into(self, storage, *, skip_session_ids=None):
+        skip_session_ids = {
+            str(session_id or "").strip()
+            for session_id in (skip_session_ids or [])
+            if str(session_id or "").strip()
+        }
         recovered = []
         errors = []
+        # UI save snapshots own presentation metadata. Recover them before
+        # daemon/runtime ledger appends so a later canonical append cannot make
+        # the richer UI snapshot look stale and discard its timeline.
+        for name in sorted(os.listdir(self.directory)):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(self.directory, name)
+            try:
+                session_id = self._recover_pending_chat_save(
+                    storage,
+                    path,
+                    skip_session_ids,
+                )
+                if session_id and session_id not in recovered:
+                    recovered.append(session_id)
+            except Exception as exc:
+                errors.append(
+                    {"path": path, "error": str(exc), "source": "pending_chat_save"}
+                )
         try:
             manifests, manifest_errors = self.runtime_journal.scan_manifests()
             errors.extend(manifest_errors)
@@ -120,22 +232,86 @@ class ChatRecoveryJournal:
                 continue
             session_id = str(manifest.get("session_id") or "").strip()
             run_id = str(pending.get("run_id") or "").strip()
+            if session_id in skip_session_ids:
+                continue
             try:
                 if not session_id or not run_id:
                     raise ValueError("runtime pending commit has no session_id or run_id")
-                messages = [
-                    item for item in (pending.get("messages") or []) if isinstance(item, dict)
-                ]
-                expected_hash = str(pending.get("messages_hash") or "")
-                actual_hash = RuntimeJournal.messages_hash(messages)
-                if not expected_hash or expected_hash != actual_hash:
-                    raise ValueError("runtime pending commit checksum mismatch")
-                storage.save_conversation_safely(
+                pending_format = str(pending.get("format") or "legacy_snapshot_v2")
+                if pending_format == PENDING_COMMIT_FORMAT_APPEND_V1:
+                    base_message_ids = [
+                        str(message_id or "")
+                        for message_id in (pending.get("base_message_ids") or [])
+                    ]
+                    append_messages = [
+                        item
+                        for item in (pending.get("append_messages") or [])
+                        if isinstance(item, dict)
+                    ]
+                    expected_append_hash = str(
+                        pending.get("append_messages_hash") or ""
+                    )
+                    if (
+                        not expected_append_hash
+                        or expected_append_hash
+                        != RuntimeJournal.messages_hash(append_messages)
+                    ):
+                        raise ValueError("runtime append commit checksum mismatch")
+                    committed_messages = storage.get_messages(session_id)
+                    if len(committed_messages) < len(base_message_ids):
+                        raise ValueError(
+                            "runtime append base is newer than committed SQLite history"
+                        )
+                    committed_base = committed_messages[:len(base_message_ids)]
+                    committed_base_ids = [
+                        str(message.get("id") or "")
+                        for message in committed_base
+                        if isinstance(message, dict)
+                    ]
+                    if committed_base_ids != base_message_ids:
+                        raise ValueError(
+                            "runtime append base message IDs diverged from SQLite history"
+                        )
+                    if RuntimeJournal.messages_hash(committed_base) != str(
+                        pending.get("base_messages_hash") or ""
+                    ):
+                        raise ValueError(
+                            "runtime append base checksum diverged from SQLite history"
+                        )
+                    expected_messages = merge_messages_by_id(
+                        committed_base,
+                        append_messages,
+                    )
+                    messages = merge_messages_by_id(
+                        committed_messages,
+                        append_messages,
+                    )
+                elif pending_format == "legacy_snapshot_v2":
+                    messages = [
+                        item
+                        for item in (pending.get("messages") or [])
+                        if isinstance(item, dict)
+                    ]
+                    expected_hash = str(pending.get("messages_hash") or "")
+                    actual_hash = RuntimeJournal.legacy_snapshot_messages_hash(messages)
+                    if not expected_hash or expected_hash != actual_hash:
+                        raise ValueError("legacy runtime snapshot checksum mismatch")
+                    expected_messages = messages
+                else:
+                    raise ValueError(
+                        f"unsupported runtime pending commit format: {pending_format}"
+                    )
+                save_result = storage.save_conversation_safely(
                     session_id,
                     messages,
                     title=pending.get("title") or "新任务",
                     status=pending.get("status") or "active",
-                    meta=pending.get("meta") or {},
+                    meta=(
+                        pending.get("meta")
+                        if isinstance(pending.get("meta"), dict)
+                        and pending.get("meta")
+                        else None
+                    ),
                 )
                 acknowledged = self.runtime_journal.acknowledge_commit(
                     session_id,
@@ -143,10 +319,22 @@ class ChatRecoveryJournal:
                     storage.get_messages(session_id),
                 )
                 if not acknowledged:
-                    raise RuntimeError(
-                        "runtime pending commit did not match the recovered SQLite snapshot"
+                    committed_after_save = storage.get_messages(session_id)
+                    acknowledged = (
+                        save_result.get("outcome") == "stale"
+                        and self.runtime_journal.acknowledge_superseded_commit(
+                            session_id,
+                            run_id,
+                            expected_messages,
+                            committed_after_save,
+                        )
                     )
-                recovered.append(session_id)
+                    if not acknowledged:
+                        raise RuntimeError(
+                            "runtime pending commit did not match the recovered SQLite snapshot"
+                        )
+                if session_id not in recovered:
+                    recovered.append(session_id)
             except Exception as exc:
                 errors.append(
                     {
@@ -161,98 +349,5 @@ class ChatRecoveryJournal:
                         "error": str(exc),
                         "source": "runtime_pending_commit",
                     }
-                )
-        for name in sorted(os.listdir(self.directory)):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(self.directory, name)
-            try:
-                payload = self._read_envelope(path)["payload"]
-                session_id = str(payload.get("session_id") or "").strip()
-                if not session_id:
-                    raise ValueError("recovery journal has no session_id")
-                messages = list(payload.get("messages") or [])
-                owners = storage.get_message_owners(
-                    [
-                        message.get("id")
-                        for message in messages
-                        if isinstance(message, dict)
-                    ]
-                )
-                remapped_messages = []
-                for message in messages:
-                    if not isinstance(message, dict):
-                        remapped_messages.append(message)
-                        continue
-                    normalized_message = dict(message)
-                    message_id = str(normalized_message.get("id") or "").strip()
-                    owner = owners.get(message_id)
-                    if message_id and owner and owner != session_id:
-                        replacement = uuid.uuid5(
-                            uuid.NAMESPACE_URL,
-                            f"deepseek-cowork-recovery:{session_id}:{message_id}",
-                        ).hex
-                        meta = (
-                            dict(normalized_message.get("meta") or {})
-                            if isinstance(normalized_message.get("meta"), dict)
-                            else {}
-                        )
-                        meta["recovered_original_message_id"] = message_id
-                        normalized_message["meta"] = meta
-                        normalized_message["id"] = replacement
-                    remapped_messages.append(normalized_message)
-                messages = remapped_messages
-                if messages and isinstance(messages[-1], dict):
-                    last_message = dict(messages[-1])
-                    last_meta = (
-                        dict(last_message.get("meta") or {})
-                        if isinstance(last_message.get("meta"), dict)
-                        else {}
-                    )
-                    if last_meta.get("recovery_checkpoint"):
-                        messages = messages[:-1]
-                        run_id = str(last_message.get("id") or uuid.uuid4().hex)
-                        self.runtime_journal.begin_run(
-                            session_id,
-                            run_id,
-                            turn_id=last_meta.get("active_turn_id") or "",
-                            writer_owner="recovery:v1",
-                            base_messages=messages,
-                            status="interrupted",
-                            extra={
-                                "draft_content": str(last_message.get("content") or ""),
-                                "draft_reasoning": str(
-                                    last_message.get("reasoning")
-                                    or last_message.get("reasoning_content")
-                                    or ""
-                                ),
-                                "legacy_recovery_checkpoint": True,
-                                "finished_at": time.time(),
-                            },
-                        )
-                        self.runtime_journal.append_event(
-                            session_id,
-                            run_id,
-                            "legacy_checkpoint_recovered",
-                            {
-                                "content_length": len(str(last_message.get("content") or "")),
-                            },
-                        )
-                status = str(payload.get("status") or "draft")
-                if status == "running":
-                    status = "interrupted"
-                storage.save_conversation_safely(
-                    session_id,
-                    messages,
-                    title=payload.get("title") or "新任务",
-                    status=status,
-                    meta=payload.get("meta") or {},
-                )
-                os.unlink(path)
-                if session_id not in recovered:
-                    recovered.append(session_id)
-            except Exception as exc:
-                errors.append(
-                    {"path": path, "error": str(exc), "source": "pending_chat_save"}
                 )
         return recovered, errors

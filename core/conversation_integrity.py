@@ -9,12 +9,95 @@ that would otherwise make a legacy conversation unloadable.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
 
 
 MESSAGE_ID_NAMESPACE = "deepseek-cowork-message"
+
+
+def canonical_ledger_message(message, *, include_id=True):
+    """Return the storage/provider-stable identity of one ledger message.
+
+    UI projection metadata and database timestamps are deliberately excluded:
+    the UI and daemon may carry different presentation projections for the same
+    canonical message, but that must never look like a conversation fork.
+    """
+
+    if not isinstance(message, dict):
+        return None
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    stable_meta = {
+        key: value
+        for key, value in meta.items()
+        if key != "sequence"
+        and key != "ui_only"
+        and not str(key).startswith("ui_")
+    }
+    normalized = {
+        "role": str(message.get("role") or ""),
+        "content": message.get("content") or "",
+        "tool_call_id": str(message.get("tool_call_id") or ""),
+        "reasoning_content": (
+            message.get("reasoning_content")
+            if message.get("reasoning_content") is not None
+            else message.get("reasoning") or ""
+        ),
+    }
+    if include_id:
+        normalized["id"] = str(message.get("id") or "")
+    if isinstance(message.get("content_parts"), list):
+        normalized["content_parts"] = message.get("content_parts")
+    if stable_meta:
+        normalized["meta"] = stable_meta
+    if message.get("result_obj") is not None:
+        normalized["result_obj"] = message.get("result_obj")
+    raw_tool_calls = message.get("tool_calls")
+    if isinstance(raw_tool_calls, list):
+        tool_calls = []
+        for raw_call in raw_tool_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = (
+                raw_call.get("function")
+                if isinstance(raw_call.get("function"), dict)
+                else {}
+            )
+            arguments = function.get("arguments")
+            if isinstance(arguments, (dict, list)):
+                arguments = json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            elif arguments is None:
+                arguments = ""
+            tool_calls.append({
+                "id": str(raw_call.get("id") or ""),
+                "type": str(raw_call.get("type") or "function"),
+                "name": str(function.get("name") or ""),
+                "arguments": arguments,
+            })
+        normalized["tool_calls"] = tool_calls
+    return normalized
+
+
+def canonical_ledger_messages_hash(messages):
+    normalized = [
+        canonical_ledger_message(message, include_id=True)
+        for message in (messages or [])
+        if isinstance(message, dict)
+    ]
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -382,16 +465,7 @@ def merge_messages_by_id(existing_messages, incoming_messages):
     }
 
     def signature(message):
-        comparable = copy.deepcopy(message)
-        meta = comparable.get("meta") if isinstance(comparable.get("meta"), dict) else None
-        if meta is not None:
-            comparable["meta"] = {
-                key: value
-                for key, value in meta.items()
-                if key != "ui_only" and not str(key).startswith("ui_")
-            }
-            if not comparable["meta"]:
-                comparable.pop("meta", None)
+        comparable = canonical_ledger_message(message, include_id=True)
         try:
             return json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:

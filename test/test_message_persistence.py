@@ -11,6 +11,23 @@ from core.message_persistence import (
 
 
 class TestMessagePersistenceProjection(unittest.TestCase):
+    def test_context_visible_interruption_enters_provider_ledger_without_reasoning(self):
+        message = {
+            "id": "interrupted-1",
+            "role": "assistant",
+            "content": "部分正文\n\n⚠️ 本轮已中断，以上内容可能不完整。",
+            "meta": {
+                "ui_reply_kind": "interrupted",
+                "context_visible_interruption": True,
+            },
+        }
+
+        self.assertEqual(filter_persistable_messages([message]), [message])
+        projected, excluded = project_provider_messages([message])
+        self.assertEqual(projected, [message])
+        self.assertEqual(excluded, [])
+        self.assertNotIn("reasoning", projected[0])
+
     def test_valid_tool_round_is_preserved(self):
         messages = [
             {"id": "u1", "role": "user", "content": "read"},

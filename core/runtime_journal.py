@@ -6,8 +6,11 @@ import threading
 import time
 from contextlib import contextmanager
 
+from .conversation_integrity import canonical_ledger_messages_hash
+
 
 RUNTIME_JOURNAL_VERSION = 2
+PENDING_COMMIT_FORMAT_APPEND_V1 = "ledger_append_v1"
 
 
 class RuntimeJournalError(RuntimeError):
@@ -57,6 +60,12 @@ class RuntimeJournal:
 
     @classmethod
     def messages_hash(cls, messages):
+        return canonical_ledger_messages_hash(messages)
+
+    @classmethod
+    def legacy_snapshot_messages_hash(cls, messages):
+        """Hash a v2 full snapshot exactly as already distributed builds did."""
+
         normalized = []
         for message in messages or []:
             if not isinstance(message, dict):
@@ -67,24 +76,22 @@ class RuntimeJournal:
                 meta.pop("sequence", None)
                 if not meta:
                     meta = None
-            normalized.append(
-                {
-                    "id": str(message.get("id") or ""),
-                    "role": str(message.get("role") or ""),
-                    "content": message.get("content"),
-                    "tool_calls": message.get("tool_calls"),
-                    "reasoning_content": (
-                        message.get("reasoning_content")
-                        if message.get("reasoning_content") is not None
-                        else message.get("reasoning")
-                    ),
-                    "content_parts": message.get("content_parts"),
-                    "meta": meta,
-                    "result_obj": message.get("result_obj"),
-                    "token_count": message.get("token_count"),
-                    "tool_call_id": message.get("tool_call_id"),
-                }
-            )
+            normalized.append({
+                "id": str(message.get("id") or ""),
+                "role": str(message.get("role") or ""),
+                "content": message.get("content"),
+                "tool_calls": message.get("tool_calls"),
+                "reasoning_content": (
+                    message.get("reasoning_content")
+                    if message.get("reasoning_content") is not None
+                    else message.get("reasoning")
+                ),
+                "content_parts": message.get("content_parts"),
+                "meta": meta,
+                "result_obj": message.get("result_obj"),
+                "token_count": message.get("token_count"),
+                "tool_call_id": message.get("tool_call_id"),
+            })
         return cls.checksum(normalized)
 
     def _session_dir(self, session_id):
@@ -275,6 +282,11 @@ class RuntimeJournal:
             "status": str(status or "running"),
             "writer_owner": str(writer_owner or ""),
             "base_messages_hash": self.messages_hash(base_messages or []),
+            "base_message_ids": [
+                str(message.get("id") or "")
+                for message in (base_messages or [])
+                if isinstance(message, dict)
+            ],
             "last_event_sequence": 0,
             "draft_content": "",
             "draft_reasoning": "",
@@ -344,7 +356,12 @@ class RuntimeJournal:
             record = self._read(path, default=None)
             if record is None:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
-            record.update(dict(patch or {}))
+            incoming = dict(patch or {})
+            if record.get("stop_requested"):
+                incoming.pop("status", None)
+                incoming.pop("terminal_error", None)
+                incoming.pop("finished_at", None)
+            record.update(incoming)
             record["updated_at"] = time.time()
             if record.get("status") in {"completed", "failed", "interrupted", "cancelled"}:
                 record["finished_at"] = record.get("finished_at") or time.time()
@@ -356,6 +373,34 @@ class RuntimeJournal:
                     manifest["revision"] = int(manifest.get("revision") or 0) + 1
                     manifest["updated_at"] = time.time()
                     self._atomic_write(self._manifest_path(session_id), manifest)
+            return record
+
+    def interrupt_run(self, session_id, run_id, *, reason="interrupted by user", patch=None):
+        """Atomically make user interruption win over a late daemon commit."""
+
+        with self.session_lock(session_id):
+            path = self._record_path(session_id, "runs", run_id)
+            record = self._read(path, default=None)
+            if record is None:
+                raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            record.update(dict(patch or {}))
+            record.update({
+                "status": "interrupted",
+                "stop_requested": True,
+                "terminal_error": str(reason or "interrupted by user"),
+                "updated_at": time.time(),
+                "finished_at": time.time(),
+            })
+            self._atomic_write(path, record)
+            manifest = self.load_manifest(session_id)
+            if str(manifest.get("active_run_id") or "") == str(run_id):
+                manifest["active_run_id"] = ""
+            if str(manifest.get("pending_commit_run_id") or "") == str(run_id):
+                manifest.pop("pending_commit", None)
+                manifest["pending_commit_run_id"] = ""
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = time.time()
+            self._atomic_write(self._manifest_path(session_id), manifest)
             return record
 
     def append_event(self, session_id, run_id, event_type, payload=None, provider_sequence=None):
@@ -482,19 +527,65 @@ class RuntimeJournal:
         return newest
 
     def mark_pending_commit(self, session_id, run_id, messages, *, title="", status="active", meta=None):
-        payload = {
-            "pending_commit": {
+        canonical_messages = [
+            item for item in (messages or []) if isinstance(item, dict)
+        ]
+        with self.session_lock(session_id):
+            run = self._read(
+                self._record_path(session_id, "runs", run_id),
+                default=None,
+            )
+            if not isinstance(run, dict):
+                raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            if run.get("stop_requested"):
+                raise RuntimeJournalError(
+                    f"pending commit rejected for interrupted run {run_id}"
+                )
+            base_message_ids = [
+                str(message_id or "")
+                for message_id in (run.get("base_message_ids") or [])
+            ]
+            if len(base_message_ids) > len(canonical_messages):
+                raise RuntimeJournalError(
+                    f"pending commit is shorter than its base for session {session_id}"
+                )
+            actual_base_ids = [
+                str(message.get("id") or "")
+                for message in canonical_messages[:len(base_message_ids)]
+            ]
+            if actual_base_ids != base_message_ids:
+                raise RuntimeJournalError(
+                    f"pending commit does not extend its base for session {session_id}"
+                )
+            actual_base_hash = self.messages_hash(
+                canonical_messages[:len(base_message_ids)]
+            )
+            base_messages_hash = str(run.get("base_messages_hash") or "")
+            if actual_base_hash != base_messages_hash:
+                raise RuntimeJournalError(
+                    f"pending commit base checksum mismatch for session {session_id}"
+                )
+            append_messages = canonical_messages[len(base_message_ids):]
+            pending = {
+                "format": PENDING_COMMIT_FORMAT_APPEND_V1,
                 "run_id": str(run_id),
-                "messages": [item for item in (messages or []) if isinstance(item, dict)],
+                "base_message_ids": base_message_ids,
+                "base_messages_hash": base_messages_hash,
+                "append_messages": append_messages,
+                "append_messages_hash": self.messages_hash(append_messages),
                 "title": str(title or ""),
                 "status": str(status or "active"),
-                "meta": dict(meta or {}),
-                "messages_hash": self.messages_hash(messages or []),
+                "meta": dict(meta) if isinstance(meta, dict) and meta else None,
+                "expected_messages_hash": self.messages_hash(canonical_messages),
                 "created_at": time.time(),
-            },
-            "pending_commit_run_id": str(run_id),
-        }
-        return self.update_manifest(session_id, payload)
+            }
+            manifest = self.load_manifest(session_id)
+            manifest["pending_commit"] = pending
+            manifest["pending_commit_run_id"] = str(run_id)
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = time.time()
+            self._atomic_write(self._manifest_path(session_id), manifest)
+            return manifest
 
     def acknowledge_commit(self, session_id, run_id, sqlite_messages):
         with self.session_lock(session_id):
@@ -505,7 +596,14 @@ class RuntimeJournal:
             pending = manifest.get("pending_commit")
             sqlite_messages_hash = self.messages_hash(sqlite_messages or [])
             if isinstance(pending, dict):
-                expected_messages_hash = str(pending.get("messages_hash") or "")
+                if pending.get("format") == PENDING_COMMIT_FORMAT_APPEND_V1:
+                    expected_messages_hash = str(
+                        pending.get("expected_messages_hash") or ""
+                    )
+                else:
+                    expected_messages_hash = self.messages_hash(
+                        pending.get("messages") or []
+                    )
                 if expected_messages_hash and expected_messages_hash != sqlite_messages_hash:
                     return False
             manifest.pop("pending_commit", None)
@@ -536,4 +634,57 @@ class RuntimeJournal:
                 os.unlink(event_path)
             except FileNotFoundError:
                 pass
+            return True
+
+    def acknowledge_superseded_commit(
+        self,
+        session_id,
+        run_id,
+        expected_messages,
+        sqlite_messages,
+    ):
+        """Clear a pending snapshot only after proving SQLite strictly extends it."""
+
+        expected = [
+            message for message in (expected_messages or []) if isinstance(message, dict)
+        ]
+        committed = [
+            message for message in (sqlite_messages or []) if isinstance(message, dict)
+        ]
+        if len(committed) <= len(expected):
+            return False
+        expected_ids = [str(message.get("id") or "") for message in expected]
+        committed_prefix = committed[:len(expected)]
+        if [str(message.get("id") or "") for message in committed_prefix] != expected_ids:
+            return False
+        if self.messages_hash(committed_prefix) != self.messages_hash(expected):
+            return False
+        with self.session_lock(session_id):
+            manifest = self.load_manifest(session_id)
+            if str(manifest.get("pending_commit_run_id") or "") != str(run_id or ""):
+                return False
+            pending = manifest.get("pending_commit")
+            if not isinstance(pending, dict):
+                return False
+            if pending.get("format") == PENDING_COMMIT_FORMAT_APPEND_V1:
+                if str(pending.get("expected_messages_hash") or "") != self.messages_hash(expected):
+                    return False
+            else:
+                legacy_messages = [
+                    message
+                    for message in (pending.get("messages") or [])
+                    if isinstance(message, dict)
+                ]
+                if (
+                    str(pending.get("messages_hash") or "")
+                    != self.legacy_snapshot_messages_hash(legacy_messages)
+                    or self.messages_hash(legacy_messages) != self.messages_hash(expected)
+                ):
+                    return False
+            manifest.pop("pending_commit", None)
+            manifest["pending_commit_run_id"] = ""
+            manifest["sqlite_messages_hash"] = self.messages_hash(committed)
+            manifest["revision"] = int(manifest.get("revision") or 0) + 1
+            manifest["updated_at"] = time.time()
+            self._atomic_write(self._manifest_path(session_id), manifest)
             return True

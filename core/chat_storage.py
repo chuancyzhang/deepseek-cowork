@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
-from .conversation_integrity import normalize_message_ids
+from .conversation_integrity import canonical_ledger_message, normalize_message_ids
 from .message_persistence import filter_persistable_messages
 
 
@@ -534,45 +534,7 @@ class ChatStorage:
     def _message_signature(self, message):
         if not isinstance(message, dict):
             return None
-        signature = {
-            "role": message.get("role") or "",
-            "content": message.get("content") or "",
-            "tool_call_id": message.get("tool_call_id") or "",
-            "reasoning_content": message.get("reasoning_content") or message.get("reasoning") or "",
-        }
-        content_parts = message.get("content_parts")
-        if isinstance(content_parts, list):
-            signature["content_parts"] = content_parts
-        meta = message.get("meta")
-        if isinstance(meta, dict) and meta:
-            signature["meta"] = meta
-        result_obj = message.get("result_obj")
-        if result_obj is not None:
-            signature["result_obj"] = result_obj
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, list):
-            normalized_calls = []
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
-                arguments = function.get("arguments")
-                if isinstance(arguments, (dict, list)):
-                    try:
-                        arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-                    except Exception:
-                        arguments = str(arguments)
-                elif arguments is None:
-                    arguments = ""
-                normalized_calls.append(
-                    {
-                        "id": tool_call.get("id") or "",
-                        "type": tool_call.get("type") or "function",
-                        "name": function.get("name") or "",
-                        "arguments": arguments,
-                    }
-                )
-            signature["tool_calls"] = normalized_calls
+        signature = canonical_ledger_message(message, include_id=False)
         try:
             return json.dumps(signature, ensure_ascii=False, sort_keys=True)
         except Exception:

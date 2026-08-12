@@ -1889,7 +1889,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state.current_content_buffer = "部分结果"
             bubble.set_main_content("部分结果", final=False)
             window.stop_agent()
-            self.assertIn("任务已停止", bubble.main_content_text)
+            self.assertIn("本轮已中断", bubble.main_content_text)
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
@@ -1898,7 +1898,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_error_silently_removes_current_group_without_persisting_chat_error(self):
+    def test_error_preserves_interrupted_context_without_raw_reasoning(self):
         window = MainWindow()
         try:
             state = window.get_current_session()
@@ -1907,16 +1907,18 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state.active_turn_id = 1
             bubble = window._append_live_thinking_segment(state)
             window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
-            self.assertIsNone(bubble.parent())
+            self.assertIsNotNone(bubble.parent())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
-            self.assertFalse(
-                any(
-                    (message.get("meta") or {}).get("ui_reply_kind") == "error"
-                    for message in state.messages
-                    if isinstance(message, dict)
-                )
-            )
+            interrupted = [
+                message
+                for message in state.messages
+                if isinstance(message, dict)
+                and (message.get("meta") or {}).get("context_visible_interruption")
+            ]
+            self.assertEqual(len(interrupted), 1)
+            self.assertIn("本轮因异常中断", interrupted[0]["content"])
+            self.assertNotIn("reasoning", interrupted[0])
         finally:
             window.close()
             window.deleteLater()
@@ -2162,9 +2164,20 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
-            self.assertIsNone(bubble.parent())
+            self.assertIsNotNone(bubble.parent())
+            self.assertIn("本轮因异常中断", bubble.main_content_text)
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
-            self.assertEqual(assistants, [])
+            self.assertEqual(len(assistants), 3)
+            self.assertFalse(
+                any(
+                    message.get("id") == "assistant-stage"
+                    and not message.get("tool_calls")
+                    for message in assistants
+                )
+            )
+            self.assertTrue(
+                (assistants[-1].get("meta") or {}).get("context_visible_interruption")
+            )
         finally:
             window.close()
             window.deleteLater()
@@ -2328,6 +2341,67 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(window.bubbles[1].main_content_text, "最终结果")
         for _kind, widget in window.render_order:
             widget.deleteLater()
+
+    def test_persisted_interrupted_timeline_restores_without_guidance(self):
+        state = SimpleNamespace(
+            session_id="session-interrupted-timeline",
+            live_activity=False,
+            last_agent_bubble=None,
+            tool_cards={},
+            ui_timeline_events=[
+                {
+                    "sequence": 1,
+                    "turn_id": "8",
+                    "kind": "thinking",
+                    "status": "interrupted",
+                    "started_at": 1.0,
+                    "finished_at": 2.0,
+                    "text": "已完成分析",
+                },
+                {
+                    "sequence": 2,
+                    "turn_id": "8",
+                    "kind": "error",
+                    "status": "interrupted",
+                    "finished_at": 2.0,
+                    "text": "本轮已中断",
+                },
+            ],
+        )
+
+        class RenderStub:
+            _render_persisted_timeline_items = MainWindow._render_persisted_timeline_items
+
+            def __init__(self):
+                self.bubble = None
+
+            def add_chat_bubble(self, *_args, **_kwargs):
+                self.bubble = ChatBubble("Agent", "")
+                return self.bubble
+
+            def _assistant_source_message_id_from_messages(self, messages):
+                return str((messages or [{}])[-1].get("id") or "")
+
+        render_items = [{
+            "type": "assistant",
+            "content": "部分正文\n\n⚠️ 本轮已中断，以上内容可能不完整。",
+            "messages": [{
+                "id": "assistant-interrupted",
+                "meta": {
+                    "ui_turn_id": "8",
+                    "ui_reply_kind": "interrupted",
+                    "context_visible_interruption": True,
+                },
+            }],
+            "tool_calls": [],
+        }]
+        window = RenderStub()
+
+        self.assertTrue(window._render_persisted_timeline_items(render_items, state))
+        self.assertIn("本轮已中断", window.bubble.main_content_text)
+        self.assertFalse(window.bubble.think_timer.isActive())
+        self.assertTrue(window.bubble.copy_result_btn.isHidden())
+        window.bubble.deleteLater()
 
     def test_short_user_message_uses_natural_width(self):
         bubble = ChatBubble("User", "你好")

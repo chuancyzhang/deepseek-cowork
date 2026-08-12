@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -1347,6 +1348,73 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     self.assertEqual(continue_worker.run_context["grill_round_count"], 0)
                     self.assertEqual(continue_worker.run_context["grill_cycle_count"], 1)
                     self.assertEqual(continued["grill_cycle_transition"]["choice"], expected_choice)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_grill_interruption_checkpoint_projects_question_and_answer_without_reasoning(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "分析需求"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_GRILLING},
+                    turn_id="3",
+                    request_id="run-grill-checkpoint",
+                )
+                projected = worker._grill_interruption_context_messages([
+                    {
+                        "id": "assistant-question",
+                        "role": "assistant",
+                        "content": "先确认关键条件。",
+                        "reasoning": "不应进入上下文的原始思考",
+                        "tool_calls": [{
+                            "id": "call-question",
+                            "type": "function",
+                            "function": {
+                                "name": "request_user_input",
+                                "arguments": json.dumps({
+                                    "message": "请回答",
+                                    "questions": [{
+                                        "id": "scope",
+                                        "question": "范围是什么？",
+                                        "options": [{"label": "全部", "value": "all"}],
+                                    }],
+                                }, ensure_ascii=False),
+                            },
+                        }],
+                    },
+                    {
+                        "id": "tool-answer",
+                        "role": "tool",
+                        "tool_call_id": "call-question",
+                        "content": "已收到用户输入，共回答 1 个问题。",
+                        "result_obj": {
+                            "answers": {
+                                "scope": {
+                                    "selected_options": ["all"],
+                                    "text": "包含归档",
+                                }
+                            }
+                        },
+                    },
+                ])
+
+                self.assertEqual([item["role"] for item in projected], ["assistant", "user"])
+                self.assertIn("范围是什么", projected[0]["content"])
+                self.assertIn("scope：all；包含归档", projected[1]["content"])
+                self.assertTrue(all("reasoning" not in item for item in projected))
+                self.assertTrue(all("tool_calls" not in item for item in projected))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

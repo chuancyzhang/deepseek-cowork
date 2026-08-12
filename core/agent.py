@@ -25,7 +25,7 @@ from core.im_gateway_registry import (
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
-from core.message_persistence import project_provider_messages
+from core.message_persistence import filter_persistable_messages, project_provider_messages
 from core.runtime_journal import RuntimeJournal
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
@@ -696,6 +696,9 @@ class LLMWorker(QThread):
         self.agent_id = agent_id or parent_agent_id or ""
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
+        self.started_in_grill_mode = (
+            str(self.run_context.get("mode") or "") == RUN_MODE_GRILLING
+        )
         self.turn_id = str(turn_id or "")
         self.request_id = str(request_id or "")
         
@@ -731,6 +734,7 @@ class LLMWorker(QThread):
         self.file_state_cache = {"reads": {}}
         self.chat_storage = None
         self.runtime_journal = None
+        self.runtime_run_managed = False
         self.runtime_journal_init_error = ""
         self.agent_manager = None
         try:
@@ -738,6 +742,14 @@ class LLMWorker(QThread):
             db_path = os.path.join(history_dir, "chat_history.sqlite")
             self.chat_storage = ChatStorage(db_path)
             self.runtime_journal = RuntimeJournal(history_dir)
+            self.runtime_run_managed = bool(
+                self.session_id
+                and self.request_id
+                and self.runtime_journal.get_run(
+                    self.session_id,
+                    self.request_id,
+                )
+            )
         except Exception as exc:
             self.chat_storage = None
             self.runtime_journal = None
@@ -2258,6 +2270,214 @@ class LLMWorker(QThread):
             })
             raise RuntimeError(f"tool execution journal write failed: {exc}") from exc
 
+    def _checkpoint_generated_ledger(self, generated_messages, boundary):
+        """Persist only replay-safe, closed ledger rounds for crash/stop recovery."""
+
+        run_id = str(self.request_id or "").strip()
+        if (
+            not self.runtime_journal
+            or not self.session_id
+            or not run_id
+            or not self.runtime_run_managed
+        ):
+            return None
+        persistable = filter_persistable_messages(generated_messages)
+        if self.started_in_grill_mode:
+            persistable = self._grill_interruption_context_messages(persistable)
+        checkpoint = {
+            "format": "closed_ledger_v1",
+            "boundary": str(boundary or "closed_round"),
+            "messages": [json_copy(message, {}) for message in persistable],
+            "messages_hash": RuntimeJournal.messages_hash(persistable),
+            "context_projection": (
+                "grill_interruption"
+                if self.started_in_grill_mode
+                else "canonical_ledger"
+            ),
+            "created_at": time.time(),
+        }
+        try:
+            return self.runtime_journal.update_run(
+                self.session_id,
+                run_id,
+                {"ledger_checkpoint": checkpoint},
+            )
+        except Exception as exc:
+            self.observability_signal.emit({
+                "type": "runtime_journal_error",
+                "stage": "ledger_checkpoint",
+                "boundary": checkpoint["boundary"],
+                "error": str(exc),
+                "timestamp": time.time(),
+            })
+            raise RuntimeError(f"ledger checkpoint write failed: {exc}") from exc
+
+    def _grill_interruption_context_messages(self, messages):
+        """Project completed grill Q&A to plain context without raw reasoning."""
+
+        source = [message for message in (messages or []) if isinstance(message, dict)]
+        tool_results = {
+            str(message.get("tool_call_id") or ""): message
+            for message in source
+            if message.get("role") == "tool" and str(message.get("tool_call_id") or "")
+        }
+        projected = []
+        for message in source:
+            role = str(message.get("role") or "")
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if role == "system" or meta.get("hidden"):
+                continue
+            tool_calls = message.get("tool_calls") if role == "assistant" else None
+            if isinstance(tool_calls, list) and tool_calls:
+                request_calls = []
+                for call in tool_calls:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if (
+                        not isinstance(function, dict)
+                        or str(function.get("name") or "") != "request_user_input"
+                    ):
+                        request_calls = []
+                        break
+                    request_calls.append(call)
+                if not request_calls:
+                    body = str(message.get("content") or "").strip()
+                    if body:
+                        projected.append({
+                            "id": uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"grill-interruption-body:{message.get('id') or ''}",
+                            ).hex,
+                            "role": "assistant",
+                            "content": body,
+                            "content_parts": [{"type": "text", "text": body}],
+                            "meta": {
+                                "turn_id": str(meta.get("turn_id") or self.turn_id),
+                                "request_id": str(meta.get("request_id") or self.request_id),
+                                "source": "grill_interruption_body",
+                            },
+                        })
+                    continue
+                question_lines = []
+                body = str(message.get("content") or "").strip()
+                if body:
+                    question_lines.append(body)
+                for call in request_calls:
+                    function = call.get("function") or {}
+                    raw_arguments = function.get("arguments")
+                    if isinstance(raw_arguments, dict):
+                        arguments = raw_arguments
+                    else:
+                        try:
+                            arguments = json.loads(str(raw_arguments or "{}"))
+                        except Exception:
+                            arguments = {}
+                    prompt = str(arguments.get("message") or "").strip()
+                    if prompt:
+                        question_lines.append(prompt)
+                    for question in arguments.get("questions") or []:
+                        if isinstance(question, dict) and str(question.get("question") or "").strip():
+                            question_lines.append(str(question.get("question")).strip())
+                question_text = "\n".join(dict.fromkeys(question_lines)).strip()
+                if question_text:
+                    projected.append({
+                        "id": uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"grill-interruption-question:{message.get('id') or ''}",
+                        ).hex,
+                        "role": "assistant",
+                        "content": question_text,
+                        "content_parts": [{"type": "text", "text": question_text}],
+                        "meta": {
+                            "turn_id": str(meta.get("turn_id") or self.turn_id),
+                            "request_id": str(meta.get("request_id") or self.request_id),
+                            "source": "grill_interruption_question",
+                        },
+                    })
+                for call in request_calls:
+                    call_id = str(call.get("id") or "")
+                    result = tool_results.get(call_id)
+                    if not result:
+                        continue
+                    result_obj = (
+                        result.get("result_obj")
+                        if isinstance(result.get("result_obj"), dict)
+                        else {}
+                    )
+                    interaction_response = (
+                        result_obj.get("interaction_response")
+                        if isinstance(result_obj.get("interaction_response"), dict)
+                        else {}
+                    )
+                    answers = (
+                        result_obj.get("answers")
+                        if isinstance(result_obj.get("answers"), dict)
+                        else interaction_response.get("answers")
+                        if isinstance(interaction_response.get("answers"), dict)
+                        else {}
+                    )
+                    answer_lines = []
+                    for question_id, answer in answers.items():
+                        if isinstance(answer, dict):
+                            selected = [
+                                str(value)
+                                for value in (answer.get("selected_options") or [])
+                                if str(value).strip()
+                            ]
+                            free_text = str(answer.get("text") or "").strip()
+                            value = "；".join(selected + ([free_text] if free_text else []))
+                        else:
+                            value = str(answer or "").strip()
+                        if value:
+                            answer_lines.append(f"{question_id}：{value}")
+                    if not answer_lines:
+                        selected = [
+                            str(value)
+                            for value in (interaction_response.get("selected_options") or [])
+                            if str(value).strip()
+                        ]
+                        free_text = str(interaction_response.get("text") or "").strip()
+                        answer_lines.extend(selected)
+                        if free_text:
+                            answer_lines.append(free_text)
+                    answer_text = "\n".join(answer_lines).strip()
+                    if not answer_text:
+                        answer_text = str(result_obj.get("content") or "").strip()
+                    if not answer_text:
+                        answer_text = str(result.get("content") or "").strip()
+                    if not answer_text:
+                        continue
+                    result_meta = (
+                        result.get("meta")
+                        if isinstance(result.get("meta"), dict)
+                        else {}
+                    )
+                    projected.append({
+                        "id": uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"grill-interruption-answer:{result.get('id') or call_id}",
+                        ).hex,
+                        "role": "user",
+                        "content": answer_text,
+                        "meta": {
+                            "turn_id": str(result_meta.get("turn_id") or self.turn_id),
+                            "request_id": str(result_meta.get("request_id") or self.request_id),
+                            "source": "grill_interruption_answer",
+                        },
+                    })
+                continue
+            if role == "tool":
+                continue
+            content = str(message.get("content") or "").strip()
+            if role not in {"assistant", "user"} or not content:
+                continue
+            plain_message = json_copy(message, {})
+            plain_message.pop("reasoning", None)
+            plain_message.pop("reasoning_content", None)
+            plain_message.pop("tool_calls", None)
+            plain_message.pop("result_obj", None)
+            projected.append(plain_message)
+        return projected
+
     def run(self):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is
         # sanitized after the concrete provider/protocol is known so Responses
@@ -3502,6 +3722,14 @@ class LLMWorker(QThread):
                             )
                         else:
                             tool_failure_repair_count = 0
+                        self._checkpoint_generated_ledger(
+                            generated_messages,
+                            boundary=(
+                                "grill_question_answered"
+                                if self._is_grilling_mode()
+                                else "tool_round_closed"
+                            ),
+                        )
                         if (
                             self.run_context.get("grill_checkpoint_cancelled")
                             or self.run_context.get("grill_input_cancelled")

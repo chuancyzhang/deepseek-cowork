@@ -6,6 +6,7 @@ import unittest
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.chat_save_queue import ChatSaveRequest
 from core.chat_storage import ChatStorage
+from core.runtime_journal import RuntimeJournal
 
 
 class TestChatRecoveryJournal(unittest.TestCase):
@@ -199,6 +200,184 @@ class TestChatRecoveryJournal(unittest.TestCase):
             self.assertEqual(manifest.get("pending_commit_run_id"), "")
             self.assertNotIn("pending_commit", manifest)
             self.assertEqual(journal.recover_into(storage), ([], []))
+
+    def test_distributed_legacy_v2_snapshot_upgrades_once_and_preserves_meta(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            storage.save_conversation(
+                "session-legacy-v2",
+                [{
+                    "id": "u1",
+                    "role": "user",
+                    "content": "question",
+                    "meta": {"sequence": 0, "ui_turn_id": "1"},
+                }],
+                title="Legacy",
+                meta={"ui_timeline_v1": [{"kind": "thinking", "turn_id": "1"}]},
+            )
+            journal = ChatRecoveryJournal(temp_dir)
+            messages = [
+                {"id": "u1", "role": "user", "content": "question", "meta": {"sequence": 0}},
+                {"id": "a1", "role": "assistant", "content": "answer"},
+            ]
+            journal.runtime_journal.begin_run(
+                "session-legacy-v2",
+                "run-legacy-v2",
+                writer_owner="ui:old",
+                base_messages=[],
+                status="completed",
+            )
+            journal.runtime_journal.update_manifest(
+                "session-legacy-v2",
+                {
+                    "pending_commit_run_id": "run-legacy-v2",
+                    "pending_commit": {
+                        "run_id": "run-legacy-v2",
+                        "messages": messages,
+                        "messages_hash": RuntimeJournal.legacy_snapshot_messages_hash(messages),
+                        "title": "Legacy",
+                        "status": "completed",
+                        "meta": {},
+                    },
+                },
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, ["session-legacy-v2"])
+            self.assertEqual(errors, [])
+            self.assertEqual([item["id"] for item in storage.get_messages("session-legacy-v2")], ["u1", "a1"])
+            self.assertIn("ui_timeline_v1", storage.get_conversation_meta("session-legacy-v2"))
+
+    def test_distributed_legacy_snapshot_is_acknowledged_when_sqlite_is_newer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            old_messages = [{"id": "u1", "role": "user", "content": "old"}]
+            storage.save_conversation(
+                "session-legacy-stale",
+                old_messages + [{"id": "a2", "role": "assistant", "content": "newer"}],
+                title="Newer",
+            )
+            journal = ChatRecoveryJournal(temp_dir)
+            journal.runtime_journal.begin_run(
+                "session-legacy-stale",
+                "run-legacy-stale",
+                writer_owner="ui:old",
+                base_messages=[],
+                status="completed",
+            )
+            journal.runtime_journal.update_manifest(
+                "session-legacy-stale",
+                {
+                    "pending_commit_run_id": "run-legacy-stale",
+                    "pending_commit": {
+                        "run_id": "run-legacy-stale",
+                        "messages": old_messages,
+                        "messages_hash": RuntimeJournal.legacy_snapshot_messages_hash(old_messages),
+                        "title": "Old",
+                        "status": "completed",
+                    },
+                },
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, ["session-legacy-stale"])
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [message["id"] for message in storage.get_messages("session-legacy-stale")],
+                ["u1", "a2"],
+            )
+            self.assertEqual(
+                journal.runtime_journal.load_manifest("session-legacy-stale")["pending_commit_run_id"],
+                "",
+            )
+
+    def test_periodic_recovery_skips_live_session_without_consuming_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            journal = ChatRecoveryJournal(temp_dir)
+            messages = [{"id": "u1", "role": "user", "content": "question"}]
+            journal.runtime_journal.begin_run(
+                "session-live",
+                "run-live",
+                writer_owner="ui:1",
+                base_messages=[],
+            )
+            journal.runtime_journal.mark_pending_commit(
+                "session-live",
+                "run-live",
+                messages,
+            )
+
+            recovered, errors = journal.recover_into(
+                storage,
+                skip_session_ids={"session-live"},
+            )
+
+            self.assertEqual((recovered, errors), ([], []))
+            self.assertEqual(storage.get_messages("session-live"), [])
+            self.assertEqual(
+                journal.runtime_journal.load_manifest("session-live")["pending_commit_run_id"],
+                "run-live",
+            )
+
+    def test_ui_snapshot_recovers_before_runtime_append(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            base = [{"id": "u0", "role": "user", "content": "old"}]
+            storage.save_conversation("session-order", base, title="Order")
+            journal = ChatRecoveryJournal(temp_dir)
+            ui_user = {
+                "id": "u1",
+                "role": "user",
+                "content": "new",
+                "meta": {"turn_id": "2", "ui_turn_id": "2"},
+            }
+            journal.record(
+                ChatSaveRequest(
+                    session_id="session-order",
+                    messages=base + [ui_user],
+                    title="Order",
+                    status="running",
+                    meta={"ui_timeline_v1": [{"kind": "thinking", "turn_id": "2"}]},
+                    ready_at=0.0,
+                    revision=1,
+                )
+            )
+            journal.runtime_journal.begin_run(
+                "session-order",
+                "run-order",
+                writer_owner="ui:1",
+                base_messages=base,
+            )
+            daemon_user = {
+                "id": "u1",
+                "role": "user",
+                "content": "new",
+                "meta": {"turn_id": "2"},
+            }
+            assistant = {
+                "id": "a1",
+                "role": "assistant",
+                "content": "answer",
+                "meta": {"turn_id": "2"},
+            }
+            journal.runtime_journal.mark_pending_commit(
+                "session-order",
+                "run-order",
+                base + [daemon_user, assistant],
+            )
+
+            recovered, errors = journal.recover_into(storage)
+
+            self.assertEqual(recovered, ["session-order"])
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [message["id"] for message in storage.get_messages("session-order")],
+                ["u0", "u1", "a1"],
+            )
+            self.assertIn("ui_timeline_v1", storage.get_conversation_meta("session-order"))
 
 
 if __name__ == "__main__":

@@ -49,7 +49,11 @@ def _filter_ledger_messages(messages, *, include_runtime_repairs=False):
             )
         ):
             continue
-        if str(meta.get("ui_reply_kind") or "").strip().lower() in {"error", "interrupted"}:
+        if (
+            str(meta.get("ui_reply_kind") or "").strip().lower()
+            in {"error", "interrupted"}
+            and not meta.get("context_visible_interruption")
+        ):
             continue
         if str(meta.get("source") or "").strip() == "responses_generation_stopped":
             continue

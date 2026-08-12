@@ -138,6 +138,90 @@ class TestRuntimeJournal(unittest.TestCase):
             self.assertEqual(reused["execution_id"], "execution-1")
             self.assertEqual(reused["result_obj"], {"content": "saved"})
 
+    def test_pending_commit_uses_append_protocol_and_ignores_ui_projection_meta(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            base = [{
+                "id": "u1",
+                "role": "user",
+                "content": "one",
+                "meta": {"sequence": 0, "ui_turn_id": "1"},
+            }]
+            journal.begin_run(
+                "session-append",
+                "run-append",
+                writer_owner="ui:1",
+                base_messages=base,
+            )
+            full = [
+                {**base[0], "meta": {"sequence": 0}},
+                {"id": "a1", "role": "assistant", "content": "two"},
+            ]
+            journal.mark_pending_commit("session-append", "run-append", full)
+
+            pending = journal.load_manifest("session-append")["pending_commit"]
+            self.assertEqual(pending["format"], "ledger_append_v1")
+            self.assertEqual([item["id"] for item in pending["append_messages"]], ["a1"])
+            self.assertNotIn("messages", pending)
+            self.assertTrue(journal.acknowledge_commit("session-append", "run-append", full))
+
+    def test_stable_hash_ignores_ui_metadata_but_not_semantic_metadata(self):
+        base = [{
+            "id": "a1",
+            "role": "assistant",
+            "content": "answer",
+            "meta": {"sequence": 1, "ui_turn_id": "3", "request_id": "run-1"},
+        }]
+        different_projection = [{
+            "id": "a1",
+            "role": "assistant",
+            "content": "answer",
+            "meta": {"sequence": 99, "ui_stage_id": "stage-4", "request_id": "run-1"},
+            "created_at": 123,
+        }]
+        different_semantics = [{
+            "id": "a1",
+            "role": "assistant",
+            "content": "answer",
+            "meta": {"request_id": "run-2"},
+        }]
+
+        self.assertEqual(
+            RuntimeJournal.messages_hash(base),
+            RuntimeJournal.messages_hash(different_projection),
+        )
+        self.assertNotEqual(
+            RuntimeJournal.messages_hash(base),
+            RuntimeJournal.messages_hash(different_semantics),
+        )
+
+    def test_user_interruption_rejects_late_pending_commit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            base = [{"id": "u1", "role": "user", "content": "one"}]
+            journal.begin_run(
+                "session-stop",
+                "run-stop",
+                writer_owner="ui:1",
+                base_messages=base,
+            )
+            journal.interrupt_run("session-stop", "run-stop")
+            journal.update_run(
+                "session-stop",
+                "run-stop",
+                {"status": "completed", "terminal_error": "late success"},
+            )
+            stopped_run = journal.get_run("session-stop", "run-stop")
+            self.assertEqual(stopped_run["status"], "interrupted")
+            self.assertEqual(stopped_run["terminal_error"], "interrupted by user")
+
+            with self.assertRaises(RuntimeJournalError):
+                journal.mark_pending_commit(
+                    "session-stop",
+                    "run-stop",
+                    base + [{"id": "a1", "role": "assistant", "content": "late"}],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

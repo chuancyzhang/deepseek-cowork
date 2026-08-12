@@ -14311,7 +14311,6 @@ class DaemonStreamWorker(QThread):
                 self._sock.close()
             except Exception:
                 pass
-
     def _dispatch_stream_message(self, msg):
         try:
             self._last_sequence = max(self._last_sequence, int(msg.get("sequence") or 0))
@@ -14495,6 +14494,26 @@ class DaemonStreamWorker(QThread):
                 aborted=self._aborted,
             )
             self._sock = None
+
+
+class DaemonStopWorker(QThread):
+    result_signal = Signal(dict, str)
+
+    def __init__(self, client, session_id, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.session_id = str(session_id or "")
+
+    def run(self):
+        try:
+            response = self.client.stop_session(self.session_id)
+            if not isinstance(response, dict) or response.get("status") != "ok":
+                raise RuntimeError(
+                    str((response or {}).get("error") or "守护进程未确认停止请求")
+                )
+            self.result_signal.emit(response, self.session_id)
+        except Exception as exc:
+            self.result_signal.emit({"status": "error", "error": str(exc)}, self.session_id)
 
 
 class DaemonAttachWorker(DaemonStreamWorker):
@@ -22708,6 +22727,7 @@ class MainWindow(QMainWindow):
         self._last_submit_text = ""
         self._last_submit_ts = 0.0
         self._detached_workers = []
+        self._daemon_stop_workers = set()
         self.memory_update_worker = None
         self.memory_update_dialog = None
         self._last_memory_update_cutoff_at = None
@@ -28813,7 +28833,26 @@ class MainWindow(QMainWindow):
         storage = getattr(self, "chat_storage", None)
         if journal is None or storage is None:
             return []
-        recovered, errors = journal.recover_into(storage)
+        busy_session_ids = {
+            str(session_id)
+            for session_id, state in list(getattr(self, "sessions", {}).items())
+            if (
+                getattr(state, "live_activity", False)
+                or getattr(state, "daemon_running", False)
+                or (
+                    getattr(state, "llm_worker", None) is not None
+                    and state.llm_worker.isRunning()
+                )
+                or (
+                    getattr(state, "code_worker", None) is not None
+                    and state.code_worker.isRunning()
+                )
+            )
+        }
+        recovered, errors = journal.recover_into(
+            storage,
+            skip_session_ids=busy_session_ids,
+        )
         for item in errors:
             log_chat_recovery(
                 "runtime_record_failed",
@@ -29435,6 +29474,9 @@ class MainWindow(QMainWindow):
         if self.daemon_status_worker and self.daemon_status_worker.isRunning():
             self.daemon_status_worker.wait(1000)
         self.daemon_status_worker = None
+        for stop_worker in list(getattr(self, "_daemon_stop_workers", set())):
+            if stop_worker.isRunning():
+                stop_worker.wait(3500)
         for session_id, state in list(self.sessions.items()):
             for guidance_worker in list(getattr(state, "guidance_workers", []) or []):
                 try:
@@ -32947,12 +32989,13 @@ class MainWindow(QMainWindow):
             self._sync_question_navigator(session_id)
 
     def _render_persisted_timeline_items(self, render_items, state, insert_index=None, animate=True):
-        """Project a guided turn back into natural conversational order."""
+        """Project a persisted turn back into its original UI event order."""
         if not state or getattr(state, "live_activity", False):
             return False
         guidance_messages = {}
         turn_ids = set()
         assistant_items = []
+        has_terminal_projection = False
         for item in render_items or []:
             item_type = item.get("type")
             if item_type == "guidance":
@@ -32965,16 +33008,34 @@ class MainWindow(QMainWindow):
                     turn_ids.add(str(meta.get("turn_id")))
             elif item_type == "assistant":
                 assistant_items.append(item)
-        if not guidance_messages or not turn_ids:
+                for message in item.get("messages") or []:
+                    if not isinstance(message, dict):
+                        continue
+                    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+                    message_turn_id = str(
+                        meta.get("ui_turn_id") or meta.get("turn_id") or ""
+                    )
+                    if message_turn_id:
+                        turn_ids.add(message_turn_id)
+                    if (
+                        str(meta.get("ui_reply_kind") or "").lower()
+                        in {"error", "interrupted"}
+                    ):
+                        has_terminal_projection = True
+        if not assistant_items or not turn_ids:
             return False
         events = [
             event for event in list(getattr(state, "ui_timeline_events", []) or [])
             if isinstance(event, dict) and str(event.get("turn_id") or "") in turn_ids
         ]
-        if not events or not any(
-            event.get("kind") == "guidance" and str(event.get("message_id") or "") in guidance_messages
+        if not events:
+            return False
+        has_matching_guidance = any(
+            event.get("kind") == "guidance"
+            and str(event.get("message_id") or "") in guidance_messages
             for event in events
-        ):
+        )
+        if not has_matching_guidance and not has_terminal_projection:
             return False
         events.sort(key=lambda event: int(event.get("sequence") or 0))
 
@@ -33095,6 +33156,8 @@ class MainWindow(QMainWindow):
             return False
         target.update_thinking(duration=target.think_duration, is_final=True)
         target.set_main_content(final_content, content_parts=final_content_parts, final=True)
+        if any(event.get("kind") == "error" for event in events):
+            target.set_message_actions_enabled(False)
         return True
 
     def render_render_items(self, render_items, session_id, insert_index=None, animate=True):
@@ -38837,52 +38900,167 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
 
+    def _merge_runtime_ledger_checkpoint(self, state, run_id):
+        if not state or not str(run_id or "").strip():
+            return 0
+        run = self.runtime_journal.get_run(state.session_id, run_id)
+        checkpoint = run.get("ledger_checkpoint") if isinstance(run, dict) else None
+        if not isinstance(checkpoint, dict):
+            return 0
+        if checkpoint.get("format") != "closed_ledger_v1":
+            raise RuntimeError(
+                f"不支持的运行账本检查点格式: {checkpoint.get('format') or 'missing'}"
+            )
+        checkpoint_messages = filter_persistable_messages(
+            checkpoint.get("messages") or []
+        )
+        expected_hash = str(checkpoint.get("messages_hash") or "")
+        if (
+            not expected_hash
+            or expected_hash != RuntimeJournal.messages_hash(checkpoint_messages)
+        ):
+            raise RuntimeError("运行账本检查点校验失败")
+        before_ids = {
+            str(message.get("id") or "")
+            for message in state.messages
+            if isinstance(message, dict)
+        }
+        state.messages = merge_messages_by_id(
+            state.messages,
+            checkpoint_messages,
+        )
+        return sum(
+            1
+            for message in checkpoint_messages
+            if str(message.get("id") or "") not in before_ids
+        )
+
+    def _start_daemon_stop_worker(self, session_id):
+        if not self.daemon_client or not str(session_id or "").strip():
+            return
+        worker = DaemonStopWorker(self.daemon_client, session_id, parent=self)
+        self._daemon_stop_workers.add(worker)
+
+        def handle_result(result, stopped_session_id):
+            if result.get("status") == "ok":
+                log_sub_agent_runtime(
+                    "daemon_stop_confirmed",
+                    session_id=stopped_session_id,
+                    stopped=bool(result.get("stopped")),
+                )
+                return
+            error = str(result.get("error") or "未知错误")
+            self.append_log(
+                f"守护进程未确认任务停止({stopped_session_id}): {error}"
+            )
+            self.add_system_toast(
+                f"远端停止确认失败：{error}",
+                "error",
+                session_id=stopped_session_id,
+                auto_close_ms=0,
+            )
+
+        def cleanup():
+            self._daemon_stop_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.result_signal.connect(handle_result, Qt.QueuedConnection)
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _finish_interrupted_turn(self, state, *, turn_id, run_id, bubble, reason_text, outcome):
+        self._timeline_close_open_events(state, status="interrupted")
+        self._timeline_append_event(
+            state,
+            "error",
+            status="interrupted",
+            text=reason_text,
+            turn_id=turn_id,
+            reply_kind="interrupted",
+            finished_at=time.time(),
+        )
+        partial_content = str(
+            getattr(state, "current_content_buffer", "") or ""
+        ).strip()
+        interruption_text = f"⚠️ {reason_text}，以上内容可能不完整。"
+        if partial_content:
+            interruption_text = f"{partial_content}\n\n{interruption_text}"
+        existing_content = ""
+        if (
+            state.messages
+            and isinstance(state.messages[-1], dict)
+            and state.messages[-1].get("role") == "assistant"
+        ):
+            existing_content = str(state.messages[-1].get("content") or "").strip()
+        if existing_content != interruption_text:
+            message_meta = {
+                "turn_id": str(turn_id or ""),
+                "request_id": str(run_id or ""),
+                "ui_turn_id": str(turn_id or ""),
+                "ui_reply_kind": "interrupted",
+                "context_visible_interruption": True,
+                "run_outcome": str(outcome or "interrupted"),
+            }
+            if bubble is not None:
+                message_meta.update({
+                    "ui_turn_group_id": str(getattr(bubble, "ui_turn_group_id", "")),
+                    "ui_stage_id": str(getattr(bubble, "ui_stage_id", "")),
+                })
+            state.messages.append({
+                "id": self._new_message_id(),
+                "role": "assistant",
+                "content": interruption_text,
+                "content_parts": [{"type": "text", "text": interruption_text}],
+                "meta": message_meta,
+            })
+        if bubble is not None:
+            bubble.stop_thinking_timers()
+            bubble.set_message_actions_enabled(False)
+            bubble.update_thinking(duration=bubble.think_duration, is_final=True)
+            bubble.set_main_content(interruption_text, final=True)
+        state.messages = self.chat_storage.normalize_messages(
+            state.messages,
+            conversation_id=state.session_id,
+        )
+        self._rebuild_session_render_spans(state)
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
+        state.pending_thinking_delta = ""
+        return interruption_text
+
     def stop_agent(self):
         state = self.get_current_session()
-        if not state: return
+        if not state:
+            return
         stopped_turn_id = state.active_turn_id
         stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
+        was_daemon_running = bool(state.daemon_running)
+        daemon_worker = state.daemon_worker
+        llm_worker = state.llm_worker
+        code_worker = state.code_worker
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
             state.last_agent_bubble.stop_thinking_timers()
-        if not state.daemon_running:
-            self._stop_live_subagents(state, force=True)
-        if self.daemon_client and state.daemon_running and state.session_id:
-            try:
-                self.daemon_client.stop_session(state.session_id)
-            except Exception:
-                pass
-        if state.daemon_worker:
-            daemon_worker = state.daemon_worker
+        if daemon_worker:
             self._disconnect_worker_signals(daemon_worker)
-            try:
-                daemon_worker.abort()
-            except Exception:
-                pass
-            daemon_worker.wait(1200)
+            daemon_worker.detach()
             if daemon_worker.isRunning():
                 self._keep_detached_worker(daemon_worker)
-        if state.llm_worker:
-            llm_worker = state.llm_worker
+        if llm_worker:
             self._disconnect_worker_signals(llm_worker)
-            try:
-                llm_worker.stop()
-            except Exception:
-                pass
-            llm_worker.wait(1200)
+            llm_worker.stop()
             if llm_worker.isRunning():
                 self._keep_detached_worker(llm_worker)
-        if state.code_worker:
-            code_worker = state.code_worker
+        if code_worker:
             self._disconnect_worker_signals(code_worker)
-            try:
-                code_worker.stop()
-            except Exception:
-                pass
-            code_worker.wait(1200)
+            code_worker.stop()
             if code_worker.isRunning():
                 self._keep_detached_worker(code_worker)
+
+        # Terminalize the local run before any remote cancellation wait. This
+        # prevents a stopped turn from remaining steerable/"thinking" in the UI.
         state.active_turn_id += 1
         state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id)
         state.daemon_worker = None
@@ -38891,14 +39069,35 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        try:
+            checkpoint_count = self._merge_runtime_ledger_checkpoint(
+                state,
+                stopped_run_id,
+            )
+            if checkpoint_count:
+                log_sub_agent_runtime(
+                    "ui_interrupted_ledger_checkpoint_merged",
+                    session_id=state.session_id,
+                    run_id=stopped_run_id,
+                    message_count=checkpoint_count,
+                )
+        except Exception as exc:
+            self.append_log(
+                f"运行账本检查点恢复失败({state.session_id}, run={stopped_run_id}): {exc}"
+            )
+            self.add_system_toast(
+                f"已停止任务，但已完成轮次恢复失败：{exc}",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=0,
+            )
         if stopped_run_id:
             try:
-                self.runtime_journal.update_run(
+                self.runtime_journal.interrupt_run(
                     state.session_id,
                     stopped_run_id,
-                    {
-                        "status": "cancelled",
-                        "terminal_error": "cancelled by user",
+                    reason="interrupted by user",
+                    patch={
                         "draft_content": str(state.current_content_buffer or ""),
                         "draft_reasoning": str(state.current_thinking_buffer or ""),
                     },
@@ -38906,7 +39105,7 @@ class MainWindow(QMainWindow):
                 self.runtime_journal.append_event(
                     state.session_id,
                     stopped_run_id,
-                    "cancelled",
+                    "interrupted",
                     {"reason": "user_stop"},
                 )
             except Exception as exc:
@@ -38915,68 +39114,33 @@ class MainWindow(QMainWindow):
                 )
         self._finish_grill_mode(state, "stopped")
         self._reject_unapplied_guidance(state, restore_input=True)
-        self._timeline_close_open_events(state, status="interrupted")
-        self._timeline_append_event(
-            state,
-            "error",
-            status="interrupted",
-            text="任务已由用户停止",
-            turn_id=stopped_turn_id,
-            reply_kind="interrupted",
-            finished_at=time.time(),
-        )
         self._persist_pending_guidance(state)
-        partial_content = (state.current_content_buffer or "").strip()
-        partial_thinking = (state.current_thinking_buffer or "").strip()
         stopped_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
-        stop_text = "⚠️ 任务已停止（保留未完成内容）"
-        if partial_content:
-            stop_text = f"{partial_content}\n\n{stop_text}"
-        existing_content = ""
-        if state.messages and isinstance(state.messages[-1], dict) and state.messages[-1].get("role") == "assistant":
-            existing_content = (state.messages[-1].get("content") or "").strip()
-        if existing_content != stop_text:
-            stop_message = {
-                "id": self._new_message_id(),
-                "role": "assistant",
-                "content": stop_text,
-                "reasoning": partial_thinking,
-                "content_parts": [{"type": "text", "text": stop_text}],
-            }
-            if stopped_bubble is not None:
-                stop_message["meta"] = {
-                    "ui_only": True,
-                    "ui_turn_id": str(stopped_turn_id),
-                    "ui_turn_group_id": str(getattr(stopped_bubble, "ui_turn_group_id", "")),
-                    "ui_stage_id": str(getattr(stopped_bubble, "ui_stage_id", "")),
-                    "ui_reply_kind": "interrupted",
-                }
-            else:
-                stop_message["meta"] = {
-                    "ui_only": True,
-                    "ui_turn_id": str(stopped_turn_id),
-                    "ui_reply_kind": "interrupted",
-                }
-            state.messages.append(stop_message)
-            self.save_chat_history(session_id=state.session_id)
-        if stopped_bubble is not None:
-            stopped_bubble.set_message_actions_enabled(False)
-            stopped_bubble.set_main_content(stop_text, final=True)
+        self._finish_interrupted_turn(
+            state,
+            turn_id=stopped_turn_id,
+            run_id=stopped_run_id,
+            bubble=stopped_bubble,
+            reason_text="本轮已中断",
+            outcome="interrupted",
+        )
+        self.save_chat_history(session_id=state.session_id)
         log_sub_agent_runtime(
             "ui_assistant_turn_interrupted",
             session_id=state.session_id,
             turn_id=str(getattr(state, "active_turn_id", "")),
             group_id=str(getattr(getattr(state, "active_agent_turn_group", None), "group_id", "")),
         )
-        state.current_content_buffer = ""
-        state.current_thinking_buffer = ""
-        state.last_flushed_content_buffer = ""
         self.add_system_toast("任务已停止", "warning", session_id=state.session_id)
         self.set_session_phase("Interrupted", state.session_id)
         self.set_session_status("interrupted", state.session_id, save=True)
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
         self.normalize_session_ui(state)
+        if was_daemon_running:
+            self._start_daemon_stop_worker(state.session_id)
+        else:
+            self._stop_live_subagents(state, force=True)
 
     def on_action_clicked(self):
         state = self.get_current_session()
@@ -42075,6 +42239,48 @@ class MainWindow(QMainWindow):
         if not isinstance(run, dict) or str(run.get("status") or "") != "running":
             return False
         if str(run.get("execution_backend") or "") != "daemon":
+            checkpoint_count = 0
+            try:
+                checkpoint_count = self._merge_runtime_ledger_checkpoint(
+                    state,
+                    run_id,
+                )
+            except Exception as exc:
+                self.append_log(
+                    f"本地运行检查点恢复失败({state.session_id}, run={run_id}): {exc}"
+                )
+                self.add_system_toast(
+                    f"未完成对话恢复失败：{exc}",
+                    "error",
+                    session_id=state.session_id,
+                    auto_close_ms=0,
+                )
+                return False
+            draft_content = str(run.get("draft_content") or "").strip()
+            interruption_text = "⚠️ 本轮因程序异常退出而中断，以上内容可能不完整。"
+            if draft_content:
+                interruption_text = f"{draft_content}\n\n{interruption_text}"
+            interruption_message = {
+                "id": uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"local-run-interruption:{state.session_id}:{run_id}",
+                ).hex,
+                "role": "assistant",
+                "content": interruption_text,
+                "content_parts": [{"type": "text", "text": interruption_text}],
+                "meta": {
+                    "turn_id": str(run.get("turn_id") or ""),
+                    "request_id": run_id,
+                    "ui_turn_id": str(run.get("turn_id") or ""),
+                    "ui_reply_kind": "interrupted",
+                    "context_visible_interruption": True,
+                    "run_outcome": "process_exit",
+                },
+            }
+            state.messages = merge_messages_by_id(
+                state.messages,
+                [interruption_message],
+            )
             self.runtime_journal.update_run(
                 state.session_id,
                 run_id,
@@ -42082,6 +42288,22 @@ class MainWindow(QMainWindow):
                     "status": "interrupted",
                     "terminal_error": "The local UI worker did not survive the application restart.",
                 },
+            )
+            self._timeline_append_event(
+                state,
+                "error",
+                status="interrupted",
+                text="本轮因程序异常退出而中断",
+                turn_id=run.get("turn_id") or "",
+                reply_kind="interrupted",
+                finished_at=time.time(),
+            )
+            self.save_chat_history(session_id=state.session_id)
+            log_sub_agent_runtime(
+                "ui_local_run_recovered_as_interrupted",
+                session_id=state.session_id,
+                request_id=run_id,
+                checkpoint_message_count=checkpoint_count,
             )
             return False
         raw_turn_id = str(run.get("turn_id") or "")
@@ -43076,9 +43298,6 @@ class MainWindow(QMainWindow):
             self.temp_thinking_bubble = state.temp_thinking_bubble
 
         if "error" in result:
-            daemon_owned_history = (
-                self._history_writer_owner_for_session(state.session_id) == "daemon"
-            )
             run_id = str(
                 result.get("request_id")
                 or getattr(state, "active_turn_request_id", "")
@@ -43117,18 +43336,51 @@ class MainWindow(QMainWindow):
                 )
                 state.first_submit_diagnostic_turn_id = 0
             self._reject_unapplied_guidance(state, restore_input=True)
-            self._timeline_close_open_events(state, status="interrupted")
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
             bubble.stop_thinking_timers()
-            state.messages = self.chat_storage.normalize_messages(
-                state.messages,
-                conversation_id=state.session_id,
+            recovered_generated = filter_persistable_messages(
+                result.get("generated_messages") or []
             )
-            self._rebuild_session_render_spans(state)
+            checkpoint_projection = ""
+            if run_id:
+                run_record = self.runtime_journal.get_run(state.session_id, run_id) or {}
+                run_checkpoint = (
+                    run_record.get("ledger_checkpoint")
+                    if isinstance(run_record.get("ledger_checkpoint"), dict)
+                    else {}
+                )
+                checkpoint_projection = str(
+                    run_checkpoint.get("context_projection") or ""
+                )
+            try:
+                self._merge_runtime_ledger_checkpoint(state, run_id)
+            except Exception as exc:
+                self.append_log(
+                    f"异常中断账本检查点恢复失败({state.session_id}, run={run_id}): {exc}"
+                )
+            if checkpoint_projection == "grill_interruption":
+                recovered_generated = []
+            generated_to_append = self._merge_generated_messages(
+                state.messages,
+                recovered_generated,
+            )
+            if generated_to_append:
+                self._annotate_generated_messages_for_unified_turn(
+                    state,
+                    generated_to_append,
+                )
+                state.messages.extend(generated_to_append)
+            interruption_text = self._finish_interrupted_turn(
+                state,
+                turn_id=turn_id or state.active_turn_id,
+                run_id=run_id,
+                bubble=bubble,
+                reason_text="本轮因异常中断",
+                outcome="error",
+            )
             self._finish_grill_mode(state, "error")
-            if not daemon_owned_history:
-                self.save_chat_history(session_id=state.session_id)
+            self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
                 "ui_assistant_turn_failed",
                 session_id=state.session_id,
@@ -43141,19 +43393,13 @@ class MainWindow(QMainWindow):
                 state.last_agent_bubble = None
             if is_current and self.last_agent_bubble is bubble:
                 self.last_agent_bubble = None
-            bubble.hide()
-            bubble.setParent(None)
-            bubble.deleteLater()
-            state.current_content_buffer = ""
-            state.current_thinking_buffer = ""
-            state.last_flushed_content_buffer = ""
             error_text = str(result.get("error") or "未知错误")
             if getattr(state, "favorite_run_id", ""):
                 self.set_session_phase("Error", state.session_id)
                 self.set_session_status("error", state.session_id, save=True, error=error_text)
             else:
                 self.set_session_phase("Ready", state.session_id)
-                self.set_session_status("draft", state.session_id, save=True)
+                self.set_session_status("interrupted", state.session_id, save=True)
             if is_current: self.normalize_session_ui(state)
             return
 

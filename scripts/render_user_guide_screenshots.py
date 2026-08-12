@@ -675,14 +675,120 @@ def main_run():
             window.resize(1280, 760)
             save_widget(window, "s40-favorites-library.png", 220)
             window.show_favorite_editor(favorite_id="fav-weekly-report")
-            save_widget(window, "s41-favorite-editor.png", 220)
             editor = window.product_pages["favorite_editor"]
+            editor.run_options_toggle.setChecked(False)
+            save_widget(window, "s41-favorite-editor.png", 220)
+            editor.run_options_toggle.setChecked(True)
+            process_events(160)
             editor_scroll = editor.findChild(main.QScrollArea)
             editor_scroll.verticalScrollBar().setValue(editor_scroll.verticalScrollBar().maximum())
+            process_events(120)
             save_widget(window, "s42-favorite-schedule.png", 180)
             if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
                 window.resize(760, 720)
                 save_widget(window, "favorites-editor-narrow.png", 180)
+                window.resize(1280, 760)
+
+            window.show_conversation_page()
+            session_id = window.create_new_session(
+                title="产品周报",
+                make_current=True,
+                workspace_dir=str(project_dir),
+            )
+            state = window.get_session(session_id)
+            window._set_favorite_task_origin(
+                state,
+                window.config_manager.get_favorite("fav-weekly-report"),
+                "scheduler",
+                1786323600,
+            )
+            user_message_id = window._new_message_id()
+            state.messages = [
+                {
+                    "id": user_message_id,
+                    "role": "user",
+                    "content": "读取项目中的本周资料，生成结构清晰的产品周报。",
+                },
+                {
+                    "id": window._new_message_id(),
+                    "role": "assistant",
+                    "content": "产品周报已经整理完成，包含本周进展、主要风险和下周计划。",
+                },
+            ]
+            window.add_chat_bubble(
+                "User",
+                state.messages[0]["content"],
+                animate=False,
+                source_message_id=user_message_id,
+                session_id=session_id,
+            )
+            agent_bubble = window._create_agent_chat_bubble(
+                state,
+                text=state.messages[1]["content"],
+                thinking="正在读取项目资料并整理周报结构。",
+                duration=8.6,
+            )
+            window._connect_chat_bubble_actions(agent_bubble, state)
+            agent_bubble.apply_dynamic_widths(window.dynamic_message_width, window.dynamic_user_bubble_width)
+            window._attach_live_agent_stage(state, agent_bubble)
+            agent_bubble.set_main_content(state.messages[1]["content"], final=True)
+            agent_bubble.update_thinking(is_final=True)
+            window.update_conversation_header()
+            save_widget(window, "favorites-scheduled-chat.png", 220)
+
+            from unittest.mock import patch
+
+            from core.theme import ThemeRuntimeManager, default_design_tokens
+            from core.theme_service import ThemeRepository
+
+            repository = ThemeRepository(str(APP_DATA_DIR / "favorites-theme-preview"))
+            theme_manager = ThemeRuntimeManager(app, repository)
+            app.theme_manager = theme_manager
+            window.theme_manager = theme_manager
+            theme_manager.themeChanged.connect(window._apply_runtime_theme)
+            theme_manager.previewStateChanged.connect(window._on_theme_preview_state)
+            window.open_favorites()
+            repository.write_preview(
+                name="常用深色预览",
+                overrides={
+                    "tokens": {
+                        "primary": "#8b93ff",
+                        "primary_soft": "#252a43",
+                        "bg_app": "#101116",
+                        "bg_main": "#15171d",
+                        "bg_panel": "#181b22",
+                        "bg_sidebar": "#12141a",
+                        "bg_sidebar_hover": "#1c2029",
+                        "bg_sidebar_selected": "#23283a",
+                        "management_bg": "#101116",
+                        "management_panel_bg": "#181b22",
+                        "text_primary": "#eceef3",
+                        "text_secondary": "#b7bcc8",
+                        "text_tertiary": "#858c9b",
+                        "sidebar_text": "#eceef3",
+                        "sidebar_text_muted": "#aeb4c2",
+                        "sidebar_border": "#292d36",
+                        "border": "#343946",
+                        "border_subtle": "#292d36",
+                        "separator": "#292d36",
+                    }
+                },
+                default_tokens=default_design_tokens(),
+                session_id="favorites-screenshot",
+            )
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                if not theme_manager.apply_repository_state(reason="favorites_screenshot"):
+                    raise RuntimeError(theme_manager.last_error)
+            save_widget(window, "favorites-theme-preview.png", 220)
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                if not theme_manager.restore_saved_theme(reason="favorites_screenshot_restore"):
+                    raise RuntimeError(theme_manager.last_error)
             return
         if SCREENSHOT_SCOPE == "browser-skill":
             render_browser_skill_setup(window, app)
@@ -1384,6 +1490,8 @@ def main_run():
         window.open_favorites()
         save_widget(window, "s40-favorites-library.png")
         window.show_favorite_editor(favorite_id="guide-favorite")
+        editor = window.product_pages["favorite_editor"]
+        editor.run_options_toggle.setChecked(False)
         save_widget(window, "s41-favorite-editor.png")
         window.handle_product_back()
         window.show_conversation_page()

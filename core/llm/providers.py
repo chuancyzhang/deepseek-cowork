@@ -29,6 +29,28 @@ DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES = {
     "function_call",
     "web_search_call",
 }
+TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "concurrency limit exceeded",
+    "upstream request failed",
+    "temporarily unavailable",
+    "service unavailable",
+    "server overloaded",
+    "too many requests",
+    "rate limit",
+    "request timeout",
+    "timed out",
+    "connection reset",
+    "connection aborted",
+    "connection closed",
+    "bad gateway",
+    "gateway timeout",
+    "http 429",
+    "status code: 429",
+    "status code: 502",
+    "status code: 503",
+    "status code: 504",
+)
+RESPONSES_TRANSIENT_MAX_RETRIES = 2
 RESPONSES_WEB_SEARCH_TOOL_TYPES = {
     "web_search",
     "web_search_2025_08_26",
@@ -290,7 +312,7 @@ class OpenAIProvider(LLMProvider):
             )
             ensure_tool_call_sequence(messages, context=f"{provider_name} request")
             if self.api_protocol == API_PROTOCOL_RESPONSES:
-                yield from self._responses_stream(
+                yield from self._responses_stream_with_retry(
                     messages,
                     tools=tools,
                     prompt_cache_key=prompt_cache_key,
@@ -493,7 +515,6 @@ class OpenAIProvider(LLMProvider):
             )
 
         normalized = []
-        has_reasoning_text = False
         has_tool_item = False
         for raw_item in raw_items:
             item = self._json_compatible(raw_item)
@@ -513,14 +534,6 @@ class OpenAIProvider(LLMProvider):
                 content = item.get("content")
                 if not isinstance(content, list):
                     raise RuntimeError("DeepSeek Responses reasoning item is missing content.")
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    if (
-                        str(part.get("type") or "") == "reasoning_text"
-                        and str(part.get("text") or "")
-                    ):
-                        has_reasoning_text = True
             elif item_type == "message":
                 if (
                     not str(item.get("id") or "").strip()
@@ -546,16 +559,60 @@ class OpenAIProvider(LLMProvider):
                     raise RuntimeError("DeepSeek Responses returned an invalid web_search_call item.")
             normalized.append(item)
 
-        if (
-            has_tool_item
-            and (self.thinking_enabled or self.reasoning_effort)
-            and not has_reasoning_text
-        ):
-            raise RuntimeError(
-                "DeepSeek Responses used a tool but did not return replayable reasoning_text; "
-                "tool execution was stopped to prevent an invalid follow-up request."
-            )
         return normalized
+
+    @staticmethod
+    def _is_transient_provider_error(error):
+        text = str(error or "").strip().lower()
+        return bool(text) and any(marker in text for marker in TRANSIENT_PROVIDER_ERROR_MARKERS)
+
+    def _responses_stream_with_retry(
+        self,
+        messages,
+        tools=None,
+        prompt_cache_key=None,
+        request_context=None,
+    ):
+        for retry_count in range(RESPONSES_TRANSIENT_MAX_RETRIES + 1):
+            emitted_actionable_output = False
+            failed_terminal = None
+            try:
+                for chunk in self._responses_stream(
+                    messages,
+                    tools=tools,
+                    prompt_cache_key=prompt_cache_key,
+                    request_context=request_context,
+                ):
+                    chunk_type = str(chunk.get("type") or "") if isinstance(chunk, dict) else ""
+                    if chunk_type in {"content", "tool_call"}:
+                        emitted_actionable_output = True
+                    if (
+                        chunk_type == "provider_terminal"
+                        and str(chunk.get("status") or "") != "completed"
+                    ):
+                        failed_terminal = chunk
+                        continue
+                    yield chunk
+                return
+            except Exception as exc:
+                can_retry = bool(
+                    retry_count < RESPONSES_TRANSIENT_MAX_RETRIES
+                    and not emitted_actionable_output
+                    and self._is_transient_provider_error(exc)
+                )
+                if can_retry:
+                    next_retry = retry_count + 1
+                    yield {
+                        "type": "provider_retry",
+                        "attempt": next_retry,
+                        "max_retries": RESPONSES_TRANSIENT_MAX_RETRIES,
+                        "reason": str(exc),
+                    }
+                    time.sleep(min(0.5 * (2 ** retry_count), 2.0))
+                    continue
+                if failed_terminal is not None:
+                    yield failed_terminal
+                raise
 
     def _normalize_responses_replay_items(self, raw_items, source="response"):
         if self.requires_deepseek_responses_replay:

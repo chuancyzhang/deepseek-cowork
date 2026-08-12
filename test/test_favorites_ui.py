@@ -6,14 +6,18 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget
 
 from core.config_manager import ConfigManager
+from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
+from core.theme_service import ThemeRepository
 from main import (
     FAVORITE_EXECUTION_CHAT,
     FAVORITE_EXECUTION_WORKSPACE,
     FavoriteEditorPage,
+    FavoritesPage,
     MainWindow,
+    MultiLineElidedLabel,
 )
 
 
@@ -91,6 +95,142 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertFalse(editor.is_dirty())
         finally:
             editor.deleteLater()
+
+    def test_editor_uses_task_first_flow_and_progressive_run_options(self):
+        editor = FavoriteEditorPage(
+            skills=[{"name": "visualize", "display_name": "数据可视化", "description": "生成清晰图表"}],
+            projects=[{"name": "项目", "path": self.workspace}],
+            prefill={"name": "周报", "prompt": "整理周报"},
+        )
+        try:
+            self.assertTrue(editor.run_options_content.isHidden())
+            self.assertEqual(editor.execution_mode_combo.currentText(), "独立聊天")
+            self.assertEqual(editor.schedule_attached_check.text(), "添加计划")
+            self.assertEqual(editor.schedule_prompt_mode_combo.itemText(0), "使用上面的任务内容")
+            self.assertEqual(editor.skill_list.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+            self.assertIn("数据可视化\n生成清晰图表", editor.skill_list.item(0).text())
+
+            editor.run_options_toggle.setChecked(True)
+            editor.schedule_attached_check.setChecked(True)
+            self.assertFalse(editor.run_options_content.isHidden())
+            self.assertFalse(editor.schedule_card.isHidden())
+            self.assertEqual(editor.schedule_attached_check.text(), "移除计划")
+            self.assertIsNotNone(editor.favorite_payload()["schedule"])
+        finally:
+            editor.deleteLater()
+
+    def test_favorite_cards_have_equal_height_for_odd_and_even_counts(self):
+        manager = self._create_window().config_manager
+        page = None
+        try:
+            for count in (1, 2, 3, 5):
+                manager.set_favorites([
+                    {
+                        "id": f"fav-{index}",
+                        "name": f"任务 {index}",
+                        "description": "这是一段用于验证三行说明与统一卡片高度的较长普通用户任务用途。" * 2,
+                        "prompt": f"执行任务 {index}",
+                    }
+                    for index in range(count)
+                ])
+                if page is not None:
+                    page.deleteLater()
+                page = FavoritesPage(manager)
+                page.resize(1200, 760)
+                page.show()
+                self.app.processEvents()
+                cards = page.findChildren(type(page.container), "FavoriteCard")
+                self.assertEqual(len(cards), count)
+                self.assertEqual({card.height() for card in cards}, {page.card_height()})
+                self.assertTrue(all(card.sizePolicy().verticalPolicy() == QSizePolicy.Fixed for card in cards))
+                summaries = page.findChildren(MultiLineElidedLabel, "FavoriteSummary")
+                self.assertEqual(len(summaries), count)
+                self.assertTrue(all(summary.height() == summary.fontMetrics().lineSpacing() * 3 for summary in summaries))
+
+            page.resize(700, 760)
+            self.app.processEvents()
+            page.refresh_cards()
+            self.app.processEvents()
+            cards = [
+                page.grid.itemAt(index).widget()
+                for index in range(page.grid.count())
+                if page.grid.itemAt(index).widget()
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+            ]
+            self.assertEqual(page._grid_columns, 1)
+            self.assertEqual(len(cards), 5)
+            self.assertEqual({card.height() for card in cards}, {page.card_height()})
+        finally:
+            if page is not None:
+                page.deleteLater()
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    widget.close()
+                    widget.deleteLater()
+
+    def test_favorites_follow_theme_preview_and_restore_without_changing_data(self):
+        previous_manager = getattr(self.app, "theme_manager", None)
+        manager = ThemeRuntimeManager(self.app, ThemeRepository(self.temp.name))
+        self.app.theme_manager = manager
+        window = self._create_window()
+        try:
+            window.theme_manager = manager
+            manager.themeChanged.connect(window._apply_runtime_theme)
+            manager.previewStateChanged.connect(window._on_theme_preview_state)
+            window.config_manager.set_favorites(
+                [{"id": "fav-theme", "name": "主题验收", "description": "验证安全预览与取消。", "prompt": "验收"}]
+            )
+            window.open_favorites()
+            page = window.product_pages[window.PAGE_FAVORITES]
+            original_favorites = window.config_manager.get_favorites()
+            original_panel = DesignTokens.bg_panel
+
+            manager.repository.write_preview(
+                name="常用主题预览",
+                overrides={
+                    "tokens": {
+                        "bg_panel": "#1c2230",
+                        "text_primary": "#f2f4ff",
+                        "text_secondary": "#b9c0d0",
+                    }
+                },
+                default_tokens=default_design_tokens(),
+                session_id="favorites-theme-test",
+            )
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                self.assertTrue(manager.apply_repository_state(reason="favorites_preview"), manager.last_error)
+            page = window.product_pages[window.PAGE_FAVORITES]
+            preview_card = next(
+                page.grid.itemAt(index).widget()
+                for index in range(page.grid.count())
+                if page.grid.itemAt(index).widget()
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+            )
+            self.assertIn("#1c2230", preview_card.styleSheet())
+            self.assertFalse(window.theme_preview_bar.isHidden())
+            self.assertEqual(window.config_manager.get_favorites(), original_favorites)
+
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                self.assertTrue(manager.restore_saved_theme(reason="favorites_preview_restore"))
+            restored_card = next(
+                page.grid.itemAt(index).widget()
+                for index in range(page.grid.count())
+                if page.grid.itemAt(index).widget()
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+            )
+            self.assertIn(original_panel, restored_card.styleSheet())
+            self.assertTrue(window.theme_preview_bar.isHidden())
+            self.assertEqual(window.config_manager.get_favorites(), original_favorites)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.theme_manager = previous_manager
 
     def test_composer_prefill_only_carries_real_project_workspace(self):
         window = self._create_window()
@@ -171,10 +311,118 @@ class FavoritesUiTests(unittest.TestCase):
             running = window.config_manager.get_favorite_run_history()[0]
             self.assertEqual(running["status"], "running")
             state = window.get_session(running["session_id"])
+            self.assertEqual(state.persisted_conversation_meta["task_origin"]["favorite_name"], "后台日报")
+            self.assertEqual(state.persisted_conversation_meta["task_origin"]["trigger_source"], "scheduler")
             window.set_session_status("error", state.session_id, error="provider unavailable")
             finished = window.config_manager.get_favorite_run_history()[0]
             self.assertEqual(finished["status"], "error")
             self.assertEqual(finished["error"], "provider unavailable")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_background_submit_retires_welcome_and_renders_user_request(self):
+        window = self._create_window()
+        try:
+            foreground_id = window.current_session_id
+            background_id = window.create_new_session(make_current=False)
+            background = window.get_session(background_id)
+            self.assertIsNotNone(background.empty_state)
+            with patch.object(window, "_model_profile_for_state", return_value={"id": "test", "model_name": "test"}), patch.object(
+                window, "_model_profile_snapshot_for_state", return_value={"id": "test", "model_name": "test"}
+            ), patch.object(window, "_enqueue_staged_chat_save", return_value=True), patch.object(
+                window, "_ensure_session_visible_in_history"
+            ), patch.object(window, "process_agent_logic"):
+                self.assertTrue(
+                    window._submit_session_request(
+                        background,
+                        "自动整理今天的日报",
+                        [],
+                        check_duplicates=False,
+                    )
+                )
+            self.assertEqual(window.current_session_id, foreground_id)
+            self.assertIsNone(background.empty_state)
+            self.assertEqual(background.messages[-1]["content"], "自动整理今天的日报")
+            user_bubbles = [
+                widget for widget in background.session_widget.findChildren(QWidget)
+                if widget.__class__.__name__ == "ChatBubble" and getattr(widget, "role", "") == "User"
+            ]
+            self.assertEqual(len(user_bubbles), 1)
+            window.handle_thinking_signal(
+                "正在整理资料。",
+                session_id=background_id,
+                turn_id=background.active_turn_id,
+            )
+            window.flush_session_thinking(background_id)
+            window.handle_content_signal(
+                "日报已经整理完成。",
+                session_id=background_id,
+                turn_id=background.active_turn_id,
+            )
+            window.flush_session_content(background_id, final=True)
+            turn_group = background.active_agent_turn_group
+            self.assertIsNotNone(turn_group)
+            self.assertLess(
+                background.chat_layout.indexOf(user_bubbles[0]),
+                background.chat_layout.indexOf(turn_group),
+            )
+            agent_bubble = turn_group.stage_bubbles[-1]
+            self.assertIn("正在整理资料", agent_bubble.get_active_think_widget().text())
+            self.assertEqual(agent_bubble.main_content_text, "日报已经整理完成。")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_task_origin_is_persisted_and_shown_in_conversation_header(self):
+        window = self._create_window()
+        try:
+            state = window.get_current_session()
+            window._set_favorite_task_origin(
+                state,
+                {"id": "fav-origin", "name": "晨间简报"},
+                "scheduler",
+                1720000000,
+            )
+            meta = window._compose_session_meta(state)
+            self.assertEqual(meta["task_origin"]["favorite_name"], "晨间简报")
+            window.update_conversation_header()
+            self.assertFalse(window.workspace_subtitle_label.isHidden())
+            self.assertEqual(window.workspace_subtitle_label.text(), "由定时任务启动 · 常用「晨间简报」")
+
+            state.persisted_conversation_meta["task_origin"]["trigger_source"] = "manual"
+            window.update_conversation_header()
+            self.assertEqual(window.workspace_subtitle_label.text(), "手动运行计划 · 常用「晨间简报」")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_task_origin_restores_from_saved_conversation_meta(self):
+        window = self._create_window()
+        try:
+            state = window.get_current_session()
+            state.messages = [{"id": "u1", "role": "user", "content": "生成晨报"}]
+            window._set_favorite_task_origin(
+                state,
+                {"id": "fav-deleted", "name": "已删除的晨报"},
+                "scheduler",
+                1720000100,
+            )
+            window.save_chat_history(session_id=state.session_id, flush=True)
+            saved_id = state.session_id
+            window.sessions.pop(saved_id)
+            window.session_tabs.removeTab(window.session_tabs.indexOf(state.session_widget))
+
+            window.create_new_session(session_id=saved_id, make_current=False)
+            restored = window.get_session(saved_id)
+            restored.history_loaded = False
+            restored.persisted_conversation_meta = window.chat_storage.get_conversation_meta(saved_id)
+            window.activate_session(saved_id, ensure_loaded=False)
+            window.update_conversation_header()
+            self.assertEqual(
+                window.workspace_subtitle_label.text(),
+                "由定时任务启动 · 常用「已删除的晨报」",
+            )
         finally:
             window.close()
             window.deleteLater()

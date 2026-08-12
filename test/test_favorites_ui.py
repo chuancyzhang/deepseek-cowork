@@ -143,6 +143,8 @@ class FavoritesUiTests(unittest.TestCase):
                 self.assertEqual(len(cards), count)
                 self.assertEqual({card.height() for card in cards}, {page.card_height()})
                 self.assertTrue(all(card.sizePolicy().verticalPolicy() == QSizePolicy.Fixed for card in cards))
+                self.assertEqual(len(page.findChildren(QWidget, "FavoriteDeleteButton")), count)
+                self.assertEqual(len(page.findChildren(QWidget, "FavoriteMoreButton")), 0)
                 summaries = page.findChildren(MultiLineElidedLabel, "FavoriteSummary")
                 self.assertEqual(len(summaries), count)
                 self.assertTrue(all(summary.height() == summary.fontMetrics().lineSpacing() * 3 for summary in summaries))

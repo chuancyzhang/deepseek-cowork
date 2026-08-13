@@ -1,6 +1,7 @@
 import hashlib
 import os
 import platform
+import signal
 import subprocess
 import sys
 import threading
@@ -80,6 +81,61 @@ def subprocess_kwargs_no_window(**kwargs):
             pass
         kwargs["startupinfo"] = startupinfo
     return kwargs
+
+
+def terminate_process_tree(process, timeout=2.0):
+    """Terminate a tool process together with descendants it already spawned."""
+
+    if process is None:
+        return True
+    try:
+        if process.poll() is not None:
+            return True
+    except Exception:
+        return False
+
+    wait_timeout = max(0.1, float(timeout or 0.0))
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=wait_timeout,
+                **subprocess_kwargs_no_window(),
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
+    try:
+        process.wait(timeout=wait_timeout)
+        return True
+    except Exception:
+        pass
+
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except Exception:
+            pass
+    try:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=wait_timeout)
+    except Exception:
+        pass
+    try:
+        return process.poll() is not None
+    except Exception:
+        return False
 
 
 def _frozen_windows_bundle_dir():

@@ -3527,6 +3527,8 @@ class LLMWorker(QThread):
                                                 "blocked_tool": name,
                                                 "content": f"工具 {name} 执行失败：{exc}",
                                             }
+                                        if self.is_stopped:
+                                            break
                                         failure_kind = self._tool_result_failure_kind(result)
                                         if (
                                             failure_kind == "failed"

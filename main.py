@@ -14506,7 +14506,7 @@ class DaemonStreamWorker(QThread):
             session_id=self.session_id,
         )
         try:
-            self.client.stop_session(self.session_id)
+            self.client.stop_session(self.session_id, run_id=self.request_id)
         except Exception:
             pass
 
@@ -14730,14 +14730,15 @@ class DaemonStreamWorker(QThread):
 class DaemonStopWorker(QThread):
     result_signal = Signal(dict, str)
 
-    def __init__(self, client, session_id, parent=None):
+    def __init__(self, client, session_id, run_id="", parent=None):
         super().__init__(parent)
         self.client = client
         self.session_id = str(session_id or "")
+        self.run_id = str(run_id or "")
 
     def run(self):
         try:
-            response = self.client.stop_session(self.session_id)
+            response = self.client.stop_session(self.session_id, run_id=self.run_id)
             if not isinstance(response, dict) or response.get("status") != "ok":
                 raise RuntimeError(
                     str((response or {}).get("error") or "守护进程未确认停止请求")
@@ -39482,10 +39483,15 @@ class MainWindow(QMainWindow):
             if str(message.get("id") or "") not in before_ids
         )
 
-    def _start_daemon_stop_worker(self, session_id):
+    def _start_daemon_stop_worker(self, session_id, run_id=""):
         if not self.daemon_client or not str(session_id or "").strip():
             return
-        worker = DaemonStopWorker(self.daemon_client, session_id, parent=self)
+        worker = DaemonStopWorker(
+            self.daemon_client,
+            session_id,
+            run_id=run_id,
+            parent=self,
+        )
         self._daemon_stop_workers.add(worker)
 
         def handle_result(result, stopped_session_id):
@@ -39493,6 +39499,7 @@ class MainWindow(QMainWindow):
                 log_sub_agent_runtime(
                     "daemon_stop_confirmed",
                     session_id=stopped_session_id,
+                    run_id=str(result.get("run_id") or run_id or ""),
                     stopped=bool(result.get("stopped")),
                 )
                 return
@@ -39582,10 +39589,19 @@ class MainWindow(QMainWindow):
             return
         stopped_turn_id = state.active_turn_id
         stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
-        was_daemon_running = bool(state.daemon_running)
         daemon_worker = state.daemon_worker
         llm_worker = state.llm_worker
         code_worker = state.code_worker
+        was_daemon_running = bool(state.daemon_running)
+        needs_daemon_stop = bool(daemon_worker is not None or was_daemon_running)
+        if needs_daemon_stop:
+            # Start the authoritative daemon cancellation before projecting a
+            # terminal UI state. The request is scoped to this run so a late
+            # stop can never cancel a newer turn in the same conversation.
+            self._start_daemon_stop_worker(
+                state.session_id,
+                run_id=stopped_run_id,
+            )
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
@@ -39684,9 +39700,7 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
         self.normalize_session_ui(state)
-        if was_daemon_running:
-            self._start_daemon_stop_worker(state.session_id)
-        else:
+        if not needs_daemon_stop:
             self._stop_live_subagents(state, force=True)
 
     def on_action_clicked(self):
@@ -41141,6 +41155,16 @@ class MainWindow(QMainWindow):
         )
         state.pending_guidance_messages = []
 
+    def _clear_submitted_composer(self, state, *, clear_current_input):
+        if not state or not clear_current_input:
+            return
+        state.composer_draft = ""
+        if state.session_id != self.current_session_id:
+            state.prompt_files = []
+            return
+        self.input_field.clear()
+        self._clear_prompt_files()
+
     def _submit_session_request(
         self,
         state,
@@ -41594,9 +41618,14 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             if office_card is not None:
                 office_card._sync_process_placeholder()
-            if clear_current_input:
-                self.input_field.clear()
-                self._clear_prompt_files()
+        # Clearing the visible editor must also clear the per-session draft.
+        # Otherwise a first submit that refreshes/activates the new history row
+        # restores the just-sent text and the next click creates a second valid
+        # message with new IDs.
+        self._clear_submitted_composer(
+            state,
+            clear_current_input=clear_current_input,
+        )
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)

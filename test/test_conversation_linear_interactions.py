@@ -2111,6 +2111,22 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_submit_clear_input_also_clears_session_draft_before_history_refresh(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.composer_draft = "会被提交的首条问题"
+            window.input_field.setPlainText("会被提交的首条问题")
+
+            window._clear_submitted_composer(state, clear_current_input=True)
+            window.set_current_session(state.session_id)
+
+            self.assertEqual(state.composer_draft, "")
+            self.assertEqual(window.input_field.toPlainText(), "")
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_error_preserves_interrupted_context_without_raw_reasoning(self):
         window = MainWindow()
         try:

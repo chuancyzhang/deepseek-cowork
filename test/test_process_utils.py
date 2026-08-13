@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 from core import process_utils
 from core.process_utils import (
@@ -11,10 +11,24 @@ from core.process_utils import (
     reveal_path_in_file_manager,
     runtime_debug_logging_enabled,
     subprocess_kwargs_no_window,
+    terminate_process_tree,
 )
 
 
 class TestProcessUtils(unittest.TestCase):
+    def test_terminate_process_tree_uses_taskkill_for_live_windows_process(self):
+        process = MagicMock()
+        process.pid = 4321
+        process.poll.side_effect = [None, None, 0]
+        process.wait.return_value = 0
+        with patch.object(process_utils.os, "name", "nt"), patch.object(
+            process_utils.subprocess,
+            "run",
+        ) as run:
+            self.assertTrue(terminate_process_tree(process, timeout=0.5))
+
+        self.assertEqual(run.call_args.args[0], ["taskkill", "/PID", "4321", "/T", "/F"])
+
     def test_reveal_path_uses_windows_shell_for_directory_and_file(self):
         calls = []
 

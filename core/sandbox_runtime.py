@@ -4,9 +4,10 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 from core.env_utils import get_app_data_dir, get_base_dir
-from core.process_utils import subprocess_kwargs_no_window
+from core.process_utils import subprocess_kwargs_no_window, terminate_process_tree
 
 
 SANDBOX_VERSION = "v1"
@@ -624,6 +625,8 @@ def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=No
     popen_kwargs = {}
     if text:
         popen_kwargs.update({"encoding": "utf-8", "errors": "replace", "bufsize": 1})
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
 
     return subprocess.Popen(
         args,
@@ -677,7 +680,17 @@ def build_skill_script_command(runtime, script_path, args=None):
     raise ValueError(f"Unsupported script runtime: {runtime}")
 
 
-def run_skill_script_in_sandbox(skill_id, script_path, runtime, args=None, cwd=None, input_text=None, timeout_seconds=120, extra_env=None):
+def run_skill_script_in_sandbox(
+    skill_id,
+    script_path,
+    runtime,
+    args=None,
+    cwd=None,
+    input_text=None,
+    timeout_seconds=120,
+    extra_env=None,
+    abort_check=None,
+):
     command, shell_kind = build_skill_script_command(runtime, script_path, args=args)
     process = run_in_sandbox(
         command,
@@ -688,7 +701,34 @@ def run_skill_script_in_sandbox(skill_id, script_path, runtime, args=None, cwd=N
         extra_env=extra_env,
     )
     input_bytes = None if input_text is None else str(input_text).encode("utf-8")
-    output_raw, error_raw = process.communicate(input=input_bytes, timeout=timeout_seconds)
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds or 0.0))
+    first_poll = True
+    while True:
+        if callable(abort_check) and bool(abort_check()):
+            terminate_process_tree(process)
+            return {
+                "ok": False,
+                "aborted": True,
+                "exit_code": process.poll(),
+                "stdout": "",
+                "stderr": "Execution aborted by user.",
+                "runtime": (runtime or "").strip().lower(),
+                "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
+                "cwd": cwd or os.path.dirname(os.path.abspath(script_path)),
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_process_tree(process)
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
+        try:
+            output_raw, error_raw = process.communicate(
+                input=input_bytes if first_poll else None,
+                timeout=min(0.2, remaining),
+            )
+            break
+        except subprocess.TimeoutExpired:
+            first_poll = False
+            continue
     stdout = output_raw.decode("utf-8", errors="replace") if isinstance(output_raw, (bytes, bytearray)) else (output_raw or "")
     stderr = error_raw.decode("utf-8", errors="replace") if isinstance(error_raw, (bytes, bytearray)) else (error_raw or "")
     return {

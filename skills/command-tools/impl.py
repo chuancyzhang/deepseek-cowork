@@ -256,6 +256,10 @@ def run_skill_script(
     if not record:
         return f"Error: Skill '{skill_name}' not found."
 
+    abort_state = _init_abort_state(_context)
+    if abort_state["aborted"]:
+        return "Error: Script execution aborted by user."
+
     args_list = []
     if isinstance(args, str) and args.strip():
         try:
@@ -330,6 +334,7 @@ def run_skill_script(
             input_text=input_text,
             timeout_seconds=int(timeout_seconds) if timeout_seconds is not None else 120,
             extra_env=extra_env,
+            abort_check=lambda: bool(abort_state["aborted"]),
         )
         payload = {
             "skill_name": skill_name,

@@ -3638,6 +3638,99 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertEqual(run["status"], "interrupted")
         self.assertTrue(run["stop_requested"])
 
+    def test_stop_session_run_id_does_not_cancel_newer_active_run(self):
+        class _Worker:
+            request_id = "newer-run"
+
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        session_id = "run-scoped-stop-session"
+        worker = _Worker()
+        self.state.set_active_worker(
+            session_id,
+            worker,
+            turn_id="newer-turn",
+            run_id=worker.request_id,
+        )
+
+        with patch.object(interaction_service, "cancel_session_requests") as cancel:
+            stopped = self.state.stop_session(
+                session_id,
+                expected_run_id="older-run",
+            )
+
+        self.assertFalse(stopped)
+        self.assertFalse(worker.stopped)
+        cancel.assert_not_called()
+
+    def test_stop_before_worker_registration_prevents_worker_start(self):
+        class _Worker:
+            request_id = "prestart-stop-run"
+
+            def __init__(self):
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+        session_id = "prestart-stop-session"
+        worker = _Worker()
+        self.state.runtime_journal.begin_run(
+            session_id,
+            worker.request_id,
+            turn_id="prestart-stop-turn",
+            writer_owner="daemon:test",
+            base_messages=[],
+            extra={
+                "execution_backend": "daemon",
+                "daemon_instance_id": self.state.daemon_instance_id,
+            },
+        )
+
+        stopped = self.state.stop_session(
+            session_id,
+            expected_run_id=worker.request_id,
+        )
+        activated = self.state.set_active_worker(
+            session_id,
+            worker,
+            turn_id="prestart-stop-turn",
+            run_id=worker.request_id,
+        )
+        if activated:
+            worker.start()
+
+        self.assertTrue(stopped)
+        self.assertFalse(activated)
+        self.assertFalse(worker.started)
+        run = self.state.runtime_journal.get_run(session_id, worker.request_id)
+        self.assertEqual(run["status"], "interrupted")
+        self.assertTrue(run["stop_requested"])
+
+    def test_old_worker_finish_cannot_clear_newer_active_worker(self):
+        class _Worker:
+            def __init__(self, request_id):
+                self.request_id = request_id
+
+        session_id = "scoped-clear-session"
+        old_worker = _Worker("old-run")
+        new_worker = _Worker("new-run")
+        self.state.set_active_worker(session_id, old_worker, run_id=old_worker.request_id)
+        self.state.set_active_worker(session_id, new_worker, run_id=new_worker.request_id)
+
+        cleared = self.state.clear_active_worker(
+            session_id,
+            expected_worker=old_worker,
+            expected_run_id=old_worker.request_id,
+        )
+
+        self.assertFalse(cleared)
+        self.assertIs(self.state.active_workers[session_id]["worker"], new_worker)
+
     def test_guidance_mutation_roundtrip(self):
         class _Worker:
             turn_id = "turn-8"

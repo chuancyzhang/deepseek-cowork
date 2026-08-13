@@ -19,7 +19,7 @@ from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
-from core.runtime_journal import RuntimeJournal, RuntimeJournalError
+from core.runtime_journal import RUN_TERMINAL_STATUSES, RuntimeJournal, RuntimeJournalError
 from core.conversation_integrity import merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
@@ -401,17 +401,44 @@ class DaemonState:
         return True
     
     def set_active_worker(self, session_id, worker, turn_id=None, run_id=None):
+        resolved_run_id = str(run_id or getattr(worker, "request_id", "") or "")
         with self.lock:
+            if resolved_run_id:
+                run_record = self.runtime_journal.get_run(session_id, resolved_run_id)
+                if isinstance(run_record, dict) and (
+                    bool(run_record.get("stop_requested"))
+                    or str(run_record.get("status") or "") in RUN_TERMINAL_STATUSES
+                ):
+                    _log_daemon(
+                        "set_active_worker rejected terminal run "
+                        f"session_id={session_id} run_id={resolved_run_id} "
+                        f"status={run_record.get('status')}"
+                    )
+                    return False
             self.active_workers[session_id] = {
                 "worker": worker,
                 "turn_id": str(turn_id or getattr(worker, "turn_id", "") or ""),
-                "run_id": str(run_id or getattr(worker, "request_id", "") or ""),
+                "run_id": resolved_run_id,
             }
+            return True
     
-    def clear_active_worker(self, session_id):
+    def clear_active_worker(self, session_id, *, expected_worker=None, expected_run_id=""):
         with self.lock:
-            if session_id in self.active_workers:
-                del self.active_workers[session_id]
+            active = self.active_workers.get(session_id)
+            if not active:
+                return False
+            active_worker = active.get("worker") if isinstance(active, dict) else active
+            active_run_id = str(
+                (active.get("run_id") if isinstance(active, dict) else "")
+                or getattr(active_worker, "request_id", "")
+                or ""
+            )
+            if expected_worker is not None and active_worker is not expected_worker:
+                return False
+            if expected_run_id and active_run_id != str(expected_run_id):
+                return False
+            del self.active_workers[session_id]
+            return True
 
     def detach_worker_until_finished(self, session_id, worker, reason=""):
         if not worker:
@@ -451,7 +478,9 @@ class DaemonState:
         )
         return True
     
-    def stop_session(self, session_id):
+    def stop_session(self, session_id, expected_run_id=""):
+        expected_run_id = str(expected_run_id or "").strip()
+        interrupted_run_ids = set()
         with self.lock:
             active = self.active_workers.get(session_id)
             worker = active.get("worker") if isinstance(active, dict) else active
@@ -464,7 +493,18 @@ class DaemonState:
                 item
                 for item in self.detached_workers.values()
                 if item.get("session_id") == session_id
+                and (
+                    not expected_run_id
+                    or str(
+                        item.get("run_id")
+                        or getattr(item.get("worker"), "request_id", "")
+                        or ""
+                    ) == expected_run_id
+                )
             ]
+            if expected_run_id and active_run_id != expected_run_id:
+                worker = None
+                active_run_id = ""
             detached = [item.get("worker") for item in detached_entries]
             run_ids = {
                 run_id
@@ -481,31 +521,47 @@ class DaemonState:
                 ]
                 if run_id
             }
-        for run_id in run_ids:
-            try:
-                self.runtime_journal.interrupt_run(
-                    session_id,
-                    run_id,
-                    reason="interrupted by user",
-                )
-            except RuntimeJournalError as exc:
-                _log_daemon(
-                    f"stop_session runtime interrupt failed session_id={session_id} "
-                    f"run_id={run_id} error={exc}"
-                )
-        interaction_service.cancel_session_requests(session_id, reason="cancelled")
-        self._close_live_subagents(session_id, force=True)
-        if worker:
-            try:
-                worker.stop()
-            except Exception as e:
-                _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
-        for detached_worker in detached:
-            try:
-                detached_worker.stop()
-            except Exception as e:
-                _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
-        return bool(worker or detached)
+            if expected_run_id:
+                run_ids.add(expected_run_id)
+            # Keep the journal transition and worker registration mutually exclusive.
+            # Otherwise a stop can observe no worker, then a worker can register and
+            # start after the journal has already been marked interrupted.
+            for run_id in run_ids:
+                try:
+                    record = self.runtime_journal.interrupt_run(
+                        session_id,
+                        run_id,
+                        reason="interrupted by user",
+                    )
+                    if bool(record.get("stop_requested")):
+                        interrupted_run_ids.add(run_id)
+                except RuntimeJournalError as exc:
+                    _log_daemon(
+                        f"stop_session runtime interrupt failed session_id={session_id} "
+                        f"run_id={run_id} error={exc}"
+                    )
+            matched_execution = bool(worker or detached)
+            if matched_execution or not expected_run_id:
+                interaction_service.cancel_session_requests(session_id, reason="cancelled")
+                self._close_live_subagents(session_id, force=True)
+            if worker:
+                try:
+                    worker.stop()
+                except Exception as e:
+                    _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
+            for detached_worker in detached:
+                try:
+                    detached_worker.stop()
+                except Exception as e:
+                    _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
+            stopped = bool(matched_execution or interrupted_run_ids)
+        _log_daemon(
+            "stop_session handled "
+            f"session_id={session_id} expected_run_id={expected_run_id or '-'} "
+            f"matched_worker={bool(worker)} detached_workers={len(detached)} "
+            f"interrupted_runs={sorted(interrupted_run_ids)} stopped={stopped}"
+        )
+        return stopped
 
     def steer_session(self, session_id, expected_turn_id, message):
         with self.lock:
@@ -621,7 +677,11 @@ class DaemonState:
 
         def on_finished(result):
             result_holder["result"] = result
-            self.clear_active_worker(session_id)
+            self.clear_active_worker(
+                session_id,
+                expected_worker=worker,
+                expected_run_id=request_id,
+            )
             loop.quit()
 
         worker = LLMWorker(
@@ -636,12 +696,20 @@ class DaemonState:
             dependency_coordinator=self.dependency_coordinator,
         )
         worker.finished_signal.connect(on_finished)
-        self.set_active_worker(
+        activated = self.set_active_worker(
             session_id,
             worker,
             turn_id=turn_id,
             run_id=request_id,
         )
+        if not activated:
+            return {
+                "error": "Run interrupted by user.",
+                "generated_messages": [],
+                "turn_id": turn_id,
+                "request_id": request_id,
+                "_runtime_terminal": "interrupted",
+            }
         worker.start()
         loop.exec()
         return result_holder.get("result") or {"error": "No response"}
@@ -1454,32 +1522,44 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 send_stream({"type": "interaction_request", "data": request_payload})
 
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
-            state.set_active_worker(
+            activated = state.set_active_worker(
                 session_id,
                 worker,
                 turn_id=turn_id,
                 run_id=request_id,
             )
-            try:
-                _log_daemon(f"send_message_stream worker_starting session_id={session_id} turn_id={turn_id}")
-                send_stream({"type": "turn_started", "turn_id": turn_id})
-                worker.start()
-                _log_daemon(
-                    f"send_message_stream worker_started session_id={session_id} "
-                    f"turn_id={turn_id} is_running={worker.isRunning()}"
-                )
-                done.wait()
-                if not worker.wait(2000):
-                    state.detach_worker_until_finished(
-                        session_id,
-                        worker,
-                        reason="stream_closed" if stream_closed.is_set() else "finished_wait_timeout",
+            if activated:
+                try:
+                    _log_daemon(f"send_message_stream worker_starting session_id={session_id} turn_id={turn_id}")
+                    send_stream({"type": "turn_started", "turn_id": turn_id})
+                    worker.start()
+                    _log_daemon(
+                        f"send_message_stream worker_started session_id={session_id} "
+                        f"turn_id={turn_id} is_running={worker.isRunning()}"
                     )
-            finally:
+                    done.wait()
+                    if not worker.wait(2000):
+                        state.detach_worker_until_finished(
+                            session_id,
+                            worker,
+                            reason="stream_closed" if stream_closed.is_set() else "finished_wait_timeout",
+                        )
+                finally:
+                    try:
+                        interaction_service.interaction_requested.disconnect(handle_interaction_request)
+                    except Exception as e:
+                        _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
+            else:
                 try:
                     interaction_service.interaction_requested.disconnect(handle_interaction_request)
                 except Exception as e:
                     _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
+                result_holder["result"] = {
+                    "error": "Run interrupted by user.",
+                    "generated_messages": [],
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                }
             result = result_holder.get("result") or {"error": "No response"}
             latest_run = state.runtime_journal.get_run(session_id, request_id) or {}
             if latest_run.get("stop_requested"):
@@ -1565,7 +1645,11 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             )
             if isinstance(result, dict):
                 result["_runtime_terminal"] = terminal_status
-            state.clear_active_worker(session_id)
+            state.clear_active_worker(
+                session_id,
+                expected_worker=worker,
+                expected_run_id=request_id,
+            )
 
             postprocess_error = ""
             try:
@@ -1676,8 +1760,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             if not session_id:
                 self._send({"status": "error", "error": "Missing session_id"})
                 return
-            stopped = self.server.state.stop_session(session_id)
-            self._send({"status": "ok", "stopped": stopped})
+            expected_run_id = str(data.get("run_id") or "")
+            stopped = self.server.state.stop_session(
+                session_id,
+                expected_run_id=expected_run_id,
+            )
+            self._send({
+                "status": "ok",
+                "stopped": stopped,
+                "run_id": expected_run_id,
+            })
             return
         if action == "steer_message":
             session_id = data.get("session_id")
@@ -1939,8 +2031,11 @@ class DaemonClient:
             except Exception as e:
                 _log_daemon(f"send_message_stream socket close failed session_id={session_id} error={e}")
     
-    def stop_session(self, session_id):
-        return self._request({"action": "stop_session", "session_id": session_id})
+    def stop_session(self, session_id, run_id=""):
+        payload = {"action": "stop_session", "session_id": session_id}
+        if run_id:
+            payload["run_id"] = str(run_id)
+        return self._request(payload)
 
     def attach_run(self, session_id, run_id, starting_after=0):
         return self._request(

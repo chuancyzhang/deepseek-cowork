@@ -2,7 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,6 +10,33 @@ from core import sandbox_runtime
 
 
 class TestSandboxRuntime(unittest.TestCase):
+    def test_skill_script_abort_terminates_process_tree(self):
+        process = MagicMock()
+        process.poll.return_value = None
+        command = ["python", "demo.py"]
+        with patch.object(
+            sandbox_runtime,
+            "build_skill_script_command",
+            return_value=(command, "exec"),
+        ), patch.object(
+            sandbox_runtime,
+            "run_in_sandbox",
+            return_value=process,
+        ), patch.object(
+            sandbox_runtime,
+            "terminate_process_tree",
+        ) as terminate:
+            result = sandbox_runtime.run_skill_script_in_sandbox(
+                "demo",
+                "demo.py",
+                "python",
+                abort_check=lambda: True,
+            )
+
+        self.assertTrue(result["aborted"])
+        self.assertFalse(result["ok"])
+        terminate.assert_called_once_with(process)
+
     def tearDown(self):
         sandbox_runtime._RUNTIME_CACHE = None
         sandbox_runtime.reset_native_library_dir_caches()

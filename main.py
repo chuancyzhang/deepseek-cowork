@@ -27043,6 +27043,8 @@ class MainWindow(QMainWindow):
                     "finalizing",
                 }
                 or
+                bool(getattr(state, "live_activity", False))
+                or
                 (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
                 or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
                 or getattr(state, "daemon_running", False)
@@ -27137,6 +27139,20 @@ class MainWindow(QMainWindow):
         retained_messages = self.chat_storage.normalize_messages(
             copy.deepcopy((state.messages or [])[:target_index]),
             conversation_id=state.session_id,
+        )
+
+    def _session_has_current_execution(self, state):
+        if not state:
+            return False
+        llm_worker = getattr(state, "llm_worker", None)
+        code_worker = getattr(state, "code_worker", None)
+        daemon_worker = getattr(state, "daemon_worker", None)
+        return bool(
+            getattr(state, "live_activity", False)
+            or getattr(state, "daemon_running", False)
+            or (llm_worker is not None and llm_worker.isRunning())
+            or (code_worker is not None and code_worker.isRunning())
+            or (daemon_worker is not None and daemon_worker.isRunning())
         )
         retained_ids = {
             str(message.get("id") or "")
@@ -28387,7 +28403,7 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state:
             return
-        if self._session_is_busy(state):
+        if self._session_has_current_execution(state):
             self.add_system_toast(
                 "当前任务结束后可调整拷问模式",
                 "info",
@@ -31167,6 +31183,14 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        if self._session_is_busy(state):
+            log_ui_navigation(
+                "history_load_skipped_live_session",
+                session_id=session_id,
+                active_turn_id=str(getattr(state, "active_turn_id", "") or ""),
+                request_id=str(getattr(state, "active_turn_request_id", "") or ""),
+            )
+            return
         if not self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000):
             state.history_loaded = False
             state.history_loading = False
@@ -31410,8 +31434,7 @@ class MainWindow(QMainWindow):
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
-        if not self.attach_active_daemon_run_if_needed(state):
-            self._restore_terminal_runtime_run_if_needed(state)
+        self.attach_active_daemon_run_if_needed(state)
 
     def _finish_session_history_load(self, state):
         if not state:
@@ -34156,6 +34179,7 @@ class MainWindow(QMainWindow):
                     animate=animate,
                     attachments=self._message_user_attachments(msg),
                     source_message_id=str(msg.get("id") or "").strip(),
+                    session_id=session_id,
                     target_layout=target_layout,
                     edited=bool((msg.get("meta") or {}).get("edited")),
                 )
@@ -34180,6 +34204,7 @@ class MainWindow(QMainWindow):
                         thinking=None,
                         index=current_idx if target_layout is None else None,
                         animate=animate,
+                        session_id=session_id,
                         target_layout=target_layout,
                     )
                     if current_idx is not None and target_layout is None: current_idx += 1
@@ -42825,14 +42850,14 @@ class MainWindow(QMainWindow):
         )
 
     def attach_active_daemon_run_if_needed(self, state):
-        if not state or (state.daemon_worker and state.daemon_worker.isRunning()):
+        if not state or self._session_has_current_execution(state):
             return False
         try:
             manifest = self.runtime_journal.load_manifest(state.session_id)
             run_id = str(manifest.get("active_run_id") or "")
             run = self.runtime_journal.get_run(state.session_id, run_id) if run_id else None
             if not run_id:
-                return self._restore_terminal_runtime_run_if_needed(state)
+                return False
         except Exception as exc:
             self.append_log(f"后台运行恢复检查失败({state.session_id}): {exc}")
             return False
@@ -42947,109 +42972,6 @@ class MainWindow(QMainWindow):
             request_id=run_id,
             turn_id=turn_id,
         )
-        return True
-
-    def _restore_terminal_runtime_run_if_needed(self, state):
-        """Reconcile a terminal sidecar that is newer than SQLite UI history."""
-
-        manifest = self.runtime_journal.load_manifest(state.session_id)
-        pending = manifest.get("pending_commit") if isinstance(manifest, dict) else None
-        if isinstance(pending, dict):
-            return False
-        runs = self.runtime_journal.list_runs(state.session_id)
-        terminal_run = next(
-            (
-                run
-                for run in runs
-                if str(run.get("status") or "")
-                in {"completed", "failed", "interrupted", "cancelled"}
-            ),
-            None,
-        )
-        if not isinstance(terminal_run, dict):
-            return False
-        run_id = str(terminal_run.get("run_id") or "").strip()
-        final_result = terminal_run.get("final_result")
-        if not run_id or not isinstance(final_result, dict):
-            return False
-        existing_request_ids = {
-            str((message.get("meta") or {}).get("request_id") or "")
-            for message in state.messages
-            if (
-                isinstance(message, dict)
-                and message.get("role") == "assistant"
-                and isinstance(message.get("meta"), dict)
-            )
-        }
-        if run_id in existing_request_ids:
-            return False
-        terminal_status = str(terminal_run.get("status") or "failed")
-        result = dict(final_result)
-        result["request_id"] = run_id
-        result["_runtime_terminal"] = terminal_status
-        generated = filter_persistable_messages(result.get("generated_messages") or [])
-        if terminal_status == "completed":
-            recovered = self._merge_generated_messages(state.messages, generated)
-            if not recovered and str(result.get("content") or "").strip():
-                recovered = [{
-                    "id": self._new_message_id(),
-                    "role": result.get("role") or "assistant",
-                    "content": str(result.get("content") or ""),
-                    "reasoning_content": str(result.get("reasoning") or ""),
-                    "meta": {"request_id": run_id},
-                }]
-            if not recovered:
-                return False
-            state.messages = self.chat_storage.normalize_messages(
-                merge_messages_by_id(state.messages, recovered),
-                conversation_id=state.session_id,
-            )
-        else:
-            draft_content = str(terminal_run.get("draft_content") or "").strip()
-            reason = "本轮已中断" if terminal_status in {"interrupted", "cancelled"} else "本轮执行失败"
-            if draft_content:
-                generated.append({
-                    "id": uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"terminal-run-recovery:{state.session_id}:{run_id}",
-                    ).hex,
-                    "role": "assistant",
-                    "content": draft_content,
-                    "content_parts": [{"type": "text", "text": draft_content}],
-                    "meta": {
-                        "request_id": run_id,
-                        "turn_id": str(terminal_run.get("turn_id") or ""),
-                        "ui_reply_kind": "interrupted" if reason == "本轮已中断" else "error",
-                        "context_visible_interruption": False,
-                        "run_outcome": terminal_status,
-                    },
-                })
-            state.messages = self.chat_storage.normalize_messages(
-                merge_messages_by_id(state.messages, generated),
-                conversation_id=state.session_id,
-            )
-            self._show_conversation_notice(
-                state,
-                "已停止" if terminal_status in {"interrupted", "cancelled"} else reason,
-                "neutral" if terminal_status in {"interrupted", "cancelled"} else "error",
-            )
-        self._rebuild_session_render_spans(state)
-        state.session_status = terminal_status if terminal_status != "cancelled" else "interrupted"
-        state.run_phase = "Completed" if terminal_status == "completed" else (
-            "Interrupted" if terminal_status in {"interrupted", "cancelled"} else "Error"
-        )
-        saved = self.save_chat_history(session_id=state.session_id, flush=True)
-        log_sub_agent_runtime(
-            "ui_terminal_runtime_recovered",
-            session_id=state.session_id,
-            request_id=run_id,
-            terminal_status=terminal_status,
-            saved=bool(saved),
-        )
-        if saved and getattr(state, "history_loaded", False):
-            state.history_loaded = False
-            state.history_loading = False
-            self.queue_session_history_load(state.session_id)
         return True
 
     def process_daemon_logic(

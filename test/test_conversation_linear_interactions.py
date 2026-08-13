@@ -1,3 +1,4 @@
+import copy
 import os
 import hashlib
 import inspect
@@ -950,7 +951,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_terminal_runtime_result_recovers_once_after_reopen(self):
+    def test_terminal_runtime_result_never_rewrites_loaded_history(self):
         with tempfile.TemporaryDirectory() as root:
             window = MainWindow()
             try:
@@ -992,18 +993,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     {"status": "completed", "final_result": final_result},
                 )
 
-                self.assertTrue(window._restore_terminal_runtime_run_if_needed(state))
-                self.assertEqual(state.session_status, "completed")
-                self.assertEqual(
-                    [message["content"] for message in state.messages if message.get("role") == "assistant"],
-                    ["恢复后的完整回答。"],
-                )
-                self.assertFalse(window._restore_terminal_runtime_run_if_needed(state))
+                before = copy.deepcopy(state.messages)
+                self.assertFalse(window.attach_active_daemon_run_if_needed(state))
+                self.assertEqual(state.messages, before)
             finally:
                 window.close()
                 window.deleteLater()
 
-    def test_failed_terminal_runtime_recovers_partial_content_without_error_message(self):
+    def test_failed_terminal_runtime_never_rewrites_loaded_history(self):
         with tempfile.TemporaryDirectory() as root:
             window = MainWindow()
             try:
@@ -1038,19 +1035,103 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     },
                 )
 
-                self.assertTrue(window._restore_terminal_runtime_run_if_needed(state))
-                assistants = [
-                    message for message in state.messages
-                    if message.get("role") == "assistant"
-                ]
-                self.assertEqual([message["content"] for message in assistants], ["已经生成的部分内容。"])
-                self.assertFalse(
-                    any("以上内容可能不完整" in message["content"] for message in assistants)
+                before = copy.deepcopy(state.messages)
+                self.assertFalse(window.attach_active_daemon_run_if_needed(state))
+                self.assertEqual(state.messages, before)
+            finally:
+                window.close()
+                window.deleteLater()
+
+    def test_history_load_is_rejected_while_session_is_running(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.history_loaded = False
+            state.live_activity = True
+            window.flush_pending_chat_saves = MagicMock(return_value=True)
+            window._show_session_loading_state = MagicMock()
+
+            window.queue_session_history_load(state.session_id)
+
+            window.flush_pending_chat_saves.assert_not_called()
+            window._show_session_loading_state.assert_not_called()
+            self.assertFalse(state.history_loaded)
+            self.assertTrue(state.live_activity)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_history_batch_renders_only_into_its_target_session(self):
+        window = MainWindow()
+        try:
+            current = window.get_current_session()
+            background_id = window.create_new_session(
+                "history-render-target",
+                make_current=False,
+            )
+            background = window.get_session(background_id)
+            message = {
+                "id": "history-user-target",
+                "role": "user",
+                "content": "只属于目标历史会话",
+            }
+            background.messages = [message]
+
+            window.render_message_batch(
+                [message],
+                background.session_id,
+                animate=False,
+            )
+
+            current_ids = {
+                bubble.source_message_id
+                for bubble in current.session_widget.findChildren(ChatBubble)
+            }
+            background_ids = {
+                bubble.source_message_id
+                for bubble in background.session_widget.findChildren(ChatBubble)
+            }
+            self.assertNotIn("history-user-target", current_ids)
+            self.assertIn("history-user-target", background_ids)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_active_local_worker_is_not_recovered_as_previous_process(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                state = window.get_current_session()
+                state.messages = [{
+                    "id": "u-live-local",
+                    "role": "user",
+                    "content": "你好",
+                    "meta": {"turn_id": "1", "request_id": "request-live-local"},
+                }]
+                state.live_activity = True
+                state.active_turn_id = 1
+                state.active_turn_request_id = "request-live-local"
+                state.llm_worker = MagicMock()
+                state.llm_worker.isRunning.return_value = True
+                window.runtime_journal = RuntimeJournal(root)
+                window.runtime_journal.begin_run(
+                    state.session_id,
+                    "request-live-local",
+                    turn_id="1",
+                    writer_owner="ui:test",
+                    base_messages=state.messages,
                 )
-                self.assertFalse(
-                    any((message.get("meta") or {}).get("context_visible_interruption") for message in assistants)
+                window._show_conversation_notice = MagicMock()
+
+                self.assertFalse(window.attach_active_daemon_run_if_needed(state))
+                window._show_conversation_notice.assert_not_called()
+                self.assertEqual(
+                    window.runtime_journal.get_run(
+                        state.session_id,
+                        "request-live-local",
+                    )["status"],
+                    "running",
                 )
-                self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
             finally:
                 window.close()
                 window.deleteLater()

@@ -17382,6 +17382,7 @@ class AssistantTurnGroup(QFrame):
         if bubble is None:
             raise ValueError("AI 轮次阶段不能为空。")
         if self.stage_bubbles:
+            self._finish_stage_thinking(self.stage_bubbles[-1])
             separator = QWidget(self)
             separator.setObjectName("AssistantStageSeparatorArea")
             separator_layout = QHBoxLayout(separator)
@@ -17962,7 +17963,7 @@ class ChatBubble(QFrame):
             main_layout.addWidget(content_wrapper)
             
         else: # Agent
-            self.timeline_started_at = time.time()
+            self.timeline_started_at = time.monotonic()
             self.timeline_finished_at = None
             self.timeline_events = []
             main_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -18575,7 +18576,7 @@ class ChatBubble(QFrame):
     def _on_think_tick(self):
         if self.think_start_time is None: return
         
-        elapsed = time.time() - self.think_start_time
+        elapsed = time.monotonic() - self.think_start_time
         current_total = self.think_duration + elapsed
         
         arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
@@ -18598,7 +18599,7 @@ class ChatBubble(QFrame):
     def set_thinking_state(self, is_thinking):
         if is_thinking:
             if not self.think_timer.isActive():
-                self.think_start_time = time.time()
+                self.think_start_time = time.monotonic()
                 self.think_timer.start()
                 
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
@@ -18609,7 +18610,7 @@ class ChatBubble(QFrame):
             if self.think_timer.isActive():
                 self.think_timer.stop()
                 if self.think_start_time:
-                    self.think_duration += time.time() - self.think_start_time
+                    self.think_duration += time.monotonic() - self.think_start_time
                     self.think_start_time = None
 
     def get_active_think_widget(self, force_new=False):
@@ -18662,12 +18663,9 @@ class ChatBubble(QFrame):
             self.think_duration = duration
         
         if is_final:
-            if self.think_timer.isActive():
-                self.think_timer.stop()
-                self.think_start_time = None
-                
-            self.timeline_finished_at = time.time()
-            total = max(self.think_duration, self.timeline_finished_at - self.timeline_started_at)
+            self.set_thinking_state(False)
+            self.timeline_finished_at = time.monotonic()
+            total = self.think_duration
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
             self.think_toggle_btn.setText(f" 深度思考 · {total:.1f} 秒  {arrow}")
         self._notify_stage_visibility_changed()
@@ -18676,12 +18674,12 @@ class ChatBubble(QFrame):
         if self.think_timer.isActive():
             self.think_timer.stop()
             if self.think_start_time:
-                self.think_duration += time.time() - self.think_start_time
+                self.think_duration += time.monotonic() - self.think_start_time
                 self.think_start_time = None
         timer = getattr(self, "_thinking_replay_timer", None)
         if timer and timer.isActive():
             timer.stop()
-        self.timeline_finished_at = time.time()
+        self.timeline_finished_at = time.monotonic()
         arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
         self.think_toggle_btn.setText(f" 深度思考已停止 · {self.think_duration:.1f} 秒  {arrow}")
 
@@ -20580,6 +20578,7 @@ class SessionState:
         self.completed_turn_id = 0
         self.active_turn_request_id = ""
         self.active_turn_user_message_id = ""
+        self.submit_in_progress = False
         self.first_submit_diagnostic_turn_id = 0
         self.turn_steerable = False
         self.pending_guidance_messages = []
@@ -20641,6 +20640,7 @@ class SessionState:
         self.chat_save_revision = 0
         self.last_chat_recovery_checkpoint_at = 0.0
         self.composer_draft = ""
+        self.conversation_notice = None
         self.saved_scroll_position = None
         self.drawer_open = False
         self.drawer_tab = None
@@ -24232,12 +24232,6 @@ class MainWindow(QMainWindow):
         )
         self.model_select_btn.clicked.connect(self.show_model_selector_popover)
 
-        self.pause_btn = QPushButton()
-        self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        self.pause_btn.setVisible(False)
-        self.pause_btn.setObjectName("SecondaryBtn")
-        self.pause_btn.setFixedHeight(32)
         
         self.action_btn = QPushButton("发送")
         self.action_btn.setText("开始")
@@ -24323,7 +24317,6 @@ class MainWindow(QMainWindow):
         prompt_context_layout.addWidget(self.selected_skills_badge)
         prompt_context_layout.addWidget(self.grill_mode_badge)
         prompt_context_layout.addWidget(self.project_selector_btn)
-        prompt_context_layout.addWidget(self.pause_btn)
         prompt_context_layout.addWidget(self.loop_hint)
         prompt_context_layout.addStretch(1)
 
@@ -24479,7 +24472,6 @@ class MainWindow(QMainWindow):
         controller.register_component("composer.grill_mode", self.grill_mode_badge)
         controller.register_component("composer.agent", self.agent_picker_btn)
         controller.register_component("composer.model", self.model_select_btn)
-        controller.register_component("composer.pause", self.pause_btn)
         controller.register_component("composer.submit", self.action_btn)
         controller.register_component(
             "conversation.question_navigator",
@@ -24690,19 +24682,6 @@ class MainWindow(QMainWindow):
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
         self.model_select_btn.setStyleSheet(model_style)
-        self.pause_btn.setIcon(
-            qta.icon(
-                "fa5s.play" if self.pause_btn.toolTip() == "继续" else "fa5s.pause",
-                color=(
-                    DesignTokens.success_icon
-                    if self.pause_btn.toolTip() == "继续"
-                    else DesignTokens.icon_secondary
-                ),
-            )
-        )
-        self.pause_btn.setStyleSheet(
-            apple_button_style("secondary", radius=DesignTokens.radius_sm)
-        )
         self.action_btn.setIcon(
             qta.icon("fa5s.paper-plane", color=DesignTokens.text_inverse)
         )
@@ -26140,7 +26119,7 @@ class MainWindow(QMainWindow):
             message_id=str(message_id or ""),
             error=reason,
         )
-        self.add_system_toast(reason, "error", session_id=getattr(state, "session_id", None), auto_close_ms=6000)
+        self._show_conversation_notice(state, reason, "error")
 
     def _finalize_question_navigator_jump(self, state, message_id):
         node = (getattr(state, "render_node_by_message_id", {}) or {}).get(str(message_id or ""))
@@ -27311,24 +27290,36 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"历史改写旧保存快照清理失败({state.session_id}, operation={operation}): {exc}"
             )
-        manifest = self.runtime_journal.load_manifest(state.session_id)
-        pending_run_id = str(manifest.get("pending_commit_run_id") or "")
-        if pending_run_id:
-            self.runtime_journal.quarantine_pending_commit(
+        try:
+            manifest = self.runtime_journal.load_manifest(state.session_id)
+            pending_run_id = str(manifest.get("pending_commit_run_id") or "")
+            if pending_run_id:
+                self.runtime_journal.quarantine_pending_commit(
+                    state.session_id,
+                    pending_run_id,
+                    reason=f"history rewrite committed: {operation}",
+                    committed_messages=self.chat_storage.get_messages(state.session_id),
+                )
+            self.runtime_journal.update_manifest(
                 state.session_id,
-                pending_run_id,
-                reason=f"history rewrite committed: {operation}",
-                committed_messages=self.chat_storage.get_messages(state.session_id),
+                {
+                    "sqlite_messages_hash": result.get("messages_hash") or "",
+                    "history_rewrite_revision": state.chat_save_revision,
+                    "history_rewrite_operation": str(operation or "rewrite"),
+                    "history_rewrite_at": time.time(),
+                },
             )
-        self.runtime_journal.update_manifest(
-            state.session_id,
-            {
-                "sqlite_messages_hash": result.get("messages_hash") or "",
-                "history_rewrite_revision": state.chat_save_revision,
-                "history_rewrite_operation": str(operation or "rewrite"),
-                "history_rewrite_at": time.time(),
-            },
-        )
+        except Exception as exc:
+            result["post_commit_error"] = str(exc)
+            self.append_log(
+                f"历史已写入 SQLite，但运行状态更新失败"
+                f"({state.session_id}, operation={operation}): {exc}"
+            )
+            self._show_conversation_notice(
+                state,
+                f"消息已保存，但运行状态更新失败：{exc}",
+                "error",
+            )
         log_ui_navigation(
             "history_rewrite_persisted",
             session_id=state.session_id,
@@ -27348,17 +27339,17 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         allowed, message = self._can_rewrite_session_from_message(state)
         if not allowed:
-            self.add_system_toast(message, "warning", session_id=session_id, auto_close_ms=3200)
+            self._show_conversation_notice(state, message, "warning")
             return False
         source_message = self._find_message_by_id(getattr(state, "messages", []), message_id)
         if not isinstance(source_message, dict) or (source_message.get("role") or "") != "user":
-            self.add_system_toast("只能编辑用户消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            self._show_conversation_notice(state, "只能编辑用户消息。", "warning")
             return False
 
         edited_text = str(edited_text or "").strip()
         prompt_files = self._message_attachment_paths(source_message)
         if not edited_text and not prompt_files:
-            self.add_system_toast("消息内容不能为空。", "warning", session_id=session_id, auto_close_ms=3200)
+            self._show_conversation_notice(state, "消息内容不能为空。", "warning")
             return False
 
         self.save_chat_history(session_id=session_id, flush=True)
@@ -27369,7 +27360,7 @@ class MainWindow(QMainWindow):
             -1,
         )
         if target_index < 0:
-            self.add_system_toast("找不到要编辑的消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            self._show_conversation_notice(state, "找不到要编辑的消息。", "warning")
             return False
         downstream_count = max(0, len(messages) - target_index - 1)
         log_ui_navigation(
@@ -27401,7 +27392,7 @@ class MainWindow(QMainWindow):
         try:
             rewrite_snapshot = self._capture_history_rewrite(state, message_id)
         except Exception as exc:
-            self.add_system_toast(str(exc), "error", session_id=session_id, auto_close_ms=5000)
+            self._show_conversation_notice(state, str(exc), "error")
             log_ui_navigation(
                 "history_rewrite_index_error",
                 session_id=session_id,
@@ -27423,13 +27414,8 @@ class MainWindow(QMainWindow):
             downstream_count=downstream_count,
         )
         log_ui_navigation("history_rewrite_submit_started", session_id=session_id, target_index=target_index)
-        rewrite_result = None
+        state.last_history_rewrite_committed = False
         try:
-            rewrite_result = self._persist_history_rewrite(
-                state,
-                rewrite_guard,
-                operation="edit_branch_base",
-            )
             submitted = self._submit_session_request(
                 state,
                 edited_text,
@@ -27437,35 +27423,27 @@ class MainWindow(QMainWindow):
                 check_duplicates=False,
                 clear_current_input=False,
                 user_message_meta={"edited": True},
+                history_rewrite_guard=rewrite_guard,
             )
         except Exception as exc:
             submitted = False
-            self.add_system_toast(
-                f"编辑分支提交失败：{exc}",
+            self._show_conversation_notice(
+                state,
+                f"消息修改失败：{exc}",
                 "error",
-                session_id=session_id,
-                auto_close_ms=0,
             )
         if not submitted:
+            if getattr(state, "last_history_rewrite_committed", False):
+                self._commit_history_rewrite(rewrite_snapshot)
+                self.refresh_history_list()
+                log_ui_navigation(
+                    "history_edit_committed_run_not_started",
+                    session_id=session_id,
+                    downstream_count=downstream_count,
+                )
+                return False
             self._restore_history_rewrite(state, rewrite_snapshot)
-            if rewrite_result:
-                try:
-                    self._persist_history_rewrite(
-                        state,
-                        {
-                            "messages_hash": rewrite_result.get("messages_hash"),
-                            "revision": rewrite_result.get("revision"),
-                        },
-                        operation="edit_branch_rollback",
-                    )
-                except Exception as rollback_exc:
-                    self.add_system_toast(
-                        f"编辑分支回滚冲突：{rollback_exc}。请重新打开会话后恢复。",
-                        "error",
-                        session_id=session_id,
-                        auto_close_ms=0,
-                    )
-            self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=session_id, auto_close_ms=3200)
+            self._show_conversation_notice(state, "消息未修改，请重试。", "warning")
             log_ui_navigation("history_edit_failed", session_id=session_id, downstream_count=downstream_count)
             log_ui_navigation("history_rewrite_rolled_back", session_id=session_id, target_index=target_index)
             return False
@@ -27496,7 +27474,6 @@ class MainWindow(QMainWindow):
             lambda s=state, snap=rewrite_snapshot, mid=edited_message_id: self._restore_rewrite_viewport(s, snap, mid),
         )
         self.refresh_history_list()
-        self.add_system_toast("已从此处重新生成", "success", session_id=session_id, auto_close_ms=3200)
         log_ui_navigation("history_edit_done", session_id=session_id, downstream_count=downstream_count)
         log_ui_navigation(
             "history_rewrite_committed",
@@ -28306,7 +28283,6 @@ class MainWindow(QMainWindow):
         card = self._office_draft_card_for_state(state)
         if card is not None:
             card.set_failed(title or self._office_task_failed_title(state))
-        self.add_system_toast(text, "error", session_id=getattr(state, "session_id", None), auto_close_ms=6000)
         self.set_session_phase("Failed", state.session_id)
         self.set_session_status("failed", state.session_id, save=True)
         self.refresh_step_list(state.session_id)
@@ -28639,11 +28615,10 @@ class MainWindow(QMainWindow):
                     error=str(exc),
                     traceback=traceback.format_exc(),
                 )
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     f"任务已结束，但过程视图收尾失败：{exc}",
                     "warning",
-                    session_id=state.session_id,
-                    auto_close_ms=6000,
                 )
         if status in {"completed", "error", "failed", "interrupted"}:
             self._mark_session_favorite_run_completed(state, status, error=error)
@@ -28943,14 +28918,29 @@ class MainWindow(QMainWindow):
                 traceback=traceback.format_exc(),
             )
 
-    def handle_observability_event(self, data, session_id=None):
+    def _event_matches_active_run(self, state, turn_id=None, request_id=None):
+        if not state:
+            return False
+        if turn_id is not None and str(turn_id) != str(getattr(state, "active_turn_id", "")):
+            return False
+        if request_id is not None and str(request_id) != str(
+            getattr(state, "active_turn_request_id", "")
+        ):
+            return False
+        return True
+
+    def handle_observability_event(self, data, session_id=None, turn_id=None, request_id=None):
         try:
             on_ui_thread = QThread.currentThread() is self.thread()
         except RuntimeError:
             on_ui_thread = True
         if not on_ui_thread:
             payload = dict(data) if isinstance(data, dict) else {}
-            QTimer.singleShot(0, lambda p=payload, sid=session_id: self.handle_observability_event(p, sid))
+            QTimer.singleShot(
+                0,
+                lambda p=payload, sid=session_id, tid=turn_id, rid=request_id:
+                    self.handle_observability_event(p, sid, tid, rid),
+            )
             return
         if not isinstance(data, dict):
             log_sub_agent_runtime(
@@ -28965,6 +28955,14 @@ class MainWindow(QMainWindow):
                 "ui_observability_missing_session",
                 session_id=str(session_id or ""),
                 event_type=data.get("type") or "",
+            )
+            return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            log_sub_agent_runtime(
+                "ui_observability_stale_run_rejected",
+                session_id=state.session_id,
+                turn_id=str(turn_id or ""),
+                request_id=str(request_id or ""),
             )
             return
         try:
@@ -30148,7 +30146,6 @@ class MainWindow(QMainWindow):
     def normalize_session_ui(self, state):
         if not state: return
         running = state.llm_worker and state.llm_worker.isRunning()
-        paused = running and state.llm_worker.is_paused
         running_code = state.code_worker and state.code_worker.isRunning()
         running_daemon = getattr(state, "daemon_running", False)
         
@@ -30163,7 +30160,6 @@ class MainWindow(QMainWindow):
             self.input_field.setEnabled(False)
             
             # Hide extra buttons/prompts when running
-            self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         else:
             self.action_btn.setText("发送")
@@ -30176,7 +30172,6 @@ class MainWindow(QMainWindow):
             self.action_btn.setEnabled(True)
             self.input_field.setEnabled(True)
             
-            self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
 
     def normalize_session_ui(self, state):
@@ -30192,7 +30187,6 @@ class MainWindow(QMainWindow):
             and state.llm_worker.isRunning()
         )
         running = lifecycle_running
-        paused = worker_running and state.llm_worker.is_paused
         running_code = bool(
             lifecycle_running
             and state.code_worker
@@ -30213,7 +30207,6 @@ class MainWindow(QMainWindow):
             self.stop_btn.setVisible(True)
             if steerable:
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
-            self.pause_btn.setVisible(bool(running))
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
                 loop_text = (
                     f"正在重试 {int(state.provider_retry_attempt)}/"
@@ -30227,12 +30220,6 @@ class MainWindow(QMainWindow):
             self.loop_hint.setText(loop_text or "处理中")
             self.loop_hint.setToolTip(loop_text or "处理中")
             self.loop_hint.setVisible(bool(running_daemon or running_code or loop_text))
-            if paused:
-                self.pause_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.success_text))
-                self.pause_btn.setToolTip("继续")
-            else:
-                self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
-                self.pause_btn.setToolTip("暂停")
         else:
             grill_armed = normalize_grill_mode_state(
                 getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
@@ -30251,7 +30238,6 @@ class MainWindow(QMainWindow):
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             else:
                 self.input_field.setPlaceholderText("直接开始聊天；需要处理文件时再连接项目")
-            self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
         self.refresh_grill_mode_controls(state.session_id)
@@ -31409,11 +31395,10 @@ class MainWindow(QMainWindow):
         if not state or int(token or 0) != int(getattr(state, "history_load_token", 0) or 0):
             return
         if state.ui_timeline_warning:
-            self.add_system_toast(
+            self._show_conversation_notice(
+                state,
                 "部分对话过程无法按原顺序恢复，已按会话消息显示。",
                 "warning",
-                session_id=state.session_id,
-                auto_close_ms=6000,
             )
 
         self._finish_session_history_load(state)
@@ -31453,9 +31438,14 @@ class MainWindow(QMainWindow):
             lambda value: bridge.resolve_request(request.get("request_id"), value),
         )
     
-    def handle_daemon_interaction_request(self, request, session_id=None):
+    def handle_daemon_interaction_request(
+        self, request, session_id=None, turn_id=None, run_request_id=None
+    ):
         request = dict(request or {})
         target_session_id = str(session_id or request.get("session_id") or self.current_session_id or "")
+        state = self.get_session(target_session_id)
+        if not self._event_matches_active_run(state, turn_id, run_request_id):
+            return
 
         def resolve(value):
             if self.daemon_client:
@@ -31515,7 +31505,12 @@ class MainWindow(QMainWindow):
             if first_input is not None and first_input.isVisible():
                 QTimer.singleShot(0, first_input.setFocus)
         else:
-            self.add_system_toast("后台对话正在等待你的输入", "info", session_id=state.session_id, auto_close_ms=0)
+            self.add_system_toast(
+                "后台对话正在等待你的输入",
+                "info",
+                session_id=state.session_id,
+                auto_close_ms=0,
+            )
         return card
 
     def refresh_history_list(self):
@@ -33462,11 +33457,10 @@ class MainWindow(QMainWindow):
                 state.history_page_queue = []
                 state.auto_loading_history = False
                 state.history_page_loading = False
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     f"历史消息加载失败：{exc}",
                     "error",
-                    session_id=session_id,
-                    auto_close_ms=6000,
                 )
                 log_ui_navigation("history_load_error", session_id=session_id, stage="page", error=str(exc))
                 jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
@@ -33846,6 +33840,18 @@ class MainWindow(QMainWindow):
             error=state.ui_timeline_warning,
         )
         return 1
+
+    def _show_conversation_notice(self, state, text, tone="info"):
+        if not state:
+            return None
+        notice = getattr(state, "conversation_notice", None)
+        if notice is not None and _qt_object_alive(notice):
+            notice.set_text(text, tone)
+        else:
+            notice = ProductInlineNotice(text, tone)
+            state.conversation_notice = notice
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
+        return notice
 
     def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
         """Restore every assistant/tool round as stages in one conversational turn."""
@@ -34706,11 +34712,10 @@ class MainWindow(QMainWindow):
         }
         state = self.get_session(session_id)
         if state:
-            self.add_system_toast(
-                "会话保存失败，正在等待下一次保存重试。",
+            self._show_conversation_notice(
+                state,
+                "聊天记录保存失败，正在等待下一次保存重试。",
                 "warning",
-                session_id=session_id,
-                auto_close_ms=3500,
             )
 
     def handle_chat_save_blocked(self, session_id, revision, error):
@@ -34743,12 +34748,10 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"会话冲突快照隔离失败({session_id or 'unknown'}): {quarantine_exc}"
             )
-        self.add_system_toast(
-            "会话历史已在其他版本或窗口中变化，本次保存已停止重试。"
-            "请重新打开该会话，并从当前历史重新提交。",
+        self._show_conversation_notice(
+            self.get_session(session_id),
+            "聊天记录已在其他窗口中变化，请重新打开此对话后再提交。",
             "error",
-            session_id=session_id,
-            auto_close_ms=0,
         )
 
     def handle_chat_save_completed(self, session_id, revision):
@@ -36836,15 +36839,8 @@ class MainWindow(QMainWindow):
             self._set_deliverable_controls_enabled(getattr(self, "current_deliverable_path", ""))
 
     def cancel_deliverable_conversion(self):
-        target = str(getattr(self, "deliverable_conversion_running_target", "") or "").upper()
         self.stop_agent()
         self._set_deliverable_conversion_running("")
-        self.add_system_toast(
-            f"已请求停止当前{target or '办公文件'}生成任务",
-            "warning",
-            session_id=getattr(self, "current_session_id", None),
-            auto_close_ms=3600,
-        )
 
     def _submit_html_deliverable_conversion(self, state, path, target_format, template_path=""):
         target_format = str(target_format or "").lower()
@@ -36914,19 +36910,12 @@ class MainWindow(QMainWindow):
             self._set_deliverable_conversion_running(target_format)
             if hasattr(self, "set_context_tab_hint"):
                 self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
-            self.add_system_toast(
-                f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
-                "info",
-                session_id=session_id,
-                auto_close_ms=3200,
-            )
             return True
         self._set_deliverable_conversion_running("")
-        self.add_system_toast(
-            "生成任务未能提交，HTML 已保留在当前对话中，可直接重试。",
+        self._show_conversation_notice(
+            state,
+            "生成任务未能提交，HTML 已保留在当前对话中。",
             "warning",
-            session_id=session_id,
-            auto_close_ms=4200,
         )
         return False
 
@@ -38031,13 +38020,6 @@ class MainWindow(QMainWindow):
             active_turn_id=getattr(state, "active_turn_id", None),
             office_pending=bool(getattr(state, "office_draft_preview_pending", False)),
         )
-        if submitted:
-            self.add_system_toast(
-                f"PPT Agent 已启动：{ppt_agent_strategy_label(selected_strategy)}",
-                "info",
-                session_id=state.session_id,
-                auto_close_ms=3200,
-            )
         return submitted
 
     def handle_office_draft_requested(self, profile, source_message_id, source_text, session_id=None):
@@ -38047,12 +38029,7 @@ class MainWindow(QMainWindow):
         try:
             self._ensure_session_workspace(state)
         except Exception as exc:
-            self.add_system_toast(
-                f"聊天工作目录不可用：{exc}",
-                "error",
-                session_id=state.session_id,
-                auto_close_ms=6000,
-            )
+            self._show_conversation_notice(state, f"聊天工作目录不可用：{exc}", "error")
             return False
         source = str(source_text or "").strip()
         if source_message_id:
@@ -38060,7 +38037,7 @@ class MainWindow(QMainWindow):
             if isinstance(message, dict) and str(message.get("content") or "").strip():
                 source = str(message.get("content") or "").strip()
         if not source:
-            self.add_system_toast("这条回复没有可用于生成办公稿的内容。", "warning", session_id=state.session_id)
+            self._show_conversation_notice(state, "这条回复没有可用于生成办公稿的内容。", "warning")
             return False
         profile = normalize_office_output_profile(profile)
         prompt = self._build_office_draft_prompt(profile, source)
@@ -38073,13 +38050,6 @@ class MainWindow(QMainWindow):
             workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
             office_output_profile=profile,
         )
-        if submitted:
-            self.add_system_toast(
-                f"正在生成{self._office_profile_label(profile)}办公稿",
-                "info",
-                session_id=state.session_id,
-                auto_close_ms=2800,
-            )
         return submitted
 
     def _merge_home_action_skills(self, state, action_id, skill_names):
@@ -39349,27 +39319,15 @@ class MainWindow(QMainWindow):
         )
         return True
 
-    def handle_skill_used(self, skill_name, session_id=None):
+    def handle_skill_used(self, skill_name, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
         current_text = state.active_skills_label.text()
         if f"[{skill_name}]" not in current_text:
             state.active_skills_label.setText(current_text + f" [{skill_name}]")
             state.active_skills_label.setVisible(True)
-
-    def toggle_pause(self):
-        state = self.get_current_session()
-        if state and state.llm_worker and state.llm_worker.isRunning():
-            if state.llm_worker.is_paused:
-                state.llm_worker.resume()
-                self.pause_btn.setText("")
-                self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.icon_secondary))
-                self.pause_btn.setToolTip("暂停")
-            else:
-                state.llm_worker.pause()
-                self.pause_btn.setText("")
-                self.pause_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.success_icon))
-                self.pause_btn.setToolTip("继续")
 
     def _disconnect_worker_signals(self, worker):
         if not worker:
@@ -39507,11 +39465,10 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"守护进程未确认任务停止({stopped_session_id}): {error}"
             )
-            self.add_system_toast(
-                f"远端停止确认失败：{error}",
+            self._show_conversation_notice(
+                self.get_session(stopped_session_id),
+                f"停止确认失败：{error}",
                 "error",
-                session_id=stopped_session_id,
-                auto_close_ms=0,
             )
 
         def cleanup():
@@ -39536,9 +39493,7 @@ class MainWindow(QMainWindow):
         partial_content = str(
             getattr(state, "current_content_buffer", "") or ""
         ).strip()
-        interruption_text = f"⚠️ {reason_text}，以上内容可能不完整。"
-        if partial_content:
-            interruption_text = f"{partial_content}\n\n{interruption_text}"
+        interruption_text = partial_content
         existing_content = ""
         if (
             state.messages
@@ -39546,13 +39501,13 @@ class MainWindow(QMainWindow):
             and state.messages[-1].get("role") == "assistant"
         ):
             existing_content = str(state.messages[-1].get("content") or "").strip()
-        if existing_content != interruption_text:
+        if interruption_text and existing_content != interruption_text:
             message_meta = {
                 "turn_id": str(turn_id or ""),
                 "request_id": str(run_id or ""),
                 "ui_turn_id": str(turn_id or ""),
                 "ui_reply_kind": "interrupted",
-                "context_visible_interruption": True,
+                "context_visible_interruption": False,
                 "run_outcome": str(outcome or "interrupted"),
             }
             if bubble is not None:
@@ -39571,7 +39526,13 @@ class MainWindow(QMainWindow):
             bubble.stop_thinking_timers()
             bubble.set_message_actions_enabled(False)
             bubble.update_thinking(duration=bubble.think_duration, is_final=True)
-            bubble.set_main_content(interruption_text, final=True)
+            if interruption_text:
+                bubble.set_main_content(interruption_text, final=True)
+        self._show_conversation_notice(
+            state,
+            "已停止" if str(outcome or "") == "interrupted" else str(reason_text or "运行失败"),
+            "neutral" if str(outcome or "") == "interrupted" else "error",
+        )
         state.messages = self.chat_storage.normalize_messages(
             state.messages,
             conversation_id=state.session_id,
@@ -39648,11 +39609,10 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"运行账本检查点恢复失败({state.session_id}, run={stopped_run_id}): {exc}"
             )
-            self.add_system_toast(
-                f"已停止任务，但已完成轮次恢复失败：{exc}",
+            self._show_conversation_notice(
+                state,
+                f"任务已停止，但部分运行记录恢复失败：{exc}",
                 "error",
-                session_id=state.session_id,
-                auto_close_ms=0,
             )
         if stopped_run_id:
             try:
@@ -39694,7 +39654,6 @@ class MainWindow(QMainWindow):
             turn_id=str(getattr(state, "active_turn_id", "")),
             group_id=str(getattr(getattr(state, "active_agent_turn_group", None), "group_id", "")),
         )
-        self.add_system_toast("任务已停止", "warning", session_id=state.session_id)
         self.set_session_phase("Interrupted", state.session_id)
         self.set_session_status("interrupted", state.session_id, save=True)
         self.refresh_step_list(state.session_id)
@@ -39812,8 +39771,6 @@ class MainWindow(QMainWindow):
         self.refresh_clarify_controls(state.session_id)
 
         is_current = state.session_id == self.current_session_id
-        if is_current:
-            self.add_system_toast("反问已完成，等待确认", "info", session_id=state.session_id)
         self._rebuild_session_render_spans(state)
         state.displayed_render_count = len(state.render_items)
         self.refresh_change_list(state.session_id)
@@ -40264,11 +40221,10 @@ class MainWindow(QMainWindow):
                     error=str(exc),
                     traceback=traceback.format_exc(),
                 )
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     f"智能体启动失败：{profile.get('name') or '未命名智能体'} - {exc}",
                     "error",
-                    session_id=state.session_id,
-                    auto_close_ms=6000,
                 )
 
         if not started_profiles:
@@ -40287,12 +40243,7 @@ class MainWindow(QMainWindow):
         parent_meta["summoned_agents"] = started_descriptors
         parent_message["meta"] = parent_meta
         self._rebuild_session_render_spans(state)
-        self.add_system_toast(
-            f"已启动 {len(started_profiles)} 个智能体，结果会自动回填",
-            "success",
-            session_id=state.session_id,
-            auto_close_ms=3500,
-        )
+        self.set_session_phase("Agents running", state.session_id)
         self.save_chat_history(session_id=state.session_id)
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
@@ -40392,7 +40343,7 @@ class MainWindow(QMainWindow):
                 self.input_field.setPlainText(combined)
             self.refresh_prompt_file_chips(state.session_id)
             self.input_field.setFocus()
-        self.add_system_toast(toast_text, tone, session_id=state.session_id)
+        self._show_conversation_notice(state, toast_text, tone)
         return True
 
     def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
@@ -40653,7 +40604,7 @@ class MainWindow(QMainWindow):
             mutation_ready=not already_persisted,
         )
         if state.session_id == self.current_session_id:
-            self.add_system_toast("已加入当前任务", "info", session_id=state.session_id, auto_close_ms=2200)
+            self.set_session_phase("Guidance queued", state.session_id)
 
     def _pending_guidance_message(self, state, message_id):
         target_id = str(message_id or "")
@@ -40731,20 +40682,12 @@ class MainWindow(QMainWindow):
         if not state or not card or not self._guidance_mutation_allowed(state, message_id):
             if card is not None:
                 card.set_mutation_ready(False)
-            self.add_system_toast(
-                "这条补充引导已不在待应用队列中。",
-                "warning",
-                session_id=session_id,
-            )
+            self._show_conversation_notice(state, "这条补充引导已不在待应用队列中。", "warning")
             return False
         source_message = self._pending_guidance_message(state, message_id)
         replacement = self._build_edited_guidance_message(state, source_message, edited_text)
         if replacement is None:
-            self.add_system_toast(
-                "补充引导内容不能为空。",
-                "warning",
-                session_id=session_id,
-            )
+            self._show_conversation_notice(state, "补充引导内容不能为空。", "warning")
             card.keep_inline_edit_after_failure()
             return False
         if self._message_display_content(source_message).strip() == str(edited_text or "").strip():
@@ -40796,11 +40739,7 @@ class MainWindow(QMainWindow):
         if not state or not card or not self._guidance_mutation_allowed(state, message_id):
             if card is not None:
                 card.set_mutation_ready(False)
-            self.add_system_toast(
-                "这条补充引导已不在待应用队列中。",
-                "warning",
-                session_id=session_id,
-            )
+            self._show_conversation_notice(state, "这条补充引导已不在待应用队列中。", "warning")
             return False
         source_message = copy.deepcopy(self._pending_guidance_message(state, message_id))
         expected_turn_id = state.active_turn_id
@@ -40958,20 +40897,13 @@ class MainWindow(QMainWindow):
         if not updated or event is None or card is None:
             error = "local_guidance_projection_missing"
             self._log_guidance_mutation(state, message_id, "update", "error", error)
-            self.add_system_toast(
-                "补充引导已更新，但界面状态同步失败，请重新打开当前会话。",
-                "error",
-                session_id=state.session_id,
+            self._show_conversation_notice(
+                state, "补充引导已更新，但界面状态同步失败，请重新打开当前会话。", "error"
             )
             return False
         self.save_chat_history(session_id=state.session_id)
         self._log_guidance_mutation(state, message_id, "update", "finish")
-        self.add_system_toast(
-            "已更新补充引导",
-            "success",
-            session_id=state.session_id,
-            auto_close_ms=2200,
-        )
+        self.set_session_phase("Guidance updated", state.session_id)
         return True
 
     def _commit_pending_guidance_delete(self, state, message_id, source_message):
@@ -41012,10 +40944,8 @@ class MainWindow(QMainWindow):
         if projection_missing:
             error = "local_guidance_widget_missing"
             self._log_guidance_mutation(state, message_id, "delete", "error", error)
-            self.add_system_toast(
-                "补充引导已撤回，但界面状态同步失败，请重新打开当前会话。",
-                "error",
-                session_id=state.session_id,
+            self._show_conversation_notice(
+                state, "补充引导已撤回，但界面状态同步失败，请重新打开当前会话。", "error"
             )
             return False
         self._log_guidance_mutation(state, message_id, "delete", "finish")
@@ -41048,7 +40978,7 @@ class MainWindow(QMainWindow):
                 card.keep_inline_edit_after_failure() if operation == "update" else card.set_mutation_busy(False)
             message = f"补充引导修改失败：{error}"
         self._log_guidance_mutation(state, message_id, operation, "error", error)
-        self.add_system_toast(message, "warning", session_id=state.session_id)
+        self._show_conversation_notice(state, message, "warning")
 
     def _handle_daemon_guidance_result(
         self, response, worker, session_id, expected_turn_id, message,
@@ -41104,7 +41034,7 @@ class MainWindow(QMainWindow):
             result = state.llm_worker.steer(message, expected_turn_id=expected_turn_id)
             if not result.get("accepted"):
                 if state.session_id == self.current_session_id:
-                    self.add_system_toast("当前任务已结束，请重新发送。", "warning", session_id=state.session_id)
+                    self._show_conversation_notice(state, "当前任务已结束，请重新发送。", "warning")
                 return False
             if clear_current_input and state.session_id == self.current_session_id:
                 self.input_field.clear()
@@ -41170,6 +41100,31 @@ class MainWindow(QMainWindow):
         state,
         raw_user_text,
         prompt_files=None,
+        **options,
+    ):
+        if not state or getattr(state, "submit_in_progress", False):
+            if state is not None:
+                log_ppt_agent_debug(
+                    "submit_session_request_reentrant_rejected",
+                    session_id=state.session_id,
+                )
+            return False
+        state.submit_in_progress = True
+        try:
+            return self._submit_session_request_once(
+                state,
+                raw_user_text,
+                prompt_files,
+                **options,
+            )
+        finally:
+            state.submit_in_progress = False
+
+    def _submit_session_request_once(
+        self,
+        state,
+        raw_user_text,
+        prompt_files=None,
         *,
         check_duplicates=True,
         clear_current_input=False,
@@ -41182,6 +41137,7 @@ class MainWindow(QMainWindow):
         ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
         ppt_agent_template_file="",
         user_message_meta=None,
+        history_rewrite_guard=None,
     ):
         log_ppt_agent_debug(
             "submit_session_request_begin",
@@ -41204,11 +41160,10 @@ class MainWindow(QMainWindow):
                 history_loading=getattr(state, "history_loading", None),
             )
             if state.session_id == self.current_session_id:
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     "历史会话仍在加载，加载完成后再发送。",
                     "info",
-                    session_id=state.session_id,
-                    auto_close_ms=3500,
                 )
                 self.normalize_session_ui(state)
             return False
@@ -41262,7 +41217,7 @@ class MainWindow(QMainWindow):
                     clear_current_input=clear_current_input,
                 )
             if state.session_id == self.current_session_id:
-                self.add_system_toast("当前运行阶段不支持中途引导。", "warning", session_id=state.session_id)
+                self._show_conversation_notice(state, "当前运行阶段不支持中途引导。", "warning")
             return False
         if not raw_user_text and not prompt_files:
             log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
@@ -41284,11 +41239,10 @@ class MainWindow(QMainWindow):
                 attachment_count=len(prompt_files),
             )
             if state.session_id == self.current_session_id:
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     f"拷问模式不能与{'、'.join(grill_conflicts)}同时使用。请先取消其中一种；输入和附件已保留。",
                     "warning",
-                    session_id=state.session_id,
-                    auto_close_ms=0,
                 )
             return False
         if not self._model_profile_for_state(state):
@@ -41301,14 +41255,13 @@ class MainWindow(QMainWindow):
             )
             if state.session_id == self.current_session_id:
                 if has_configured_models:
-                    self.add_system_toast("当前对话选择的模型不可用，请重新选择模型。", "error", session_id=state.session_id)
+                    self._show_conversation_notice(state, "当前对话选择的模型不可用，请重新选择模型。", "error")
                     self.refresh_model_selector()
                 else:
-                    self.add_system_toast(
+                    self._show_conversation_notice(
+                        state,
                         "尚未配置模型，请先在“设置 → 模型与服务”添加渠道和模型。",
                         "warning",
-                        session_id=state.session_id,
-                        auto_close_ms=5000,
                     )
                     QTimer.singleShot(0, lambda: self.open_settings("模型与服务"))
             return False
@@ -41338,7 +41291,7 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             if state.session_id == self.current_session_id:
-                self.add_system_toast(f"聊天工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
+                self._show_conversation_notice(state, f"聊天工作目录不可用：{exc}", "error")
             return False
         user_message_id = self._new_message_id()
         next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
@@ -41391,7 +41344,7 @@ class MainWindow(QMainWindow):
             if not source_files:
                 log_ppt_agent_debug("submit_session_conversion_source_missing", session_id=state.session_id)
                 if state.session_id == self.current_session_id:
-                    self.add_system_toast("没有找到本轮转换需要的源 HTML 文件。", "warning", session_id=state.session_id)
+                    self._show_conversation_notice(state, "没有找到本轮转换需要的源 HTML 文件。", "warning")
                 return False
             state.office_conversion_source_files = source_files[:1]
             template_candidates = [
@@ -41495,11 +41448,10 @@ class MainWindow(QMainWindow):
                     stage="persistence",
                 )
             if state.session_id == self.current_session_id:
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     "消息无法安全保存，已保留输入且未启动任务。请检查磁盘空间和目录权限。",
                     "error",
-                    session_id=state.session_id,
-                    auto_close_ms=0,
                 )
             return False
         try:
@@ -41655,7 +41607,29 @@ class MainWindow(QMainWindow):
             previous_render_count,
             previous_render_total,
         )
-        if not daemon_owned_history and not self._enqueue_staged_chat_save(staged_save_request):
+        history_rewrite_result = None
+        if history_rewrite_guard is not None:
+            try:
+                history_rewrite_result = self._persist_history_rewrite(
+                    state,
+                    history_rewrite_guard,
+                    operation="edit_message",
+                )
+            except Exception:
+                state.messages.pop()
+                self._rebuild_session_render_spans(state)
+                raise
+            state.last_history_rewrite_committed = True
+            if history_rewrite_result.get("post_commit_error"):
+                state.session_status = "draft"
+                state.live_activity = False
+                self._show_conversation_notice(
+                    state,
+                    "消息已修改，生成未开始。请重新发送该消息。",
+                    "error",
+                )
+                return False
+        elif not daemon_owned_history and not self._enqueue_staged_chat_save(staged_save_request):
             try:
                 self.runtime_journal.update_run(
                     state.session_id,
@@ -41978,13 +41952,17 @@ class MainWindow(QMainWindow):
             current_session_id=str(getattr(self, "current_session_id", "") or ""),
         )
 
-    def add_tool_card(self, data, session_id=None, index=None, animate=True):
+    def add_tool_card(
+        self, data, session_id=None, index=None, animate=True, turn_id=None, request_id=None
+    ):
         meta = data.get('meta') or {}
         card = ToolCallCard(data['name'], data['args'], data['id'], meta=meta)
         card.clicked.connect(self.show_tool_details)
         
         state = self.get_session(session_id)
         if not state: return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if getattr(state, "live_activity", False):
             self.flush_session_thinking(state.session_id)
             self.flush_session_content(state.session_id, final=False)
@@ -42113,7 +42091,7 @@ class MainWindow(QMainWindow):
                 "result": pending_result.get("result", ""),
                 "meta": pending_result.get("meta"),
                 "result_obj": pending_result.get("result_obj"),
-            }, session_id=session_id)
+            }, session_id=session_id, turn_id=turn_id, request_id=request_id)
 
         if state.pending_clarify_questions:
             self.set_session_phase("Clarifying", state.session_id)
@@ -42125,7 +42103,7 @@ class MainWindow(QMainWindow):
         self.process_ui_events(force=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
-    def update_tool_card(self, data, session_id=None):
+    def update_tool_card(self, data, session_id=None, turn_id=None, request_id=None):
         tool_id = data['id']
         result = data['result']
         meta = data.get('meta')
@@ -42184,7 +42162,7 @@ class MainWindow(QMainWindow):
             elif action_type == "run_favorite_schedule" and favorite_id:
                 QTimer.singleShot(0, lambda fid=favorite_id: self.run_favorite_schedule_now(fid))
             else:
-                self.add_system_toast("无法执行常用操作：客户端动作无效", "error", session_id=state.session_id)
+                self._show_conversation_notice(state, "无法执行常用操作：客户端动作无效", "error")
         if isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
             state.pending_clarify_questions = []
             state.clarify_mode_state = CLARIFY_MODE_EXPLORING
@@ -42748,15 +42726,43 @@ class MainWindow(QMainWindow):
             self.llm_worker = state.llm_worker
         session_id = state.session_id
         state.llm_worker.finished_signal.connect(lambda result, sid=session_id, tid=turn_id: self.handle_llm_response(result, sid, tid), Qt.QueuedConnection)
-        state.llm_worker.content_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_content_signal(text, sid, tid), Qt.QueuedConnection)
+        state.llm_worker.content_signal.connect(
+            lambda text, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_content_signal(text, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         state.llm_worker.step_signal.connect(self.append_log, Qt.QueuedConnection)
-        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
-        state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid), Qt.QueuedConnection)
-        state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid), Qt.QueuedConnection)
-        state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid), Qt.QueuedConnection)
-        state.llm_worker.observability_signal.connect(lambda data, sid=session_id: self.handle_observability_event(data, sid), Qt.QueuedConnection)
+        state.llm_worker.thinking_signal.connect(
+            lambda text, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_thinking_signal(text, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
+        state.llm_worker.skill_used_signal.connect(
+            lambda name, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_skill_used(name, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
+        state.llm_worker.tool_call_signal.connect(
+            lambda data, sid=session_id, tid=turn_id, rid=request_id:
+                self.add_tool_card(data, sid, turn_id=tid, request_id=rid),
+            Qt.QueuedConnection,
+        )
+        state.llm_worker.tool_result_signal.connect(
+            lambda data, sid=session_id, tid=turn_id, rid=request_id:
+                self.update_tool_card(data, sid, turn_id=tid, request_id=rid),
+            Qt.QueuedConnection,
+        )
+        state.llm_worker.observability_signal.connect(
+            lambda data, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_observability_event(data, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid), Qt.QueuedConnection)
-        state.llm_worker.agent_state_signal.connect(lambda data, sid=session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
+        state.llm_worker.agent_state_signal.connect(
+            lambda data, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_agent_state(data, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         state.llm_worker.start()
         log_ppt_agent_debug(
             "process_agent_worker_started",
@@ -42769,36 +42775,44 @@ class MainWindow(QMainWindow):
              self.normalize_session_ui(state)
 
     def _connect_daemon_worker_signals(self, state, worker, turn_id):
+        request_id = str(getattr(worker, "request_id", "") or "")
         worker.finished_signal.connect(
             lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid),
             Qt.QueuedConnection,
         )
         worker.thinking_signal.connect(
-            lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid),
+            lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_thinking_signal(text, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.content_signal.connect(
-            lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid),
+            lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_content_signal(text, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.tool_call_signal.connect(
-            lambda data, sid=state.session_id: self.add_tool_card(data, sid),
+            lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.add_tool_card(data, sid, turn_id=tid, request_id=rid),
             Qt.QueuedConnection,
         )
         worker.tool_result_signal.connect(
-            lambda data, sid=state.session_id: self.update_tool_card(data, sid),
+            lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.update_tool_card(data, sid, turn_id=tid, request_id=rid),
             Qt.QueuedConnection,
         )
         worker.observability_signal.connect(
-            lambda data, sid=state.session_id: self.handle_observability_event(data, sid),
+            lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_observability_event(data, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.agent_state_signal.connect(
-            lambda data, sid=state.session_id: self.handle_agent_state(data, sid),
+            lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_agent_state(data, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.interaction_signal.connect(
-            lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid),
+            lambda req, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_daemon_interaction_request(req, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.turn_started_signal.connect(
@@ -42843,38 +42857,29 @@ class MainWindow(QMainWindow):
                 self.append_log(
                     f"本地运行检查点恢复失败({state.session_id}, run={run_id}): {exc}"
                 )
-                self.add_system_toast(
-                    f"未完成对话恢复失败：{exc}",
-                    "error",
-                    session_id=state.session_id,
-                    auto_close_ms=0,
-                )
+                self._show_conversation_notice(state, f"未完成对话恢复失败：{exc}", "error")
                 return False
             draft_content = str(run.get("draft_content") or "").strip()
-            interruption_text = "⚠️ 本轮因程序异常退出而中断，以上内容可能不完整。"
             if draft_content:
-                interruption_text = f"{draft_content}\n\n{interruption_text}"
-            interruption_message = {
-                "id": uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"local-run-interruption:{state.session_id}:{run_id}",
-                ).hex,
-                "role": "assistant",
-                "content": interruption_text,
-                "content_parts": [{"type": "text", "text": interruption_text}],
-                "meta": {
-                    "turn_id": str(run.get("turn_id") or ""),
-                    "request_id": run_id,
-                    "ui_turn_id": str(run.get("turn_id") or ""),
-                    "ui_reply_kind": "interrupted",
-                    "context_visible_interruption": True,
-                    "run_outcome": "process_exit",
-                },
-            }
-            state.messages = merge_messages_by_id(
-                state.messages,
-                [interruption_message],
-            )
+                partial_message = {
+                    "id": uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"local-run-partial:{state.session_id}:{run_id}",
+                    ).hex,
+                    "role": "assistant",
+                    "content": draft_content,
+                    "content_parts": [{"type": "text", "text": draft_content}],
+                    "meta": {
+                        "turn_id": str(run.get("turn_id") or ""),
+                        "request_id": run_id,
+                        "ui_turn_id": str(run.get("turn_id") or ""),
+                        "ui_reply_kind": "interrupted",
+                        "context_visible_interruption": False,
+                        "run_outcome": "process_exit",
+                    },
+                }
+                state.messages = merge_messages_by_id(state.messages, [partial_message])
+            self._show_conversation_notice(state, "上次运行因程序退出而停止", "warning")
             self.runtime_journal.update_run(
                 state.session_id,
                 run_id,
@@ -43002,28 +43007,31 @@ class MainWindow(QMainWindow):
         else:
             draft_content = str(terminal_run.get("draft_content") or "").strip()
             reason = "本轮已中断" if terminal_status in {"interrupted", "cancelled"} else "本轮执行失败"
-            visible_text = f"⚠️ {reason}，以上内容可能不完整。"
             if draft_content:
-                visible_text = f"{draft_content}\n\n{visible_text}"
-            recovered_message = {
-                "id": uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"terminal-run-recovery:{state.session_id}:{run_id}",
-                ).hex,
-                "role": "assistant",
-                "content": visible_text,
-                "content_parts": [{"type": "text", "text": visible_text}],
-                "meta": {
-                    "request_id": run_id,
-                    "turn_id": str(terminal_run.get("turn_id") or ""),
-                    "ui_reply_kind": "interrupted" if reason == "本轮已中断" else "error",
-                    "context_visible_interruption": True,
-                    "run_outcome": terminal_status,
-                },
-            }
+                generated.append({
+                    "id": uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"terminal-run-recovery:{state.session_id}:{run_id}",
+                    ).hex,
+                    "role": "assistant",
+                    "content": draft_content,
+                    "content_parts": [{"type": "text", "text": draft_content}],
+                    "meta": {
+                        "request_id": run_id,
+                        "turn_id": str(terminal_run.get("turn_id") or ""),
+                        "ui_reply_kind": "interrupted" if reason == "本轮已中断" else "error",
+                        "context_visible_interruption": False,
+                        "run_outcome": terminal_status,
+                    },
+                })
             state.messages = self.chat_storage.normalize_messages(
-                merge_messages_by_id(state.messages, generated + [recovered_message]),
+                merge_messages_by_id(state.messages, generated),
                 conversation_id=state.session_id,
+            )
+            self._show_conversation_notice(
+                state,
+                "已停止" if terminal_status in {"interrupted", "cancelled"} else reason,
+                "neutral" if terminal_status in {"interrupted", "cancelled"} else "error",
             )
         self._rebuild_session_render_spans(state)
         state.session_status = terminal_status if terminal_status != "cancelled" else "interrupted"
@@ -43379,7 +43387,7 @@ class MainWindow(QMainWindow):
             lambda sid=session_id: self._flush_sub_agent_monitor_render(sid),
         )
 
-    def handle_agent_state(self, data, session_id=None):
+    def handle_agent_state(self, data, session_id=None, turn_id=None, request_id=None):
         try:
             on_ui_thread = QThread.currentThread() is self.thread()
         except RuntimeError:
@@ -43393,9 +43401,11 @@ class MainWindow(QMainWindow):
                 status=payload.get("status") or "",
                 event_type=payload.get("event_type") or "",
             )
+            payload["_ui_turn_id"] = turn_id
+            payload["_ui_request_id"] = request_id
             self.agent_state_ui_signal.emit(payload, str(session_id or ""))
             return
-        self._handle_agent_state_ui(data, session_id)
+        self._handle_agent_state_ui(data, session_id, turn_id, request_id)
 
     def _show_skill_change_system_notice(self, event):
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
@@ -43528,10 +43538,12 @@ class MainWindow(QMainWindow):
         worker.start()
         return True
 
-    def _handle_agent_state_ui(self, data, session_id=None):
+    def _handle_agent_state_ui(self, data, session_id=None, turn_id=None, request_id=None):
+        payload = dict(data) if isinstance(data, dict) else {}
+        turn_id = payload.pop("_ui_turn_id", turn_id)
+        request_id = payload.pop("_ui_request_id", request_id)
         self._agent_state_ui_event_seq = int(getattr(self, "_agent_state_ui_event_seq", 0)) + 1
         ui_event_seq = self._agent_state_ui_event_seq
-        payload = dict(data) if isinstance(data, dict) else {}
         if payload.get("type") == "skill_changed":
             self._show_skill_change_system_notice(payload)
             self.start_background_skill_load(force=True)
@@ -43568,6 +43580,14 @@ class MainWindow(QMainWindow):
                 session_id=str(session_id or ""),
                 agent_id=agent_id,
                 status=status,
+            )
+            return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            log_sub_agent_runtime(
+                "ui_agent_state_stale_run_rejected",
+                session_id=state.session_id,
+                turn_id=str(turn_id or ""),
+                request_id=str(request_id or ""),
             )
             return
         _log_stage(
@@ -43748,9 +43768,11 @@ class MainWindow(QMainWindow):
             event_count=len(getattr(state, "sub_agent_events", []) or []),
         )
 
-    def handle_content_signal(self, text, session_id=None, turn_id=None):
+    def handle_content_signal(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if turn_id is not None and turn_id != state.active_turn_id:
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
@@ -43767,9 +43789,11 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.current_content_buffer = state.current_content_buffer
 
-    def handle_thinking_signal(self, text, session_id=None, turn_id=None):
+    def handle_thinking_signal(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if turn_id is not None and turn_id != state.active_turn_id:
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
@@ -43913,6 +43937,18 @@ class MainWindow(QMainWindow):
         if not state:
             log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
+        result = dict(result) if isinstance(result, dict) else {
+            "error": "Provider returned an invalid result payload."
+        }
+        request_id = result.get("request_id")
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            log_sub_agent_runtime(
+                "ui_result_stale_run_rejected",
+                session_id=state.session_id,
+                turn_id=str(turn_id or ""),
+                request_id=str(request_id or ""),
+            )
+            return
         if turn_id is not None and (
             turn_id != state.active_turn_id
             or turn_id <= state.completed_turn_id
@@ -43925,9 +43961,6 @@ class MainWindow(QMainWindow):
                 completed_turn_id=state.completed_turn_id,
             )
             return
-        result = dict(result) if isinstance(result, dict) else {
-            "error": "Provider returned an invalid result payload."
-        }
         provider_succeeded = "error" not in result
         if provider_succeeded:
             has_final_content = bool(str(result.get("content") or "").strip())
@@ -44006,11 +44039,10 @@ class MainWindow(QMainWindow):
             if provider_succeeded:
                 self.set_session_phase("Completed", state.session_id)
                 self.set_session_status("completed", state.session_id, save=False)
-                self.add_system_toast(
+                self._show_conversation_notice(
+                    state,
                     f"回答已完成，但界面收尾失败：{exc}",
                     "warning",
-                    session_id=state.session_id,
-                    auto_close_ms=0,
                 )
             else:
                 self.set_session_phase("Error", state.session_id)
@@ -44510,7 +44542,7 @@ class MainWindow(QMainWindow):
             god_mode = self.config_manager.get_god_mode()
             
             if god_mode:
-                 self.add_system_toast("God Mode 已开启，正在执行高权限代码", "warning", session_id=state.session_id)
+                 self._show_conversation_notice(state, "God Mode 已开启，正在执行高权限代码", "warning")
 
             state.code_worker = CodeWorker(code_block, self._workspace_dir_for_state(state), god_mode=god_mode)
             state.code_worker.output_signal.connect(lambda text, sid=state.session_id: self.handle_code_output(text, sid))

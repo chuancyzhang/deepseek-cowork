@@ -324,6 +324,33 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_background_inline_request_keeps_waiting_input_toast(self):
+        window = MainWindow()
+        try:
+            background_id = window.create_new_session("background-interaction", make_current=False)
+            background = window.get_session(background_id)
+            window.add_system_toast = MagicMock()
+
+            window._show_inline_interaction_request(
+                {
+                    "request_id": "background-waiting",
+                    "kind": "choice",
+                    "options": [{"label": "继续", "value": "continue"}],
+                },
+                background.session_id,
+                lambda _value: None,
+            )
+
+            window.add_system_toast.assert_called_once_with(
+                "后台对话正在等待你的输入",
+                "info",
+                session_id=background.session_id,
+                auto_close_ms=0,
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_legacy_interaction_dialog_cannot_create_top_level_surface(self):
         with self.assertRaisesRegex(RuntimeError, "InlineInteractionCard"):
             MainWindow.show_interaction_dialog(object(), {"kind": "text"})
@@ -976,6 +1003,58 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 window.close()
                 window.deleteLater()
 
+    def test_failed_terminal_runtime_recovers_partial_content_without_error_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                state = window.get_current_session()
+                state.messages = [{
+                    "id": "u-runtime-failed",
+                    "role": "user",
+                    "content": "恢复失败轮次",
+                    "meta": {"turn_id": "1", "request_id": "request-runtime-failed"},
+                }]
+                state.history_loaded = False
+                window.runtime_journal = RuntimeJournal(root)
+                window.runtime_journal.begin_run(
+                    state.session_id,
+                    "request-runtime-failed",
+                    turn_id="1",
+                    writer_owner="ui:test",
+                    base_messages=state.messages,
+                )
+                final_result = {
+                    "request_id": "request-runtime-failed",
+                    "error": "provider failed",
+                    "generated_messages": [],
+                }
+                window.runtime_journal.update_run(
+                    state.session_id,
+                    "request-runtime-failed",
+                    {
+                        "status": "failed",
+                        "draft_content": "已经生成的部分内容。",
+                        "final_result": final_result,
+                    },
+                )
+
+                self.assertTrue(window._restore_terminal_runtime_run_if_needed(state))
+                assistants = [
+                    message for message in state.messages
+                    if message.get("role") == "assistant"
+                ]
+                self.assertEqual([message["content"] for message in assistants], ["已经生成的部分内容。"])
+                self.assertFalse(
+                    any("以上内容可能不完整" in message["content"] for message in assistants)
+                )
+                self.assertFalse(
+                    any((message.get("meta") or {}).get("context_visible_interruption") for message in assistants)
+                )
+                self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
+            finally:
+                window.close()
+                window.deleteLater()
+
     def test_render_failure_after_provider_success_keeps_completed_terminal(self):
         window = MainWindow()
         try:
@@ -989,7 +1068,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "_handle_llm_response_impl",
                     side_effect=RuntimeError("visualization render failed"),
                 ),
-                patch.object(window, "add_system_toast") as toast,
+                patch.object(window, "_show_conversation_notice") as notice,
             ):
                 window.handle_llm_response(
                     {
@@ -1003,8 +1082,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertEqual(state.session_status, "completed")
             self.assertFalse(window._session_has_live_activity(state.session_id))
-            toast.assert_called()
-            self.assertIn("界面收尾失败", toast.call_args.args[0])
+            notice.assert_called()
+            self.assertIn("界面收尾失败", notice.call_args.args[1])
         finally:
             window.close()
             window.deleteLater()
@@ -2102,7 +2181,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state.current_content_buffer = "部分结果"
             bubble.set_main_content("部分结果", final=False)
             window.stop_agent()
-            self.assertIn("本轮已中断", bubble.main_content_text)
+            self.assertEqual(bubble.main_content_text, "部分结果")
+            self.assertEqual(state.conversation_notice.label.text(), "已停止")
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
@@ -2127,6 +2207,101 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_submit_reentrant_call_is_rejected_before_second_dispatch(self):
+        window = MainWindow.__new__(MainWindow)
+        state = SimpleNamespace(session_id="session-a", submit_in_progress=False)
+        calls = []
+
+        def submit_once(*_args, **_kwargs):
+            calls.append("outer")
+            self.assertFalse(window._submit_session_request(state, "重复提交"))
+            return True
+
+        window._submit_session_request_once = submit_once
+        self.assertTrue(window._submit_session_request(state, "首条消息"))
+        self.assertEqual(calls, ["outer"])
+        self.assertFalse(state.submit_in_progress)
+
+    def test_stale_run_events_do_not_mutate_active_session(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.active_turn_id = 2
+            state.active_turn_request_id = "request-2"
+            state.current_content_buffer = ""
+
+            window.handle_content_signal(
+                "旧请求内容",
+                state.session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
+            window.add_tool_card(
+                {"id": "old-tool", "name": "run_command", "args": {}},
+                state.session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
+
+            self.assertEqual(state.current_content_buffer, "")
+            self.assertNotIn("old-tool", state.tool_cards)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_new_stage_freezes_previous_thinking_timer(self):
+        first = ChatBubble("Agent", "", thinking="...")
+        second = ChatBubble("Agent", "", thinking="...")
+        group = AssistantTurnGroup("turn-1")
+        try:
+            group.add_stage(first)
+            self.assertTrue(first.think_timer.isActive())
+            group.add_stage(second)
+            self.assertFalse(first.think_timer.isActive())
+            self.assertTrue(second.think_timer.isActive())
+        finally:
+            first.deleteLater()
+            second.deleteLater()
+            group.deleteLater()
+
+    def test_history_rewrite_keeps_sqlite_commit_when_runtime_sidecar_fails(self):
+        window = MainWindow.__new__(MainWindow)
+        state = SimpleNamespace(
+            session_id="session-edit",
+            messages=[{"id": "edited", "role": "user", "content": "修改后"}],
+            chat_save_revision=1,
+            persisted_conversation_meta={},
+            session_status="draft",
+        )
+        window.chat_storage = MagicMock()
+        window.chat_storage.rewrite_conversation_safely.return_value = {
+            "revision": 2,
+            "messages_hash": "new-hash",
+            "previous_messages_hash": "old-hash",
+            "message_count": 1,
+            "meta": {},
+        }
+        window.chat_recovery_journal = MagicMock()
+        window.chat_recovery_journal._path_for_session.return_value = "missing"
+        window.runtime_journal = MagicMock()
+        window.runtime_journal.load_manifest.side_effect = PermissionError("manifest denied")
+        window._compose_session_meta = MagicMock(return_value={})
+        window._resolved_session_title = MagicMock(return_value="修改后")
+        window.append_log = MagicMock()
+        window._show_conversation_notice = MagicMock()
+
+        result = MainWindow._persist_history_rewrite(
+            window,
+            state,
+            {"messages_hash": "old-hash", "revision": 1},
+            operation="edit_message",
+        )
+
+        self.assertEqual(state.chat_save_revision, 2)
+        self.assertIn("manifest denied", result["post_commit_error"])
+        window.chat_storage.rewrite_conversation_safely.assert_called_once()
+        window._show_conversation_notice.assert_called_once()
+
     def test_error_preserves_interrupted_context_without_raw_reasoning(self):
         window = MainWindow()
         try:
@@ -2145,9 +2320,11 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 if isinstance(message, dict)
                 and (message.get("meta") or {}).get("context_visible_interruption")
             ]
-            self.assertEqual(len(interrupted), 1)
-            self.assertIn("本轮执行失败", interrupted[0]["content"])
-            self.assertNotIn("reasoning", interrupted[0])
+            self.assertEqual(interrupted, [])
+            self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
+            self.assertFalse(
+                any("本轮执行失败" in str(message.get("content") or "") for message in state.messages)
+            )
         finally:
             window.close()
             window.deleteLater()
@@ -2394,9 +2571,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=1,
             )
             self.assertIsNotNone(bubble.parent())
-            self.assertIn("本轮执行失败", bubble.main_content_text)
+            self.assertNotIn("本轮执行失败", bubble.main_content_text)
+            self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
-            self.assertEqual(len(assistants), 3)
+            self.assertEqual(len(assistants), 2)
             self.assertFalse(
                 any(
                     message.get("id") == "assistant-stage"
@@ -2404,8 +2582,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     for message in assistants
                 )
             )
-            self.assertTrue(
-                (assistants[-1].get("meta") or {}).get("context_visible_interruption")
+            self.assertFalse(
+                any((message.get("meta") or {}).get("context_visible_interruption") for message in assistants)
             )
         finally:
             window.close()

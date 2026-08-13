@@ -231,8 +231,9 @@ class TestDeliverableScanning(unittest.TestCase):
         window.input_field = QTextEdit()
         window.tool_menu_btn = QPushButton()
         window.stop_btn = QPushButton()
-        window.pause_btn = QPushButton()
         window.loop_hint = QLabel()
+        window.sessions = {state.session_id: state}
+        window.current_session_id = state.session_id
         window.refresh_selected_skill_controls = MagicMock()
         window.refresh_project_selector = MagicMock()
         window.refresh_context_badges = MagicMock()

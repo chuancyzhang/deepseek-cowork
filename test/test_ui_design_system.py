@@ -18,6 +18,7 @@ from main import (
     CAPABILITY_SCENES,
     MemoryUpdateDialog,
     SkillsCenterDialog,
+    StatusPill,
     apple_button_style,
     apple_section_surface_style,
     initialize_desktop_theme,
@@ -124,6 +125,19 @@ class UiDesignSystemTests(unittest.TestCase):
         self.assertTrue(row.isCheckable())
         self.assertEqual(notice.label.text(), "运行中")
         self.assertFalse(master_detail.detail_visible)
+
+    def test_status_pill_reserves_width_for_network_retry_copy(self):
+        retry_text = "网络连接中断，正在重试 3/5"
+        pill = StatusPill("处理中")
+        pill.setText(retry_text)
+        pill.resize(pill.minimumWidth(), pill.sizeHint().height())
+        pill.show()
+        self.app.processEvents()
+
+        self.assertEqual(pill.text(), retry_text)
+        self.assertEqual(pill.text_label.text(), retry_text)
+        self.assertGreater(pill.minimumWidth(), 100)
+        self.assertLessEqual(pill.minimumWidth(), StatusPill.MAX_WIDTH)
 
     def test_plain_empty_state_supports_icon_secondary_action_and_content_updates(self):
         empty = ProductEmptyState(

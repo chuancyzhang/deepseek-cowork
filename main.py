@@ -19,6 +19,7 @@ import faulthandler
 import markdown
 import socket
 import threading
+import unicodedata
 from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -15172,13 +15173,15 @@ class ElidedToolLabel(QLabel):
 
 
 class StatusPill(QFrame):
+    MAX_WIDTH = 300
+
     def __init__(self, text="", icon_name="fa5s.circle", icon_color=None, parent=None):
         super().__init__(parent)
         icon_color = icon_color or DesignTokens.primary
         self.setObjectName("StatusPill")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
-        self.setMaximumWidth(300)
+        self.setMaximumWidth(self.MAX_WIDTH)
         self.setStyleSheet(
             f"QFrame#StatusPill {{ background: {DesignTokens.bg_secondary}; border: none; "
             f"border-radius: 6px; }}"
@@ -15197,9 +15200,32 @@ class StatusPill(QFrame):
             f"color: {DesignTokens.text_secondary}; font-size: 11px; font-weight: 600;"
         )
         layout.addWidget(self.text_label, 1)
+        self._sync_text_width()
+
+    def _sync_text_width(self):
+        margins = self.layout().contentsMargins()
+        metrics = QFontMetrics(self.text_label.font())
+        text = self.text()
+        measured_width = metrics.horizontalAdvance(text)
+        estimated_width = sum(
+            metrics.height()
+            if unicodedata.east_asian_width(char) in {"W", "F"}
+            else max(1, metrics.horizontalAdvance(char))
+            for char in text
+        )
+        text_width = max(measured_width, estimated_width)
+        content_width = (
+            margins.left()
+            + margins.right()
+            + self.icon_label.sizeHint().width()
+            + self.layout().spacing()
+            + text_width
+        )
+        self.setMinimumWidth(min(self.MAX_WIDTH, content_width))
 
     def setText(self, text):
         self.text_label.setFullText(text)
+        self._sync_text_width()
 
     def text(self):
         return self.text_label.fullText()

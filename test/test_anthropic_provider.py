@@ -1,6 +1,8 @@
 import os
 import sys
 import unittest
+from types import ModuleType
+from unittest.mock import MagicMock, patch
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,6 +15,13 @@ class TestAnthropicProviderMessages(unittest.TestCase):
         provider = AnthropicProvider.__new__(AnthropicProvider)
         provider.supports_vision = False
         return provider
+
+    def test_anthropic_stream_read_timeout_is_sixty_seconds(self):
+        module = ModuleType("anthropic")
+        module.Anthropic = MagicMock()
+        with patch.dict(sys.modules, {"anthropic": module}):
+            AnthropicProvider("key", "https://example.test", "model")
+        self.assertEqual(module.Anthropic.call_args.kwargs["timeout"].read, 60.0)
 
     @staticmethod
     def _tool_call(call_id, name):

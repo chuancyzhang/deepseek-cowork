@@ -875,6 +875,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state = window.get_current_session()
             state.messages = [{"id": "u1", "role": "user", "content": "hello"}]
             state.active_turn_id = 1
+            state.active_turn_request_id = "run-retry"
             window.set_session_status("running", state.session_id)
             before_messages = list(state.messages)
             before_phase = state.run_phase
@@ -888,18 +889,150 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "delay_seconds": 1.0,
                 },
                 state.session_id,
+                1,
+                "run-retry",
             )
 
             self.assertEqual(state.messages, before_messages)
             self.assertEqual(state.run_phase, before_phase)
             self.assertEqual(state.provider_retry_attempt, 3)
             self.assertEqual(state.provider_retry_max, 5)
-            window.normalize_session_ui(state)
-            self.assertEqual(window.loop_hint.text(), "正在重试 3/5")
+            self.assertEqual(window.loop_hint.text(), "网络连接中断，正在重试 3/5")
             self.assertEqual(state.observability_events[-1]["type"], "provider_retry")
+            self.assertEqual(state.observability_events[-1]["session_id"], state.session_id)
+            self.assertEqual(state.observability_events[-1]["turn_id"], "1")
+            self.assertEqual(state.observability_events[-1]["run_id"], "run-retry")
             session_meta = str(window._compose_session_meta(state))
             self.assertNotIn("provider_retry", session_meta)
             self.assertNotIn("正在重试", session_meta)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_session_switch_keeps_runtime_state_owned_by_each_session(self):
+        window = MainWindow()
+        try:
+            first = window.get_current_session()
+            first.messages = [{"id": "first", "role": "user", "content": "A"}]
+            first.composer_draft = "A 草稿"
+            second_id = window.create_new_session(make_current=False)
+            second = window.get_session(second_id)
+            second.messages = [{"id": "second", "role": "user", "content": "B"}]
+            second.composer_draft = "B 草稿"
+
+            window.set_current_session(second_id)
+            self.assertEqual(window.input_field.toPlainText(), "B 草稿")
+            window.input_field.setPlainText("B 新草稿")
+            window.sync_current_session_state()
+            window.set_current_session(first.session_id)
+
+            self.assertEqual(first.messages[0]["content"], "A")
+            self.assertEqual(second.messages[0]["content"], "B")
+            self.assertEqual(second.composer_draft, "B 新草稿")
+            self.assertFalse(hasattr(window, "messages"))
+            self.assertFalse(hasattr(window, "chat_layout"))
+            self.assertFalse(hasattr(window, "llm_worker"))
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_history_rewrite_truncates_session_messages(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [
+                {"id": "keep", "role": "user", "content": "保留"},
+                {"id": "drop", "role": "assistant", "content": "删除"},
+            ]
+
+            retained_ids = window._truncate_rewrite_state(state, 1)
+
+            self.assertEqual([message["id"] for message in state.messages], ["keep"])
+            self.assertEqual(retained_ids, {"keep"})
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_background_provider_retry_does_not_change_foreground_status(self):
+        window = MainWindow()
+        try:
+            background = window.get_current_session()
+            foreground_id = window.create_new_session(make_current=True)
+            foreground = window.get_session(foreground_id)
+            window.set_session_status("running", background.session_id)
+            window.normalize_session_ui(foreground)
+            foreground_hint = window.loop_hint.text()
+
+            window.handle_observability_event(
+                {
+                    "type": "provider_retry",
+                    "attempt": 2,
+                    "max_retries": 5,
+                    "reason": "read timeout",
+                },
+                background.session_id,
+            )
+
+            self.assertEqual(window.current_session_id, foreground.session_id)
+            self.assertEqual(window.loop_hint.text(), foreground_hint)
+            self.assertEqual(background.provider_retry_attempt, 2)
+            window.set_current_session(background.session_id)
+            window.normalize_session_ui(background)
+            self.assertEqual(window.loop_hint.text(), "网络连接中断，正在重试 2/5")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_code_input_reply_is_sent_to_requesting_session_worker(self):
+        window = MainWindow()
+        try:
+            requesting = window.get_current_session()
+            foreground_id = window.create_new_session(make_current=True)
+            requesting_worker = SimpleNamespace(provide_input=MagicMock())
+            foreground_worker = SimpleNamespace(provide_input=MagicMock())
+            requesting.code_worker = requesting_worker
+            window.get_session(foreground_id).code_worker = foreground_worker
+
+            with patch("main.QInputDialog.getText", return_value=("只给 A", True)):
+                window.handle_code_input_request("请输入值", requesting.session_id)
+
+            requesting_worker.provide_input.assert_called_once_with("只给 A")
+            foreground_worker.provide_input.assert_not_called()
+            requesting.code_worker = None
+            window.get_session(foreground_id).code_worker = None
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_retry_exhaustion_has_specific_notice_and_technical_event(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_retry_exhaustion")
+            state.live_activity = True
+            state.active_turn_id = 1
+            state.provider_retry_attempt = 5
+            state.provider_retry_max = 5
+            window._append_live_thinking_segment(state)
+
+            window.handle_llm_response(
+                {"error": "read timeout"},
+                state.session_id,
+                turn_id=1,
+            )
+
+            self.assertEqual(
+                state.conversation_notice.label.text(),
+                "网络连接中断，重试 5 次后仍未恢复",
+            )
+            event = state.observability_events[-1]
+            self.assertEqual(event["category"], "network_retry_exhausted")
+            self.assertEqual(event["retry_attempt"], 5)
+            self.assertFalse(state.conversation_notice.action_button.isHidden())
+            state.conversation_notice.actionRequested.emit()
+            self.assertEqual(window.right_drawer_tab, window.RIGHT_TAB_OBSERVABILITY)
+            self.assertIn("网络连接中断", window.td_info_label.text())
+            self.assertEqual(window.td_result_edit.toPlainText(), "read timeout")
         finally:
             window.close()
             window.deleteLater()
@@ -2402,9 +2535,11 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 and (message.get("meta") or {}).get("context_visible_interruption")
             ]
             self.assertEqual(interrupted, [])
-            self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
+            self.assertEqual(state.conversation_notice.label.text(), "模型服务未能完成本轮请求")
+            self.assertEqual(state.observability_events[-1]["category"], "provider_error")
+            self.assertFalse(state.conversation_notice.action_button.isHidden())
             self.assertFalse(
-                any("本轮执行失败" in str(message.get("content") or "") for message in state.messages)
+                any("模型服务未能完成本轮请求" in str(message.get("content") or "") for message in state.messages)
             )
         finally:
             window.close()
@@ -2653,7 +2788,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
             self.assertIsNotNone(bubble.parent())
             self.assertNotIn("本轮执行失败", bubble.main_content_text)
-            self.assertEqual(state.conversation_notice.label.text(), "本轮执行失败")
+            self.assertEqual(state.conversation_notice.label.text(), "模型未返回最终正文")
+            self.assertEqual(state.observability_events[-1]["category"], "missing_final_content")
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
             self.assertEqual(len(assistants), 2)
             self.assertFalse(

@@ -4,6 +4,7 @@ import unittest
 import tempfile
 import threading
 import time
+import httpx
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,7 @@ from core.llm.deepseek import (
 )
 from core.llm.providers import (
     API_PROTOCOL_RESPONSES,
+    MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
     OpenAIProvider,
     ProviderStreamError,
     _wait_before_model_retry,
@@ -67,6 +69,12 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         self.assertEqual(captured["reasoning_effort"], "max")
         self.assertEqual(captured["extra_body"]["thinking"]["type"], "enabled")
+
+    def test_openai_stream_read_timeout_is_sixty_seconds(self):
+        self._build_provider()
+        timeout = sys.modules["openai"].OpenAI.call_args.kwargs["timeout"]
+        self.assertEqual(MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(timeout.read, 60.0)
 
     def test_chat_completions_blocks_incomplete_tool_round_before_provider_call(self):
         provider, client = self._build_provider(
@@ -1272,6 +1280,12 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
     def test_model_retry_classification_excludes_request_and_context_errors(self):
         self.assertTrue(is_transient_model_api_error(ConnectionError("connection reset")))
+        self.assertTrue(is_transient_model_api_error(httpx.ReadTimeout("stream idle")))
+        self.assertTrue(
+            is_transient_model_api_error(
+                SimpleNamespace(status_code=599, __str__=lambda self: "upstream")
+            )
+        )
         self.assertTrue(
             is_transient_model_api_error(
                 ProviderStreamError("upstream unavailable")

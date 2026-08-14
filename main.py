@@ -22927,7 +22927,6 @@ class MainWindow(QMainWindow):
         
         self.sessions = {}
         self.current_session_id = None
-        self.messages = []
         self.history_rows = {}
         self.history_buttons = {}
         self.history_age_labels = {}
@@ -22950,18 +22949,8 @@ class MainWindow(QMainWindow):
         self._session_load_token_counter = 0
         self._history_load_workers = set()
         self._history_process_events_suppressed = 0
-        self.tool_cards = {}
-        self.pending_tool_results = {}
-        self.current_content_buffer = ""
-        self.current_thinking_buffer = ""
-        self.last_flushed_content_buffer = ""
-        self.temp_thinking_bubble = None
-        self.last_agent_bubble = None
-        self.llm_worker = None
-        self.code_worker = None
         self.active_run_session_id = None
         self.active_code_session_id = None
-        self.chat_layout = None
         self.active_skills_label = None
         self.current_selected_tool_id = None
         self._last_submit_text = ""
@@ -27140,20 +27129,6 @@ class MainWindow(QMainWindow):
             copy.deepcopy((state.messages or [])[:target_index]),
             conversation_id=state.session_id,
         )
-
-    def _session_has_current_execution(self, state):
-        if not state:
-            return False
-        llm_worker = getattr(state, "llm_worker", None)
-        code_worker = getattr(state, "code_worker", None)
-        daemon_worker = getattr(state, "daemon_worker", None)
-        return bool(
-            getattr(state, "live_activity", False)
-            or getattr(state, "daemon_running", False)
-            or (llm_worker is not None and llm_worker.isRunning())
-            or (code_worker is not None and code_worker.isRunning())
-            or (daemon_worker is not None and daemon_worker.isRunning())
-        )
         retained_ids = {
             str(message.get("id") or "")
             for message in retained_messages
@@ -27219,6 +27194,20 @@ class MainWindow(QMainWindow):
         state.active_agent_turn_group = None
         state.pending_guidance_messages = []
         return retained_ids
+
+    def _session_has_current_execution(self, state):
+        if not state:
+            return False
+        llm_worker = getattr(state, "llm_worker", None)
+        code_worker = getattr(state, "code_worker", None)
+        daemon_worker = getattr(state, "daemon_worker", None)
+        return bool(
+            getattr(state, "live_activity", False)
+            or getattr(state, "daemon_running", False)
+            or (llm_worker is not None and llm_worker.isRunning())
+            or (code_worker is not None and code_worker.isRunning())
+            or (daemon_worker is not None and daemon_worker.isRunning())
+        )
 
     def _restore_history_rewrite(self, state, snapshot):
         start = int(snapshot.get("layout_index") or 0)
@@ -27981,7 +27970,7 @@ class MainWindow(QMainWindow):
             phase = getattr(state, "run_phase", "Idle") or "Idle"
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
                 phase = (
-                    f"正在重试 {int(state.provider_retry_attempt)}/"
+                    f"网络连接中断，正在重试 {int(state.provider_retry_attempt)}/"
                     f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
                 )
         self.phase_badge.setText(f"状态：{display_run_phase(phase)}")
@@ -28849,6 +28838,16 @@ class MainWindow(QMainWindow):
         if event_type == "system_prompt":
             cache_key = event.get("prompt_cache_key") or ""
             return f"[{stamp}] SYSTEM PROMPT loaded\nprompt_cache_key={cache_key}"
+        if event_type == "run_error":
+            return (
+                f"[{stamp}] RUN ERROR {event.get('summary') or ''}\n"
+                f"category={event.get('category') or ''} "
+                f"retry={event.get('retry_attempt', 0)}/{event.get('max_retries', 0)}\n"
+                f"session_id={event.get('session_id') or ''} "
+                f"turn_id={event.get('turn_id') or ''} "
+                f"run_id={event.get('run_id') or ''}\n"
+                f"error={event.get('error') or ''}"
+            )
         if event_type == "llm_usage":
             usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
             rate = usage.get("cache_hit_rate")
@@ -28984,6 +28983,9 @@ class MainWindow(QMainWindow):
         try:
             event = dict(data)
             event.setdefault("timestamp", time.time())
+            event.setdefault("session_id", state.session_id)
+            event.setdefault("turn_id", str(turn_id or ""))
+            event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
             if event_type == "system_prompt":
                 state.system_prompt_text = event.get("content") or ""
@@ -29023,6 +29025,7 @@ class MainWindow(QMainWindow):
                     "ui_provider_retry",
                     session_id=state.session_id,
                     turn_id=str(event.get("turn_id") or ""),
+                    run_id=str(request_id or event.get("request_id") or ""),
                     request_id=str(event.get("request_id") or ""),
                     attempt=retry_attempt,
                     max_retries=retry_max,
@@ -29053,6 +29056,8 @@ class MainWindow(QMainWindow):
                 self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
                 self.refresh_observability_view(state.session_id)
                 self.refresh_context_badges(state.session_id)
+                if event_type == "provider_retry":
+                    self.normalize_session_ui(state)
         except Exception:
             log_sub_agent_runtime(
                 "ui_observability_event_failed",
@@ -30094,12 +30099,6 @@ class MainWindow(QMainWindow):
     def sync_current_session_state(self):
         state = self.get_current_session()
         if not state: return
-        state.messages = self.messages
-        state.tool_cards = self.tool_cards
-        state.pending_tool_results = self.pending_tool_results
-        state.current_content_buffer = self.current_content_buffer
-        state.current_thinking_buffer = self.current_thinking_buffer
-        state.last_flushed_content_buffer = getattr(self, "last_flushed_content_buffer", "")
         if hasattr(self, "input_field"):
             state.composer_draft = self.input_field.toPlainText()
         if getattr(state, "chat_scroll", None):
@@ -30111,17 +30110,6 @@ class MainWindow(QMainWindow):
         state = self.sessions.get(session_id)
         if not state: return
         self.current_session_id = session_id
-        self.messages = state.messages
-        self.tool_cards = state.tool_cards
-        self.pending_tool_results = getattr(state, "pending_tool_results", {})
-        self.current_content_buffer = state.current_content_buffer
-        self.current_thinking_buffer = getattr(state, "current_thinking_buffer", "")
-        self.last_flushed_content_buffer = getattr(state, "last_flushed_content_buffer", "")
-        self.temp_thinking_bubble = state.temp_thinking_bubble
-        self.last_agent_bubble = state.last_agent_bubble
-        self.llm_worker = state.llm_worker
-        self.code_worker = state.code_worker
-        self.chat_layout = state.chat_layout
         self.active_skills_label = state.active_skills_label
         open_paths = self._session_open_file_paths(state)
         if not getattr(state, "selected_deliverable_path", "") and open_paths:
@@ -30225,7 +30213,7 @@ class MainWindow(QMainWindow):
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
                 loop_text = (
-                    f"正在重试 {int(state.provider_retry_attempt)}/"
+                    f"网络连接中断，正在重试 {int(state.provider_retry_attempt)}/"
                     f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
                 )
             else:
@@ -31421,8 +31409,8 @@ class MainWindow(QMainWindow):
         if state.ui_timeline_warning:
             self._show_conversation_notice(
                 state,
-                "部分对话过程无法按原顺序恢复，已按会话消息显示。",
-                "warning",
+                "部分历史执行过程未恢复，消息内容不受影响。",
+                "neutral",
             )
 
         self._finish_session_history_load(state)
@@ -33864,7 +33852,15 @@ class MainWindow(QMainWindow):
         )
         return 1
 
-    def _show_conversation_notice(self, state, text, tone="info"):
+    def _show_conversation_notice(
+        self,
+        state,
+        text,
+        tone="info",
+        *,
+        action_text="",
+        action_callback=None,
+    ):
         if not state:
             return None
         notice = getattr(state, "conversation_notice", None)
@@ -33874,7 +33870,40 @@ class MainWindow(QMainWindow):
             notice = ProductInlineNotice(text, tone)
             state.conversation_notice = notice
             state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
+        previous_callback = getattr(notice, "_conversation_action_callback", None)
+        if previous_callback is not None:
+            notice.actionRequested.disconnect(previous_callback)
+        notice._conversation_action_callback = action_callback
+        notice.set_action(action_text if action_callback is not None else "")
+        if action_callback is not None:
+            notice.actionRequested.connect(action_callback)
         return notice
+
+    def _show_run_failure_details(self, session_id, event):
+        self.activate_session(session_id)
+        self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
+        self.set_observability_section(self.OBS_SECTION_DETAILS)
+        self.current_selected_tool_id = None
+        self.td_info_label.setText(str(event.get("summary") or "运行失败"))
+        self.td_meta_label.setText(
+            f"会话 {session_id} · 轮次 {event.get('turn_id') or '-'} · 运行 {event.get('run_id') or '-'}"
+        )
+        self.td_meta_label.show()
+        self.td_args_meta_label.hide()
+        self.td_args_meta_edit.hide()
+        self.td_args_edit.set_code(
+            json.dumps(
+                {
+                    "category": event.get("category") or "provider_error",
+                    "retry_attempt": int(event.get("retry_attempt") or 0),
+                    "max_retries": int(event.get("max_retries") or 0),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "json",
+        )
+        self.td_result_edit.set_result(str(event.get("error") or "未知错误"))
 
     def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
         """Restore every assistant/tool round as stages in one conversational turn."""
@@ -39505,14 +39534,15 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _finish_interrupted_turn(self, state, *, turn_id, run_id, bubble, reason_text, outcome):
-        self._timeline_close_open_events(state, status="interrupted")
+        timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
+        self._timeline_close_open_events(state, status=timeline_status)
         self._timeline_append_event(
             state,
             "error",
-            status="interrupted",
+            status=timeline_status,
             text=reason_text,
             turn_id=turn_id,
-            reply_kind="interrupted",
+            reply_kind=timeline_status,
             finished_at=time.time(),
         )
         partial_content = str(
@@ -39569,6 +39599,19 @@ class MainWindow(QMainWindow):
         state.pending_thinking_delta = ""
         return interruption_text
 
+    @staticmethod
+    def _run_failure_presentation(error_text, interrupted, retry_attempt, retry_max):
+        if interrupted:
+            return "interrupted", "已停止"
+        if str(error_text or "").strip() == "Provider completed without final assistant content.":
+            return "missing_final_content", "模型未返回最终正文"
+        if int(retry_attempt or 0) > 0 and int(retry_max or 0) > 0:
+            return (
+                "network_retry_exhausted",
+                f"网络连接中断，重试 {int(retry_max)} 次后仍未恢复",
+            )
+        return "provider_error", "模型服务未能完成本轮请求"
+
     def stop_agent(self):
         state = self.get_current_session()
         if not state:
@@ -39617,7 +39660,6 @@ class MainWindow(QMainWindow):
         state.turn_steerable = False
         state.llm_worker = None
         state.code_worker = None
-        self.code_worker = None
         try:
             checkpoint_count = self._merge_runtime_ledger_checkpoint(
                 state,
@@ -40600,9 +40642,6 @@ class MainWindow(QMainWindow):
         # Content buffers are presentation-only; generated_messages remain canonical.
         state.current_content_buffer = ""
         state.last_flushed_content_buffer = ""
-        if state.session_id == self.current_session_id:
-            self.current_content_buffer = ""
-            self.last_flushed_content_buffer = ""
         self.request_session_scroll_to_bottom(state.session_id, force=False)
         self.save_chat_history(session_id=state.session_id)
         return event
@@ -41325,6 +41364,7 @@ class MainWindow(QMainWindow):
             "submit_session_ids_allocated",
             session_id=state.session_id,
             turn_id=next_turn_id,
+            run_id=submit_request_id,
             user_message_id=user_message_id,
             request_id=submit_request_id,
         )
@@ -41996,9 +42036,6 @@ class MainWindow(QMainWindow):
             if (state.current_content_buffer or "").strip():
                 state.current_content_buffer = ""
                 state.last_flushed_content_buffer = ""
-                if state.session_id == self.current_session_id:
-                    self.current_content_buffer = ""
-                    self.last_flushed_content_buffer = ""
         args_obj = data.get("args")
         if isinstance(args_obj, str):
             try:
@@ -42710,9 +42747,6 @@ class MainWindow(QMainWindow):
         state.agent_turn_group_sequence = 0
         state.agent_stage_closed = False
         self.set_session_phase("Preparing", state.session_id)
-        if state.session_id == self.current_session_id:
-            self.current_content_buffer = ""
-            self.current_thinking_buffer = ""
         effective_workspace_dir = self._ensure_session_workspace(state)
         
         # Insert "Thinking" bubble
@@ -42747,10 +42781,12 @@ class MainWindow(QMainWindow):
             dependency_coordinator=self.skill_dependency_coordinator,
         )
         state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
-        if state.session_id == self.current_session_id:
-            self.llm_worker = state.llm_worker
         session_id = state.session_id
-        state.llm_worker.finished_signal.connect(lambda result, sid=session_id, tid=turn_id: self.handle_llm_response(result, sid, tid), Qt.QueuedConnection)
+        state.llm_worker.finished_signal.connect(
+            lambda result, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_llm_response(result, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         state.llm_worker.content_signal.connect(
             lambda text, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_content_signal(text, sid, tid, rid),
@@ -42793,6 +42829,7 @@ class MainWindow(QMainWindow):
             "process_agent_worker_started",
             session_id=state.session_id,
             turn_id=turn_id,
+            run_id=request_id,
             is_running=state.llm_worker.isRunning(),
         )
         
@@ -42802,7 +42839,8 @@ class MainWindow(QMainWindow):
     def _connect_daemon_worker_signals(self, state, worker, turn_id):
         request_id = str(getattr(worker, "request_id", "") or "")
         worker.finished_signal.connect(
-            lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid),
+            lambda result, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_daemon_response(result, sid, tid, rid),
             Qt.QueuedConnection,
         )
         worker.thinking_signal.connect(
@@ -43006,9 +43044,6 @@ class MainWindow(QMainWindow):
         state.agent_turn_group_sequence = 0
         state.agent_stage_closed = False
         self.set_session_phase("Preparing", state.session_id)
-        if state.session_id == self.current_session_id:
-            self.current_content_buffer = ""
-            self.current_thinking_buffer = ""
         effective_workspace_dir = self._ensure_session_workspace(state)
         state.temp_thinking_bubble = self._create_agent_chat_bubble(
             state,
@@ -43048,6 +43083,7 @@ class MainWindow(QMainWindow):
             "process_daemon_worker_started",
             session_id=state.session_id,
             turn_id=turn_id,
+            run_id=request_id,
             is_running=state.daemon_worker.isRunning(),
         )
         if state.session_id == self.current_session_id:
@@ -43082,7 +43118,7 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
-    def handle_daemon_response(self, result, session_id=None, turn_id=None):
+    def handle_daemon_response(self, result, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state:
             log_ppt_agent_debug("daemon_response_missing_session", session_id=session_id, turn_id=turn_id)
@@ -43110,7 +43146,7 @@ class MainWindow(QMainWindow):
             self.daemon_available = False
         if isinstance(result, dict) and not result.get("_streamed"):
             result["_from_daemon"] = True
-        self.handle_llm_response(result, session_id, turn_id)
+        self.handle_llm_response(result, session_id, turn_id, request_id)
 
     def handle_worker_output(self, text, session_id=None):
         self.append_log(f"[Worker] {text}")
@@ -43700,6 +43736,14 @@ class MainWindow(QMainWindow):
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
         if getattr(state, "provider_retry_attempt", 0):
+            log_sub_agent_runtime(
+                "ui_provider_retry_resumed",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=str(request_id or state.active_turn_request_id or ""),
+                retry_attempt=int(state.provider_retry_attempt),
+                max_retries=int(state.provider_retry_max),
+            )
             state.provider_retry_attempt = 0
             state.provider_retry_max = 0
             self.set_session_phase("Analyzing", state.session_id)
@@ -43708,8 +43752,6 @@ class MainWindow(QMainWindow):
         self._timeline_append_text_delta(state, "content_fragment", text)
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
-        if state.session_id == self.current_session_id:
-            self.current_content_buffer = state.current_content_buffer
 
     def handle_thinking_signal(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
@@ -43721,6 +43763,14 @@ class MainWindow(QMainWindow):
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
         if getattr(state, "provider_retry_attempt", 0):
+            log_sub_agent_runtime(
+                "ui_provider_retry_resumed",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=str(request_id or state.active_turn_request_id or ""),
+                retry_attempt=int(state.provider_retry_attempt),
+                max_retries=int(state.provider_retry_max),
+            )
             state.provider_retry_attempt = 0
             state.provider_retry_max = 0
         self._ensure_live_agent_stage(state)
@@ -43735,8 +43785,6 @@ class MainWindow(QMainWindow):
         state.pending_thinking_delta += delta
         if state.thinking_flush_timer and not state.thinking_flush_timer.isActive():
             state.thinking_flush_timer.start()
-        if state.session_id == self.current_session_id:
-            self.current_thinking_buffer = state.current_thinking_buffer
 
     def flush_session_content(self, session_id, final=False):
         state = self.get_session(session_id)
@@ -43854,7 +43902,7 @@ class MainWindow(QMainWindow):
                 message["meta"] = meta
         return generated_messages
 
-    def handle_llm_response(self, result, session_id=None, turn_id=None):
+    def handle_llm_response(self, result, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state:
             log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
@@ -43862,7 +43910,10 @@ class MainWindow(QMainWindow):
         result = dict(result) if isinstance(result, dict) else {
             "error": "Provider returned an invalid result payload."
         }
-        request_id = result.get("request_id")
+        if request_id is not None:
+            result["request_id"] = request_id
+        else:
+            request_id = result.get("request_id")
         if not self._event_matches_active_run(state, turn_id, request_id):
             log_sub_agent_runtime(
                 "ui_result_stale_run_rejected",
@@ -44018,8 +44069,6 @@ class MainWindow(QMainWindow):
             previous_message_count=previous_message_count,
         )
         state.llm_worker = None
-        if state.session_id == self.current_session_id:
-            self.llm_worker = None
         if state.content_flush_timer and state.content_flush_timer.isActive():
             state.content_flush_timer.stop()
         if state.thinking_flush_timer and state.thinking_flush_timer.isActive():
@@ -44049,9 +44098,6 @@ class MainWindow(QMainWindow):
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         
         state.last_agent_bubble = bubble
-        if is_current:
-            self.last_agent_bubble = bubble
-            self.temp_thinking_bubble = state.temp_thinking_bubble
 
         if "error" in result:
             run_id = str(
@@ -44065,6 +44111,14 @@ class MainWindow(QMainWindow):
                 runtime_terminal in {"interrupted", "cancelled"}
                 or "interrupted by user" in error_text.lower()
                 or "stopped by user" in error_text.lower()
+            )
+            retry_attempt = int(getattr(state, "provider_retry_attempt", 0) or 0)
+            retry_max = int(getattr(state, "provider_retry_max", 0) or 0)
+            failure_category, failure_summary = self._run_failure_presentation(
+                error_text,
+                interrupted,
+                retry_attempt,
+                retry_max,
             )
             failure_status = "interrupted" if interrupted else "failed"
             if run_id:
@@ -44140,23 +44194,50 @@ class MainWindow(QMainWindow):
                 turn_id=turn_id or state.active_turn_id,
                 run_id=run_id,
                 bubble=bubble,
-                reason_text="本轮已中断" if interrupted else "本轮执行失败",
+                reason_text=failure_summary,
                 outcome=failure_status,
             )
+            if not interrupted:
+                failure_event = {
+                    "type": "run_error",
+                    "status": failure_status,
+                    "category": failure_category,
+                    "summary": failure_summary,
+                    "error": error_text,
+                    "session_id": state.session_id,
+                    "turn_id": str(turn_id or state.active_turn_id or ""),
+                    "run_id": run_id,
+                    "retry_attempt": retry_attempt,
+                    "max_retries": retry_max,
+                    "timestamp": time.time(),
+                }
+                state.observability_events.append(failure_event)
+                state.observability_events = state.observability_events[-500:]
+                self._show_conversation_notice(
+                    state,
+                    failure_summary,
+                    "error",
+                    action_text="查看技术详情",
+                    action_callback=lambda sid=state.session_id, payload=dict(failure_event): self._show_run_failure_details(sid, payload),
+                )
+                if is_current:
+                    self.refresh_observability_view()
             self._finish_grill_mode(state, "error")
             self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
                 "ui_assistant_turn_failed",
                 session_id=state.session_id,
                 turn_id=str(getattr(state, "active_turn_id", "")),
+                run_id=run_id,
                 group_id=str(getattr(bubble, "ui_turn_group_id", "")),
                 stage_id=str(getattr(bubble, "ui_stage_id", "")),
                 error=str(result.get("error") or "未知错误"),
+                category=failure_category,
+                retry_attempt=retry_attempt,
+                max_retries=retry_max,
             )
             if state.last_agent_bubble is bubble:
                 state.last_agent_bubble = None
-            if is_current and self.last_agent_bubble is bubble:
-                self.last_agent_bubble = None
             if getattr(state, "favorite_run_id", ""):
                 self.set_session_phase("Error", state.session_id)
                 self.set_session_status("error", state.session_id, save=True, error=error_text)
@@ -44355,6 +44436,7 @@ class MainWindow(QMainWindow):
             "ui_assistant_turn_finished",
             session_id=state.session_id,
             turn_id=str(getattr(state, "active_turn_id", "")),
+            run_id=run_id,
             group_id=str(getattr(bubble, "ui_turn_group_id", "")),
             stage_id=str(getattr(bubble, "ui_stage_id", "")),
             content_len=len(str(content or "")),
@@ -44467,12 +44549,18 @@ class MainWindow(QMainWindow):
                  self._show_conversation_notice(state, "God Mode 已开启，正在执行高权限代码", "warning")
 
             state.code_worker = CodeWorker(code_block, self._workspace_dir_for_state(state), god_mode=god_mode)
-            state.code_worker.output_signal.connect(lambda text, sid=state.session_id: self.handle_code_output(text, sid))
-            state.code_worker.finished_signal.connect(lambda sid=state.session_id: self.handle_code_finished(sid))
-            state.code_worker.input_request_signal.connect(self.handle_code_input_request)
-            
-            if is_current:
-                self.code_worker = state.code_worker
+            state.code_worker.output_signal.connect(
+                lambda text, sid=state.session_id, tid=turn_id, rid=run_id:
+                    self.handle_code_output(text, sid, tid, rid)
+            )
+            state.code_worker.finished_signal.connect(
+                lambda sid=state.session_id, tid=turn_id, rid=run_id:
+                    self.handle_code_finished(sid, tid, rid)
+            )
+            state.code_worker.input_request_signal.connect(
+                lambda prompt, sid=state.session_id, tid=turn_id, rid=run_id:
+                    self.handle_code_input_request(prompt, sid, tid, rid)
+            )
             
             state.code_worker.start()
             if is_current: self.normalize_session_ui(state)
@@ -44499,8 +44587,10 @@ class MainWindow(QMainWindow):
             self.refresh_change_list(state.session_id)
             if is_current: self.normalize_session_ui(state)
 
-    def handle_code_output(self, text, session_id=None):
+    def handle_code_output(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
+        if state and not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if state and state.last_agent_bubble:
             if state.last_agent_bubble.code_output_edit is None:
                 label = QLabel("执行结果:")
@@ -44535,8 +44625,10 @@ class MainWindow(QMainWindow):
             self.process_ui_events()
             self.request_session_scroll_to_bottom(state.session_id, force=False)
 
-    def handle_code_finished(self, session_id=None):
+    def handle_code_finished(self, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
+        if state and not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if state: state.code_worker = None
         if state:
             code_text = ""
@@ -44560,17 +44652,21 @@ class MainWindow(QMainWindow):
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
         if session_id == self.current_session_id:
-            self.code_worker = None
             self.normalize_session_ui(state)
 
-    def handle_code_input_request(self, prompt):
+    def handle_code_input_request(self, prompt, session_id, turn_id=None, request_id=None):
+        state = self.get_session(session_id)
+        if not state or state.code_worker is None:
+            raise RuntimeError(f"代码输入请求缺少运行中的会话 worker：{session_id}")
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
         if any(k in prompt.lower() for k in ["confirm", "yes/no", "是否"]):
              reply = QMessageBox.question(self, '需要确认', prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
              response = "yes" if reply == QMessageBox.Yes else "no"
         else:
              text, ok = QInputDialog.getText(self, "输入请求", prompt)
              response = text if ok else ""
-        self.code_worker.provide_input(response)
+        state.code_worker.provide_input(response)
 
 if __name__ == "__main__":
     install_native_crash_logging()

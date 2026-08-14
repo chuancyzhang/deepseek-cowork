@@ -316,7 +316,11 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.window.handle_chat_save_failed(state.session_id, 3, "conflict")
             self.window.handle_chat_save_failed(state.session_id, 4, "conflict")
 
-        toast.assert_called_once()
+        toast.assert_not_called()
+        self.assertEqual(
+            state.conversation_notice.label.text(),
+            "聊天记录保存失败，正在等待下一次保存重试。",
+        )
         self.assertEqual(
             self.window._chat_save_failure_notified_at[state.session_id]["revision"],
             3,

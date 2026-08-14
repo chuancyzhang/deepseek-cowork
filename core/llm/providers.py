@@ -6,6 +6,7 @@ import mimetypes
 import os
 import json
 import time
+import httpx
 from .deepseek import (
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
@@ -70,6 +71,7 @@ MODEL_API_TRANSIENT_MAX_RETRIES = 5
 MODEL_API_RETRY_BASE_DELAY_SECONDS = 0.5
 MODEL_API_RETRY_MAX_DELAY_SECONDS = 8.0
 MODEL_API_RETRY_AFTER_MAX_SECONDS = 30.0
+MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS = 60.0
 RESPONSES_WEB_SEARCH_TOOL_TYPES = {
     "web_search",
     "web_search_2025_08_26",
@@ -97,9 +99,14 @@ def is_transient_model_api_error(error):
     """Return whether an API transport/upstream failure is safe to retry."""
 
     status_code = _exception_status_code(error)
-    if status_code in {408, 425, 429, 500, 502, 503, 504}:
+    if status_code in {408, 425, 429} or (
+        status_code is not None and 500 <= status_code <= 599
+    ):
         return True
-    if isinstance(error, (TimeoutError, ConnectionError)):
+    if isinstance(
+        error,
+        (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError),
+    ):
         return True
     text = str(error or "").strip().lower()
     if text and any(marker in text for marker in TRANSIENT_PROVIDER_ERROR_MARKERS):
@@ -434,7 +441,16 @@ class OpenAIProvider(LLMProvider):
         api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
     ):
         from openai import OpenAI
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(
+                connect=20.0,
+                read=MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
+                write=60.0,
+                pool=60.0,
+            ),
+        )
         self.base_url = base_url
         self.model_name = model_name
         self.thinking_enabled = bool(thinking_enabled)
@@ -1362,6 +1378,12 @@ class AnthropicProvider(LLMProvider):
                 client_kwargs["default_headers"] = {"X-Api-Key": omit_header}
         else:
             client_kwargs["api_key"] = cleaned_key
+        client_kwargs["timeout"] = httpx.Timeout(
+            connect=20.0,
+            read=MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
+            write=60.0,
+            pool=60.0,
+        )
         self.client = Anthropic(**client_kwargs)
         self.base_url = base_url
         self.model_name = model_name

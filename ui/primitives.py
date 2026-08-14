@@ -1396,6 +1396,8 @@ class ProductMasterDetail(QFrame):
 
 
 class ProductInlineNotice(QFrame):
+    actionRequested = Signal()
+
     def __init__(self, text="", tone="neutral", parent=None):
         super().__init__(parent)
         self.setObjectName("ProductInlineNotice")
@@ -1403,7 +1405,14 @@ class ProductInlineNotice(QFrame):
         self.label.setWordWrap(True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
-        layout.addWidget(self.label)
+        layout.addWidget(self.label, 1)
+        self.action_button = QPushButton(self)
+        self.action_button.setObjectName("ProductInlineNoticeAction")
+        self.action_button.setCursor(Qt.PointingHandCursor)
+        self.action_button.setStyleSheet(product_button_style("secondary", radius=6))
+        self.action_button.clicked.connect(self.actionRequested.emit)
+        self.action_button.hide()
+        layout.addWidget(self.action_button, 0, Qt.AlignRight)
         self.set_tone(tone)
         bind_theme(self, self.refresh_theme, surface="feedback")
 
@@ -1424,11 +1433,17 @@ class ProductInlineNotice(QFrame):
 
     def refresh_theme(self, _resolved=None):
         self.set_tone(getattr(self, "_tone", "neutral"))
+        self.action_button.setStyleSheet(product_button_style("secondary", radius=6))
 
     def set_text(self, text, tone=None):
         self.label.setText(str(text or ""))
         if tone is not None:
             self.set_tone(tone)
+
+    def set_action(self, text=""):
+        label = str(text or "").strip()
+        self.action_button.setText(label)
+        self.action_button.setVisible(bool(label))
 
 
 class ProductSection(QFrame):

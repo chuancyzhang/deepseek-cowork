@@ -14463,6 +14463,7 @@ class DaemonStreamWorker(QThread):
     finished_signal = Signal(object, str)
     thinking_signal = Signal(str)
     content_signal = Signal(str)
+    content_snapshot_signal = Signal(str)
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
     observability_signal = Signal(dict)
@@ -14554,6 +14555,8 @@ class DaemonStreamWorker(QThread):
             self.turn_started_signal.emit(str(msg.get("turn_id") or ""))
         elif message_type == "content":
             self.content_signal.emit(msg.get("delta", ""))
+        elif message_type == "content_snapshot":
+            self.content_snapshot_signal.emit(msg.get("content", ""))
         elif message_type == "tool_call":
             self.tool_call_signal.emit(msg.get("data") or {})
         elif message_type == "tool_result":
@@ -31498,10 +31501,8 @@ class MainWindow(QMainWindow):
         if not state or int(token or 0) != int(getattr(state, "history_load_token", 0) or 0):
             return
         if state.ui_timeline_warning:
-            self._show_conversation_notice(
-                state,
-                "部分历史执行过程未恢复，消息内容不受影响。",
-                "neutral",
+            self.append_log(
+                f"历史过程数据已忽略({state.session_id}): {state.ui_timeline_warning}"
             )
 
         self._finish_session_history_load(state)
@@ -33930,19 +33931,13 @@ class MainWindow(QMainWindow):
         return True, ""
 
     def _render_unified_restore_error(self, state, message, insert_index=None):
-        text = f"对话过程恢复失败：{str(message or '未知错误')} 请保留会话并查看诊断日志。"
-        notice = ProductInlineNotice(text, "error")
-        if insert_index is not None:
-            state.chat_layout.insertWidget(insert_index, notice)
-        else:
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, notice)
         state.ui_timeline_warning = str(message or "未知错误")
         log_sub_agent_runtime(
             "ui_assistant_turn_restore_rejected",
             session_id=state.session_id,
             error=state.ui_timeline_warning,
         )
-        return 1
+        return 0
 
     def _show_conversation_notice(
         self,
@@ -34558,7 +34553,7 @@ class MainWindow(QMainWindow):
         if status in {"applied", "rejected"}:
             event["finished_at"] = time.time()
         widget = (getattr(state, "guidance_widgets", {}) or {}).get(str(message_id or ""))
-        if widget is not None:
+        if widget is not None and hasattr(widget, "set_status"):
             widget.set_status(status)
         return True
 
@@ -39553,41 +39548,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
 
-    def _merge_runtime_ledger_checkpoint(self, state, run_id):
-        if not state or not str(run_id or "").strip():
-            return 0
-        run = self.runtime_journal.get_run(state.session_id, run_id)
-        checkpoint = run.get("ledger_checkpoint") if isinstance(run, dict) else None
-        if not isinstance(checkpoint, dict):
-            return 0
-        if checkpoint.get("format") != "closed_ledger_v1":
-            raise RuntimeError(
-                f"不支持的运行账本检查点格式: {checkpoint.get('format') or 'missing'}"
-            )
-        checkpoint_messages = filter_persistable_messages(
-            checkpoint.get("messages") or []
-        )
-        expected_hash = str(checkpoint.get("messages_hash") or "")
-        if (
-            not expected_hash
-            or expected_hash != RuntimeJournal.messages_hash(checkpoint_messages)
-        ):
-            raise RuntimeError("运行账本检查点校验失败")
-        before_ids = {
-            str(message.get("id") or "")
-            for message in state.messages
-            if isinstance(message, dict)
-        }
-        state.messages = merge_messages_by_id(
-            state.messages,
-            checkpoint_messages,
-        )
-        return sum(
-            1
-            for message in checkpoint_messages
-            if str(message.get("id") or "") not in before_ids
-        )
-
     def _start_daemon_stop_worker(self, session_id, run_id=""):
         if not self.daemon_client or not str(session_id or "").strip():
             return
@@ -39612,11 +39572,6 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"守护进程未确认任务停止({stopped_session_id}): {error}"
             )
-            self._show_conversation_notice(
-                self.get_session(stopped_session_id),
-                f"停止确认失败：{error}",
-                "error",
-            )
 
         def cleanup():
             self._daemon_stop_workers.discard(worker)
@@ -39638,38 +39593,11 @@ class MainWindow(QMainWindow):
             reply_kind=timeline_status,
             finished_at=time.time(),
         )
-        partial_content = str(
+        # A partial stream is presentation state, not a committed assistant
+        # message.  Stopping or failing a run must never manufacture history.
+        interruption_text = str(
             getattr(state, "current_content_buffer", "") or ""
         ).strip()
-        interruption_text = partial_content
-        existing_content = ""
-        if (
-            state.messages
-            and isinstance(state.messages[-1], dict)
-            and state.messages[-1].get("role") == "assistant"
-        ):
-            existing_content = str(state.messages[-1].get("content") or "").strip()
-        if interruption_text and existing_content != interruption_text:
-            message_meta = {
-                "turn_id": str(turn_id or ""),
-                "request_id": str(run_id or ""),
-                "ui_turn_id": str(turn_id or ""),
-                "ui_reply_kind": "interrupted",
-                "context_visible_interruption": False,
-                "run_outcome": str(outcome or "interrupted"),
-            }
-            if bubble is not None:
-                message_meta.update({
-                    "ui_turn_group_id": str(getattr(bubble, "ui_turn_group_id", "")),
-                    "ui_stage_id": str(getattr(bubble, "ui_stage_id", "")),
-                })
-            state.messages.append({
-                "id": self._new_message_id(),
-                "role": "assistant",
-                "content": interruption_text,
-                "content_parts": [{"type": "text", "text": interruption_text}],
-                "meta": message_meta,
-            })
         if bubble is not None:
             bubble.stop_thinking_timers()
             bubble.set_message_actions_enabled(False)
@@ -39678,7 +39606,7 @@ class MainWindow(QMainWindow):
                 bubble.set_main_content(interruption_text, final=True)
         self._show_conversation_notice(
             state,
-            "已停止" if str(outcome or "") == "interrupted" else str(reason_text or "运行失败"),
+            "已停止" if str(outcome or "") == "interrupted" else str(reason_text or "本轮未完成，请重试"),
             "neutral" if str(outcome or "") == "interrupted" else "error",
         )
         state.messages = self.chat_storage.normalize_messages(
@@ -39697,13 +39625,10 @@ class MainWindow(QMainWindow):
         if interrupted:
             return "interrupted", "已停止"
         if str(error_text or "").strip() == "Provider completed without final assistant content.":
-            return "missing_final_content", "模型未返回最终正文"
+            return "missing_final_content", "本轮未完成，请重试"
         if int(retry_attempt or 0) > 0 and int(retry_max or 0) > 0:
-            return (
-                "network_retry_exhausted",
-                f"网络连接中断，重试 {int(retry_max)} 次后仍未恢复",
-            )
-        return "provider_error", "模型服务未能完成本轮请求"
+            return "network_retry_exhausted", "暂时无法连接模型，请重试"
+        return "provider_error", "本轮未完成，请重试"
 
     def stop_agent(self):
         state = self.get_current_session()
@@ -39753,27 +39678,6 @@ class MainWindow(QMainWindow):
         state.turn_steerable = False
         state.llm_worker = None
         state.code_worker = None
-        try:
-            checkpoint_count = self._merge_runtime_ledger_checkpoint(
-                state,
-                stopped_run_id,
-            )
-            if checkpoint_count:
-                log_sub_agent_runtime(
-                    "ui_interrupted_ledger_checkpoint_merged",
-                    session_id=state.session_id,
-                    run_id=stopped_run_id,
-                    message_count=checkpoint_count,
-                )
-        except Exception as exc:
-            self.append_log(
-                f"运行账本检查点恢复失败({state.session_id}, run={stopped_run_id}): {exc}"
-            )
-            self._show_conversation_notice(
-                state,
-                f"任务已停止，但部分运行记录恢复失败：{exc}",
-                "error",
-            )
         if stopped_run_id:
             try:
                 self.runtime_journal.interrupt_run(
@@ -39796,7 +39700,7 @@ class MainWindow(QMainWindow):
                     f"运行停止状态写入恢复日志失败({state.session_id}, run={stopped_run_id}): {exc}"
                 )
         self._finish_grill_mode(state, "stopped")
-        self._reject_unapplied_guidance(state, restore_input=True)
+        self._reject_unapplied_guidance(state, restore_input=False)
         self._persist_pending_guidance(state)
         stopped_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
         self._finish_interrupted_turn(
@@ -40533,28 +40437,30 @@ class MainWindow(QMainWindow):
             message for message in list(getattr(state, "pending_guidance_messages", []) or [])
             if str((message or {}).get("id") or "") in rejected_message_ids
         ]
-        state.pending_guidance_messages = [
-            message for message in list(getattr(state, "pending_guidance_messages", []) or [])
-            if str((message or {}).get("id") or "") not in rejected_message_ids
-        ]
-        if restore_input and rejected_messages:
-            restored_text = "\n\n".join(
-                self._message_display_content(message) for message in rejected_messages
-                if self._message_display_content(message).strip()
-            )
-            restored_paths = []
-            for rejected_message in rejected_messages:
-                restored_paths.extend(
-                    item.get("path") for item in self._message_user_attachments(rejected_message)
-                    if isinstance(item, dict) and item.get("path")
-                )
-            self._restore_rejected_guidance(state, restored_text, restored_paths)
+        # Sent guidance is already committed conversation history.  If the
+        # active run closes before consuming it, retain the message so it can
+        # participate in the next turn; never turn it back into a draft.
+        for message in list(getattr(state, "pending_guidance_messages", []) or []):
+            if str((message or {}).get("id") or "") not in rejected_message_ids:
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            meta = dict(meta)
+            meta.pop("same_turn_guidance", None)
+            meta["deferred_from_turn"] = str(meta.get("turn_id") or "")
+            message["meta"] = meta
+            for committed in state.messages:
+                if (
+                    isinstance(committed, dict)
+                    and str(committed.get("id") or "") == str(message.get("id") or "")
+                ):
+                    committed["meta"] = copy.deepcopy(meta)
+                    break
         if rejected_message_ids:
             log_sub_agent_runtime(
                 "ui_guidance_timeline_rejected",
                 session_id=state.session_id,
                 message_count=len(rejected_message_ids),
-                restored=bool(restore_input and rejected_messages),
+                restored=False,
             )
         return rejected_messages
 
@@ -40700,6 +40606,10 @@ class MainWindow(QMainWindow):
         if not isinstance(previous_group, AssistantTurnGroup):
             previous_group = None
         previous_group_id = str(getattr(bubble, "ui_turn_group_id", "")) if bubble is not None else ""
+        # Switch the routing boundary before any widget work can process
+        # queued signals; a re-entrant delta must never return to the old group.
+        state.active_agent_turn_group = None
+        state.agent_stage_closed = False
         self.add_turn_guidance_inline(
             message,
             display_content=event.get("text") or "",
@@ -40714,8 +40624,6 @@ class MainWindow(QMainWindow):
             previous_group.finalize_process_only()
         # The next model delta belongs to a new conversational thought after
         # the user's guidance, never to the segment that preceded it.
-        state.active_agent_turn_group = None
-        state.agent_stage_closed = False
         self._append_live_thinking_segment(state)
         log_sub_agent_runtime(
             "ui_assistant_turn_guidance_boundary",
@@ -40755,6 +40663,12 @@ class MainWindow(QMainWindow):
         )
         if not already_persisted and not already_pending:
             state.pending_guidance_messages.append(copy.deepcopy(message))
+        if not already_persisted:
+            state.messages.append(copy.deepcopy(message))
+            state.messages = self.chat_storage.normalize_messages(
+                state.messages,
+                conversation_id=state.session_id,
+            )
         self._render_turn_guidance_checkpoint(
             state,
             message,
@@ -40762,8 +40676,7 @@ class MainWindow(QMainWindow):
             attachments or [],
             mutation_ready=not already_persisted,
         )
-        if state.session_id == self.current_session_id:
-            self.set_session_phase("Guidance queued", state.session_id)
+        self.save_chat_history(session_id=state.session_id)
 
     def _pending_guidance_message(self, state, message_id):
         target_id = str(message_id or "")
@@ -41142,16 +41055,27 @@ class MainWindow(QMainWindow):
     def _handle_daemon_guidance_result(
         self, response, worker, session_id, expected_turn_id, message,
         display_content, attachments, raw_user_text, prompt_files,
+        expected_request_id="",
     ):
         state = self.get_session(session_id)
         if state and worker in state.guidance_workers:
             state.guidance_workers.remove(worker)
+        if not state or not self._event_matches_active_run(
+            state, expected_turn_id, expected_request_id
+        ):
+            log_sub_agent_runtime(
+                "ui_guidance_result_stale_run_rejected",
+                session_id=str(session_id or ""),
+                turn_id=str(expected_turn_id or ""),
+                request_id=str(expected_request_id or ""),
+                message_id=str((message or {}).get("id") or ""),
+            )
+            return
         accepted = bool(
             isinstance(response, dict)
             and response.get("status") == "ok"
             and response.get("accepted")
             and str(response.get("turn_id") or "") == str(expected_turn_id)
-            and state
             and state.active_turn_id == expected_turn_id
         )
         if accepted:
@@ -41159,12 +41083,19 @@ class MainWindow(QMainWindow):
         else:
             if state:
                 self._timeline_set_guidance_status(state, message.get("id"), "rejected")
-            self._restore_rejected_guidance(state, raw_user_text, prompt_files)
             if state:
+                self._reject_unapplied_guidance(state, restore_input=False)
+                self._persist_pending_guidance(state)
                 self.save_chat_history(session_id=state.session_id)
+                QTimer.singleShot(
+                    0,
+                    lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
+                        self.get_session(sid)
+                    ),
+                )
     def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
-        if not state or not getattr(state, "turn_steerable", False):
+        if not state:
             return False
         if not self._ensure_vision_attachment_support(state, prompt_files):
             return False
@@ -41176,6 +41107,7 @@ class MainWindow(QMainWindow):
         if not payload.get("content"):
             return False
         expected_turn_id = state.active_turn_id
+        expected_request_id = str(getattr(state, "active_turn_request_id", "") or "")
         message = {
             "id": self._new_message_id(),
             "role": "user",
@@ -41184,6 +41116,7 @@ class MainWindow(QMainWindow):
                 **(payload.get("meta") or {}),
                 "same_turn_guidance": True,
                 "turn_id": str(expected_turn_id),
+                "request_id": expected_request_id,
             },
         }
         if payload.get("content_parts"):
@@ -41192,9 +41125,15 @@ class MainWindow(QMainWindow):
         if state.llm_worker and state.llm_worker.isRunning():
             result = state.llm_worker.steer(message, expected_turn_id=expected_turn_id)
             if not result.get("accepted"):
-                if state.session_id == self.current_session_id:
-                    self._show_conversation_notice(state, "当前任务已结束，请重新发送。", "warning")
-                return False
+                self._accept_turn_guidance(
+                    state, message, payload.get("display_content") or "", payload.get("attachments") or []
+                )
+                self._reject_unapplied_guidance(state, restore_input=False)
+                self._persist_pending_guidance(state)
+                if clear_current_input and state.session_id == self.current_session_id:
+                    self.input_field.clear()
+                    self._clear_prompt_files(state.session_id)
+                return True
             if clear_current_input and state.session_id == self.current_session_id:
                 self.input_field.clear()
                 self._clear_prompt_files(state.session_id)
@@ -41207,7 +41146,7 @@ class MainWindow(QMainWindow):
             if clear_current_input and state.session_id == self.current_session_id:
                 self.input_field.clear()
                 self._clear_prompt_files(state.session_id)
-            self._render_turn_guidance_checkpoint(
+            self._accept_turn_guidance(
                 state, message, payload.get("display_content") or "", payload.get("attachments") or []
             )
             worker = DaemonSteerWorker(
@@ -41218,15 +41157,24 @@ class MainWindow(QMainWindow):
                 lambda response, w=worker, sid=state.session_id, tid=expected_turn_id,
                        msg=copy.deepcopy(message), display=payload.get("display_content") or "",
                        attachments=copy.deepcopy(payload.get("attachments") or []), raw=raw_user_text,
+                       rid=expected_request_id,
                        files=list(prompt_files): self._handle_daemon_guidance_result(
-                           response, w, sid, tid, msg, display, attachments, raw, files
+                           response, w, sid, tid, msg, display, attachments, raw, files, rid
                        ),
                 Qt.QueuedConnection,
             )
             worker.finished.connect(worker.deleteLater)
             worker.start()
             return True
-        return False
+        self._accept_turn_guidance(
+            state, message, payload.get("display_content") or "", payload.get("attachments") or []
+        )
+        self._reject_unapplied_guidance(state, restore_input=False)
+        self._persist_pending_guidance(state)
+        if clear_current_input and state.session_id == self.current_session_id:
+            self.input_field.clear()
+            self._clear_prompt_files(state.session_id)
+        return True
 
     def _persist_pending_guidance(self, state):
         if not state or not state.pending_guidance_messages:
@@ -41243,6 +41191,40 @@ class MainWindow(QMainWindow):
             conversation_id=state.session_id,
         )
         state.pending_guidance_messages = []
+
+    def _start_deferred_guidance_if_idle(self, state):
+        if not state or self._session_is_busy(state):
+            return False
+        deferred = []
+        for message in state.messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if meta.get("deferred_from_turn") and not meta.get("deferred_guidance_consumed"):
+                deferred.append(message)
+        if not deferred:
+            return False
+        for message in deferred[:-1]:
+            meta = dict(message.get("meta") or {})
+            meta.pop("same_turn_guidance", None)
+            meta.pop("deferred_from_turn", None)
+            meta["deferred_guidance_consumed"] = True
+            message["meta"] = meta
+        trigger = deferred[-1]
+        log_sub_agent_runtime(
+            "ui_deferred_guidance_turn_start",
+            session_id=state.session_id,
+            message_count=len(deferred),
+            trigger_message_id=str(trigger.get("id") or ""),
+        )
+        return self._submit_session_request(
+            state,
+            self._message_display_content(trigger),
+            self._message_attachment_paths(trigger),
+            check_duplicates=False,
+            clear_current_input=False,
+            existing_message_payload=trigger,
+        )
 
     def _clear_submitted_composer(self, state, *, clear_current_input):
         if not state or not clear_current_input:
@@ -41297,6 +41279,7 @@ class MainWindow(QMainWindow):
         ppt_agent_template_file="",
         user_message_meta=None,
         history_rewrite_guard=None,
+        existing_message_payload=None,
     ):
         log_ppt_agent_debug(
             "submit_session_request_begin",
@@ -41368,16 +41351,12 @@ class MainWindow(QMainWindow):
                 has_llm_worker=bool(getattr(state, "llm_worker", None)),
                 daemon_running=bool(getattr(state, "daemon_running", False)),
             )
-            if getattr(state, "turn_steerable", False):
-                return self._submit_turn_guidance(
-                    state,
-                    raw_user_text,
-                    prompt_files,
-                    clear_current_input=clear_current_input,
-                )
-            if state.session_id == self.current_session_id:
-                self._show_conversation_notice(state, "当前运行阶段不支持中途引导。", "warning")
-            return False
+            return self._submit_turn_guidance(
+                state,
+                raw_user_text,
+                prompt_files,
+                clear_current_input=clear_current_input,
+            )
         if not raw_user_text and not prompt_files:
             log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
@@ -41452,7 +41431,12 @@ class MainWindow(QMainWindow):
             if state.session_id == self.current_session_id:
                 self._show_conversation_notice(state, f"聊天工作目录不可用：{exc}", "error")
             return False
-        user_message_id = self._new_message_id()
+        existing_message_payload = (
+            copy.deepcopy(existing_message_payload)
+            if isinstance(existing_message_payload, dict)
+            else None
+        )
+        user_message_id = str((existing_message_payload or {}).get("id") or self._new_message_id())
         next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
         submit_request_id = uuid.uuid4().hex
         log_ppt_agent_debug(
@@ -41532,15 +41516,24 @@ class MainWindow(QMainWindow):
             "id": user_message_id,
             "role": "user",
             "content": user_text,
-            "created_at": int(time.time()),
+            "created_at": int((existing_message_payload or {}).get("created_at") or time.time()),
         }
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
-        message_meta = dict(payload.get("meta") or {})
+        existing_meta = (
+            dict(existing_message_payload.get("meta") or {})
+            if existing_message_payload
+            else {}
+        )
+        existing_meta.pop("same_turn_guidance", None)
+        existing_meta.pop("deferred_from_turn", None)
+        message_meta = {**existing_meta, **dict(payload.get("meta") or {})}
         if isinstance(user_message_meta, dict):
             message_meta.update(user_message_meta)
         message_meta["turn_id"] = str(next_turn_id)
         message_meta["request_id"] = submit_request_id
+        if existing_message_payload:
+            message_meta["deferred_guidance_consumed"] = True
         existing_sequences = []
         for existing_message in state.messages:
             existing_meta = existing_message.get("meta") if isinstance(existing_message, dict) else None
@@ -41586,6 +41579,15 @@ class MainWindow(QMainWindow):
             state.grill_execution_confirmed = False
         if message_meta:
             message_payload["meta"] = message_meta
+        staged_messages = [
+            copy.deepcopy(item)
+            for item in state.messages
+            if not (
+                existing_message_payload
+                and isinstance(item, dict)
+                and str(item.get("id") or "") == user_message_id
+            )
+        ] + [message_payload]
         if daemon_owned_history:
             state.chat_save_revision = max(
                 0,
@@ -41593,14 +41595,14 @@ class MainWindow(QMainWindow):
             ) + 1
             staged_save_request = self._build_chat_save_request(
                 state,
-                messages=list(state.messages) + [message_payload],
+                messages=staged_messages,
                 status="running",
                 revision=state.chat_save_revision,
             )
         else:
             staged_save_request = self._stage_chat_save_request(
                 state,
-                messages=list(state.messages) + [message_payload],
+                messages=staged_messages,
                 status="running",
             )
         if staged_save_request is None:
@@ -41700,17 +41702,18 @@ class MainWindow(QMainWindow):
                 process_widget_count=office_card.process_widget_count(),
             )
         try:
-            self.add_chat_bubble(
-                "User",
-                payload.get("display_content") or "",
-                animate=False,
-                force_scroll=state.session_id == self.current_session_id,
-                attachments=payload.get("attachments") or [],
-                source_message_id=user_message_id,
-                created_at=message_payload["created_at"],
-                session_id=state.session_id,
-                target_layout=office_card.process_layout if office_card is not None else None,
-            )
+            if not existing_message_payload:
+                self.add_chat_bubble(
+                    "User",
+                    payload.get("display_content") or "",
+                    animate=False,
+                    force_scroll=state.session_id == self.current_session_id,
+                    attachments=payload.get("attachments") or [],
+                    source_message_id=user_message_id,
+                    created_at=message_payload["created_at"],
+                    session_id=state.session_id,
+                    target_layout=office_card.process_layout if office_card is not None else None,
+                )
             log_ppt_agent_debug(
                 "submit_session_user_bubble_added",
                 session_id=state.session_id,
@@ -41763,11 +41766,20 @@ class MainWindow(QMainWindow):
             )
         previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
         previous_render_total = len(getattr(state, "render_items", []) or [])
-        state.messages.append(message_payload)
+        if existing_message_payload:
+            state.messages = [
+                message_payload
+                if isinstance(item, dict) and str(item.get("id") or "") == user_message_id
+                else item
+                for item in state.messages
+            ]
+        else:
+            state.messages.append(message_payload)
         self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
-        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        if not existing_message_payload:
+            state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         self._sync_displayed_render_count_after_live_append(
             state,
             previous_render_count,
@@ -42272,6 +42284,15 @@ class MainWindow(QMainWindow):
         meta = data.get('meta')
         state = self.get_session(session_id)
         if not state: return
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            log_sub_agent_runtime(
+                "ui_tool_result_stale_run_rejected",
+                session_id=str(session_id or ""),
+                turn_id=str(turn_id or ""),
+                request_id=str(request_id or ""),
+                tool_call_id=str(tool_id or ""),
+            )
+            return
         if tool_id not in state.tool_cards:
             state.pending_tool_results[tool_id] = {
                 "result": result,
@@ -42480,6 +42501,7 @@ class MainWindow(QMainWindow):
         session_id=None,
         target_layout=None,
         edited=False,
+        process_events=True,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
@@ -42554,7 +42576,8 @@ class MainWindow(QMainWindow):
                     message_index + 1,
                     key=f"user:{source_message_id}",
                 )
-        self.process_ui_events(force=False)
+        if process_events:
+            self.process_ui_events(force=False)
         
         # Keep latest message in view when appending.
         if index is None:
@@ -42588,53 +42611,21 @@ class MainWindow(QMainWindow):
             text = str((message or {}).get("content") or "").strip()
         attachment_items = list(attachments or [])
 
-        wrapper = QWidget()
-        wrapper.setObjectName("TurnGuidanceInline")
-        wrapper_layout = QHBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(42, 4, 8, 4)
-        wrapper_layout.setSpacing(0)
-
-        normalized_status = status if status in GuidanceTimelineEvent.STATUS_COPY else "applied"
-        card = GuidanceTimelineEvent(
-            str((message or {}).get("id") or ""),
+        # Guidance is a normal user message. Queue/application state remains
+        # internal and never changes its chat appearance.
+        return self.add_chat_bubble(
+            "User",
             text,
-            status=normalized_status,
+            animate=False,
+            force_scroll=force_scroll,
             attachments=attachment_items,
-            mutation_ready=mutation_ready,
+            source_message_id=str((message or {}).get("id") or ""),
+            created_at=(message or {}).get("created_at"),
+            session_id=state.session_id,
+            index=index,
+            target_layout=target_layout,
+            process_events=process_events,
         )
-        card.editSubmitRequested.connect(
-            lambda message_id, edited_text, sid=state.session_id: self.edit_pending_guidance_inline(
-                sid,
-                message_id,
-                edited_text,
-            )
-        )
-        card.deleteRequested.connect(
-            lambda message_id, sid=state.session_id: self.delete_pending_guidance(
-                sid,
-                message_id,
-            )
-        )
-        card.setMaximumWidth(DesignTokens.message_max_width)
-        state.guidance_widgets[str((message or {}).get("id") or "")] = card
-        wrapper_layout.addWidget(card)
-        wrapper_layout.addStretch()
-
-        layout = target_layout or state.chat_layout
-        if index is not None:
-            layout.insertWidget(index, wrapper)
-        else:
-            if layout is state.chat_layout:
-                layout.insertWidget(layout.count() - 1, wrapper)
-            else:
-                layout.addWidget(wrapper)
-
-        if process_events:
-            self.process_ui_events(force=False)
-        if index is None:
-            self.request_session_scroll_to_bottom(state.session_id, force=force_scroll)
-        self.queue_session_bubble_virtualization(state.session_id)
-        return wrapper
 
     def _connect_chat_bubble_actions(self, bubble, state):
         if bubble is None or state is None or getattr(bubble, "_main_window_actions_connected", False):
@@ -42895,6 +42886,11 @@ class MainWindow(QMainWindow):
                 self.handle_content_signal(text, sid, tid, rid),
             Qt.QueuedConnection,
         )
+        state.llm_worker.content_snapshot_signal.connect(
+            lambda text, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_content_snapshot(text, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         state.llm_worker.step_signal.connect(self.append_log, Qt.QueuedConnection)
         state.llm_worker.thinking_signal.connect(
             lambda text, sid=session_id, tid=turn_id, rid=request_id:
@@ -42956,6 +42952,11 @@ class MainWindow(QMainWindow):
                 self.handle_content_signal(text, sid, tid, rid),
             Qt.QueuedConnection,
         )
+        worker.content_snapshot_signal.connect(
+            lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_content_snapshot(text, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         worker.tool_call_signal.connect(
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.add_tool_card(data, sid, turn_id=tid, request_id=rid),
@@ -43013,39 +43014,6 @@ class MainWindow(QMainWindow):
                     f"本地运行停留在收尾状态({state.session_id}, run={run_id})，"
                     "未发现可重连的 daemon worker。"
                 )
-            checkpoint_count = 0
-            try:
-                checkpoint_count = self._merge_runtime_ledger_checkpoint(
-                    state,
-                    run_id,
-                )
-            except Exception as exc:
-                self.append_log(
-                    f"本地运行检查点恢复失败({state.session_id}, run={run_id}): {exc}"
-                )
-                self._show_conversation_notice(state, f"未完成对话恢复失败：{exc}", "error")
-                return False
-            draft_content = str(run.get("draft_content") or "").strip()
-            if draft_content:
-                partial_message = {
-                    "id": uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"local-run-partial:{state.session_id}:{run_id}",
-                    ).hex,
-                    "role": "assistant",
-                    "content": draft_content,
-                    "content_parts": [{"type": "text", "text": draft_content}],
-                    "meta": {
-                        "turn_id": str(run.get("turn_id") or ""),
-                        "request_id": run_id,
-                        "ui_turn_id": str(run.get("turn_id") or ""),
-                        "ui_reply_kind": "interrupted",
-                        "context_visible_interruption": False,
-                        "run_outcome": "process_exit",
-                    },
-                }
-                state.messages = merge_messages_by_id(state.messages, [partial_message])
-            self._show_conversation_notice(state, "上次运行因程序退出而停止", "warning")
             self.runtime_journal.update_run(
                 state.session_id,
                 run_id,
@@ -43054,21 +43022,10 @@ class MainWindow(QMainWindow):
                     "terminal_error": "The local UI worker did not survive the application restart.",
                 },
             )
-            self._timeline_append_event(
-                state,
-                "error",
-                status="interrupted",
-                text="本轮因程序异常退出而中断",
-                turn_id=run.get("turn_id") or "",
-                reply_kind="interrupted",
-                finished_at=time.time(),
-            )
-            self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
-                "ui_local_run_recovered_as_interrupted",
+                "ui_local_run_journal_terminalized",
                 session_id=state.session_id,
                 request_id=run_id,
-                checkpoint_message_count=checkpoint_count,
             )
             return False
         raw_turn_id = str(run.get("turn_id") or "")
@@ -43856,6 +43813,24 @@ class MainWindow(QMainWindow):
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
 
+    def handle_content_snapshot(self, text, session_id=None, turn_id=None, request_id=None):
+        state = self.get_session(session_id)
+        if not state or not self._event_matches_active_run(state, turn_id, request_id):
+            return
+        if turn_id is not None and (
+            turn_id != state.active_turn_id or turn_id <= state.completed_turn_id
+        ):
+            return
+        canonical_content = str(text or "")
+        self._ensure_live_agent_stage(state)
+        state.current_content_buffer = canonical_content
+        state.last_flushed_content_buffer = ""
+        event = self._timeline_find_event(state, kind="content_fragment", open_only=True)
+        if event is None:
+            event = self._timeline_append_event(state, "content_fragment", status="running")
+        event["text"] = canonical_content
+        self.flush_session_content(state.session_id, final=False)
+
     def handle_thinking_signal(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state: return
@@ -44117,8 +44092,8 @@ class MainWindow(QMainWindow):
                 self.set_session_status("completed", state.session_id, save=False)
                 self._show_conversation_notice(
                     state,
-                    f"回答已完成，但界面收尾失败：{exc}",
-                    "warning",
+                    "本轮未完成，请重试",
+                    "error",
                 )
             else:
                 self.set_session_phase("Error", state.session_id)
@@ -44137,6 +44112,11 @@ class MainWindow(QMainWindow):
         if not state:
             log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
+        run_id = str(
+            result.get("request_id")
+            or getattr(state, "active_turn_request_id", "")
+            or ""
+        ).strip()
         is_first_submit_turn = bool(
             getattr(state, "first_submit_diagnostic_turn_id", 0)
             and str(getattr(state, "first_submit_diagnostic_turn_id", 0)) == str(turn_id or state.active_turn_id)
@@ -44203,11 +44183,6 @@ class MainWindow(QMainWindow):
         state.last_agent_bubble = bubble
 
         if "error" in result:
-            run_id = str(
-                result.get("request_id")
-                or getattr(state, "active_turn_request_id", "")
-                or ""
-            ).strip()
             runtime_terminal = str(result.get("_runtime_terminal") or "").strip().lower()
             error_text = str(result.get("error") or "未知错误")
             interrupted = bool(
@@ -44256,42 +44231,10 @@ class MainWindow(QMainWindow):
                     error=str(result.get("error") or "未知错误"),
                 )
                 state.first_submit_diagnostic_turn_id = 0
-            self._reject_unapplied_guidance(state, restore_input=True)
+            self._reject_unapplied_guidance(state, restore_input=False)
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
             bubble.stop_thinking_timers()
-            recovered_generated = filter_persistable_messages(
-                result.get("generated_messages") or []
-            )
-            checkpoint_projection = ""
-            if run_id:
-                run_record = self.runtime_journal.get_run(state.session_id, run_id) or {}
-                run_checkpoint = (
-                    run_record.get("ledger_checkpoint")
-                    if isinstance(run_record.get("ledger_checkpoint"), dict)
-                    else {}
-                )
-                checkpoint_projection = str(
-                    run_checkpoint.get("context_projection") or ""
-                )
-            try:
-                self._merge_runtime_ledger_checkpoint(state, run_id)
-            except Exception as exc:
-                self.append_log(
-                    f"异常中断账本检查点恢复失败({state.session_id}, run={run_id}): {exc}"
-                )
-            if checkpoint_projection == "grill_interruption":
-                recovered_generated = []
-            generated_to_append = self._merge_generated_messages(
-                state.messages,
-                recovered_generated,
-            )
-            if generated_to_append:
-                self._annotate_generated_messages_for_unified_turn(
-                    state,
-                    generated_to_append,
-                )
-                state.messages.extend(generated_to_append)
             interruption_text = self._finish_interrupted_turn(
                 state,
                 turn_id=turn_id or state.active_turn_id,
@@ -44316,13 +44259,6 @@ class MainWindow(QMainWindow):
                 }
                 state.observability_events.append(failure_event)
                 state.observability_events = state.observability_events[-500:]
-                self._show_conversation_notice(
-                    state,
-                    failure_summary,
-                    "error",
-                    action_text="查看技术详情",
-                    action_callback=lambda sid=state.session_id, payload=dict(failure_event): self._show_run_failure_details(sid, payload),
-                )
                 if is_current:
                     self.refresh_observability_view()
             self._finish_grill_mode(state, "error")
@@ -44351,6 +44287,12 @@ class MainWindow(QMainWindow):
                 self.set_session_phase("Error", state.session_id)
                 self.set_session_status("failed", state.session_id, save=True, error=error_text)
             if is_current: self.normalize_session_ui(state)
+            QTimer.singleShot(
+                0,
+                lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
+                    self.get_session(sid)
+                ),
+            )
             return
 
         reasoning = result.get("reasoning", "")
@@ -44566,11 +44508,6 @@ class MainWindow(QMainWindow):
             previous_render_count,
             previous_render_total,
         )
-        run_id = str(
-            result.get("request_id")
-            or getattr(state, "active_turn_request_id", "")
-            or ""
-        ).strip()
         if run_id:
             try:
                 self.runtime_journal.update_run(
@@ -44689,6 +44626,12 @@ class MainWindow(QMainWindow):
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
             if is_current: self.normalize_session_ui(state)
+            QTimer.singleShot(
+                0,
+                lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
+                    self.get_session(sid)
+                ),
+            )
 
     def handle_code_output(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
@@ -44756,6 +44699,13 @@ class MainWindow(QMainWindow):
             self.refresh_change_list(state.session_id)
         if session_id == self.current_session_id:
             self.normalize_session_ui(state)
+        if state:
+            QTimer.singleShot(
+                0,
+                lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
+                    self.get_session(sid)
+                ),
+            )
 
     def handle_code_input_request(self, prompt, session_id, turn_id=None, request_id=None):
         state = self.get_session(session_id)

@@ -1469,6 +1469,40 @@ class TestDaemonState(unittest.TestCase):
         self.assertEqual([msg.get("content") for msg in messages], ["fresh prompt", "fresh answer"])
         self.assertEqual([msg.get("content") for msg in self.state.sessions[session_id]], ["fresh prompt", "fresh answer"])
 
+    def test_daemon_steer_commits_user_message_before_worker_acceptance(self):
+        session_id = "daemon-guidance-commit"
+        observed = {}
+
+        class Worker:
+            def steer(inner_self, message, expected_turn_id=None):
+                observed["sqlite"] = self.state.chat_storage.get_messages(session_id)
+                return {"accepted": True, "turn_id": str(expected_turn_id)}
+
+        self.state.sessions[session_id] = [
+            {"id": "u1", "role": "user", "content": "开始"}
+        ]
+        self.state.active_workers[session_id] = {
+            "worker": Worker(),
+            "turn_id": "7",
+            "run_id": "request-7",
+        }
+        message = {
+            "id": "guide-7",
+            "role": "user",
+            "content": "继续检查",
+            "meta": {
+                "same_turn_guidance": True,
+                "turn_id": "7",
+                "request_id": "request-7",
+            },
+        }
+
+        result = self.state.steer_session(session_id, "7", message)
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["message_committed"])
+        self.assertEqual([item["id"] for item in observed["sqlite"]], ["u1", "guide-7"])
+
     def test_run_llm_sync_uses_snapshot_and_dedupes_current_user_message(self):
         session_id = "desktop-dedupe"
         snapshot = [

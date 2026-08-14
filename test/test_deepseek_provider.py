@@ -335,7 +335,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             "completed",
         )
 
-    def test_responses_completed_output_rejects_divergent_streamed_text(self):
+    def test_responses_completed_output_reconciles_divergent_streamed_text(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1",
             model_name="gpt-5.6",
@@ -369,11 +369,32 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertIn(
-            "diverged before completion",
-            next(chunk for chunk in chunks if chunk["type"] == "error")["content"],
+        snapshot = next(chunk for chunk in chunks if chunk["type"] == "content_snapshot")
+        self.assertEqual(snapshot["previous_content"], "partial")
+        self.assertEqual(snapshot["content"], "different")
+        self.assertFalse(any(chunk["type"] == "error" for chunk in chunks))
+        self.assertEqual(
+            next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")["status"],
+            "completed",
         )
-        self.assertFalse(any(chunk["type"] == "provider_terminal" for chunk in chunks))
+
+    def test_deepseek_responses_accepts_assistant_message_without_output_id(self):
+        provider, _client = self._build_provider(
+            base_url="https://api.deepseek.com/v1",
+            model_name="deepseek-chat",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+
+        items = provider._normalize_deepseek_replay_items([
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "ok"}],
+            }
+        ])
+
+        self.assertEqual(items[0]["content"][0]["text"], "ok")
 
     def test_responses_protocol_omits_empty_prompt_cache_key(self):
         provider, client = self._build_provider(

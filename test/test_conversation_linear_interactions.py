@@ -1023,16 +1023,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertEqual(
                 state.conversation_notice.label.text(),
-                "网络连接中断，重试 5 次后仍未恢复",
+                "暂时无法连接模型，请重试",
             )
             event = state.observability_events[-1]
             self.assertEqual(event["category"], "network_retry_exhausted")
             self.assertEqual(event["retry_attempt"], 5)
-            self.assertFalse(state.conversation_notice.action_button.isHidden())
-            state.conversation_notice.actionRequested.emit()
-            self.assertEqual(window.right_drawer_tab, window.RIGHT_TAB_OBSERVABILITY)
-            self.assertIn("网络连接中断", window.td_info_label.text())
-            self.assertEqual(window.td_result_edit.toPlainText(), "read timeout")
+            self.assertTrue(state.conversation_notice.action_button.isHidden())
         finally:
             window.close()
             window.deleteLater()
@@ -1297,7 +1293,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.session_status, "completed")
             self.assertFalse(window._session_has_live_activity(state.session_id))
             notice.assert_called()
-            self.assertIn("界面收尾失败", notice.call_args.args[1])
+            self.assertEqual(notice.call_args.args[1], "本轮未完成，请重试")
         finally:
             window.close()
             window.deleteLater()
@@ -1927,18 +1923,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 session_id=state.session_id,
                 mutation_ready=True,
             )
-            card = state.guidance_widgets["guide-edit"]
-            card.begin_inline_edit()
-            card.content_editor.setPlainText("新引导")
-            card.submit_inline_edit()
-
-            self.assertEqual(worker.replacement["content"], "新引导")
-            self.assertEqual(worker.replacement["meta"]["turn_id"], "1")
-            self.assertEqual(state.pending_guidance_messages[0]["content"], "新引导")
+            self.assertNotIn("guide-edit", state.guidance_widgets)
+            self.assertFalse(window.edit_pending_guidance_inline(state.session_id, "guide-edit", "新引导"))
+            self.assertIsNone(worker.replacement)
+            self.assertEqual(state.pending_guidance_messages[0]["content"], "原引导")
             self.assertEqual(state.messages, [])
-            self.assertEqual(state.ui_timeline_events[0]["text"], "新引导")
-            self.assertEqual(card.content_label.text(), "新引导")
-            self.assertFalse(card.edit_btn.isHidden())
+            self.assertEqual(state.ui_timeline_events[0]["text"], "原引导")
         finally:
             state.llm_worker = None
             window.close()
@@ -1997,12 +1987,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 mutation_ready=True,
             )
 
-            self.assertTrue(window.delete_pending_guidance(state.session_id, "guide-delete"))
-            self.assertEqual(window.input_field.toPlainText(), "撤回这条\n\n已有草稿")
-            self.assertEqual(state.composer_draft, "撤回这条\n\n已有草稿")
-            self.assertIn(os.path.normpath(attachment.name), state.prompt_files)
-            self.assertEqual(state.pending_guidance_messages, [])
-            self.assertEqual(state.ui_timeline_events, [])
+            self.assertFalse(window.delete_pending_guidance(state.session_id, "guide-delete"))
+            self.assertEqual(window.input_field.toPlainText(), "已有草稿")
+            self.assertEqual(state.composer_draft, "已有草稿")
+            self.assertNotIn(os.path.normpath(attachment.name), state.prompt_files)
+            self.assertEqual(len(state.pending_guidance_messages), 1)
+            self.assertEqual(len(state.ui_timeline_events), 1)
             self.assertNotIn("guide-delete", state.guidance_widgets)
         finally:
             state.llm_worker = None
@@ -2144,15 +2134,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 session_id=state.session_id,
                 mutation_ready=True,
             )
-            card = state.guidance_widgets["guide-failed-edit"]
-            card.begin_inline_edit()
-            card.content_editor.setPlainText("尚未保存的新内容")
-            card.submit_inline_edit()
-
-            self.assertTrue(card.editing)
-            self.assertFalse(card.content_editor.isHidden())
-            self.assertTrue(card.content_editor.isEnabled())
-            self.assertEqual(card.content_editor.toPlainText(), "尚未保存的新内容")
+            self.assertFalse(
+                window.edit_pending_guidance_inline(
+                    state.session_id, "guide-failed-edit", "尚未保存的新内容"
+                )
+            )
+            self.assertNotIn("guide-failed-edit", state.guidance_widgets)
             self.assertEqual(state.pending_guidance_messages[0]["content"], "原内容")
         finally:
             state.llm_worker = None
@@ -2196,10 +2183,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
 
             self.assertFalse(window.delete_pending_guidance(state.session_id, "guide-race"))
-            card = state.guidance_widgets["guide-race"]
-            self.assertEqual(card.status, "applied")
-            self.assertTrue(card.edit_btn.isHidden())
-            self.assertTrue(card.delete_btn.isHidden())
+            self.assertEqual(state.ui_timeline_events[0]["status"], "queued")
+            self.assertNotIn("guide-race", state.guidance_widgets)
             self.assertEqual(window.input_field.toPlainText(), "保留草稿")
         finally:
             state.llm_worker = None
@@ -2227,12 +2212,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 "meta": {"same_turn_guidance": True, "turn_id": "1"},
             }
             window._render_turn_guidance_checkpoint(state, message, "调整方向", [])
-            guidance = state.guidance_widgets["guide-live"]
-            self.assertTrue(guidance.edit_btn.isHidden())
             window._accept_turn_guidance(state, message, "调整方向", [])
-            self.assertFalse(guidance.edit_btn.isHidden())
             continuation = state.temp_thinking_bubble
-            guidance_wrapper = guidance.parentWidget()
+            guidance_wrapper = next(
+                state.chat_layout.itemAt(i).widget()
+                for i in range(state.chat_layout.count())
+                if isinstance(state.chat_layout.itemAt(i).widget(), ChatBubble)
+                and state.chat_layout.itemAt(i).widget().source_message_id == "guide-live"
+            )
 
             self.assertEqual(first.main_content_text, "阶段回复")
             self.assertIsNot(first, continuation)
@@ -2250,6 +2237,101 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIs(continuation.chat_storage, window.chat_storage)
             self.assertFalse(first.copy_result_btn.isVisible())
             self.assertFalse(first.office_draft_btn.isVisible())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_accepted_guidance_is_committed_once_and_rendered_as_user_message(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_guidance_commit")
+            state.live_activity = True
+            state.active_turn_id = 5
+            state.active_turn_request_id = "request-5"
+            window._append_live_thinking_segment(state)
+            message = {
+                "id": "guide-commit-once",
+                "role": "user",
+                "content": "继续检查并发",
+                "meta": {
+                    "same_turn_guidance": True,
+                    "turn_id": "5",
+                    "request_id": "request-5",
+                },
+            }
+
+            with patch.object(window, "save_chat_history", return_value=True) as save:
+                window._accept_turn_guidance(state, message, "继续检查并发", [])
+                window._persist_pending_guidance(state)
+
+            self.assertEqual(
+                [item.get("id") for item in state.messages].count("guide-commit-once"),
+                1,
+            )
+            self.assertTrue(save.called)
+            bubble = next(
+                item
+                for item in state.session_widget.findChildren(ChatBubble)
+                if item.source_message_id == "guide-commit-once"
+            )
+            self.assertEqual(bubble.role, "User")
+            self.assertNotIn("guide-commit-once", state.guidance_widgets)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_unapplied_guidance_becomes_next_turn_without_duplicate_message(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [
+                {"id": "u1", "role": "user", "content": "开始"},
+                {
+                    "id": "guide-next",
+                    "role": "user",
+                    "content": "作为下一轮继续",
+                    "meta": {"deferred_from_turn": "4", "turn_id": "4"},
+                },
+            ]
+            window._session_is_busy = MagicMock(return_value=False)
+            window._submit_session_request = MagicMock(return_value=True)
+
+            self.assertTrue(window._start_deferred_guidance_if_idle(state))
+
+            window._submit_session_request.assert_called_once()
+            args, kwargs = window._submit_session_request.call_args
+            self.assertEqual(args[1], "作为下一轮继续")
+            self.assertEqual(kwargs["existing_message_payload"]["id"], "guide-next")
+            self.assertEqual([item["id"] for item in state.messages], ["u1", "guide-next"])
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_unsteerable_running_stage_commits_message_for_next_turn(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_waiting_tool_guidance")
+            state.active_turn_id = 8
+            state.active_turn_request_id = "request-8"
+            state.turn_steerable = False
+            window._append_live_thinking_segment(state)
+
+            with patch.object(window, "save_chat_history", return_value=True):
+                submitted = window._submit_turn_guidance(
+                    state,
+                    "工具结束后继续验证",
+                    clear_current_input=False,
+                )
+
+            self.assertTrue(submitted)
+            message = next(
+                item for item in state.messages if item.get("content") == "工具结束后继续验证"
+            )
+            self.assertEqual(message["meta"]["deferred_from_turn"], "8")
+            self.assertNotIn("same_turn_guidance", message["meta"])
+            self.assertEqual(state.pending_guidance_messages, [])
         finally:
             window.close()
             window.deleteLater()
@@ -2286,8 +2368,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             reentrant_timer.start(0)
 
             window._render_turn_guidance_checkpoint(state, message, "切换方向", [])
-            self.assertTrue(reentrant_timer.isActive())
-            reentrant_timer.timeout.emit()
+            if reentrant_timer.isActive():
+                reentrant_timer.timeout.emit()
             reentrant_timer.stop()
             continuation_group = state.active_agent_turn_group
 
@@ -2456,9 +2538,96 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=1,
                 request_id="request-1",
             )
+            active_card = MagicMock()
+            active_card.failed = False
+            state.tool_cards["active-tool"] = active_card
+            window.update_tool_card(
+                {"id": "active-tool", "result": "old result"},
+                state.session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
+            window.handle_content_snapshot(
+                "旧请求终态正文",
+                state.session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
 
             self.assertEqual(state.current_content_buffer, "")
             self.assertNotIn("old-tool", state.tool_cards)
+            active_card.set_result.assert_not_called()
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_content_snapshot_replaces_only_the_active_run_buffer(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_content_snapshot")
+            state.active_turn_id = 3
+            state.active_turn_request_id = "request-3"
+            state.current_content_buffer = "流式草稿"
+            window._append_live_thinking_segment(state)
+
+            window.handle_content_snapshot(
+                "终态正文",
+                state.session_id,
+                turn_id=3,
+                request_id="request-3",
+            )
+
+            self.assertEqual(state.current_content_buffer, "终态正文")
+            self.assertEqual(state.last_agent_bubble.main_content_text, "终态正文")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_three_sessions_accept_only_their_own_interleaved_run_events(self):
+        window = MainWindow()
+        try:
+            states = [window.get_current_session()]
+            states.extend(
+                window.get_session(window.create_new_session(make_current=False))
+                for _ in range(2)
+            )
+            for index, state in enumerate(states, start=1):
+                window._retire_session_empty_state(state, reason="test_parallel_sessions")
+                state.active_turn_id = index
+                state.active_turn_request_id = f"request-{index}"
+
+            for index, state in reversed(list(enumerate(states, start=1))):
+                window.handle_content_signal(
+                    f"session-{index}",
+                    state.session_id,
+                    turn_id=index,
+                    request_id=f"request-{index}",
+                )
+                window.update_tool_card(
+                    {"id": f"tool-{index}", "result": f"result-{index}"},
+                    state.session_id,
+                    turn_id=index,
+                    request_id=f"request-{index}",
+                )
+
+            window.handle_content_signal(
+                "cross-session",
+                states[1].session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
+            window.update_tool_card(
+                {"id": "tool-cross", "result": "wrong"},
+                states[2].session_id,
+                turn_id=1,
+                request_id="request-1",
+            )
+
+            for index, state in enumerate(states, start=1):
+                self.assertEqual(state.current_content_buffer, f"session-{index}")
+                self.assertIn(f"tool-{index}", state.pending_tool_results)
+                self.assertNotIn("tool-cross", state.pending_tool_results)
         finally:
             window.close()
             window.deleteLater()
@@ -2535,12 +2704,71 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 and (message.get("meta") or {}).get("context_visible_interruption")
             ]
             self.assertEqual(interrupted, [])
-            self.assertEqual(state.conversation_notice.label.text(), "模型服务未能完成本轮请求")
+            self.assertEqual(state.conversation_notice.label.text(), "本轮未完成，请重试")
             self.assertEqual(state.observability_events[-1]["category"], "provider_error")
-            self.assertFalse(state.conversation_notice.action_button.isHidden())
+            self.assertTrue(state.conversation_notice.action_button.isHidden())
             self.assertFalse(
                 any("模型服务未能完成本轮请求" in str(message.get("content") or "") for message in state.messages)
             )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_internal_runtime_errors_never_enter_conversation_notice(self):
+        forbidden = (
+            "Provider",
+            "DeepSeek",
+            "Responses",
+            "daemon",
+            "replay",
+            "timeline",
+            "SQLite",
+            "run_id",
+        )
+        raw_errors = (
+            "DeepSeek Responses returned an invalid assistant message item.",
+            "Responses output text diverged before completion.",
+            "daemon replay failed for SQLite run_id=old-run",
+        )
+        for index, raw_error in enumerate(raw_errors, start=1):
+            window = MainWindow()
+            try:
+                state = window.get_current_session()
+                window._retire_session_empty_state(state, reason="test_internal_error_copy")
+                state.live_activity = True
+                state.active_turn_id = index
+                state.active_turn_request_id = f"request-{index}"
+                window._append_live_thinking_segment(state)
+
+                window.handle_llm_response(
+                    {"error": raw_error, "request_id": f"request-{index}"},
+                    state.session_id,
+                    turn_id=index,
+                    request_id=f"request-{index}",
+                )
+
+                visible = state.conversation_notice.label.text()
+                self.assertEqual(visible, "本轮未完成，请重试")
+                self.assertTrue(state.conversation_notice.action_button.isHidden())
+                self.assertFalse(any(word.lower() in visible.lower() for word in forbidden))
+            finally:
+                window.close()
+                window.deleteLater()
+
+    def test_invalid_timeline_is_logged_without_chat_notice(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            before = state.chat_layout.count()
+
+            rendered = window._render_unified_restore_error(
+                state,
+                "timeline payload is invalid",
+            )
+
+            self.assertEqual(rendered, 0)
+            self.assertEqual(state.chat_layout.count(), before)
+            self.assertIsNone(state.conversation_notice)
         finally:
             window.close()
             window.deleteLater()
@@ -2788,10 +3016,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
             self.assertIsNotNone(bubble.parent())
             self.assertNotIn("本轮执行失败", bubble.main_content_text)
-            self.assertEqual(state.conversation_notice.label.text(), "模型未返回最终正文")
+            self.assertEqual(state.conversation_notice.label.text(), "本轮未完成，请重试")
             self.assertEqual(state.observability_events[-1]["category"], "missing_final_content")
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
-            self.assertEqual(len(assistants), 2)
+            self.assertEqual(assistants, [])
             self.assertFalse(
                 any(
                     message.get("id") == "assistant-stage"

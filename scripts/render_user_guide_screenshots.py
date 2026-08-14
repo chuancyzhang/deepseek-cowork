@@ -93,17 +93,14 @@ def render_assistant_turn_screens(window):
 
     stage.think_toggle_btn.setChecked(False)
     final.set_message_actions_enabled(False)
-    window.add_turn_guidance_inline(
+    guidance = window.add_turn_guidance_inline(
         {"id": "guide-timeline-demo", "content": "先验证现有测试，再继续修改界面。"},
         status="waiting_tool",
-        mutation_ready=True,
     )
-    guidance = state.guidance_widgets["guide-timeline-demo"]
     save_widget(window, "s18-guidance-running.png", 220)
-    if not guidance.edit_btn.isVisible() or not guidance.delete_btn.isVisible():
-        raise RuntimeError("Pending guidance actions were not visible in the running screenshot.")
+    if not isinstance(guidance, main.ChatBubble) or guidance.role != "User":
+        raise RuntimeError("Running guidance was not rendered as a normal user message.")
 
-    guidance.set_status("applied")
     followup_group = main.AssistantTurnGroup("guide-followup-group")
     state.chat_layout.insertWidget(state.chat_layout.count() - 1, followup_group)
     followup = window._create_agent_chat_bubble(state)

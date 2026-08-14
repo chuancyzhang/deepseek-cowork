@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import socket
@@ -582,7 +583,22 @@ class DaemonState:
                 "expected_turn_id": expected,
                 "turn_id": active_turn_id,
             }
-        return worker.steer(message, expected_turn_id=expected)
+        if not isinstance(message, dict):
+            return {"accepted": False, "error": "invalid_message", "turn_id": active_turn_id}
+        message = copy.deepcopy(message)
+        message["id"] = str(message.get("id") or uuid.uuid4().hex)
+        messages = self.get_session_messages(session_id)
+        messages[:] = merge_messages_by_id(messages, [message])
+        messages[:] = self._normalize_persistable_messages(
+            session_id,
+            messages,
+            source="daemon_guidance_submit",
+        )
+        if not self.save_session(session_id, acknowledge=False):
+            return {"accepted": False, "error": "message_commit_failed", "turn_id": active_turn_id}
+        result = worker.steer(message, expected_turn_id=expected)
+        result["message_committed"] = True
+        return result
 
     def update_guidance_session(self, session_id, expected_turn_id, message_id, message):
         with self.lock:
@@ -1507,6 +1523,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker_holder["worker"] = worker
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
+            content_snapshot_signal = getattr(worker, "content_snapshot_signal", None)
+            if content_snapshot_signal is not None:
+                content_snapshot_signal.connect(
+                    lambda text: send_stream({"type": "content_snapshot", "content": text}),
+                    Qt.DirectConnection,
+                )
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
             worker.tool_result_signal.connect(lambda data: send_stream({"type": "tool_result", "data": data}), Qt.DirectConnection)
             worker.agent_state_signal.connect(lambda data: send_stream({"type": "agent_state", "data": data}), Qt.DirectConnection)

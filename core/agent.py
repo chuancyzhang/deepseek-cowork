@@ -664,6 +664,7 @@ class LLMWorker(QThread):
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
     content_signal = Signal(str)
+    content_snapshot_signal = Signal(str)
     output_signal = Signal(str) # For generic output/errors
     agent_state_signal = Signal(dict) # Signal to report sub-agent status
     observability_signal = Signal(dict)
@@ -2692,6 +2693,19 @@ class LLMWorker(QThread):
                                 c_content = chunk["content"]
                                 chunk_content += c_content
                                 self.content_signal.emit(c_content)
+
+                            elif type_ == "content_snapshot":
+                                canonical_content = str(chunk.get("content") or "")
+                                chunk_content = canonical_content
+                                self.content_snapshot_signal.emit(canonical_content)
+                                self.observability_signal.emit({
+                                    "type": "provider_content_reconciled",
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                    "previous_length": len(str(chunk.get("previous_content") or "")),
+                                    "canonical_length": len(canonical_content),
+                                    "timestamp": time.time(),
+                                })
 
                             # 3. Handle Tool Calls
                             elif type_ == "tool_call":

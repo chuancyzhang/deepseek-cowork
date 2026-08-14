@@ -720,8 +720,7 @@ class OpenAIProvider(LLMProvider):
                     raise RuntimeError("DeepSeek Responses reasoning item is missing content.")
             elif item_type == "message":
                 if (
-                    not str(item.get("id") or "").strip()
-                    or str(item.get("role") or "") != "assistant"
+                    str(item.get("role") or "") != "assistant"
                     or not isinstance(item.get("content"), list)
                 ):
                     raise RuntimeError("DeepSeek Responses returned an invalid assistant message item.")
@@ -916,13 +915,17 @@ class OpenAIProvider(LLMProvider):
                             )
                 completed_output_text = "".join(completed_text_parts)
                 if streamed_output_text and not completed_output_text.startswith(streamed_output_text):
-                    raise RuntimeError(
-                        "Responses output text diverged before completion."
-                    )
-                missing_output_text = completed_output_text[len(streamed_output_text):]
-                if missing_output_text:
-                    streamed_output_text += missing_output_text
-                    yield {"type": "content", "content": missing_output_text}
+                    yield {
+                        "type": "content_snapshot",
+                        "content": completed_output_text,
+                        "previous_content": streamed_output_text,
+                    }
+                    streamed_output_text = completed_output_text
+                else:
+                    missing_output_text = completed_output_text[len(streamed_output_text):]
+                    if missing_output_text:
+                        streamed_output_text += missing_output_text
+                        yield {"type": "content", "content": missing_output_text}
                 for item in replay_items:
                     if item.get("type") != "function_call":
                         continue

@@ -121,6 +121,29 @@ class ChatScrollRegressionTests(unittest.TestCase):
         self.assertEqual(dialog.api_protocol_combo.currentData(), "chat_completions")
         dialog.deleteLater()
 
+    def test_reasoning_effort_controls_use_protocol_names(self):
+        dialog = ModelEditDialog(
+            "openai",
+            {
+                "display_name": "Test model",
+                "model_name": "test-model",
+                "reasoning_efforts": ["low", "high", "max"],
+                "reasoning_effort": "high",
+            },
+        )
+        try:
+            self.assertEqual(
+                [dialog.reasoning_checks[key].text() for key in dialog.reasoning_checks],
+                ["none", "low", "medium", "high", "xhigh", "max"],
+            )
+            self.assertEqual(
+                [dialog.reasoning_combo.itemText(index) for index in range(dialog.reasoning_combo.count())],
+                ["none", "low", "medium", "high", "xhigh", "max"],
+            )
+            self.assertEqual(dialog.reasoning_combo.currentText(), "high")
+        finally:
+            dialog.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

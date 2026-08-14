@@ -5181,19 +5181,19 @@ class ModelEditDialog(QDialog):
             form.addRow(build_form_row_label("推理"), self.thinking_check)
 
             effort_labels = {
-                "none": "无",
-                "low": "低",
-                "medium": "中",
-                "high": "高",
-                "xhigh": "超高",
-                "max": "极限",
+                "none": "none",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "xhigh",
+                "max": "max",
             }
             effort_widget = QWidget()
             effort_layout = QHBoxLayout(effort_widget)
             effort_layout.setContentsMargins(0, 0, 0, 0)
             effort_layout.setSpacing(10)
             for effort in SUPPORTED_REASONING_EFFORTS:
-                check = QCheckBox(effort_labels[effort])
+                check = QCheckBox(effort)
                 check.setChecked(effort in configured_efforts)
                 self.reasoning_checks[effort] = check
                 effort_layout.addWidget(check)
@@ -12639,11 +12639,11 @@ class ModelSelectorPopover(ProductPopover):
     effortSelected = Signal(str)
 
     EFFORT_LABELS = {
-        "low": "低",
-        "medium": "中",
-        "high": "高",
-        "xhigh": "超高",
-        "max": "极限",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
     }
 
     def __init__(self, profiles, selected_id="", parent=None):
@@ -17808,6 +17808,7 @@ class ChatBubble(QFrame):
         attachments=None,
         attachment_hint="用户添加的文件",
         source_message_id="",
+        created_at=None,
         workspace_dir="",
         edited=False,
         session_id="",
@@ -17829,6 +17830,7 @@ class ChatBubble(QFrame):
         self._virtualized_height = 0
         self._virtualized_visible_state = {}
         self.source_message_id = str(source_message_id or "").strip()
+        self.created_at = created_at if created_at is not None else time.time()
         self.workspace_dir = str(workspace_dir or "").strip()
         self.session_id = str(session_id or "").strip()
         self.chat_storage = chat_storage
@@ -17838,7 +17840,12 @@ class ChatBubble(QFrame):
         self.inline_visualization_container = None
         self.inline_visualization_layout = None
         self.edit_btn = None
+        self.copy_btn = None
         self.delete_btn = None
+        self.user_action_bar = None
+        self.user_action_effect = None
+        self.message_time_label = None
+        self._message_actions_theme_enabled = True
         self.message_action_buttons = []
         self.message_actions_enabled = True
         self.edit_controls = None
@@ -17950,13 +17957,32 @@ class ChatBubble(QFrame):
                 self.mark_edited()
 
             if self.source_message_id:
-                action_row = QHBoxLayout()
+                action_bar = QWidget()
+                action_bar.setObjectName("UserMessageActionBar")
+                action_row = QHBoxLayout(action_bar)
                 action_row.setContentsMargins(0, 0, 2, 0)
                 action_row.setSpacing(6)
                 action_row.addStretch()
+                time_text = self._format_message_time(self.created_at)
+                time_label = QLabel(time_text)
+                time_label.setObjectName("UserMessageTime")
+                time_label.setMinimumWidth(150 if "年" in time_text else 110)
+                time_label.setStyleSheet(
+                    f"color: {DesignTokens.text_tertiary}; font-size: {DesignTokens.font_size_meta}px; "
+                    "padding-right: 2px; border: none; background: transparent;"
+                )
+                time_label.setToolTip("消息发送时间")
+                action_row.addWidget(time_label)
                 action_row.addWidget(self._create_edit_button())
-                action_row.addWidget(self._create_delete_button())
-                cw_layout.addLayout(action_row)
+                action_row.addWidget(self._create_copy_button())
+                action_effect = QGraphicsOpacityEffect(action_bar)
+                action_effect.setOpacity(0.0)
+                action_bar.setGraphicsEffect(action_effect)
+                action_bar.setEnabled(False)
+                self.user_action_bar = action_bar
+                self.user_action_effect = action_effect
+                self.message_time_label = time_label
+                cw_layout.addWidget(action_bar)
             
             # Add to main
             main_layout.addStretch() # Push everything right
@@ -18274,6 +18300,11 @@ class ChatBubble(QFrame):
                 f"padding: {DesignTokens.spacing_sm}px; border-radius: {DesignTokens.radius_sm}px; "
                 f"margin-left: {DesignTokens.spacing_xs}px;"
             )
+        if self.message_time_label is not None:
+            self.message_time_label.setStyleSheet(
+                f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta}px; "
+                "padding-right: 2px; border: none; background: transparent;"
+            )
         if self.content_edit is not None and self.main_content_text:
             was_final = bool(getattr(self, "_rendered_main_content_final", False))
             self._rendered_main_content_text = None
@@ -18321,6 +18352,7 @@ class ChatBubble(QFrame):
             }[alignment]
             layout.setAlignment(qt_alignment)
         action_spec = (resolved.get("components") or {}).get("conversation.message_actions") or {}
+        self._message_actions_theme_enabled = action_spec.get("visible") is not False
         for button in self.message_action_buttons + [
             item for item in (
                 getattr(self, "copy_result_btn", None),
@@ -18330,6 +18362,8 @@ class ChatBubble(QFrame):
         ]:
             if action_spec.get("visible") is False:
                 button.hide()
+        if self.user_action_bar is not None and not self._message_actions_theme_enabled:
+            self.user_action_bar.hide()
         thinking_spec = (resolved.get("components") or {}).get("conversation.thinking_stage") or {}
         if thinking_spec.get("visible") is False and getattr(self, "thinking_widget", None) is not None:
             self.thinking_widget.hide()
@@ -18377,6 +18411,61 @@ class ChatBubble(QFrame):
         btn = self._create_message_action_button("fa5s.pen", "编辑并重新生成", self.begin_inline_edit)
         self.edit_btn = btn
         return btn
+
+    @staticmethod
+    def _format_message_time(value):
+        try:
+            timestamp = float(value)
+            moment = datetime.fromtimestamp(timestamp)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return "时间无效"
+        now = datetime.now()
+        if moment.year == now.year:
+            return f"{moment.month}月{moment.day}日 {moment:%H:%M}"
+        return f"{moment.year}年{moment.month}月{moment.day}日 {moment:%H:%M}"
+
+    def _create_copy_button(self):
+        if self.copy_btn is not None:
+            return self.copy_btn
+        btn = self._create_message_action_button("fa5s.copy", "复制消息", self.copy_user_content)
+        self.copy_btn = btn
+        return btn
+
+    def copy_user_content(self):
+        if self.role != "User" or self.user_content_edit is None:
+            return
+        QApplication.clipboard().setText(self.user_content_edit.toPlainText())
+        if self.copy_btn is not None:
+            self.copy_btn.setToolTip("已复制")
+            QTimer.singleShot(
+                1200,
+                lambda: self.copy_btn.setToolTip("复制消息")
+                if self.copy_btn is not None and _qt_object_alive(self.copy_btn)
+                else None,
+            )
+
+    def _set_user_action_bar_visible(self, visible):
+        if self.user_action_bar is None:
+            return
+        editing = bool(self.edit_controls is not None and self.edit_controls.isVisible())
+        contents_visible = bool(visible and not editing and self._message_actions_theme_enabled)
+        self.user_action_bar.setVisible(self._message_actions_theme_enabled)
+        self.user_action_bar.setEnabled(contents_visible)
+        if self.user_action_effect is not None:
+            self.user_action_effect.setOpacity(1.0 if contents_visible else 0.0)
+
+    def enterEvent(self, event):
+        self._set_user_action_bar_visible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        QTimer.singleShot(
+            0,
+            lambda: self._set_user_action_bar_visible(False)
+            if _qt_object_alive(self) and not self.underMouse()
+            else None,
+        )
+        super().leaveEvent(event)
 
     def mark_edited(self):
         if self.role != "User" or self.user_wrapper_layout is None or self.edited_label is not None:
@@ -18428,6 +18517,7 @@ class ChatBubble(QFrame):
         )
         if self.edit_controls is not None:
             self.edit_controls.setVisible(True)
+        self._set_user_action_bar_visible(False)
         for button in self.message_action_buttons:
             button.setVisible(False)
 
@@ -18478,6 +18568,7 @@ class ChatBubble(QFrame):
             self.edit_controls.setVisible(False)
         for button in self.message_action_buttons:
             button.setVisible(True)
+        self._set_user_action_bar_visible(self.underMouse())
 
     def _emit_delete_request(self):
         if self.source_message_id:
@@ -27782,11 +27873,11 @@ class MainWindow(QMainWindow):
         profiles = list(self.config_manager.iter_model_profiles() or [])
         selected = next((item for item in profiles if item.get("id") == selected_id), None)
         effort_labels = {
-            "low": "低",
-            "medium": "中",
-            "high": "高",
-            "xhigh": "超高",
-            "max": "极限",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
         }
         efforts = normalize_reasoning_efforts((selected or {}).get("reasoning_efforts"))
         current_effort = normalize_reasoning_effort((selected or {}).get("reasoning_effort"), efforts)
@@ -33689,6 +33780,7 @@ class MainWindow(QMainWindow):
                     animate=animate,
                     attachments=self._message_user_attachments(message),
                     source_message_id=str(message.get("id") or "").strip(),
+                    created_at=message.get("created_at"),
                     session_id=session_id,
                     edited=bool((message.get("meta") or {}).get("edited")),
                 )
@@ -34208,6 +34300,7 @@ class MainWindow(QMainWindow):
                     animate=animate,
                     attachments=self._message_user_attachments(msg),
                     source_message_id=str(msg.get("id") or "").strip(),
+                    created_at=msg.get("created_at"),
                     session_id=session_id,
                     target_layout=target_layout,
                     edited=bool((msg.get("meta") or {}).get("edited")),
@@ -40176,6 +40269,7 @@ class MainWindow(QMainWindow):
                 "id": self._new_message_id(),
                 "role": "user",
                 "content": str(original_text or task_text or "").strip(),
+                "created_at": int(time.time()),
                 "meta": {},
             }
             state.messages.append(parent_message)
@@ -40189,6 +40283,7 @@ class MainWindow(QMainWindow):
                     animate=False,
                     force_scroll=True,
                     source_message_id=parent_message["id"],
+                    created_at=parent_message["created_at"],
                     session_id=state.session_id,
                 )
         parent_message_id = str(parent_message.get("id") or "")
@@ -41433,7 +41528,12 @@ class MainWindow(QMainWindow):
         state.office_task_result_paths = []
         turn_model_id = self._model_id_for_state(state)
         turn_model_profile = self._model_profile_snapshot_for_state(state)
-        message_payload = {"id": user_message_id, "role": "user", "content": user_text}
+        message_payload = {
+            "id": user_message_id,
+            "role": "user",
+            "content": user_text,
+            "created_at": int(time.time()),
+        }
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
         message_meta = dict(payload.get("meta") or {})
@@ -41607,6 +41707,7 @@ class MainWindow(QMainWindow):
                 force_scroll=state.session_id == self.current_session_id,
                 attachments=payload.get("attachments") or [],
                 source_message_id=user_message_id,
+                created_at=message_payload["created_at"],
                 session_id=state.session_id,
                 target_layout=office_card.process_layout if office_card is not None else None,
             )
@@ -42375,6 +42476,7 @@ class MainWindow(QMainWindow):
         force_scroll=False,
         attachments=None,
         source_message_id="",
+        created_at=None,
         session_id=None,
         target_layout=None,
         edited=False,
@@ -42402,6 +42504,7 @@ class MainWindow(QMainWindow):
             duration,
             attachments=attachments,
             source_message_id=source_message_id,
+            created_at=created_at,
             workspace_dir=self._workspace_dir_for_state(state),
             edited=edited,
             session_id=state.session_id,

@@ -167,7 +167,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         picker = ModelSelectorPopover(profiles, "grok-45")
         self.assertEqual(picker.model_list.item(0).text(), "grok / grok-4.5")
         effort_buttons = [picker.effort_row.itemAt(i).widget() for i in range(picker.effort_row.count())]
-        self.assertTrue(any(button and button.text() == "高" and button.isChecked() for button in effort_buttons))
+        self.assertTrue(any(button and button.text() == "high" and button.isChecked() for button in effort_buttons))
         picker.deleteLater()
 
     def test_model_picker_viewport_click_emits_selected_model(self):
@@ -3032,6 +3032,36 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         bubble.apply_dynamic_widths(880, 640)
         self.assertLess(bubble.user_content_edit.width(), 200)
         bubble.deleteLater()
+
+    def test_user_message_actions_show_time_edit_and_copy_only_on_hover(self):
+        bubble = ChatBubble(
+            "User",
+            "需要复制的问题",
+            source_message_id="user-message-1",
+            created_at=1_723_130_580,
+        )
+        try:
+            self.assertEqual(bubble.user_action_effect.opacity(), 0.0)
+            self.assertIsNotNone(bubble.message_time_label)
+            self.assertIsNotNone(bubble.edit_btn)
+            self.assertIsNotNone(bubble.copy_btn)
+            self.assertIsNone(bubble.delete_btn)
+
+            bubble._set_user_action_bar_visible(True)
+            self.assertEqual(bubble.user_action_effect.opacity(), 1.0)
+            self.assertRegex(
+                bubble.message_time_label.text(),
+                r"(?:\d{4}年)?\d{1,2}月\d{1,2}日 \d{2}:\d{2}",
+            )
+
+            bubble.copy_user_content()
+            self.assertEqual(QApplication.clipboard().text(), "需要复制的问题")
+            self.assertEqual(bubble.copy_btn.toolTip(), "已复制")
+
+            bubble._set_user_action_bar_visible(False)
+            self.assertEqual(bubble.user_action_effect.opacity(), 0.0)
+        finally:
+            bubble.deleteLater()
 
     def test_skill_update_uses_searchable_target_not_native_combo(self):
         parent = QWidget()

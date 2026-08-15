@@ -869,6 +869,22 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_steerable_running_composer_keeps_direction_action_enabled_without_text(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.turn_steerable = True
+            window.input_field.clear()
+            window._session_has_live_activity = MagicMock(return_value=True)
+
+            window.refresh_composer_action_state()
+
+            self.assertEqual(window.action_btn.text(), "调整方向")
+            self.assertTrue(window.action_btn.isEnabled())
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_provider_retry_is_runtime_only_and_does_not_change_messages(self):
         window = MainWindow()
         try:

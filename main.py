@@ -30325,7 +30325,7 @@ class MainWindow(QMainWindow):
             self.action_btn.setText("调整方向" if steerable else "运行中")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-            self.action_btn.setEnabled(steerable and bool(self.input_field.toPlainText().strip()))
+            self.action_btn.setEnabled(steerable)
             self.input_field.setEnabled(steerable)
             self.tool_menu_btn.setEnabled(steerable)
             self.stop_btn.setVisible(True)
@@ -39227,7 +39227,7 @@ class MainWindow(QMainWindow):
         if running:
             steerable = bool(getattr(state, "turn_steerable", False) and not (state.code_worker and state.code_worker.isRunning()))
             self.action_btn.setText("调整方向" if steerable else "运行中")
-            self.action_btn.setEnabled(steerable and bool(self.input_field.toPlainText().strip()))
+            self.action_btn.setEnabled(steerable)
             return
         grill_armed = normalize_grill_mode_state(
             getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)

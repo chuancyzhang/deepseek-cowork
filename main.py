@@ -319,8 +319,8 @@ import shutil
 import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
-                          QDesktopServices, QGuiApplication, QColor, QPainter, 
-                          QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
+                           QDesktopServices, QGuiApplication, QColor, QPainter,
+                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
@@ -21656,6 +21656,7 @@ class FileWorkbench(QWidget):
     """Single-surface file workspace with one movable navigator panel."""
 
     effectiveModeChanged = Signal(str)
+    autoDismissRequested = Signal(str)
 
     def __init__(self, navigator, content, parent=None):
         super().__init__(parent)
@@ -21671,11 +21672,64 @@ class FileWorkbench(QWidget):
         self.content_min_width = int(getattr(DesignTokens, "file_workbench_content_min_width", 280))
         self.navigator_preferred_height = None
         self._effective_mode = "overlay"
+        self._auto_dismiss_anchors = []
         self.setMinimumSize(0, 0)
         self.content.show()
         self.navigator.show()
+        self.navigator.installEventFilter(self)
+        app = QApplication.instance()
+        if app is None:
+            raise RuntimeError("文件导航浮层需要已初始化的 QApplication")
+        app.installEventFilter(self)
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def set_auto_dismiss_anchors(self, *widgets):
+        self._auto_dismiss_anchors = [widget for widget in widgets if widget is not None]
+
+    def _is_unpinned_overlay_visible(self):
+        return bool(
+            self.navigator_visible
+            and not self.navigator_pinned
+            and self.navigator.isVisible()
+            and self.isVisible()
+        )
+
+    @staticmethod
+    def _widget_belongs_to(widget, ancestor):
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = current.parentWidget() if isinstance(current, QWidget) else None
+        return False
+
+    def _is_navigator_interaction(self, widget):
+        if self._widget_belongs_to(widget, self.navigator):
+            return True
+        return any(
+            self._widget_belongs_to(widget, anchor)
+            for anchor in self._auto_dismiss_anchors
+            if _qt_object_alive(anchor)
+        )
+
+    def _dismiss_after_pointer_leave(self):
+        if not self._is_unpinned_overlay_visible() or self.navigator.underMouse():
+            return
+        popup = QApplication.activePopupWidget()
+        if popup is not None and self._is_navigator_interaction(popup):
+            return
+        self.autoDismissRequested.emit("pointer_leave")
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if watched is self.navigator and event_type == QEvent.Leave:
+            QTimer.singleShot(0, self._dismiss_after_pointer_leave)
+        elif event_type == QEvent.MouseButtonPress and self._is_unpinned_overlay_visible():
+            widget = watched if isinstance(watched, QWidget) else None
+            if not self._is_navigator_interaction(widget):
+                self.autoDismissRequested.emit("outside_click")
+        return super().eventFilter(watched, event)
 
     def refresh_theme(self, _resolved=None):
         self.navigator.setStyleSheet(
@@ -23881,6 +23935,8 @@ class MainWindow(QMainWindow):
         
         self.file_workbench = FileWorkbench(self.file_navigator_panel, preview_container)
         self.file_workbench.effectiveModeChanged.connect(self._on_file_navigator_effective_mode_changed)
+        self.file_workbench.autoDismissRequested.connect(self._auto_dismiss_file_navigator)
+        self.file_workbench.set_auto_dismiss_anchors(self.file_navigator_btn)
         self.file_workbench.set_navigator_state(
             visible=self.file_navigator_visible,
             pinned=self.file_navigator_pinned,
@@ -25093,6 +25149,11 @@ class MainWindow(QMainWindow):
             not bool(getattr(self, "file_navigator_visible", False)),
             reason="header_button",
         )
+
+    def _auto_dismiss_file_navigator(self, reason):
+        if bool(getattr(self, "file_navigator_pinned", False)):
+            return
+        self.set_file_navigator_visible(False, reason=str(reason or "auto_dismiss"))
 
     def set_file_navigator_visible(self, visible, reason="programmatic"):
         visible = bool(visible)
@@ -35927,6 +35988,14 @@ class MainWindow(QMainWindow):
                 self.deliverable_editor_external_conflict = False
                 self.deliverable_pending_serialized = b""
                 self.deliverable_recent_internal_save_until = time.monotonic() + 1.5
+                if (
+                    session is not None
+                    and session.descriptor.kind == "sheet"
+                    and getattr(self, "deliverable_editor_web_view", None) is not None
+                ):
+                    self.deliverable_editor_web_view.page().runJavaScript(
+                        "window.coworkEditor.markClean()"
+                    )
                 self._set_deliverable_dirty(False)
                 self._set_deliverable_edit_state(
                     "ready",

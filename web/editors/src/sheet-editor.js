@@ -13,6 +13,8 @@ let univerAPI = null;
 let workbook = null;
 let commandListener = null;
 let suppressDirty = true;
+let cleanSnapshot = "";
+let dirtyCheckScheduled = false;
 
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
@@ -46,6 +48,8 @@ function sendTextPayload(kind, value) {
 
 function dispose() {
   suppressDirty = true;
+  cleanSnapshot = "";
+  dirtyCheckScheduled = false;
   if (commandListener && commandListener.dispose) commandListener.dispose();
   commandListener = null;
   if (workbook && workbook.dispose) workbook.dispose();
@@ -55,6 +59,33 @@ function dispose() {
   univerAPI = null;
   loadingChunks = [];
   document.getElementById("sheet-root").replaceChildren();
+}
+
+function serializedWorkbook() {
+  if (!workbook) throw new Error("表格模型尚未加载完成。");
+  return JSON.stringify(workbook.save());
+}
+
+function scheduleDirtyCheck() {
+  if (suppressDirty || dirtyCheckScheduled || !bridge || !workbook) return;
+  dirtyCheckScheduled = true;
+  queueMicrotask(() => {
+    dirtyCheckScheduled = false;
+    if (!suppressDirty && bridge && workbook) {
+      bridge.setDirty(serializedWorkbook() !== cleanSnapshot);
+    }
+  });
+}
+
+function trackWorkbookMutation(command) {
+  // Univer type 2 is MUTATION: persisted model data changed. Selection,
+  // focus, scrolling, and other view-only operations must not mark dirty.
+  if (command && command.type === 2) scheduleDirtyCheck();
+}
+
+function markClean() {
+  cleanSnapshot = serializedWorkbook();
+  if (bridge) bridge.setDirty(false);
 }
 
 function loadWorkbook() {
@@ -82,11 +113,10 @@ function loadWorkbook() {
     workbook = univerAPI.createWorkbook(snapshot);
     commandListener = univerAPI.addEvent(
       univerAPI.Event.CommandExecuted,
-      () => {
-        if (!suppressDirty && bridge) bridge.setDirty(true);
-      }
+      trackWorkbookMutation
     );
     window.setTimeout(() => {
+      cleanSnapshot = serializedWorkbook();
       suppressDirty = false;
       bridge.setDirty(false);
       bridge.editorLoaded(sessionId);
@@ -98,8 +128,7 @@ function loadWorkbook() {
 
 function requestSave() {
   try {
-    if (!workbook) throw new Error("表格模型尚未加载完成。");
-    sendTextPayload("sheet", JSON.stringify(workbook.save()));
+    sendTextPayload("sheet", serializedWorkbook());
   } catch (error) {
     reportError(error);
   }
@@ -129,6 +158,7 @@ window.coworkEditor = {
     loadWorkbook();
   },
   requestSave,
+  markClean,
   command() {},
   dispose,
   setTheme

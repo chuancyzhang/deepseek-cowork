@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 
@@ -96,6 +96,49 @@ class FileWorkbenchTest(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(workbench.is_effectively_pinned())
         self.assertEqual(navigator.height(), 176)
+        workbench.close()
+
+    def test_unpinned_overlay_requests_dismiss_on_leave_and_outside_click(self):
+        navigator = QFrame()
+        navigator.setObjectName("FileNavigatorPanel")
+        content = QWidget()
+        workbench = FileWorkbench(navigator, content)
+        dismiss_reasons = []
+        workbench.autoDismissRequested.connect(dismiss_reasons.append)
+        workbench.resize(500, 320)
+        workbench.set_navigator_state(visible=True, pinned=False, width=280)
+        workbench.show()
+        self.app.processEvents()
+
+        with patch.object(navigator, "underMouse", return_value=False):
+            workbench.eventFilter(navigator, QEvent(QEvent.Leave))
+            QTest.qWait(1)
+            self.app.processEvents()
+        self.assertIn("pointer_leave", dismiss_reasons)
+
+        dismiss_reasons.clear()
+        QTest.mouseClick(content, Qt.LeftButton, pos=QPoint(420, 200))
+        self.app.processEvents()
+        self.assertIn("outside_click", dismiss_reasons)
+        workbench.close()
+
+    def test_pinned_navigator_does_not_auto_dismiss(self):
+        navigator = QFrame()
+        navigator.setObjectName("FileNavigatorPanel")
+        content = QWidget()
+        workbench = FileWorkbench(navigator, content)
+        dismiss_reasons = []
+        workbench.autoDismissRequested.connect(dismiss_reasons.append)
+        workbench.resize(860, 320)
+        workbench.set_navigator_state(visible=True, pinned=True, width=280)
+        workbench.show()
+        self.app.processEvents()
+
+        workbench.eventFilter(navigator, QEvent(QEvent.Leave))
+        QTest.mouseClick(content, Qt.LeftButton, pos=QPoint(500, 200))
+        self.app.processEvents()
+
+        self.assertEqual(dismiss_reasons, [])
         workbench.close()
 
     def test_preferred_overlay_height_tracks_visible_workspace_rows(self):

@@ -23,6 +23,9 @@ class DeliverableEditorWebTest(unittest.TestCase):
 
         self.assertIn("disableForceStringAlert: true", sheet_source)
         self.assertIn("disableForceStringMark: true", sheet_source)
+        self.assertIn("serializedWorkbook() !== cleanSnapshot", sheet_source)
+        self.assertIn("command.type === 2", sheet_source)
+        self.assertIn("markClean", sheet_source)
         self.assertIn("scale: 1.1", docx_source)
         self.assertIn("--cowork-font-size: 14px", shared_css)
         self.assertIn("--cowork-control-height: 32px", shared_css)

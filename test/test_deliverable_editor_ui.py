@@ -270,6 +270,43 @@ class DeliverableEditorUiTest(unittest.TestCase):
         self.assertIn('"control-height": "32px"', scripts[0])
         self.assertIn('"toolbar-height": "44px"', scripts[0])
 
+    def test_successful_sheet_save_resets_web_editor_clean_baseline(self):
+        scripts = []
+        page = type(
+            "_Page",
+            (),
+            {"runJavaScript": lambda _self, script: scripts.append(script)},
+        )()
+        self.window.deliverable_editor_web_view = type(
+            "_View", (), {"page": lambda _self: page}
+        )()
+        self.window.deliverable_edit_session = type(
+            "_Session",
+            (),
+            {
+                "path": r"D:\workspace\data.xlsx",
+                "dirty": True,
+                "descriptor": type("_Descriptor", (), {"kind": "sheet"})(),
+            },
+        )()
+        self.window.deliverable_edit_dirty = True
+        result = {
+            "ok": True,
+            "result": type(
+                "_SaveResult",
+                (),
+                {"path": r"D:\workspace\data.xlsx", "bytes_written": 128},
+            )(),
+        }
+
+        with patch.object(self.window, "add_system_toast"), patch.object(
+            self.window, "_watch_deliverable_paths"
+        ):
+            self.window._handle_deliverable_save_finished(result)
+
+        self.assertIn("window.coworkEditor.markClean()", scripts)
+        self.assertFalse(self.window.deliverable_edit_dirty)
+
     def test_docx_editor_uses_compact_mode_button(self):
         with tempfile.TemporaryDirectory() as directory:
             source = os.path.join(directory, "report.docx")

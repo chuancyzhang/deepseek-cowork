@@ -2297,6 +2297,91 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_completed_run_does_not_reappend_tool_round_committed_before_guidance(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_guidance_generated_replay")
+            state.live_activity = True
+            state.active_turn_id = 9
+            state.active_turn_request_id = "request-guidance-9"
+            state.active_turn_user_message_id = "user-guidance-9"
+            state.messages = [{
+                "id": "user-guidance-9",
+                "role": "user",
+                "content": "先查询",
+                "meta": {"turn_id": "9", "request_id": "request-guidance-9"},
+            }]
+            first = window._append_live_thinking_segment(state)
+            first.set_main_content("正在查询。", final=False)
+            state.current_content_buffer = "正在查询。"
+            window._timeline_append_text_delta(state, "content_fragment", "正在查询。")
+            guidance = {
+                "id": "guide-guidance-9",
+                "role": "user",
+                "content": "再比较另一家公司",
+                "meta": {
+                    "same_turn_guidance": True,
+                    "turn_id": "9",
+                    "request_id": "request-guidance-9",
+                },
+            }
+            window._accept_turn_guidance(state, guidance, "再比较另一家公司", [])
+            window.handle_content_signal(
+                "最终比较结果。",
+                state.session_id,
+                turn_id=9,
+                request_id="request-guidance-9",
+            )
+            window.handle_llm_response(
+                {
+                    "role": "assistant",
+                    "content": "最终比较结果。",
+                    "request_id": "request-guidance-9",
+                    "generated_messages": [
+                        {
+                            "id": "provider-stage-9",
+                            "role": "assistant",
+                            "content": "正在查询。",
+                            "tool_calls": [{
+                                "id": "tool-guidance-9",
+                                "type": "function",
+                                "function": {"name": "search", "arguments": "{}"},
+                            }],
+                        },
+                        {
+                            "id": "tool-result-guidance-9",
+                            "role": "tool",
+                            "tool_call_id": "tool-guidance-9",
+                            "content": "ok",
+                        },
+                        copy.deepcopy(guidance),
+                        {
+                            "id": "provider-final-9",
+                            "role": "assistant",
+                            "content": "最终比较结果。",
+                        },
+                    ],
+                },
+                state.session_id,
+                turn_id=9,
+                request_id="request-guidance-9",
+            )
+
+            self.assertEqual(
+                [(item.get("role"), item.get("content")) for item in state.messages],
+                [
+                    ("user", "先查询"),
+                    ("assistant", "正在查询。"),
+                    ("user", "再比较另一家公司"),
+                    ("assistant", "最终比较结果。"),
+                ],
+            )
+            self.assertFalse(any(item.get("role") == "tool" for item in state.messages))
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_unapplied_guidance_becomes_next_turn_without_duplicate_message(self):
         window = MainWindow()
         try:
@@ -2345,8 +2430,17 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             message = next(
                 item for item in state.messages if item.get("content") == "工具结束后继续验证"
             )
-            self.assertEqual(message["meta"]["deferred_from_turn"], "8")
-            self.assertNotIn("same_turn_guidance", message["meta"])
+            self.assertEqual(message["meta"]["turn_id"], "8")
+            self.assertTrue(message["meta"]["same_turn_guidance"])
+            self.assertNotIn("deferred_from_turn", message["meta"])
+            event = next(
+                item
+                for item in state.ui_timeline_events
+                if item.get("kind") == "guidance"
+                and item.get("message_id") == message["id"]
+            )
+            self.assertEqual(event["status"], "rejected")
+            self.assertFalse(event.get("deferred_consumed", False))
             self.assertEqual(state.pending_guidance_messages, [])
         finally:
             window.close()
@@ -2550,7 +2644,6 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "request_id": "request-guided-7",
                 },
             }
-            state.messages.append(guidance)
             with patch.object(window, "save_chat_history", return_value=True):
                 window._render_turn_guidance_checkpoint(
                     state,
@@ -2558,6 +2651,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "改用东方财富数据",
                     [],
                 )
+            window.chat_storage.save_conversation_safely(
+                state.session_id,
+                state.messages,
+                title="引导原子提交",
+                status="running",
+                meta={},
+            )
 
             second = state.temp_thinking_bubble
             second.set_main_content("东方财富显示主线仍在", final=False)
@@ -2586,12 +2686,22 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 item
                 for item in state.messages
                 if item.get("role") == "assistant"
-                and (item.get("meta") or {}).get("context_visible_interruption")
             ]
             self.assertEqual(len(visible_assistant), 2)
             self.assertEqual(
+                [item["meta"]["ui_reply_kind"] for item in visible_assistant],
+                ["stage", "interrupted"],
+            )
+            self.assertEqual(
                 {item["meta"]["request_id"] for item in visible_assistant},
                 {"request-guided-7"},
+            )
+            self.assertNotIn(
+                "context_visible_interruption",
+                visible_assistant[0]["meta"],
+            )
+            self.assertTrue(
+                visible_assistant[1]["meta"]["context_visible_interruption"]
             )
             window.chat_storage.save_conversation_safely(
                 state.session_id,

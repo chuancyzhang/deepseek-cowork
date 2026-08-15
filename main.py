@@ -34702,6 +34702,7 @@ class MainWindow(QMainWindow):
                 "message_id": str(raw.get("message_id") or ""),
                 "tool_call_id": str(raw.get("tool_call_id") or ""),
                 "text": str(raw.get("text") or ""),
+                "deferred_consumed": bool(raw.get("deferred_consumed", False)),
             }
             normalized.append(event)
         normalized.sort(key=lambda item: item["sequence"])
@@ -39694,31 +39695,36 @@ class MainWindow(QMainWindow):
         worker.finished.connect(cleanup)
         worker.start()
 
-    def _persist_visible_interrupted_assistant_stages(
+    def _append_visible_assistant_stages(
         self,
         state,
         *,
         turn_id,
         run_id,
         outcome,
+        groups=None,
         fallback_bubble=None,
     ):
-        """Commit exactly the assistant text that the user has already seen.
+        """Append exactly the assistant text that the user has already seen.
 
-        Live bubbles are a projection while a run is active.  Once that run is
-        interrupted or fails, every non-empty projected assistant stage becomes
-        durable conversation history.  Runtime checkpoints are deliberately not
-        consulted here: the active session UI is the source of the visible text,
-        and SQLite remains the only history ledger.
+        This method is intentionally append-only.  A guidance boundary commits
+        its preceding visible stages before the guidance message; a terminal
+        boundary can therefore append only the still-active tail.  Runtime
+        checkpoints are never consulted.
         """
         if state is None:
             return []
         turn_key = str(turn_id or "")
         run_key = str(run_id or "").strip()
         group_prefix = f"turn-{turn_key}-" if turn_key else ""
+        source_groups = (
+            list(groups)
+            if groups is not None
+            else list(getattr(state, "live_agent_turn_groups", []) or [])
+        )
         groups = [
             group
-            for group in list(getattr(state, "live_agent_turn_groups", []) or [])
+            for group in source_groups
             if isinstance(group, AssistantTurnGroup)
             and (
                 not group_prefix
@@ -39730,6 +39736,10 @@ class MainWindow(QMainWindow):
             if isinstance(parent, AssistantTurnGroup):
                 groups = [parent]
 
+        terminal = str(outcome or "").strip().lower() in {
+            "interrupted", "failed", "error",
+        }
+        reply_kind = "interrupted" if terminal else "stage"
         stage_groups = []
         seen_stage_keys = set()
         for group in groups:
@@ -39751,22 +39761,26 @@ class MainWindow(QMainWindow):
                     "cowork-visible-assistant:"
                     f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
                 ).hex
+                meta = {
+                    "turn_id": turn_key,
+                    "request_id": run_key,
+                    "ui_turn_id": turn_key,
+                    "ui_turn_group_id": group_id,
+                    "ui_stage_id": stage_id,
+                    "ui_reply_kind": reply_kind,
+                }
+                if terminal:
+                    meta.update({
+                        "context_visible_interruption": True,
+                        "visible_interruption_outcome": str(outcome or "interrupted"),
+                    })
                 persisted_group.append({
                     "id": message_id,
                     "role": "assistant",
                     "content": content,
                     "content_parts": [{"type": "text", "text": content}],
                     "created_at": int(time.time()),
-                    "meta": {
-                        "turn_id": turn_key,
-                        "request_id": run_key,
-                        "ui_turn_id": turn_key,
-                        "ui_turn_group_id": group_id,
-                        "ui_stage_id": stage_id,
-                        "ui_reply_kind": "interrupted",
-                        "context_visible_interruption": True,
-                        "visible_interruption_outcome": str(outcome or "interrupted"),
-                    },
+                    "meta": meta,
                 })
             stage_groups.append(persisted_group)
 
@@ -39780,104 +39794,67 @@ class MainWindow(QMainWindow):
                     "cowork-visible-assistant:"
                     f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
                 ).hex
+                meta = {
+                    "turn_id": turn_key,
+                    "request_id": run_key,
+                    "ui_turn_id": turn_key,
+                    "ui_turn_group_id": group_id,
+                    "ui_stage_id": stage_id,
+                    "ui_reply_kind": reply_kind,
+                }
+                if terminal:
+                    meta.update({
+                        "context_visible_interruption": True,
+                        "visible_interruption_outcome": str(outcome or "interrupted"),
+                    })
                 stage_groups = [[{
                     "id": message_id,
                     "role": "assistant",
                     "content": content,
                     "content_parts": [{"type": "text", "text": content}],
                     "created_at": int(time.time()),
-                    "meta": {
-                        "turn_id": turn_key,
-                        "request_id": run_key,
-                        "ui_turn_id": turn_key,
-                        "ui_turn_group_id": group_id,
-                        "ui_stage_id": stage_id,
-                        "ui_reply_kind": "interrupted",
-                        "context_visible_interruption": True,
-                        "visible_interruption_outcome": str(outcome or "interrupted"),
-                    },
+                    "meta": meta,
                 }]]
 
         visible_messages = [message for group_messages in stage_groups for message in group_messages]
         if not visible_messages:
             return []
 
-        visible_ids = {str(message.get("id") or "") for message in visible_messages}
-        existing = [
-            message for message in list(getattr(state, "messages", []) or [])
-            if not (
-                isinstance(message, dict)
-                and str(message.get("id") or "") in visible_ids
-            )
-        ]
-        active_user_id = str(getattr(state, "active_turn_user_message_id", "") or "")
-        start_index = next(
-            (
-                index
-                for index, message in enumerate(existing)
-                if isinstance(message, dict)
-                and (
-                    (active_user_id and str(message.get("id") or "") == active_user_id)
-                    or (
-                        not active_user_id
-                        and message.get("role") == "user"
-                        and not is_same_turn_guidance_message(message)
-                        and str((message.get("meta") or {}).get("turn_id") or "") == turn_key
-                        and (
-                            not run_key
-                            or str((message.get("meta") or {}).get("request_id") or "") == run_key
-                        )
-                    )
-                )
-            ),
-            None,
-        )
-        if start_index is None:
-            state.messages = existing + visible_messages
-        else:
-            prefix = existing[:start_index]
-            current_run = existing[start_index:]
-            initial_user = current_run[0]
-            guidance = [
-                message
-                for message in current_run[1:]
-                if isinstance(message, dict)
-                and is_same_turn_guidance_message(message)
-                and str((message.get("meta") or {}).get("turn_id") or "") == turn_key
-                and (
-                    not run_key
-                    or str((message.get("meta") or {}).get("request_id") or "") == run_key
-                )
-            ]
-            guidance_ids = {str(message.get("id") or "") for message in guidance}
-            remainder = [
-                message
-                for message in current_run[1:]
-                if not (
-                    isinstance(message, dict)
-                    and str(message.get("id") or "") in guidance_ids
-                )
-            ]
-            rebuilt = [initial_user]
-            for group_index, group_messages in enumerate(stage_groups):
-                rebuilt.extend(group_messages)
-                if group_index < len(guidance):
-                    rebuilt.append(guidance[group_index])
-            if len(guidance) > len(stage_groups):
-                rebuilt.extend(guidance[len(stage_groups):])
-            rebuilt.extend(remainder)
-            state.messages = prefix + rebuilt
+        existing_ids = {
+            str(message.get("id") or "")
+            for message in list(getattr(state, "messages", []) or [])
+            if isinstance(message, dict)
+        }
+        existing_sequences = []
+        for message in list(getattr(state, "messages", []) or []):
+            meta = message.get("meta") if isinstance(message, dict) else None
+            if not isinstance(meta, dict):
+                continue
+            try:
+                existing_sequences.append(int(meta.get("sequence")))
+            except (TypeError, ValueError):
+                continue
+        next_sequence = max(existing_sequences, default=len(state.messages) - 1) + 1
+        appended = []
+        for message in visible_messages:
+            if str(message.get("id") or "") in existing_ids:
+                continue
+            message["meta"]["sequence"] = next_sequence
+            next_sequence += 1
+            state.messages.append(message)
+            existing_ids.add(str(message.get("id") or ""))
+            appended.append(message)
 
         log_sub_agent_runtime(
-            "ui_visible_interrupted_assistant_committed",
+            "ui_visible_assistant_stages_appended",
             session_id=state.session_id,
             turn_id=turn_key,
             run_id=run_key,
             outcome=str(outcome or "interrupted"),
-            message_count=len(visible_messages),
-            content_len=sum(len(str(message.get("content") or "")) for message in visible_messages),
+            message_count=len(appended),
+            content_len=sum(len(str(message.get("content") or "")) for message in appended),
         )
-        return visible_messages
+        return appended
 
     def _finish_interrupted_turn(self, state, *, turn_id, run_id, bubble, reason_text, outcome):
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
@@ -39900,7 +39877,7 @@ class MainWindow(QMainWindow):
             bubble.update_thinking(duration=bubble.think_duration, is_final=True)
             if interruption_text:
                 bubble.set_main_content(interruption_text, final=True)
-        self._persist_visible_interrupted_assistant_stages(
+        self._append_visible_assistant_stages(
             state,
             turn_id=turn_id,
             run_id=run_id,
@@ -40740,24 +40717,9 @@ class MainWindow(QMainWindow):
             message for message in list(getattr(state, "pending_guidance_messages", []) or [])
             if str((message or {}).get("id") or "") in rejected_message_ids
         ]
-        # Sent guidance is already committed conversation history.  If the
-        # active run closes before consuming it, retain the message so it can
-        # participate in the next turn; never turn it back into a draft.
-        for message in list(getattr(state, "pending_guidance_messages", []) or []):
-            if str((message or {}).get("id") or "") not in rejected_message_ids:
-                continue
-            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-            meta = dict(meta)
-            meta.pop("same_turn_guidance", None)
-            meta["deferred_from_turn"] = str(meta.get("turn_id") or "")
-            message["meta"] = meta
-            for committed in state.messages:
-                if (
-                    isinstance(committed, dict)
-                    and str(committed.get("id") or "") == str(message.get("id") or "")
-                ):
-                    committed["meta"] = copy.deepcopy(meta)
-                    break
+        # Sent guidance is immutable conversation history.  Whether it was
+        # consumed by this run lives on the timeline event, never by rewriting
+        # or moving the already committed user message.
         if rejected_message_ids:
             log_sub_agent_runtime(
                 "ui_guidance_timeline_rejected",
@@ -40909,6 +40871,44 @@ class MainWindow(QMainWindow):
         if not isinstance(previous_group, AssistantTurnGroup):
             previous_group = None
         previous_group_id = str(getattr(bubble, "ui_turn_group_id", "")) if bubble is not None else ""
+        self._append_visible_assistant_stages(
+            state,
+            turn_id=getattr(state, "active_turn_id", ""),
+            run_id=getattr(state, "active_turn_request_id", ""),
+            outcome="guidance_boundary",
+            groups=[previous_group] if previous_group is not None else [],
+            fallback_bubble=bubble,
+        )
+        if not any(
+            isinstance(item, dict) and str(item.get("id") or "") == message_id
+            for item in state.messages
+        ):
+            committed_guidance = copy.deepcopy(message)
+            committed_meta = (
+                dict(committed_guidance.get("meta") or {})
+                if isinstance(committed_guidance.get("meta"), dict)
+                else {}
+            )
+            existing_sequences = []
+            for item in state.messages:
+                item_meta = item.get("meta") if isinstance(item, dict) else None
+                if not isinstance(item_meta, dict):
+                    continue
+                try:
+                    existing_sequences.append(int(item_meta.get("sequence")))
+                except (TypeError, ValueError):
+                    continue
+            committed_meta["sequence"] = max(
+                existing_sequences,
+                default=len(state.messages) - 1,
+            ) + 1
+            committed_guidance["meta"] = committed_meta
+            state.messages.append(committed_guidance)
+        state.messages = self.chat_storage.normalize_messages(
+            state.messages,
+            conversation_id=state.session_id,
+        )
+        self._rebuild_session_render_spans(state)
         # Switch the routing boundary before any widget work can process
         # queued signals; a re-entrant delta must never return to the old group.
         state.active_agent_turn_group = None
@@ -40945,7 +40945,8 @@ class MainWindow(QMainWindow):
                 and previous_group.process_finalized
             ),
         )
-        # Content buffers are presentation-only; generated_messages remain canonical.
+        # The visible stage and guidance are now one append-only persistence
+        # bundle.  The next stage starts from an empty presentation buffer.
         state.current_content_buffer = ""
         state.last_flushed_content_buffer = ""
         self.request_session_scroll_to_bottom(state.session_id, force=False)
@@ -40966,12 +40967,6 @@ class MainWindow(QMainWindow):
         )
         if not already_persisted and not already_pending:
             state.pending_guidance_messages.append(copy.deepcopy(message))
-        if not already_persisted:
-            state.messages.append(copy.deepcopy(message))
-            state.messages = self.chat_storage.normalize_messages(
-                state.messages,
-                conversation_id=state.session_id,
-            )
         self._render_turn_guidance_checkpoint(
             state,
             message,
@@ -40979,7 +40974,6 @@ class MainWindow(QMainWindow):
             attachments or [],
             mutation_ready=not already_persisted,
         )
-        self.save_chat_history(session_id=state.session_id)
 
     def _pending_guidance_message(self, state, message_id):
         target_id = str(message_id or "")
@@ -41498,29 +41492,53 @@ class MainWindow(QMainWindow):
     def _start_deferred_guidance_if_idle(self, state):
         if not state or self._session_is_busy(state):
             return False
+        rejected_events = {
+            str(event.get("message_id") or ""): event
+            for event in list(getattr(state, "ui_timeline_events", []) or [])
+            if isinstance(event, dict)
+            and event.get("kind") == "guidance"
+            and event.get("status") == "rejected"
+            and not event.get("deferred_consumed")
+            and str(event.get("message_id") or "")
+        }
         deferred = []
         for message in state.messages:
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
             meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-            if meta.get("deferred_from_turn") and not meta.get("deferred_guidance_consumed"):
+            message_id = str(message.get("id") or "")
+            if message_id in rejected_events or (
+                meta.get("deferred_from_turn")
+                and not meta.get("deferred_guidance_consumed")
+            ):
                 deferred.append(message)
         if not deferred:
             return False
         for message in deferred[:-1]:
-            meta = dict(message.get("meta") or {})
-            meta.pop("same_turn_guidance", None)
-            meta.pop("deferred_from_turn", None)
-            meta["deferred_guidance_consumed"] = True
-            message["meta"] = meta
+            event = rejected_events.get(str(message.get("id") or ""))
+            if event is not None:
+                event["deferred_consumed"] = True
         trigger = deferred[-1]
+        trigger_id = str(trigger.get("id") or "")
+        trigger_event = rejected_events.get(trigger_id)
+        if trigger_event is None:
+            trigger_event = self._timeline_append_event(
+                state,
+                "guidance",
+                status="rejected",
+                message_id=trigger_id,
+                text=self._message_display_content(trigger),
+                finished_at=time.time(),
+                deferred_consumed=False,
+            )
+        trigger_event["deferred_consumed"] = True
         log_sub_agent_runtime(
             "ui_deferred_guidance_turn_start",
             session_id=state.session_id,
             message_count=len(deferred),
-            trigger_message_id=str(trigger.get("id") or ""),
+            trigger_message_id=trigger_id,
         )
-        return self._submit_session_request(
+        started = self._submit_session_request(
             state,
             self._message_display_content(trigger),
             self._message_attachment_paths(trigger),
@@ -41528,6 +41546,9 @@ class MainWindow(QMainWindow):
             clear_current_input=False,
             existing_message_payload=trigger,
         )
+        if not started:
+            trigger_event["deferred_consumed"] = False
+        return started
 
     def _clear_submitted_composer(self, state, *, clear_current_input):
         if not state or not clear_current_input:
@@ -41739,6 +41760,10 @@ class MainWindow(QMainWindow):
             if isinstance(existing_message_payload, dict)
             else None
         )
+        reuse_committed_guidance = bool(
+            existing_message_payload
+            and is_same_turn_guidance_message(existing_message_payload)
+        )
         user_message_id = str((existing_message_payload or {}).get("id") or self._new_message_id())
         next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
         submit_request_id = uuid.uuid4().hex
@@ -41882,15 +41907,18 @@ class MainWindow(QMainWindow):
             state.grill_execution_confirmed = False
         if message_meta:
             message_payload["meta"] = message_meta
-        staged_messages = [
-            copy.deepcopy(item)
-            for item in state.messages
-            if not (
-                existing_message_payload
-                and isinstance(item, dict)
-                and str(item.get("id") or "") == user_message_id
-            )
-        ] + [message_payload]
+        if reuse_committed_guidance:
+            staged_messages = copy.deepcopy(state.messages)
+        else:
+            staged_messages = [
+                copy.deepcopy(item)
+                for item in state.messages
+                if not (
+                    existing_message_payload
+                    and isinstance(item, dict)
+                    and str(item.get("id") or "") == user_message_id
+                )
+            ] + [message_payload]
         if daemon_owned_history:
             state.chat_save_revision = max(
                 0,
@@ -41940,7 +41968,11 @@ class MainWindow(QMainWindow):
                     "model_id": str(turn_model_id or ""),
                     "protocol": str(message_meta.get("protocol") or ""),
                     "user_message_id": user_message_id,
-                    "pending_user_message": message_payload if daemon_owned_history else None,
+                    "pending_user_message": (
+                        message_payload
+                        if daemon_owned_history and not reuse_committed_guidance
+                        else None
+                    ),
                 },
             )
             self.runtime_journal.append_event(
@@ -42069,7 +42101,7 @@ class MainWindow(QMainWindow):
             )
         previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
         previous_render_total = len(getattr(state, "render_items", []) or [])
-        if existing_message_payload:
+        if existing_message_payload and not reuse_committed_guidance:
             state.messages = [
                 message_payload
                 if isinstance(item, dict) and str(item.get("id") or "") == user_message_id
@@ -44283,6 +44315,55 @@ class MainWindow(QMainWindow):
                 message["meta"] = meta
         return generated_messages
 
+    @staticmethod
+    def _exclude_generated_rounds_committed_at_guidance(existing_messages, generated_messages):
+        """Drop provider replay for stages already committed before guidance.
+
+        The visible stage is intentionally persisted before its following user
+        guidance.  A successful provider result may later replay the same
+        assistant tool round in ``generated_messages``.  Re-appending that
+        round after the guidance would duplicate content and break chronology,
+        so the already represented assistant and its matching tool results are
+        excluded as one protocol unit.
+        """
+        committed_stage_keys = {
+            (
+                str(meta.get("ui_turn_group_id") or ""),
+                str(meta.get("ui_stage_id") or ""),
+            )
+            for message in list(existing_messages or [])
+            if isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and isinstance((meta := message.get("meta")), dict)
+            and str(meta.get("ui_reply_kind") or "") == "stage"
+            and str(meta.get("ui_turn_group_id") or "")
+            and str(meta.get("ui_stage_id") or "")
+        }
+        if not committed_stage_keys:
+            return list(generated_messages or [])
+        excluded_tool_ids = set()
+        filtered = []
+        for message in list(generated_messages or []):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            stage_key = (
+                str(meta.get("ui_turn_group_id") or ""),
+                str(meta.get("ui_stage_id") or ""),
+            )
+            if role == "assistant" and stage_key in committed_stage_keys:
+                excluded_tool_ids.update(
+                    str(tool_call.get("id") or "")
+                    for tool_call in list(message.get("tool_calls") or [])
+                    if isinstance(tool_call, dict) and str(tool_call.get("id") or "")
+                )
+                continue
+            if role == "tool" and str(message.get("tool_call_id") or "") in excluded_tool_ids:
+                continue
+            filtered.append(message)
+        return filtered
+
     def handle_llm_response(self, result, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state:
@@ -44639,6 +44720,16 @@ class MainWindow(QMainWindow):
             )
         generated_messages_raw = result.get("generated_messages", [])
         persistable_generated_messages = filter_persistable_messages(generated_messages_raw)
+        self._annotate_generated_messages_for_unified_turn(
+            state,
+            persistable_generated_messages,
+        )
+        persistable_generated_messages = (
+            self._exclude_generated_rounds_committed_at_guidance(
+                state.messages,
+                persistable_generated_messages,
+            )
+        )
         persistence_filtered_count = (
             len(generated_messages_raw) - len(persistable_generated_messages)
             if isinstance(generated_messages_raw, list)

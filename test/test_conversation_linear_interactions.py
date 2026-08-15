@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSiz
 
 from core.chat_storage import ChatStorage
 from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
-from core.conversation_render import is_legacy_skill_change_notice_message
+from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message
 from core.runtime_journal import RuntimeJournal
 from core.theme import DesignTokens
 
@@ -2473,16 +2473,127 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state = window.get_current_session()
             window._retire_session_empty_state(state, reason="test_stop_stage")
             state.active_turn_id = 1
+            state.active_turn_request_id = "request-stop-1"
+            state.active_turn_user_message_id = "user-stop-1"
+            state.messages = [{
+                "id": "user-stop-1",
+                "role": "user",
+                "content": "先给我部分结果",
+                "meta": {"turn_id": "1", "request_id": "request-stop-1"},
+            }]
             bubble = window._append_live_thinking_segment(state)
             state.current_content_buffer = "部分结果"
             bubble.set_main_content("部分结果", final=False)
             window.stop_agent()
             self.assertEqual(bubble.main_content_text, "部分结果")
+            self.assertEqual(
+                [(item.get("role"), item.get("content")) for item in state.messages],
+                [("user", "先给我部分结果"), ("assistant", "部分结果")],
+            )
+            persisted = state.messages[-1]
+            self.assertTrue(persisted["meta"]["context_visible_interruption"])
+            self.assertEqual(persisted["meta"]["request_id"], "request-stop-1")
             self.assertEqual(state.conversation_notice.label.text(), "已停止")
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_stop_persists_all_visible_stages_around_guidance_in_display_order(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_stop_guided_stages")
+            state.live_activity = True
+            state.history_loaded = True
+            state.history_loading = False
+            state.active_turn_id = 7
+            state.active_turn_request_id = "request-guided-7"
+            state.active_turn_user_message_id = "user-guided-7"
+            state.messages = [{
+                "id": "user-guided-7",
+                "role": "user",
+                "content": "分析行情",
+                "meta": {"turn_id": "7", "request_id": "request-guided-7"},
+            }]
+
+            first = window._append_live_thinking_segment(state)
+            first.set_main_content("先分析资金面", final=False)
+            state.current_content_buffer = "先分析资金面"
+            window._timeline_append_text_delta(state, "content_fragment", "先分析资金面")
+            guidance = {
+                "id": "guide-guided-7",
+                "role": "user",
+                "content": "改用东方财富数据",
+                "meta": {
+                    "same_turn_guidance": True,
+                    "turn_id": "7",
+                    "request_id": "request-guided-7",
+                },
+            }
+            state.messages.append(guidance)
+            with patch.object(window, "save_chat_history", return_value=True):
+                window._render_turn_guidance_checkpoint(
+                    state,
+                    guidance,
+                    "改用东方财富数据",
+                    [],
+                )
+
+            second = state.temp_thinking_bubble
+            second.set_main_content("东方财富显示主线仍在", final=False)
+            state.current_content_buffer = "东方财富显示主线仍在"
+            window._timeline_append_text_delta(
+                state,
+                "content_fragment",
+                "东方财富显示主线仍在",
+            )
+            window.stop_agent()
+
+            self.assertEqual(
+                [(item.get("role"), item.get("content")) for item in state.messages],
+                [
+                    ("user", "分析行情"),
+                    ("assistant", "先分析资金面"),
+                    ("user", "改用东方财富数据"),
+                    ("assistant", "东方财富显示主线仍在"),
+                ],
+            )
+            self.assertEqual(
+                [item.get("type") for item in build_conversation_render_items(state.messages)],
+                ["user", "assistant", "guidance", "assistant"],
+            )
+            visible_assistant = [
+                item
+                for item in state.messages
+                if item.get("role") == "assistant"
+                and (item.get("meta") or {}).get("context_visible_interruption")
+            ]
+            self.assertEqual(len(visible_assistant), 2)
+            self.assertEqual(
+                {item["meta"]["request_id"] for item in visible_assistant},
+                {"request-guided-7"},
+            )
+            window.chat_storage.save_conversation_safely(
+                state.session_id,
+                state.messages,
+                title="中断可见正文持久化",
+                status="interrupted",
+                meta={},
+            )
+            stored = window.chat_storage.get_messages(state.session_id)
+            self.assertEqual(
+                [(item.get("role"), item.get("content")) for item in stored],
+                [
+                    ("user", "分析行情"),
+                    ("assistant", "先分析资金面"),
+                    ("user", "改用东方财富数据"),
+                    ("assistant", "东方财富显示主线仍在"),
+                ],
+            )
         finally:
             window.close()
             window.deleteLater()

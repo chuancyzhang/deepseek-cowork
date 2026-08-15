@@ -39607,6 +39607,191 @@ class MainWindow(QMainWindow):
         worker.finished.connect(cleanup)
         worker.start()
 
+    def _persist_visible_interrupted_assistant_stages(
+        self,
+        state,
+        *,
+        turn_id,
+        run_id,
+        outcome,
+        fallback_bubble=None,
+    ):
+        """Commit exactly the assistant text that the user has already seen.
+
+        Live bubbles are a projection while a run is active.  Once that run is
+        interrupted or fails, every non-empty projected assistant stage becomes
+        durable conversation history.  Runtime checkpoints are deliberately not
+        consulted here: the active session UI is the source of the visible text,
+        and SQLite remains the only history ledger.
+        """
+        if state is None:
+            return []
+        turn_key = str(turn_id or "")
+        run_key = str(run_id or "").strip()
+        group_prefix = f"turn-{turn_key}-" if turn_key else ""
+        groups = [
+            group
+            for group in list(getattr(state, "live_agent_turn_groups", []) or [])
+            if isinstance(group, AssistantTurnGroup)
+            and (
+                not group_prefix
+                or str(getattr(group, "group_id", "") or "").startswith(group_prefix)
+            )
+        ]
+        if not groups and fallback_bubble is not None:
+            parent = fallback_bubble.parentWidget()
+            if isinstance(parent, AssistantTurnGroup):
+                groups = [parent]
+
+        stage_groups = []
+        seen_stage_keys = set()
+        for group in groups:
+            persisted_group = []
+            group_id = str(getattr(group, "group_id", "") or "")
+            for stage_index, stage in enumerate(list(getattr(group, "stage_bubbles", []) or []), start=1):
+                if stage is None or not _qt_object_alive(stage):
+                    continue
+                content = str(getattr(stage, "main_content_text", "") or "").strip()
+                if not content:
+                    continue
+                stage_id = str(getattr(stage, "ui_stage_id", "") or f"{group_id}:stage-{stage_index}")
+                stage_key = (group_id, stage_id)
+                if stage_key in seen_stage_keys:
+                    continue
+                seen_stage_keys.add(stage_key)
+                message_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "cowork-visible-assistant:"
+                    f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
+                ).hex
+                persisted_group.append({
+                    "id": message_id,
+                    "role": "assistant",
+                    "content": content,
+                    "content_parts": [{"type": "text", "text": content}],
+                    "created_at": int(time.time()),
+                    "meta": {
+                        "turn_id": turn_key,
+                        "request_id": run_key,
+                        "ui_turn_id": turn_key,
+                        "ui_turn_group_id": group_id,
+                        "ui_stage_id": stage_id,
+                        "ui_reply_kind": "interrupted",
+                        "context_visible_interruption": True,
+                        "visible_interruption_outcome": str(outcome or "interrupted"),
+                    },
+                })
+            stage_groups.append(persisted_group)
+
+        if not stage_groups and fallback_bubble is not None:
+            content = str(getattr(fallback_bubble, "main_content_text", "") or "").strip()
+            if content:
+                group_id = str(getattr(fallback_bubble, "ui_turn_group_id", "") or "")
+                stage_id = str(getattr(fallback_bubble, "ui_stage_id", "") or "fallback-stage")
+                message_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "cowork-visible-assistant:"
+                    f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
+                ).hex
+                stage_groups = [[{
+                    "id": message_id,
+                    "role": "assistant",
+                    "content": content,
+                    "content_parts": [{"type": "text", "text": content}],
+                    "created_at": int(time.time()),
+                    "meta": {
+                        "turn_id": turn_key,
+                        "request_id": run_key,
+                        "ui_turn_id": turn_key,
+                        "ui_turn_group_id": group_id,
+                        "ui_stage_id": stage_id,
+                        "ui_reply_kind": "interrupted",
+                        "context_visible_interruption": True,
+                        "visible_interruption_outcome": str(outcome or "interrupted"),
+                    },
+                }]]
+
+        visible_messages = [message for group_messages in stage_groups for message in group_messages]
+        if not visible_messages:
+            return []
+
+        visible_ids = {str(message.get("id") or "") for message in visible_messages}
+        existing = [
+            message for message in list(getattr(state, "messages", []) or [])
+            if not (
+                isinstance(message, dict)
+                and str(message.get("id") or "") in visible_ids
+            )
+        ]
+        active_user_id = str(getattr(state, "active_turn_user_message_id", "") or "")
+        start_index = next(
+            (
+                index
+                for index, message in enumerate(existing)
+                if isinstance(message, dict)
+                and (
+                    (active_user_id and str(message.get("id") or "") == active_user_id)
+                    or (
+                        not active_user_id
+                        and message.get("role") == "user"
+                        and not is_same_turn_guidance_message(message)
+                        and str((message.get("meta") or {}).get("turn_id") or "") == turn_key
+                        and (
+                            not run_key
+                            or str((message.get("meta") or {}).get("request_id") or "") == run_key
+                        )
+                    )
+                )
+            ),
+            None,
+        )
+        if start_index is None:
+            state.messages = existing + visible_messages
+        else:
+            prefix = existing[:start_index]
+            current_run = existing[start_index:]
+            initial_user = current_run[0]
+            guidance = [
+                message
+                for message in current_run[1:]
+                if isinstance(message, dict)
+                and is_same_turn_guidance_message(message)
+                and str((message.get("meta") or {}).get("turn_id") or "") == turn_key
+                and (
+                    not run_key
+                    or str((message.get("meta") or {}).get("request_id") or "") == run_key
+                )
+            ]
+            guidance_ids = {str(message.get("id") or "") for message in guidance}
+            remainder = [
+                message
+                for message in current_run[1:]
+                if not (
+                    isinstance(message, dict)
+                    and str(message.get("id") or "") in guidance_ids
+                )
+            ]
+            rebuilt = [initial_user]
+            for group_index, group_messages in enumerate(stage_groups):
+                rebuilt.extend(group_messages)
+                if group_index < len(guidance):
+                    rebuilt.append(guidance[group_index])
+            if len(guidance) > len(stage_groups):
+                rebuilt.extend(guidance[len(stage_groups):])
+            rebuilt.extend(remainder)
+            state.messages = prefix + rebuilt
+
+        log_sub_agent_runtime(
+            "ui_visible_interrupted_assistant_committed",
+            session_id=state.session_id,
+            turn_id=turn_key,
+            run_id=run_key,
+            outcome=str(outcome or "interrupted"),
+            message_count=len(visible_messages),
+            content_len=sum(len(str(message.get("content") or "")) for message in visible_messages),
+        )
+        return visible_messages
+
     def _finish_interrupted_turn(self, state, *, turn_id, run_id, bubble, reason_text, outcome):
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
         self._timeline_close_open_events(state, status=timeline_status)
@@ -39619,8 +39804,6 @@ class MainWindow(QMainWindow):
             reply_kind=timeline_status,
             finished_at=time.time(),
         )
-        # A partial stream is presentation state, not a committed assistant
-        # message.  Stopping or failing a run must never manufacture history.
         interruption_text = str(
             getattr(state, "current_content_buffer", "") or ""
         ).strip()
@@ -39630,6 +39813,13 @@ class MainWindow(QMainWindow):
             bubble.update_thinking(duration=bubble.think_duration, is_final=True)
             if interruption_text:
                 bubble.set_main_content(interruption_text, final=True)
+        self._persist_visible_interrupted_assistant_stages(
+            state,
+            turn_id=turn_id,
+            run_id=run_id,
+            outcome=outcome,
+            fallback_bubble=bubble,
+        )
         self._show_conversation_notice(
             state,
             "已停止" if str(outcome or "") == "interrupted" else str(reason_text or "本轮未完成，请重试"),

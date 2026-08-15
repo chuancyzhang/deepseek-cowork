@@ -21713,6 +21713,24 @@ class FileWorkbench(QWidget):
             if _qt_object_alive(anchor)
         )
 
+    def _is_internal_pointer_event(self, watched, global_position=None):
+        if global_position is not None:
+            navigator_position = self.navigator.mapFromGlobal(global_position)
+            if self.navigator.rect().contains(navigator_position):
+                return True
+        widget = watched if isinstance(watched, QWidget) else None
+        if widget is None and global_position is not None:
+            widget = QApplication.widgetAt(global_position)
+        if self._is_navigator_interaction(widget):
+            return True
+        popup = QApplication.activePopupWidget()
+        if popup is None or not self._is_navigator_interaction(popup):
+            return False
+        if global_position is None:
+            return True
+        popup_position = popup.mapFromGlobal(global_position)
+        return popup.rect().contains(popup_position)
+
     def _dismiss_after_pointer_leave(self):
         if not self._is_unpinned_overlay_visible():
             return
@@ -21729,8 +21747,11 @@ class FileWorkbench(QWidget):
         if watched is self.navigator and event_type == QEvent.Leave:
             QTimer.singleShot(0, self._dismiss_after_pointer_leave)
         elif event_type == QEvent.MouseButtonPress and self._is_unpinned_overlay_visible():
-            widget = watched if isinstance(watched, QWidget) else None
-            if not self._is_navigator_interaction(widget):
+            try:
+                global_position = event.globalPosition().toPoint()
+            except (AttributeError, TypeError):
+                global_position = None
+            if not self._is_internal_pointer_event(watched, global_position):
                 self.autoDismissRequested.emit("outside_click")
         return super().eventFilter(watched, event)
 

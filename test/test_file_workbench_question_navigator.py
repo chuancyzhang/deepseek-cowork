@@ -128,6 +128,15 @@ class FileWorkbenchTest(unittest.TestCase):
         workbench.eventFilter(child_control, QEvent(QEvent.MouseButtonPress))
         self.assertEqual(dismiss_reasons, [])
 
+        window_target = workbench.windowHandle()
+        self.assertIsNotNone(window_target)
+        self.assertTrue(
+            workbench._is_internal_pointer_event(window_target, inside_position)
+        )
+        self.assertFalse(
+            workbench._is_internal_pointer_event(window_target, QPoint(5000, 5000))
+        )
+
         dismiss_reasons.clear()
         QTest.mouseClick(content, Qt.LeftButton, pos=QPoint(420, 200))
         self.app.processEvents()

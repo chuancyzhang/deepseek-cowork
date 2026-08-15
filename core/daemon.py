@@ -401,8 +401,21 @@ class DaemonState:
             self.runtime_journal.acknowledge_commit(session_id, run_id, messages)
         return True
     
-    def set_active_worker(self, session_id, worker, turn_id=None, run_id=None):
+    def set_active_worker(
+        self,
+        session_id,
+        worker,
+        turn_id=None,
+        run_id=None,
+        writer_owner=None,
+    ):
         resolved_run_id = str(run_id or getattr(worker, "request_id", "") or "")
+        resolved_writer_owner = str(writer_owner or "").strip()
+        if not resolved_writer_owner and resolved_run_id:
+            run_record = self.runtime_journal.get_run(session_id, resolved_run_id)
+            resolved_writer_owner = str((run_record or {}).get("writer_owner") or "").strip()
+        if not resolved_writer_owner:
+            resolved_writer_owner = f"daemon:{os.getpid()}"
         with self.lock:
             if resolved_run_id:
                 run_record = self.runtime_journal.get_run(session_id, resolved_run_id)
@@ -420,6 +433,7 @@ class DaemonState:
                 "worker": worker,
                 "turn_id": str(turn_id or getattr(worker, "turn_id", "") or ""),
                 "run_id": resolved_run_id,
+                "writer_owner": resolved_writer_owner,
             }
             return True
     
@@ -570,9 +584,11 @@ class DaemonState:
             if isinstance(active, dict):
                 worker = active.get("worker")
                 active_turn_id = str(active.get("turn_id") or "")
+                writer_owner = str(active.get("writer_owner") or "")
             else:
                 worker = active
                 active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+                writer_owner = ""
         expected = str(expected_turn_id or "")
         if not worker:
             return {"accepted": False, "error": "turn_not_active", "turn_id": active_turn_id}
@@ -587,17 +603,26 @@ class DaemonState:
             return {"accepted": False, "error": "invalid_message", "turn_id": active_turn_id}
         message = copy.deepcopy(message)
         message["id"] = str(message.get("id") or uuid.uuid4().hex)
-        messages = self.get_session_messages(session_id)
-        messages[:] = merge_messages_by_id(messages, [message])
-        messages[:] = self._normalize_persistable_messages(
-            session_id,
-            messages,
-            source="daemon_guidance_submit",
-        )
-        if not self.save_session(session_id, acknowledge=False):
-            return {"accepted": False, "error": "message_commit_failed", "turn_id": active_turn_id}
+        ui_owned_history = writer_owner.startswith("ui:")
+        if not ui_owned_history:
+            messages = self.get_session_messages(session_id)
+            messages[:] = merge_messages_by_id(messages, [message])
+            messages[:] = self._normalize_persistable_messages(
+                session_id,
+                messages,
+                source="daemon_guidance_submit",
+            )
+            if not self.save_session(session_id, acknowledge=False):
+                return {"accepted": False, "error": "message_commit_failed", "turn_id": active_turn_id}
+        else:
+            _log_daemon(
+                "daemon_guidance_history_write_delegated "
+                f"session_id={session_id} turn_id={active_turn_id} "
+                f"message_id={message['id']} writer_owner={writer_owner}"
+            )
         result = worker.steer(message, expected_turn_id=expected)
-        result["message_committed"] = True
+        result["message_committed"] = not ui_owned_history
+        result["history_writer_owner"] = writer_owner
         return result
 
     def update_guidance_session(self, session_id, expected_turn_id, message_id, message):
@@ -717,6 +742,7 @@ class DaemonState:
             worker,
             turn_id=turn_id,
             run_id=request_id,
+            writer_owner=(self.runtime_journal.get_run(session_id, request_id) or {}).get("writer_owner"),
         )
         if not activated:
             return {
@@ -1549,6 +1575,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 worker,
                 turn_id=turn_id,
                 run_id=request_id,
+                writer_owner=writer_owner,
             )
             if activated:
                 try:

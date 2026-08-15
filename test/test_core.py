@@ -1,5 +1,6 @@
 import unittest
 import base64
+import copy
 import os
 import sys
 import tempfile
@@ -1502,6 +1503,52 @@ class TestDaemonState(unittest.TestCase):
         self.assertTrue(result["accepted"])
         self.assertTrue(result["message_committed"])
         self.assertEqual([item["id"] for item in observed["sqlite"]], ["u1", "guide-7"])
+
+    def test_ui_owned_daemon_steer_never_writes_conversation_history(self):
+        session_id = "ui-guidance-single-writer"
+        committed = [
+            {"id": "u1", "role": "user", "content": "开始"},
+            {"id": "a1", "role": "assistant", "content": "已显示阶段"},
+            {
+                "id": "guide-8",
+                "role": "user",
+                "content": "继续检查",
+                "meta": {"same_turn_guidance": True, "turn_id": "8"},
+            },
+        ]
+        self.state.chat_storage.save_conversation_safely(
+            session_id,
+            committed,
+            title="UI owned",
+        )
+
+        class Worker:
+            def steer(inner_self, message, expected_turn_id=None):
+                return {"accepted": True, "turn_id": str(expected_turn_id)}
+
+        self.state.sessions[session_id] = copy.deepcopy(committed[:1])
+        self.state.active_workers[session_id] = {
+            "worker": Worker(),
+            "turn_id": "8",
+            "run_id": "request-8",
+            "writer_owner": "ui:1234",
+        }
+
+        with patch.object(self.state, "save_session") as save_session:
+            result = self.state.steer_session(
+                session_id,
+                "8",
+                copy.deepcopy(committed[-1]),
+            )
+
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["message_committed"])
+        self.assertEqual(result["history_writer_owner"], "ui:1234")
+        save_session.assert_not_called()
+        self.assertEqual(
+            [item["id"] for item in self.state.chat_storage.get_messages(session_id)],
+            ["u1", "a1", "guide-8"],
+        )
 
     def test_run_llm_sync_uses_snapshot_and_dedupes_current_user_message(self):
         session_id = "desktop-dedupe"

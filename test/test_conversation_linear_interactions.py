@@ -2577,6 +2577,44 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_daemon_guidance_waits_for_ui_history_commit_before_steering(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.daemon_running = True
+            state.active_turn_id = 4
+            state.active_turn_request_id = "request-guidance-barrier"
+            window.daemon_client = object()
+            order = []
+            fake_worker = MagicMock()
+            fake_worker.finished_signal = MagicMock()
+            fake_worker.finished = MagicMock()
+            fake_worker.start.side_effect = lambda: order.append("steer")
+
+            def accept_guidance(*_args, **_kwargs):
+                state.chat_save_revision = 12
+                order.append("commit_requested")
+
+            def wait_for_revision(session_id, revision, timeout_ms=0):
+                self.assertEqual(session_id, state.session_id)
+                self.assertEqual(revision, 12)
+                self.assertEqual(timeout_ms, 3000)
+                order.append("commit_confirmed")
+                return True
+
+            with (
+                patch.object(window, "_accept_turn_guidance", side_effect=accept_guidance),
+                patch.object(window, "wait_for_chat_save_revision", side_effect=wait_for_revision),
+                patch("main.DaemonSteerWorker", return_value=fake_worker),
+            ):
+                self.assertTrue(window._submit_turn_guidance(state, "调整方向"))
+
+            self.assertEqual(order, ["commit_requested", "commit_confirmed", "steer"])
+            self.assertIn(fake_worker, state.guidance_workers)
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_stop_marks_partial_stage_without_message_actions(self):
         window = MainWindow()
         try:

@@ -35,6 +35,8 @@ class ChatSaveWorker(QThread):
         self._inflight = set()
         self._highest_revision = {}
         self._accepted_signature = {}
+        self._completed_revision = {}
+        self._blocked_revision = {}
         self._failure_counts = {}
         self._stop_requested = False
 
@@ -124,6 +126,39 @@ class ChatSaveWorker(QThread):
                 else:
                     self._condition.wait()
 
+    def wait_for_revision(self, session_id, revision, timeout_ms=3000):
+        """Wait until a specific session snapshot is durably committed.
+
+        Guidance delivery uses this as a local transaction barrier: the UI
+        ledger must contain the visible assistant stage and guidance before a
+        daemon is allowed to apply that guidance to the active model run.
+        """
+        target_session = str(session_id or "").strip()
+        target_revision = max(0, int(revision or 0))
+        if not target_session or target_revision <= 0:
+            return False
+        timeout_seconds = max(0, int(timeout_ms or 0)) / 1000.0
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
+        with self._condition:
+            request = self._pending.get(target_session)
+            if request and int(request.revision or 0) >= target_revision:
+                request.ready_at = time.monotonic()
+            self._condition.notify_all()
+            while True:
+                completed = int(self._completed_revision.get(target_session, 0) or 0)
+                if completed >= target_revision:
+                    return True
+                blocked = int(self._blocked_revision.get(target_session, 0) or 0)
+                if blocked >= target_revision:
+                    return False
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._condition.wait(timeout=remaining)
+                else:
+                    self._condition.wait()
+
     def stop_worker(self, timeout_ms=3000):
         flushed = self.flush(timeout_ms=timeout_ms)
         with self._condition:
@@ -189,6 +224,10 @@ class ChatSaveWorker(QThread):
                 storage = None
                 with self._condition:
                     self._failure_counts.pop(request.session_id, None)
+                    self._blocked_revision[request.session_id] = max(
+                        int(self._blocked_revision.get(request.session_id, 0) or 0),
+                        int(request.revision or 0),
+                    )
                     self._inflight.discard(request.session_id)
                     self._condition.notify_all()
                 self.save_blocked.emit(
@@ -214,6 +253,10 @@ class ChatSaveWorker(QThread):
 
             with self._condition:
                 self._failure_counts.pop(request.session_id, None)
+                self._completed_revision[request.session_id] = max(
+                    int(self._completed_revision.get(request.session_id, 0) or 0),
+                    int(request.revision or 0),
+                )
                 self._inflight.discard(request.session_id)
                 self._condition.notify_all()
             self.save_completed.emit(request.session_id, int(request.revision or 0))

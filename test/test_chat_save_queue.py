@@ -71,6 +71,43 @@ class TestChatSaveQueue(unittest.TestCase):
         self.assertEqual([message.get("content") for message in messages], ["second"])
         self.assertEqual(completed[-1], ("session-1", 2))
 
+    def test_wait_for_revision_is_a_durable_commit_barrier(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
+            worker = ChatSaveWorker(storage.db_path, debounce_ms=500)
+            worker.start()
+            try:
+                request = ChatSaveRequest(
+                    session_id="guidance-barrier",
+                    messages=[
+                        {"id": "u1", "role": "user", "content": "开始"},
+                        {"id": "a1", "role": "assistant", "content": "已显示阶段"},
+                        {"id": "g1", "role": "user", "content": "调整方向"},
+                    ],
+                    title="Guidance",
+                    status="running",
+                    meta={},
+                    ready_at=0.0,
+                    revision=7,
+                )
+                self.assertTrue(worker.enqueue(request))
+                self.assertTrue(
+                    worker.wait_for_revision(
+                        "guidance-barrier",
+                        7,
+                        timeout_ms=2000,
+                    )
+                )
+                self.assertEqual(
+                    [item["id"] for item in storage.get_messages("guidance-barrier")],
+                    ["u1", "a1", "g1"],
+                )
+            finally:
+                self.assertTrue(worker.stop_worker(timeout_ms=2000))
+                del worker
+                del storage
+                gc.collect()
+
     def test_worker_saves_multiple_sessions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
@@ -207,8 +244,12 @@ class TestChatSaveQueue(unittest.TestCase):
                 worker.start()
                 try:
                     self.assertTrue(worker.enqueue(request))
-                    self.assertTrue(
-                        worker.flush(session_id="session-diverged", timeout_ms=2000)
+                    self.assertFalse(
+                        worker.wait_for_revision(
+                            "session-diverged",
+                            2,
+                            timeout_ms=2000,
+                        )
                     )
                     app.processEvents()
                 finally:

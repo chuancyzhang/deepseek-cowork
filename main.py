@@ -34941,6 +34941,16 @@ class MainWindow(QMainWindow):
             return True
         return worker.flush(session_id=session_id, timeout_ms=timeout_ms)
 
+    def wait_for_chat_save_revision(self, session_id, revision, timeout_ms=3000):
+        worker = getattr(self, "chat_save_worker", None)
+        if not worker:
+            return True
+        return worker.wait_for_revision(
+            session_id,
+            revision,
+            timeout_ms=timeout_ms,
+        )
+
     def handle_chat_save_failed(self, session_id, revision, error):
         session_id = str(session_id or "").strip()
         self.append_log(
@@ -35000,11 +35010,9 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"会话冲突快照隔离失败({session_id or 'unknown'}): {quarantine_exc}"
             )
-        self._show_conversation_notice(
-            self.get_session(session_id),
-            "聊天记录已在其他窗口中变化，请重新打开此对话后再提交。",
-            "error",
-        )
+        # A conflict is an internal ledger-protection event.  The committed
+        # SQLite history remains authoritative, so do not present the
+        # quarantined technical snapshot as if the user's chat were lost.
 
     def handle_chat_save_completed(self, session_id, revision):
         session_id = str(session_id or "").strip()
@@ -41445,6 +41453,32 @@ class MainWindow(QMainWindow):
                 self._clear_prompt_files(state.session_id)
             self._accept_turn_guidance(
                 state, message, payload.get("display_content") or "", payload.get("attachments") or []
+            )
+            guidance_revision = max(0, int(getattr(state, "chat_save_revision", 0) or 0))
+            if not self.wait_for_chat_save_revision(
+                state.session_id,
+                guidance_revision,
+                timeout_ms=3000,
+            ):
+                log_ppt_agent_debug(
+                    "turn_guidance_commit_barrier_failed",
+                    session_id=state.session_id,
+                    turn_id=str(expected_turn_id or ""),
+                    request_id=expected_request_id,
+                    message_id=str(message.get("id") or ""),
+                    revision=guidance_revision,
+                )
+                self._timeline_set_guidance_status(state, message.get("id"), "rejected")
+                self._reject_unapplied_guidance(state, restore_input=False)
+                self._persist_pending_guidance(state)
+                return True
+            log_ppt_agent_debug(
+                "turn_guidance_commit_barrier_passed",
+                session_id=state.session_id,
+                turn_id=str(expected_turn_id or ""),
+                request_id=expected_request_id,
+                message_id=str(message.get("id") or ""),
+                revision=guidance_revision,
             )
             worker = DaemonSteerWorker(
                 self.daemon_client, state.session_id, expected_turn_id, message, parent=self

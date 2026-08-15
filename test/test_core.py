@@ -2043,6 +2043,125 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_workspace_agents_md_is_appended_to_stable_system_prompt(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "AGENTS.md"), "w", encoding="utf-8-sig") as handle:
+                handle.write("请运行项目测试。\n保留现有 API。")
+
+            worker = self._build_prompt_worker(temp_dir)
+            prompt = worker._build_stable_system_prompt()
+
+            self.assertIn("# 工作区约定（AGENTS.md）", prompt)
+            self.assertIn("请运行项目测试。", prompt)
+            self.assertIn("保留现有 API。", prompt)
+            self.assertIn("不能覆盖 Cowork 固定的安全与权限策略", prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_workspace_agents_md_only_reads_workspace_root(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(temp_dir, "nested"))
+            with open(os.path.join(temp_dir, "nested", "AGENTS.md"), "w", encoding="utf-8") as handle:
+                handle.write("nested instructions")
+            with open(os.path.join(temp_dir, "AGENTS.override.md"), "w", encoding="utf-8") as handle:
+                handle.write("override instructions")
+
+            worker = self._build_prompt_worker(temp_dir)
+            prompt = worker._build_stable_system_prompt()
+
+            self.assertNotIn("# 工作区约定（AGENTS.md）", prompt)
+            self.assertNotIn("nested instructions", prompt)
+            self.assertNotIn("override instructions", prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_workspace_agents_md_empty_file_is_ignored(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "AGENTS.md"), "w", encoding="utf-8") as handle:
+                handle.write(" \r\n\t")
+
+            worker = self._build_prompt_worker(temp_dir)
+
+            self.assertNotIn("# 工作区约定（AGENTS.md）", worker._build_stable_system_prompt())
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_workspace_agents_md_larger_than_32_kib_is_not_truncated(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            content = "规则" * 20000 + "末尾规则"
+            with open(os.path.join(temp_dir, "AGENTS.md"), "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+            worker = self._build_prompt_worker(temp_dir)
+            prompt = worker._build_stable_system_prompt()
+
+            self.assertIn(content, prompt)
+            self.assertIn("末尾规则", prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_new_worker_reloads_workspace_agents_md(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            agents_path = os.path.join(temp_dir, "AGENTS.md")
+            with open(agents_path, "w", encoding="utf-8") as handle:
+                handle.write("first version")
+            first_worker = self._build_prompt_worker(temp_dir)
+            first_prompt = first_worker._get_stable_system_prompt()
+
+            with open(agents_path, "w", encoding="utf-8") as handle:
+                handle.write("second version")
+            second_worker = self._build_prompt_worker(temp_dir)
+            second_prompt = second_worker._get_stable_system_prompt()
+
+            self.assertIn("first version", first_prompt)
+            self.assertNotIn("second version", first_prompt)
+            self.assertIn("second version", second_prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_workspace_agents_md_read_errors_stop_before_provider_call(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(temp_dir, "AGENTS.md"), "wb") as handle:
+                handle.write(b"\xff\xfe\x00")
+            worker = self._build_prompt_worker(temp_dir)
+            worker.api_key = "test-key"
+            results = []
+            worker.finished_signal.connect(results.append)
+
+            with patch("core.agent.LLMFactory.create_provider") as create_provider:
+                worker.run()
+
+            create_provider.assert_not_called()
+            self.assertEqual(len(results), 1)
+            self.assertIn("系统提示词加载失败", results[0]["error"])
+            self.assertIn("AGENTS.md 解码失败", results[0]["error"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_workspace_agents_md_rejects_directory_and_oversized_file(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            agents_path = os.path.join(temp_dir, "AGENTS.md")
+            os.makedirs(agents_path)
+            worker = self._build_prompt_worker(temp_dir)
+            with self.assertRaisesRegex(RuntimeError, "不是普通文件"):
+                worker._load_workspace_agents_prompt()
+
+            shutil.rmtree(agents_path)
+            with open(agents_path, "wb") as handle:
+                handle.truncate(10 * 1024 * 1024 + 1)
+            next_worker = self._build_prompt_worker(temp_dir)
+            with self.assertRaisesRegex(RuntimeError, "超过普通文本文件的 10 MiB 上限"):
+                next_worker._load_workspace_agents_prompt()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_prompt_observability_omits_hash_fields(self):
         temp_dir = tempfile.mkdtemp()
         try:

@@ -320,7 +320,7 @@ import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
                            QDesktopServices, QGuiApplication, QColor, QPainter,
-                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
+                           QBrush, QCursor, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
@@ -21714,7 +21714,10 @@ class FileWorkbench(QWidget):
         )
 
     def _dismiss_after_pointer_leave(self):
-        if not self._is_unpinned_overlay_visible() or self.navigator.underMouse():
+        if not self._is_unpinned_overlay_visible():
+            return
+        pointer_position = self.navigator.mapFromGlobal(QCursor.pos())
+        if self.navigator.rect().contains(pointer_position):
             return
         popup = QApplication.activePopupWidget()
         if popup is not None and self._is_navigator_interaction(popup):
@@ -25555,8 +25558,6 @@ class MainWindow(QMainWindow):
                 source = self.file_filter_model.mapFromSource(self.file_model.index(path))
                 if source.isValid():
                     self.on_file_clicked(source)
-            if not self.file_workbench.is_effectively_pinned():
-                self.set_file_navigator_visible(False, reason="current_file_selected")
 
     def _sync_deliverable_action_visibility(self):
         path = getattr(self, "current_deliverable_path", "")
@@ -36555,8 +36556,7 @@ class MainWindow(QMainWindow):
             return
         log_sub_agent_runtime("deliverable_list_item_selected", path=path)
         self.set_file_navigator_scope(self.FILE_SCOPE_DELIVERABLES, refresh=False)
-        if self.select_deliverable(path) and not self.file_workbench.is_effectively_pinned():
-            self.set_file_navigator_visible(False, reason="deliverable_selected")
+        self.select_deliverable(path)
 
     def open_deliverable_from_chat(self, path, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -37372,8 +37372,7 @@ class MainWindow(QMainWindow):
             scope=getattr(self, "file_navigator_scope", self.FILE_SCOPE_WORKSPACE),
         )
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
-            if self.select_deliverable(path, render_html=True) and not self.file_workbench.is_effectively_pinned():
-                self.set_file_navigator_visible(False, reason="workspace_file_selected")
+            self.select_deliverable(path, render_html=True)
             return
         if not self.confirm_leave_deliverable_edit("切换文件"):
             return
@@ -37394,8 +37393,6 @@ class MainWindow(QMainWindow):
         self._sync_file_header()
         self._sync_current_file_filter_notice()
         self._set_deliverable_status("")
-        if not self.file_workbench.is_effectively_pinned():
-            self.set_file_navigator_visible(False, reason="workspace_file_selected")
         if not os.path.isfile(path): return
         ext = os.path.splitext(path)[1].lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}

@@ -110,11 +110,23 @@ class FileWorkbenchTest(unittest.TestCase):
         workbench.show()
         self.app.processEvents()
 
-        with patch.object(navigator, "underMouse", return_value=False):
+        with patch("main.QCursor.pos", return_value=QPoint(5000, 5000)):
             workbench.eventFilter(navigator, QEvent(QEvent.Leave))
             QTest.qWait(1)
             self.app.processEvents()
         self.assertIn("pointer_leave", dismiss_reasons)
+
+        dismiss_reasons.clear()
+        inside_position = navigator.mapToGlobal(QPoint(20, 20))
+        with patch("main.QCursor.pos", return_value=inside_position):
+            workbench.eventFilter(navigator, QEvent(QEvent.Leave))
+            QTest.qWait(1)
+            self.app.processEvents()
+        self.assertEqual(dismiss_reasons, [])
+
+        child_control = QWidget(navigator)
+        workbench.eventFilter(child_control, QEvent(QEvent.MouseButtonPress))
+        self.assertEqual(dismiss_reasons, [])
 
         dismiss_reasons.clear()
         QTest.mouseClick(content, Qt.LeftButton, pos=QPoint(420, 200))

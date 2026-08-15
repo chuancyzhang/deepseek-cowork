@@ -2186,6 +2186,23 @@ class TestDeliverableScanning(unittest.TestCase):
 
         window.file_tree.setExpanded.assert_called_once_with(index, True)
 
+    def test_deliverable_click_opens_file_without_hiding_navigator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "report.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"pptx")
+            window = MainWindow.__new__(MainWindow)
+            item = MagicMock()
+            item.data.return_value = path
+            window.set_file_navigator_scope = MagicMock()
+            window.select_deliverable = MagicMock(return_value=True)
+            window.set_file_navigator_visible = MagicMock()
+
+            window.on_deliverable_item_clicked(item)
+
+            window.select_deliverable.assert_called_once_with(path)
+            window.set_file_navigator_visible.assert_not_called()
+
     def test_preview_and_edit_use_single_mode_action(self):
         QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)

@@ -1262,6 +1262,25 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("network error", errors[0]["content"])
 
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_model_api_retries_current_server_overload_message(self, _wait):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+        overload = "Our servers are currently overloaded. Please try again later."
+        client.chat.completions.create.side_effect = RuntimeError(overload)
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.chat.completions.create.call_count, 6)
+        self.assertEqual(len([chunk for chunk in chunks if chunk["type"] == "provider_retry"]), 5)
+        errors = [chunk for chunk in chunks if chunk["type"] == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn(overload, errors[0]["content"])
+
     @patch("core.llm.providers._wait_before_model_retry", return_value=False)
     def test_model_api_retry_wait_stops_without_final_error(self, _wait):
         provider, client = self._build_provider(

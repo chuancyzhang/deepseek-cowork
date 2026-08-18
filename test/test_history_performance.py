@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from core.conversation_render import build_conversation_render_spans
 from main import (
     AssistantTurnGroup,
+    ChatBubble,
     HistoricalAssistantSummary,
     MainWindow,
     OfficeDraftTaskCard,
@@ -130,6 +131,108 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertEqual(results[0]["token"], 7)
         self.assertEqual(results[0]["spans"], [{"start": 0, "end": 1}, {"start": 1, "end": 2}])
         self.assertNotIn("widget", results[0])
+
+    def test_history_worker_native_finish_exits_loading_state(self):
+        class SignalStub:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback, *_args):
+                self.callbacks.append(callback)
+
+            def emit(self, *args):
+                for callback in list(self.callbacks):
+                    callback(*args)
+
+        class WorkerStub:
+            def __init__(self):
+                self.finished_signal = SignalStub()
+                self.finished = SignalStub()
+                self.start = MagicMock()
+                self.deleteLater = MagicMock()
+
+        worker = WorkerStub()
+        self.state.history_load_token = 23
+        self.state.history_loading = True
+        with (
+            patch("main.SessionHistoryLoadWorker", return_value=worker),
+            patch.object(self.window, "_show_session_load_error_state") as show_error,
+        ):
+            self.window._load_session_history(self.state.session_id, 23)
+            worker.finished.emit()
+
+        self.assertFalse(self.state.history_loading)
+        self.assertFalse(self.state.history_loaded)
+        show_error.assert_called_once()
+        worker.deleteLater.assert_called_once()
+
+    def test_live_user_projection_reentry_creates_one_widget(self):
+        message = {"id": "u-reentry", "role": "user", "content": "第一条"}
+        self.state.messages = [message]
+        self.state.render_items = build_conversation_render_spans(self.state.messages)
+        original_process_events = self.window.process_ui_events
+        reentered = False
+
+        def reenter_once(*_args, **_kwargs):
+            nonlocal reentered
+            if reentered:
+                return
+            reentered = True
+            self.window.render_message_batch(
+                [message],
+                self.state.session_id,
+                animate=False,
+            )
+
+        self.window.process_ui_events = reenter_once
+        try:
+            inserted = self.window.render_message_batch(
+                [message],
+                self.state.session_id,
+                animate=False,
+            )
+        finally:
+            self.window.process_ui_events = original_process_events
+
+        widgets = [
+            self.state.chat_layout.itemAt(index).widget()
+            for index in range(self.state.chat_layout.count())
+        ]
+        self.assertTrue(reentered)
+        self.assertEqual(inserted, 1)
+        self.assertEqual(len([widget for widget in widgets if isinstance(widget, ChatBubble)]), 1)
+
+    def test_same_user_text_with_different_ids_creates_two_widgets(self):
+        messages = [
+            {"id": "u-same-1", "role": "user", "content": "相同内容"},
+            {"id": "u-same-2", "role": "user", "content": "相同内容"},
+        ]
+        self.state.messages = messages
+
+        inserted = self.window.render_message_batch(
+            messages,
+            self.state.session_id,
+            animate=False,
+        )
+
+        self.assertEqual(inserted, 2)
+        self.assertIsNot(
+            self.state.render_node_by_message_id["u-same-1"]["widget"],
+            self.state.render_node_by_message_id["u-same-2"]["widget"],
+        )
+
+    def test_repeated_history_user_span_does_not_change_layout_or_count(self):
+        message = {"id": "u-history", "role": "user", "content": "历史问题"}
+        self.state.messages = [message]
+        spans = build_conversation_render_spans(self.state.messages)
+
+        first_inserted = self.window._render_session_history_spans(self.state, spans)
+        first_layout_count = self.state.chat_layout.count()
+        second_inserted = self.window._render_session_history_spans(self.state, spans)
+
+        self.assertEqual(first_inserted, 1)
+        self.assertEqual(second_inserted, 0)
+        self.assertEqual(self.state.chat_layout.count(), first_layout_count)
 
     def test_history_load_preserves_hidden_ledger_and_replays_visible_spans(self):
         raw_messages = [
@@ -367,6 +470,32 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertEqual([message["id"] for message in self.state.messages], ["a1", "u2"])
         self.assertIs(self.state.render_node_by_message_id["u2"]["widget"], downstream_widget)
 
+
+    def test_recovery_does_not_reload_loaded_session_history(self):
+        self.state.history_loaded = True
+        self.state.history_loading = False
+        with (
+            patch.object(self.window.chat_recovery_journal, "recover_into", return_value=([self.state.session_id], [])),
+            patch.object(self.window, "queue_session_history_load") as queue_load,
+            patch.object(self.window, "refresh_history_list"),
+        ):
+            self.window.recover_runtime_pending_commits()
+        queue_load.assert_not_called()
+        self.assertTrue(self.state.history_loaded)
+
+    def test_stale_initial_history_render_token_is_ignored(self):
+        self.state.history_load_token = 2
+        self.state.history_initial_render_token = 1
+        self.state.history_initial_render_queue = [{"start": 0, "end": 1}]
+        self.window._render_next_initial_history_span(self.state.session_id, 1)
+        self.assertEqual(len(self.state.history_initial_render_queue), 1)
+
+    def test_stale_history_page_render_token_is_ignored(self):
+        self.state.history_load_token = 8
+        self.state.history_page_token = 7
+        self.state.history_page_queue = [{"start": 0, "end": 1}]
+        self.window._render_next_history_page_span(self.state.session_id, 7)
+        self.assertEqual(len(self.state.history_page_queue), 1)
 
 if __name__ == "__main__":
     unittest.main()

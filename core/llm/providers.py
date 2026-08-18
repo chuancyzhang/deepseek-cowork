@@ -46,6 +46,7 @@ TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "temporarily unavailable",
     "service unavailable",
     "server overloaded",
+    "our servers are currently overloaded",
     "too many requests",
     "rate limit",
     "request timeout",

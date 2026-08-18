@@ -913,7 +913,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.run_phase, before_phase)
             self.assertEqual(state.provider_retry_attempt, 3)
             self.assertEqual(state.provider_retry_max, 5)
-            self.assertEqual(window.loop_hint.text(), "网络连接中断，正在重试 3/5")
+            self.assertEqual(window.loop_hint.text(), "正在重试 3/5")
             self.assertEqual(state.observability_events[-1]["type"], "provider_retry")
             self.assertEqual(state.observability_events[-1]["session_id"], state.session_id)
             self.assertEqual(state.observability_events[-1]["turn_id"], "1")
@@ -994,7 +994,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(background.provider_retry_attempt, 2)
             window.set_current_session(background.session_id)
             window.normalize_session_ui(background)
-            self.assertEqual(window.loop_hint.text(), "网络连接中断，正在重试 2/5")
+            self.assertEqual(window.loop_hint.text(), "正在重试 2/5")
         finally:
             window.close()
             window.deleteLater()
@@ -1046,6 +1046,72 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(event["retry_attempt"], 5)
             self.assertTrue(state.conversation_notice.action_button.isHidden())
         finally:
+            window.close()
+            window.deleteLater()
+
+    def test_provider_overload_has_specific_notice_without_message_append(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_provider_overload")
+            state.messages = [{"id": "u-overload", "role": "user", "content": "继续"}]
+            before_message_ids = [message["id"] for message in state.messages]
+            state.live_activity = True
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-overload"
+            state.provider_retry_attempt = 5
+            state.provider_retry_max = 5
+            window._append_live_thinking_segment(state)
+
+            window.handle_llm_response(
+                {
+                    "error": "Our servers are currently overloaded. Please try again later.",
+                    "request_id": "request-overload",
+                },
+                state.session_id,
+                turn_id=1,
+                request_id="request-overload",
+            )
+
+            self.assertEqual([message["id"] for message in state.messages], before_message_ids)
+            self.assertEqual(len(state.messages), 1)
+            self.assertEqual(
+                state.conversation_notice.label.text(),
+                "模型服务繁忙，请稍后再发送",
+            )
+            self.assertEqual(state.observability_events[-1]["category"], "provider_overloaded")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_daemon_native_finish_uses_daemon_terminal_handler(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            worker = SimpleNamespace(
+                _ui_result_received=False,
+                _ui_terminal_handled=False,
+            )
+            state.active_turn_id = 4
+            state.active_turn_request_id = "request-daemon"
+            state.daemon_worker = worker
+
+            with patch.object(window, "handle_daemon_response") as handle_daemon:
+                window._handle_native_run_worker_finished(
+                    state.session_id,
+                    4,
+                    "request-daemon",
+                    "daemon",
+                    worker,
+                )
+
+            handle_daemon.assert_called_once()
+            result = handle_daemon.call_args.args[0]
+            self.assertEqual(result["error"], "运行线程提前结束")
+            self.assertEqual(result["request_id"], "request-daemon")
+            self.assertTrue(worker._ui_terminal_handled)
+        finally:
+            state.daemon_worker = None
             window.close()
             window.deleteLater()
 

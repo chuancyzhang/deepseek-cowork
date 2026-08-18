@@ -544,7 +544,7 @@ STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
 UI_NAVIGATION_LOG_FILENAME = "ui_navigation.log"
 NATIVE_CRASH_LOG_FILENAME = "native_crash.log"
-PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
+CHAT_RUNTIME_DEBUG_LOG_FILENAME = "chat_runtime_debug.log"
 CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
 FAVORITES_LOG_FILENAME = "favorites_runtime.log"
@@ -614,12 +614,12 @@ def log_chat_recovery(stage, **fields):
     )
 
 
-def log_ppt_agent_debug(stage, **fields):
+def log_chat_runtime_debug(stage, **fields):
     try:
         payload = {"stage": stage}
         payload.update(fields or {})
         append_background_process_log(
-            PPT_AGENT_DEBUG_LOG_FILENAME,
+            CHAT_RUNTIME_DEBUG_LOG_FILENAME,
             json.dumps(payload, ensure_ascii=False, default=str),
         )
     except Exception:
@@ -27021,7 +27021,7 @@ class MainWindow(QMainWindow):
         usage_request_id = str(usage.get("request_id") or "").strip()
         counted_request_ids = getattr(state, "counted_usage_request_ids", set())
         if usage_request_id and usage_request_id in counted_request_ids:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "token_usage_duplicate_request_ignored",
                 session_id=state.session_id,
                 request_id=usage_request_id,
@@ -28173,7 +28173,7 @@ class MainWindow(QMainWindow):
             phase = getattr(state, "run_phase", "Idle") or "Idle"
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
                 phase = (
-                    f"网络连接中断，正在重试 {int(state.provider_retry_attempt)}/"
+                    f"正在重试 {int(state.provider_retry_attempt)}/"
                     f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
                 )
         self.phase_badge.setText(f"状态：{display_run_phase(phase)}")
@@ -28317,7 +28317,7 @@ class MainWindow(QMainWindow):
 
     def _initialize_office_task_process(self, card, state, message=None, prompt_files=None, run_context=None, runtime_note=""):
         if card is None or getattr(card, "_process_initialized", False):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "office_process_init_skipped",
                 session_id=getattr(state, "session_id", ""),
                 has_card=card is not None,
@@ -28328,7 +28328,7 @@ class MainWindow(QMainWindow):
         meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
         workflow_mode = normalize_workflow_mode(meta.get("workflow_mode") or (run_context or {}).get("workflow_mode"))
         ppt_agent_mode = bool(meta.get("ppt_agent_mode") or (run_context or {}).get("ppt_agent_mode"))
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "office_process_init_begin",
             session_id=getattr(state, "session_id", ""),
             workflow_mode=workflow_mode,
@@ -28371,7 +28371,7 @@ class MainWindow(QMainWindow):
         if runtime_note:
             card.add_process_note(runtime_note, tone="muted")
         card._sync_process_placeholder()
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "office_process_init_done",
             session_id=getattr(state, "session_id", ""),
             process_widget_count=card.process_widget_count(),
@@ -28381,14 +28381,14 @@ class MainWindow(QMainWindow):
 
     def _schedule_office_task_process_bootstrap_check(self, state):
         if not state or getattr(state, "_office_process_bootstrap_check_pending", False):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "office_process_bootstrap_check_skipped",
                 session_id=getattr(state, "session_id", "") if state else "",
                 pending=bool(getattr(state, "_office_process_bootstrap_check_pending", False)) if state else False,
             )
             return
         state._office_process_bootstrap_check_pending = True
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "office_process_bootstrap_check_scheduled",
             session_id=getattr(state, "session_id", ""),
             delay_ms=OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS,
@@ -28401,11 +28401,11 @@ class MainWindow(QMainWindow):
     def _ensure_office_task_process_visible(self, session_id):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("office_process_bootstrap_missing_session", session_id=session_id)
+            log_chat_runtime_debug("office_process_bootstrap_missing_session", session_id=session_id)
             return
         state._office_process_bootstrap_check_pending = False
         if not getattr(state, "office_draft_preview_pending", False):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "office_process_bootstrap_not_pending",
                 session_id=session_id,
                 office_draft_preview_pending=False,
@@ -28413,7 +28413,7 @@ class MainWindow(QMainWindow):
             return
         card = self._office_draft_card_for_state(state)
         if card is None or card.process_widget_count() > 0:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "office_process_bootstrap_noop",
                 session_id=session_id,
                 has_card=card is not None,
@@ -28422,7 +28422,7 @@ class MainWindow(QMainWindow):
             return
         card.add_process_note("任务已提交，正在等待模型运行接管。", tone="muted")
         card._sync_process_placeholder()
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "office_process_bootstrap_added_note",
             session_id=session_id,
             process_widget_count=card.process_widget_count(),
@@ -28445,7 +28445,7 @@ class MainWindow(QMainWindow):
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, card)
         state.office_draft_task_card = card
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "office_task_card_created",
             session_id=getattr(state, "session_id", ""),
             profile_label=profile_label or self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE),
@@ -29147,6 +29147,67 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _bind_run_worker_finished(self, state, worker, kind, turn_id, request_id, result_handler):
+        if not state or worker is None:
+            raise ValueError("运行 worker 收尾缺少会话或 worker。")
+        worker._ui_result_received = False
+        worker._ui_terminal_handled = False
+
+        def mark_result_received(*_args):
+            worker._ui_result_received = True
+
+        def on_result(*args):
+            result = args[0] if args else {}
+            if worker._ui_terminal_handled:
+                return
+            worker._ui_terminal_handled = True
+            result_handler(result)
+
+        worker.finished_signal.connect(mark_result_received, Qt.DirectConnection)
+        worker.finished_signal.connect(on_result, Qt.QueuedConnection)
+        worker.finished.connect(
+            lambda sid=state.session_id, tid=turn_id, rid=request_id, current=worker, worker_kind=kind:
+            self._handle_native_run_worker_finished(sid, tid, rid, worker_kind, current),
+            Qt.QueuedConnection,
+        )
+
+    def _handle_native_run_worker_finished(self, session_id, turn_id, request_id, kind, worker):
+        state = self.get_session(session_id)
+        if not state or not self._event_matches_active_run(state, turn_id, request_id):
+            return
+        current_worker = {
+            "llm": getattr(state, "llm_worker", None),
+            "daemon": getattr(state, "daemon_worker", None),
+            "code": getattr(state, "code_worker", None),
+        }.get(str(kind or ""))
+        if current_worker is not worker or getattr(worker, "_ui_result_received", False) or getattr(worker, "_ui_terminal_handled", False):
+            return
+        worker._ui_terminal_handled = True
+        message = "运行线程提前结束"
+        log_sub_agent_runtime(
+            "ui_run_worker_native_finished_without_result",
+            session_id=state.session_id,
+            turn_id=str(turn_id or ""),
+            request_id=str(request_id or ""),
+            worker_kind=str(kind or ""),
+        )
+        if kind == "code":
+            state.code_worker = None
+            self._show_conversation_notice(state, message, "error")
+            self.set_session_phase("Failed", state.session_id)
+            self.set_session_status("failed", state.session_id, save=True, error=message)
+            self.refresh_step_list(state.session_id)
+            self.refresh_change_list(state.session_id)
+            if state.session_id == self.current_session_id:
+                self.normalize_session_ui(state)
+            return
+        result = {"error": message, "_runtime_terminal": "failed", "request_id": request_id}
+        if kind == "daemon":
+            self.handle_daemon_response(result, state.session_id, turn_id, request_id)
+            return
+        state.llm_worker = None
+        self.handle_llm_response(result, state.session_id, turn_id, request_id)
+
     def handle_observability_event(self, data, session_id=None, turn_id=None, request_id=None):
         try:
             on_ui_thread = QThread.currentThread() is self.thread()
@@ -29526,13 +29587,6 @@ class MainWindow(QMainWindow):
         if not recovered:
             return []
         self.refresh_history_list()
-        for session_id in recovered:
-            state = self.get_session(session_id)
-            if not state or getattr(state, "live_activity", False) or state.daemon_running:
-                continue
-            state.history_loaded = False
-            state.history_loading = False
-            self.queue_session_history_load(session_id)
         log_ui_navigation(
             "runtime_pending_commits_recovered",
             recovered_count=len(recovered),
@@ -30416,7 +30470,7 @@ class MainWindow(QMainWindow):
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
                 loop_text = (
-                    f"网络连接中断，正在重试 {int(state.provider_retry_attempt)}/"
+                    f"正在重试 {int(state.provider_retry_attempt)}/"
                     f"{int(state.provider_retry_max or state.provider_retry_attempt)}"
                 )
             else:
@@ -31255,14 +31309,22 @@ class MainWindow(QMainWindow):
         state.displayed_render_count = len(initial_spans)
         state.history_initial_render_queue = list(initial_spans)
         state.history_initial_render_inserted = 0
+        state.history_initial_render_token = int(getattr(state, "history_load_token", 0) or 0)
         state.history_page_loading = True
         state.history_initial_render_started_at = time.perf_counter()
         state.history_initial_render_completion = completion
-        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_initial_history_span(sid))
+        QTimer.singleShot(
+            0,
+            lambda sid=state.session_id, token=state.history_initial_render_token:
+            self._render_next_initial_history_span(sid, token),
+        )
 
-    def _render_next_initial_history_span(self, session_id):
+    def _render_next_initial_history_span(self, session_id, token=None):
         state = self.get_session(session_id)
         if not state:
+            return
+        expected_token = int(token or getattr(state, "history_initial_render_token", 0) or 0)
+        if expected_token != int(getattr(state, "history_load_token", 0) or 0):
             return
         queue = getattr(state, "history_initial_render_queue", [])
         if queue:
@@ -31274,7 +31336,11 @@ class MainWindow(QMainWindow):
                     state.chat_layout.removeWidget(loading_widget)
                     loading_widget.deleteLater()
                 state.history_loading_widget = None
-            QTimer.singleShot(0, lambda sid=session_id: self._render_next_initial_history_span(sid))
+            QTimer.singleShot(
+                0,
+                lambda sid=session_id, load_token=expected_token:
+                self._render_next_initial_history_span(sid, load_token),
+            )
             return
         state.history_page_loading = False
         if not int(getattr(state, "history_initial_render_inserted", 0) or 0):
@@ -31411,13 +31477,29 @@ class MainWindow(QMainWindow):
 
         log_ui_navigation("history_load_start", session_id=session_id, token=token)
         worker = SessionHistoryLoadWorker(self.chat_storage, session_id, token, self)
+        worker._ui_result_received = False
         self._history_load_workers.add(worker)
-        worker.finished_signal.connect(self._handle_session_history_loaded)
+
+        def mark_result_received(*_args):
+            worker._ui_result_received = True
+
+        worker.finished_signal.connect(mark_result_received, Qt.DirectConnection)
+        worker.finished_signal.connect(self._handle_session_history_loaded, Qt.QueuedConnection)
+
+        def handle_native_finished():
+            if not getattr(worker, "_ui_result_received", False):
+                self._handle_session_history_loaded({
+                    "ok": False,
+                    "session_id": session_id,
+                    "token": token,
+                    "error": "历史加载线程提前结束",
+                })
 
         def cleanup_worker():
             self._history_load_workers.discard(worker)
             worker.deleteLater()
 
+        worker.finished.connect(handle_native_finished, Qt.QueuedConnection)
         worker.finished.connect(cleanup_worker)
         worker.start()
 
@@ -33627,6 +33709,7 @@ class MainWindow(QMainWindow):
                 break
         state.auto_loading_history = True
         state.history_page_loading = True
+        state.history_page_token = int(getattr(state, "history_load_token", 0) or 0)
         state.history_page_queue = spans_to_load
         state.history_page_insert_index = 0
         state.history_page_old_max = vbar.maximum()
@@ -33634,11 +33717,18 @@ class MainWindow(QMainWindow):
         state.history_page_anchor_widget = anchor_widget
         state.history_page_anchor_offset = anchor_offset
         state.displayed_render_count += len(spans_to_load)
-        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
+        QTimer.singleShot(
+            0,
+            lambda sid=state.session_id, token=state.history_page_token:
+            self._render_next_history_page_span(sid, token),
+        )
 
-    def _render_next_history_page_span(self, session_id):
+    def _render_next_history_page_span(self, session_id, token=None):
         state = self.get_session(session_id)
         if not state:
+            return
+        expected_token = int(token or getattr(state, "history_page_token", 0) or 0)
+        if expected_token != int(getattr(state, "history_load_token", 0) or 0):
             return
         queue = getattr(state, "history_page_queue", [])
         if queue:
@@ -33679,7 +33769,11 @@ class MainWindow(QMainWindow):
                 if jump_target:
                     self._question_jump_error(state, jump_target, f"加载目标提问失败：{exc}")
                 return
-            QTimer.singleShot(0, lambda sid=session_id: self._render_next_history_page_span(sid))
+            QTimer.singleShot(
+                0,
+                lambda sid=session_id, load_token=expected_token:
+                self._render_next_history_page_span(sid, load_token),
+            )
             return
         state.auto_loading_history = False
         state.history_page_loading = False
@@ -34369,6 +34463,36 @@ class MainWindow(QMainWindow):
             reasoning = msg.get('reasoning')
             
             if role == 'user':
+                message_id = str(msg.get("id") or "").strip()
+                if target_layout is None and message_id:
+                    existing_node = state.render_node_by_message_id.get(message_id)
+                    existing_widget = (
+                        existing_node.get("widget")
+                        if isinstance(existing_node, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(existing_node, dict)
+                        and existing_node.get("kind") == "user"
+                        and existing_widget is not None
+                        and _qt_object_alive(existing_widget)
+                        and self._top_level_chat_widget(state, existing_widget) is not None
+                    ):
+                        log_ui_navigation(
+                            "user_message_projection_reused",
+                            session_id=state.session_id,
+                            message_id=message_id,
+                            history_loading=bool(getattr(state, "history_loading", False)),
+                            rendering_history=bool(getattr(state, "rendering_history_bubbles", False)),
+                        )
+                        finalize_active_bubble()
+                        state.last_agent_bubble = None
+                        continue
+                    if isinstance(existing_node, dict):
+                        state.render_node_by_message_id.pop(message_id, None)
+                        node_key = str(existing_node.get("key") or "")
+                        if state.render_nodes.get(node_key) is existing_node:
+                            state.render_nodes.pop(node_key, None)
                 if is_same_turn_guidance_message(msg):
                     if active_agent_bubble is not None:
                         if pending_content_parts:
@@ -34403,7 +34527,7 @@ class MainWindow(QMainWindow):
                     index=current_idx if target_layout is None else None,
                     animate=animate,
                     attachments=self._message_user_attachments(msg),
-                    source_message_id=str(msg.get("id") or "").strip(),
+                    source_message_id=message_id,
                     created_at=msg.get("created_at"),
                     session_id=session_id,
                     target_layout=target_layout,
@@ -38167,7 +38291,7 @@ class MainWindow(QMainWindow):
         session_id=None,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "ppt_agent_request_begin",
             session_id=getattr(state, "session_id", "") if state else "",
             has_state=bool(state),
@@ -38182,7 +38306,7 @@ class MainWindow(QMainWindow):
         try:
             self._ensure_session_workspace(state)
         except Exception as exc:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "ppt_agent_request_workspace_error",
                 session_id=state.session_id,
                 error=str(exc),
@@ -38203,12 +38327,12 @@ class MainWindow(QMainWindow):
                 source_names += f" 等 {len(source_files)} 个资料"
             request = f"请基于附加资料生成一份演示文稿 PPT 工作稿。资料包括：{source_names}。"
         if not request:
-            log_ppt_agent_debug("ppt_agent_request_empty", session_id=state.session_id)
+            log_chat_runtime_debug("ppt_agent_request_empty", session_id=state.session_id)
             self.add_system_toast("请先描述要生成的 PPT，或先添加资料。", "warning", session_id=state.session_id, auto_close_ms=3200)
             return False
         missing_files = [path for path in source_files if not os.path.isfile(path)]
         if missing_files:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "ppt_agent_request_missing_files",
                 session_id=state.session_id,
                 missing_count=len(missing_files),
@@ -38222,7 +38346,7 @@ class MainWindow(QMainWindow):
             )
             return False
         if template_file and (not os.path.isfile(template_file) or os.path.splitext(template_file)[1].lower() != ".pptx"):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "ppt_agent_request_invalid_template",
                 session_id=state.session_id,
                 template_file=template_file,
@@ -38253,7 +38377,7 @@ class MainWindow(QMainWindow):
         normalized_strategy = normalize_ppt_agent_strategy(strategy)
         selected_strategy = normalize_ppt_agent_strategy(prompt_result.get("selected_strategy"))
         normalized_preference = normalize_ppt_agent_preference(preference)
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "ppt_agent_request_prompt_built",
             session_id=state.session_id,
             selected_strategy=selected_strategy,
@@ -38276,7 +38400,7 @@ class MainWindow(QMainWindow):
             ppt_agent_preference=normalized_preference,
             ppt_agent_template_file=template_file,
         )
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "ppt_agent_request_submitted",
             session_id=state.session_id,
             submitted=bool(submitted),
@@ -39912,6 +40036,8 @@ class MainWindow(QMainWindow):
     def _run_failure_presentation(error_text, interrupted, retry_attempt, retry_max):
         if interrupted:
             return "interrupted", "已停止"
+        if "our servers are currently overloaded" in str(error_text or "").strip().lower():
+            return "provider_overloaded", "模型服务繁忙，请稍后再发送"
         if str(error_text or "").strip() == "Provider completed without final assistant content.":
             return "missing_final_content", "本轮未完成，请重试"
         if int(retry_attempt or 0) > 0 and int(retry_max or 0) > 0:
@@ -40469,15 +40595,12 @@ class MainWindow(QMainWindow):
             state.displayed_count = len(state.messages)
             state.displayed_render_count = len(state.render_items)
             if state.session_id == self.current_session_id:
-                self.add_chat_bubble(
-                    "User",
-                    self._message_display_content(parent_message),
+                self.render_message_batch(
+                    [parent_message],
+                    state.session_id,
                     animate=False,
-                    force_scroll=True,
-                    source_message_id=parent_message["id"],
-                    created_at=parent_message["created_at"],
-                    session_id=state.session_id,
                 )
+                self.request_session_scroll_to_bottom(state.session_id, force=True)
         parent_message_id = str(parent_message.get("id") or "")
         agent_state_proxy = type(
             "_AgentStateProxy",
@@ -41460,7 +41583,7 @@ class MainWindow(QMainWindow):
                 guidance_revision,
                 timeout_ms=3000,
             ):
-                log_ppt_agent_debug(
+                log_chat_runtime_debug(
                     "turn_guidance_commit_barrier_failed",
                     session_id=state.session_id,
                     turn_id=str(expected_turn_id or ""),
@@ -41472,7 +41595,7 @@ class MainWindow(QMainWindow):
                 self._reject_unapplied_guidance(state, restore_input=False)
                 self._persist_pending_guidance(state)
                 return True
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "turn_guidance_commit_barrier_passed",
                 session_id=state.session_id,
                 turn_id=str(expected_turn_id or ""),
@@ -41603,7 +41726,7 @@ class MainWindow(QMainWindow):
     ):
         if not state or getattr(state, "submit_in_progress", False):
             if state is not None:
-                log_ppt_agent_debug(
+                log_chat_runtime_debug(
                     "submit_session_request_reentrant_rejected",
                     session_id=state.session_id,
                 )
@@ -41639,7 +41762,7 @@ class MainWindow(QMainWindow):
         history_rewrite_guard=None,
         existing_message_payload=None,
     ):
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "submit_session_request_begin",
             session_id=getattr(state, "session_id", "") if state else "",
             has_state=bool(state),
@@ -41653,7 +41776,7 @@ class MainWindow(QMainWindow):
         if not state:
             return False
         if not session_history_ready(state):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_history_not_ready",
                 session_id=getattr(state, "session_id", ""),
                 history_loaded=getattr(state, "history_loaded", None),
@@ -41694,7 +41817,7 @@ class MainWindow(QMainWindow):
                     },
                 )
         except Exception as exc:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_tool_history_invalid",
                 session_id=state.session_id,
                 error=str(exc),
@@ -41702,7 +41825,7 @@ class MainWindow(QMainWindow):
             return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._session_is_busy(state):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_busy",
                 session_id=state.session_id,
                 turn_steerable=bool(getattr(state, "turn_steerable", False)),
@@ -41716,7 +41839,7 @@ class MainWindow(QMainWindow):
                 clear_current_input=clear_current_input,
             )
         if not raw_user_text and not prompt_files:
-            log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
+            log_chat_runtime_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
         grill_armed = normalize_grill_mode_state(
@@ -41743,7 +41866,7 @@ class MainWindow(QMainWindow):
             return False
         if not self._model_profile_for_state(state):
             has_configured_models = bool(self.config_manager.iter_model_profiles())
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_model_missing",
                 session_id=state.session_id,
                 selected_model_id=self._model_id_for_state(state),
@@ -41765,7 +41888,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_vision_attachment_support(state, prompt_files):
             return False
         if mentioned_profiles and not delegated_text:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_agent_mention_without_task",
                 session_id=state.session_id,
                 mentioned_count=len(mentioned_profiles),
@@ -41776,12 +41899,12 @@ class MainWindow(QMainWindow):
         payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
         user_text = payload.get("content") or ""
         if not user_text:
-            log_ppt_agent_debug("submit_session_empty_user_text_after_payload", session_id=state.session_id)
+            log_chat_runtime_debug("submit_session_empty_user_text_after_payload", session_id=state.session_id)
             return False
         try:
             self._ensure_session_workspace(state)
         except Exception as exc:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_workspace_error",
                 session_id=state.session_id,
                 error=str(exc),
@@ -41801,7 +41924,7 @@ class MainWindow(QMainWindow):
         user_message_id = str((existing_message_payload or {}).get("id") or self._new_message_id())
         next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
         submit_request_id = uuid.uuid4().hex
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "submit_session_ids_allocated",
             session_id=state.session_id,
             turn_id=next_turn_id,
@@ -41819,7 +41942,7 @@ class MainWindow(QMainWindow):
             # is enforced by the generated message_id/turn_id/request_id and
             # by the session busy state; text/time equality is not a ledger
             # identity rule because two independent turns may have the same text.
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_identity_dedup_enabled",
                 session_id=state.session_id,
                 strategy="message_id_turn_id_request_id",
@@ -41848,7 +41971,7 @@ class MainWindow(QMainWindow):
                 if os.path.splitext(path)[1].lower() in {".html", ".htm"}
             ]
             if not source_files:
-                log_ppt_agent_debug("submit_session_conversion_source_missing", session_id=state.session_id)
+                log_chat_runtime_debug("submit_session_conversion_source_missing", session_id=state.session_id)
                 if state.session_id == self.current_session_id:
                     self._show_conversation_notice(state, "没有找到本轮转换需要的源 HTML 文件。", "warning")
                 return False
@@ -42036,6 +42159,25 @@ class MainWindow(QMainWindow):
                 f"运行恢复日志写入失败：{exc}",
             )
             return False
+        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
+        previous_render_total = len(getattr(state, "render_items", []) or [])
+        if existing_message_payload and not reuse_committed_guidance:
+            state.messages = [
+                message_payload
+                if isinstance(item, dict) and str(item.get("id") or "") == user_message_id
+                else item
+                for item in state.messages
+            ]
+        else:
+            state.messages.append(message_payload)
+        self._rebuild_session_render_spans(state)
+        if not existing_message_payload:
+            state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        self._sync_displayed_render_count_after_live_append(
+            state,
+            previous_render_count,
+            previous_render_total,
+        )
         is_first_submit = bool(getattr(state, "empty_state", None) is not None)
         self._retire_session_empty_state(state, reason="first_submit")
         office_card = None
@@ -42046,7 +42188,7 @@ class MainWindow(QMainWindow):
                 running=True,
                 target_format=office_conversion_target or "html",
             )
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_office_card_ready",
                 session_id=state.session_id,
                 has_card=office_card is not None,
@@ -42065,25 +42207,32 @@ class MainWindow(QMainWindow):
                 },
                 runtime_note="正在等待模型运行接管。",
             )
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_office_process_initialized",
                 session_id=state.session_id,
                 process_widget_count=office_card.process_widget_count(),
             )
         try:
             if not existing_message_payload:
-                self.add_chat_bubble(
-                    "User",
-                    payload.get("display_content") or "",
-                    animate=False,
-                    force_scroll=state.session_id == self.current_session_id,
-                    attachments=payload.get("attachments") or [],
-                    source_message_id=user_message_id,
-                    created_at=message_payload["created_at"],
-                    session_id=state.session_id,
-                    target_layout=office_card.process_layout if office_card is not None else None,
-                )
-            log_ppt_agent_debug(
+                if office_card is not None:
+                    self.add_chat_bubble(
+                        "User",
+                        payload.get("display_content") or "",
+                        animate=False,
+                        force_scroll=state.session_id == self.current_session_id,
+                        attachments=payload.get("attachments") or [],
+                        source_message_id=user_message_id,
+                        created_at=message_payload["created_at"],
+                        session_id=state.session_id,
+                        target_layout=office_card.process_layout,
+                    )
+                else:
+                    self.render_message_batch(
+                        [message_payload],
+                        state.session_id,
+                        animate=False,
+                    )
+            log_chat_runtime_debug(
                 "submit_session_user_bubble_added",
                 session_id=state.session_id,
                 background=state.session_id != self.current_session_id,
@@ -42091,7 +42240,7 @@ class MainWindow(QMainWindow):
                 process_widget_count=office_card.process_widget_count() if office_card is not None else -1,
             )
         except Exception as exc:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "submit_session_user_bubble_error",
                 session_id=state.session_id,
                 background=state.session_id != self.current_session_id,
@@ -42133,27 +42282,6 @@ class MainWindow(QMainWindow):
                 session_id=state.session_id,
                 turn_id=state.active_turn_id,
             )
-        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
-        previous_render_total = len(getattr(state, "render_items", []) or [])
-        if existing_message_payload and not reuse_committed_guidance:
-            state.messages = [
-                message_payload
-                if isinstance(item, dict) and str(item.get("id") or "") == user_message_id
-                else item
-                for item in state.messages
-            ]
-        else:
-            state.messages.append(message_payload)
-        self._rebuild_session_render_spans(state)
-        # Keep rendered-count in sync for live messages; otherwise load-more
-        # may re-render freshly added items as if they were unseen history.
-        if not existing_message_payload:
-            state.displayed_count = min(len(state.messages), state.displayed_count + 1)
-        self._sync_displayed_render_count_after_live_append(
-            state,
-            previous_render_count,
-            previous_render_total,
-        )
         history_rewrite_result = None
         if history_rewrite_guard is not None:
             try:
@@ -42251,7 +42379,7 @@ class MainWindow(QMainWindow):
                         error=status_message,
                     )
                     state.first_submit_diagnostic_turn_id = 0
-                log_ppt_agent_debug(
+                log_chat_runtime_debug(
                     "submit_session_ppt_skill_unavailable",
                     session_id=state.session_id,
                     selected_strategy=ppt_agent_selected_strategy,
@@ -42277,7 +42405,7 @@ class MainWindow(QMainWindow):
             ppt_agent_preference=ppt_agent_preference,
             ppt_agent_template_file=ppt_agent_template_file,
         )
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "submit_session_run_context_built",
             session_id=state.session_id,
             run_context_keys=sorted(list((run_context or {}).keys())),
@@ -42300,7 +42428,7 @@ class MainWindow(QMainWindow):
                     runtime="daemon",
                 )
             self._append_office_process_note(state, "正在启动后台模型流。", tone="muted")
-            log_ppt_agent_debug("submit_session_dispatch_daemon", session_id=state.session_id, turn_id=current_turn_id)
+            log_chat_runtime_debug("submit_session_dispatch_daemon", session_id=state.session_id, turn_id=current_turn_id)
             try:
                 self.process_daemon_logic(
                     user_text,
@@ -42332,7 +42460,7 @@ class MainWindow(QMainWindow):
                     runtime="local",
                 )
             self._append_office_process_note(state, "正在启动本地模型流。", tone="muted")
-            log_ppt_agent_debug("submit_session_dispatch_local", session_id=state.session_id, turn_id=current_turn_id)
+            log_chat_runtime_debug("submit_session_dispatch_local", session_id=state.session_id, turn_id=current_turn_id)
             try:
                 self.process_agent_logic(
                     user_text,
@@ -43191,11 +43319,11 @@ class MainWindow(QMainWindow):
     ):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("process_agent_missing_session", session_id=session_id)
+            log_chat_runtime_debug("process_agent_missing_session", session_id=session_id)
             return
         if turn_id is None:
             turn_id = state.active_turn_id
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "process_agent_begin",
             session_id=state.session_id,
             turn_id=turn_id,
@@ -43224,7 +43352,7 @@ class MainWindow(QMainWindow):
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
             office_card.add_process_note("本地模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "process_agent_office_card_attached",
                 session_id=state.session_id,
                 process_widget_count=office_card.process_widget_count(),
@@ -43245,10 +43373,14 @@ class MainWindow(QMainWindow):
         )
         state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
         session_id = state.session_id
-        state.llm_worker.finished_signal.connect(
+        self._bind_run_worker_finished(
+            state,
+            state.llm_worker,
+            "llm",
+            turn_id,
+            request_id,
             lambda result, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_llm_response(result, sid, tid, rid),
-            Qt.QueuedConnection,
         )
         state.llm_worker.content_signal.connect(
             lambda text, sid=session_id, tid=turn_id, rid=request_id:
@@ -43293,7 +43425,7 @@ class MainWindow(QMainWindow):
             Qt.QueuedConnection,
         )
         state.llm_worker.start()
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "process_agent_worker_started",
             session_id=state.session_id,
             turn_id=turn_id,
@@ -43306,10 +43438,14 @@ class MainWindow(QMainWindow):
 
     def _connect_daemon_worker_signals(self, state, worker, turn_id):
         request_id = str(getattr(worker, "request_id", "") or "")
-        worker.finished_signal.connect(
+        self._bind_run_worker_finished(
+            state,
+            worker,
+            "daemon",
+            turn_id,
+            request_id,
             lambda result, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_daemon_response(result, sid, tid, rid),
-            Qt.QueuedConnection,
         )
         worker.thinking_signal.connect(
             lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
@@ -43453,11 +43589,11 @@ class MainWindow(QMainWindow):
     ):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("process_daemon_missing_session", session_id=session_id)
+            log_chat_runtime_debug("process_daemon_missing_session", session_id=session_id)
             return
         if turn_id is None:
             turn_id = state.active_turn_id
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "process_daemon_begin",
             session_id=state.session_id,
             turn_id=turn_id,
@@ -43485,7 +43621,7 @@ class MainWindow(QMainWindow):
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
             office_card.add_process_note("后台模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "process_daemon_office_card_attached",
                 session_id=state.session_id,
                 process_widget_count=office_card.process_widget_count(),
@@ -43508,7 +43644,7 @@ class MainWindow(QMainWindow):
         )
         self._connect_daemon_worker_signals(state, state.daemon_worker, turn_id)
         state.daemon_worker.start()
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "process_daemon_worker_started",
             session_id=state.session_id,
             turn_id=turn_id,
@@ -43521,7 +43657,7 @@ class MainWindow(QMainWindow):
     def handle_daemon_turn_started(self, daemon_turn_id, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state or turn_id != state.active_turn_id:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "daemon_turn_started_ignored",
                 session_id=session_id,
                 daemon_turn_id=daemon_turn_id,
@@ -43530,7 +43666,7 @@ class MainWindow(QMainWindow):
             )
             return
         if str(daemon_turn_id or "") != str(turn_id or ""):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "daemon_turn_started_mismatch",
                 session_id=session_id,
                 daemon_turn_id=daemon_turn_id,
@@ -43538,7 +43674,7 @@ class MainWindow(QMainWindow):
             )
             return
         state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "daemon_turn_started",
             session_id=session_id,
             daemon_turn_id=daemon_turn_id,
@@ -43550,17 +43686,17 @@ class MainWindow(QMainWindow):
     def handle_daemon_response(self, result, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("daemon_response_missing_session", session_id=session_id, turn_id=turn_id)
+            log_chat_runtime_debug("daemon_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
         if turn_id is not None and turn_id != state.active_turn_id:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "daemon_response_ignored_turn",
                 session_id=session_id,
                 turn_id=turn_id,
                 active_turn_id=state.active_turn_id,
             )
             return
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "daemon_response_received",
             session_id=session_id,
             turn_id=turn_id,
@@ -44401,7 +44537,7 @@ class MainWindow(QMainWindow):
     def handle_llm_response(self, result, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
+            log_chat_runtime_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
         result = dict(result) if isinstance(result, dict) else {
             "error": "Provider returned an invalid result payload."
@@ -44422,7 +44558,7 @@ class MainWindow(QMainWindow):
             turn_id != state.active_turn_id
             or turn_id <= state.completed_turn_id
         ):
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "llm_response_ignored_before_terminal",
                 session_id=session_id,
                 turn_id=turn_id,
@@ -44494,7 +44630,7 @@ class MainWindow(QMainWindow):
         try:
             return self._handle_llm_response_impl(result, session_id, turn_id)
         except Exception as exc:
-            log_ppt_agent_debug(
+            log_chat_runtime_debug(
                 "llm_response_finalize_failed",
                 session_id=state.session_id,
                 turn_id=turn_id,
@@ -44528,7 +44664,7 @@ class MainWindow(QMainWindow):
     def _handle_llm_response_impl(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state:
-            log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
+            log_chat_runtime_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
         run_id = str(
             result.get("request_id")
@@ -44545,7 +44681,7 @@ class MainWindow(QMainWindow):
         previous_render_total = len(getattr(state, "render_items", []) or [])
         if turn_id is not None:
             if turn_id != state.active_turn_id:
-                log_ppt_agent_debug(
+                log_chat_runtime_debug(
                     "llm_response_ignored_turn",
                     session_id=session_id,
                     turn_id=turn_id,
@@ -44553,7 +44689,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             if turn_id <= state.completed_turn_id:
-                log_ppt_agent_debug(
+                log_chat_runtime_debug(
                     "llm_response_ignored_completed",
                     session_id=session_id,
                     turn_id=turn_id,
@@ -44561,7 +44697,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             state.completed_turn_id = turn_id
-        log_ppt_agent_debug(
+        log_chat_runtime_debug(
             "llm_response_begin",
             session_id=session_id,
             turn_id=turn_id,
@@ -45021,9 +45157,14 @@ class MainWindow(QMainWindow):
                 lambda text, sid=state.session_id, tid=turn_id, rid=run_id:
                     self.handle_code_output(text, sid, tid, rid)
             )
-            state.code_worker.finished_signal.connect(
-                lambda sid=state.session_id, tid=turn_id, rid=run_id:
-                    self.handle_code_finished(sid, tid, rid)
+            self._bind_run_worker_finished(
+                state,
+                state.code_worker,
+                "code",
+                turn_id,
+                run_id,
+                lambda _result, sid=state.session_id, tid=turn_id, rid=run_id:
+                    self.handle_code_finished(sid, tid, rid),
             )
             state.code_worker.input_request_signal.connect(
                 lambda prompt, sid=state.session_id, tid=turn_id, rid=run_id:

@@ -136,6 +136,28 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self._read_bytes("legacy.txt").decode("gbk"), "新值\r\n")
 
+    def test_bounded_read_covering_entire_file_grants_write_audit(self):
+        self._write_bytes("bounded.txt", b"one\ntwo\n")
+
+        complete = read_text_file(
+            self.workspace,
+            "bounded.txt",
+            offset=1,
+            limit=2,
+            context=self.context,
+            action="text_file_read",
+        )
+        self.assertTrue(complete["audit_complete"])
+        self.assertFalse(complete["truncated"])
+
+        result = apply_patch(
+            self.workspace,
+            "*** Begin Patch\n*** Update File: bounded.txt\n@@\n-one\n+ONE\n*** End Patch",
+            context=self.context,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._read_text("bounded.txt"), "ONE\ntwo\n")
+
     def test_add_multi_hunk_eof_and_continuous_updates(self):
         added = apply_patch(
             self.workspace,

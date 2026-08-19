@@ -739,7 +739,8 @@ def read_text_file(
             truncated = end_index < total_lines
         content = "".join(selected)
         returned_lines = len(selected)
-        if parsed_offset == 1 and parsed_limit is None:
+        audit_complete = parsed_offset == 1 and not truncated
+        if audit_complete:
             record_full_read_state(
                 abs_path,
                 context,
@@ -764,7 +765,7 @@ def read_text_file(
                 "returned_lines": returned_lines,
                 "total_lines": total_lines,
                 "next_offset": parsed_offset + returned_lines if truncated else None,
-                "audit_complete": parsed_offset == 1 and parsed_limit is None,
+                "audit_complete": audit_complete,
             },
         )
     except TextFileCodecError as exc:

@@ -48,6 +48,19 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsInstance(self.window.td_result_edit, ProductResultViewer)
         self.assertIsInstance(self.window.td_args_meta_edit, ProductCodeViewer)
 
+    def test_observability_prompt_view_keeps_full_scrollable_context(self):
+        state = self.window.get_current_session()
+        state.system_prompt_text = "prefix\n" + ("x" * 7000) + "\nsuffix"
+        state.runtime_context_text = "runtime context"
+
+        self.window.refresh_observability_view(state.session_id)
+
+        rendered = self.window.observability_prompt_edit.toPlainText()
+        self.assertIn("prefix", rendered)
+        self.assertIn("suffix", rendered)
+        self.assertIn("runtime context", rendered)
+        self.assertNotIn("已截断", rendered)
+
     def test_initial_window_and_composer_fit_logical_available_screen(self):
         self.window.show()
         self.app.processEvents()

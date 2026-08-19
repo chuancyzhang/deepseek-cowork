@@ -28964,7 +28964,7 @@ class MainWindow(QMainWindow):
                 current_session_id=str(getattr(self, "current_session_id", "") or ""),
             )
             return
-        safe_text = _safe_text_preview(text, limit)
+        safe_text = str(text or "") if limit is None else _safe_text_preview(text, limit)
         try:
             current_text = edit.toPlainText()
             if current_text == safe_text:
@@ -29113,12 +29113,12 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            prompt_joined, prompt_preview = self._build_observability_prompt_texts(state, preview_limit=6000)
+            prompt_joined, _ = self._build_observability_prompt_texts(state, preview_limit=6000)
             self._set_observability_text(
                 self.observability_prompt_edit,
-                prompt_preview,
+                prompt_joined,
                 "system_prompt",
-                limit=6000,
+                limit=None,
             )
             if hasattr(self, "observability_copy_prompt_btn") and _qt_object_alive(self.observability_copy_prompt_btn):
                 self.observability_copy_prompt_btn.setEnabled(bool(prompt_joined.strip()))

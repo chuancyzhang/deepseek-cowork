@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import os
 import tempfile
 import time
@@ -41,6 +42,20 @@ class ProductExperienceFixTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_ui_navigation_keeps_event_stage_and_records_phase(self):
+        with patch("main.append_background_process_log") as append_log:
+            main_module.log_ui_navigation(
+                "first_submit_error",
+                session_id="session-1",
+                turn_id=1,
+                phase="run",
+                error="provider failed",
+            )
+
+        payload = json.loads(append_log.call_args.args[1])
+        self.assertEqual(payload["stage"], "first_submit_error")
+        self.assertEqual(payload["phase"], "run")
 
     def test_skill_center_reports_remote_required_config_as_pending(self):
         self.assertEqual(

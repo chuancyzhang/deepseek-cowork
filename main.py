@@ -28670,7 +28670,7 @@ class MainWindow(QMainWindow):
             log_ui_navigation(
                 "grill_error",
                 session_id=state.session_id,
-                stage="run",
+                phase="run",
             )
         state.grill_mode_state = GRILL_MODE_DISABLED
         state.grill_round_count = 0
@@ -31695,7 +31695,7 @@ class MainWindow(QMainWindow):
                 "history_load_error",
                 session_id=session_id,
                 token=token,
-                stage="normalized_render_spans",
+                phase="normalized_render_spans",
                 error=exc,
             )
             if session_id == self.current_session_id:
@@ -33841,7 +33841,7 @@ class MainWindow(QMainWindow):
                     f"历史消息加载失败：{exc}",
                     "error",
                 )
-                log_ui_navigation("history_load_error", session_id=session_id, stage="page", error=str(exc))
+                log_ui_navigation("history_load_error", session_id=session_id, phase="page", error=str(exc))
                 jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
                 if jump_target:
                     self._question_jump_error(state, jump_target, f"加载目标提问失败：{exc}")
@@ -42177,7 +42177,7 @@ class MainWindow(QMainWindow):
                 log_ui_navigation(
                     "grill_error",
                     session_id=state.session_id,
-                    stage="persistence",
+                    phase="persistence",
                 )
             if state.session_id == self.current_session_id:
                 self._show_conversation_notice(
@@ -42407,7 +42407,7 @@ class MainWindow(QMainWindow):
                 log_ui_navigation(
                     "grill_error",
                     session_id=state.session_id,
-                    stage="save_queue",
+                    phase="save_queue",
                 )
             return False
         self._ensure_session_visible_in_history(state)
@@ -42452,7 +42452,7 @@ class MainWindow(QMainWindow):
                         "first_submit_error",
                         session_id=state.session_id,
                         turn_id=current_turn_id,
-                        stage="ppt_agent_validation",
+                        phase="ppt_agent_validation",
                         error=status_message,
                     )
                     state.first_submit_diagnostic_turn_id = 0
@@ -42523,7 +42523,7 @@ class MainWindow(QMainWindow):
                         "first_submit_error",
                         session_id=state.session_id,
                         turn_id=current_turn_id,
-                        stage="daemon_start",
+                        phase="daemon_start",
                         error=str(exc),
                     )
                     state.first_submit_diagnostic_turn_id = 0
@@ -42553,7 +42553,7 @@ class MainWindow(QMainWindow):
                         "first_submit_error",
                         session_id=state.session_id,
                         turn_id=current_turn_id,
-                        stage="local_start",
+                        phase="local_start",
                         error=str(exc),
                     )
                     state.first_submit_diagnostic_turn_id = 0
@@ -44858,7 +44858,7 @@ class MainWindow(QMainWindow):
                     "first_submit_error",
                     session_id=state.session_id,
                     turn_id=turn_id or state.active_turn_id,
-                    stage="run",
+                    phase="run",
                     error=str(result.get("error") or "未知错误"),
                 )
                 state.first_submit_diagnostic_turn_id = 0

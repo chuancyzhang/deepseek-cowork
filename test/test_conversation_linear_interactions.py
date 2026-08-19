@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import hashlib
 import inspect
@@ -21,6 +22,7 @@ from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
 from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message
 from core.runtime_journal import RuntimeJournal
 from core.theme import DesignTokens
+import main as main_module
 
 from main import (
     AssistantTurnGroup,
@@ -3033,11 +3035,29 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window._retire_session_empty_state(state, reason="test_error_stage")
             state.live_activity = True
             state.active_turn_id = 1
+            state.first_submit_diagnostic_turn_id = 1
             bubble = window._append_live_thinking_segment(state)
-            window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
+            with patch("main.append_background_process_log") as append_log:
+                window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
             self.assertIsNotNone(bubble.parent())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
+            self.assertEqual(state.first_submit_diagnostic_turn_id, 0)
+            navigation_payloads = [
+                json.loads(call.args[1])
+                for call in append_log.call_args_list
+                if call.args and call.args[0] == main_module.UI_NAVIGATION_LOG_FILENAME
+            ]
+            self.assertIn(
+                {
+                    "stage": "first_submit_error",
+                    "session_id": state.session_id,
+                    "turn_id": 1,
+                    "phase": "run",
+                    "error": "provider failed",
+                },
+                navigation_payloads,
+            )
             interrupted = [
                 message
                 for message in state.messages

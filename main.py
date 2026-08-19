@@ -19009,10 +19009,25 @@ class ChatBubble(QFrame):
         self.content_col_layout.addWidget(container)
 
     def _handle_content_link(self, href):
-        value = str(href or "")
-        if not value.startswith("cowork-file:"):
+        value = str(href or "").strip()
+        if value.startswith("cowork-file:"):
+            self.deliverablePathActivated.emit(unquote(value[len("cowork-file:"):]))
             return
-        self.deliverablePathActivated.emit(unquote(value[len("cowork-file:"):]))
+        url = QUrl(value)
+        scheme = url.scheme().lower()
+        if scheme not in {"http", "https"}:
+            return
+        opened = bool(QDesktopServices.openUrl(url))
+        log_ui_navigation(
+            "chat_external_link_opened" if opened else "chat_external_link_open_failed",
+            scheme=scheme,
+        )
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "无法打开链接",
+                "系统默认浏览器未能打开该网页，请检查默认浏览器设置后重试。",
+            )
 
     def _sync_deliverable_cards(self, text):
         if not hasattr(self, "deliverable_cards_layout"):
@@ -23128,6 +23143,7 @@ class MainWindow(QMainWindow):
         self.history_rows = {}
         self.history_buttons = {}
         self.history_age_labels = {}
+        self.history_age_timestamps = {}
         self.history_activity_indicators = {}
         self.history_activity_statuses = {}
         self.history_skill_capture_indicators = {}
@@ -23283,6 +23299,10 @@ class MainWindow(QMainWindow):
         self.history_search_timer.timeout.connect(self.refresh_history_list)
         self.history_search_input.textChanged.connect(lambda *_: self.history_search_timer.start())
         sidebar_layout.addWidget(self.history_search_input)
+        self.history_age_timer = QTimer(self)
+        self.history_age_timer.setInterval(30000)
+        self.history_age_timer.timeout.connect(self.refresh_history_age_labels)
+        self.history_age_timer.start()
 
         project_header = ConversationHistoryRow()
         self.project_header = project_header
@@ -28798,6 +28818,7 @@ class MainWindow(QMainWindow):
             save_requested=bool(save),
             error=str(error or ""),
         )
+        self._sync_history_age_for_session(state)
         # The authoritative lifecycle state must reach both sidebar surfaces
         # before any presentation finalizer or asynchronous persistence work.
         self.refresh_session_activity_indicator(state.session_id)
@@ -32012,6 +32033,43 @@ class MainWindow(QMainWindow):
         weeks = max(1, days // 7)
         return f"{weeks}周前"
 
+    @staticmethod
+    def _last_message_timestamp(messages):
+        for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
+            try:
+                timestamp = int(float(message.get("created_at") or 0))
+            except (TypeError, ValueError):
+                continue
+            if timestamp > 0:
+                return timestamp
+        return 0
+
+    def refresh_history_age_labels(self, session_id=None):
+        timestamps = getattr(self, "history_age_timestamps", {})
+        labels = getattr(self, "history_age_labels", {})
+        session_ids = [session_id] if session_id else list(labels)
+        for current_session_id in session_ids:
+            label = labels.get(current_session_id)
+            if label is None or not _qt_object_alive(label):
+                continue
+            label.setText(
+                self._format_project_session_age(
+                    timestamps.get(current_session_id)
+                )
+            )
+
+    def _sync_history_age_for_session(self, state):
+        if state is None:
+            return
+        session_id = str(getattr(state, "session_id", "") or "").strip()
+        timestamp = self._last_message_timestamp(getattr(state, "messages", []))
+        if not session_id or not timestamp:
+            return
+        self.history_age_timestamps[session_id] = timestamp
+        self.refresh_history_age_labels(session_id)
+
     def _conversation_workspace_path(self, conversation):
         meta = (conversation or {}).get("meta") or {}
         if str(meta.get("workspace_source") or "").strip().lower() == "chat":
@@ -32264,17 +32322,26 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def _live_history_conversation_record(self, state):
+    def _live_history_conversation_record(self, state, stored_record=None):
         if not self._session_has_history_content(state):
             return None
         session_id = str(getattr(state, "session_id", "") or "").strip()
         if not session_id:
             return None
         meta = self._compose_session_meta(state)
+        stored_record = stored_record or {}
+        last_message_at = self._last_message_timestamp(
+            getattr(state, "messages", [])
+        ) or int(
+            stored_record.get("last_message_at")
+            or stored_record.get("updated_at")
+            or time.time()
+        )
         return {
             "id": session_id,
             "title": self._resolved_session_title(state),
-            "updated_at": int(time.time()),
+            "updated_at": int(stored_record.get("updated_at") or last_message_at),
+            "last_message_at": last_message_at,
             "status": getattr(state, "session_status", "draft") or "draft",
             "meta": meta,
             "im_provider": "",
@@ -32286,12 +32353,20 @@ class MainWindow(QMainWindow):
             if isinstance(conversation, dict) and conversation.get("id"):
                 merged[str(conversation.get("id"))] = dict(conversation)
         for state in (getattr(self, "sessions", {}) or {}).values():
-            record = self._live_history_conversation_record(state)
+            session_id = str(getattr(state, "session_id", "") or "").strip()
+            record = self._live_history_conversation_record(
+                state,
+                stored_record=merged.get(session_id),
+            )
             if record:
                 merged[record["id"]] = record
         return sorted(
             merged.values(),
-            key=lambda item: int((item or {}).get("updated_at") or 0),
+            key=lambda item: int(
+                (item or {}).get("last_message_at")
+                or (item or {}).get("updated_at")
+                or 0
+            ),
             reverse=True,
         )
 
@@ -32517,6 +32592,7 @@ class MainWindow(QMainWindow):
         self.history_rows[session_id] = row
         self.history_buttons[session_id] = btn
         self.history_age_labels[session_id] = age_label
+        self.history_age_timestamps[session_id] = int(entry.get("updated_at") or 0)
         self.history_activity_indicators[session_id] = activity_indicator
         self.history_activity_statuses[session_id] = activity_status
         self.history_skill_capture_indicators[session_id] = skill_indicator
@@ -33203,6 +33279,7 @@ class MainWindow(QMainWindow):
         self.history_rows = {}
         self.history_buttons = {}
         self.history_age_labels = {}
+        self.history_age_timestamps = {}
         self.history_activity_indicators = {}
         self.history_activity_statuses = {}
         self.history_skill_capture_indicators = {}
@@ -33265,7 +33342,7 @@ class MainWindow(QMainWindow):
             matches_query = not query or session_id in (search_ids or set()) or query.lower() in title.lower() or query.lower() in project_name.lower()
             if not matches_query:
                 continue
-            updated_at = conv.get("updated_at")
+            updated_at = conv.get("last_message_at") or conv.get("updated_at")
             entry = {
                 "id": session_id,
                 "title": title,

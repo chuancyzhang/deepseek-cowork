@@ -539,6 +539,39 @@ class TestChatStorageMessages(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in page], ["conv-4", "conv-3"])
 
+    def test_conversation_summary_exposes_last_message_time(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "last-message-time",
+            [
+                {"id": "u1", "role": "user", "content": "first", "created_at": 111},
+                {"id": "a1", "role": "assistant", "content": "last", "created_at": 222},
+            ],
+            title="demo",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = 999 WHERE id = ?",
+                ("last-message-time",),
+            )
+            conn.commit()
+
+        summary = storage.list_conversation_summaries()[0]
+
+        self.assertEqual(summary["updated_at"], 999)
+        self.assertEqual(summary["last_message_at"], 222)
+
+        storage.upsert_conversation("empty-conversation", title="empty")
+        empty_summary = next(
+            item
+            for item in storage.list_conversation_summaries()
+            if item["id"] == "empty-conversation"
+        )
+        self.assertEqual(
+            empty_summary["last_message_at"],
+            empty_summary["updated_at"],
+        )
+
     def test_migrate_legacy_json_histories_imports_missing_sessions(self):
         storage = ChatStorage(self.db_path)
         legacy_path = os.path.join(self.temp_dir, "chat_history_legacy-session.json")

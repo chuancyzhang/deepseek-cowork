@@ -1309,6 +1309,11 @@ class ChatStorage:
                     "id": row["id"],
                     "title": row["title"],
                     "updated_at": row["updated_at"],
+                    "last_message_at": (
+                        row["last_message_at"]
+                        if "last_message_at" in row.keys()
+                        else row["updated_at"]
+                    ),
                     "status": row["status"] or "active",
                     "meta": meta,
                     "im_provider": row["im_provider"],
@@ -1325,7 +1330,18 @@ class ChatStorage:
                 params.extend([max(0, int(limit)), max(0, int(offset or 0))])
             rows = conn.execute(
                 f"""
-                SELECT c.id, c.title, c.updated_at, c.status, c.meta, im.provider AS im_provider
+                SELECT c.id, c.title, c.updated_at,
+                       COALESCE(
+                           (
+                               SELECT m.created_at
+                               FROM messages m
+                               WHERE m.conversation_id = c.id
+                               ORDER BY m.position DESC
+                               LIMIT 1
+                           ),
+                           c.updated_at
+                       ) AS last_message_at,
+                       c.status, c.meta, im.provider AS im_provider
                 FROM conversations c
                 LEFT JOIN (
                     SELECT conversation_id, MIN(provider) AS provider

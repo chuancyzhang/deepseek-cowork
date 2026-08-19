@@ -321,6 +321,55 @@ class TestDeliverableScanning(unittest.TestCase):
             first_button.click()
             self.assertEqual(activated, [os.path.normpath(report)])
 
+    def test_agent_bubble_dispatches_only_file_and_web_links(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("Agent", "")
+        activated = []
+        bubble.deliverablePathActivated.connect(activated.append)
+
+        bubble._handle_content_link("cowork-file:D%3A%5Cdemo%5Creport.pptx")
+        self.assertEqual(activated, [r"D:\demo\report.pptx"])
+
+        with patch("main.QDesktopServices.openUrl", return_value=True) as open_url, patch(
+            "main.log_ui_navigation"
+        ) as navigation_log:
+            bubble._handle_content_link("https://example.com/report")
+            bubble._handle_content_link("http://example.com/help")
+            bubble._handle_content_link("javascript:alert(1)")
+            bubble._handle_content_link("relative/page")
+
+        self.assertEqual(open_url.call_count, 2)
+        self.assertEqual(
+            [call.args[0].scheme() for call in open_url.call_args_list],
+            ["https", "http"],
+        )
+        self.assertEqual(navigation_log.call_count, 2)
+        self.assertTrue(
+            all("http" in call.kwargs["scheme"] for call in navigation_log.call_args_list)
+        )
+        self.assertTrue(
+            all("url" not in call.kwargs for call in navigation_log.call_args_list)
+        )
+        bubble.deleteLater()
+        app.processEvents()
+
+    def test_agent_bubble_reports_web_link_open_failure(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("Agent", "")
+        with patch("main.QDesktopServices.openUrl", return_value=False), patch(
+            "main.QMessageBox.warning"
+        ) as warning, patch("main.log_ui_navigation") as navigation_log:
+            bubble._handle_content_link("https://example.com/report")
+
+        warning.assert_called_once()
+        self.assertIn("默认浏览器", warning.call_args.args[2])
+        navigation_log.assert_called_once_with(
+            "chat_external_link_open_failed",
+            scheme="https",
+        )
+        bubble.deleteLater()
+        app.processEvents()
+
     def test_agent_bubble_builds_card_for_inline_code_delivery_path(self):
         app = QApplication.instance() or QApplication([])
         workspace = r"D:\code\数据分析测试"

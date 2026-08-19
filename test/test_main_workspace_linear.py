@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QBoxLayout, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QPushButton, QWidget
 
 from main import (
     ConversationHistoryRow,
@@ -907,6 +907,33 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         labels = [button.text().strip() for button in self.window.findChildren(QPushButton)]
         self.assertIn("新建聊天", labels)
         self.assertNotIn("新建对话", labels)
+
+    def test_live_history_uses_last_message_time_instead_of_refresh_time(self):
+        state = self.window.get_current_session()
+        state.messages = [
+            {"id": "u1", "role": "user", "content": "hello", "created_at": 123}
+        ]
+
+        record = self.window._live_history_conversation_record(
+            state,
+            stored_record={"updated_at": 999, "last_message_at": 456},
+        )
+
+        self.assertEqual(record["updated_at"], 999)
+        self.assertEqual(record["last_message_at"], 123)
+
+    def test_history_age_refresh_updates_visible_label_without_rebuilding(self):
+        session_id = "age-refresh"
+        label = QLabel("刚刚")
+        self.window.history_age_labels[session_id] = label
+        self.window.history_age_timestamps[session_id] = __import__("time").time() - 120
+
+        with patch.object(self.window, "refresh_history_list") as rebuild:
+            self.window.refresh_history_age_labels()
+
+        self.assertIn("分钟前", label.text())
+        rebuild.assert_not_called()
+        label.deleteLater()
 
     def test_first_valid_submit_projects_session_into_sidebar_before_worker_runs(self):
         state = self.window.get_current_session()

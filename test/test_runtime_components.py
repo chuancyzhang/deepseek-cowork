@@ -21,6 +21,18 @@ class TestRuntimeComponents(unittest.TestCase):
         }
 
     def test_download_source_defaults_and_custom_https(self):
+        defaults = runtime_components.normalize_download_sources({})
+        self.assertEqual(defaults["python"]["selected"], "tsinghua")
+        self.assertEqual(
+            runtime_components.selected_source("python", defaults)["url"],
+            "https://pypi.tuna.tsinghua.edu.cn/simple",
+        )
+
+        saved_pypi = runtime_components.normalize_download_sources({
+            "python": {"selected": "pypi", "custom": []},
+        })
+        self.assertEqual(saved_pypi["python"]["selected"], "pypi")
+
         normalized = runtime_components.normalize_download_sources({
             "python": {
                 "selected": "corp",

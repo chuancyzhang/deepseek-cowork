@@ -64,7 +64,7 @@ TOOLKITS = {
 
 def default_download_sources():
     return {
-        "python": {"selected": "pypi", "custom": []},
+        "python": {"selected": "tsinghua", "custom": []},
         "node": {"selected": "nodejs", "custom": []},
     }
 

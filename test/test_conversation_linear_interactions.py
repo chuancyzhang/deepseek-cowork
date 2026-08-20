@@ -71,10 +71,26 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        def accept_chat_save(window, session_id=None, flush=False):
+            del flush
+            sessions = getattr(window, "sessions", None)
+            state = sessions.get(session_id) if isinstance(sessions, dict) else None
+            if state is not None:
+                state.chat_save_revision = max(
+                    0,
+                    int(getattr(state, "chat_save_revision", 0) or 0),
+                ) + 1
+            return True
+
         self._save_chat_patch = patch.object(
             MainWindow,
             "save_chat_history",
-            new=lambda self, session_id=None, flush=False: True,
+            new=accept_chat_save,
+        )
+        self._wait_for_save_patch = patch.object(
+            MainWindow,
+            "wait_for_chat_save_revision",
+            new=lambda self, session_id, revision, timeout_ms=3000: True,
         )
         self._checkpoint_patch = patch.object(
             MainWindow,
@@ -82,11 +98,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             new=lambda self, state: False,
         )
         self._save_chat_patch.start()
+        self._wait_for_save_patch.start()
         self._checkpoint_patch.start()
 
     def tearDown(self):
         self.app.processEvents()
         self._checkpoint_patch.stop()
+        self._wait_for_save_patch.stop()
         self._save_chat_patch.stop()
 
     def test_skill_picker_searches_description_and_preserves_hidden_selection(self):
@@ -1160,6 +1178,278 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     if isinstance(message, dict)
                 )
             )
+            final_messages = [
+                message
+                for message in state.messages
+                if message.get("role") == "assistant"
+                and message.get("content") == "正常完成。"
+            ]
+            self.assertEqual([message.get("id") for message in final_messages], ["a-normal"])
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_empty_generated_merge_persists_visible_terminal_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                storage = ChatStorage(os.path.join(root, "chat.sqlite"))
+                window.chat_storage = storage
+                window.runtime_journal = RuntimeJournal(root)
+                state = window.get_current_session()
+                window._retire_session_empty_state(state, reason="test_terminal_fallback")
+                state.history_loaded = True
+                state.active_turn_id = 1
+                state.active_turn_request_id = "request-terminal-fallback"
+                state.messages = [
+                    {
+                        "id": "user-terminal-fallback",
+                        "role": "user",
+                        "content": "继续",
+                        "meta": {"turn_id": "1", "request_id": "request-terminal-fallback"},
+                    },
+                    {
+                        "id": "assistant-already-merged",
+                        "role": "assistant",
+                        "content": "此前阶段",
+                        "meta": {"turn_id": "1", "request_id": "request-terminal-fallback"},
+                    },
+                ]
+                storage.save_conversation_safely(state.session_id, state.messages, title="测试")
+                window.runtime_journal.begin_run(
+                    state.session_id,
+                    "request-terminal-fallback",
+                    turn_id="1",
+                    writer_owner="ui:test",
+                    base_messages=state.messages,
+                )
+                bubble = window._append_live_thinking_segment(state)
+
+                def save_now(session_id=None, flush=False):
+                    del flush
+                    target = window.get_session(session_id)
+                    target.chat_save_revision += 1
+                    storage.save_conversation_safely(
+                        target.session_id,
+                        target.messages,
+                        title="测试",
+                        status="completed",
+                    )
+                    return True
+
+                def revision_is_durable(session_id, revision, timeout_ms=3000):
+                    del timeout_ms
+                    self.assertEqual(session_id, state.session_id)
+                    self.assertEqual(revision, state.chat_save_revision)
+                    return any(
+                        message.get("content") == "最终正文"
+                        for message in storage.get_messages(session_id)
+                    )
+
+                with (
+                    patch.object(window, "save_chat_history", side_effect=save_now),
+                    patch.object(window, "wait_for_chat_save_revision", side_effect=revision_is_durable),
+                ):
+                    window.handle_llm_response(
+                        {
+                            "request_id": "request-terminal-fallback",
+                            "role": "assistant",
+                            "content": "最终正文",
+                            "generated_messages": [copy.deepcopy(state.messages[1])],
+                        },
+                        state.session_id,
+                        turn_id=1,
+                        request_id="request-terminal-fallback",
+                    )
+
+                persisted = storage.get_messages(state.session_id)
+                final_messages = [
+                    message
+                    for message in persisted
+                    if message.get("role") == "assistant"
+                    and message.get("content") == "最终正文"
+                ]
+                self.assertEqual(len(final_messages), 1)
+                self.assertEqual(final_messages[0]["meta"]["ui_reply_kind"], "final")
+                self.assertEqual(bubble.source_message_id, final_messages[0]["id"])
+                self.assertEqual(
+                    ChatStorage(os.path.join(root, "chat.sqlite")).get_messages(state.session_id)[-1]["content"],
+                    "最终正文",
+                )
+            finally:
+                window.close()
+                window.deleteLater()
+
+    def test_diverged_pending_commit_keeps_current_history_and_persists_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                storage = ChatStorage(os.path.join(root, "chat.sqlite"))
+                window.chat_storage = storage
+                window.runtime_journal = RuntimeJournal(root)
+                state = window.get_current_session()
+                window._retire_session_empty_state(state, reason="test_diverged_pending_commit")
+                state.history_loaded = True
+                state.active_turn_id = 1
+                state.active_turn_request_id = "request-diverged-terminal"
+                old_base = [{
+                    "id": "user-diverged-terminal",
+                    "role": "user",
+                    "content": "原问题",
+                    "meta": {"turn_id": "1", "request_id": "request-diverged-terminal"},
+                }]
+                state.messages = [
+                    {
+                        **copy.deepcopy(old_base[0]),
+                        "content": "编辑后的问题",
+                    },
+                    {
+                        "id": "assistant-diverged-stage",
+                        "role": "assistant",
+                        "content": "此前阶段",
+                        "meta": {"turn_id": "1", "request_id": "request-diverged-terminal"},
+                    },
+                ]
+                storage.save_conversation_safely(state.session_id, state.messages, title="测试")
+                window.runtime_journal.begin_run(
+                    state.session_id,
+                    "request-diverged-terminal",
+                    turn_id="1",
+                    writer_owner="ui:test",
+                    base_messages=old_base,
+                )
+                window._append_live_thinking_segment(state)
+
+                def save_now(session_id=None, flush=False):
+                    del flush
+                    target = window.get_session(session_id)
+                    target.chat_save_revision += 1
+                    storage.save_conversation_safely(
+                        target.session_id,
+                        target.messages,
+                        title="测试",
+                        status="completed",
+                    )
+                    return True
+
+                with (
+                    patch.object(window.runtime_journal, "mark_pending_commit", side_effect=RuntimeError(
+                        "pending commit does not extend its base"
+                    )),
+                    patch.object(window, "save_chat_history", side_effect=save_now),
+                    patch.object(window, "wait_for_chat_save_revision", return_value=True),
+                ):
+                    window.handle_llm_response(
+                        {
+                            "request_id": "request-diverged-terminal",
+                            "role": "assistant",
+                            "content": "分叉后的最终正文",
+                            "generated_messages": [copy.deepcopy(state.messages[1])],
+                        },
+                        state.session_id,
+                        turn_id=1,
+                        request_id="request-diverged-terminal",
+                    )
+
+                persisted = storage.get_messages(state.session_id)
+                self.assertEqual(persisted[0]["content"], "编辑后的问题")
+                self.assertNotIn("原问题", [message.get("content") for message in persisted])
+                self.assertEqual(
+                    [
+                        message.get("content")
+                        for message in persisted
+                        if message.get("role") == "assistant"
+                        and message.get("content") == "分叉后的最终正文"
+                    ],
+                    ["分叉后的最终正文"],
+                )
+            finally:
+                window.close()
+                window.deleteLater()
+
+    def test_terminal_fallback_is_idempotent_and_rejects_content_conflict(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.active_turn_id = 3
+            state.active_turn_request_id = "request-terminal-idempotent"
+            bubble = window._append_live_thinking_segment(state)
+            kwargs = {
+                "generated_messages": [],
+                "generated_messages_raw": [{"id": "old", "role": "assistant", "content": "旧阶段"}],
+                "reasoning": "",
+                "content_parts": [],
+                "turn_id": 3,
+                "run_id": "request-terminal-idempotent",
+                "bubble": bubble,
+            }
+            first_id = window._ensure_terminal_assistant_message(
+                state,
+                content="最终结果",
+                **kwargs,
+            )
+            second_id = window._ensure_terminal_assistant_message(
+                state,
+                content="最终结果",
+                **kwargs,
+            )
+            self.assertEqual(first_id, second_id)
+            self.assertEqual(
+                [message.get("id") for message in state.messages].count(first_id),
+                1,
+            )
+            with self.assertRaisesRegex(ValueError, "消息内容不同"):
+                window._ensure_terminal_assistant_message(
+                    state,
+                    content="冲突结果",
+                    **kwargs,
+                )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_terminal_save_barrier_keeps_actions_hidden_when_revision_fails(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_terminal_save_failed")
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-terminal-save-failed"
+            state.messages = [{
+                "id": "user-terminal-save-failed",
+                "role": "user",
+                "content": "继续",
+                "meta": {"turn_id": "1", "request_id": "request-terminal-save-failed"},
+            }]
+            bubble = window._append_live_thinking_segment(state)
+
+            def accept_without_commit(session_id=None, flush=False):
+                del session_id, flush
+                state.chat_save_revision += 1
+                return True
+
+            with (
+                patch.object(window, "save_chat_history", side_effect=accept_without_commit),
+                patch.object(window, "wait_for_chat_save_revision", return_value=False),
+            ):
+                window.handle_llm_response(
+                    {
+                        "request_id": "request-terminal-save-failed",
+                        "role": "assistant",
+                        "content": "已显示但未保存",
+                        "generated_messages": [],
+                    },
+                    state.session_id,
+                    turn_id=1,
+                    request_id="request-terminal-save-failed",
+                )
+
+            self.assertEqual(bubble.main_content_text, "已显示但未保存")
+            self.assertFalse(bubble.message_actions_enabled)
+            self.assertFalse(bubble._pending_main_content_final)
+            self.assertEqual(bubble.source_message_id, "")
+            self.assertEqual(state.session_status, "error")
+            self.assertIn("结果尚未保存", state.conversation_notice.label.text())
         finally:
             window.close()
             window.deleteLater()

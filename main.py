@@ -39904,6 +39904,14 @@ class MainWindow(QMainWindow):
         worker.finished.connect(cleanup)
         worker.start()
 
+    @staticmethod
+    def _visible_assistant_message_id(session_id, run_id, turn_id, group_id, stage_id):
+        return uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "cowork-visible-assistant:"
+            f"{session_id}:{run_id}:{turn_id}:{group_id}:{stage_id}",
+        ).hex
+
     def _append_visible_assistant_stages(
         self,
         state,
@@ -39965,11 +39973,13 @@ class MainWindow(QMainWindow):
                 if stage_key in seen_stage_keys:
                     continue
                 seen_stage_keys.add(stage_key)
-                message_id = uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    "cowork-visible-assistant:"
-                    f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
-                ).hex
+                message_id = self._visible_assistant_message_id(
+                    state.session_id,
+                    run_key,
+                    turn_key,
+                    group_id,
+                    stage_id,
+                )
                 meta = {
                     "turn_id": turn_key,
                     "request_id": run_key,
@@ -39998,11 +40008,13 @@ class MainWindow(QMainWindow):
             if content:
                 group_id = str(getattr(fallback_bubble, "ui_turn_group_id", "") or "")
                 stage_id = str(getattr(fallback_bubble, "ui_stage_id", "") or "fallback-stage")
-                message_id = uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    "cowork-visible-assistant:"
-                    f"{state.session_id}:{run_key}:{turn_key}:{group_id}:{stage_id}",
-                ).hex
+                message_id = self._visible_assistant_message_id(
+                    state.session_id,
+                    run_key,
+                    turn_key,
+                    group_id,
+                    stage_id,
+                )
                 meta = {
                     "turn_id": turn_key,
                     "request_id": run_key,
@@ -44563,6 +44575,122 @@ class MainWindow(QMainWindow):
         return generated_messages
 
     @staticmethod
+    def _final_assistant_for_content(messages, content):
+        expected_content = str(content or "").strip()
+        if not expected_content:
+            return None
+        for message in reversed(list(messages or [])):
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "") != "assistant":
+                continue
+            if message.get("tool_calls"):
+                continue
+            if str(message.get("content") or "").strip() == expected_content:
+                return message
+        return None
+
+    def _ensure_terminal_assistant_message(
+        self,
+        state,
+        *,
+        generated_messages,
+        generated_messages_raw,
+        content,
+        reasoning,
+        content_parts,
+        turn_id,
+        run_id,
+        bubble,
+    ):
+        """Return the canonical message id for the final text already shown."""
+        final_message = self._final_assistant_for_content(generated_messages, content)
+        decision = "generated"
+        if final_message is None:
+            turn_key = str(turn_id or getattr(state, "active_turn_id", "") or "")
+            run_key = str(run_id or "").strip()
+            group_id = str(getattr(bubble, "ui_turn_group_id", "") or "")
+            stage_id = str(getattr(bubble, "ui_stage_id", "") or "")
+            identity = {
+                "turn_id": turn_key,
+                "request_id": run_key,
+                "ui_turn_group_id": group_id,
+                "ui_stage_id": stage_id,
+            }
+            missing_identity = [key for key, value in identity.items() if not value]
+            if missing_identity:
+                raise RuntimeError(
+                    "无法为已展示终态建立稳定身份，缺少：" + ", ".join(missing_identity)
+                )
+            message_id = self._visible_assistant_message_id(
+                state.session_id,
+                run_key,
+                turn_key,
+                group_id,
+                stage_id,
+            )
+            fallback_message = {
+                "id": message_id,
+                "role": "assistant",
+                "content": content,
+                "reasoning": reasoning,
+                "content_parts": list(content_parts or []),
+                "meta": {
+                    "turn_id": turn_key,
+                    "request_id": run_key,
+                    "ui_turn_id": turn_key,
+                    "ui_turn_group_id": group_id,
+                    "ui_stage_id": stage_id,
+                    "ui_reply_kind": "final",
+                },
+            }
+            previous_count = len(state.messages)
+            merged = merge_messages_by_id(state.messages, [fallback_message])
+            state.messages[:] = merged
+            final_message = self._find_message_by_id(state.messages, message_id)
+            decision = "fallback_appended" if len(merged) > previous_count else "fallback_existing"
+
+        message_id = str((final_message or {}).get("id") or "").strip()
+        if not message_id:
+            raise RuntimeError("终态 assistant 消息缺少 message_id")
+        meta = final_message.get("meta") if isinstance(final_message.get("meta"), dict) else {}
+        log_sub_agent_runtime(
+            "ui_terminal_message_reconciled",
+            session_id=state.session_id,
+            turn_id=str(turn_id or getattr(state, "active_turn_id", "") or ""),
+            run_id=str(run_id or ""),
+            group_id=str(meta.get("ui_turn_group_id") or getattr(bubble, "ui_turn_group_id", "")),
+            stage_id=str(meta.get("ui_stage_id") or getattr(bubble, "ui_stage_id", "")),
+            decision=decision,
+            message_id=message_id,
+            content_len=len(str(content or "")),
+            generated_message_count=len(generated_messages or []),
+            raw_generated_message_count=(
+                len(generated_messages_raw)
+                if isinstance(generated_messages_raw, list)
+                else 0
+            ),
+        )
+        return message_id
+
+    def _fail_terminal_persistence(self, state, bubble, final_content_event, error):
+        if final_content_event is not None:
+            final_content_event["status"] = "save_failed"
+        bubble.set_message_actions_enabled(False)
+        self._show_conversation_notice(
+            state,
+            "结果尚未保存，已保留在当前窗口。请检查磁盘空间和目录权限后重试。",
+            "error",
+        )
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
+        self.set_session_phase("Save failed", state.session_id)
+        self.set_session_status("error", state.session_id, save=False, error=str(error or ""))
+        if state.session_id == self.current_session_id:
+            self.normalize_session_ui(state)
+
+    @staticmethod
     def _exclude_generated_rounds_committed_at_guidance(existing_messages, generated_messages):
         """Drop provider replay for stages already committed before guidance.
 
@@ -44792,7 +44920,7 @@ class MainWindow(QMainWindow):
             or (isinstance(result, dict) and "error" in result)
         ):
             self._append_live_thinking_segment(state)
-        self.flush_session_content(state.session_id, final=True)
+        self.flush_session_content(state.session_id, final=False)
         self.flush_session_thinking(state.session_id)
         is_current = state.session_id == self.current_session_id
         if state.temp_thinking_bubble:
@@ -44929,7 +45057,6 @@ class MainWindow(QMainWindow):
         reasoning = result.get("reasoning", "")
         content = result.get("content", "")
         content_parts = result.get("content_parts") if isinstance(result.get("content_parts"), list) else []
-        role = result.get("role", "assistant")
         duration = result.get("duration", None)
         self._timeline_close_open_events(state, kinds={"thinking"})
         turn_key = str(getattr(state, "active_turn_id", ""))
@@ -44951,16 +45078,17 @@ class MainWindow(QMainWindow):
                 finished_at=finished_at,
             )
         open_content_event = self._timeline_find_event(state, kind="content_fragment", open_only=True)
+        final_content_event = open_content_event
         if open_content_event is not None:
             open_content_event["kind"] = "final_content"
-            open_content_event["status"] = "completed"
+            open_content_event["status"] = "saving"
             open_content_event["reply_kind"] = "final"
             open_content_event["finished_at"] = time.time()
         elif (content or "").strip():
-            self._timeline_append_event(
+            final_content_event = self._timeline_append_event(
                 state,
                 "final_content",
-                status="completed",
+                status="saving",
                 text=content,
                 reply_kind="final",
                 finished_at=time.time(),
@@ -45012,7 +45140,7 @@ class MainWindow(QMainWindow):
         for msg in generated_messages or []:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 tool_calls.extend(msg.get("tool_calls") or [])
-        assistant_source_message_id = self._assistant_source_message_id_from_messages(generated_messages)
+        assistant_source_message_id = ""
 
         missing_final_content = not (content or "").strip()
         if missing_final_content:
@@ -45038,7 +45166,7 @@ class MainWindow(QMainWindow):
                 stage_id=str(getattr(bubble, "ui_stage_id", "")),
             )
 
-        bubble.set_message_actions_enabled(not missing_final_content)
+        bubble.set_message_actions_enabled(False)
 
         has_thinking_text = False
         for timeline_index in range(bubble.think_container_layout.count() - 1, -1, -1):
@@ -45054,6 +45182,7 @@ class MainWindow(QMainWindow):
             interval_ms = 30
             total_ms = int(max((duration or 0) * 1000, interval_ms))
             chunk_size = max(1, int(len(reasoning) * interval_ms / total_ms))
+            bubble.set_main_content(content, content_parts=content_parts, final=False)
 
             timer = QTimer(bubble)
             bubble._thinking_replay_timer = timer
@@ -45067,20 +45196,15 @@ class MainWindow(QMainWindow):
                 if replay_index >= len(reasoning):
                     timer.stop()
                     bubble.update_thinking(duration=duration, is_final=True)
-                    bubble.set_main_content(content, content_parts=content_parts, final=True)
 
             timer.timeout.connect(_tick)
             timer.start(interval_ms)
         elif should_replay_thinking:
             bubble.update_thinking(reasoning, duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts, final=True)
+            bubble.set_main_content(content, content_parts=content_parts, final=False)
         else:
             bubble.update_thinking(duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts, final=True)
-        if assistant_source_message_id:
-            bubble.set_source_message_id(assistant_source_message_id)
-            bubble.set_message_actions_enabled(not missing_final_content)
-        self._finish_office_draft_task_card(state, content=content, bubble=bubble)
+            bubble.set_main_content(content, content_parts=content_parts, final=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:
@@ -45104,20 +45228,30 @@ class MainWindow(QMainWindow):
         if generated_messages:
             self._annotate_generated_messages_for_unified_turn(state, generated_messages)
             state.messages.extend(generated_messages)
-        elif isinstance(generated_messages_raw, list) and generated_messages_raw:
-            pass
-        else:
-            assistant_source_message_id = self._new_message_id()
-            fallback_message = {
-                "id": assistant_source_message_id,
-                "role": role, 
-                "content": content,
-                "reasoning": reasoning,
-                "content_parts": content_parts
-            }
-            self._annotate_generated_messages_for_unified_turn(state, [fallback_message])
-            state.messages.append(fallback_message)
-            bubble.set_source_message_id(assistant_source_message_id)
+        try:
+            assistant_source_message_id = self._ensure_terminal_assistant_message(
+                state,
+                generated_messages=generated_messages,
+                generated_messages_raw=generated_messages_raw,
+                content=content,
+                reasoning=reasoning,
+                content_parts=content_parts,
+                turn_id=turn_id or state.active_turn_id,
+                run_id=run_id,
+                bubble=bubble,
+            )
+        except Exception as exc:
+            log_sub_agent_runtime(
+                "ui_terminal_message_reconcile_failed",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=run_id,
+                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                error=str(exc),
+            )
+            self._fail_terminal_persistence(state, bubble, final_content_event, exc)
+            return
         log_sub_agent_runtime(
             "ui_assistant_turn_finished",
             session_id=state.session_id,
@@ -45183,8 +45317,74 @@ class MainWindow(QMainWindow):
                 self.append_log(
                     f"运行完成状态写入恢复日志失败({state.session_id}, run={run_id}): {exc}"
                 )
-        if self._history_writer_owner_for_session(state.session_id) != "daemon":
-            self.save_chat_history(session_id=state.session_id)
+        history_writer_owner = self._history_writer_owner_for_session(state.session_id)
+        if history_writer_owner != "daemon":
+            previous_save_revision = max(
+                0,
+                int(getattr(state, "chat_save_revision", 0) or 0),
+            )
+            save_accepted = self.save_chat_history(session_id=state.session_id)
+            commit_revision = max(
+                0,
+                int(getattr(state, "chat_save_revision", 0) or 0),
+            )
+            log_sub_agent_runtime(
+                "ui_terminal_commit_started",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=run_id,
+                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                message_id=assistant_source_message_id,
+                previous_revision=previous_save_revision,
+                revision=commit_revision,
+                save_accepted=bool(save_accepted),
+            )
+            commit_confirmed = bool(
+                save_accepted
+                and commit_revision > previous_save_revision
+                and self.wait_for_chat_save_revision(
+                    state.session_id,
+                    commit_revision,
+                    timeout_ms=3000,
+                )
+            )
+            if not commit_confirmed:
+                log_sub_agent_runtime(
+                    "ui_terminal_commit_failed",
+                    session_id=state.session_id,
+                    turn_id=str(turn_id or state.active_turn_id or ""),
+                    run_id=run_id,
+                    group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                    stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                    message_id=assistant_source_message_id,
+                    previous_revision=previous_save_revision,
+                    revision=commit_revision,
+                    save_accepted=bool(save_accepted),
+                )
+                self._fail_terminal_persistence(
+                    state,
+                    bubble,
+                    final_content_event,
+                    "terminal assistant SQLite revision was not acknowledged",
+                )
+                return
+            log_sub_agent_runtime(
+                "ui_terminal_commit_acknowledged",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=run_id,
+                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                message_id=assistant_source_message_id,
+                revision=commit_revision,
+            )
+        if final_content_event is not None:
+            final_content_event["status"] = "completed"
+        bubble.set_source_message_id(assistant_source_message_id)
+        bubble.set_main_content(content, content_parts=content_parts, final=True)
+        bubble.set_message_actions_enabled(not missing_final_content)
+        self._finish_office_draft_task_card(state, content=content, bubble=bubble)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""

@@ -35,6 +35,7 @@ DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES = {
 TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "network_error",
     "network error",
+    "stream_read_error",
     "fetch failed",
     "temporary failure in name resolution",
     "name resolution",

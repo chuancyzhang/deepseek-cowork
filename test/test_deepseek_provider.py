@@ -1160,6 +1160,88 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertNotIn("background", client.responses.create.call_args.kwargs)
 
     @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_responses_stream_read_error_retries_without_partial_leak(self, _wait):
+        provider, client = self._build_provider(api_protocol=API_PROTOCOL_RESPONSES)
+
+        def failed_stream():
+            yield SimpleNamespace(
+                type="response.reasoning_text.delta",
+                delta="partial reasoning",
+            )
+            yield SimpleNamespace(type="response.output_text.delta", delta="partial answer")
+            yield SimpleNamespace(
+                type="response.output_item.added",
+                output_index=1,
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc-partial",
+                    call_id="call-partial",
+                    name="lookup",
+                    arguments="",
+                ),
+            )
+            yield SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="fc-partial",
+                output_index=1,
+                delta='{"q":"partial"}',
+            )
+            raise RuntimeError("stream_read_error")
+
+        success_stream = [
+            SimpleNamespace(type="response.output_text.delta", delta="final"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    id="resp-final",
+                    output=[{
+                        "id": "msg-final",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "final",
+                            "annotations": [],
+                        }],
+                    }],
+                    usage=None,
+                ),
+            ),
+        ]
+        client.responses.create.side_effect = [failed_stream(), success_stream]
+        messages = [{"role": "user", "content": "hello"}]
+
+        chunks = list(provider.chat_stream(messages))
+
+        self.assertEqual(client.responses.create.call_count, 2)
+        retries = [chunk for chunk in chunks if chunk["type"] == "provider_retry"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["reason"], "stream_read_error")
+        self.assertEqual(
+            [chunk["content"] for chunk in chunks if chunk["type"] == "content"],
+            ["final"],
+        )
+        self.assertFalse(any(chunk["type"] == "reasoning" for chunk in chunks))
+        self.assertFalse(any(chunk["type"] == "tool_call" for chunk in chunks))
+        request_inputs = [
+            call.kwargs["input"] for call in client.responses.create.call_args_list
+        ]
+        self.assertEqual(request_inputs, [request_inputs[0], request_inputs[0]])
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_responses_stream_read_error_exhaustion_reports_one_error(self, _wait):
+        provider, client = self._build_provider(api_protocol=API_PROTOCOL_RESPONSES)
+        client.responses.create.side_effect = RuntimeError("stream_read_error")
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.responses.create.call_count, 6)
+        self.assertEqual(len([chunk for chunk in chunks if chunk["type"] == "provider_retry"]), 5)
+        errors = [chunk for chunk in chunks if chunk["type"] == "error"]
+        self.assertEqual(errors, [{"type": "error", "content": "stream_read_error"}])
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
     def test_chat_completions_retries_five_times_then_succeeds_without_partial_leak(
         self,
         _wait,
@@ -1321,6 +1403,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
     def test_model_retry_classification_excludes_request_and_context_errors(self):
         self.assertTrue(is_transient_model_api_error(ConnectionError("connection reset")))
         self.assertTrue(is_transient_model_api_error(httpx.ReadTimeout("stream idle")))
+        self.assertTrue(is_transient_model_api_error(RuntimeError("stream_read_error")))
         self.assertTrue(
             is_transient_model_api_error(
                 SimpleNamespace(status_code=599, __str__=lambda self: "upstream")

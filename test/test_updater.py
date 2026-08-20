@@ -20,6 +20,8 @@ from core.updater import (
     extract_update_zip,
     expected_asset_path,
     launch_windows_update_script,
+    local_update_package_version,
+    prepare_local_update,
     prepare_update,
     select_release_asset,
     write_update_plan,
@@ -118,6 +120,137 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual(result["release"]["tag_name"], "V4.8.0")
         self.assertEqual(result["asset"]["name"], "deepseek-cowork-v4.8.0.zip")
         self.assertNotIn("zip_path", result)
+
+    def _write_local_update_package(self, path, *, safe=True, valid_structure=True):
+        with zipfile.ZipFile(path, "w") as archive:
+            if not safe:
+                archive.writestr("../escape.txt", "bad")
+            elif valid_structure:
+                archive.writestr(f"deepseek-cowork/{APP_EXE_NAME}", "new exe")
+                archive.writestr(
+                    f"deepseek-cowork/{INTERNAL_DIR_NAME}/config.json",
+                    '{"updated": true}',
+                )
+            else:
+                archive.writestr("README.txt", "not an app package")
+
+    def _write_local_install_dir(self):
+        install_dir = os.path.join(self.temp_dir, "install")
+        os.makedirs(os.path.join(install_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        with open(os.path.join(install_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("old exe")
+        with open(
+            os.path.join(install_dir, INTERNAL_DIR_NAME, "config.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write('{"updated": false}')
+        return install_dir
+
+    def test_local_update_package_version_requires_standard_name(self):
+        self.assertEqual(
+            local_update_package_version("deepseek-cowork-v5.2.0.zip"),
+            "5.2.0",
+        )
+        for name in ("update.zip", "deepseek-cowork-v5.2.zip", "deepseek-cowork-v5.2.0-beta.zip"):
+            with self.subTest(name=name), self.assertRaises(UpdaterError):
+                local_update_package_version(name)
+
+    def test_prepare_local_update_builds_plan_without_network_or_copying_package(self):
+        source_dir = os.path.join(self.temp_dir, "downloads")
+        target_dir = os.path.join(self.temp_dir, "updates")
+        os.makedirs(source_dir, exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
+        zip_path = os.path.join(source_dir, "deepseek-cowork-v5.2.0.zip")
+        self._write_local_update_package(zip_path)
+        install_dir = self._write_local_install_dir()
+
+        with patch("core.updater.updates_dir", return_value=target_dir), \
+             patch("core.updater.requests.get") as mocked_get:
+            result = prepare_local_update(
+                zip_path,
+                current_version="5.1.6",
+                install_dir=install_dir,
+            )
+
+        mocked_get.assert_not_called()
+        self.assertEqual(result["update_source"], "local")
+        self.assertEqual(result["release"]["tag_name"], "5.2.0")
+        self.assertEqual(result["zip_path"], os.path.abspath(zip_path))
+        self.assertTrue(os.path.isfile(zip_path))
+        self.assertTrue(os.path.isfile(result["change_plan_path"]))
+        self.assertGreaterEqual(result["change_summary"]["modified"], 2)
+        self.assertFalse(os.path.exists(os.path.join(target_dir, os.path.basename(zip_path))))
+
+    def test_prepare_local_update_keeps_selected_package_inside_update_cache(self):
+        target_dir = os.path.join(self.temp_dir, "updates")
+        os.makedirs(target_dir, exist_ok=True)
+        zip_path = os.path.join(target_dir, "deepseek-cowork-v5.2.0.zip")
+        old_zip = os.path.join(target_dir, "deepseek-cowork-v5.1.0.zip")
+        self._write_local_update_package(zip_path)
+        with open(old_zip, "wb") as handle:
+            handle.write(b"old")
+
+        with patch("core.updater.updates_dir", return_value=target_dir):
+            prepare_local_update(
+                zip_path,
+                current_version="5.1.6",
+                install_dir=self._write_local_install_dir(),
+            )
+
+        self.assertTrue(os.path.isfile(zip_path))
+        self.assertFalse(os.path.exists(old_zip))
+
+    def test_prepare_local_update_rejects_same_or_older_version(self):
+        install_dir = self._write_local_install_dir()
+        for version in ("5.1.6", "5.1.5"):
+            zip_path = os.path.join(self.temp_dir, f"deepseek-cowork-v{version}.zip")
+            self._write_local_update_package(zip_path)
+            with self.subTest(version=version), self.assertRaisesRegex(UpdaterError, "不高于当前版本"):
+                prepare_local_update(
+                    zip_path,
+                    current_version="5.1.6",
+                    install_dir=install_dir,
+                )
+
+    def test_prepare_local_update_rejects_missing_or_invalid_package(self):
+        install_dir = self._write_local_install_dir()
+        missing = os.path.join(self.temp_dir, "deepseek-cowork-v5.2.0.zip")
+        with self.assertRaisesRegex(UpdaterError, "不存在或已被删除"):
+            prepare_local_update(missing, current_version="5.1.6", install_dir=install_dir)
+
+        renamed = os.path.join(self.temp_dir, "update.zip")
+        self._write_local_update_package(renamed)
+        with self.assertRaisesRegex(UpdaterError, "名称无效"):
+            prepare_local_update(renamed, current_version="5.1.6", install_dir=install_dir)
+
+    def test_prepare_local_update_rejects_corrupt_unsafe_and_wrong_structure_zip(self):
+        install_dir = self._write_local_install_dir()
+        cases = (
+            ("5.2.0", "corrupt", None),
+            ("5.2.1", "unsafe", False),
+            ("5.2.2", "structure", False),
+        )
+        for version, kind, package_flag in cases:
+            case_dir = os.path.join(self.temp_dir, kind)
+            target_dir = os.path.join(case_dir, "updates")
+            os.makedirs(target_dir, exist_ok=True)
+            zip_path = os.path.join(case_dir, f"deepseek-cowork-v{version}.zip")
+            if kind == "corrupt":
+                with open(zip_path, "wb") as handle:
+                    handle.write(b"not a zip")
+            elif kind == "unsafe":
+                self._write_local_update_package(zip_path, safe=package_flag)
+            else:
+                self._write_local_update_package(zip_path, valid_structure=package_flag)
+            with self.subTest(kind=kind), \
+                 patch("core.updater.updates_dir", return_value=target_dir), \
+                 self.assertRaises(UpdaterError):
+                prepare_local_update(
+                    zip_path,
+                    current_version="5.1.6",
+                    install_dir=install_dir,
+                )
 
     def test_download_asset_reuses_existing_package_when_size_matches(self):
         asset = {

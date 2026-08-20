@@ -101,6 +101,96 @@ class ProductExperienceFixTests(unittest.TestCase):
             dialog._allow_close_without_prompt = True
             dialog.close()
 
+    def test_settings_local_update_is_disabled_in_source_mode(self):
+        with patch("main.platform.system", return_value="Windows"), patch.object(
+            main_module.sys, "frozen", False, create=True
+        ):
+            dialog = SettingsDialog(ConfigManager())
+        try:
+            self.assertFalse(dialog.local_update_btn.isEnabled())
+            self.assertIn("源码运行模式", dialog.local_update_hint_label.text())
+        finally:
+            dialog._allow_close_without_prompt = True
+            dialog.close()
+
+    def test_settings_local_update_file_picker_cancel_is_noop(self):
+        with patch("main.platform.system", return_value="Windows"), patch.object(
+            main_module.sys, "frozen", True, create=True
+        ):
+            dialog = SettingsDialog(ConfigManager())
+            try:
+                with patch("main.QFileDialog.getOpenFileName", return_value=("", "")), patch.object(
+                    dialog, "_begin_local_app_update"
+                ) as begin_update:
+                    dialog.start_local_app_update()
+
+                begin_update.assert_not_called()
+                self.assertEqual(dialog._pending_local_update_path, "")
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_settings_queues_local_update_until_automatic_check_finishes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = os.path.join(temp_dir, "deepseek-cowork-v5.2.0.zip")
+            with open(package_path, "wb") as handle:
+                handle.write(b"package")
+            with patch("main.platform.system", return_value="Windows"), patch.object(
+                main_module.sys, "frozen", True, create=True
+            ):
+                dialog = SettingsDialog(ConfigManager())
+                try:
+                    worker = SimpleNamespace(check_only=True, isRunning=lambda: True)
+                    dialog.app_update_worker = worker
+                    with patch(
+                        "main.QFileDialog.getOpenFileName",
+                        return_value=(package_path, "ZIP 文件 (*.zip)"),
+                    ), patch("main.log_app_update"), patch.object(
+                        dialog, "_begin_local_app_update"
+                    ) as begin_update:
+                        dialog.start_local_app_update()
+                        begin_update.assert_not_called()
+                        self.assertEqual(dialog._pending_local_update_path, package_path)
+                        self.assertIn("在线检查结束后", dialog.update_status_label.text())
+
+                        dialog.handle_app_update_finished({
+                            "check_only": True,
+                            "update_source": "online",
+                            "error": "network unavailable",
+                        })
+
+                    begin_update.assert_called_once_with(package_path)
+                    self.assertNotIn("network unavailable", dialog.update_status_label.text())
+                finally:
+                    dialog._allow_close_without_prompt = True
+                    dialog.close()
+
+    def test_settings_local_validation_error_restores_actions_and_message(self):
+        with patch("main.platform.system", return_value="Windows"), patch.object(
+            main_module.sys, "frozen", True, create=True
+        ):
+            dialog = SettingsDialog(ConfigManager())
+            try:
+                dialog.app_update_worker = SimpleNamespace(check_only=False)
+                dialog.update_btn.setEnabled(False)
+                dialog.local_update_btn.setEnabled(False)
+                with patch("main.QMessageBox.warning") as warning:
+                    dialog.handle_app_update_finished({
+                        "check_only": False,
+                        "install_enabled": True,
+                        "update_source": "local",
+                        "error": "更新包结构无效",
+                    })
+
+                self.assertTrue(dialog.update_btn.isEnabled())
+                self.assertTrue(dialog.local_update_btn.isEnabled())
+                self.assertIn("本地安装包验证失败", dialog.update_status_label.text())
+                self.assertIn("更新包结构无效", dialog.update_status_label.text())
+                warning.assert_called_once()
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
     def test_enterprise_message_has_local_save_boundary_and_single_channel(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "core.config_manager.get_app_data_dir", return_value=temp_dir

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import requests
 
-from core.app_version import APP_VERSION, is_newer_version
+from core.app_version import APP_VERSION, compare_versions, is_newer_version
 from core.process_utils import subprocess_kwargs_no_window
 from core.env_utils import get_app_data_dir
 
@@ -22,6 +22,10 @@ INTERNAL_DIR_NAME = "_internal"
 UPDATE_DIR_NAME = "updates"
 UPDATE_PLAN_FORMAT = 1
 UPDATE_EXCLUDED_ROOTS = {"user_data"}
+LOCAL_UPDATE_PACKAGE_PATTERN = re.compile(
+    r"^deepseek-cowork-v(?P<version>\d+\.\d+\.\d+)\.zip$",
+    re.IGNORECASE,
+)
 
 
 class UpdaterError(RuntimeError):
@@ -427,6 +431,80 @@ def prepare_update(current_version=APP_VERSION, download=False, progress_callbac
             "change_summary": change_plan["summary"],
         })
     return result
+
+
+def local_update_package_version(zip_path):
+    package_name = os.path.basename(os.fspath(zip_path or ""))
+    match = LOCAL_UPDATE_PACKAGE_PATTERN.fullmatch(package_name)
+    if not match:
+        raise UpdaterError(
+            "本地安装包名称无效。请选择名称为 deepseek-cowork-vX.Y.Z.zip 的官方安装包。"
+        )
+    return match.group("version")
+
+
+def prepare_local_update(
+    zip_path,
+    current_version=APP_VERSION,
+    install_dir=None,
+    progress_callback=None,
+):
+    source_path = os.path.abspath(os.fspath(zip_path or ""))
+    if not source_path or not os.path.isfile(source_path):
+        raise UpdaterError("本地安装包不存在或已被删除。")
+    if not install_dir:
+        raise UpdaterError("本地更新缺少当前安装目录。")
+
+    package_name = os.path.basename(source_path)
+    package_version = local_update_package_version(source_path)
+    if compare_versions(package_version, current_version) <= 0:
+        raise UpdaterError(
+            f"本地安装包版本 {package_version} 不高于当前版本 {current_version}，不能安装。"
+        )
+
+    package_size = os.path.getsize(source_path)
+    _emit(progress_callback, f"正在验证本地安装包 {package_name}", 5)
+    target_dir = updates_dir()
+    cleanup_update_artifacts(
+        target_dir=target_dir,
+        keep_paths=[source_path],
+        progress_callback=progress_callback,
+    )
+    staged_app_dir = extract_update_zip(
+        source_path,
+        target_dir=target_dir,
+        progress_callback=progress_callback,
+    )
+    _emit(progress_callback, "正在生成本地更新差异清单", 70)
+    change_plan = build_update_plan(
+        os.path.abspath(os.fspath(install_dir)),
+        staged_app_dir,
+        progress_callback=progress_callback,
+    )
+    change_plan_path = write_update_plan(change_plan, target_dir=target_dir)
+    _emit(progress_callback, "本地安装包已准备完成", 100)
+    return {
+        "current_version": current_version,
+        "update_available": True,
+        "update_source": "local",
+        "release": {
+            "tag_name": package_version,
+            "name": package_version,
+            "body": "",
+            "html_url": "",
+        },
+        "asset": {
+            "name": package_name,
+            "browser_download_url": "",
+            "size": package_size,
+        },
+        "zip_path": source_path,
+        "staged_app_dir": staged_app_dir,
+        "updates_dir": target_dir,
+        "change_plan": change_plan,
+        "change_plan_path": change_plan_path,
+        "change_summary": change_plan["summary"],
+    }
 
 
 def _cmd_quote(value):

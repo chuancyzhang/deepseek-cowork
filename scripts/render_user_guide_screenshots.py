@@ -1352,6 +1352,27 @@ def main_run():
             save_widget(model_filled, "08-model-configuration.png")
             model_filled.hide()
             return
+        if SCREENSHOT_SCOPE == "update-settings":
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                window.resize(900, 650)
+            original_start_app_update = main.SettingsDialog.start_app_update
+            had_frozen = hasattr(main.sys, "frozen")
+            original_frozen = getattr(main.sys, "frozen", False)
+            main.SettingsDialog.start_app_update = lambda *_args, **_kwargs: None
+            main.sys.frozen = True
+            try:
+                window.open_settings("更新")
+            finally:
+                main.SettingsDialog.start_app_update = original_start_app_update
+                if had_frozen:
+                    main.sys.frozen = original_frozen
+                else:
+                    delattr(main.sys, "frozen")
+            settings = window.product_pages[window.PAGE_SETTINGS]
+            settings._automatic_update_check_started = True
+            select_settings_page(settings, "更新")
+            save_widget(window, "s36-update.png", 220)
+            return
         if SCREENSHOT_SCOPE in {
             "enterprise-messages",
             "enterprise-messages-qa",

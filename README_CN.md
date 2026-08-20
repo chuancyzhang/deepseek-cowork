@@ -49,7 +49,7 @@ Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观
 
 1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版 ZIP。
 2. 完整解压后运行 `deepseek-cowork.exe`；不要直接在压缩包内启动。
-3. 打开“设置 → 模型与服务”，添加模型并完成一次连接测试。
+3. 首次启动时可直接填写 DeepSeek API Key；应用会验证官方接口、同步模型并优先选择推荐的 `deepseek-v4-flash`。也可以稍后到“设置 → 模型与服务”手动配置。
 
 基准环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
 

@@ -1332,6 +1332,57 @@ def main_run():
             settings = window.product_pages[window.PAGE_SETTINGS]
             settings._automatic_update_check_started = True
             save_widget(window, "06-model-service-settings.png")
+            save_widget(window, "s05-model-services.png")
+            model_editor = settings.model_channel_manager.editors[0]
+            model_editor.fetch_btn.setText("拉取中…")
+            model_editor.fetch_btn.setEnabled(False)
+            model_editor.test_status_label.setText("正在读取接口模型列表…")
+            save_widget(window, "s05d-model-fetch-loading.png")
+            model_editor.fetch_btn.setText("拉取模型")
+            model_editor.test_status_label.setText("拉取失败 · API Key 无效，请更新密钥后重试。")
+            model_editor.test_status_label.setStyleSheet(
+                f"color: {main.DesignTokens.error_text}; font-size: 12px;"
+            )
+            model_page = settings.content_stack.currentWidget()
+            model_page.verticalScrollBar().setValue(model_page.verticalScrollBar().maximum())
+            process_events(80)
+            save_widget(window, "s05e-model-fetch-error.png")
+            model_page.verticalScrollBar().setValue(0)
+            model_editor.test_status_label.setText("选择一个模型后，可验证地址、密钥与真实调用。")
+            model_editor.test_status_label.setStyleSheet(main.apple_settings_inline_note_style())
+            model_editor._refresh_fetch_button()
+            window.resize(900, 650)
+            save_widget(window, "model-settings-narrow.png")
+            window.resize(1280, 720)
+            process_events(80)
+            import_dialog = main.ModelImportDialog(
+                [
+                    {"id": "deepseek-v4-flash", "owned_by": "deepseek"},
+                    {"id": "deepseek-v4-pro", "owned_by": "deepseek"},
+                    {"id": "gpt-5.6", "owned_by": "openai"},
+                    {"id": "text-embedding-demo", "owned_by": "demo"},
+                ],
+                existing_model_names=["deepseek-v4-pro"],
+                recommended_model="deepseek-v4-flash",
+                parent=settings,
+            )
+            import_dialog.model_list.item(0).setCheckState(main.Qt.Checked)
+            save_widget(import_dialog, "s05b-model-import.png")
+            import_dialog.hide()
+            batch_dialog = main.BatchModelCapabilityDialog("openai", 3, parent=settings)
+            batch_dialog.vision_combo.setCurrentIndex(1)
+            batch_dialog.reasoning_mode_combo.setCurrentIndex(1)
+            batch_dialog.reasoning_checks["high"].setChecked(True)
+            batch_dialog.reasoning_checks["max"].setChecked(True)
+            batch_dialog.reasoning_combo.setCurrentIndex(
+                batch_dialog.reasoning_combo.findData("high")
+            )
+            save_widget(batch_dialog, "s05c-model-batch-capabilities.png")
+            batch_dialog.hide()
+            quickstart = main.DeepSeekQuickstartDialog(window.config_manager, parent=window)
+            quickstart.api_key_input.setText("sk-••••••••••••••••")
+            save_widget(quickstart, "s03b-deepseek-quickstart.png")
+            quickstart.hide()
             model_empty = main.ModelEditDialog("openai", parent=settings)
             model_empty.model_name_input.setText("gpt-5.6")
             save_widget(model_empty, "07-add-model.png")

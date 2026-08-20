@@ -50,7 +50,7 @@ See the [product document](docs/product.md) for the complete product model.
 
 1. Download the latest ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
 2. Extract it completely, then run `deepseek-cowork.exe`; do not launch it from inside the archive.
-3. Open **Settings → Models & Services**, add a model, and test the connection.
+3. On first launch, paste a DeepSeek API key to validate the official service, sync its models, and select the recommended `deepseek-v4-flash`. You can also configure another service later under **Settings → Models & Services**.
 
 The reference environment is a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is
 recommended; a discrete GPU is not required.

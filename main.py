@@ -200,6 +200,13 @@ from core.browser_skill_component import (
     uninstall_browser_skill,
 )
 from core.llm.factory import LLMFactory
+from core.llm.model_catalog import (
+    DEEPSEEK_OFFICIAL_BASE_URL,
+    get_recommended_model,
+    is_deepseek_official_base_url,
+    is_recommended_model,
+    list_available_models,
+)
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
     filter_transcripts_for_memory_update,
@@ -553,6 +560,7 @@ FAVORITES_LOG_FILENAME = "favorites_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
 CHAT_RECOVERY_LOG_FILENAME = "chat_recovery.log"
 APP_UPDATE_LOG_FILENAME = "app_update.log"
+MODEL_SERVICE_LOG_FILENAME = "model_service.log"
 WINDOWS_APP_USER_MODEL_ID = "deepseek.cowork"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
@@ -960,6 +968,19 @@ def log_ui_navigation(stage, **fields):
     payload.update(fields or {})
     append_background_process_log(
         UI_NAVIGATION_LOG_FILENAME,
+        json.dumps(payload, ensure_ascii=False, default=str),
+    )
+
+
+def log_model_service_event(stage, **fields):
+    safe_fields = {
+        key: value for key, value in (fields or {}).items()
+        if key not in {"api_key", "authorization", "headers"}
+    }
+    payload = {"stage": str(stage or "")}
+    payload.update(safe_fields)
+    append_background_process_log(
+        MODEL_SERVICE_LOG_FILENAME,
         json.dumps(payload, ensure_ascii=False, default=str),
     )
 
@@ -5108,6 +5129,476 @@ class _LegacySkillsCenterDialog(QDialog):
             else:
                 QMessageBox.warning(self, "失败", msg)
 
+class ModelCatalogFetchWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, provider_type, base_url, api_key, parent=None):
+        super().__init__(parent)
+        self.provider_type = str(provider_type or "openai")
+        self.base_url = str(base_url or "").strip()
+        self.api_key = str(api_key or "").strip()
+
+    def run(self):
+        started_at = time.monotonic()
+        log_model_service_event(
+            "fetch_start",
+            provider_type=self.provider_type,
+            official_deepseek=is_deepseek_official_base_url(self.base_url),
+        )
+        try:
+            models = list_available_models(
+                self.provider_type,
+                self.base_url,
+                self.api_key,
+                timeout=20,
+            )
+            elapsed = time.monotonic() - started_at
+            log_model_service_event(
+                "fetch_finish",
+                provider_type=self.provider_type,
+                official_deepseek=is_deepseek_official_base_url(self.base_url),
+                model_count=len(models),
+                elapsed_ms=int(elapsed * 1000),
+            )
+            self.finished_signal.emit({"ok": True, "models": models, "elapsed": elapsed})
+        except Exception as exc:
+            elapsed = time.monotonic() - started_at
+            message = str(exc) or type(exc).__name__
+            log_model_service_event(
+                "fetch_error",
+                provider_type=self.provider_type,
+                official_deepseek=is_deepseek_official_base_url(self.base_url),
+                error_type=type(exc).__name__,
+                elapsed_ms=int(elapsed * 1000),
+            )
+            self.finished_signal.emit({
+                "ok": False,
+                "error": message,
+                "error_type": type(exc).__name__,
+                "elapsed": elapsed,
+            })
+
+
+class ModelImportDialog(QDialog):
+    def __init__(self, models, existing_model_names=None, recommended_model="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("ModelImportDialog")
+        self.setWindowTitle("选择接口模型")
+        self.resize(620, 620)
+        self.setMinimumSize(520, 480)
+        self.setStyleSheet(linear_dialog_stylesheet("ModelImportDialog"))
+        self.models = list(models or [])
+        self.existing_model_names = {
+            str(value or "").strip() for value in (existing_model_names or []) if str(value or "").strip()
+        }
+        self.recommended_model = str(recommended_model or "").strip()
+        self._items = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        title = QLabel("接口返回的模型")
+        title.setProperty("roleTitle", True)
+        layout.addWidget(title)
+        subtitle = QLabel(
+            "模型接口只声明可见的模型标识，不保证聊天、工具、图片或推理能力。导入后请按实际能力配置。"
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setProperty("roleSubtitle", True)
+        layout.addWidget(subtitle)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索模型或所有者")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._filter_items)
+        layout.addWidget(self.search_input)
+
+        self.model_list = QListWidget()
+        self.model_list.setStyleSheet(
+            apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=12, padding=6)
+        )
+        self.model_list.itemChanged.connect(lambda _item: self._refresh_summary())
+        ordered = sorted(
+            self.models,
+            key=lambda item: (
+                str(item.get("id") or "") != self.recommended_model,
+                str(item.get("id") or "").casefold(),
+            ),
+        )
+        for model in ordered:
+            model_name = str(model.get("id") or "").strip()
+            if not model_name:
+                continue
+            existing = model_name in self.existing_model_names
+            recommended = model_name == self.recommended_model
+            suffixes = []
+            if recommended:
+                suffixes.append("推荐")
+            if existing:
+                suffixes.append("已添加")
+            owner = str(model.get("owned_by") or "").strip()
+            detail = " · ".join(filter(None, (owner, " / ".join(suffixes))))
+            item = QListWidgetItem(model_name + (f"\n{detail}" if detail else ""))
+            item.setData(Qt.UserRole, dict(model))
+            item.setData(Qt.UserRole + 1, f"{model_name} {owner}".casefold())
+            item.setCheckState(Qt.Unchecked)
+            if existing:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self.model_list.addItem(item)
+            self._items.append(item)
+        layout.addWidget(self.model_list, 1)
+
+        action_row = QHBoxLayout()
+        self.summary_label = QLabel()
+        self.summary_label.setStyleSheet(apple_caption_style())
+        action_row.addWidget(self.summary_label)
+        action_row.addStretch()
+        select_all_btn = QPushButton("全选可导入")
+        select_all_btn.setObjectName("SecondaryBtn")
+        select_all_btn.clicked.connect(self._select_all_visible)
+        action_row.addWidget(select_all_btn)
+        layout.addLayout(action_row)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        self.import_btn = QPushButton("导入所选模型")
+        self.import_btn.setObjectName("PrimaryBtn")
+        self.import_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(self.import_btn)
+        layout.addLayout(buttons)
+        self._refresh_summary()
+
+    def _filter_items(self, text):
+        query = str(text or "").strip().casefold()
+        for item in self._items:
+            item.setHidden(bool(query and query not in str(item.data(Qt.UserRole + 1) or "")))
+
+    def _select_all_visible(self):
+        for item in self._items:
+            if not item.isHidden() and item.flags() & Qt.ItemIsEnabled:
+                item.setCheckState(Qt.Checked)
+
+    def _refresh_summary(self):
+        count = len(self.selected_models())
+        available = sum(bool(item.flags() & Qt.ItemIsEnabled) for item in self._items)
+        if hasattr(self, "summary_label"):
+            self.summary_label.setText(f"接口返回 {len(self._items)} 个 · 可导入 {available} 个 · 已选择 {count} 个")
+        if hasattr(self, "import_btn"):
+            self.import_btn.setEnabled(count > 0)
+
+    def selected_models(self):
+        return [
+            dict(item.data(Qt.UserRole) or {})
+            for item in self._items
+            if item.flags() & Qt.ItemIsEnabled and item.checkState() == Qt.Checked
+        ]
+
+
+class BatchModelCapabilityDialog(QDialog):
+    def __init__(self, provider_type, model_count, parent=None):
+        super().__init__(parent)
+        self.provider_type = str(provider_type or "openai")
+        self.setObjectName("BatchModelCapabilityDialog")
+        self.setWindowTitle("批量配置模型能力")
+        self.resize(600, 520)
+        self.setMinimumSize(520, 460)
+        self.setStyleSheet(linear_dialog_stylesheet("BatchModelCapabilityDialog"))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        title = QLabel(f"批量配置 {int(model_count)} 个模型")
+        title.setProperty("roleTitle", True)
+        layout.addWidget(title)
+        subtitle = QLabel("“不修改”会保留每个模型原来的设置；只应用本次明确选择的能力。")
+        subtitle.setWordWrap(True)
+        subtitle.setProperty("roleSubtitle", True)
+        layout.addWidget(subtitle)
+
+        card, card_layout = build_settings_surface("共同能力", "模型名称和模型标识仍保持各自独立。", radius=16)
+        form = QFormLayout()
+        form.setSpacing(12)
+        configure_responsive_form_layout(form)
+        self.vision_combo = QComboBox()
+        apply_settings_combo_style(self.vision_combo)
+        self.vision_combo.addItem("不修改", None)
+        self.vision_combo.addItem("支持图片理解", True)
+        self.vision_combo.addItem("不支持图片理解", False)
+        form.addRow(build_form_row_label("图片理解"), self.vision_combo)
+
+        self.protocol_combo = None
+        self.reasoning_mode_combo = None
+        self.reasoning_checks = {}
+        self.reasoning_combo = None
+        if self.provider_type == "openai":
+            self.protocol_combo = QComboBox()
+            apply_settings_combo_style(self.protocol_combo)
+            self.protocol_combo.addItem("不修改", "")
+            self.protocol_combo.addItem("Chat Completions", API_PROTOCOL_CHAT_COMPLETIONS)
+            self.protocol_combo.addItem("Responses", API_PROTOCOL_RESPONSES)
+            form.addRow(build_form_row_label("API 协议"), self.protocol_combo)
+
+            self.reasoning_mode_combo = QComboBox()
+            apply_settings_combo_style(self.reasoning_mode_combo)
+            self.reasoning_mode_combo.addItem("不修改", "unchanged")
+            self.reasoning_mode_combo.addItem("支持推理强度", "enabled")
+            self.reasoning_mode_combo.addItem("不支持推理强度", "disabled")
+            form.addRow(build_form_row_label("推理"), self.reasoning_mode_combo)
+
+            effort_widget = QWidget()
+            effort_layout = QHBoxLayout(effort_widget)
+            effort_layout.setContentsMargins(0, 0, 0, 0)
+            effort_layout.setSpacing(8)
+            for effort in SUPPORTED_REASONING_EFFORTS:
+                check = QCheckBox(effort)
+                self.reasoning_checks[effort] = check
+                effort_layout.addWidget(check)
+                check.toggled.connect(lambda _checked: self._sync_reasoning_controls())
+            effort_layout.addStretch()
+            form.addRow(build_form_row_label("支持档位"), effort_widget)
+
+            self.reasoning_combo = QComboBox()
+            apply_settings_combo_style(self.reasoning_combo)
+            for effort in SUPPORTED_REASONING_EFFORTS:
+                self.reasoning_combo.addItem(effort, effort)
+            form.addRow(build_form_row_label("默认档位"), self.reasoning_combo)
+            self.reasoning_mode_combo.currentIndexChanged.connect(self._sync_reasoning_controls)
+        card_layout.addLayout(form)
+        layout.addWidget(card)
+        layout.addStretch()
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        apply_btn = QPushButton("应用到所选模型")
+        apply_btn.setObjectName("PrimaryBtn")
+        apply_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(apply_btn)
+        layout.addLayout(buttons)
+        self._sync_reasoning_controls()
+
+    def _sync_reasoning_controls(self, *_args):
+        if not self.reasoning_mode_combo:
+            return
+        enabled = self.reasoning_mode_combo.currentData() == "enabled"
+        allowed = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
+        for check in self.reasoning_checks.values():
+            check.setEnabled(enabled)
+        self.reasoning_combo.setEnabled(enabled and bool(allowed))
+        for index in range(self.reasoning_combo.count()):
+            self.reasoning_combo.model().item(index).setEnabled(self.reasoning_combo.itemData(index) in allowed)
+        if allowed and self.reasoning_combo.currentData() not in allowed:
+            self.reasoning_combo.setCurrentIndex(self.reasoning_combo.findData(allowed[0]))
+
+    def accept(self):
+        if self.reasoning_mode_combo and self.reasoning_mode_combo.currentData() == "enabled":
+            efforts = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
+            if not efforts:
+                QMessageBox.warning(self, "批量配置", "启用推理能力时，请至少选择一个支持档位。")
+                return
+            if self.reasoning_combo.currentData() not in efforts:
+                QMessageBox.warning(self, "批量配置", "默认推理档位必须属于支持档位。")
+                return
+        super().accept()
+
+    def changes(self):
+        changes = {}
+        if self.vision_combo.currentData() is not None:
+            changes["supports_vision"] = bool(self.vision_combo.currentData())
+        if self.protocol_combo and self.protocol_combo.currentData():
+            changes["api_protocol"] = self.protocol_combo.currentData()
+        if self.reasoning_mode_combo:
+            mode = self.reasoning_mode_combo.currentData()
+            if mode == "disabled":
+                changes.update({
+                    "deepseek_thinking_enabled": False,
+                    "deepseek_reasoning_effort": "",
+                    "reasoning_efforts": [],
+                    "reasoning_effort": "",
+                })
+            elif mode == "enabled":
+                efforts = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
+                selected = str(self.reasoning_combo.currentData() or "")
+                changes.update({
+                    "deepseek_thinking_enabled": True,
+                    "deepseek_reasoning_effort": selected,
+                    "reasoning_efforts": efforts,
+                    "reasoning_effort": selected,
+                })
+        return changes
+
+
+class DeepSeekQuickstartDialog(QDialog):
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.fetch_worker = None
+        self.configured_profile = None
+        self._completed = False
+        self.setObjectName("DeepSeekQuickstartDialog")
+        self.setWindowTitle("快速启用 DeepSeek")
+        self.resize(540, 410)
+        self.setMinimumSize(500, 390)
+        self.setModal(True)
+        self.setStyleSheet(linear_dialog_stylesheet("DeepSeekQuickstartDialog"))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+        title = QLabel("填写 API Key，即可开始使用")
+        title.setProperty("roleTitle", True)
+        layout.addWidget(title)
+        recommended = get_recommended_model("openai", DEEPSEEK_OFFICIAL_BASE_URL)
+        subtitle = QLabel(
+            f"应用会验证 DeepSeek 官方接口、同步可用模型，并优先选择推荐模型 {recommended}。"
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setProperty("roleSubtitle", True)
+        layout.addWidget(subtitle)
+
+        card, card_layout = build_settings_surface(
+            "DeepSeek 官方服务",
+            "API Key 仅保存到本机现有配置中，不会写入诊断日志。",
+            radius=16,
+        )
+        form = QFormLayout()
+        configure_responsive_form_layout(form)
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("粘贴 DeepSeek API Key")
+        self.api_key_input.textChanged.connect(self._refresh_submit_state)
+        form.addRow(build_form_row_label("API Key"), self.api_key_input)
+        service_label = QLabel(DEEPSEEK_OFFICIAL_BASE_URL)
+        service_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow(build_form_row_label("服务地址"), service_label)
+        card_layout.addLayout(form)
+        key_link = QLabel('<a href="https://platform.deepseek.com/api_keys">前往 DeepSeek 平台获取 API Key</a>')
+        key_link.setOpenExternalLinks(True)
+        key_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        card_layout.addWidget(key_link)
+        layout.addWidget(card)
+
+        self.status_label = QLabel("验证成功后会自动保存，无需再到设置页重复填写。")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(apple_settings_inline_note_style())
+        layout.addWidget(self.status_label)
+        layout.addStretch()
+
+        buttons = QHBoxLayout()
+        self.later_btn = QPushButton("稍后配置")
+        self.later_btn.setObjectName("SecondaryBtn")
+        self.later_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.later_btn)
+        buttons.addStretch()
+        self.submit_btn = QPushButton("验证并开始使用")
+        self.submit_btn.setObjectName("PrimaryBtn")
+        self.submit_btn.clicked.connect(self._start_validation)
+        buttons.addWidget(self.submit_btn)
+        layout.addLayout(buttons)
+        self._refresh_submit_state()
+        self.api_key_input.setFocus(Qt.OtherFocusReason)
+        log_model_service_event("onboarding_show")
+
+    def _refresh_submit_state(self, *_args):
+        running = bool(self.fetch_worker and self.fetch_worker.isRunning())
+        self.submit_btn.setEnabled(bool(self.api_key_input.text().strip()) and not running)
+
+    def _start_validation(self):
+        if self.fetch_worker and self.fetch_worker.isRunning():
+            return
+        api_key = self.api_key_input.text().strip()
+        if not api_key:
+            return
+        log_model_service_event("onboarding_submit")
+        log_model_service_event("onboarding_start")
+        self.api_key_input.setEnabled(False)
+        self.later_btn.setEnabled(False)
+        self.submit_btn.setText("验证中…")
+        self.status_label.setText("正在验证 Key 并读取 DeepSeek 官方模型…")
+        self.status_label.setStyleSheet(apple_settings_inline_note_style())
+        self.fetch_worker = ModelCatalogFetchWorker(
+            "openai",
+            DEEPSEEK_OFFICIAL_BASE_URL,
+            api_key,
+            self,
+        )
+        self.fetch_worker.finished_signal.connect(
+            lambda result, secret=api_key: self._handle_validation_result(result, secret)
+        )
+        self.fetch_worker.start()
+        self._refresh_submit_state()
+
+    def _handle_validation_result(self, result, api_key):
+        self.fetch_worker = None
+        if not result.get("ok"):
+            message = str(result.get("error") or "DeepSeek API Key 验证失败")
+            self.status_label.setText(f"验证失败：{message}")
+            self.status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
+            self.api_key_input.setEnabled(True)
+            self.later_btn.setEnabled(True)
+            self.submit_btn.setText("重新验证")
+            self._refresh_submit_state()
+            log_model_service_event(
+                "onboarding_error",
+                phase="validation",
+                error_type=str(result.get("error_type") or "ModelCatalogError"),
+            )
+            return
+        try:
+            self.configured_profile = self.config_manager.apply_deepseek_quickstart(
+                api_key,
+                result.get("models") or [],
+            )
+        except Exception as exc:
+            self.status_label.setText(f"保存失败：{exc}")
+            self.status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
+            self.api_key_input.setEnabled(True)
+            self.later_btn.setEnabled(True)
+            self.submit_btn.setText("重新验证")
+            self._refresh_submit_state()
+            log_model_service_event(
+                "onboarding_error",
+                phase="save",
+                error_type=type(exc).__name__,
+            )
+            return
+        recommended = get_recommended_model("openai", DEEPSEEK_OFFICIAL_BASE_URL)
+        self._completed = True
+        self.status_label.setText(f"已配置，推荐并正在使用 {recommended}。")
+        self.status_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-size: 12px;")
+        self.submit_btn.setText("开始使用")
+        self.submit_btn.setEnabled(True)
+        self.submit_btn.clicked.disconnect()
+        self.submit_btn.clicked.connect(self.accept)
+        self.later_btn.setEnabled(False)
+        log_model_service_event(
+            "onboarding_finish",
+            model_count=len(result.get("models") or []),
+            recommended_model=recommended,
+        )
+
+    def reject(self):
+        if self.fetch_worker and self.fetch_worker.isRunning():
+            return
+        if self._completed:
+            super().accept()
+            return
+        log_model_service_event("onboarding_cancel")
+        super().reject()
+
+    def closeEvent(self, event):
+        if self.fetch_worker and self.fetch_worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class ModelEditDialog(QDialog):
     def __init__(self, provider_id, model=None, parent=None):
         super().__init__(parent)
@@ -5333,6 +5824,8 @@ class ModelChannelEditor(QFrame):
         self.on_expand = on_expand
         self.on_delete = on_delete
         self.test_worker = None
+        self.fetch_worker = None
+        self._fetch_signature = None
         self._tested_signature = ""
         self.setObjectName("ModelChannelEditor")
         self.setStyleSheet(
@@ -5436,37 +5929,53 @@ class ModelChannelEditor(QFrame):
         form.addRow(build_form_row_label("服务地址"), self.base_url_input)
         body_layout.addLayout(form)
 
+        fetch_row = QHBoxLayout()
+        fetch_hint = QLabel("使用当前地址和密钥读取接口模型列表")
+        fetch_hint.setMinimumWidth(0)
+        fetch_hint.setWordWrap(True)
+        fetch_hint.setStyleSheet(apple_caption_style())
+        fetch_row.addWidget(fetch_hint, 1)
+        fetch_row.addStretch()
+        self.fetch_btn = QPushButton("拉取模型")
+        self.fetch_btn.setObjectName("SecondaryBtn")
+        self.fetch_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.text_secondary))
+        self.fetch_btn.clicked.connect(self.fetch_models)
+        fetch_row.addWidget(self.fetch_btn)
+        body_layout.addLayout(fetch_row)
+
         model_title = QLabel("可用模型")
         model_title.setStyleSheet(apple_settings_section_title_style())
         body_layout.addWidget(model_title)
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(104)
+        self.model_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.model_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.model_list.setTextElideMode(Qt.ElideRight)
         self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
         self.model_list.currentRowChanged.connect(self.clear_test_result)
+        self.model_list.itemSelectionChanged.connect(self._refresh_model_actions)
         body_layout.addWidget(self.model_list)
 
         button_row = QHBoxLayout()
-        add_btn = QPushButton("新增模型")
-        add_btn.setObjectName("SecondaryBtn")
-        add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
-        edit_btn = QPushButton("编辑")
-        edit_btn.setObjectName("SecondaryBtn")
-        edit_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
-        delete_btn = QPushButton("删除")
-        delete_btn.setObjectName("SecondaryBtn")
-        delete_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
-        add_btn.clicked.connect(self.add_model)
-        edit_btn.clicked.connect(self.edit_model)
-        delete_btn.clicked.connect(self.delete_model)
+        self.add_model_btn = QPushButton("新增模型")
+        self.add_model_btn.setObjectName("SecondaryBtn")
+        self.add_model_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
+        self.edit_model_btn = QPushButton("编辑")
+        self.edit_model_btn.setObjectName("SecondaryBtn")
+        self.edit_model_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
+        self.delete_model_btn = QPushButton("删除")
+        self.delete_model_btn.setObjectName("SecondaryBtn")
+        self.delete_model_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
+        self.add_model_btn.clicked.connect(self.add_model)
+        self.edit_model_btn.clicked.connect(self.edit_model)
+        self.delete_model_btn.clicked.connect(self.delete_model)
         self.test_btn = QPushButton("测试")
         self.test_btn.setObjectName("SecondaryBtn")
         self.test_btn.setIcon(qta.icon("fa5s.plug", color=DesignTokens.text_secondary))
         self.test_btn.clicked.connect(self.test_current_model)
-        button_row.addWidget(add_btn)
-        button_row.addWidget(edit_btn)
-        button_row.addWidget(delete_btn)
+        button_row.addWidget(self.add_model_btn)
+        button_row.addWidget(self.edit_model_btn)
+        button_row.addWidget(self.delete_model_btn)
         button_row.addStretch()
         button_row.addWidget(self.test_btn)
         body_layout.addLayout(button_row)
@@ -5475,6 +5984,11 @@ class ModelChannelEditor(QFrame):
         self.test_status_label.setWordWrap(True)
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         body_layout.addWidget(self.test_status_label)
+
+        self.recommendation_notice = QLabel()
+        self.recommendation_notice.setWordWrap(True)
+        self.recommendation_notice.setStyleSheet(apple_settings_inline_note_style())
+        body_layout.addWidget(self.recommendation_notice)
 
         layout.addWidget(self.body)
         self.refresh_model_list()
@@ -5490,6 +6004,11 @@ class ModelChannelEditor(QFrame):
         self.api_key_input.textChanged.connect(lambda *_args: self.changed.emit())
         self.base_url_input.textChanged.connect(lambda *_args: self.changed.emit())
         self.provider_combo.currentIndexChanged.connect(lambda *_args: self.changed.emit())
+        self.api_key_input.textChanged.connect(self._refresh_fetch_button)
+        self.base_url_input.textChanged.connect(self._refresh_fetch_button)
+        self.provider_combo.currentIndexChanged.connect(self._refresh_fetch_button)
+        self._refresh_fetch_button()
+        self._refresh_model_actions()
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -5528,6 +6047,30 @@ class ModelChannelEditor(QFrame):
         self.title_label.setText(self._channel_name())
         self.meta_label.setText(f"{provider_label} · {model_count} 个模型 · {'已填写密钥' if key_ready else '未填写密钥'}")
         self.status_chip.setText(settings_status_chip(summary_text, tone))
+        self._refresh_recommendation_notice()
+
+    def _recommended_model(self):
+        return get_recommended_model(self._provider_type(), self.base_url_input.text().strip())
+
+    def _refresh_recommendation_notice(self):
+        if not hasattr(self, "recommendation_notice"):
+            return
+        recommended = self._recommended_model()
+        if not recommended:
+            self.recommendation_notice.hide()
+            return
+        names = {str(model.get("model_name") or "").strip() for model in self._models()}
+        if recommended in names:
+            self.recommendation_notice.setText(f"推荐模型：{recommended}。推荐标识不会自动替换你当前选择的模型。")
+            self.recommendation_notice.setStyleSheet(
+                f"color: {DesignTokens.primary}; font-size: 12px;"
+            )
+        else:
+            self.recommendation_notice.setText(f"推荐模型 {recommended} 尚未添加，请拉取模型后导入。")
+            self.recommendation_notice.setStyleSheet(
+                f"color: {DesignTokens.warning_text}; font-size: 12px;"
+            )
+        self.recommendation_notice.show()
 
     def set_expanded(self, expanded):
         self.expanded = bool(expanded)
@@ -5553,18 +6096,65 @@ class ModelChannelEditor(QFrame):
             self.on_delete(self)
 
     def refresh_model_list(self):
+        selected_ids = {
+            str(item.data(Qt.UserRole) or "") for item in self.model_list.selectedItems()
+        }
         self.model_list.clear()
-        for model in self._models():
+        recommended = self._recommended_model()
+        ordered_models = sorted(
+            enumerate(self._models()),
+            key=lambda pair: (
+                str(pair[1].get("model_name") or "") != recommended,
+                pair[0],
+            ),
+        )
+        for _source_index, model in ordered_models:
             label = model.get("display_name") or model.get("model_name") or "未命名模型"
             protocol = normalize_openai_api_protocol(model.get("api_protocol"))
             protocol_label = "Responses" if protocol == API_PROTOCOL_RESPONSES else "Chat Completions"
             suffix = f"  ·  {protocol_label}" if self._provider_type() == "openai" else ""
-            item = QListWidgetItem(f"{label}  ·  {model.get('model_name', '')}{suffix}")
+            recommendation = "  ·  推荐" if str(model.get("model_name") or "") == recommended else ""
+            capability = "  ·  图片" if model.get("supports_vision") else ""
+            efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
+            reasoning = f"  ·  推理 {'/'.join(efforts)}" if efforts else ""
+            item = QListWidgetItem(
+                f"{label}  ·  {model.get('model_name', '')}{recommendation}{capability}{reasoning}{suffix}"
+            )
             item.setData(Qt.UserRole, model.get("id"))
             self.model_list.addItem(item)
-        if self.model_list.count() and self.model_list.currentRow() < 0:
+            if str(model.get("id") or "") in selected_ids:
+                item.setSelected(True)
+        if self.model_list.count() and not self.model_list.selectedItems():
             self.model_list.setCurrentRow(0)
         self.refresh_header()
+        self._refresh_model_actions()
+
+    def _selected_model_ids(self):
+        return [str(item.data(Qt.UserRole) or "") for item in self.model_list.selectedItems()]
+
+    def _selected_model_indexes(self):
+        selected_ids = set(self._selected_model_ids())
+        return [
+            index for index, model in enumerate(self._models())
+            if str(model.get("id") or "") in selected_ids
+        ]
+
+    def _refresh_model_actions(self):
+        count = len(self.model_list.selectedItems()) if hasattr(self, "model_list") else 0
+        if hasattr(self, "edit_model_btn"):
+            self.edit_model_btn.setEnabled(count > 0)
+            self.edit_model_btn.setText(f"批量配置（{count}）" if count > 1 else "编辑")
+        if hasattr(self, "delete_model_btn"):
+            self.delete_model_btn.setEnabled(count == 1)
+        if hasattr(self, "test_btn"):
+            self.test_btn.setEnabled(count == 1 and not (self.test_worker and self.test_worker.isRunning()))
+
+    def _refresh_fetch_button(self, *_args):
+        if not hasattr(self, "fetch_btn"):
+            return
+        running = bool(self.fetch_worker and self.fetch_worker.isRunning())
+        ready = bool(self.api_key_input.text().strip() and self.base_url_input.text().strip())
+        self.fetch_btn.setEnabled(ready and not running)
 
     def clear_test_result(self, *_args):
         if self.test_worker and self.test_worker.isRunning():
@@ -5584,32 +6174,230 @@ class ModelChannelEditor(QFrame):
             self.changed.emit()
 
     def _current_model_index(self):
-        row = self.model_list.currentRow()
-        if row < 0 or row >= len(self._models()):
-            return -1
-        return row
+        item = self.model_list.currentItem()
+        model_id = str(item.data(Qt.UserRole) or "") if item else ""
+        return next(
+            (index for index, model in enumerate(self._models()) if str(model.get("id") or "") == model_id),
+            -1,
+        )
 
     def edit_model(self):
-        index = self._current_model_index()
-        if index < 0:
+        indexes = self._selected_model_indexes()
+        if not indexes:
             return
+        if len(indexes) > 1:
+            log_model_service_event(
+                "batch_edit_start",
+                provider_type=self._provider_type(),
+                model_count=len(indexes),
+            )
+            dialog = BatchModelCapabilityDialog(self._provider_type(), len(indexes), self)
+            if dialog.exec() != QDialog.Accepted:
+                log_model_service_event(
+                    "batch_edit_cancel",
+                    provider_type=self._provider_type(),
+                    model_count=len(indexes),
+                )
+                return
+            changes = dialog.changes()
+            if not changes:
+                log_model_service_event(
+                    "batch_edit_cancel",
+                    provider_type=self._provider_type(),
+                    model_count=len(indexes),
+                    reason="no_changes",
+                )
+                return
+            log_model_service_event(
+                "batch_edit_submit",
+                provider_type=self._provider_type(),
+                model_count=len(indexes),
+                changed_fields=sorted(changes),
+            )
+            selected_ids = self._selected_model_ids()
+            try:
+                updated_models = copy.deepcopy(self._models())
+                for index in indexes:
+                    updated_models[index].update(copy.deepcopy(changes))
+                self.channel_config["models"] = updated_models
+            except Exception as exc:
+                log_model_service_event(
+                    "batch_edit_error",
+                    provider_type=self._provider_type(),
+                    model_count=len(indexes),
+                    error_type=type(exc).__name__,
+                )
+                raise
+            self.refresh_model_list()
+            for row in range(self.model_list.count()):
+                item = self.model_list.item(row)
+                item.setSelected(str(item.data(Qt.UserRole) or "") in selected_ids)
+            self.clear_test_result()
+            self.changed.emit()
+            log_model_service_event(
+                "batch_edit_finish",
+                provider_type=self._provider_type(),
+                model_count=len(indexes),
+                changed_fields=sorted(changes),
+            )
+            return
+        index = indexes[0]
         current = self._models()[index]
+        current_id = str(current.get("id") or "")
         dialog = ModelEditDialog(self._provider_type(), current, self)
         if dialog.exec() == QDialog.Accepted:
             self._models()[index] = dialog.get_model(existing_id=current.get("id"))
             self.refresh_model_list()
-            self.model_list.setCurrentRow(index)
+            for row in range(self.model_list.count()):
+                if str(self.model_list.item(row).data(Qt.UserRole) or "") == current_id:
+                    self.model_list.setCurrentRow(row)
+                    break
             self.clear_test_result()
             self.changed.emit()
+
+    def fetch_models(self):
+        if self.fetch_worker and self.fetch_worker.isRunning():
+            return
+        api_key = self.api_key_input.text().strip()
+        base_url = self.base_url_input.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "拉取模型", "请填写访问密钥。")
+            return
+        if not base_url:
+            QMessageBox.warning(self, "拉取模型", "请填写服务地址。")
+            return
+        log_model_service_event(
+            "fetch_submit",
+            provider_type=self._provider_type(),
+            official_deepseek=is_deepseek_official_base_url(base_url),
+        )
+        self._fetch_signature = (self._provider_type(), base_url, api_key)
+        self.fetch_btn.setText("拉取中…")
+        self.test_status_label.setText("正在读取接口模型列表…")
+        self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+        self.fetch_worker = ModelCatalogFetchWorker(
+            self._provider_type(), base_url, api_key, self
+        )
+        self.fetch_worker.finished_signal.connect(self.handle_fetch_result)
+        self.fetch_worker.start()
+        self._refresh_fetch_button()
+
+    def handle_fetch_result(self, result):
+        self.fetch_btn.setText("拉取模型")
+        current_signature = (
+            self._provider_type(),
+            self.base_url_input.text().strip(),
+            self.api_key_input.text().strip(),
+        )
+        self.fetch_worker = None
+        self._refresh_fetch_button()
+        if current_signature != self._fetch_signature:
+            self.test_status_label.setText("服务配置已变化，已忽略旧的模型列表，请重新拉取。")
+            self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+            log_model_service_event(
+                "fetch_cancel",
+                provider_type=self._provider_type(),
+                reason="configuration_changed",
+            )
+            return
+        if not result.get("ok"):
+            message = str(result.get("error") or "模型接口请求失败")
+            self.test_status_label.setText(f"拉取失败 · {message}")
+            self.test_status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
+            QMessageBox.warning(self, "拉取模型失败", message)
+            return
+        models = list(result.get("models") or [])
+        self.test_status_label.setText(f"接口返回 {len(models)} 个模型，正在等待选择。")
+        self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+        log_model_service_event(
+            "import_start",
+            provider_type=self._provider_type(),
+            returned_count=len(models),
+        )
+        dialog = ModelImportDialog(
+            models,
+            existing_model_names=[model.get("model_name") for model in self._models()],
+            recommended_model=self._recommended_model(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            log_model_service_event(
+                "import_cancel",
+                provider_type=self._provider_type(),
+                returned_count=len(models),
+            )
+            return
+        selected = dialog.selected_models()
+        log_model_service_event(
+            "import_submit",
+            provider_type=self._provider_type(),
+            returned_count=len(models),
+            selected_count=len(selected),
+        )
+        existing_ids = {str(model.get("id") or "") for model in self._models()}
+        imported_ids = []
+        imported_models = []
+        try:
+            existing_names = {
+                str(model.get("model_name") or "").strip() for model in self._models()
+            }
+            for record in selected:
+                model_name = str(record.get("id") or "").strip()
+                if not model_name or model_name in existing_names:
+                    continue
+                model_id = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
+                while model_id in existing_ids:
+                    model_id = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
+                existing_ids.add(model_id)
+                existing_names.add(model_name)
+                imported_ids.append(model_id)
+                model = {
+                    "id": model_id,
+                    "display_name": model_name,
+                    "model_name": model_name,
+                    "supports_vision": False,
+                }
+                if self._provider_type() == "openai":
+                    model.update({
+                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                        "deepseek_thinking_enabled": False,
+                        "deepseek_reasoning_effort": "",
+                        "reasoning_efforts": [],
+                        "reasoning_effort": "",
+                    })
+                imported_models.append(model)
+            self._models().extend(imported_models)
+        except Exception as exc:
+            log_model_service_event(
+                "import_error",
+                provider_type=self._provider_type(),
+                error_type=type(exc).__name__,
+            )
+            raise
+        self.refresh_model_list()
+        for row in range(self.model_list.count()):
+            item = self.model_list.item(row)
+            item.setSelected(str(item.data(Qt.UserRole) or "") in imported_ids)
+        self.test_status_label.setText(f"已导入 {len(imported_ids)} 个模型；保存设置后生效。")
+        self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+        if imported_ids:
+            self.changed.emit()
+        log_model_service_event(
+            "import_finish",
+            provider_type=self._provider_type(),
+            returned_count=len(models),
+            imported_count=len(imported_ids),
+        )
 
     def delete_model(self):
         index = self._current_model_index()
         if index < 0:
             return
+        visible_row = self.model_list.currentRow()
         del self._models()[index]
         self.refresh_model_list()
         if self.model_list.count():
-            self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
+            self.model_list.setCurrentRow(min(visible_row, self.model_list.count() - 1))
         self.clear_test_result()
         self.changed.emit()
 
@@ -5646,7 +6434,6 @@ class ModelChannelEditor(QFrame):
         self.test_worker.start()
 
     def handle_test_result(self, result):
-        self.test_btn.setEnabled(True)
         self.test_btn.setText("测试")
         index = self._current_model_index()
         current_model = dict(self._models()[index]) if index >= 0 else {}
@@ -5659,6 +6446,7 @@ class ModelChannelEditor(QFrame):
             self.test_status_label.setText("配置已变化，请重新测试。")
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
             self.test_worker = None
+            self._refresh_model_actions()
             return
         elapsed = float(result.get("elapsed") or 0)
         if result.get("ok"):
@@ -5670,6 +6458,7 @@ class ModelChannelEditor(QFrame):
             self.test_status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
             QMessageBox.warning(self, "模型测试失败", message)
         self.test_worker = None
+        self._refresh_model_actions()
 
     def get_channel_config(self):
         return {
@@ -5734,6 +6523,18 @@ class ModelChannelManager(QWidget):
 
         for index, channel in enumerate(channels or []):
             self._add_editor(channel, expanded=index == 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        available_width = max(0, self.width())
+        if available_width < 760:
+            target_width = 150
+        elif available_width < 920:
+            target_width = 180
+        else:
+            target_width = 220
+        if self.channel_list.width() != target_width:
+            self.channel_list.setFixedWidth(target_width)
 
     def _add_editor(self, channel, expanded=False):
         editor = ModelChannelEditor(
@@ -12870,7 +13671,18 @@ class ModelSelectorPopover(ProductPopover):
 
     def __init__(self, profiles, selected_id="", parent=None):
         super().__init__(parent, width=440)
-        self.profiles = list(profiles or [])
+        self.profiles = sorted(
+            list(profiles or []),
+            key=lambda profile: (
+                not is_recommended_model(
+                    profile.get("model_name"),
+                    profile.get("provider_type") or profile.get("provider"),
+                    profile.get("base_url"),
+                ),
+                str(profile.get("channel_display_name") or profile.get("provider_display_name") or "").casefold(),
+                str(profile.get("display_name") or profile.get("model_name") or "").casefold(),
+            ),
+        )
         self.selected_id = str(selected_id or "")
         self._items = []
         layout = QVBoxLayout(self)
@@ -12900,10 +13712,20 @@ class ModelSelectorPopover(ProductPopover):
             display = profile.get("display_name") or profile.get("model_name") or "模型"
             channel = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
             label = f"{channel} / {display}" if channel else display
+            recommended = is_recommended_model(
+                profile.get("model_name"),
+                profile.get("provider_type") or profile.get("provider"),
+                profile.get("base_url"),
+            )
+            if recommended:
+                label += "  ·  推荐"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, model_id)
             item.setData(Qt.UserRole + 1, f"{channel} {display} {profile.get('model_name') or ''}".casefold())
-            item.setToolTip(" / ".join(filter(None, (channel, profile.get("model_name") or display))))
+            tooltip = " / ".join(filter(None, (channel, profile.get("model_name") or display)))
+            if recommended:
+                tooltip += " · 产品推荐模型"
+            item.setToolTip(tooltip)
             self.model_list.addItem(item)
             self._items.append(item)
             if model_id == self.selected_id:
@@ -23179,6 +24001,8 @@ class MainWindow(QMainWindow):
     def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
         self.config_manager = config_manager or ConfigManager()
+        self._model_onboarding_shown = False
+        self._model_onboarding_dialog = None
         self.theme_manager = theme_manager or getattr(QApplication.instance(), "theme_manager", None)
         self.setWindowTitle("DeepSeek Cowork")
         self.workspace_theme_controller = WorkspaceThemeController()
@@ -25262,6 +26086,48 @@ class MainWindow(QMainWindow):
         log_startup_stage("startup_workspace_ready", has_workspace=bool(self.workspace_dir))
         self.refresh_history_list()
         log_startup_stage("startup_history_ready")
+        QTimer.singleShot(0, self._show_model_onboarding_if_needed)
+
+    def _show_model_onboarding_if_needed(self):
+        if self._model_onboarding_shown:
+            return False
+        try:
+            if self.config_manager.has_usable_model_profile():
+                return False
+        except Exception as exc:
+            log_model_service_event(
+                "onboarding_check_error",
+                error_type=type(exc).__name__,
+            )
+            self.add_system_toast(f"无法检查模型配置：{exc}", "error", auto_close_ms=8000)
+            return False
+        self._model_onboarding_shown = True
+        dialog = DeepSeekQuickstartDialog(self.config_manager, self)
+        self._model_onboarding_dialog = dialog
+        result = dialog.exec()
+        self._model_onboarding_dialog = None
+        if result != QDialog.Accepted or not dialog.configured_profile:
+            return False
+        configured_id = str(dialog.configured_profile.get("id") or "")
+        state = self.get_current_session()
+        if state and configured_id:
+            usable_ids = {
+                str(profile.get("id") or "")
+                for profile in self.config_manager.iter_model_profiles()
+                if str(profile.get("api_key") or "").strip()
+                and str(profile.get("model_name") or "").strip()
+            }
+            state_model_id = str(getattr(state, "selected_model_id", "") or "")
+            if state_model_id not in usable_ids:
+                self._set_session_model_id(state, configured_id)
+        self.refresh_model_selector()
+        recommended = get_recommended_model("openai", DEEPSEEK_OFFICIAL_BASE_URL)
+        self.add_system_toast(
+            f"DeepSeek 已配置，当前使用推荐模型 {recommended}",
+            "success",
+            auto_close_ms=5000,
+        )
+        return True
 
     def keyPressEvent(self, event):
         if (
@@ -28239,6 +29105,12 @@ class MainWindow(QMainWindow):
             display_name = selected.get("display_name") or selected.get("model_name") or "模型"
             channel_name = selected.get("channel_display_name") or selected.get("provider_display_name") or selected.get("provider") or ""
             label = f"{channel_name} / {display_name}" if channel_name else display_name
+            if is_recommended_model(
+                selected.get("model_name"),
+                selected.get("provider_type") or selected.get("provider"),
+                selected.get("base_url"),
+            ):
+                label += " · 推荐"
             label += f" · {effort_labels.get(current_effort, current_effort) if current_effort else '标准'}"
             self.model_select_btn.setText(label)
             self.model_select_btn.setToolTip(label)

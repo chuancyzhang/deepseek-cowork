@@ -5,6 +5,7 @@ import shutil
 import re
 import uuid
 import time
+import copy
 from contextlib import contextmanager
 from .env_utils import get_app_data_dir, get_base_dir
 from .llm.deepseek import (
@@ -19,6 +20,11 @@ from .llm.deepseek import (
 from .llm.providers import (
     API_PROTOCOL_CHAT_COMPLETIONS,
     normalize_openai_api_protocol,
+)
+from .llm.model_catalog import (
+    DEEPSEEK_OFFICIAL_BASE_URL,
+    get_recommended_model,
+    is_deepseek_official_base_url,
 )
 from .favorites_manager import (
     FAVORITE_RUN_HISTORY_LIMIT,
@@ -38,6 +44,10 @@ from .im_gateway_config import normalize_im_gateway_config
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+
+
+def _recommended_deepseek_model():
+    return get_recommended_model("openai", DEEPSEEK_OFFICIAL_BASE_URL)
 
 
 def _slug_config_value(value):
@@ -269,7 +279,7 @@ class ConfigManager:
             "base_url": DEFAULT_DEEPSEEK_BASE_URL,
             "model_name": DEFAULT_DEEPSEEK_MODEL,
             "llm_provider": "openai",
-            "selected_model_id": "deepseek-v4-flash",
+            "selected_model_id": _recommended_deepseek_model(),
             "model_channels": self._default_model_channels(),
             "model_provider_configs": self._default_model_provider_configs(),
             "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
@@ -452,30 +462,53 @@ class ConfigManager:
         if updated:
             self.save_config()
 
+    def _default_deepseek_models(self):
+        models = [
+            {
+                "id": "deepseek-v4-flash",
+                "display_name": "deepseek-v4-flash",
+                "model_name": "deepseek-v4-flash",
+                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
+            },
+            {
+                "id": "deepseek-v4-pro",
+                "display_name": "deepseek-v4-pro",
+                "model_name": DEFAULT_DEEPSEEK_MODEL,
+                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
+            },
+        ]
+        recommended = _recommended_deepseek_model()
+        if recommended and all(model["model_name"] != recommended for model in models):
+            models.append({
+                "id": recommended,
+                "display_name": recommended,
+                "model_name": recommended,
+                "supports_vision": False,
+                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                "deepseek_thinking_enabled": False,
+                "deepseek_reasoning_effort": "",
+                "reasoning_efforts": [],
+                "reasoning_effort": "",
+            })
+        return sorted(
+            models,
+            key=lambda model: (
+                str(model.get("model_name") or "") != recommended,
+                str(model.get("model_name") or "").casefold(),
+            ),
+        )
+
     def _default_model_provider_configs(self):
         return {
             "openai": {
                 "display_name": "deepseek官方",
                 "api_key": "",
                 "base_url": DEFAULT_DEEPSEEK_BASE_URL,
-                "models": [
-                    {
-                        "id": "deepseek-v4-flash",
-                        "display_name": "deepseek-v4-flash",
-                        "model_name": "deepseek-v4-flash",
-                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                    },
-                    {
-                        "id": "deepseek-v4-pro",
-                        "display_name": "deepseek-v4-pro",
-                        "model_name": DEFAULT_DEEPSEEK_MODEL,
-                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                    }
-                ],
+                "models": self._default_deepseek_models(),
             },
             "anthropic": {
                 "display_name": "Anthropic",
@@ -499,24 +532,7 @@ class ConfigManager:
                 "provider_type": "openai",
                 "api_key": "",
                 "base_url": DEFAULT_DEEPSEEK_BASE_URL,
-                "models": [
-                    {
-                        "id": "deepseek-v4-flash",
-                        "display_name": "deepseek-v4-flash",
-                        "model_name": "deepseek-v4-flash",
-                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                    },
-                    {
-                        "id": "deepseek-v4-pro",
-                        "display_name": "deepseek-v4-pro",
-                        "model_name": DEFAULT_DEEPSEEK_MODEL,
-                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                    }
-                ],
+                "models": self._default_deepseek_models(),
             },
         ]
 
@@ -1068,6 +1084,118 @@ class ConfigManager:
                 profiles.append(profile)
         return profiles
 
+    def has_usable_model_profile(self):
+        return any(
+            str(profile.get("model_name") or "").strip()
+            and str(profile.get("api_key") or "").strip()
+            for profile in self.iter_model_profiles()
+        )
+
+    def apply_deepseek_quickstart(self, api_key, discovered_models):
+        """Atomically configure the official DeepSeek channel after validation."""
+
+        secret = str(api_key or "").strip()
+        if not secret:
+            raise ValueError("请填写 DeepSeek API Key。")
+        discovered_ids = []
+        seen = set()
+        for item in discovered_models or []:
+            model_name = str(item.get("id") if isinstance(item, dict) else item or "").strip()
+            if not model_name or model_name in seen:
+                continue
+            seen.add(model_name)
+            discovered_ids.append(model_name)
+        recommended = _recommended_deepseek_model()
+        if not recommended:
+            raise ValueError("产品推荐模型尚未配置。")
+        if recommended not in seen:
+            available = "、".join(discovered_ids[:8]) or "无"
+            raise ValueError(f"接口未返回推荐模型 {recommended}。当前可用模型：{available}")
+
+        channels = self.get_model_channels()
+        snapshot = copy.deepcopy(self.config)
+        try:
+            official = next(
+                (
+                    channel for channel in channels
+                    if str(channel.get("provider_type") or "openai").lower() == "openai"
+                    and is_deepseek_official_base_url(channel.get("base_url"))
+                ),
+                None,
+            )
+            if official is None:
+                official = copy.deepcopy(self._default_model_channels()[0])
+                channels.insert(0, official)
+            normalized_default = self._normalize_model_channels(
+                [copy.deepcopy(self._default_model_channels()[0])]
+            )[0]
+            pristine_product_default = official == normalized_default
+            official["provider_type"] = "openai"
+            official["base_url"] = DEEPSEEK_OFFICIAL_BASE_URL
+            official["api_key"] = secret
+            retained_models = [] if pristine_product_default else list(official.get("models") or [])
+            existing_by_name = {
+                str(model.get("model_name") or "").strip(): model
+                for model in retained_models
+                if str(model.get("model_name") or "").strip()
+            }
+            default_by_name = {
+                str(model.get("model_name") or "").strip(): model
+                for model in self._default_model_channels()[0].get("models") or []
+            }
+            merged_models = list(retained_models)
+            for model_name in discovered_ids:
+                if model_name in existing_by_name:
+                    continue
+                template = copy.deepcopy(default_by_name.get(model_name) or {
+                    "id": f"{official.get('channel_id') or 'deepseek-official'}-{_slug_config_value(model_name)}",
+                    "display_name": model_name,
+                    "model_name": model_name,
+                    "supports_vision": False,
+                    "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                    "deepseek_thinking_enabled": False,
+                    "deepseek_reasoning_effort": "",
+                    "reasoning_efforts": [],
+                    "reasoning_effort": "",
+                })
+                merged_models.append(template)
+            official["models"] = merged_models
+
+            normalized = self._normalize_model_channels(channels)
+            selected_profile = None
+            for channel in normalized:
+                if not is_deepseek_official_base_url(channel.get("base_url")):
+                    continue
+                selected_profile = next(
+                    (
+                        dict(model) for model in channel.get("models") or []
+                        if str(model.get("model_name") or "").strip() == recommended
+                    ),
+                    None,
+                )
+                if selected_profile:
+                    selected_profile.update({
+                        "provider": "openai",
+                        "provider_type": "openai",
+                        "provider_display_name": channel.get("display_name") or "deepseek官方",
+                        "channel_id": channel.get("channel_id") or "",
+                        "channel_display_name": channel.get("display_name") or "deepseek官方",
+                        "api_key": secret,
+                        "base_url": channel.get("base_url") or DEEPSEEK_OFFICIAL_BASE_URL,
+                    })
+                    break
+            if not selected_profile:
+                raise ValueError(f"无法保存推荐模型 {recommended}。")
+            self.config["model_channels"] = normalized
+            self.config["model_provider_configs"] = self._provider_configs_from_channels(normalized)
+            self.config["selected_model_id"] = selected_profile["id"]
+            self._sync_legacy_model_fields(save=False, profile=selected_profile)
+            self._write_config_or_raise()
+            return copy.deepcopy(selected_profile)
+        except Exception:
+            self.config = snapshot
+            raise
+
     def get_model_profile(self, model_id=None):
         configs = self.get_model_channels()
         selected_id = str(model_id or self.config.get("selected_model_id") or "").strip()
@@ -1436,6 +1564,19 @@ class ConfigManager:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"Error saving config: {e}")
+
+    def _write_config_or_raise(self):
+        os.makedirs(self.data_dir, exist_ok=True)
+        temp_path = f"{self.config_path}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(self.config, handle, indent=4, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.config_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def _set_config_value(self, key, value):
         if self.config.get(key) == value:

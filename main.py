@@ -85,6 +85,12 @@ from core.deliverable_preview import (
     render_pdf_text_preview,
     render_structured_document_preview,
 )
+from core.deliverable_pdf_export import (
+    PDF_EXPORT_EXTENSIONS,
+    DeliverablePdfExportController,
+    DeliverablePdfExportError,
+    default_pdf_target,
+)
 from core.deliverable_editing import (
     DeliverableEditError,
     EditSession,
@@ -24912,6 +24918,12 @@ class MainWindow(QMainWindow):
         self.deliverable_more_copy_action.triggered.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
         self.deliverable_more_refresh_action = QAction(qta.icon('fa5s.sync-alt', color=DesignTokens.text_secondary), "刷新预览", self.deliverable_more_menu)
         self.deliverable_more_refresh_action.triggered.connect(lambda: self.render_selected_deliverable(force=True))
+        self.deliverable_more_export_pdf_action = QAction(
+            qta.icon("fa5s.file-pdf", color=DesignTokens.text_secondary),
+            "导出为 PDF…",
+            self.deliverable_more_menu,
+        )
+        self.deliverable_more_export_pdf_action.triggered.connect(self.export_current_deliverable_pdf)
         self.deliverable_more_save_copy_action = QAction(
             qta.icon("fa5s.save", color=DesignTokens.text_secondary),
             "另存为…",
@@ -24928,6 +24940,7 @@ class MainWindow(QMainWindow):
         self.deliverable_more_menu.addAction(self.deliverable_more_reveal_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_copy_action)
         self.deliverable_more_menu.addSeparator()
+        self.deliverable_more_menu.addAction(self.deliverable_more_export_pdf_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_refresh_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_save_copy_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_restore_action)
@@ -24971,11 +24984,8 @@ class MainWindow(QMainWindow):
         generate_pptx_action.triggered.connect(self.start_pptx_deliverable_conversion)
         generate_docx_action = QAction("生成 DOCX", self.deliverable_generate_menu)
         generate_docx_action.triggered.connect(lambda: self.start_deliverable_conversion("docx"))
-        generate_pdf_action = QAction("生成 PDF", self.deliverable_generate_menu)
-        generate_pdf_action.triggered.connect(lambda: self.start_deliverable_conversion("pdf"))
         self.deliverable_generate_menu.addAction(generate_pptx_action)
         self.deliverable_generate_menu.addAction(generate_docx_action)
-        self.deliverable_generate_menu.addAction(generate_pdf_action)
         self.deliverable_generate_btn.clicked.connect(
             lambda: self.deliverable_generate_menu.exec(
                 self.deliverable_generate_btn.mapToGlobal(self.deliverable_generate_btn.rect().bottomLeft())
@@ -25067,6 +25077,8 @@ class MainWindow(QMainWindow):
         self.deliverable_edit_worker = None
         self.deliverable_save_worker = None
         self.deliverable_restore_worker = None
+        self.deliverable_pdf_export_controller = None
+        self.deliverable_pending_pdf_export_source = ""
         self.deliverable_pending_serialized = b""
         self.deliverable_editor_external_conflict = False
         self.deliverable_editor_internal_write = False
@@ -26771,9 +26783,13 @@ class MainWindow(QMainWindow):
         path = getattr(self, "current_deliverable_path", "")
         ext = os.path.splitext(path)[1].lower() if path else ""
         is_html = ext in {".html", ".htm"} and os.path.isfile(path)
+        exportable_pdf = ext in PDF_EXPORT_EXTENSIONS and os.path.isfile(path)
         row = getattr(self, "deliverable_conversion_row", None)
         if row is not None:
             row.setVisible(is_html)
+        export_action = getattr(self, "deliverable_more_export_pdf_action", None)
+        if export_action is not None:
+            export_action.setVisible(exportable_pdf)
         status = getattr(self, "deliverable_status_label", None)
         editable = bool(path and os.path.isfile(path) and editor_descriptor(path) is not None)
         mode_button = getattr(self, "deliverable_mode_btn", None)
@@ -36888,6 +36904,17 @@ class MainWindow(QMainWindow):
                 action.setEnabled(is_file)
         edit_state = getattr(self, "deliverable_edit_state", "idle")
         edit_busy = edit_state in {"loading", "saving", "restoring"}
+        export_controller = getattr(self, "deliverable_pdf_export_controller", None)
+        export_running = bool(export_controller is not None and export_controller.running)
+        export_action = getattr(self, "deliverable_more_export_pdf_action", None)
+        if export_action:
+            export_action.setEnabled(
+                is_file
+                and ext in PDF_EXPORT_EXTENSIONS
+                and not edit_busy
+                and not export_running
+            )
+            export_action.setText("正在导出 PDF…" if export_running else "导出为 PDF…")
         edit_session = getattr(self, "deliverable_edit_session", None)
         editing_current = bool(
             is_editable
@@ -37457,6 +37484,7 @@ class MainWindow(QMainWindow):
     def _handle_deliverable_editor_error(self, message):
         message = str(message or "编辑器发生未知错误。")
         session = getattr(self, "deliverable_edit_session", None)
+        self.deliverable_pending_pdf_export_source = ""
         log_sub_agent_runtime(
             "deliverable_edit_error",
             path=getattr(session, "path", ""),
@@ -37541,7 +37569,11 @@ class MainWindow(QMainWindow):
         self.deliverable_editor_internal_write = False
         self.deliverable_pending_save_target = ""
         session = getattr(self, "deliverable_edit_session", None)
+        pending_pdf_source = str(
+            getattr(self, "deliverable_pending_pdf_export_source", "") or ""
+        )
         if result.get("ok"):
+            self.deliverable_pending_pdf_export_source = ""
             save_result = result["result"]
             if result.get("saved_copy"):
                 self._set_deliverable_edit_state(
@@ -37577,7 +37609,21 @@ class MainWindow(QMainWindow):
             self._set_deliverable_controls_enabled(
                 getattr(session, "path", "") if session else ""
             )
+            if (
+                not result.get("saved_copy")
+                and pending_pdf_source
+                and session is not None
+                and os.path.normcase(os.path.abspath(session.path))
+                == os.path.normcase(os.path.abspath(pending_pdf_source))
+            ):
+                QTimer.singleShot(
+                    0,
+                    lambda source_path=pending_pdf_source: self._prompt_and_start_deliverable_pdf_export(
+                        source_path
+                    ),
+                )
             return
+        self.deliverable_pending_pdf_export_source = ""
         code = str(result.get("code") or "save_failed")
         message = str(result.get("message") or "保存失败。")
         serialized = result.get("serialized")
@@ -37771,6 +37817,7 @@ class MainWindow(QMainWindow):
         self.deliverable_editor_external_conflict = False
         self.deliverable_pending_serialized = b""
         self.deliverable_pending_save_target = ""
+        self.deliverable_pending_pdf_export_source = ""
         self.deliverable_text_loading = True
         try:
             self.deliverable_text_editor.clear()
@@ -38613,6 +38660,198 @@ class MainWindow(QMainWindow):
                 "页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。",
                 tone="error",
             )
+
+    def _build_deliverable_markdown_pdf_document(self, source):
+        body = markdown.markdown(
+            str(source or ""),
+            extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
+        )
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+{markdown_render_style()}
+<style>
+html {{ background: #ffffff; print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+body {{ background: #ffffff; }}
+main {{ min-width: 0; }}
+img, video, svg {{ max-width: 100%; height: auto; }}
+pre, table, blockquote {{ break-inside: avoid-page; }}
+a {{ overflow-wrap: anywhere; }}
+</style>
+</head>
+<body><main>{body}</main></body>
+</html>"""
+
+    def export_current_deliverable_pdf(self, _checked=False):
+        path = os.path.abspath(str(getattr(self, "current_deliverable_path", "") or ""))
+        extension = os.path.splitext(path)[1].lower()
+        log_sub_agent_runtime(
+            "deliverable_pdf_export_requested",
+            path=path,
+            format=extension.lstrip("."),
+        )
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "无法导出 PDF", "源文件不存在或已被删除。")
+            return
+        if extension not in PDF_EXPORT_EXTENSIONS:
+            QMessageBox.information(
+                self,
+                "无法导出 PDF",
+                "仅支持将 Markdown、HTML 和 DOCX 导出为 PDF。",
+            )
+            return
+        controller = getattr(self, "deliverable_pdf_export_controller", None)
+        if controller is not None and controller.running:
+            self.add_system_toast("已有 PDF 正在导出，请稍候。", "warning", auto_close_ms=2800)
+            return
+        edit_state = getattr(self, "deliverable_edit_state", "idle")
+        if edit_state in {"loading", "saving", "restoring"}:
+            QMessageBox.warning(self, "暂时无法导出", "请等待当前文件操作完成后再导出 PDF。")
+            return
+        session = getattr(self, "deliverable_edit_session", None)
+        editing_current = bool(
+            session is not None
+            and os.path.normcase(os.path.abspath(session.path))
+            == os.path.normcase(path)
+            and edit_state != "idle"
+        )
+        if editing_current and getattr(self, "deliverable_edit_dirty", False):
+            choice = ProductMessageDialog(
+                "保存并导出 PDF",
+                "当前文件有未保存的修改。需要先安全保存源文件，保存成功后再继续导出。",
+                tone="warning",
+                buttons=[
+                    ("保存并导出", "save_export", "primary", True),
+                    ("取消", "cancel", "secondary", False),
+                ],
+                parent=self,
+            ).exec_result("cancel")
+            if choice != "save_export":
+                return
+            self.deliverable_pending_pdf_export_source = path
+            log_sub_agent_runtime(
+                "deliverable_pdf_export_save_required",
+                path=path,
+                format=extension.lstrip("."),
+            )
+            self.save_deliverable_edit()
+            return
+        self._prompt_and_start_deliverable_pdf_export(path)
+
+    def _prompt_and_start_deliverable_pdf_export(self, source_path):
+        source_path = os.path.abspath(str(source_path or ""))
+        if not source_path or not os.path.isfile(source_path):
+            QMessageBox.warning(self, "无法导出 PDF", "源文件不存在或已被删除。")
+            return
+        target, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出为 PDF",
+            default_pdf_target(source_path),
+            "PDF 文件 (*.pdf)",
+        )
+        target = str(target or "").strip()
+        if not target:
+            return
+        if not os.path.splitext(target)[1]:
+            target += ".pdf"
+        if os.path.splitext(target)[1].lower() != ".pdf":
+            QMessageBox.warning(self, "无法导出 PDF", "导出文件必须使用 .pdf 扩展名。")
+            return
+        extension = os.path.splitext(source_path)[1].lower()
+        try:
+            docx_editor_path = self._editor_asset_path("docx") if extension == ".docx" else ""
+            controller = DeliverablePdfExportController(self)
+            controller.stage_changed.connect(self._handle_deliverable_pdf_export_stage)
+            controller.succeeded.connect(self._handle_deliverable_pdf_export_success)
+            controller.failed.connect(self._handle_deliverable_pdf_export_failure)
+            self.deliverable_pdf_export_controller = controller
+            self._set_deliverable_pdf_export_running(True)
+            controller.start(
+                source_path,
+                target,
+                markdown_renderer=self._build_deliverable_markdown_pdf_document,
+                docx_editor_path=docx_editor_path,
+            )
+        except DeliverablePdfExportError as exc:
+            self.deliverable_pdf_export_controller = None
+            self._set_deliverable_pdf_export_running(False)
+            self._handle_deliverable_pdf_export_failure(exc.code, exc.message)
+        except Exception as exc:
+            self.deliverable_pdf_export_controller = None
+            self._set_deliverable_pdf_export_running(False)
+            self._handle_deliverable_pdf_export_failure(
+                "export_start_unexpected",
+                f"启动 PDF 导出失败：{exc}",
+            )
+
+    def _set_deliverable_pdf_export_running(self, running):
+        action = getattr(self, "deliverable_more_export_pdf_action", None)
+        if action:
+            action.setText("正在导出 PDF…" if running else "导出为 PDF…")
+            action.setEnabled(not running)
+        if running:
+            self._set_deliverable_status("正在导出 PDF…")
+        self._set_deliverable_controls_enabled(
+            getattr(self, "current_deliverable_path", "")
+        )
+
+    def _handle_deliverable_pdf_export_stage(self, stage, details):
+        stage = str(stage or "")
+        details = dict(details or {})
+        event_name = {
+            "start": "deliverable_pdf_export_start",
+            "prepared": "deliverable_pdf_export_run",
+            "render_ready": "deliverable_pdf_export_render_ready",
+        }.get(stage, "deliverable_pdf_export_stage")
+        log_sub_agent_runtime(event_name, stage=stage, **details)
+
+    def _handle_deliverable_pdf_export_success(self, result):
+        result = dict(result or {})
+        self.deliverable_pdf_export_controller = None
+        self._set_deliverable_pdf_export_running(False)
+        self._set_deliverable_status("")
+        log_sub_agent_runtime(
+            "deliverable_pdf_export_finish",
+            path=result.get("target_path"),
+            format=result.get("format"),
+            page_count=int(result.get("page_count") or 0),
+            bytes_written=int(result.get("bytes_written") or 0),
+            elapsed_ms=int(result.get("elapsed_ms") or 0),
+        )
+        self.refresh_deliverables(render_current=False)
+        self.add_system_toast(
+            f"已导出 PDF：{os.path.basename(str(result.get('target_path') or ''))}",
+            "success",
+            auto_close_ms=3600,
+        )
+
+    def _handle_deliverable_pdf_export_failure(self, code, message):
+        controller = getattr(self, "deliverable_pdf_export_controller", None)
+        source_path = str(
+            getattr(controller, "_source_path", "")
+            or getattr(self, "current_deliverable_path", "")
+            or ""
+        )
+        started_at = float(getattr(controller, "_started_at", 0.0) or 0.0)
+        elapsed_ms = round((time.monotonic() - started_at) * 1000) if started_at else 0
+        self.deliverable_pdf_export_controller = None
+        self._set_deliverable_pdf_export_running(False)
+        message = str(message or "PDF 导出失败。")
+        log_sub_agent_runtime(
+            "deliverable_pdf_export_error",
+            path=source_path,
+            format=os.path.splitext(source_path)[1].lower().lstrip("."),
+            elapsed_ms=elapsed_ms,
+            code=str(code or "pdf_export_failed"),
+            error=message,
+        )
+        self._set_deliverable_status("PDF 导出失败。", tone="error")
+        QMessageBox.critical(
+            self,
+            "导出 PDF 失败",
+            message + "\n\n源文件和已有目标文件均未被修改，请修复问题后重试。",
+        )
 
     def _set_deliverable_conversion_running(self, target_format=""):
         target_format = str(target_format or "").strip().lower()

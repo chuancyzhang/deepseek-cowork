@@ -40,7 +40,8 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
             spec_text = handle.read()
 
-        self.assertIn("PySide6-Addons>=6.0.0", requirements)
+        self.assertIn("PySide6>=6.2.0", requirements)
+        self.assertIn("PySide6-Addons>=6.2.0", requirements)
         required_modules = [
             "PySide6.QtPositioning",
             "PySide6.QtPdf",

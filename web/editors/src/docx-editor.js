@@ -166,6 +166,88 @@ function requestSave() {
   }, 30000);
 }
 
+async function preparePdfExport(layout = {}) {
+  try {
+    if (!editor) throw new Error("DOCX 渲染模型尚未加载完成。");
+    const requestedWidth = Number(layout.width_px);
+    const requestedHeight = Number(layout.height_px);
+    const requestedDirection = String(layout.direction || "").toLowerCase();
+    if (requestedWidth > 0 && requestedHeight > 0) {
+      editor.command.executePaperSize(requestedWidth, requestedHeight);
+    }
+    if (requestedDirection === "horizontal" || requestedDirection === "vertical") {
+      editor.command.executePaperDirection(requestedDirection);
+    }
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+    const options = editor.command.getOptions();
+    const rendered = await Promise.resolve(editor.command.getImage({
+      pixelRatio: 2,
+      mode: "print"
+    }));
+    const pageImages = Array.isArray(rendered) ? rendered : [rendered];
+    if (!pageImages.length || pageImages.some((item) => typeof item !== "string" || !item)) {
+      throw new Error("DOCX 渲染器没有生成可打印页面。");
+    }
+
+    const direction = String(options.paperDirection || "vertical").toLowerCase();
+    const landscape = direction.includes("horizontal") || direction.includes("landscape");
+    const baseWidth = Number(options.width) || 794;
+    const baseHeight = Number(options.height) || 1123;
+    const widthPx = landscape ? baseHeight : baseWidth;
+    const heightPx = landscape ? baseWidth : baseHeight;
+    const widthMm = widthPx * 25.4 / 96;
+    const heightMm = heightPx * 25.4 / 96;
+
+    const printable = document.createElement("main");
+    printable.id = "cowork-pdf-pages";
+    const imageElements = pageImages.map((source) => {
+      const page = document.createElement("section");
+      page.className = "cowork-pdf-page";
+      const image = document.createElement("img");
+      image.src = source;
+      image.alt = "";
+      page.append(image);
+      printable.append(page);
+      return image;
+    });
+
+    const style = document.createElement("style");
+    style.id = "cowork-pdf-print-style";
+    style.textContent = `
+      @page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
+      html, body { width: ${widthMm}mm; margin: 0; padding: 0; overflow: visible; background: #fff; }
+      #cowork-pdf-pages { width: ${widthMm}mm; margin: 0; padding: 0; }
+      .cowork-pdf-page {
+        box-sizing: border-box;
+        width: ${widthMm}mm;
+        height: ${heightMm}mm;
+        margin: 0;
+        padding: 0;
+        break-after: page;
+        page-break-after: always;
+        overflow: hidden;
+        background: #fff;
+      }
+      .cowork-pdf-page:last-child { break-after: auto; page-break-after: auto; }
+      .cowork-pdf-page img { display: block; width: 100%; height: 100%; }
+    `;
+    document.head.append(style);
+    document.body.replaceChildren(printable);
+    await Promise.all(imageElements.map((image) => image.decode()));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    bridge.pdfExportReady(sessionId, JSON.stringify({
+      pageCount: pageImages.length,
+      widthMm,
+      heightMm,
+      pixelRatio: 2,
+      explicitPageBreaks: Number(layout.explicit_page_breaks) || 0
+    }));
+  } catch (error) {
+    reportError(error);
+  }
+}
+
 function dispose() {
   suppressDirty = true;
   dirtyTrackingArmed = false;
@@ -202,6 +284,7 @@ window.coworkEditor = {
     loadDocument();
   },
   requestSave,
+  preparePdfExport,
   command,
   dispose,
   setTheme

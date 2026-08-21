@@ -202,6 +202,7 @@ from core.browser_skill_component import (
 from core.llm.factory import LLMFactory
 from core.llm.model_catalog import (
     DEEPSEEK_OFFICIAL_BASE_URL,
+    build_new_model_defaults,
     get_recommended_model,
     is_deepseek_official_base_url,
     is_recommended_model,
@@ -5241,9 +5242,11 @@ class ModelImportDialog(QDialog):
             item = QListWidgetItem(model_name + (f"\n{detail}" if detail else ""))
             item.setData(Qt.UserRole, dict(model))
             item.setData(Qt.UserRole + 1, f"{model_name} {owner}".casefold())
-            item.setCheckState(Qt.Unchecked)
             if existing:
+                item.setCheckState(Qt.Checked)
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            else:
+                item.setCheckState(Qt.Unchecked)
             self.model_list.addItem(item)
             self._items.append(item)
         layout.addWidget(self.model_list, 1)
@@ -5600,12 +5603,14 @@ class DeepSeekQuickstartDialog(QDialog):
 
 
 class ModelEditDialog(QDialog):
-    def __init__(self, provider_id, model=None, parent=None):
+    def __init__(self, provider_id, model=None, parent=None, base_url=""):
         super().__init__(parent)
         self.setObjectName("ModelEditDialog")
         self.provider_id = provider_id
-        model = dict(model or {})
-        self._editing_existing = bool(model)
+        self.base_url = str(base_url or "").strip()
+        source_model = dict(model or {})
+        self._editing_existing = bool(source_model)
+        model = source_model or build_new_model_defaults(provider_id, self.base_url, "")
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
         self.resize(560, 560)
         self.setMinimumSize(520, 520)
@@ -5661,7 +5666,12 @@ class ModelEditDialog(QDialog):
             def sync_new_model_protocol(model_name):
                 if self._editing_existing or self._protocol_user_selected:
                     return
-                protocol = API_PROTOCOL_RESPONSES if is_gpt_5_6_model(model_name) else API_PROTOCOL_CHAT_COMPLETIONS
+                protocol = (
+                    API_PROTOCOL_RESPONSES
+                    if is_deepseek_official_base_url(self.base_url)
+                    or is_gpt_5_6_model(model_name)
+                    else API_PROTOCOL_CHAT_COMPLETIONS
+                )
                 index = self.api_protocol_combo.findData(protocol)
                 self._syncing_protocol = True
                 self.api_protocol_combo.setCurrentIndex(index)
@@ -5674,6 +5684,16 @@ class ModelEditDialog(QDialog):
         self.vision_check = QCheckBox("支持图片理解")
         self.vision_check.setChecked(bool(model.get("supports_vision", False)))
         form.addRow(build_form_row_label("图片理解"), self.vision_check)
+        if not self._editing_existing and is_deepseek_official_base_url(self.base_url):
+            self.model_name_input.textChanged.connect(
+                lambda model_name: self.vision_check.setChecked(
+                    bool(
+                        build_new_model_defaults(
+                            self.provider_id, self.base_url, model_name
+                        ).get("supports_vision")
+                    )
+                )
+            )
 
         self.thinking_check = None
         self.reasoning_combo = None
@@ -6164,7 +6184,11 @@ class ModelChannelEditor(QFrame):
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
 
     def add_model(self):
-        dialog = ModelEditDialog(self._provider_type(), parent=self)
+        dialog = ModelEditDialog(
+            self._provider_type(),
+            parent=self,
+            base_url=self.base_url_input.text().strip(),
+        )
         if dialog.exec() == QDialog.Accepted:
             model = dialog.get_model()
             model["id"] = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
@@ -6244,7 +6268,12 @@ class ModelChannelEditor(QFrame):
         index = indexes[0]
         current = self._models()[index]
         current_id = str(current.get("id") or "")
-        dialog = ModelEditDialog(self._provider_type(), current, self)
+        dialog = ModelEditDialog(
+            self._provider_type(),
+            current,
+            self,
+            base_url=self.base_url_input.text().strip(),
+        )
         if dialog.exec() == QDialog.Accepted:
             self._models()[index] = dialog.get_model(existing_id=current.get("id"))
             self.refresh_model_list()
@@ -6355,16 +6384,14 @@ class ModelChannelEditor(QFrame):
                     "id": model_id,
                     "display_name": model_name,
                     "model_name": model_name,
-                    "supports_vision": False,
                 }
-                if self._provider_type() == "openai":
-                    model.update({
-                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                        "deepseek_thinking_enabled": False,
-                        "deepseek_reasoning_effort": "",
-                        "reasoning_efforts": [],
-                        "reasoning_effort": "",
-                    })
+                model.update(
+                    build_new_model_defaults(
+                        self._provider_type(),
+                        self.base_url_input.text().strip(),
+                        model_name,
+                    )
+                )
                 imported_models.append(model)
             self._models().extend(imported_models)
         except Exception as exc:

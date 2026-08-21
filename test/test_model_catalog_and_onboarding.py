@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from core.config_manager import ConfigManager
@@ -14,6 +15,7 @@ from main import (
     DeepSeekQuickstartDialog,
     MainWindow,
     ModelChannelEditor,
+    ModelEditDialog,
     ModelImportDialog,
     ModelSelectorPopover,
 )
@@ -115,6 +117,26 @@ class ModelCatalogTests(unittest.TestCase):
         finally:
             model_catalog.MODEL_RECOMMENDATIONS[model_catalog.DEEPSEEK_RECOMMENDATION_KEY] = original
 
+    def test_new_model_defaults_only_apply_to_official_deepseek(self):
+        vision = model_catalog.build_new_model_defaults(
+            "openai", "https://api.deepseek.com/v1/", "deepseek-v4-flash-vision-exp"
+        )
+        flash = model_catalog.build_new_model_defaults(
+            "openai", "https://api.deepseek.com", "deepseek-v4-flash"
+        )
+        third_party = model_catalog.build_new_model_defaults(
+            "openai", "https://example.com/v1", "deepseek-v4-flash-vision-exp"
+        )
+
+        self.assertEqual(vision["api_protocol"], "responses")
+        self.assertEqual(vision["reasoning_efforts"], ["high", "max"])
+        self.assertEqual(vision["reasoning_effort"], "max")
+        self.assertTrue(vision["supports_vision"])
+        self.assertFalse(flash["supports_vision"])
+        self.assertEqual(third_party["api_protocol"], "chat_completions")
+        self.assertEqual(third_party["reasoning_efforts"], [])
+        self.assertFalse(third_party["supports_vision"])
+
 
 class ConfigQuickstartTests(unittest.TestCase):
     def setUp(self):
@@ -137,13 +159,28 @@ class ConfigQuickstartTests(unittest.TestCase):
         config.set_model_channels([], "")
         profile = config.apply_deepseek_quickstart(
             "deepseek-key",
-            [{"id": "deepseek-v4-pro"}, {"id": "deepseek-v4-flash"}],
+            [
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-v4-flash"},
+                {"id": "deepseek-v4-flash-vision-exp"},
+            ],
         )
         self.assertTrue(config.has_usable_model_profile())
         self.assertEqual(config.get_selected_model_id(), "deepseek-v4-flash")
         self.assertEqual(profile["model_name"], "deepseek-v4-flash")
         self.assertEqual(profile["api_key"], "deepseek-key")
         self.assertEqual(profile["base_url"], "https://api.deepseek.com")
+        models = {
+            model["model_name"]: model
+            for model in config.get_model_channels()[0]["models"]
+        }
+        for model in models.values():
+            self.assertEqual(model["api_protocol"], "responses")
+            self.assertEqual(model["reasoning_efforts"], ["high", "max"])
+            self.assertEqual(model["reasoning_effort"], "max")
+        self.assertTrue(models["deepseek-v4-flash-vision-exp"]["supports_vision"])
+        self.assertFalse(models["deepseek-v4-flash"]["supports_vision"])
+        self.assertFalse(models["deepseek-v4-pro"]["supports_vision"])
 
     def test_fresh_quickstart_persists_only_discovered_models(self):
         config = self._config()
@@ -186,7 +223,14 @@ class ConfigQuickstartTests(unittest.TestCase):
     def test_quickstart_preserves_existing_capabilities_and_other_channels(self):
         config = self._config()
         channels = config.get_model_channels()
-        channels[0]["models"][0]["supports_vision"] = True
+        channels[0]["models"][0].update({
+            "supports_vision": True,
+            "api_protocol": "chat_completions",
+            "deepseek_thinking_enabled": True,
+            "deepseek_reasoning_effort": "high",
+            "reasoning_efforts": ["high"],
+            "reasoning_effort": "high",
+        })
         channels.append({
             "channel_id": "other",
             "display_name": "Other",
@@ -198,7 +242,11 @@ class ConfigQuickstartTests(unittest.TestCase):
         config.set_model_channels(channels, "other-model")
         config.apply_deepseek_quickstart("deepseek-key", [{"id": "deepseek-v4-flash"}])
         saved = config.get_model_channels()
-        self.assertTrue(saved[0]["models"][0]["supports_vision"])
+        existing = saved[0]["models"][0]
+        self.assertTrue(existing["supports_vision"])
+        self.assertEqual(existing["api_protocol"], "chat_completions")
+        self.assertEqual(existing["reasoning_efforts"], ["high"])
+        self.assertEqual(existing["reasoning_effort"], "high")
         self.assertTrue(any(channel["channel_id"] == "other" for channel in saved))
 
     def test_missing_recommendation_keeps_config_unchanged(self):
@@ -237,6 +285,13 @@ class ModelConfigurationUiTests(unittest.TestCase):
         )
         try:
             self.assertIn("推荐", dialog.model_list.item(0).text())
+            existing_item = next(
+                dialog.model_list.item(row)
+                for row in range(dialog.model_list.count())
+                if dialog.model_list.item(row).text().startswith("model-existing")
+            )
+            self.assertEqual(existing_item.checkState(), Qt.Checked)
+            self.assertFalse(bool(existing_item.flags() & Qt.ItemIsEnabled))
             dialog._select_all_visible()
             self.assertEqual(
                 {item["id"] for item in dialog.selected_models()},
@@ -244,6 +299,93 @@ class ModelConfigurationUiTests(unittest.TestCase):
             )
         finally:
             dialog.close()
+
+    def test_official_deepseek_manual_add_defaults_and_tracks_vision_model(self):
+        dialog = ModelEditDialog(
+            "openai", base_url="https://api.deepseek.com", parent=None
+        )
+        try:
+            self.assertEqual(dialog.api_protocol_combo.currentData(), "responses")
+            self.assertTrue(dialog.thinking_check.isChecked())
+            self.assertEqual(
+                [key for key, check in dialog.reasoning_checks.items() if check.isChecked()],
+                ["high", "max"],
+            )
+            self.assertEqual(dialog.reasoning_combo.currentData(), "max")
+            dialog.model_name_input.setText("deepseek-v4-flash-vision-exp")
+            self.assertTrue(dialog.vision_check.isChecked())
+            dialog.model_name_input.setText("deepseek-v4-flash")
+            self.assertFalse(dialog.vision_check.isChecked())
+        finally:
+            dialog.close()
+
+    def test_third_party_manual_add_keeps_generic_defaults(self):
+        dialog = ModelEditDialog(
+            "openai", base_url="https://example.com/v1", parent=None
+        )
+        try:
+            dialog.model_name_input.setText("deepseek-v4-flash-vision-exp")
+            self.assertEqual(dialog.api_protocol_combo.currentData(), "chat_completions")
+            self.assertFalse(dialog.thinking_check.isChecked())
+            self.assertFalse(dialog.vision_check.isChecked())
+        finally:
+            dialog.close()
+
+    def test_editing_existing_official_model_preserves_saved_capabilities(self):
+        dialog = ModelEditDialog(
+            "openai",
+            {
+                "display_name": "Existing",
+                "model_name": "deepseek-v4-flash-vision-exp",
+                "api_protocol": "chat_completions",
+                "supports_vision": False,
+                "deepseek_thinking_enabled": True,
+                "deepseek_reasoning_effort": "high",
+                "reasoning_efforts": ["high"],
+                "reasoning_effort": "high",
+            },
+            base_url="https://api.deepseek.com",
+        )
+        try:
+            saved = dialog.get_model(existing_id="existing")
+            self.assertEqual(saved["api_protocol"], "chat_completions")
+            self.assertFalse(saved["supports_vision"])
+            self.assertEqual(saved["reasoning_efforts"], ["high"])
+            self.assertEqual(saved["reasoning_effort"], "high")
+        finally:
+            dialog.close()
+
+    def test_official_deepseek_import_applies_defaults_to_each_new_model(self):
+        editor = ModelChannelEditor({
+            "channel_id": "deepseek-official",
+            "display_name": "DeepSeek",
+            "provider_type": "openai",
+            "api_key": "key",
+            "base_url": "https://api.deepseek.com",
+            "models": [],
+        })
+        records = [
+            {"id": "deepseek-v4-flash", "owned_by": "deepseek"},
+            {"id": "deepseek-v4-flash-vision-exp", "owned_by": "deepseek"},
+            {"id": "deepseek-v4-pro", "owned_by": "deepseek"},
+        ]
+        try:
+            editor._fetch_signature = ("openai", "https://api.deepseek.com", "key")
+            with patch("main.ModelImportDialog") as dialog_type:
+                dialog_type.return_value.exec.return_value = QDialog.Accepted
+                dialog_type.return_value.selected_models.return_value = records
+                editor.handle_fetch_result({"ok": True, "models": records})
+            models = {model["model_name"]: model for model in editor._models()}
+            self.assertEqual(set(models), {record["id"] for record in records})
+            for model in models.values():
+                self.assertEqual(model["api_protocol"], "responses")
+                self.assertEqual(model["reasoning_efforts"], ["high", "max"])
+                self.assertEqual(model["reasoning_effort"], "max")
+            self.assertTrue(models["deepseek-v4-flash-vision-exp"]["supports_vision"])
+            self.assertFalse(models["deepseek-v4-flash"]["supports_vision"])
+            self.assertFalse(models["deepseek-v4-pro"]["supports_vision"])
+        finally:
+            editor.close()
 
     def test_batch_dialog_only_returns_explicit_changes(self):
         dialog = BatchModelCapabilityDialog("openai", 2)

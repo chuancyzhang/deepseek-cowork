@@ -184,7 +184,7 @@ class TestConfigManager(unittest.TestCase):
         cm = self._create_config_manager()
         self.assertEqual(DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro")
         self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
-        self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
+        self.assertEqual(cm.get("deepseek_reasoning_effort"), "max")
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
         self.assertEqual(cm.get("deepseek_v4_context_window_tokens"), 1000000)
         self.assertEqual(cm.get("context_budget_ratio"), 0.8)
@@ -289,7 +289,10 @@ class TestConfigManager(unittest.TestCase):
         for model in channel["models"]:
             self.assertEqual(model["display_name"], model["id"])
             self.assertEqual(model["model_name"], model["id"])
-            self.assertEqual(model["api_protocol"], "chat_completions")
+            self.assertEqual(model["api_protocol"], "responses")
+            self.assertEqual(model["reasoning_efforts"], ["high", "max"])
+            self.assertEqual(model["reasoning_effort"], "max")
+            self.assertFalse(model["supports_vision"])
         self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
         self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
 

@@ -1,4 +1,4 @@
-"""Model discovery and product-level model recommendations."""
+"""Model discovery, recommendations, and defaults for newly added models."""
 
 from __future__ import annotations
 
@@ -10,9 +10,14 @@ import httpx
 from anthropic import Anthropic
 from openai import OpenAI
 
+from .providers import API_PROTOCOL_CHAT_COMPLETIONS, API_PROTOCOL_RESPONSES
+
 
 DEEPSEEK_OFFICIAL_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_RECOMMENDATION_KEY = "deepseek_official"
+DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp"
+DEEPSEEK_NEW_MODEL_REASONING_EFFORTS = ("high", "max")
+DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT = "max"
 
 # Product-owned configuration. Recommendation decisions elsewhere must read
 # this registry instead of hard-coding a model name.
@@ -77,6 +82,32 @@ def get_recommendation_label(provider_type="openai", base_url=DEEPSEEK_OFFICIAL_
 def is_recommended_model(model_name, provider_type="openai", base_url=DEEPSEEK_OFFICIAL_BASE_URL):
     recommended = get_recommended_model(provider_type, base_url)
     return bool(recommended and str(model_name or "").strip() == recommended)
+
+
+def build_new_model_defaults(provider_type, base_url, model_name):
+    """Return explicit defaults for a model created after service configuration."""
+
+    provider = _normalized_provider_type(provider_type)
+    if provider != "openai":
+        return {"supports_vision": False}
+    if not is_deepseek_official_base_url(base_url):
+        return {
+            "supports_vision": False,
+            "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+            "deepseek_thinking_enabled": False,
+            "deepseek_reasoning_effort": "",
+            "reasoning_efforts": [],
+            "reasoning_effort": "",
+        }
+    normalized_name = str(model_name or "").strip().lower()
+    return {
+        "supports_vision": normalized_name == DEEPSEEK_VISION_MODEL,
+        "api_protocol": API_PROTOCOL_RESPONSES,
+        "deepseek_thinking_enabled": True,
+        "deepseek_reasoning_effort": DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT,
+        "reasoning_efforts": list(DEEPSEEK_NEW_MODEL_REASONING_EFFORTS),
+        "reasoning_effort": DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT,
+    }
 
 
 def _safe_error_message(error, api_key=""):

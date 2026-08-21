@@ -23,6 +23,7 @@ from .llm.providers import (
 )
 from .llm.model_catalog import (
     DEEPSEEK_OFFICIAL_BASE_URL,
+    build_new_model_defaults,
     get_recommended_model,
     is_deepseek_official_base_url,
 )
@@ -463,23 +464,17 @@ class ConfigManager:
             self.save_config()
 
     def _default_deepseek_models(self):
+        model_names = ("deepseek-v4-flash", DEFAULT_DEEPSEEK_MODEL)
         models = [
             {
-                "id": "deepseek-v4-flash",
-                "display_name": "deepseek-v4-flash",
-                "model_name": "deepseek-v4-flash",
-                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-            },
-            {
-                "id": "deepseek-v4-pro",
-                "display_name": "deepseek-v4-pro",
-                "model_name": DEFAULT_DEEPSEEK_MODEL,
-                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-            },
+                "id": model_name,
+                "display_name": model_name,
+                "model_name": model_name,
+                **build_new_model_defaults(
+                    "openai", DEEPSEEK_OFFICIAL_BASE_URL, model_name
+                ),
+            }
+            for model_name in model_names
         ]
         recommended = _recommended_deepseek_model()
         if recommended and all(model["model_name"] != recommended for model in models):
@@ -487,12 +482,9 @@ class ConfigManager:
                 "id": recommended,
                 "display_name": recommended,
                 "model_name": recommended,
-                "supports_vision": False,
-                "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                "deepseek_thinking_enabled": False,
-                "deepseek_reasoning_effort": "",
-                "reasoning_efforts": [],
-                "reasoning_effort": "",
+                **build_new_model_defaults(
+                    "openai", DEEPSEEK_OFFICIAL_BASE_URL, recommended
+                ),
             })
         return sorted(
             models,
@@ -1151,12 +1143,9 @@ class ConfigManager:
                     "id": f"{official.get('channel_id') or 'deepseek-official'}-{_slug_config_value(model_name)}",
                     "display_name": model_name,
                     "model_name": model_name,
-                    "supports_vision": False,
-                    "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
-                    "deepseek_thinking_enabled": False,
-                    "deepseek_reasoning_effort": "",
-                    "reasoning_efforts": [],
-                    "reasoning_effort": "",
+                    **build_new_model_defaults(
+                        "openai", DEEPSEEK_OFFICIAL_BASE_URL, model_name
+                    ),
                 })
                 merged_models.append(template)
             official["models"] = merged_models

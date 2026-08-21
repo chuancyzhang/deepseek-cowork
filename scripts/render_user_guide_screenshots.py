@@ -1358,15 +1358,14 @@ def main_run():
             import_dialog = main.ModelImportDialog(
                 [
                     {"id": "deepseek-v4-flash", "owned_by": "deepseek"},
+                    {"id": "deepseek-v4-flash-vision-exp", "owned_by": "deepseek"},
                     {"id": "deepseek-v4-pro", "owned_by": "deepseek"},
-                    {"id": "gpt-5.6", "owned_by": "openai"},
-                    {"id": "text-embedding-demo", "owned_by": "demo"},
                 ],
-                existing_model_names=["deepseek-v4-pro"],
+                existing_model_names=["deepseek-v4-flash", "deepseek-v4-pro"],
                 recommended_model="deepseek-v4-flash",
                 parent=settings,
             )
-            import_dialog.model_list.item(0).setCheckState(main.Qt.Checked)
+            import_dialog.model_list.item(1).setCheckState(main.Qt.Checked)
             save_widget(import_dialog, "s05b-model-import.png")
             import_dialog.hide()
             batch_dialog = main.BatchModelCapabilityDialog("openai", 3, parent=settings)

@@ -760,6 +760,8 @@ class SkillManager:
         }
 
     def _normalize_skill_spec(self, skill_name, meta, spec, tool_refs, kind):
+        from .capability_authorization import normalize_authorization_declaration
+
         spec = spec if isinstance(spec, dict) else {}
         spec["version"] = spec.get("version") if isinstance(spec.get("version"), int) else 2
         spec["name"] = spec.get("name") if isinstance(spec.get("name"), str) and spec.get("name").strip() else (meta.get("name") or skill_name)
@@ -779,6 +781,12 @@ class SkillManager:
         spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
         spec["config_fields"] = self._normalize_config_fields(spec.get("config_fields"))
         spec["config_requirements"] = self._normalize_config_requirements(spec.get("config_requirements"))
+        try:
+            spec["authorization"] = normalize_authorization_declaration(spec.get("authorization"))
+            spec.pop("authorization_error", None)
+        except ValueError as exc:
+            spec["authorization"] = {}
+            spec["authorization_error"] = str(exc)
         spec["mcp_server_presets"] = self._normalize_mcp_server_presets(spec.get("mcp_server_presets"))
         spec["python_dependencies"] = self._coerce_string_list(spec.get("python_dependencies"))
         spec["node_dependencies"] = self._coerce_string_list(spec.get("node_dependencies"))

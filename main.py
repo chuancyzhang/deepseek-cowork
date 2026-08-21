@@ -171,6 +171,7 @@ from core.process_utils import (
     reveal_path_in_file_manager,
     runtime_debug_logging_enabled,
     subprocess_kwargs_no_window,
+    terminate_process_tree,
 )
 from core.updater import (
     GITHUB_RELEASES_URL,
@@ -204,6 +205,14 @@ from core.browser_skill_component import (
     log_browser_skill_event,
     prepare_browser_skill_extension,
     uninstall_browser_skill,
+)
+from core.capability_authorization import authorization_status_for_skill
+from core.wecom_capability import (
+    WECOM_AUTH_PROVIDER_ID,
+    get_wecom_authorization_status,
+    log_wecom_event,
+    start_wecom_cli,
+    wecom_config_dir,
 )
 from core.llm.factory import LLMFactory
 from core.llm.model_catalog import (
@@ -3331,6 +3340,8 @@ class CapabilityWorkbenchDialog(QDialog):
         self.browser_offline_guidance_visible = False
         self.browser_pending_browser_id = ""
         self.browser_enable_after_check = False
+        self.authorization_status = {}
+        self.authorization_status_worker = None
         self.setWindowTitle("能力设置" if self.simple_mode else "能力工作台")
         self.resize(980, 680)
         apply_product_dialog(self, "CapabilityWorkbenchDialog")
@@ -3363,14 +3374,22 @@ class CapabilityWorkbenchDialog(QDialog):
         if self.simple_mode:
             self._build_simple_intro(layout)
 
-        self.tabs = QTabWidget()
+        # Keep ownership explicit even for simple setup pages that hide the tabs.
+        # An unparented hidden QTabWidget can outlive its dialog ownership path.
+        self.tabs = QTabWidget(self)
         if self.simple_mode and self._is_browser_automation():
             self.tabs.hide()
             self._build_browser_automation_setup(layout)
             layout.addStretch()
+        elif self.simple_mode and self._has_authorization():
+            self.tabs.hide()
+            self._build_authorization_setup(layout)
+            layout.addStretch()
         else:
             layout.addWidget(self.tabs, 1)
-        if self.simple_mode and not self._is_browser_automation():
+        if self.simple_mode and (self._is_browser_automation() or self._has_authorization()):
+            pass
+        elif self.simple_mode:
             self._build_config_tab()
             self.tabs.tabBar().hide()
             if not self.tabs.count():
@@ -3387,9 +3406,162 @@ class CapabilityWorkbenchDialog(QDialog):
                 self._refresh_browser_automation_theme,
                 surface="management",
             )
+        elif self.simple_mode and self._has_authorization():
+            bind_theme(self, self._refresh_authorization_theme, surface="management")
 
     def _is_browser_automation(self):
         return self.skill_name == "browser-automation"
+
+    def _has_authorization(self):
+        declaration = self.skill.get("authorization")
+        return isinstance(declaration, dict) and bool(declaration.get("provider"))
+
+    def _build_authorization_setup(self, root_layout):
+        declaration = dict(self.skill.get("authorization") or {})
+        provider_id = str(declaration.get("provider") or "").strip()
+        if provider_id != WECOM_AUTH_PROVIDER_ID:
+            raise ValueError(f"能力声明了不受支持的授权 Provider：{provider_id}")
+        section, section_layout = build_settings_surface(
+            "连接企业微信",
+            "扫码、连接检测和重新授权都在这里完成。关闭能力不会删除已保存的授权。",
+            radius=18,
+        )
+        section.setObjectName("CapabilityAuthorizationSetup")
+        self.authorization_title = QLabel("企业微信连接")
+        self.authorization_description = QLabel("")
+        self.authorization_description.setWordWrap(True)
+        self.authorization_notice = ProductInlineNotice("正在检查本机授权…", "info")
+        section_layout.addWidget(self.authorization_title)
+        section_layout.addWidget(self.authorization_description)
+        section_layout.addWidget(self.authorization_notice)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.authorization_primary_btn = QPushButton("扫码连接")
+        self.authorization_primary_btn.setObjectName("CapabilityAuthorizationPrimary")
+        self.authorization_primary_btn.clicked.connect(
+            lambda checked=False: self._start_authorization()
+        )
+        self.authorization_check_btn = QPushButton("检测连接")
+        self.authorization_check_btn.setObjectName("CapabilityAuthorizationCheck")
+        self.authorization_check_btn.clicked.connect(
+            lambda checked=False: self._check_authorization(True)
+        )
+        self.authorization_enable_btn = QPushButton("开启能力")
+        self.authorization_enable_btn.setObjectName("CapabilityAuthorizationEnable")
+        self.authorization_enable_btn.setStyleSheet(product_button_style("primary"))
+        self.authorization_enable_btn.clicked.connect(
+            lambda checked=False: self._set_simple_enabled(True)
+        )
+        self.authorization_enable_btn.hide()
+        actions.addWidget(self.authorization_primary_btn)
+        actions.addWidget(self.authorization_check_btn)
+        actions.addWidget(self.authorization_enable_btn)
+        actions.addStretch()
+        if self.skill.get("enabled"):
+            disable_btn = QPushButton("关闭能力")
+            disable_btn.setObjectName("CapabilityAuthorizationDisable")
+            disable_btn.setStyleSheet(product_button_style("secondary"))
+            disable_btn.clicked.connect(lambda checked=False: self._set_simple_enabled(False))
+            actions.addWidget(disable_btn)
+        section_layout.addLayout(actions)
+        root_layout.addWidget(section)
+        self._refresh_authorization_theme()
+        self._check_authorization(False)
+
+    def _refresh_authorization_theme(self, _resolved=None):
+        apply_product_dialog(self, "CapabilityWorkbenchDialog")
+        if not hasattr(self, "authorization_title"):
+            return
+        self.authorization_title.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_body}px;font-weight:600;color:{DesignTokens.text_primary};"
+        )
+        self.authorization_description.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_meta}px;color:{DesignTokens.text_secondary};"
+        )
+        self.authorization_primary_btn.setStyleSheet(product_button_style("primary"))
+        self.authorization_check_btn.setStyleSheet(product_button_style("secondary"))
+        self.authorization_enable_btn.setStyleSheet(product_button_style("primary"))
+        self._render_authorization_status()
+
+    def _check_authorization(self, verify_remote):
+        worker = self.authorization_status_worker
+        if worker is not None and worker.isRunning():
+            return False
+        self.authorization_primary_btn.setEnabled(False)
+        self.authorization_check_btn.setEnabled(False)
+        self.authorization_notice.set_text(
+            "正在验证企业微信连接…" if verify_remote else "正在检查本机授权…",
+            "info",
+        )
+        worker = WecomAuthorizationStatusWorker(verify_remote, self)
+        self.authorization_status_worker = worker
+        worker.completed.connect(self._handle_authorization_status)
+        worker.finished.connect(lambda: self._authorization_worker_finished(worker))
+        worker.start()
+        return True
+
+    def _authorization_worker_finished(self, worker):
+        if self.authorization_status_worker is worker:
+            self.authorization_status_worker = None
+        if hasattr(self, "authorization_primary_btn"):
+            self.authorization_primary_btn.setEnabled(True)
+            self._render_authorization_status()
+
+    def _handle_authorization_status(self, status):
+        self.authorization_status = dict(status or {})
+        self._render_authorization_status()
+
+    def _render_authorization_status(self):
+        if not hasattr(self, "authorization_notice"):
+            return
+        state = str(self.authorization_status.get("state") or "checking")
+        state_text = str(self.authorization_status.get("state_text") or "正在检查")
+        detail = str(self.authorization_status.get("detail") or "").strip()
+        notice_kind = {
+            "connected": "success",
+            "authorized_unverified": "warning",
+            "unauthorized": "neutral",
+            "needs_reauthorization": "error",
+            "cli_unavailable": "error",
+        }.get(state, "info")
+        message = state_text + (f"：{detail}" if detail else "")
+        self.authorization_notice.set_text(message, notice_kind)
+        self.authorization_description.setText(
+            "已连接时可直接开启；关闭后授权仍会保留。"
+            if state == "connected"
+            else "完成扫码并通过联网身份校验后，Cowork 才会自动开启这项能力。"
+        )
+        self.authorization_primary_btn.setText(
+            "重新授权" if self.authorization_status.get("authorized") else "扫码连接"
+        )
+        self.authorization_check_btn.setEnabled(state != "unauthorized")
+        self.authorization_enable_btn.setVisible(
+            state == "connected" and not bool(self.skill.get("enabled"))
+        )
+
+    def _start_authorization(self):
+        log_ui_navigation(
+            "capability_authorization_begin",
+            skill_name=self.skill_name,
+            provider=WECOM_AUTH_PROVIDER_ID,
+        )
+        dialog = WecomQrAuthorizationDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            log_ui_navigation(
+                "capability_authorization_cancel",
+                skill_name=self.skill_name,
+                provider=WECOM_AUTH_PROVIDER_ID,
+            )
+            self._check_authorization(False)
+            return False
+        self.authorization_status = dict(dialog.authorization_status or {})
+        self._render_authorization_status()
+        log_ui_navigation(
+            "capability_authorization_done",
+            skill_name=self.skill_name,
+            provider=WECOM_AUTH_PROVIDER_ID,
+        )
+        return self._set_simple_enabled(True)
 
     def _refresh_browser_automation_theme(self, _resolved=None):
         apply_product_dialog(self, "CapabilityWorkbenchDialog")
@@ -4114,6 +4286,17 @@ class CapabilityWorkbenchDialog(QDialog):
         name = self.skill_name
         if (
             enabled
+            and self._has_authorization()
+            and str(self.authorization_status.get("state") or "") != "connected"
+        ):
+            if hasattr(self, "authorization_notice"):
+                self.authorization_notice.set_text(
+                    "请先扫码连接并通过企业微信联网验证。",
+                    "warning",
+                )
+            return False
+        if (
+            enabled
             and self._is_browser_automation()
             and not self.browser_component_status.get("ready")
         ):
@@ -4144,6 +4327,15 @@ class CapabilityWorkbenchDialog(QDialog):
             )
             QMessageBox.warning(self, "能力", f"无法更新能力状态：{exc}")
             return False
+
+    def done(self, result):
+        worker = self.authorization_status_worker
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            if not worker.wait(5000):
+                QMessageBox.warning(self, "能力", "企业微信连接检测仍在停止，请稍候再关闭。")
+                return
+        super().done(result)
 
     def _subtitle_text(self):
         if self._is_mcp_skill():
@@ -9149,6 +9341,291 @@ class SessionHistoryLoadWorker(QThread):
             })
 
 
+class WecomAuthorizationStatusWorker(QThread):
+    completed = Signal(dict)
+
+    def __init__(self, verify_remote=False, parent=None):
+        super().__init__(parent)
+        self.verify_remote = bool(verify_remote)
+        self.cancel_event = threading.Event()
+
+    def cancel(self):
+        self.cancel_event.set()
+
+    def run(self):
+        status = get_wecom_authorization_status(
+            verify_remote=self.verify_remote,
+            abort_check=self.cancel_event.is_set,
+        )
+        if not self.cancel_event.is_set():
+            self.completed.emit(status)
+
+
+class WecomQrAuthorizationWorker(QThread):
+    qr_ready = Signal(str, int)
+    status_changed = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.cancel_event = threading.Event()
+        self._process = None
+        self._cancel_logged = False
+
+    def cancel(self):
+        self.cancel_event.set()
+        process = self._process
+        if process is not None and process.poll() is None:
+            terminate_process_tree(process)
+
+    def _log_cancel(self):
+        if self._cancel_logged:
+            return
+        self._cancel_logged = True
+        log_wecom_event("cancel", operation="authorization", state="cancelled")
+
+    @staticmethod
+    def _publish_staged_config(config_dir, staging_dir):
+        config_dir = os.path.abspath(config_dir)
+        staging_dir = os.path.abspath(staging_dir)
+        parent = os.path.abspath(os.path.dirname(config_dir))
+        for path in (config_dir, staging_dir):
+            if os.path.commonpath([path, parent]) != parent or path == parent:
+                raise RuntimeError("企业微信凭据发布目录越界。")
+        if not os.path.isdir(staging_dir):
+            raise RuntimeError("企业微信暂存凭据不存在。")
+        os.makedirs(config_dir, exist_ok=True)
+        backup_dir = os.path.join(parent, f".reauth-backup-{uuid.uuid4().hex}")
+        os.replace(config_dir, backup_dir)
+        try:
+            os.replace(staging_dir, config_dir)
+        except Exception:
+            os.replace(backup_dir, config_dir)
+            raise
+        try:
+            shutil.rmtree(backup_dir)
+        except Exception as exc:
+            os.replace(config_dir, staging_dir)
+            os.replace(backup_dir, config_dir)
+            raise RuntimeError(f"企业微信旧凭据清理失败，已回滚：{exc}") from exc
+
+    def run(self):
+        started = time.monotonic()
+        config_dir = wecom_config_dir()
+        config_parent = os.path.dirname(config_dir)
+        staging_dir = tempfile.mkdtemp(prefix=".reauth-staging-", dir=config_parent)
+        try:
+            log_wecom_event("start", operation="authorization", state="generating")
+            with tempfile.TemporaryDirectory(prefix="cowork-wecom-auth-") as temp_dir:
+                qr_path = os.path.join(temp_dir, "qr.png")
+                self._process = start_wecom_cli(
+                    [
+                        "auth", "init", "--noninteractive", "--no-browser",
+                        "--output-qrcode", "qr.png",
+                    ],
+                    cwd=temp_dir,
+                    config_dir=staging_dir,
+                )
+                deadline = time.monotonic() + 305
+                qr_emitted = False
+                while True:
+                    if self.cancel_event.is_set():
+                        terminate_process_tree(self._process)
+                        self._log_cancel()
+                        return
+                    if not qr_emitted and os.path.isfile(qr_path) and os.path.getsize(qr_path) > 0:
+                        qr_emitted = True
+                        log_wecom_event("run", operation="authorization", state="waiting")
+                        self.qr_ready.emit(qr_path, 300)
+                        self.status_changed.emit("waiting")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        terminate_process_tree(self._process)
+                        raise TimeoutError("等待企业微信扫码超时，请重新生成二维码。")
+                    try:
+                        self._process.communicate(timeout=min(0.2, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                if self._process.returncode != 0:
+                    raise RuntimeError(f"企业微信扫码授权失败（退出码 {self._process.returncode}）。")
+                self.status_changed.emit("verifying")
+                status = get_wecom_authorization_status(
+                    verify_remote=True,
+                    abort_check=self.cancel_event.is_set,
+                    config_dir=staging_dir,
+                )
+                if status.get("state") != "connected":
+                    raise RuntimeError(status.get("detail") or "企业微信联网验证失败，请重试。")
+                self._publish_staged_config(config_dir, staging_dir)
+                log_wecom_event(
+                    "finish", operation="authorization", state="connected",
+                    duration_ms=int((time.monotonic() - started) * 1000), exit_code=0,
+                )
+                self.completed.emit(status)
+        except Exception as exc:
+            if self.cancel_event.is_set():
+                self._log_cancel()
+                return
+            error_code = "timeout" if isinstance(exc, TimeoutError) else "authorization_failed"
+            log_wecom_event(
+                "error", operation="authorization", state="failed", error_code=error_code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            self.failed.emit(str(exc) or "企业微信扫码授权失败。")
+        finally:
+            self._process = None
+            if os.path.isdir(staging_dir):
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception:
+                    log_wecom_event(
+                        "error", operation="authorization", state="cleanup_failed",
+                        error_code="credential_cleanup_failed",
+                    )
+                    self.failed.emit("企业微信授权临时凭据清理失败，请关闭 Cowork 后重试。")
+
+
+class WecomQrAuthorizationDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("WecomQrAuthorizationDialog")
+        self.setWindowTitle("扫码连接企业微信")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.authorization_status = {}
+        self._worker = None
+        self._expires_at = 0
+        self._state = "generating"
+        apply_product_dialog(self, "WecomQrAuthorizationDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+        self.title_label = QLabel("使用企业微信扫码连接")
+        self.description_label = QLabel("凭据仅保存在 Cowork 的独立应用数据目录，不会写入能力配置或日志。")
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.description_label)
+        self.qr_label = QLabel("正在生成二维码…")
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setFixedSize(252, 252)
+        qr_row = QHBoxLayout()
+        qr_row.addStretch()
+        qr_row.addWidget(self.qr_label)
+        qr_row.addStretch()
+        layout.addLayout(qr_row)
+        self.status_notice = ProductInlineNotice("正在生成企业微信授权二维码…", "info")
+        layout.addWidget(self.status_notice)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.retry_btn = QPushButton("重新生成二维码")
+        self.retry_btn.setStyleSheet(product_button_style("primary"))
+        self.retry_btn.clicked.connect(self._restart)
+        self.retry_btn.hide()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet(product_button_style("secondary"))
+        cancel_btn.clicked.connect(self.reject)
+        actions.addWidget(self.retry_btn)
+        actions.addWidget(cancel_btn)
+        layout.addLayout(actions)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._update_countdown)
+        self._refresh_theme()
+        bind_theme(self, self._refresh_theme, surface="dialogs")
+        self._start_worker()
+
+    def _refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "WecomQrAuthorizationDialog")
+        self.title_label.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_page}px;font-weight:{DesignTokens.font_weight_bold};"
+            f"color:{DesignTokens.text_primary};"
+        )
+        self.description_label.setStyleSheet(apple_settings_inline_note_style())
+        self.qr_label.setStyleSheet(
+            f"QLabel {{ background:{DesignTokens.bg_main}; border:1px solid {DesignTokens.border_subtle};"
+            f"border-radius:{DesignTokens.radius_md}px; color:{DesignTokens.text_secondary}; }}"
+        )
+
+    def _start_worker(self):
+        self._state = "generating"
+        self.retry_btn.hide()
+        self.qr_label.setPixmap(QPixmap())
+        self.qr_label.setText("正在生成二维码…")
+        self.status_notice.set_text("正在生成企业微信授权二维码…", "info")
+        self._worker = WecomQrAuthorizationWorker(self)
+        self._worker.qr_ready.connect(self._on_qr_ready)
+        self._worker.status_changed.connect(self._on_status_changed)
+        self._worker.completed.connect(self._on_completed)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _restart(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            if not self._worker.wait(5000):
+                self.status_notice.set_text("正在取消上一轮扫码，请稍候。", "warning")
+                return
+        self._start_worker()
+
+    def _on_qr_ready(self, path, expire_in):
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            if self._worker and self._worker.isRunning():
+                self._worker.cancel()
+            self._on_failed("企业微信二维码图片无效，请重新生成。")
+            return
+        self.qr_label.setPixmap(pixmap.scaled(232, 232, Qt.KeepAspectRatio, Qt.FastTransformation))
+        self._expires_at = time.time() + max(0, int(expire_in or 0))
+        self._state = "waiting"
+        self._timer.start()
+        self._update_countdown()
+
+    def _on_status_changed(self, status):
+        if status == "waiting":
+            self._state = "waiting"
+        elif status == "verifying":
+            self._state = "verifying"
+            self.status_notice.set_text("扫码成功，正在验证企业微信连接…", "info")
+
+    def _update_countdown(self):
+        remaining = max(0, int(self._expires_at - time.time()))
+        if remaining and self._state == "waiting":
+            self.status_notice.set_text(f"请使用企业微信扫码并确认授权（还剩 {remaining} 秒）。", "info")
+        elif not remaining and self._state == "waiting":
+            self._timer.stop()
+            if self._worker and self._worker.isRunning():
+                self._worker.cancel()
+            self._state = "expired"
+            self.status_notice.set_text("二维码已过期，请重新生成。", "warning")
+            self.retry_btn.show()
+
+    def _on_completed(self, status):
+        self._timer.stop()
+        self._state = "completed"
+        self.authorization_status = dict(status or {})
+        self.status_notice.set_text("企业微信已连接，正在开启能力…", "success")
+        QTimer.singleShot(120, self.accept)
+
+    def _on_failed(self, message):
+        self._timer.stop()
+        self._state = "failed"
+        self.status_notice.set_text(str(message or "企业微信扫码授权失败。"), "error")
+        self.retry_btn.show()
+
+    def reject(self):
+        if self._worker and self._worker.isRunning():
+            self._state = "cancelling"
+            self.status_notice.set_text("正在取消扫码…", "neutral")
+            self._worker.cancel()
+            if not self._worker.wait(5000):
+                self.status_notice.set_text("授权进程仍在停止，请稍候再关闭。", "warning")
+                return
+        super().reject()
+
+
 class ChannelQrWorker(QThread):
     qr_ready = Signal(str, int)
     status_changed = Signal(str)
@@ -13039,6 +13516,22 @@ class SkillsCenterDialog(QDialog):
 
     def refresh_list(self):
         self._all_skills = list(self.skill_manager.get_all_skills() or [])
+        for skill in self._all_skills:
+            if not skill.get("authorization"):
+                continue
+            try:
+                skill["_authorization_status"] = authorization_status_for_skill(
+                    skill,
+                    verify_remote=False,
+                )
+            except Exception as exc:
+                skill["_authorization_status"] = {
+                    "state": "cli_unavailable",
+                    "state_text": "CLI 不可用",
+                    "detail": str(exc),
+                    "authorized": False,
+                    "verified": False,
+                }
         self._user_owned_names = {
             str(skill.get("name") or "").strip()
             for skill in self._all_skills
@@ -13182,6 +13675,68 @@ class SkillsCenterDialog(QDialog):
         name = str(skill.get("name") or "").strip()
         enabled = bool(skill.get("enabled"))
         needs_config = not enabled and skill_center_config_state(skill) == "needs_config"
+        authorization = dict(skill.get("authorization") or {})
+        authorization_status = dict(skill.get("_authorization_status") or {})
+        if authorization:
+            state = str(authorization_status.get("state") or "cli_unavailable")
+            state_text = str(authorization_status.get("state_text") or "CLI 不可用")
+            connected = state == "connected"
+            if enabled and connected:
+                label_text = "✓ 已开启"
+                label_color = DesignTokens.success_text
+            elif enabled:
+                label_text = f"已开启 · {state_text}"
+                label_color = DesignTokens.warning_text
+            elif connected:
+                label_text = "已连接 · 已关闭"
+                label_color = DesignTokens.success_text
+            else:
+                label_text = state_text
+                label_color = (
+                    DesignTokens.error_text
+                    if state in {"needs_reauthorization", "cli_unavailable"}
+                    else DesignTokens.warning_text
+                )
+            status = QLabel(label_text)
+            status.setObjectName("CapabilityAuthorizationStateLabel")
+            status.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; color: {label_color};"
+            )
+            detail = str(authorization_status.get("detail") or "").strip()
+            if detail:
+                status.setToolTip(detail)
+            actions.addWidget(status)
+            actions.addStretch()
+            settings_btn = QPushButton("设置")
+            settings_btn.setObjectName("CapabilityAuthorizationSettings")
+            settings_btn.setStyleSheet(product_button_style("ghost"))
+            settings_btn.clicked.connect(
+                lambda checked=False, value=dict(skill): self._open_detail(value)
+            )
+            actions.addWidget(settings_btn)
+            if enabled:
+                close_btn = QPushButton("关闭")
+                close_btn.setObjectName("CapabilityDisableAction")
+                close_btn.setStyleSheet(product_button_style("ghost"))
+                close_btn.clicked.connect(
+                    lambda checked=False, value=dict(skill): self._toggle_skill(value, False)
+                )
+                actions.addWidget(close_btn)
+            else:
+                action = QPushButton("开启" if connected else "连接并开启")
+                action.setObjectName("CapabilityEnableAction")
+                action.setStyleSheet(product_button_style("primary"))
+                if connected:
+                    action.clicked.connect(
+                        lambda checked=False, value=dict(skill): self._toggle_skill(value, True)
+                    )
+                else:
+                    action.clicked.connect(
+                        lambda checked=False, value=dict(skill): self._open_detail(value)
+                    )
+                actions.addWidget(action)
+            layout.addLayout(actions)
+            return row
         is_browser_automation = name == "browser-automation"
         browser_ready = bool(self.browser_component_status.get("ready"))
         browser_task = dict(self.browser_component_task or {}) if is_browser_automation else {}
@@ -13286,6 +13841,15 @@ class SkillsCenterDialog(QDialog):
             )
             self._open_detail(skill)
             return False
+        if enabled and skill.get("authorization"):
+            auth_status = dict(skill.get("_authorization_status") or {})
+            if str(auth_status.get("state") or "") != "connected":
+                log_ui_navigation(
+                    "capability_authorization_required",
+                    skill_name=name,
+                )
+                self._open_detail(skill)
+                return False
         log_ui_navigation("capability_enable_begin", skill_name=name, enabled=bool(enabled))
         try:
             self.config_manager.set_skill_enabled(name, bool(enabled))

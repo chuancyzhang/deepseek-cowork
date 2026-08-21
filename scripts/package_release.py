@@ -23,7 +23,9 @@ from core.app_version import APP_VERSION  # noqa: E402
 
 ARCHIVE_ROOT = "deepseek-cowork"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
-DEFAULT_MAX_DIST_MB = 850
+# The pinned WeCom CLI and its official Skill add about 10.6 MiB to the
+# distribution. Keep a narrow, explicit allowance for that reviewed bundle.
+DEFAULT_MAX_DIST_MB = 865
 DEFAULT_MAX_ZIP_MB = 375
 EDITOR_MAX_UNPACKED_BYTES = 30 * 1024 * 1024
 EDITOR_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
@@ -47,6 +49,8 @@ BROWSER_SKILL_ARTIFACT_HASHES = {
     BROWSER_SKILL_CLI_ARCHIVE: "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13",
     BROWSER_SKILL_EXTENSION_ARCHIVE: "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E",
 }
+WECOM_CLI_VERSION = "1.1.0"
+WECOM_CLI_SHA256 = "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B"
 
 QT_TRANSLATION_ALLOWLIST = {
     "qt_en.qm",
@@ -91,6 +95,12 @@ REQUIRED_PATHS = (
     "_internal/resources/browser_skill/LICENSE.txt",
     f"_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_CLI_ARCHIVE}",
     f"_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_EXTENSION_ARCHIVE}",
+    "_internal/resources/wecom_cli/bundle.json",
+    "_internal/resources/wecom_cli/LICENSE.txt",
+    "_internal/resources/wecom_cli/bin/wecom-cli.exe",
+    "_internal/ai_skills/wecom-unified/SKILL.md",
+    "_internal/ai_skills/wecom-unified/skill.json",
+    "_internal/ai_skills/wecom-unified/LICENSE",
 )
 
 
@@ -249,6 +259,45 @@ def _audit_browser_skill_assets(dist_dir: Path) -> dict:
     return verified
 
 
+def _audit_wecom_cli_assets(dist_dir: Path) -> dict:
+    bundle_root = dist_dir / "_internal" / "resources" / "wecom_cli"
+    manifest_path = bundle_root / "bundle.json"
+    executable_path = bundle_root / "bin" / "wecom-cli.exe"
+    license_path = bundle_root / "LICENSE.txt"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        license_text = license_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise PackageAuditError(f"Invalid WeCom CLI bundle: {exc}") from exc
+    expected = {
+        "schema": 1,
+        "component_id": "wecom-cli",
+        "package": "@wecom/cli-win32-x64",
+        "version": WECOM_CLI_VERSION,
+        "platform": "win32-x64",
+        "archive": "cli-win32-x64-1.1.0.tgz",
+        "url": "https://registry.npmjs.org/@wecom/cli-win32-x64/-/cli-win32-x64-1.1.0.tgz",
+        "archive_sha256": "1E7F24CCCDC9D61706A717F8765E114663B3911E11B1E22814DEA855AE77D313",
+        "executable": "bin/wecom-cli.exe",
+        "executable_sha256": WECOM_CLI_SHA256,
+        "license": "LICENSE.txt",
+    }
+    if any(str(manifest.get(key)) != str(value) for key, value in expected.items()):
+        raise PackageAuditError("WeCom CLI bundle manifest does not match the pinned release.")
+    if "MIT License" not in license_text or "Copyright (c) 2026 WeCom" not in license_text:
+        raise PackageAuditError("WeCom CLI MIT license is missing or invalid.")
+    actual_sha256 = _file_sha256(executable_path)
+    if actual_sha256 != WECOM_CLI_SHA256:
+        raise PackageAuditError(
+            f"WeCom CLI SHA256 mismatch: expected={WECOM_CLI_SHA256} actual={actual_sha256}"
+        )
+    return {
+        "version": WECOM_CLI_VERSION,
+        "sha256": actual_sha256,
+        "bytes": executable_path.stat().st_size,
+    }
+
+
 def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB) -> dict:
     dist_dir = dist_dir.resolve()
     if not dist_dir.is_dir():
@@ -271,6 +320,7 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
 
     editor_assets = _audit_editor_assets(dist_dir, files)
     browser_skill_assets = _audit_browser_skill_assets(dist_dir)
+    wecom_cli_assets = _audit_wecom_cli_assets(dist_dir)
     components: dict[str, dict[str, int]] = {}
     total_bytes = 0
     for relative in files:
@@ -309,6 +359,7 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
         "required_paths": list(REQUIRED_PATHS),
         "editor_assets": editor_assets,
         "browser_skill_assets": browser_skill_assets,
+        "wecom_cli_assets": wecom_cli_assets,
     }
 
 

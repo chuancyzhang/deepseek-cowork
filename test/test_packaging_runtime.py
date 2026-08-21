@@ -120,6 +120,23 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Cannot analyze bundled Skill"):
                 collect_hiddenimports(temp_dir)
 
+    def test_wecom_cli_and_skill_are_pinned_and_packaged(self):
+        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
+            spec_text = handle.read()
+        with open(os.path.join(ROOT, "scripts", "fetch_runtimes.ps1"), "r", encoding="utf-8") as handle:
+            fetch_text = handle.read()
+        with open(os.path.join(ROOT, "scripts", "package_release.py"), "r", encoding="utf-8") as handle:
+            release_text = handle.read()
+
+        for text in (spec_text, fetch_text, release_text):
+            self.assertIn("1.1.0", text)
+            self.assertIn("51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B", text)
+        self.assertIn("_collect_wecom_cli_bundle_for_analysis", spec_text)
+        self.assertIn("_audit_wecom_cli_assets", release_text)
+        self.assertIn("_internal/resources/wecom_cli/bin/wecom-cli.exe", release_text)
+        self.assertIn("_internal/ai_skills/wecom-unified/skill.json", release_text)
+        self.assertIn("DEFAULT_MAX_DIST_MB = 865", release_text)
+
 
 if __name__ == "__main__":
     unittest.main()

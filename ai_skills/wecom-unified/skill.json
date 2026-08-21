@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "name": "wecom-unified",
+  "display_name": "企业微信办公套件",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Use the Cowork-managed WeCom CLI for contacts, documents, sheets, mail, calendars, meetings, tasks, drive files, and messages.",
+  "description_cn": "通过 Cowork 管理的企业微信 CLI 处理通讯录、文档、表格、邮件、日程、会议、待办、微盘和消息。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "企业微信办公",
+    "summary": "连接企业微信，在一个能力中处理常用办公数据和协作任务。",
+    "examples": ["查询通讯录与日程", "读写企业微信文档和表格", "处理邮件、待办与微盘文件"],
+    "access_note": "需要扫码连接企业微信；写入、发送、删除或修改操作仍需明确确认。"
+  },
+  "authorization": {
+    "provider": "wecom_cli",
+    "required": true
+  },
+  "reference_policy": {
+    "root": "references",
+    "extensions": [".md"]
+  },
+  "references": [
+    "references/wecomcli-contact.md",
+    "references/wecomcli-doc.md",
+    "references/wecomcli-doc-manage.md",
+    "references/wecomcli-sheet.md",
+    "references/wecomcli-smartsheet.md",
+    "references/wecomcli-smartpage.md",
+    "references/wecomcli-calendar.md",
+    "references/wecomcli-meeting.md",
+    "references/wecomcli-todo.md",
+    "references/wecomcli-disk.md",
+    "references/wecomcli-email.md",
+    "references/wecomcli-message.md",
+    "references/wecomcli-media.md"
+  ],
+  "tags": ["wecom", "企业微信", "通讯录", "文档", "表格", "邮件", "日程", "会议", "待办", "微盘", "消息"],
+  "triggers": ["企业微信", "企微", "doc.weixin.qq.com", "page.weixin.qq.com", "drive.weixin.qq.com", "企业微信文档", "企业微信日程", "企业微信邮件"],
+  "anti_triggers": ["企业消息渠道", "Bot ID", "Webhook 机器人配置"],
+  "tool_refs": ["wecom_reference_read", "wecom_cli"],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "external_components": [
+    {
+      "id": "wecom-cli",
+      "name": "企业微信原生 CLI",
+      "capability": "wecom-unified",
+      "version": "1.1.0"
+    }
+  ],
+  "workflow": [
+    "Read the relevant top-level domain reference before constructing a command.",
+    "Load any child reference named by that domain only when the operation needs it.",
+    "Use wecom_cli with an argument array and verify every write result."
+  ]
+}

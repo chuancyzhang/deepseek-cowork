@@ -2033,6 +2033,38 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_wecom_selection_only_changes_append_only_runtime_context(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+
+            class SkillManagerStub(_PromptSkillManagerStub):
+                def get_brief_skill_prompt(self, skill_name):
+                    return "[Experience Package] 企业微信办公套件" if skill_name == "wecom-unified" else ""
+
+                def get_skill_display_name(self, skill_name):
+                    return "企业微信办公套件" if skill_name == "wecom-unified" else skill_name
+
+            worker.skill_manager = SkillManagerStub()
+            snapshot = {
+                "python": {"available": True, "version": "3.test", "path": "python.exe"},
+                "node": {"available": False},
+                "bash": {"available": False},
+            }
+            worker.run_context["selected_skill_names"] = []
+            stable_without_selection = worker._build_stable_system_prompt()
+            runtime_without_selection = worker._build_runtime_context_prompt(snapshot)
+            worker.run_context["selected_skill_names"] = ["wecom-unified"]
+            stable_with_selection = worker._build_stable_system_prompt()
+            runtime_with_selection = worker._build_runtime_context_prompt(snapshot)
+
+            self.assertEqual(stable_without_selection, stable_with_selection)
+            self.assertNotIn("wecom-unified", runtime_without_selection)
+            self.assertIn("wecom-unified", runtime_with_selection)
+            self.assertIn("企业微信办公套件", runtime_with_selection)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_grilling_count_is_dynamic_not_cached_in_stable_prompt(self):
         temp_dir = tempfile.mkdtemp()
         try:

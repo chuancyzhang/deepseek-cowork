@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "component_id": "wecom-cli",
+  "package": "@wecom/cli-win32-x64",
+  "version": "1.1.0",
+  "platform": "win32-x64",
+  "archive": "cli-win32-x64-1.1.0.tgz",
+  "url": "https://registry.npmjs.org/@wecom/cli-win32-x64/-/cli-win32-x64-1.1.0.tgz",
+  "archive_sha256": "1E7F24CCCDC9D61706A717F8765E114663B3911E11B1E22814DEA855AE77D313",
+  "executable": "bin/wecom-cli.exe",
+  "executable_sha256": "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B",
+  "license": "LICENSE.txt"
+}

@@ -31,6 +31,9 @@ BROWSER_SKILL_BUILD_ARTIFACTS = {
         "sha256": "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E",
     },
 }
+WECOM_CLI_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "wecom_cli")
+WECOM_CLI_VERSION = "1.1.0"
+WECOM_CLI_SHA256 = "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B"
 
 python_prefix = sys.exec_prefix
 python_runtime_prefix = getattr(sys, "base_prefix", "") or python_prefix
@@ -171,6 +174,50 @@ def _collect_browser_skill_bundle_for_analysis():
         BROWSER_SKILL_RESOURCE_ROOT,
         "resources/browser_skill",
     )
+
+
+def _collect_wecom_cli_bundle_for_analysis():
+    manifest_path = os.path.join(WECOM_CLI_RESOURCE_ROOT, "bundle.json")
+    license_path = os.path.join(WECOM_CLI_RESOURCE_ROOT, "LICENSE.txt")
+    executable_path = os.path.join(WECOM_CLI_RESOURCE_ROOT, "bin", "wecom-cli.exe")
+    for required_path in (manifest_path, license_path, executable_path):
+        if not os.path.isfile(required_path):
+            raise FileNotFoundError(
+                f"Missing WeCom CLI bundle file: {required_path}. "
+                "Run scripts/fetch_runtimes.ps1 before building."
+            )
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    expected = {
+        "schema": 1,
+        "component_id": "wecom-cli",
+        "package": "@wecom/cli-win32-x64",
+        "version": WECOM_CLI_VERSION,
+        "platform": "win32-x64",
+        "archive": "cli-win32-x64-1.1.0.tgz",
+        "url": "https://registry.npmjs.org/@wecom/cli-win32-x64/-/cli-win32-x64-1.1.0.tgz",
+        "archive_sha256": "1E7F24CCCDC9D61706A717F8765E114663B3911E11B1E22814DEA855AE77D313",
+        "executable": "bin/wecom-cli.exe",
+        "executable_sha256": WECOM_CLI_SHA256,
+        "license": "LICENSE.txt",
+    }
+    mismatches = [key for key, value in expected.items() if str(manifest.get(key)) != str(value)]
+    if mismatches:
+        raise RuntimeError("WeCom CLI bundle manifest mismatch: " + ", ".join(mismatches))
+    digest = hashlib.sha256()
+    with open(executable_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_sha256 = digest.hexdigest().upper()
+    if actual_sha256 != WECOM_CLI_SHA256:
+        raise RuntimeError(
+            f"WeCom CLI SHA256 mismatch: expected={WECOM_CLI_SHA256} actual={actual_sha256}"
+        )
+    with open(license_path, "r", encoding="utf-8") as handle:
+        license_text = handle.read()
+    if "MIT License" not in license_text or "Copyright (c) 2026 WeCom" not in license_text:
+        raise RuntimeError("WeCom CLI MIT license is missing or invalid.")
+    return _collect_tree_for_analysis(WECOM_CLI_RESOURCE_ROOT, "resources/wecom_cli")
 
 
 def _collect_dynamic_skill_core_hiddenimports(*skill_roots):
@@ -678,6 +725,7 @@ application_datas.extend(
     ]
 )
 application_datas.extend(_collect_browser_skill_bundle_for_analysis())
+application_datas.extend(_collect_wecom_cli_bundle_for_analysis())
 DYNAMIC_SKILL_CORE_HIDDENIMPORTS = _collect_dynamic_skill_core_hiddenimports(
     os.path.join(SPEC_DIR, "skills"),
     os.path.join(SPEC_DIR, "ai_skills"),

@@ -407,6 +407,22 @@ BrowserSkill CLI 属于外部程序。Windows 冻结态通过
 
 随包 helper 继续使用普通启动路径，不套用外部程序隔离规则。
 
+### 9.4 企业微信办公能力授权与调用
+
+`wecom-unified` 是默认关闭的随包可选能力，与企业消息渠道没有配置或运行时依赖。能力清单只声明 `authorization.provider=wecom_cli`；受信任 Provider 注册表决定授权实现，manifest 不能注入命令。
+
+Windows x64 发行包固定包含 `@wecom/cli-win32-x64@1.1.0`。构建同时校验 npm 归档 URL、归档 SHA-256、归档结构、原生可执行文件 SHA-256、版本输出和 MIT License；源码态与冻结态只解析只读资源目录中的固定路径，缺失或损坏时明确失败，不查询系统 PATH、全局 npm 或网络。
+
+扫码 Worker 以参数数组直接启动 `auth init --noninteractive --no-browser --output-qrcode qr.png`，二维码只存在于本轮临时目录。新凭据先写入同一 AppData 能力根下的隔离暂存目录，取消、关闭、超时、授权失败或联网验证失败都不会触碰旧凭据；只有验证成功后才以目录交换事务发布，发布或旧快照清理失败会回滚。成功前先读取暂存授权状态，再调用只读 `identity whoami`；只有两步均通过才允许开启能力。
+
+凭据根目录固定为 `AppData/DeepSeekCowork/capability_data/wecom-unified/wecom-cli`，只通过 `WECOM_CLI_CONFIG_DIR` 注入子进程。能力 Tool 由 `wecom_reference_read` 和 `wecom_cli` 组成：前者只读取能力包 `references` 下的 Markdown，后者禁止 `auth`、不经过 shell、约束本地路径到当前会话工作区，并统一处理取消、超时和结构化错误。
+
+联网验证成功后只保存验证时间和加密凭据文件的 SHA-256 指纹，不保存身份响应。能力卡可据此显示最近一次真实验证状态；凭据文件变化会使指纹立即失效并回到“本机已授权但未验证”，用户点击“检测连接”时仍会发起新的只读身份请求。
+
+稳定系统提示词不包含企业微信能力正文。能力未选择时只参与现有目录检索；选择或搜索命中后，主 Skill 和业务域入口列表以追加式上下文进入下一模型请求。参考正文继续按需读取，因此不会重写既有历史前缀。
+
+诊断事件覆盖授权的生成、等待、完成、取消、错误，以及 CLI 调用的开始、运行、完成和错误。日志只保留阶段、耗时、命令类别和退出码，不记录二维码、Bot ID、Secret、Token、URL 参数、CLI 参数或业务响应。
+
 ## 10. 主题与设置事务
 
 主题包通过 Schema、资产白名单、稳定 Surface/Component ID 和

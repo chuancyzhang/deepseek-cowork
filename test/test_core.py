@@ -1585,6 +1585,33 @@ class TestDaemonState(unittest.TestCase):
         saved_messages = self.state.chat_storage.get_messages(session_id)
         self.assertEqual([msg.get("content") for msg in saved_messages], ["first", "reply", "continue", "done"])
 
+    def test_ui_owned_run_llm_sync_leaves_history_commit_to_ui(self):
+        session_id = "ui-owned-sync"
+        self.state._run_worker_once = lambda *_args, **_kwargs: {
+            "content": "done",
+            "generated_messages": [
+                {"id": "assistant-ui-sync", "role": "assistant", "content": "done"}
+            ],
+        }
+
+        result = self.state.run_llm_sync(
+            session_id,
+            "hello",
+            workspace_dir=self.temp_dir,
+            messages_snapshot=[
+                {"id": "user-ui-sync", "role": "user", "content": "hello"}
+            ],
+            user_message_id="user-ui-sync",
+            request_id="run-ui-sync",
+            turn_id="turn-ui-sync",
+            writer_owner="ui:test",
+        )
+
+        self.assertEqual(result["content"], "done")
+        self.assertFalse(self.state.chat_storage.has_conversation(session_id))
+        manifest = self.state.runtime_journal.load_manifest(session_id)
+        self.assertFalse(manifest.get("pending_commit_run_id"))
+
     def test_run_llm_sync_classifies_provider_error_as_failed(self):
         session_id = "desktop-provider-failed"
         self.state._run_worker_once = lambda *_args, **_kwargs: {
@@ -4023,7 +4050,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         )
         self.assertFalse(any(chunk.get("type") == "error" for chunk in chunks))
 
-    def test_ui_owned_daemon_stream_only_marks_pending_commit(self):
+    def test_ui_owned_daemon_stream_leaves_history_commit_to_ui(self):
         from PySide6.QtCore import QThread, Signal
 
         class _UiOwnedWorker(QThread):
@@ -4054,7 +4081,6 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                 )
 
         session_id = "ui-owned-daemon-session"
-        manifest_at_final = None
         with patch("core.daemon.LLMWorker", _UiOwnedWorker):
             chunks = []
             for chunk in self.client.send_message_stream(
@@ -4065,24 +4091,15 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                     writer_owner="ui:4242",
                 ):
                 chunks.append(chunk)
-                if chunk.get("type") == "final":
-                    manifest_at_final = self.state.runtime_journal.load_manifest(session_id)
 
         self.assertTrue(any(chunk.get("type") == "final" for chunk in chunks))
-        self.assertTrue(str((manifest_at_final or {}).get("pending_commit_run_id") or ""))
         self.assertFalse(self.state.chat_storage.has_conversation(session_id))
         manifest = self.state.runtime_journal.load_manifest(session_id)
-        run_id = str(manifest.get("pending_commit_run_id") or "")
-        self.assertTrue(run_id)
-        self.assertEqual(manifest.get("pending_commit_run_id"), run_id)
-        run = self.state.runtime_journal.get_run(session_id, run_id)
+        self.assertFalse(manifest.get("pending_commit_run_id"))
+        runs = self.state.runtime_journal.list_runs(session_id)
+        self.assertEqual(len(runs), 1)
+        run = runs[0]
         self.assertEqual(run.get("status"), "completed")
-        pending = manifest.get("pending_commit") or {}
-        self.assertEqual(pending.get("format"), "ledger_append_v1")
-        self.assertEqual(
-            [item.get("content") for item in pending.get("append_messages") or []],
-            ["hello", "daemon answer"],
-        )
 
     def test_socket_disconnect_does_not_stop_daemon_worker(self):
         from PySide6.QtCore import QThread, Signal

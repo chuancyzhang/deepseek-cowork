@@ -1223,25 +1223,7 @@ class DaemonState:
         )
         commit_error = postprocess_error
         daemon_commit_succeeded = False
-        if not postprocess_error and effective_writer_owner.startswith("ui:"):
-            if provider_succeeded:
-                try:
-                    self.runtime_journal.mark_pending_commit(
-                        session_id,
-                        request_id,
-                        messages,
-                        title=_compute_session_title(messages),
-                    )
-                except RuntimeJournalError as exc:
-                    stopped_run = self.runtime_journal.get_run(session_id, request_id) or {}
-                    if not stopped_run.get("stop_requested"):
-                        commit_error = str(exc)
-                    else:
-                        _log_daemon(
-                            f"daemon_sync pending_commit rejected_interrupted "
-                            f"session_id={session_id} run_id={request_id}"
-                        )
-        elif not postprocess_error and not effective_writer_owner.startswith("ui:"):
+        if not postprocess_error and not effective_writer_owner.startswith("ui:"):
             try:
                 daemon_commit_succeeded = self.save_session(
                     session_id,
@@ -1264,17 +1246,11 @@ class DaemonState:
                 "commit_failed",
                 {"error": commit_error},
             )
-        elif provider_succeeded:
+        elif provider_succeeded and not effective_writer_owner.startswith("ui:"):
             self.runtime_journal.update_run(
                 session_id,
                 request_id,
-                {
-                    "commit_status": (
-                        "pending"
-                        if effective_writer_owner.startswith("ui:")
-                        else "completed"
-                    )
-                },
+                {"commit_status": "completed"},
             )
         if daemon_commit_succeeded:
             self.runtime_journal.acknowledge_commit(
@@ -1730,36 +1706,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             )
             daemon_commit_succeeded = False
             commit_error = postprocess_error
-            if not postprocess_error and ui_owned_history:
-                if provider_succeeded:
-                    try:
-                        state.runtime_journal.mark_pending_commit(
-                            session_id,
-                            request_id,
-                            messages,
-                            title=_compute_session_title(messages),
-                        )
-                        _log_daemon(
-                            f"send_message_stream pending_commit session_id={session_id} "
-                            f"run_id={request_id} writer_owner={writer_owner}"
-                        )
-                    except RuntimeJournalError as exc:
-                        stopped_run = state.runtime_journal.get_run(
-                            session_id,
-                            request_id,
-                        ) or {}
-                        if not stopped_run.get("stop_requested"):
-                            commit_error = str(exc)
-                            _log_daemon(
-                                f"send_message_stream pending_commit failed "
-                                f"session_id={session_id} run_id={request_id} error={exc}"
-                            )
-                        else:
-                            _log_daemon(
-                                f"send_message_stream pending_commit rejected_interrupted "
-                                f"session_id={session_id} run_id={request_id}"
-                            )
-            elif not postprocess_error and not ui_owned_history:
+            if not postprocess_error and not ui_owned_history:
                 try:
                     daemon_commit_succeeded = state.save_session(
                         session_id,
@@ -1789,11 +1736,11 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "commit_failed",
                     {"error": commit_error},
                 )
-            elif provider_succeeded:
+            elif provider_succeeded and not ui_owned_history:
                 state.runtime_journal.update_run(
                     session_id,
                     request_id,
-                    {"commit_status": "pending" if ui_owned_history else "completed"},
+                    {"commit_status": "completed"},
                 )
             send_stream({"type": "final", "result": result})
             if daemon_commit_succeeded:

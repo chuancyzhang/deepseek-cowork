@@ -2,11 +2,51 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from core.runtime_journal import RuntimeJournal, RuntimeJournalError
 
 
 class TestRuntimeJournal(unittest.TestCase):
+    def test_atomic_write_retries_permission_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            target = os.path.join(temp_dir, "retry.json")
+            real_replace = os.replace
+            attempts = 0
+
+            def replace_after_two_failures(source, destination):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("temporarily denied")
+                return real_replace(source, destination)
+
+            with (
+                patch("core.runtime_journal.os.replace", side_effect=replace_after_two_failures),
+                patch("core.runtime_journal.time.sleep"),
+            ):
+                journal._atomic_write(target, {"ok": True})
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(journal._read(target), {"ok": True})
+
+    def test_atomic_write_raises_last_permission_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            target = os.path.join(temp_dir, "denied.json")
+            denied = PermissionError("still denied")
+
+            with (
+                patch("core.runtime_journal.os.replace", side_effect=denied) as replace,
+                patch("core.runtime_journal.time.sleep"),
+            ):
+                with self.assertRaises(PermissionError) as raised:
+                    journal._atomic_write(target, {"ok": False})
+
+            self.assertIs(raised.exception, denied)
+            self.assertEqual(replace.call_count, 3)
+
     def test_run_events_are_checksummed_monotonic_and_replayable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             journal = RuntimeJournal(temp_dir)

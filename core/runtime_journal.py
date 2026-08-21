@@ -127,23 +127,36 @@ class RuntimeJournal:
     def _atomic_write(self, path, payload):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         envelope = self._envelope(payload)
-        fd, temp_path = tempfile.mkstemp(
-            prefix=".runtime-",
-            suffix=".tmp",
-            dir=os.path.dirname(path),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(envelope, handle, ensure_ascii=False, separators=(",", ":"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, path)
-        except Exception:
+        for attempt in range(3):
+            temp_path = ""
             try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-            raise
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=".runtime-",
+                    suffix=".tmp",
+                    dir=os.path.dirname(path),
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(envelope, handle, ensure_ascii=False, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+                return
+            except PermissionError:
+                try:
+                    if temp_path:
+                        os.unlink(temp_path)
+                except OSError:
+                    pass
+                if attempt == 2:
+                    raise
+                time.sleep(0.05)
+            except Exception:
+                try:
+                    if temp_path:
+                        os.unlink(temp_path)
+                except OSError:
+                    pass
+                raise
 
     def _read(self, path, default=None):
         if not os.path.isfile(path):

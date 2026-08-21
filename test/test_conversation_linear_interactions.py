@@ -3004,6 +3004,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(bubble.office_draft_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
+            self.assertFalse(window._session_is_busy(state))
         finally:
             window.close()
             window.deleteLater()

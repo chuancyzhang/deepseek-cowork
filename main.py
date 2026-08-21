@@ -217,6 +217,7 @@ from core.memory_update import (
     save_memory_update_state,
 )
 from core.memory_store import MemoryStore
+from core.token_speed import TokenSpeedTracker
 from core.mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
     TRANSPORT_STDIO,
@@ -1402,17 +1403,35 @@ def token_usage_cache_rate(summary):
     return max(0.0, min(1.0, cached_tokens / input_tokens))
 
 
-def format_token_usage_chip_text(summary):
+def format_token_speed_rate(rate):
+    try:
+        value = max(0.0, float(rate))
+    except (TypeError, ValueError):
+        return "--"
+    return f"{value:.1f} tok/s"
+
+
+def format_token_usage_chip_text(summary, speed_snapshot=None):
     usage = normalize_token_usage_summary(summary)
     total_tokens = usage.get("total_tokens", 0)
     cached_tokens = usage.get("cached_input_tokens", 0)
     if cached_tokens > 0:
         rate = token_usage_cache_rate(usage) * 100
-        return f"{compact_token_count(total_tokens)} tokens · 缓存 {compact_token_count(cached_tokens)} / {rate:.0f}%"
-    return f"{compact_token_count(total_tokens)} tokens · 缓存 0"
+        text = f"{compact_token_count(total_tokens)} tokens · 缓存 {compact_token_count(cached_tokens)} / {rate:.0f}%"
+    else:
+        text = f"{compact_token_count(total_tokens)} tokens · 缓存 0"
+    if not isinstance(speed_snapshot, dict):
+        return text
+    if str(speed_snapshot.get("unavailable_reason") or "").strip():
+        return text + " · 速度不可用"
+    if speed_snapshot.get("active"):
+        return text + " · 速度 " + format_token_speed_rate(speed_snapshot.get("current_rate"))
+    if speed_snapshot.get("last_rate") is not None:
+        return text + " · 最近 " + format_token_speed_rate(speed_snapshot.get("last_rate"))
+    return text
 
 
-def format_token_usage_tooltip(summary, last_usage=None):
+def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None):
     usage = normalize_token_usage_summary(summary)
     lines = [
         "当前统计桶累计 token 用量（按 Provider / 模型 / 协议隔离）",
@@ -1425,6 +1444,38 @@ def format_token_usage_tooltip(summary, last_usage=None):
     ]
     if usage.get("missing_usage_count", 0):
         lines.append(f"未返回用量的请求：{usage.get('missing_usage_count', 0):,}")
+    if isinstance(speed_snapshot, dict):
+        unavailable_reason = str(speed_snapshot.get("unavailable_reason") or "").strip()
+        active = bool(speed_snapshot.get("active"))
+        last_rate = speed_snapshot.get("last_rate")
+        if unavailable_reason or active or last_rate is not None:
+            lines.extend(["", "Token 生成速度（估算）"])
+            if unavailable_reason:
+                lines.append("状态：不可用")
+                lines.append("原因：" + unavailable_reason)
+                lines.append("恢复：下一次模型请求将重新初始化速度监控。")
+            elif active:
+                current_rate = speed_snapshot.get("current_rate")
+                lines.append(
+                    "当前速度："
+                    + (
+                        format_token_speed_rate(current_rate)
+                        if current_rate is not None
+                        else "等待首个生成片段"
+                    )
+                )
+                lines.append(
+                    f"当前请求已估算：{int(speed_snapshot.get('current_tokens') or 0):,} tokens"
+                )
+            if last_rate is not None:
+                lines.extend(
+                    [
+                        f"最近完成请求均速：{format_token_speed_rate(last_rate)}",
+                        f"最近估算输出：{int(speed_snapshot.get('last_tokens') or 0):,} tokens",
+                        f"有效计时：{float(speed_snapshot.get('last_duration') or 0.0):.2f} 秒",
+                    ]
+                )
+            lines.append("口径：近 3 秒滑动窗口；统计思考与正文，不含 Tool 参数和首 token 等待时间。")
     if isinstance(last_usage, dict) and last_usage:
         last = normalize_last_token_usage(last_usage)
         lines.extend(
@@ -21842,6 +21893,8 @@ class SessionState:
         self.token_usage_buckets = {}
         self.counted_usage_request_ids = set()
         self.last_token_usage = {}
+        self.token_speed_tracker = TokenSpeedTracker()
+        self.token_speed_timer = None
         self.chat_save_revision = 0
         self.last_chat_recovery_checkpoint_at = 0.0
         self.composer_draft = ""
@@ -28130,6 +28183,137 @@ class MainWindow(QMainWindow):
         self.prompt_files_row.addStretch()
         self.prompt_files_section.setVisible(True)
 
+    def _token_speed_snapshot(self, state):
+        tracker = getattr(state, "token_speed_tracker", None) if state else None
+        if tracker is None:
+            return None
+        return tracker.snapshot(time.monotonic())
+
+    def _fail_token_speed_monitor(self, state, error, event_type):
+        if not state:
+            return
+        tracker = getattr(state, "token_speed_tracker", None)
+        if tracker is None:
+            return
+        reason = str(error or "Token speed monitoring failed.")
+        tracker.fail(reason, time.monotonic())
+        timer = getattr(state, "token_speed_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        log_chat_runtime_debug(
+            "token_speed_monitor_error",
+            session_id=state.session_id,
+            event_type=str(event_type or ""),
+            error=reason,
+        )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _start_token_speed_monitor(self, state, event):
+        if not state:
+            return
+        request_id = str((event or {}).get("request_id") or "").strip()
+        try:
+            state.token_speed_tracker.begin(request_id, time.monotonic())
+        except Exception as exc:
+            self._fail_token_speed_monitor(state, exc, "provider_request_start")
+            return
+        timer = getattr(state, "token_speed_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+        log_chat_runtime_debug(
+            "token_speed_monitor_started",
+            session_id=state.session_id,
+            request_id=request_id,
+            provider=str((event or {}).get("provider") or ""),
+            model=str((event or {}).get("model") or ""),
+        )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _retry_token_speed_monitor(self, state, event):
+        if not state:
+            return
+        request_id = str((event or {}).get("request_id") or "").strip()
+        try:
+            state.token_speed_tracker.retry(request_id, time.monotonic())
+        except Exception as exc:
+            self._fail_token_speed_monitor(state, exc, "provider_retry")
+            return
+        log_chat_runtime_debug(
+            "token_speed_monitor_retry_reset",
+            session_id=state.session_id,
+            request_id=request_id,
+            retry_attempt=max(1, int((event or {}).get("attempt") or 1)),
+        )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _finish_token_speed_monitor(self, state, event, status=None):
+        if not state:
+            return
+        request_id = str((event or {}).get("request_id") or "").strip()
+        finish_status = str(status or (event or {}).get("status") or "completed")
+        try:
+            snapshot = state.token_speed_tracker.finish(
+                request_id,
+                time.monotonic(),
+                status=finish_status,
+            )
+        except Exception as exc:
+            self._fail_token_speed_monitor(state, exc, str((event or {}).get("type") or "finish"))
+            return
+        timer = getattr(state, "token_speed_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        log_chat_runtime_debug(
+            "token_speed_monitor_finished",
+            session_id=state.session_id,
+            request_id=request_id,
+            status=finish_status,
+            last_rate=snapshot.get("last_rate"),
+            last_tokens=snapshot.get("last_tokens"),
+            last_duration=snapshot.get("last_duration"),
+        )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _cancel_token_speed_monitor(self, state, reason):
+        if not state:
+            return
+        tracker = getattr(state, "token_speed_tracker", None)
+        if tracker is None or not tracker.active:
+            return
+        request_id = tracker.request_id
+        tracker.cancel(time.monotonic())
+        timer = getattr(state, "token_speed_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        log_chat_runtime_debug(
+            "token_speed_monitor_cancelled",
+            session_id=state.session_id,
+            request_id=request_id,
+            reason=str(reason or "cancelled"),
+        )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _record_token_speed_delta(self, state, text, kind):
+        if not state or not str(text or ""):
+            return
+        try:
+            first_sample = state.token_speed_tracker.record_text(
+                text,
+                time.monotonic(),
+            )
+        except Exception as exc:
+            self._fail_token_speed_monitor(state, exc, f"{kind}_delta")
+            return
+        if first_sample:
+            log_chat_runtime_debug(
+                "token_speed_monitor_first_sample",
+                session_id=state.session_id,
+                request_id=state.token_speed_tracker.request_id,
+                content_kind=str(kind or ""),
+                estimated_tokens=state.token_speed_tracker.estimated_tokens,
+            )
+            self.refresh_token_usage_label(state.session_id)
+
     def refresh_token_usage_label(self, session_id=None):
         state = self.get_session(session_id)
         if not state:
@@ -28139,9 +28323,24 @@ class MainWindow(QMainWindow):
             return
         summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
         state.token_usage_summary = summary
-        label.setText(format_token_usage_chip_text(summary))
-        label.setDetailText(format_token_usage_tooltip(summary, getattr(state, "last_token_usage", {})))
-        label.setVisible(int(summary.get("total_tokens") or 0) > 0)
+        speed_snapshot = self._token_speed_snapshot(state)
+        label.setText(format_token_usage_chip_text(summary, speed_snapshot))
+        label.setDetailText(
+            format_token_usage_tooltip(
+                summary,
+                getattr(state, "last_token_usage", {}),
+                speed_snapshot,
+            )
+        )
+        has_speed = bool(
+            isinstance(speed_snapshot, dict)
+            and (
+                speed_snapshot.get("active")
+                or speed_snapshot.get("last_rate") is not None
+                or str(speed_snapshot.get("unavailable_reason") or "").strip()
+            )
+        )
+        label.setVisible(int(summary.get("total_tokens") or 0) > 0 or has_speed)
 
     def apply_token_usage_event(self, state, usage):
         if not state:
@@ -29928,6 +30127,8 @@ class MainWindow(QMainWindow):
             state.live_activity = False
             state.turn_steerable = False
             state.daemon_running = False
+        if status in {"completed", "error", "failed", "interrupted", "draft"}:
+            self._cancel_token_speed_monitor(state, f"session_{status}")
         if status != "running":
             state.provider_retry_attempt = 0
             state.provider_retry_max = 0
@@ -30392,7 +30593,13 @@ class MainWindow(QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
-            if event_type == "system_prompt":
+            if event_type == "provider_request_start":
+                self._start_token_speed_monitor(state, event)
+            elif event_type == "provider_request_finish":
+                self._finish_token_speed_monitor(state, event)
+            elif event_type == "provider_request_error":
+                self._finish_token_speed_monitor(state, event, status="error")
+            elif event_type == "system_prompt":
                 state.system_prompt_text = event.get("content") or ""
                 state.runtime_context_text = event.get("runtime_context") or ""
                 state.prompt_cache_meta = {
@@ -30422,6 +30629,7 @@ class MainWindow(QMainWindow):
                     event.get("usage") if isinstance(event.get("usage"), dict) else {},
                 )
             elif event_type == "provider_retry":
+                self._retry_token_speed_monitor(state, event)
                 retry_attempt = max(1, int(event.get("attempt") or 1))
                 retry_max = max(retry_attempt, int(event.get("max_retries") or retry_attempt))
                 state.provider_retry_attempt = retry_attempt
@@ -31666,6 +31874,7 @@ class MainWindow(QMainWindow):
         state = self.sessions.get(session_id)
         if state:
             self._stop_live_subagents(state, force=True)
+            self._cancel_token_speed_monitor(state, "session_closed")
             if state.daemon_worker:
                 self._disconnect_worker_signals(state.daemon_worker)
                 try:
@@ -31813,6 +32022,11 @@ class MainWindow(QMainWindow):
         self.session_tabs.tabBar().hide()
 
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll, token_usage_label)
+        state.token_speed_timer = QTimer(self)
+        state.token_speed_timer.setInterval(500)
+        state.token_speed_timer.timeout.connect(
+            lambda sid=session_id: self.refresh_token_usage_label(sid)
+        )
         state.content_flush_timer = QTimer(self)
         state.content_flush_timer.setSingleShot(True)
         state.content_flush_timer.setInterval(CONTENT_FLUSH_INTERVAL_MS)
@@ -31931,6 +32145,9 @@ class MainWindow(QMainWindow):
         state.token_usage_buckets = {}
         state.counted_usage_request_ids = set()
         state.last_token_usage = {}
+        if state.token_speed_timer is not None and state.token_speed_timer.isActive():
+            state.token_speed_timer.stop()
+        state.token_speed_tracker.clear()
         self.refresh_token_usage_label(state.session_id)
 
     def _show_session_loading_state(self, state, text="正在加载历史会话…"):
@@ -41257,6 +41474,7 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state:
             return
+        self._cancel_token_speed_monitor(state, "user_stop")
         stopped_turn_id = state.active_turn_id
         stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
         daemon_worker = state.daemon_worker
@@ -45522,6 +45740,7 @@ class MainWindow(QMainWindow):
             state.provider_retry_max = 0
             self.set_session_phase("Analyzing", state.session_id)
         self._ensure_live_agent_stage(state)
+        self._record_token_speed_delta(state, text, "content")
         state.current_content_buffer += text
         self._timeline_append_text_delta(state, "content_fragment", text)
         if state.content_flush_timer and not state.content_flush_timer.isActive():
@@ -45567,6 +45786,7 @@ class MainWindow(QMainWindow):
             state.provider_retry_max = 0
         self._ensure_live_agent_stage(state)
         delta = text or ""
+        self._record_token_speed_delta(state, delta, "thinking")
         if delta.strip():
             if state.pending_clarify_questions:
                 self.set_session_phase("Clarifying", state.session_id)

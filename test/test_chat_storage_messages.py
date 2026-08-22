@@ -97,6 +97,48 @@ class TestChatStorageMessages(unittest.TestCase):
                 expected_revision=3,
             )
 
+    def test_history_rewrite_preserves_retained_times_and_replaces_edited_guidance(self):
+        storage = ChatStorage(self.db_path)
+        original = [
+            {"id": "u1", "role": "user", "content": "start", "created_at": 101},
+            {"id": "a1", "role": "assistant", "content": "working", "created_at": 202},
+            {
+                "id": "e090801b",
+                "role": "user",
+                "content": "old guidance",
+                "created_at": 303,
+                "meta": {"same_turn_guidance": True},
+            },
+        ]
+        storage.save_conversation_safely(
+            "rewrite-times",
+            original,
+            meta={"history_save_revision": 7},
+        )
+        original_hash = RuntimeJournal.messages_hash(storage.get_messages("rewrite-times"))
+
+        storage.rewrite_conversation_safely(
+            "rewrite-times",
+            [
+                {"id": "u1", "role": "user", "content": "start"},
+                {"id": "a1", "role": "assistant", "content": "working"},
+                {
+                    "id": "replacement-guidance",
+                    "role": "user",
+                    "content": "edited guidance",
+                    "created_at": 404,
+                },
+            ],
+            expected_messages_hash=original_hash,
+            expected_revision=7,
+            meta={"history_save_revision": 7},
+        )
+
+        rewritten = storage.get_messages("rewrite-times")
+        self.assertEqual([item["id"] for item in rewritten], ["u1", "a1", "replacement-guidance"])
+        self.assertEqual([item["created_at"] for item in rewritten], [101, 202, 404])
+        self.assertNotIn("e090801b", [item["id"] for item in rewritten])
+
     def test_safe_save_reconciles_legacy_ui_only_rows_before_append(self):
         storage = ChatStorage(self.db_path)
         first = {"id": "u1", "role": "user", "content": "hello"}
@@ -473,8 +515,8 @@ class TestChatStorageMessages(unittest.TestCase):
 
     def test_save_conversation_appends_incrementally_and_falls_back_on_edit(self):
         storage = ChatStorage(self.db_path)
-        first = {"id": "m1", "role": "user", "content": "hello"}
-        second = {"id": "m2", "role": "assistant", "content": "world"}
+        first = {"id": "m1", "role": "user", "content": "hello", "created_at": 111}
+        second = {"id": "m2", "role": "assistant", "content": "world", "created_at": 222}
 
         storage.save_conversation("conv-incremental", [dict(first)], title="demo")
         storage.save_conversation("conv-incremental", [dict(first), dict(second)], title="demo")
@@ -495,6 +537,7 @@ class TestChatStorageMessages(unittest.TestCase):
         messages = storage.get_messages("conv-incremental")
         self.assertEqual(messages[0]["content"], "hello edited")
         self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
+        self.assertEqual([msg["created_at"] for msg in messages], [111, 222])
 
     def test_update_conversation_meta_preserves_activity_time(self):
         storage = ChatStorage(self.db_path)

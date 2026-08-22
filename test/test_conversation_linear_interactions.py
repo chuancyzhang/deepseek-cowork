@@ -2948,8 +2948,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             fake_worker.finished_signal = MagicMock()
             fake_worker.finished = MagicMock()
             fake_worker.start.side_effect = lambda: order.append("steer")
+            accepted_messages = []
 
-            def accept_guidance(*_args, **_kwargs):
+            def accept_guidance(_state, message, *_args, **_kwargs):
+                accepted_messages.append(copy.deepcopy(message))
                 state.chat_save_revision = 12
                 order.append("commit_requested")
 
@@ -2969,6 +2971,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertEqual(order, ["commit_requested", "commit_confirmed", "steer"])
             self.assertIn(fake_worker, state.guidance_workers)
+            self.assertEqual(len(accepted_messages), 1)
+            self.assertGreater(accepted_messages[0]["created_at"], 0)
         finally:
             window.close()
             window.deleteLater()

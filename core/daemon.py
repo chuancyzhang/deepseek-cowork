@@ -268,7 +268,12 @@ class DaemonState:
             if existing_sequence >= 0:
                 sequences.append(existing_sequence)
         meta["sequence"] = max(sequences, default=len(messages) - 1) + 1
-        message = {"id": stable_id, "role": "user", "content": content}
+        message = {
+            "id": stable_id,
+            "role": "user",
+            "content": content,
+            "created_at": int(time.time()),
+        }
         message["meta"] = meta
         messages.append(message)
 

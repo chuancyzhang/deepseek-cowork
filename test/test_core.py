@@ -3663,10 +3663,12 @@ class TestLLMWorkerGuidance(unittest.TestCase):
         self.assertTrue(worker.steer(second, "turn-1")["accepted"])
         current_messages = []
         generated_messages = []
-        self.assertTrue(worker._append_pending_guidance(current_messages, generated_messages))
+        with patch("core.agent.time.time", return_value=1234):
+            self.assertTrue(worker._append_pending_guidance(current_messages, generated_messages))
 
         self.assertEqual([item["id"] for item in current_messages], ["g1", "g2"])
         self.assertEqual(current_messages, generated_messages)
+        self.assertEqual([item["created_at"] for item in current_messages], [1234, 1234])
 
     def test_steer_rejects_mismatched_or_closed_turn(self):
         worker = self._worker()

@@ -1262,6 +1262,8 @@ class LLMWorker(QThread):
         ledger_message = json_copy(message, {})
         if not ledger_message.get("id"):
             ledger_message["id"] = uuid.uuid4().hex
+        if ledger_message.get("created_at") is None:
+            ledger_message["created_at"] = int(time.time())
         worker_turn_id = str(getattr(self, "turn_id", "") or "")
         worker_request_id = str(getattr(self, "request_id", "") or "")
         meta = ledger_message.get("meta") if isinstance(ledger_message.get("meta"), dict) else {}

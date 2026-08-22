@@ -197,7 +197,12 @@ class TestChatRecoveryJournal(unittest.TestCase):
 
             self.assertEqual(recovered, ["session-v2"])
             self.assertEqual(errors, [])
-            self.assertEqual(storage.get_messages("session-v2"), storage.normalize_messages(messages))
+            recovered_messages = storage.get_messages("session-v2")
+            self.assertEqual(
+                RuntimeJournal.messages_hash(recovered_messages),
+                RuntimeJournal.messages_hash(storage.normalize_messages(messages)),
+            )
+            self.assertTrue(all(item.get("created_at") for item in recovered_messages))
             manifest = journal.runtime_journal.load_manifest("session-v2")
             self.assertEqual(manifest.get("pending_commit_run_id"), "")
             self.assertNotIn("pending_commit", manifest)
@@ -334,7 +339,12 @@ class TestChatRecoveryJournal(unittest.TestCase):
             self.assertEqual(recovered, [])
             self.assertEqual(len(errors), 1)
             self.assertEqual(errors[0]["source"], "runtime_pending_commit_quarantined")
-            self.assertEqual(storage.get_messages("session-legacy-diverged"), storage.normalize_messages(current_messages))
+            stored_messages = storage.get_messages("session-legacy-diverged")
+            self.assertEqual(
+                RuntimeJournal.messages_hash(stored_messages),
+                RuntimeJournal.messages_hash(storage.normalize_messages(current_messages)),
+            )
+            self.assertTrue(all(item.get("created_at") for item in stored_messages))
             manifest = journal.runtime_journal.load_manifest("session-legacy-diverged")
             self.assertFalse(manifest.get("pending_commit_run_id"))
             self.assertNotIn("pending_commit", manifest)

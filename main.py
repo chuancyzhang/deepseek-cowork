@@ -43002,6 +43002,7 @@ a {{ overflow-wrap: anywhere; }}
                 "id": message_id,
                 "role": "assistant",
                 "content": text,
+                "created_at": int(time.time()),
                 "meta": {
                     "agent_id": agent_id,
                     "agent_profile_id": data.get("agent_profile_id") or "",
@@ -43770,6 +43771,7 @@ a {{ overflow-wrap: anywhere; }}
             "id": self._new_message_id(),
             "role": "user",
             "content": payload.get("content") or "",
+            "created_at": int(time.time()),
             "meta": {
                 **(payload.get("meta") or {}),
                 "same_turn_guidance": True,
@@ -46778,6 +46780,7 @@ a {{ overflow-wrap: anywhere; }}
                 "content": content,
                 "reasoning": reasoning,
                 "content_parts": list(content_parts or []),
+                "created_at": int(time.time()),
                 "meta": {
                     "turn_id": turn_key,
                     "request_id": run_key,

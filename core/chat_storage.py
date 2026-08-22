@@ -448,9 +448,25 @@ class ChatStorage:
                 msg.get("token_count"),
                 msg.get("tool_call_id"),
                 index,
-                msg.get("created_at") or now,
+                msg.get("created_at") if msg.get("created_at") is not None else now,
             ),
         )
+
+    @staticmethod
+    def _preserve_persisted_message_created_at(rows, messages):
+        """Keep the original business time for rows retained by a rewrite."""
+        persisted_created_at = {
+            str(row["id"]): row["created_at"]
+            for row in rows
+            if row["id"] is not None and row["created_at"] is not None
+        }
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = str(message.get("id") or "")
+            if message_id in persisted_created_at:
+                message["created_at"] = persisted_created_at[message_id]
+        return messages
 
     def _existing_messages_are_prefix(self, rows, normalized_messages):
         if len(rows) > len(normalized_messages):
@@ -844,6 +860,7 @@ class ChatStorage:
                         now,
                     )
                 return
+            self._preserve_persisted_message_created_at(rows, normalized_messages)
             conn.execute("DELETE FROM agent_messages WHERE agent_id = ?", (agent_id,))
             for index, msg in enumerate(normalized_messages):
                 self._insert_message_row(
@@ -1048,6 +1065,7 @@ class ChatStorage:
                 conversation_id,
                 normalized_messages,
             )
+            self._preserve_persisted_message_created_at(rows, normalized_messages)
             self._upsert_conversation_in_connection(
                 conn,
                 conversation_id,
@@ -1155,6 +1173,7 @@ class ChatStorage:
             """,
             (conversation_id,),
         ).fetchall()
+        self._preserve_persisted_message_created_at(rows, normalized_messages)
         if rows and self._existing_messages_are_prefix(rows, normalized_messages):
             start = len(rows)
             for index, msg in enumerate(normalized_messages[start:], start=start):
@@ -1772,7 +1791,7 @@ class ChatStorage:
             rows = conn.execute(
                 """
                 SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
-                       result_obj, token_count, tool_call_id
+                       result_obj, token_count, tool_call_id, created_at
                 FROM messages
                 WHERE conversation_id = ?
                 ORDER BY position ASC

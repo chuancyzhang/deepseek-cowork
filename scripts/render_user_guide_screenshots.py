@@ -1461,6 +1461,29 @@ def main_run():
             window.input_field.setPlainText("请先压力测试这份产品方案，再由我确认是否执行。")
             save_widget(window, "s15a-grill-mode-armed.png", 200)
             return
+        if SCREENSHOT_SCOPE == "ppt-agent":
+            template_path = workspace / "品牌汇报模板.pptx"
+            template_path.write_bytes(b"pptx-preview-placeholder")
+            ppt_agent = main.PptAgentModeDialog(
+                str(workspace),
+                model_profiles=[
+                    {
+                        "id": "vision-model",
+                        "model_name": "vision-model",
+                        "display_name": "Vision Pro",
+                        "channel_display_name": "演示模型",
+                        "supports_vision": True,
+                    }
+                ],
+                selected_model_id="vision-model",
+                parent=window,
+            )
+            ppt_agent.request_edit.setPlainText("基于调研资料生成 12 页投资人路演，保留模板品牌元素和版式语言。")
+            ppt_agent.template_file = str(template_path)
+            ppt_agent.refresh_files_label()
+            save_widget(ppt_agent, "s24-ppt-agent.png", 220)
+            ppt_agent.hide()
+            return
         if SCREENSHOT_SCOPE == "home":
             narrow = os.environ.get("COWORK_SCREENSHOT_NARROW") == "1"
             if narrow:
@@ -1603,7 +1626,19 @@ def main_run():
         save_widget(skill_analysis, "31-skill-capture-analysis.png")
         skill_analysis.hide()
 
-        ppt_agent = main.PptAgentModeDialog(str(workspace), parent=window)
+        ppt_agent = main.PptAgentModeDialog(
+            str(workspace),
+            model_profiles=[
+                {
+                    "id": "vision-model",
+                    "model_name": "vision-model",
+                    "display_name": "Vision Pro",
+                    "supports_vision": True,
+                }
+            ],
+            selected_model_id="vision-model",
+            parent=window,
+        )
         save_widget(ppt_agent, "27-ppt-agent.png")
         ppt_agent.hide()
 

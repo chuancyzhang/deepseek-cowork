@@ -325,6 +325,8 @@ from core.llm.providers import (
 
 OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS = 1000
 from core.ppt_agent import (
+    PPT_AGENT_OUTPUT_HTML,
+    PPT_AGENT_OUTPUT_PPTX,
     PPT_AGENT_PREFERENCE_AUTO,
     PPT_AGENT_PREFERENCE_BUSINESS,
     PPT_AGENT_PREFERENCE_TECH,
@@ -336,10 +338,20 @@ from core.ppt_agent import (
     PPT_AGENT_STRATEGY_GUIZANG,
     PPT_AGENT_STRATEGY_HUASHU,
     build_ppt_agent_prompt,
+    normalize_ppt_agent_output_format,
     normalize_ppt_agent_preference,
     normalize_ppt_agent_strategy,
+    ppt_agent_builtin_skill_names,
     ppt_agent_strategy_skill_name,
     ppt_agent_strategy_label,
+)
+from core.presentation_renderer import (
+    RENDERER_NONE,
+    detect_presentation_renderers,
+    export_presentation_pngs,
+    file_sha256 as presentation_file_sha256,
+    presentation_run_dir,
+    python_pptx_available,
 )
 import shutil
 import traceback
@@ -17418,12 +17430,124 @@ class EmptyStateWidget(QWidget):
         self.reflow_cards()
 
 
+class PptTemplatePrepareWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, template_file, run_id, parent=None):
+        super().__init__(parent)
+        self.template_file = os.path.abspath(str(template_file or ""))
+        self.run_id = str(run_id or uuid.uuid4().hex)
+
+    def run(self):
+        try:
+            renderer_result = detect_presentation_renderers(timeout_per_candidate=10)
+            available = list(renderer_result.get("available") or [])
+            if not available:
+                self.completed.emit(
+                    {
+                        "renderer": RENDERER_NONE,
+                        "prog_id": "",
+                        "screenshots": [],
+                        "template_hash": presentation_file_sha256(self.template_file),
+                        "errors": renderer_result.get("errors") or {},
+                        "run_id": self.run_id,
+                    }
+                )
+                return
+            failures = {}
+            for candidate in available:
+                renderer = str(candidate.get("renderer") or "")
+                prog_id = str(candidate.get("prog_id") or "")
+                output_dir = os.path.join(
+                    presentation_run_dir(self.run_id, create=True),
+                    f"template-{renderer}",
+                )
+                try:
+                    screenshots = export_presentation_pngs(
+                        self.template_file,
+                        output_dir,
+                        renderer=renderer,
+                        prog_id=prog_id,
+                    )
+                    self.completed.emit(
+                        {
+                            "renderer": renderer,
+                            "prog_id": prog_id,
+                            "screenshots": screenshots,
+                            "template_hash": presentation_file_sha256(self.template_file),
+                            "errors": failures,
+                            "run_id": self.run_id,
+                        }
+                    )
+                    return
+                except Exception as exc:
+                    failures[f"{renderer}:{prog_id}"] = str(exc)
+            self.failed.emit("；".join(f"{name}: {error}" for name, error in failures.items()))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class PptResultRenderWorker(QThread):
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, pptx_path, renderer, prog_id, run_id, validation_round, final_only=False, parent=None):
+        super().__init__(parent)
+        self.pptx_path = os.path.normpath(str(pptx_path or ""))
+        self.renderer = str(renderer or RENDERER_NONE)
+        self.prog_id = str(prog_id or "")
+        self.run_id = str(run_id or uuid.uuid4().hex)
+        self.validation_round = max(1, int(validation_round or 1))
+        self.final_only = bool(final_only)
+
+    def run(self):
+        try:
+            output_dir = os.path.join(
+                presentation_run_dir(self.run_id),
+                f"result_round_{self.validation_round}",
+            )
+            screenshots = export_presentation_pngs(
+                self.pptx_path,
+                output_dir,
+                renderer=self.renderer,
+                prog_id=self.prog_id,
+            )
+            self.completed.emit(
+                {
+                    "pptx_path": self.pptx_path,
+                    "screenshots": screenshots,
+                    "renderer": self.renderer,
+                    "prog_id": self.prog_id,
+                    "validation_round": self.validation_round,
+                    "final_only": self.final_only,
+                }
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class PptAgentModeDialog(QDialog):
-    def __init__(self, workspace_dir="", parent=None):
+    def __init__(self, workspace_dir="", model_profiles=None, selected_model_id="", parent=None):
         super().__init__(parent)
         self.workspace_dir = workspace_dir or ""
+        self.model_profiles = [
+            dict(profile)
+            for profile in (model_profiles or [])
+            if profile.get("supports_vision")
+            and str(profile.get("model_name") or "").strip()
+            and str(profile.get("id") or "").strip()
+        ]
+        self.selected_model_id = str(selected_model_id or "")
         self.source_files = []
         self.template_file = ""
+        self.template_screenshots = []
+        self.template_hash = ""
+        self.renderer = RENDERER_NONE
+        self.renderer_prog_id = ""
+        self.visual_status = "unverified"
+        self.run_id = uuid.uuid4().hex
+        self.prepare_worker = None
         self.setWindowTitle("PPT Mode")
         self.setModal(True)
         self.resize(720, 680)
@@ -17472,8 +17596,32 @@ class PptAgentModeDialog(QDialog):
         )
         layout.addWidget(self._field_block("需求", self.request_edit))
 
+        primary_options = QHBoxLayout()
+        primary_options.setContentsMargins(0, 0, 0, 0)
+        primary_options.setSpacing(12)
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("PPTX（模板驱动）", PPT_AGENT_OUTPUT_PPTX)
+        self.output_format_combo.addItem("16:9 演示型 HTML", PPT_AGENT_OUTPUT_HTML)
+        apply_settings_combo_style(self.output_format_combo)
+        primary_options.addWidget(self._field_block("输出格式", self.output_format_combo), 1)
+
+        self.task_model_combo = QComboBox()
+        for profile in self.model_profiles:
+            model_id = str(profile.get("id") or "")
+            display = profile.get("display_name") or profile.get("model_name") or "模型"
+            channel = profile.get("channel_display_name") or profile.get("provider_display_name") or ""
+            self.task_model_combo.addItem(f"{channel} / {display}" if channel else display, model_id)
+        if self.selected_model_id:
+            selected_index = self.task_model_combo.findData(self.selected_model_id)
+            if selected_index >= 0:
+                self.task_model_combo.setCurrentIndex(selected_index)
+        apply_settings_combo_style(self.task_model_combo)
+        primary_options.addWidget(self._field_block("本次多模态模型", self.task_model_combo), 1)
+        layout.addLayout(primary_options)
+
         self.generation_options_toggle = QPushButton("生成选项")
         self.generation_options_toggle.setCheckable(True)
+        self.generation_options_toggle.setChecked(True)
         self.generation_options_toggle.setStyleSheet(apple_button_style("ghost", align="left"))
         self.generation_options_toggle.setIcon(qta.icon("fa5s.sliders-h", color=DesignTokens.text_secondary))
         layout.addWidget(self.generation_options_toggle)
@@ -17496,7 +17644,8 @@ class PptAgentModeDialog(QDialog):
         self.preference_combo.addItem("更适合高审美商业汇报", PPT_AGENT_PREFERENCE_BUSINESS)
         self.preference_combo.addItem("更适合模板化办公 PPT", PPT_AGENT_PREFERENCE_TEMPLATE)
         apply_settings_combo_style(self.preference_combo)
-        option_row.addWidget(self._field_block("生成偏好", self.preference_combo), 1)
+        self.preference_block = self._field_block("生成偏好", self.preference_combo)
+        option_row.addWidget(self.preference_block, 1)
 
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItem("自动选择", PPT_AGENT_STRATEGY_AUTO)
@@ -17505,7 +17654,8 @@ class PptAgentModeDialog(QDialog):
         self.strategy_combo.addItem("Frontend Slides（已内置 Skill）", PPT_AGENT_STRATEGY_FRONTEND_SLIDES)
         self.strategy_combo.addItem("Huashu Design（已内置 Skill）", PPT_AGENT_STRATEGY_HUASHU)
         apply_settings_combo_style(self.strategy_combo)
-        option_row.addWidget(self._field_block("内置 Skill", self.strategy_combo), 1)
+        self.strategy_block = self._field_block("内置 Skill", self.strategy_combo)
+        option_row.addWidget(self.strategy_block, 1)
         generation_options_layout.addLayout(option_row)
 
         files_bar = QFrame()
@@ -17524,11 +17674,11 @@ class PptAgentModeDialog(QDialog):
         add_source_btn.clicked.connect(self.add_source_files)
         file_actions.addWidget(add_source_btn)
 
-        choose_template_btn = QPushButton("选择 PPTX 模板")
-        choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
-        choose_template_btn.setStyleSheet(product_button_style("secondary", radius=8))
-        choose_template_btn.clicked.connect(self.choose_template_file)
-        file_actions.addWidget(choose_template_btn)
+        self.choose_template_btn = QPushButton("选择 PPTX 模板（必选）")
+        self.choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
+        self.choose_template_btn.setStyleSheet(product_button_style("secondary", radius=8))
+        self.choose_template_btn.clicked.connect(self.choose_template_file)
+        file_actions.addWidget(self.choose_template_btn)
 
         clear_files_btn = QPushButton("清空")
         clear_files_btn.setStyleSheet(product_button_style("ghost", radius=8))
@@ -17542,7 +17692,23 @@ class PptAgentModeDialog(QDialog):
         self.files_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         files_layout.addWidget(self.files_label)
         generation_options_layout.addWidget(files_bar)
-        self.generation_options_panel.setVisible(False)
+        self.workflow_hint = QLabel()
+        self.workflow_hint.setWordWrap(True)
+        self.workflow_hint.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        generation_options_layout.addWidget(self.workflow_hint)
+
+        self.preflight_status = QLabel()
+        self.preflight_status.setWordWrap(True)
+        self.preflight_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        generation_options_layout.addWidget(self.preflight_status)
+        self.open_dependencies_btn = QPushButton("打开设置 → 组件与依赖")
+        self.open_dependencies_btn.setStyleSheet(product_button_style("secondary", radius=8))
+        self.open_dependencies_btn.clicked.connect(self.open_dependency_settings)
+        self.open_dependencies_btn.setVisible(False)
+        generation_options_layout.addWidget(self.open_dependencies_btn, 0, Qt.AlignLeft)
+
+        self.generation_options_panel.setVisible(True)
         self.generation_options_toggle.toggled.connect(self.generation_options_panel.setVisible)
         layout.addWidget(self.generation_options_panel)
 
@@ -17553,12 +17719,154 @@ class PptAgentModeDialog(QDialog):
         cancel_btn.setStyleSheet(product_button_style("secondary", radius=8))
         cancel_btn.clicked.connect(self.reject)
         action_row.addWidget(cancel_btn)
-        submit_btn = QPushButton("交给 PPT Agent")
-        submit_btn.setIcon(qta.icon("fa5s.magic", color="white"))
-        submit_btn.setStyleSheet(product_button_style("primary", radius=8))
-        submit_btn.clicked.connect(self.accept)
-        action_row.addWidget(submit_btn)
+        self.submit_btn = QPushButton("生成 PPTX")
+        self.submit_btn.setIcon(qta.icon("fa5s.magic", color="white"))
+        self.submit_btn.setStyleSheet(product_button_style("primary", radius=8))
+        self.submit_btn.clicked.connect(self.handle_submit)
+        action_row.addWidget(self.submit_btn)
         layout.addLayout(action_row)
+        self.output_format_combo.currentIndexChanged.connect(self.sync_output_mode)
+        self.sync_output_mode()
+
+    def current_output_format(self):
+        return normalize_ppt_agent_output_format(self.output_format_combo.currentData())
+
+    def sync_output_mode(self):
+        is_pptx = self.current_output_format() == PPT_AGENT_OUTPUT_PPTX
+        self.preference_block.setVisible(not is_pptx)
+        self.strategy_block.setVisible(not is_pptx)
+        self.choose_template_btn.setVisible(is_pptx)
+        self.submit_btn.setText("生成 PPTX" if is_pptx else "生成演示型 HTML")
+        self.submit_btn.setEnabled(bool(self.model_profiles))
+        self.workflow_hint.setText(
+            "先对模板逐页截图并交给多模态模型，再建议 AI 使用 python-pptx/OOXML 直接生成 PPTX；生成后继续截图校验。"
+            if is_pptx
+            else "生成单个 16:9 分页 HTML；此模式不读取或提交 PPTX 模板。"
+        )
+        if not self.model_profiles:
+            self.preflight_status.setText("没有已配置且支持图片理解的模型。请先到设置添加多模态模型。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
+        else:
+            self.preflight_status.setText("PPTX 会优先使用 PowerPoint 渲染，WPS 可作为备用。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        self.open_dependencies_btn.setVisible(False)
+        self.refresh_files_label()
+
+    def open_dependency_settings(self):
+        parent = self.parent()
+        self.reject()
+        if parent is not None and hasattr(parent, "open_settings"):
+            QTimer.singleShot(0, lambda: parent.open_settings("组件与依赖"))
+
+    def _set_preparing(self, preparing):
+        self.submit_btn.setEnabled(not preparing and bool(self.model_profiles))
+        self.output_format_combo.setEnabled(not preparing)
+        self.task_model_combo.setEnabled(not preparing)
+        self.request_edit.setEnabled(not preparing)
+        self.choose_template_btn.setEnabled(not preparing)
+        self.generation_options_toggle.setEnabled(not preparing)
+        if preparing:
+            self.submit_btn.setText("正在渲染模板…")
+
+    def handle_submit(self):
+        request = self.request_edit.toPlainText().strip()
+        if not request and not self.source_files:
+            self.preflight_status.setText("请先描述需求，或添加至少一份资料。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.warning_text};")
+            return
+        if self.task_model_combo.currentIndex() < 0:
+            self.preflight_status.setText("没有可用于本次任务的多模态模型。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
+            return
+        if self.current_output_format() == PPT_AGENT_OUTPUT_HTML:
+            self.template_screenshots = []
+            self.renderer = RENDERER_NONE
+            self.renderer_prog_id = ""
+            self.visual_status = "unverified"
+            self.accept()
+            return
+        if not self.template_file or not os.path.isfile(self.template_file):
+            self.preflight_status.setText("生成 PPTX 必须选择有效的模板原文件。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.warning_text};")
+            return
+        if not python_pptx_available():
+            self.preflight_status.setText("缺少 python-pptx。请到“设置 → 组件与依赖”安装文档工具包后重试。")
+            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
+            self.open_dependencies_btn.setVisible(True)
+            return
+        self.open_dependencies_btn.setVisible(False)
+        self.preflight_status.setText("正在探测 PowerPoint/WPS，并逐页导出模板截图…")
+        self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        self._set_preparing(True)
+        worker = PptTemplatePrepareWorker(self.template_file, self.run_id, self)
+        self.prepare_worker = worker
+        worker.completed.connect(self._handle_template_prepared)
+        worker.failed.connect(self._handle_template_prepare_failed)
+        worker.finished.connect(lambda: self._finish_prepare_worker(worker))
+        worker.start()
+
+    def _finish_prepare_worker(self, worker):
+        if self.prepare_worker is worker:
+            self.prepare_worker = None
+        worker.deleteLater()
+
+    def _confirm_unverified_generation(self, detail=""):
+        detail = str(detail or "").strip()
+        message = (
+            "当前没有可用的 PowerPoint/WPS 自动化渲染器。\n\n"
+            "继续后，AI仍会使用 python-pptx/OOXML 生成文件，但无法查看模板真实截图，也不能执行生成后的视觉校验。"
+        )
+        if detail:
+            message += f"\n\n探测详情：{detail[:600]}"
+        choice = ProductMessageDialog(
+            "继续生成未视觉校验的 PPTX？",
+            message,
+            tone="warning",
+            buttons=[
+                ("继续生成", QMessageBox.Yes, "primary", False),
+                ("返回检查", QMessageBox.Cancel, "secondary", True),
+            ],
+            parent=self,
+        ).exec_result(QMessageBox.Cancel)
+        if choice != QMessageBox.Yes:
+            self._set_preparing(False)
+            self.sync_output_mode()
+            return False
+        self.renderer = RENDERER_NONE
+        self.renderer_prog_id = ""
+        self.template_screenshots = []
+        self.visual_status = "unverified"
+        self.accept()
+        return True
+
+    def _handle_template_prepared(self, result):
+        result = dict(result or {})
+        self.template_hash = str(result.get("template_hash") or "")
+        renderer = str(result.get("renderer") or RENDERER_NONE)
+        if renderer == RENDERER_NONE:
+            errors = result.get("errors") if isinstance(result.get("errors"), dict) else {}
+            detail = "；".join(f"{name}: {error}" for name, error in errors.items())
+            self._confirm_unverified_generation(detail)
+            return
+        self.renderer = renderer
+        self.renderer_prog_id = str(result.get("prog_id") or "")
+        self.template_screenshots = list(result.get("screenshots") or [])
+        self.visual_status = "pending"
+        log_chat_runtime_debug(
+            "ppt_agent_template_rendered",
+            renderer=self.renderer,
+            screenshot_count=len(self.template_screenshots),
+            run_id=self.run_id,
+        )
+        self.accept()
+
+    def _handle_template_prepare_failed(self, error):
+        log_chat_runtime_debug(
+            "ppt_agent_template_render_failed",
+            error=str(error),
+            run_id=self.run_id,
+        )
+        self._confirm_unverified_generation(str(error))
 
     def _field_block(self, title, widget):
         block = QWidget()
@@ -17607,7 +17915,7 @@ class PptAgentModeDialog(QDialog):
         parts = []
         if self.source_files:
             parts.append("资料: " + "、".join(os.path.basename(path) for path in self.source_files))
-        if self.template_file:
+        if self.template_file and self.current_output_format() == PPT_AGENT_OUTPUT_PPTX:
             parts.append("模板: " + os.path.basename(self.template_file))
         self.files_label.setText("\n".join(parts) if parts else "未附加资料或模板")
 
@@ -17617,7 +17925,15 @@ class PptAgentModeDialog(QDialog):
             "preference": normalize_ppt_agent_preference(self.preference_combo.currentData()),
             "strategy": normalize_ppt_agent_strategy(self.strategy_combo.currentData()),
             "source_files": list(self.source_files),
-            "template_file": self.template_file,
+            "template_file": self.template_file if self.current_output_format() == PPT_AGENT_OUTPUT_PPTX else "",
+            "output_format": self.current_output_format(),
+            "task_model_id": str(self.task_model_combo.currentData() or ""),
+            "template_screenshots": list(self.template_screenshots),
+            "template_hash": self.template_hash,
+            "renderer": self.renderer,
+            "renderer_prog_id": self.renderer_prog_id,
+            "visual_status": self.visual_status,
+            "run_id": self.run_id,
         }
 
 
@@ -17707,11 +18023,11 @@ class AgentModuleDialog(QDialog):
         text_box.setSpacing(5)
         title = QLabel("PPT Agent")
         title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary}; background: transparent; border: none;")
-        desc = QLabel("从主题、资料或模板生成演示文稿 HTML 工作稿，再导出 PPTX、DOCX 或 PDF。")
+        desc = QLabel("默认基于 PPTX 模板直接生成并视觉校验，也可生成单文件 16:9 演示型 HTML。")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
-        text_box.addWidget(self.toolkit_title_label)
-        text_box.addWidget(self.toolkit_desc_label)
+        text_box.addWidget(title)
+        text_box.addWidget(desc)
         row.addLayout(text_box, 1)
         card.clicked.connect(self._select_ppt_agent)
         self.ppt_agent_button = card
@@ -22451,6 +22767,17 @@ class SessionState:
         self.ppt_agent_selected_strategy = PPT_AGENT_STRATEGY_DEFAULT
         self.ppt_agent_preference = PPT_AGENT_PREFERENCE_AUTO
         self.ppt_agent_template_file = ""
+        self.ppt_agent_output_format = PPT_AGENT_OUTPUT_HTML
+        self.ppt_agent_template_screenshots = []
+        self.ppt_agent_template_hash = ""
+        self.ppt_agent_renderer = RENDERER_NONE
+        self.ppt_agent_renderer_prog_id = ""
+        self.ppt_agent_visual_status = ""
+        self.ppt_agent_run_id = ""
+        self.ppt_agent_task_model_id = ""
+        self.ppt_agent_validation_round = 0
+        self.ppt_agent_validation_worker = None
+        self.ppt_agent_result_file = ""
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.favorite_id = ""
@@ -28494,15 +28821,16 @@ class MainWindow(QMainWindow):
             return False
         return bool(profile.get("supports_vision", False))
 
-    def _ensure_vision_attachment_support(self, state, file_paths):
+    def _ensure_vision_attachment_support(self, state, file_paths, model_profile=None):
         image_paths = [path for path in self._normalize_prompt_file_paths(file_paths) if self._is_supported_image_attachment(path)]
-        if not image_paths or self._selected_model_supports_vision(state):
+        effective_profile = model_profile if isinstance(model_profile, dict) else self._model_profile_for_state(state)
+        if not image_paths or bool(effective_profile.get("supports_vision", False)):
             return True
         log_attachment_event(
             "vision_preflight_blocked",
             session_id=getattr(state, "session_id", ""),
             image_count=len(image_paths),
-            model_id=self._model_id_for_state(state),
+            model_id=str(effective_profile.get("id") or self._model_id_for_state(state) or ""),
         )
         if state and state.session_id == self.current_session_id:
             self.add_system_toast(
@@ -29857,11 +30185,11 @@ class MainWindow(QMainWindow):
             profile = None
         return profile if isinstance(profile, dict) else {}
 
-    def _model_profile_snapshot_for_state(self, state=None):
-        profile = copy.deepcopy(self._model_profile_for_state(state))
+    def _model_profile_snapshot_for_state(self, state=None, model_id=None):
+        profile = copy.deepcopy(self._model_profile_for_state(state, model_id=model_id))
         if not isinstance(profile, dict):
             profile = {}
-        effort = self._selected_reasoning_effort(state)
+        effort = self._selected_reasoning_effort(state, model_id=model_id)
         if effort:
             profile["reasoning_effort"] = effort
             profile["deepseek_reasoning_effort"] = effort
@@ -30024,8 +30352,8 @@ class MainWindow(QMainWindow):
         self.refresh_model_selector()
         return False
 
-    def _selected_reasoning_effort(self, state=None):
-        profile = self._model_profile_for_state(state)
+    def _selected_reasoning_effort(self, state=None, model_id=None):
+        profile = self._model_profile_for_state(state, model_id=model_id)
         if not isinstance(profile, dict):
             return ""
         efforts = normalize_reasoning_efforts(profile.get("reasoning_efforts"))
@@ -30422,12 +30750,201 @@ class MainWindow(QMainWindow):
         card = self._office_draft_card_for_state(state)
         if state and getattr(state, "session_id", None) == getattr(self, "current_session_id", None):
             self._set_deliverable_conversion_running("")
-        if card is None:
-            return
         if failed_message:
-            card.set_failed(failed_message)
+            if card is not None:
+                card.set_failed(failed_message)
             return
-        card.set_completed(self._collect_office_task_result_paths(state, content=content, bubble=bubble))
+        result_paths = self._collect_office_task_result_paths(state, content=content, bubble=bubble)
+        if card is not None:
+            card.set_completed(result_paths)
+        self._handle_ppt_agent_validation_completion(state, content, result_paths)
+
+    def _ppt_agent_generated_pptx(self, state, result_paths):
+        template_key = os.path.normcase(os.path.abspath(str(getattr(state, "ppt_agent_template_file", "") or "")))
+        candidates = []
+        for path in result_paths or []:
+            normalized = os.path.normpath(str(path or ""))
+            if os.path.splitext(normalized)[1].lower() != ".pptx" or not os.path.isfile(normalized):
+                continue
+            if template_key and os.path.normcase(os.path.abspath(normalized)) == template_key:
+                continue
+            candidates.append(normalized)
+        return max(candidates, key=os.path.getmtime) if candidates else ""
+
+    def _handle_ppt_agent_validation_completion(self, state, content, result_paths):
+        if not state or not getattr(state, "ppt_agent_mode", False):
+            return
+        if normalize_ppt_agent_output_format(getattr(state, "ppt_agent_output_format", "")) != PPT_AGENT_OUTPUT_PPTX:
+            return
+        card = self._office_draft_card_for_state(state)
+        visual_status = str(getattr(state, "ppt_agent_visual_status", "") or "").strip().lower()
+        if visual_status == "validating":
+            if "[PPT_VALIDATION_PASS]" in str(content or ""):
+                state.ppt_agent_visual_status = "verified"
+                log_chat_runtime_debug(
+                    "ppt_agent_validation_finish",
+                    session_id=state.session_id,
+                    status="verified",
+                    validation_round=getattr(state, "ppt_agent_validation_round", 0),
+                )
+                if card is not None:
+                    card.add_process_note("已完成逐页截图复核，PPTX 视觉校验通过。", tone="success")
+                return
+            if "[PPT_VALIDATION_REPAIRED]" in str(content or ""):
+                final_only = int(getattr(state, "ppt_agent_validation_round", 0) or 0) >= 2
+                state.ppt_agent_visual_status = "repair_render_pending"
+                self._schedule_ppt_agent_result_render(state, result_paths, final_only=final_only)
+                return
+            state.ppt_agent_visual_status = "validation_failed"
+            log_chat_runtime_debug(
+                "ppt_agent_validation_finish",
+                session_id=state.session_id,
+                status="marker_missing",
+                validation_round=getattr(state, "ppt_agent_validation_round", 0),
+            )
+            if card is not None:
+                card.add_process_note("视觉复核未返回可识别结论，结果保持“未验证”，请人工检查。", tone="warning")
+            return
+        if visual_status in {"verified", "validation_failed", "repair_limit_reached", "unverified"}:
+            if visual_status == "unverified" and card is not None:
+                card.add_process_note("未检测到 PowerPoint/WPS 渲染器；PPTX 已生成，但未做视觉校验。", tone="warning")
+            return
+        self._schedule_ppt_agent_result_render(state, result_paths, final_only=False)
+
+    def _schedule_ppt_agent_result_render(self, state, result_paths, final_only=False):
+        if str(getattr(state, "ppt_agent_renderer", RENDERER_NONE) or RENDERER_NONE) == RENDERER_NONE:
+            state.ppt_agent_visual_status = "unverified"
+            return
+        if getattr(state, "ppt_agent_validation_worker", None) is not None:
+            return
+        pptx_path = self._ppt_agent_generated_pptx(state, result_paths)
+        if not pptx_path:
+            remembered = os.path.normpath(str(getattr(state, "ppt_agent_result_file", "") or ""))
+            if os.path.isfile(remembered) and os.path.splitext(remembered)[1].lower() == ".pptx":
+                pptx_path = remembered
+        card = self._office_draft_card_for_state(state)
+        if not pptx_path:
+            state.ppt_agent_visual_status = "validation_failed"
+            if card is not None:
+                card.add_process_note("未找到独立生成的 PPTX 文件，无法开始视觉校验。", tone="error")
+            return
+        state.ppt_agent_result_file = pptx_path
+        next_round = max(1, int(getattr(state, "ppt_agent_validation_round", 0) or 0) + (0 if final_only else 1))
+        if final_only:
+            next_round = max(2, int(getattr(state, "ppt_agent_validation_round", 0) or 0))
+        worker = PptResultRenderWorker(
+            pptx_path,
+            getattr(state, "ppt_agent_renderer", RENDERER_NONE),
+            getattr(state, "ppt_agent_renderer_prog_id", ""),
+            getattr(state, "ppt_agent_run_id", ""),
+            next_round,
+            final_only=final_only,
+            parent=self,
+        )
+        state.ppt_agent_validation_worker = worker
+        worker.completed.connect(lambda result, sid=state.session_id: self._handle_ppt_agent_result_rendered(sid, result))
+        worker.failed.connect(lambda error, sid=state.session_id: self._handle_ppt_agent_result_render_failed(sid, error))
+        worker.finished.connect(lambda sid=state.session_id, item=worker: self._finish_ppt_agent_validation_worker(sid, item))
+        if card is not None:
+            card.add_process_note("正在逐页渲染生成结果，准备交给同一多模态模型复核。", tone="muted")
+        log_chat_runtime_debug(
+            "ppt_agent_validation_render_start",
+            session_id=state.session_id,
+            pptx_path=pptx_path,
+            validation_round=next_round,
+            final_only=bool(final_only),
+        )
+        worker.start()
+
+    def _finish_ppt_agent_validation_worker(self, session_id, worker):
+        state = self.get_session(session_id)
+        if state and getattr(state, "ppt_agent_validation_worker", None) is worker:
+            state.ppt_agent_validation_worker = None
+        worker.deleteLater()
+
+    def _handle_ppt_agent_result_render_failed(self, session_id, error):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state.ppt_agent_visual_status = "validation_failed"
+        log_chat_runtime_debug(
+            "ppt_agent_validation_render_error",
+            session_id=session_id,
+            error=str(error),
+        )
+        card = self._office_draft_card_for_state(state)
+        if card is not None:
+            card.add_process_note(f"PPTX 逐页渲染失败，结果未验证：{error}", tone="error")
+
+    def _handle_ppt_agent_result_rendered(self, session_id, result):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        result = dict(result or {})
+        screenshots = self._normalize_prompt_file_paths(result.get("screenshots") or [])
+        validation_round = max(1, int(result.get("validation_round") or 1))
+        card = self._office_draft_card_for_state(state)
+        if not screenshots:
+            self._handle_ppt_agent_result_render_failed(session_id, "渲染器未输出任何页面截图")
+            return
+        if result.get("final_only"):
+            state.ppt_agent_visual_status = "repair_limit_reached"
+            if card is not None:
+                card.add_process_note("已完成第二轮修复后的最终渲染；达到自动修复上限，请人工确认截图。", tone="warning")
+            log_chat_runtime_debug(
+                "ppt_agent_validation_finish",
+                session_id=session_id,
+                status="repair_limit_reached",
+                screenshot_count=len(screenshots),
+                validation_round=validation_round,
+            )
+            return
+        state.ppt_agent_validation_round = validation_round
+        state.ppt_agent_visual_status = "validating"
+        pptx_path = str(result.get("pptx_path") or getattr(state, "ppt_agent_result_file", "") or "")
+        template_screenshots = self._normalize_prompt_file_paths(
+            getattr(state, "ppt_agent_template_screenshots", []) or []
+        )
+        validation_prompt = (
+            "这是 PPT Agent 自动视觉校验，请使用本任务原先选择的多模态模型完成。\n\n"
+            f"当前是第 {validation_round} 轮（最多 2 轮自动修复）。请逐页查看生成 PPTX 的截图，并参考模板截图，"
+            "检查图片缺失、错位、字体替换、文字溢出、遮挡、异常空白以及品牌元素破坏。\n"
+            f"生成文件：{pptx_path}\n"
+            "若所有页面渲染正常，不要改文件，并在回复第一行写 [PPT_VALIDATION_PASS]。\n"
+            "若发现问题，请直接修复同一个 PPTX 文件，重新执行结构检查，并在回复第一行写 "
+            "[PPT_VALIDATION_REPAIRED]。不要生成 HTML，不要调用默认 PPT/HTML Skill。"
+        )
+        prompt_files = list(OrderedDict.fromkeys([pptx_path] + screenshots + template_screenshots))
+        submitted = self._submit_session_request(
+            state,
+            validation_prompt,
+            prompt_files,
+            check_duplicates=False,
+            clear_current_input=False,
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+            ppt_agent_mode=True,
+            ppt_agent_strategy=getattr(state, "ppt_agent_strategy", PPT_AGENT_STRATEGY_AUTO),
+            ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
+            ppt_agent_preference=getattr(state, "ppt_agent_preference", PPT_AGENT_PREFERENCE_AUTO),
+            ppt_agent_template_file=getattr(state, "ppt_agent_template_file", ""),
+            ppt_agent_output_format=PPT_AGENT_OUTPUT_PPTX,
+            ppt_agent_template_screenshots=template_screenshots,
+            ppt_agent_template_hash=getattr(state, "ppt_agent_template_hash", ""),
+            ppt_agent_renderer=getattr(state, "ppt_agent_renderer", RENDERER_NONE),
+            ppt_agent_renderer_prog_id=getattr(state, "ppt_agent_renderer_prog_id", ""),
+            ppt_agent_visual_status="validating",
+            ppt_agent_run_id=getattr(state, "ppt_agent_run_id", ""),
+            task_model_id=getattr(state, "ppt_agent_task_model_id", ""),
+            user_message_meta={"ppt_agent_visual_validation": True, "ppt_agent_validation_round": validation_round},
+        )
+        if not submitted:
+            state.ppt_agent_visual_status = "validation_failed"
+            if card is not None:
+                card.add_process_note("页面截图已生成，但视觉复核任务启动失败；结果保持未验证。", tone="error")
+            return
+        if card is not None:
+            card.add_process_note(f"已提交第 {validation_round} 轮逐页视觉复核。", tone="muted")
 
     def _office_task_failed_title(self, state):
         target = str(getattr(state, "office_task_target_format", "") or "").strip().upper()
@@ -40482,7 +40999,12 @@ a {{ overflow-wrap: anywhere; }}
                 workspace_dir = self._ensure_session_workspace(state)
             except Exception:
                 workspace_dir = self.workspace_dir or ""
-        dialog = PptAgentModeDialog(workspace_dir=workspace_dir or self.workspace_dir, parent=self)
+        dialog = PptAgentModeDialog(
+            workspace_dir=workspace_dir or self.workspace_dir,
+            model_profiles=list(self.config_manager.iter_model_profiles() or []),
+            selected_model_id=self._model_id_for_state(state),
+            parent=self,
+        )
         if dialog.exec() != QDialog.Accepted:
             return False
         values = dialog.values()
@@ -40492,6 +41014,14 @@ a {{ overflow-wrap: anywhere; }}
             strategy=values.get("strategy") or PPT_AGENT_STRATEGY_AUTO,
             source_files=values.get("source_files") or [],
             template_file=values.get("template_file") or "",
+            output_format=values.get("output_format") or PPT_AGENT_OUTPUT_PPTX,
+            task_model_id=values.get("task_model_id") or "",
+            template_screenshots=values.get("template_screenshots") or [],
+            template_hash=values.get("template_hash") or "",
+            renderer=values.get("renderer") or RENDERER_NONE,
+            renderer_prog_id=values.get("renderer_prog_id") or "",
+            visual_status=values.get("visual_status") or "unverified",
+            ppt_agent_run_id=values.get("run_id") or "",
         )
 
     def open_agent_module(self):
@@ -40505,6 +41035,14 @@ a {{ overflow-wrap: anywhere; }}
         strategy=PPT_AGENT_STRATEGY_AUTO,
         source_files=None,
         template_file="",
+        output_format=PPT_AGENT_OUTPUT_HTML,
+        task_model_id="",
+        template_screenshots=None,
+        template_hash="",
+        renderer=RENDERER_NONE,
+        renderer_prog_id="",
+        visual_status="unverified",
+        ppt_agent_run_id="",
         session_id=None,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -40517,6 +41055,9 @@ a {{ overflow-wrap: anywhere; }}
             has_template=bool(template_file),
             preference=preference,
             strategy=strategy,
+            output_format=output_format,
+            task_model_id=task_model_id,
+            renderer=renderer,
         )
         if not state:
             return False
@@ -40535,8 +41076,38 @@ a {{ overflow-wrap: anywhere; }}
                 auto_close_ms=6000,
             )
             return False
+        output_format = normalize_ppt_agent_output_format(output_format)
         source_files = [os.path.normpath(str(path or "").strip()) for path in (source_files or []) if str(path or "").strip()]
         template_file = os.path.normpath(str(template_file or "").strip()) if str(template_file or "").strip() else ""
+        template_screenshots = [
+            os.path.normpath(str(path or "").strip())
+            for path in (template_screenshots or [])
+            if str(path or "").strip()
+        ]
+        if output_format == PPT_AGENT_OUTPUT_HTML:
+            template_file = ""
+            template_screenshots = []
+            renderer = RENDERER_NONE
+            renderer_prog_id = ""
+            visual_status = "unverified"
+        task_model_id = str(task_model_id or "").strip()
+        task_model_profile = self._model_profile_for_state(state, model_id=task_model_id) if task_model_id else {}
+        if task_model_id and (not task_model_profile or not task_model_profile.get("supports_vision")):
+            self.add_system_toast(
+                "请选择已配置且支持图片理解的模型。",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=5200,
+            )
+            return False
+        if output_format == PPT_AGENT_OUTPUT_PPTX and not task_model_id:
+            self.add_system_toast(
+                "生成 PPTX 必须选择本次任务使用的多模态模型。",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=5200,
+            )
+            return False
         request = str(request_text or "").strip()
         if not request and source_files:
             source_names = "、".join(os.path.basename(path) for path in source_files[:3])
@@ -40562,6 +41133,18 @@ a {{ overflow-wrap: anywhere; }}
                 auto_close_ms=6000,
             )
             return False
+        missing_screenshots = [path for path in template_screenshots if not os.path.isfile(path)]
+        if missing_screenshots:
+            self.add_system_toast(
+                "模板截图不可用，请重新打开 PPT Agent 生成预览。",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=6000,
+            )
+            return False
+        if output_format == PPT_AGENT_OUTPUT_PPTX and not template_file:
+            self.add_system_toast("生成 PPTX 必须选择模板原文件。", "warning", session_id=state.session_id, auto_close_ms=5200)
+            return False
         if template_file and (not os.path.isfile(template_file) or os.path.splitext(template_file)[1].lower() != ".pptx"):
             log_chat_runtime_debug(
                 "ppt_agent_request_invalid_template",
@@ -40570,18 +41153,35 @@ a {{ overflow-wrap: anywhere; }}
             )
             self.add_system_toast("请选择有效的 PPTX 模板文件。", "error", session_id=state.session_id, auto_close_ms=5200)
             return False
+        if template_file and template_hash:
+            try:
+                if presentation_file_sha256(template_file) != str(template_hash):
+                    self.add_system_toast(
+                        "模板文件在截图后发生变化，请重新选择模板。",
+                        "error",
+                        session_id=state.session_id,
+                        auto_close_ms=6000,
+                    )
+                    return False
+            except OSError as exc:
+                self.add_system_toast(f"无法校验模板文件：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
+                return False
         prompt_result = build_ppt_agent_prompt(
             request,
             preference=preference,
             explicit_strategy=strategy,
             template_file=template_file,
+            output_format=output_format,
+            template_screenshots=template_screenshots,
+            renderer=renderer,
+            visual_validation=str(visual_status or "").lower() != "unverified",
         )
         prompt = prompt_result.get("prompt") or request
         prompt_lines = [prompt]
         if source_files:
             prompt_lines.extend(["", "本轮附加资料:"])
             prompt_lines.extend(f"- {path}" for path in source_files)
-        if template_file:
+        if template_file and output_format == PPT_AGENT_OUTPUT_HTML:
             prompt_lines.extend(
                 [
                     "",
@@ -40590,7 +41190,13 @@ a {{ overflow-wrap: anywhere; }}
                     f"- PPTX 模板文件: {template_file}",
                 ]
             )
-        prompt_files = list(OrderedDict.fromkeys(source_files + ([template_file] if template_file else [])))
+        prompt_files = list(
+            OrderedDict.fromkeys(
+                source_files
+                + ([template_file] if template_file else [])
+                + template_screenshots
+            )
+        )
         normalized_strategy = normalize_ppt_agent_strategy(strategy)
         selected_strategy = normalize_ppt_agent_strategy(prompt_result.get("selected_strategy"))
         normalized_preference = normalize_ppt_agent_preference(preference)
@@ -40616,6 +41222,14 @@ a {{ overflow-wrap: anywhere; }}
             ppt_agent_selected_strategy=selected_strategy,
             ppt_agent_preference=normalized_preference,
             ppt_agent_template_file=template_file,
+            ppt_agent_output_format=output_format,
+            ppt_agent_template_screenshots=template_screenshots,
+            ppt_agent_template_hash=template_hash,
+            ppt_agent_renderer=renderer,
+            ppt_agent_renderer_prog_id=renderer_prog_id,
+            ppt_agent_visual_status=visual_status,
+            ppt_agent_run_id=ppt_agent_run_id,
+            task_model_id=task_model_id,
         )
         log_chat_runtime_debug(
             "ppt_agent_request_submitted",
@@ -42401,19 +43015,31 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
         ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
         ppt_agent_template_file="",
+        ppt_agent_output_format=PPT_AGENT_OUTPUT_HTML,
+        ppt_agent_template_screenshots=None,
+        ppt_agent_template_hash="",
+        ppt_agent_renderer=RENDERER_NONE,
+        ppt_agent_renderer_prog_id="",
+        ppt_agent_visual_status="",
+        ppt_agent_run_id="",
+        task_model_id="",
     ):
         effective_skill_names = normalize_selected_skill_names(
             getattr(state, "selected_skill_names", [])
         )
         normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
         normalized_ppt_agent_mode = bool(ppt_agent_mode and normalized_workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        normalized_ppt_output_format = normalize_ppt_agent_output_format(ppt_agent_output_format)
         normalized_ppt_strategy = normalize_ppt_agent_strategy(ppt_agent_strategy)
         normalized_ppt_selected_strategy = normalize_ppt_agent_strategy(ppt_agent_selected_strategy)
         ppt_agent_skill_name = (
             ppt_agent_strategy_skill_name(normalized_ppt_selected_strategy)
-            if normalized_ppt_agent_mode
+            if normalized_ppt_agent_mode and normalized_ppt_output_format == PPT_AGENT_OUTPUT_HTML
             else ""
         )
+        if normalized_ppt_agent_mode and normalized_ppt_output_format == PPT_AGENT_OUTPUT_PPTX:
+            blocked_ppt_skills = set(ppt_agent_builtin_skill_names())
+            effective_skill_names = [name for name in effective_skill_names if name not in blocked_ppt_skills]
         if ppt_agent_skill_name and ppt_agent_skill_name not in effective_skill_names:
             effective_skill_names.append(ppt_agent_skill_name)
         source_files = []
@@ -42428,6 +43054,7 @@ a {{ overflow-wrap: anywhere; }}
             source_files = self._normalize_prompt_file_paths(getattr(state, "office_conversion_source_files", []) or [])
             template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
         effective_workspace_dir = self._ensure_session_workspace(state)
+        effective_model_id = str(task_model_id or self._model_id_for_state(state) or "").strip()
         return normalize_run_context(
             {
                 "mode": mode,
@@ -42450,9 +43077,9 @@ a {{ overflow-wrap: anywhere; }}
                     getattr(state, "grill_execution_confirmed", False)
                 ),
                 "selected_skill_names": effective_skill_names,
-                "selected_model_id": self._model_id_for_state(state),
-                "selected_model_profile": self._model_profile_snapshot_for_state(state),
-                "reasoning_effort": self._selected_reasoning_effort(state),
+                "selected_model_id": effective_model_id,
+                "selected_model_profile": self._model_profile_snapshot_for_state(state, model_id=effective_model_id),
+                "reasoning_effort": self._selected_reasoning_effort(state, model_id=effective_model_id),
                 "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": normalized_workflow_mode,
                 "office_output_profile": normalize_office_output_profile(
@@ -42466,6 +43093,13 @@ a {{ overflow-wrap: anywhere; }}
                 "ppt_agent_selected_strategy": normalized_ppt_selected_strategy,
                 "ppt_agent_preference": normalize_ppt_agent_preference(ppt_agent_preference),
                 "ppt_agent_template_file": str(ppt_agent_template_file or "").strip(),
+                "ppt_agent_output_format": normalized_ppt_output_format,
+                "ppt_agent_template_screenshots": list(ppt_agent_template_screenshots or []),
+                "ppt_agent_template_hash": str(ppt_agent_template_hash or "").strip(),
+                "ppt_agent_renderer": str(ppt_agent_renderer or RENDERER_NONE).strip().lower(),
+                "ppt_agent_renderer_prog_id": str(ppt_agent_renderer_prog_id or "").strip(),
+                "ppt_agent_visual_status": str(ppt_agent_visual_status or "").strip().lower(),
+                "ppt_agent_run_id": str(ppt_agent_run_id or "").strip(),
             }
         )
 
@@ -43990,6 +44624,14 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
         ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
         ppt_agent_template_file="",
+        ppt_agent_output_format=PPT_AGENT_OUTPUT_HTML,
+        ppt_agent_template_screenshots=None,
+        ppt_agent_template_hash="",
+        ppt_agent_renderer=RENDERER_NONE,
+        ppt_agent_renderer_prog_id="",
+        ppt_agent_visual_status="",
+        ppt_agent_run_id="",
+        task_model_id="",
         user_message_meta=None,
         history_rewrite_guard=None,
         existing_message_payload=None,
@@ -44096,17 +44738,21 @@ a {{ overflow-wrap: anywhere; }}
                     "warning",
                 )
             return False
-        if not self._model_profile_for_state(state):
+        task_model_id = str(task_model_id or "").strip()
+        effective_model_id = task_model_id or self._model_id_for_state(state)
+        effective_model_profile = self._model_profile_for_state(state, model_id=effective_model_id)
+        if not effective_model_profile:
             has_configured_models = bool(self.config_manager.iter_model_profiles())
             log_chat_runtime_debug(
                 "submit_session_model_missing",
                 session_id=state.session_id,
-                selected_model_id=self._model_id_for_state(state),
+                selected_model_id=effective_model_id,
                 has_configured_models=has_configured_models,
             )
             if state.session_id == self.current_session_id:
                 if has_configured_models:
-                    self._show_conversation_notice(state, "当前对话选择的模型不可用，请重新选择模型。", "error")
+                    model_scope = "PPT Agent 任务模型" if task_model_id else "当前对话选择的模型"
+                    self._show_conversation_notice(state, f"{model_scope}不可用，请重新选择模型。", "error")
                     self.refresh_model_selector()
                 else:
                     self._show_conversation_notice(
@@ -44116,8 +44762,8 @@ a {{ overflow-wrap: anywhere; }}
                     )
                     QTimer.singleShot(0, lambda: self.open_settings("模型与服务"))
             return False
-        supports_vision = self._selected_model_supports_vision(state)
-        if not self._ensure_vision_attachment_support(state, prompt_files):
+        supports_vision = bool(effective_model_profile.get("supports_vision", False))
+        if not self._ensure_vision_attachment_support(state, prompt_files, model_profile=effective_model_profile):
             return False
         if mentioned_profiles and not delegated_text:
             log_chat_runtime_debug(
@@ -44186,11 +44832,30 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_selected_strategy = normalize_ppt_agent_strategy(ppt_agent_selected_strategy)
         ppt_agent_preference = normalize_ppt_agent_preference(ppt_agent_preference)
         ppt_agent_template_file = str(ppt_agent_template_file or "").strip()
+        ppt_agent_output_format = normalize_ppt_agent_output_format(ppt_agent_output_format)
+        ppt_agent_template_screenshots = self._normalize_prompt_file_paths(ppt_agent_template_screenshots or [])
+        ppt_agent_template_hash = str(ppt_agent_template_hash or "").strip()
+        ppt_agent_renderer = str(ppt_agent_renderer or RENDERER_NONE).strip().lower()
+        ppt_agent_renderer_prog_id = str(ppt_agent_renderer_prog_id or "").strip()
+        ppt_agent_visual_status = str(ppt_agent_visual_status or "").strip().lower()
+        ppt_agent_run_id = str(ppt_agent_run_id or "").strip()
         state.ppt_agent_mode = ppt_agent_mode
         state.ppt_agent_strategy = ppt_agent_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_AUTO
         state.ppt_agent_selected_strategy = ppt_agent_selected_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_DEFAULT
         state.ppt_agent_preference = ppt_agent_preference if ppt_agent_mode else PPT_AGENT_PREFERENCE_AUTO
         state.ppt_agent_template_file = ppt_agent_template_file if ppt_agent_mode else ""
+        state.ppt_agent_output_format = ppt_agent_output_format if ppt_agent_mode else PPT_AGENT_OUTPUT_HTML
+        state.ppt_agent_template_screenshots = ppt_agent_template_screenshots if ppt_agent_mode else []
+        state.ppt_agent_template_hash = ppt_agent_template_hash if ppt_agent_mode else ""
+        state.ppt_agent_renderer = ppt_agent_renderer if ppt_agent_mode else RENDERER_NONE
+        state.ppt_agent_renderer_prog_id = ppt_agent_renderer_prog_id if ppt_agent_mode else ""
+        state.ppt_agent_visual_status = ppt_agent_visual_status if ppt_agent_mode else ""
+        previous_ppt_run_id = str(getattr(state, "ppt_agent_run_id", "") or "")
+        state.ppt_agent_run_id = ppt_agent_run_id if ppt_agent_mode else ""
+        state.ppt_agent_task_model_id = task_model_id if ppt_agent_mode else ""
+        if ppt_agent_mode and ppt_agent_run_id and ppt_agent_run_id != previous_ppt_run_id:
+            state.ppt_agent_validation_round = 0
+            state.ppt_agent_result_file = ""
         office_conversion_target = str(office_conversion_target or "").strip().lower()
         if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
             office_conversion_target = office_conversion_target if office_conversion_target in {"pptx", "docx", "pdf"} else ""
@@ -44225,10 +44890,12 @@ a {{ overflow-wrap: anywhere; }}
         state.prompt_cache_meta = {}
         state.system_prompt_appends = []
         state.office_draft_preview_pending = office_workflow
-        state.office_task_target_format = office_conversion_target or ("html" if office_workflow else "")
+        state.office_task_target_format = office_conversion_target or (
+            ppt_agent_output_format if ppt_agent_mode else ("html" if office_workflow else "")
+        )
         state.office_task_result_paths = []
-        turn_model_id = self._model_id_for_state(state)
-        turn_model_profile = self._model_profile_snapshot_for_state(state)
+        turn_model_id = effective_model_id
+        turn_model_profile = self._model_profile_snapshot_for_state(state, model_id=effective_model_id)
         message_payload = {
             "id": user_message_id,
             "role": "user",
@@ -44285,6 +44952,9 @@ a {{ overflow-wrap: anywhere; }}
                     message_meta["ppt_agent_strategy"] = ppt_agent_strategy
                     message_meta["ppt_agent_selected_strategy"] = ppt_agent_selected_strategy
                     message_meta["ppt_agent_preference"] = ppt_agent_preference
+                    message_meta["ppt_agent_output_format"] = ppt_agent_output_format
+                    message_meta["ppt_agent_renderer"] = ppt_agent_renderer
+                    message_meta["ppt_agent_visual_status"] = ppt_agent_visual_status
                     if ppt_agent_template_file:
                         message_meta["ppt_agent_template_file"] = ppt_agent_template_file
         grill_started = bool(grill_armed)
@@ -44414,11 +45084,12 @@ a {{ overflow-wrap: anywhere; }}
         self._retire_session_empty_state(state, reason="first_submit")
         office_card = None
         if state.session_id == self.current_session_id and office_workflow:
+            office_card_target = office_conversion_target or (ppt_agent_output_format if ppt_agent_mode else "html")
             office_card = self._create_office_draft_task_card(
                 state,
-                office_conversion_target.upper() if office_conversion_target else self._office_profile_label(office_output_profile),
+                office_card_target.upper() if office_card_target != "html" else self._office_profile_label(office_output_profile),
                 running=True,
-                target_format=office_conversion_target or "html",
+                target_format=office_card_target,
             )
             log_chat_runtime_debug(
                 "submit_session_office_card_ready",
@@ -44636,6 +45307,14 @@ a {{ overflow-wrap: anywhere; }}
             ppt_agent_selected_strategy=ppt_agent_selected_strategy,
             ppt_agent_preference=ppt_agent_preference,
             ppt_agent_template_file=ppt_agent_template_file,
+            ppt_agent_output_format=ppt_agent_output_format,
+            ppt_agent_template_screenshots=ppt_agent_template_screenshots,
+            ppt_agent_template_hash=ppt_agent_template_hash,
+            ppt_agent_renderer=ppt_agent_renderer,
+            ppt_agent_renderer_prog_id=ppt_agent_renderer_prog_id,
+            ppt_agent_visual_status=ppt_agent_visual_status,
+            ppt_agent_run_id=ppt_agent_run_id,
+            task_model_id=task_model_id,
         )
         log_chat_runtime_debug(
             "submit_session_run_context_built",

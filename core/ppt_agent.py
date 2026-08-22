@@ -29,6 +29,13 @@ PPT_AGENT_PREFERENCES = {
     PPT_AGENT_PREFERENCE_TEMPLATE,
 }
 
+PPT_AGENT_OUTPUT_HTML = "html"
+PPT_AGENT_OUTPUT_PPTX = "pptx"
+PPT_AGENT_OUTPUT_FORMATS = {
+    PPT_AGENT_OUTPUT_HTML,
+    PPT_AGENT_OUTPUT_PPTX,
+}
+
 
 @dataclass(frozen=True)
 class PptHtmlCapability:
@@ -118,6 +125,11 @@ def normalize_ppt_agent_preference(value):
     return text if text in PPT_AGENT_PREFERENCES else PPT_AGENT_PREFERENCE_AUTO
 
 
+def normalize_ppt_agent_output_format(value):
+    text = str(value or "").strip().lower()
+    return text if text in PPT_AGENT_OUTPUT_FORMATS else PPT_AGENT_OUTPUT_PPTX
+
+
 def choose_ppt_agent_strategy(request_text, preference=PPT_AGENT_PREFERENCE_AUTO, explicit_strategy=PPT_AGENT_STRATEGY_AUTO, template_file=""):
     explicit = normalize_ppt_agent_strategy(explicit_strategy)
     if explicit != PPT_AGENT_STRATEGY_AUTO:
@@ -172,10 +184,63 @@ def ppt_agent_capability_prompt_lines():
     return lines
 
 
-def build_ppt_agent_prompt(request_text, preference=PPT_AGENT_PREFERENCE_AUTO, explicit_strategy=PPT_AGENT_STRATEGY_AUTO, template_file=""):
+def build_ppt_agent_prompt(
+    request_text,
+    preference=PPT_AGENT_PREFERENCE_AUTO,
+    explicit_strategy=PPT_AGENT_STRATEGY_AUTO,
+    template_file="",
+    output_format=PPT_AGENT_OUTPUT_HTML,
+    template_screenshots=None,
+    renderer="",
+    visual_validation=True,
+):
     request = str(request_text or "").strip()
+    output_format = normalize_ppt_agent_output_format(output_format)
     preference = normalize_ppt_agent_preference(preference)
     explicit_strategy = normalize_ppt_agent_strategy(explicit_strategy)
+    template_file = str(template_file or "").strip()
+    template_screenshots = [
+        str(path or "").strip()
+        for path in (template_screenshots or [])
+        if str(path or "").strip()
+    ]
+    if output_format == PPT_AGENT_OUTPUT_PPTX:
+        screenshot_lines = "\n".join(
+            f"- 模板第 {index} 页截图: {path}"
+            for index, path in enumerate(template_screenshots, start=1)
+        )
+        if not screenshot_lines:
+            screenshot_lines = "- 当前没有本地演示渲染器，无法提供模板真实截图。"
+        validation_line = (
+            "- 生成后系统会用同一个本地演示渲染器截图，并交给多模态模型继续校验。"
+            if visual_validation
+            else "- 当前任务没有可用的 PowerPoint/WPS 渲染器；请完成结构校验，并明确说明成品未经视觉渲染校验。"
+        )
+        prompt = (
+            "请以「PPT Agent」身份，根据用户材料和 PPTX 模板原文件直接生成新的 PPTX。"
+            "本任务不要先生成 HTML，也不要使用默认 PPT Agent、Guizang PPT、Frontend Slides 或 Huashu Design 的 HTML-first 工作流。\n\n"
+            "建议工作方式:\n"
+            "1. 先查看本轮附加的全部模板截图，理解模板的视觉语言、页面类型、品牌元素和内容安全区。\n"
+            "2. 使用 python-pptx 程序化读取模板的页面尺寸、每个形状的坐标和大小、字体字号颜色、占位符、图片资源关系、母版和版式。\n"
+            "3. python-pptx 无法覆盖的结构，可以直接检查 PPTX ZIP 包内的 OOXML、关系文件和媒体资源。\n"
+            "4. 优先选择并克隆适合的模板页、形状 XML 和资源关系，再结合用户材料替换或叠加内容；具体实现由你根据模板决定。\n"
+            "5. 自主判断固定品牌文案、页眉页脚、示例内容和可替换区域，并决定页面数量、模板页映射、图片及图表方式。\n"
+            "6. 输出独立的新 PPTX，只保留生成页，不要覆盖或修改模板原文件。\n"
+            "7. 完成后重新打开生成文件，检查 ZIP/OOXML、幻灯片数量、页面尺寸和关系目标，并明确给出成品完整路径。\n\n"
+            "模板与渲染信息:\n"
+            f"- PPTX 模板原文件: {template_file}\n"
+            f"- 本地渲染器: {str(renderer or 'none').strip()}\n"
+            f"{validation_line}\n"
+            f"{screenshot_lines}\n\n"
+            "[用户需求]\n"
+            f"{request}"
+        )
+        return {
+            "prompt": prompt,
+            "selected_strategy": PPT_AGENT_STRATEGY_DEFAULT,
+            "selected_label": "PPTX 模板驱动生成",
+            "output_format": output_format,
+        }
     selected_strategy = choose_ppt_agent_strategy(
         request,
         preference=preference,
@@ -183,7 +248,6 @@ def build_ppt_agent_prompt(request_text, preference=PPT_AGENT_PREFERENCE_AUTO, e
         template_file=template_file,
     )
     selected_label = ppt_agent_strategy_label(selected_strategy)
-    template_file = str(template_file or "").strip()
     capability_lines = "\n".join(ppt_agent_capability_prompt_lines())
     template_lines = ""
     if template_file:

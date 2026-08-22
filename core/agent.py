@@ -42,6 +42,7 @@ from core.clarify_mode import (
     normalize_run_context,
 )
 from core.ppt_agent import (
+    PPT_AGENT_OUTPUT_PPTX,
     PPT_AGENT_STRATEGY_DEFAULT,
     normalize_ppt_agent_strategy,
     ppt_agent_capability_prompt_lines,
@@ -1896,81 +1897,99 @@ class LLMWorker(QThread):
         if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
             profile = str(self.run_context.get("office_output_profile") or "free").strip()
             ppt_agent_mode = bool(self.run_context.get("ppt_agent_mode"))
-            profile_guidance = {
-                OFFICE_OUTPUT_PROFILE_PPT: (
-                    "当前类型: PPT。请把 HTML 组织成演示文稿形态: 默认 16:9 画布、按页/幻灯片拆分、"
-                    "清晰的标题层级和演示节奏，方便用户预览后继续生成 PPTX。"
-                ),
-                OFFICE_OUTPUT_PROFILE_DESIGN: (
-                    "当前类型: 设计稿。请把 HTML 组织成设计稿形态: 画板、组件、状态、间距、色彩和视觉层级清晰，"
-                    "方便用户直接评审 UI/视觉方案。"
-                ),
-                OFFICE_OUTPUT_PROFILE_DOCX: (
-                    "当前类型: DOCX。请把 HTML 组织成文档形态: 标题层级、段落、表格、引用和分页语义清晰，"
-                    "方便用户预览后继续生成 DOCX。"
-                ),
-            }.get(
-                profile,
-                "当前类型: 自由。请按报告、方案、分析或页面型交付物自由组织 HTML，优先保证内容完整和预览体验。",
-            )
-            dynamic_state_lines.extend(
-                [
-                    "",
-                    "策略 [办公稿生成]:",
-                    "1. 你当前正在处理办公稿生成请求。对用户不要称为 HTML 模式，但内部应优先用 HTML 作为可预览、可迭代的工作稿。",
-                    f"2. {profile_guidance}",
-                    "3. 新建或修改交付物时，优先在当前项目工作区生成 HTML 文件，并在完成回复中明确给出项目内文件路径。",
-                    "4. 用户继续修改时，围绕已有 HTML 预览稿迭代；除非用户明确要求重做，尽量维护同一个主交付物。",
-                    "5. 用户要求 PPTX、DOCX 或 PDF 时，先以已确认的 HTML 作为源稿，再生成对应办公文件，并说明源 HTML 与输出文件路径。",
-                    "6. 不要只给 Markdown 摘要或口头描述；需要形成可交付内容时应落盘为可预览文件。",
-                ]
-            )
-            if ppt_agent_mode:
-                requested_strategy = normalize_ppt_agent_strategy(self.run_context.get("ppt_agent_strategy"))
-                selected_strategy = normalize_ppt_agent_strategy(
-                    self.run_context.get("ppt_agent_selected_strategy")
-                    or requested_strategy
-                    or PPT_AGENT_STRATEGY_DEFAULT
-                )
-                selected_label = ppt_agent_strategy_label(selected_strategy)
+            ppt_output_format = str(self.run_context.get("ppt_agent_output_format") or "html").strip().lower()
+            direct_pptx = bool(ppt_agent_mode and ppt_output_format == PPT_AGENT_OUTPUT_PPTX)
+            if direct_pptx:
+                template_file = str(self.run_context.get("ppt_agent_template_file") or "").strip()
+                renderer = str(self.run_context.get("ppt_agent_renderer") or "none").strip().lower()
+                visual_status = str(self.run_context.get("ppt_agent_visual_status") or "unverified").strip().lower()
+                screenshot_count = len(self.run_context.get("ppt_agent_template_screenshots") or [])
                 dynamic_state_lines.extend(
                     [
                         "",
-                        "策略 [PPT Agent]:",
-                        "1. 你是当前 PPT Mode 的唯一 PPT 生成主控；负责判断 PPT 类型、生成大纲和页面规划，并输出演示文稿形态 HTML 工作稿。",
-                        f"2. 当前策略: {selected_label}。用户显式策略: {ppt_agent_strategy_label(requested_strategy)}。",
-                        "3. 内置 html-ppt 能力是 Cowork 已加载 Skill，不是新的导出引擎；它们的输出必须进入 HTML deliverable preview。",
-                        "4. 后续 PPTX、DOCX、PDF 都通过现有 HTML→PPTX/DOCX/PDF 转换链路完成，不要绕过交付物系统直接另建一套 PPTX 导出。",
-                        "5. 如果选中的内置 Skill 不可用，必须清晰说明并停止，不要静默降级。",
-                        "6. 支持用户后续修改，如缩短某页、切换咨询风、套模板或改成发布会风格；优先迭代同一个 HTML 工作稿。",
-                        "",
-                        "可调用的已内置 html-ppt Skill:",
-                        *ppt_agent_capability_prompt_lines(),
+                        "策略 [PPT Agent · 直接 PPTX]:",
+                        "1. 本轮必须直接生成 PPTX，不要先创建 HTML 工作稿，也不要调用 Guizang、Frontend Slides、Huashu Design 等 HTML PPT Skill。",
+                        "2. 结合用户资料和模板原文件，自主规划页面数量、内容结构和模板页映射。",
+                        "3. 建议使用 python-pptx 读取页面尺寸、形状位置、字体、颜色、占位符、母版和版式；必要时直接处理 PPTX 包内 OOXML、关系文件和媒体资源。",
+                        "4. 优先克隆适合的模板页、形状 XML 和资源关系，再替换或叠加内容；具体实现由你根据模板判断，不要求固定操作 JSON。",
+                        "5. 自主区分品牌元素、固定页眉页脚、示例文字和内容占位区域，尽量保持模板视觉语言。",
+                        "6. 输出独立的新 PPTX，只保留生成页；不得覆盖或修改模板原文件。",
+                        "7. 完成后重新打开成品，检查 ZIP/OOXML、页面尺寸、幻灯片数量和关系目标，并明确给出完整路径。",
+                        f"- PPTX 模板: {template_file}",
+                        f"- 本地渲染器: {renderer}",
+                        f"- 模板截图数量: {screenshot_count}",
+                        f"- 视觉校验状态: {visual_status}",
                     ]
                 )
-                selected_skill_name = ppt_agent_strategy_skill_name(selected_strategy)
-                brief_getter = getattr(self.skill_manager, "get_brief_skill_prompt", None)
-                selected_skill_loaded = bool(callable(brief_getter) and brief_getter(selected_skill_name)) if selected_skill_name else True
-                if selected_skill_name and not selected_skill_loaded:
+                if renderer == "none":
+                    dynamic_state_lines.append(
+                        "当前没有 PowerPoint/WPS 渲染器：不得声称视觉校验通过；请明确告知用户成品仅完成结构校验。"
+                    )
+            else:
+                profile_guidance = {
+                    OFFICE_OUTPUT_PROFILE_PPT: (
+                        "当前类型: PPT。请把 HTML 组织成演示文稿形态: 默认 16:9 画布、按页/幻灯片拆分、"
+                        "清晰的标题层级和演示节奏，方便用户预览后继续生成 PPTX。"
+                    ),
+                    OFFICE_OUTPUT_PROFILE_DESIGN: (
+                        "当前类型: 设计稿。请把 HTML 组织成设计稿形态: 画板、组件、状态、间距、色彩和视觉层级清晰，"
+                        "方便用户直接评审 UI/视觉方案。"
+                    ),
+                    OFFICE_OUTPUT_PROFILE_DOCX: (
+                        "当前类型: DOCX。请把 HTML 组织成文档形态: 标题层级、段落、表格、引用和分页语义清晰，"
+                        "方便用户预览后继续生成 DOCX。"
+                    ),
+                }.get(
+                    profile,
+                    "当前类型: 自由。请按报告、方案、分析或页面型交付物自由组织 HTML，优先保证内容完整和预览体验。",
+                )
+                dynamic_state_lines.extend(
+                    [
+                        "",
+                        "策略 [办公稿生成]:",
+                        "1. 你当前正在处理办公稿生成请求。对用户不要称为 HTML 模式，但内部应优先用 HTML 作为可预览、可迭代的工作稿。",
+                        f"2. {profile_guidance}",
+                        "3. 新建或修改交付物时，优先在当前项目工作区生成 HTML 文件，并在完成回复中明确给出项目内文件路径。",
+                        "4. 用户继续修改时，围绕已有 HTML 预览稿迭代；除非用户明确要求重做，尽量维护同一个主交付物。",
+                        "5. 用户要求 PPTX、DOCX 或 PDF 时，先以已确认的 HTML 作为源稿，再生成对应办公文件，并说明源 HTML 与输出文件路径。",
+                        "6. 不要只给 Markdown 摘要或口头描述；需要形成可交付内容时应落盘为可预览文件。",
+                    ]
+                )
+                if ppt_agent_mode:
+                    requested_strategy = normalize_ppt_agent_strategy(self.run_context.get("ppt_agent_strategy"))
+                    selected_strategy = normalize_ppt_agent_strategy(
+                        self.run_context.get("ppt_agent_selected_strategy")
+                        or requested_strategy
+                        or PPT_AGENT_STRATEGY_DEFAULT
+                    )
+                    selected_label = ppt_agent_strategy_label(selected_strategy)
                     dynamic_state_lines.extend(
                         [
                             "",
-                            "PPT Agent Skill 加载错误:",
-                            f"- 选中的内置 Skill `{selected_skill_name}` 未被当前运行时加载。",
-                            "- 不要改用默认 PPT Agent 或其他策略；请直接报告该加载错误。",
-                        ]
-                    )
-                template_file = str(self.run_context.get("ppt_agent_template_file") or "").strip()
-                if template_file:
-                    dynamic_state_lines.extend(
-                        [
+                            "策略 [PPT Agent]:",
+                            "1. 你是当前 PPT Mode 的唯一 PPT 生成主控；负责判断 PPT 类型、生成大纲和页面规划，并输出演示文稿形态 HTML 工作稿。",
+                            f"2. 当前策略: {selected_label}。用户显式策略: {ppt_agent_strategy_label(requested_strategy)}。",
+                            "3. 内置 html-ppt 能力是 Cowork 已加载 Skill，不是新的导出引擎；它们的输出必须进入 HTML deliverable preview。",
+                            "4. 后续 PPTX、DOCX、PDF 都通过现有 HTML→PPTX/DOCX/PDF 转换链路完成，不要绕过交付物系统直接另建一套 PPTX 导出。",
+                            "5. 如果选中的内置 Skill 不可用，必须清晰说明并停止，不要静默降级。",
+                            "6. 支持用户后续修改；优先迭代同一个 HTML 工作稿。",
                             "",
-                            "PPT 模板约束:",
-                            f"- 用户提供的 PPTX 模板: {template_file}",
-                            "- HTML 是内容来源，PPTX 模板是后续导出的视觉与结构来源。",
-                            "- 不要修改原模板文件；生成 HTML 时要保留适合模板化转换的清晰章节、标题和页面节奏。",
+                            "可调用的已内置 html-ppt Skill:",
+                            *ppt_agent_capability_prompt_lines(),
                         ]
                     )
+                    selected_skill_name = ppt_agent_strategy_skill_name(selected_strategy)
+                    brief_getter = getattr(self.skill_manager, "get_brief_skill_prompt", None)
+                    selected_skill_loaded = bool(callable(brief_getter) and brief_getter(selected_skill_name)) if selected_skill_name else True
+                    if selected_skill_name and not selected_skill_loaded:
+                        dynamic_state_lines.extend(
+                            [
+                                "",
+                                "PPT Agent Skill 加载错误:",
+                                f"- 选中的内置 Skill `{selected_skill_name}` 未被当前运行时加载。",
+                                "- 不要改用默认 PPT Agent 或其他策略；请直接报告该加载错误。",
+                            ]
+                        )
         if self.parent_agent_id:
             dynamic_state_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
 

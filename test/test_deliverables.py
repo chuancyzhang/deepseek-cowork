@@ -18,9 +18,11 @@ from main import (
     OfficeDraftTaskCard,
     DeliverableWebPreview,
     MainWindow,
+    PptAgentModeDialog,
     QMessageBox,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
+    PPT_AGENT_OUTPUT_PPTX,
     PPT_AGENT_PREFERENCE_BUSINESS,
     PPT_AGENT_STRATEGY_AUTO,
     PPT_AGENT_STRATEGY_GUIZANG,
@@ -750,20 +752,45 @@ class TestDeliverableScanning(unittest.TestCase):
             dialog.deleteLater()
             app.processEvents()
 
+    def test_ppt_agent_dialog_defaults_to_pptx_and_filters_non_vision_models(self):
+        app = QApplication.instance() or QApplication([])
+        dialog = PptAgentModeDialog(
+            model_profiles=[
+                {"id": "text", "model_name": "text-only", "supports_vision": False},
+                {"id": "vision", "model_name": "vision-model", "supports_vision": True},
+            ],
+            selected_model_id="text",
+        )
+        try:
+            self.assertEqual(dialog.current_output_format(), PPT_AGENT_OUTPUT_PPTX)
+            self.assertEqual(dialog.task_model_combo.count(), 1)
+            self.assertEqual(dialog.task_model_combo.currentData(), "vision")
+            self.assertTrue(dialog.strategy_block.isHidden())
+            self.assertFalse(dialog.choose_template_btn.isHidden())
+        finally:
+            dialog.deleteLater()
+            app.processEvents()
+
     def test_ppt_agent_request_submits_ppt_office_workflow(self):
         with tempfile.TemporaryDirectory() as workspace:
             source_path = os.path.join(workspace, "research.md")
             template_path = os.path.join(workspace, "template.pptx")
+            screenshot_path = os.path.join(workspace, "slide-001.png")
             with open(source_path, "w", encoding="utf-8") as handle:
                 handle.write("# 研究材料")
             with open(template_path, "wb") as handle:
                 handle.write(b"pptx")
+            with open(screenshot_path, "wb") as handle:
+                handle.write(b"png")
 
             window = MainWindow.__new__(MainWindow)
             state = type("_Session", (), {"session_id": "session-1", "messages": []})()
             window.get_session = MagicMock(return_value=state)
             window.get_current_session = MagicMock(return_value=state)
             window._ensure_session_workspace = MagicMock(return_value=workspace)
+            window._model_profile_for_state = MagicMock(
+                return_value={"id": "vision-1", "model_name": "vision-model", "supports_vision": True}
+            )
             window._submit_session_request = MagicMock(return_value=True)
             window.add_system_toast = MagicMock()
 
@@ -773,6 +800,9 @@ class TestDeliverableScanning(unittest.TestCase):
                 strategy=PPT_AGENT_STRATEGY_AUTO,
                 source_files=[source_path],
                 template_file=template_path,
+                output_format=PPT_AGENT_OUTPUT_PPTX,
+                task_model_id="vision-1",
+                template_screenshots=[screenshot_path],
                 session_id="session-1",
             )
 
@@ -780,15 +810,17 @@ class TestDeliverableScanning(unittest.TestCase):
             submit_call = window._submit_session_request.call_args
             self.assertIs(submit_call.args[0], state)
             self.assertIn("PPT Agent", submit_call.args[1])
-            self.assertIn("HTML 工作稿", submit_call.args[1])
+            self.assertIn("直接生成新的 PPTX", submit_call.args[1])
+            self.assertIn("python-pptx", submit_call.args[1])
             self.assertIn(source_path, submit_call.args[1])
             self.assertIn(template_path, submit_call.args[1])
-            self.assertEqual(submit_call.args[2], [source_path, template_path])
+            self.assertEqual(submit_call.args[2], [source_path, template_path, screenshot_path])
             self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
             self.assertEqual(submit_call.kwargs["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
             self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
-            self.assertEqual(submit_call.kwargs["ppt_agent_selected_strategy"], PPT_AGENT_STRATEGY_HUASHU)
-            window.add_system_toast.assert_called_once()
+            self.assertEqual(submit_call.kwargs["ppt_agent_output_format"], PPT_AGENT_OUTPUT_PPTX)
+            self.assertEqual(submit_call.kwargs["task_model_id"], "vision-1")
+            window.add_system_toast.assert_not_called()
 
     def test_ppt_agent_request_accepts_source_file_without_manual_prompt(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -874,6 +906,118 @@ class TestDeliverableScanning(unittest.TestCase):
 
         self.assertEqual(state.selected_skill_names, ["browser-automation"])
         self.assertEqual(run_context["selected_skill_names"], ["browser-automation", "huashu-design"])
+
+    def test_direct_pptx_run_context_excludes_html_ppt_skills_and_uses_task_model(self):
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "selected_skill_names": ["browser-automation", "huashu-design", "guizang-ppt-skill"],
+                "selected_model_id": "chat-model",
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        profiles = {
+            "chat-model": {"id": "chat-model", "model_name": "chat", "supports_vision": False},
+            "vision-model": {"id": "vision-model", "model_name": "vision", "supports_vision": True},
+        }
+        window._model_profile_for_state = MagicMock(side_effect=lambda _state, model_id=None: profiles.get(model_id or "chat-model", {}))
+        window._model_id_for_state = MagicMock(return_value="chat-model")
+        window._ensure_session_workspace = MagicMock(return_value=r"D:\workspace")
+
+        run_context = MainWindow._build_run_context(
+            window,
+            state,
+            RUN_MODE_EXECUTION,
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+            ppt_agent_mode=True,
+            ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_HUASHU,
+            ppt_agent_output_format=PPT_AGENT_OUTPUT_PPTX,
+            task_model_id="vision-model",
+        )
+
+        self.assertEqual(state.selected_skill_names, ["browser-automation", "huashu-design", "guizang-ppt-skill"])
+        self.assertEqual(run_context["selected_skill_names"], ["browser-automation"])
+        self.assertEqual(run_context["selected_model_id"], "vision-model")
+        self.assertTrue(run_context["selected_model_profile"]["supports_vision"])
+
+    def test_pptx_visual_validation_pass_marks_result_verified(self):
+        window = MainWindow.__new__(MainWindow)
+        card = type("_Card", (), {"add_process_note": MagicMock()})()
+        window._office_draft_card_for_state = MagicMock(return_value=card)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "ppt_agent_mode": True,
+                "ppt_agent_output_format": PPT_AGENT_OUTPUT_PPTX,
+                "ppt_agent_visual_status": "validating",
+                "ppt_agent_validation_round": 1,
+            },
+        )()
+
+        MainWindow._handle_ppt_agent_validation_completion(
+            window,
+            state,
+            "[PPT_VALIDATION_PASS]\n逐页渲染正常。",
+            [],
+        )
+
+        self.assertEqual(state.ppt_agent_visual_status, "verified")
+        card.add_process_note.assert_called_once()
+
+    def test_pptx_rendered_result_starts_same_model_validation_turn(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            pptx_path = os.path.join(workspace, "generated.pptx")
+            screenshot_path = os.path.join(workspace, "slide-001.png")
+            template_screenshot = os.path.join(workspace, "template-001.png")
+            for path in (pptx_path, screenshot_path, template_screenshot):
+                with open(path, "wb") as handle:
+                    handle.write(b"data")
+            window = MainWindow.__new__(MainWindow)
+            window._normalize_prompt_file_paths = lambda paths: list(paths or [])
+            window._submit_session_request = MagicMock(return_value=True)
+            card = type("_Card", (), {"add_process_note": MagicMock()})()
+            window._office_draft_card_for_state = MagicMock(return_value=card)
+            state = type(
+                "_Session",
+                (),
+                {
+                    "session_id": "session-1",
+                    "ppt_agent_result_file": pptx_path,
+                    "ppt_agent_template_screenshots": [template_screenshot],
+                    "ppt_agent_strategy": PPT_AGENT_STRATEGY_AUTO,
+                    "ppt_agent_preference": PPT_AGENT_PREFERENCE_BUSINESS,
+                    "ppt_agent_template_file": os.path.join(workspace, "template.pptx"),
+                    "ppt_agent_template_hash": "hash",
+                    "ppt_agent_renderer": "powerpoint",
+                    "ppt_agent_renderer_prog_id": "PowerPoint.Application",
+                    "ppt_agent_run_id": "run-1",
+                    "ppt_agent_task_model_id": "vision-model",
+                },
+            )()
+            window.get_session = MagicMock(return_value=state)
+
+            MainWindow._handle_ppt_agent_result_rendered(
+                window,
+                "session-1",
+                {
+                    "pptx_path": pptx_path,
+                    "screenshots": [screenshot_path],
+                    "validation_round": 1,
+                    "final_only": False,
+                },
+            )
+
+            submit = window._submit_session_request.call_args
+            self.assertEqual(state.ppt_agent_visual_status, "validating")
+            self.assertEqual(submit.kwargs["task_model_id"], "vision-model")
+            self.assertEqual(submit.kwargs["ppt_agent_output_format"], PPT_AGENT_OUTPUT_PPTX)
+            self.assertIn(screenshot_path, submit.args[2])
+            self.assertIn(template_screenshot, submit.args[2])
 
     def test_ppt_agent_missing_builtin_skill_reports_unavailable(self):
         window = MainWindow.__new__(MainWindow)

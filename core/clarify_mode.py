@@ -204,6 +204,17 @@ def normalize_run_context(run_context):
         "ppt_agent_selected_strategy": str(ctx.get("ppt_agent_selected_strategy") or "").strip(),
         "ppt_agent_preference": str(ctx.get("ppt_agent_preference") or "").strip(),
         "ppt_agent_template_file": str(ctx.get("ppt_agent_template_file") or "").strip(),
+        "ppt_agent_output_format": str(ctx.get("ppt_agent_output_format") or "").strip().lower(),
+        "ppt_agent_template_hash": str(ctx.get("ppt_agent_template_hash") or "").strip(),
+        "ppt_agent_renderer": str(ctx.get("ppt_agent_renderer") or "").strip().lower(),
+        "ppt_agent_renderer_prog_id": str(ctx.get("ppt_agent_renderer_prog_id") or "").strip(),
+        "ppt_agent_visual_status": str(ctx.get("ppt_agent_visual_status") or "").strip().lower(),
+        "ppt_agent_run_id": str(ctx.get("ppt_agent_run_id") or "").strip(),
+        "ppt_agent_template_screenshots": [
+            str(path or "").strip()
+            for path in (ctx.get("ppt_agent_template_screenshots") or [])
+            if str(path or "").strip()
+        ],
     }
 
 

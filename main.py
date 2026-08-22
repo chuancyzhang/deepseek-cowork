@@ -42802,6 +42802,8 @@ a {{ overflow-wrap: anywhere; }}
                     or str(getattr(state, "stop_pending_run_id", "")) == result_run_id
                 )
             )
+            # 停止结果只进入日志：点击停止时会话通知已是终态“已停止”，
+            # 守护进程是否确认释放资源都不再向用户追加提示。
             if result.get("status") == "ok":
                 log_sub_agent_runtime(
                     "daemon_stop_confirmed",
@@ -42813,7 +42815,6 @@ a {{ overflow-wrap: anywhere; }}
                 if pending_matches:
                     state.stop_pending = False
                     state.stop_pending_run_id = ""
-                    self._show_conversation_notice(state, "已停止", "neutral")
                     self.normalize_session_ui(state)
                 return
             error = str(result.get("error") or "未知错误")
@@ -42823,11 +42824,6 @@ a {{ overflow-wrap: anywhere; }}
             if pending_matches:
                 state.stop_pending = False
                 state.stop_pending_run_id = ""
-                self._show_conversation_notice(
-                    state,
-                    f"停止未完成：{error}",
-                    "error",
-                )
                 self.normalize_session_ui(state)
 
         def cleanup():
@@ -43021,7 +43017,6 @@ a {{ overflow-wrap: anywhere; }}
         bubble,
         reason_text,
         outcome,
-        stop_confirmed=True,
     ):
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
         self._timeline_close_open_events(state, status=timeline_status)
@@ -43058,7 +43053,7 @@ a {{ overflow-wrap: anywhere; }}
                 state.active_run_retry_context = {}
             self._show_conversation_notice(
                 state,
-                "已停止" if stop_confirmed else "正在停止…",
+                "已停止",
                 "neutral",
             )
         else:
@@ -43180,14 +43175,7 @@ a {{ overflow-wrap: anywhere; }}
             bubble=stopped_bubble,
             reason_text="本轮已中断",
             outcome="interrupted",
-            stop_confirmed=not needs_daemon_stop,
         )
-        if needs_daemon_stop and not daemon_stop_started:
-            self._show_conversation_notice(
-                state,
-                "停止未完成：守护进程客户端不可用",
-                "error",
-            )
         self.save_chat_history(session_id=state.session_id)
         log_sub_agent_runtime(
             "ui_assistant_turn_interrupted",
@@ -44811,7 +44799,11 @@ a {{ overflow-wrap: anywhere; }}
         **options,
     ):
         if state is not None and getattr(state, "stop_pending", False):
-            self._show_conversation_notice(state, "正在停止上一轮，请稍候…", "neutral")
+            self._show_conversation_notice(
+                state,
+                "上一轮任务还在收尾，请稍候再试。",
+                "neutral",
+            )
             log_chat_runtime_debug(
                 "submit_session_request_stop_pending_rejected",
                 session_id=state.session_id,

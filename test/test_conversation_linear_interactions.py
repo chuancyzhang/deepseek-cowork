@@ -12,7 +12,16 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    Qt,
+    QTimer,
+    QThread,
+    Signal,
+)
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
@@ -3032,8 +3041,61 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertTrue(state.stop_pending)
             self.assertEqual(state.stop_pending_run_id, "request-stop-pending")
-            self.assertEqual(state.conversation_notice.label.text(), "正在停止…")
+            self.assertEqual(state.conversation_notice.label.text(), "已停止")
             self.assertTrue(window._session_is_busy(state))
+        finally:
+            state = window.get_current_session()
+            if state is not None:
+                state.stop_pending = False
+                state.stop_pending_run_id = ""
+            window.close()
+            window.deleteLater()
+
+    def test_failed_daemon_stop_stays_quiet_and_unblocks_new_messages(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(
+                state, reason="test_daemon_stop_quiet_failure"
+            )
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-stop-failed"
+            state.daemon_running = True
+            window.daemon_client = object()
+
+            class QuietFakeStopWorker(QThread):
+                result_signal = Signal(dict, str)
+
+                def __init__(self, *_args, **_kwargs):
+                    super().__init__(window)
+
+                def start(self):
+                    QTimer.singleShot(0, self._emit_result)
+
+                def _emit_result(self):
+                    self.result_signal.emit(
+                        {
+                            "status": "error",
+                            "error": "守护进程未确认停止请求",
+                            "run_id": "request-stop-failed",
+                        },
+                        state.session_id,
+                    )
+                    self.finished.emit()
+
+            with patch("main.DaemonStopWorker", QuietFakeStopWorker):
+                window.stop_agent()
+            self.assertEqual(state.conversation_notice.label.text(), "已停止")
+
+            self.app.processEvents()
+            self.app.processEvents()
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+
+            self.assertFalse(state.stop_pending)
+            self.assertEqual(state.stop_pending_run_id, "")
+            self.assertEqual(state.conversation_notice.label.text(), "已停止")
+            self.assertTrue(state.conversation_notice.action_button.isHidden())
+            self.assertFalse(window._session_is_busy(state))
         finally:
             state = window.get_current_session()
             if state is not None:

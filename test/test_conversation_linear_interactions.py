@@ -37,10 +37,13 @@ from main import (
     MainWindow,
     ModelSelectorPopover,
     ModelSwitchInlineNotice,
+    OFFICE_OUTPUT_PROFILE_PPT,
+    PPT_AGENT_OUTPUT_PPTX,
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
     ToolCallCard,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
     build_sub_agent_history_events,
     extract_related_paths,
     launch_daemon_subprocess,
@@ -2994,6 +2997,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             bubble = window._append_live_thinking_segment(state)
             state.current_content_buffer = "部分结果"
             bubble.set_main_content("部分结果", final=False)
+            state.active_run_retry_context = {"source_run_id": "request-stop-1"}
             window.stop_agent()
             self.assertEqual(bubble.main_content_text, "部分结果")
             self.assertEqual(
@@ -3004,6 +3008,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(persisted["meta"]["context_visible_interruption"])
             self.assertEqual(persisted["meta"]["request_id"], "request-stop-1")
             self.assertEqual(state.conversation_notice.label.text(), "已停止")
+            self.assertTrue(state.conversation_notice.action_button.isHidden())
+            self.assertEqual(state.active_run_retry_context, {})
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
@@ -3366,6 +3372,69 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(
                 any("模型服务未能完成本轮请求" in str(message.get("content") or "") for message in state.messages)
             )
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_failed_run_notice_allows_retry_with_original_task_context(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_retry_action")
+            state.session_status = "failed"
+            state.live_activity = False
+            state.messages = [
+                {
+                    "id": "user-original",
+                    "role": "user",
+                    "content": "生成 PPTX",
+                    "meta": {"turn_id": "1", "request_id": "run-failed"},
+                }
+            ]
+            state.active_run_retry_context = {
+                "source_run_id": "run-failed",
+                "source_turn_id": "1",
+                "source_user_message_id": "user-original",
+                "original_user_text": "生成 PPTX",
+                "prompt_files": [],
+                "submit_options": {
+                    "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                    "ppt_agent_mode": True,
+                    "ppt_agent_output_format": PPT_AGENT_OUTPUT_PPTX,
+                    "task_model_id": "vision-model",
+                },
+            }
+
+            notice = window._show_retryable_run_failure(
+                state,
+                "本轮未完成，请重试",
+                "run-failed",
+            )
+
+            self.assertEqual(notice.action_button.text(), "重试")
+            self.assertFalse(notice.action_button.isHidden())
+            self.assertEqual(state.failed_run_retry_context["source_user_message_id"], "user-original")
+
+            with patch.object(window, "_submit_session_request", return_value=True) as submit:
+                notice.action_button.click()
+
+            self.assertEqual(submit.call_args.args[0], state)
+            self.assertIn("请重试上一轮未完成的请求", submit.call_args.args[1])
+            self.assertIn("生成 PPTX", submit.call_args.args[1])
+            self.assertEqual(submit.call_args.args[2], [])
+            self.assertEqual(submit.call_args.kwargs["task_model_id"], "vision-model")
+            self.assertEqual(
+                submit.call_args.kwargs["user_message_meta"]["retry_of_run_id"],
+                "run-failed",
+            )
+            self.assertEqual(
+                submit.call_args.kwargs["user_message_meta"]["display_content"],
+                "重试上一轮未完成的请求",
+            )
+            self.assertEqual(state.failed_run_retry_context, {})
+            self.assertEqual(state.conversation_notice.label.text(), "正在重试上一轮请求…")
+            self.assertTrue(state.conversation_notice.action_button.isHidden())
         finally:
             window.close()
             window.deleteLater()

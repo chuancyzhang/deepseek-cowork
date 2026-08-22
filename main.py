@@ -22778,6 +22778,8 @@ class SessionState:
         self.ppt_agent_validation_round = 0
         self.ppt_agent_validation_worker = None
         self.ppt_agent_result_file = ""
+        self.active_run_retry_context = {}
+        self.failed_run_retry_context = {}
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.favorite_id = ""
@@ -30743,6 +30745,12 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
         self.save_chat_history(session_id=state.session_id)
+        retry_run_id = str(
+            (getattr(state, "active_run_retry_context", {}) or {}).get("source_run_id")
+            or getattr(state, "active_turn_request_id", "")
+            or ""
+        )
+        self._show_retryable_run_failure(state, text, retry_run_id)
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
@@ -36679,6 +36687,145 @@ class MainWindow(QMainWindow):
         if action_callback is not None:
             notice.actionRequested.connect(action_callback)
         return notice
+
+    def _mark_run_retryable_failure(self, state, run_id):
+        if not state:
+            return {}
+        run_id = str(run_id or "").strip()
+        context = copy.deepcopy(getattr(state, "active_run_retry_context", {}) or {})
+        if not context or str(context.get("source_run_id") or "").strip() != run_id:
+            return {}
+        state.active_run_retry_context = {}
+        state.failed_run_retry_context = context
+        return context
+
+    def _show_retryable_run_failure(self, state, text, run_id):
+        run_id = str(run_id or "").strip()
+        context = copy.deepcopy(getattr(state, "failed_run_retry_context", {}) or {}) if state else {}
+        if str(context.get("source_run_id") or "").strip() != run_id:
+            context = self._mark_run_retryable_failure(state, run_id)
+        if not context:
+            return self._show_conversation_notice(state, text, "error")
+        if context.get("retry_of_run_id"):
+            log_chat_runtime_debug(
+                "failed_run_retry_error",
+                session_id=state.session_id,
+                run_id=run_id,
+                retry_of_run_id=str(context.get("retry_of_run_id") or ""),
+                reason="retry_run_failed",
+            )
+        retry_callback = lambda sid=state.session_id, rid=run_id: self.retry_failed_run(sid, rid)
+        return self._show_conversation_notice(
+            state,
+            text,
+            "error",
+            action_text="重试",
+            action_callback=retry_callback,
+        )
+
+    def retry_failed_run(self, session_id, run_id):
+        state = self.get_session(session_id)
+        run_id = str(run_id or "").strip()
+        context = copy.deepcopy(getattr(state, "failed_run_retry_context", {}) or {}) if state else {}
+        if not state or not context or str(context.get("source_run_id") or "").strip() != run_id:
+            log_chat_runtime_debug(
+                "failed_run_retry_rejected",
+                session_id=str(session_id or ""),
+                run_id=run_id,
+                reason="retry_context_missing",
+            )
+            if state:
+                self._show_conversation_notice(state, "重试信息已失效，请重新发送需求。", "error")
+            return False
+        if self._session_is_busy(state):
+            log_chat_runtime_debug(
+                "failed_run_retry_rejected",
+                session_id=state.session_id,
+                run_id=run_id,
+                reason="session_busy",
+            )
+            self._show_retryable_run_failure(state, "当前任务仍在运行，结束后再重试。", run_id)
+            return False
+        original_message_id = str(context.get("source_user_message_id") or "").strip()
+        original_message = self._find_message_by_id(getattr(state, "messages", []) or [], original_message_id)
+        if not isinstance(original_message, dict) or original_message.get("role") != "user":
+            log_chat_runtime_debug(
+                "failed_run_retry_rejected",
+                session_id=state.session_id,
+                run_id=run_id,
+                reason="source_message_missing",
+                source_user_message_id=original_message_id,
+            )
+            self._show_conversation_notice(state, "原始请求已不存在，无法安全重试；请重新发送需求。", "error")
+            return False
+        prompt_files = [os.path.normpath(str(path or "")) for path in context.get("prompt_files") or []]
+        missing_files = [path for path in prompt_files if not os.path.isfile(path)]
+        if missing_files:
+            log_chat_runtime_debug(
+                "failed_run_retry_rejected",
+                session_id=state.session_id,
+                run_id=run_id,
+                reason="attachment_missing",
+                missing_files=missing_files,
+            )
+            self._show_retryable_run_failure(
+                state,
+                "重试所需的附件或模板截图已不存在，请恢复文件后再重试。",
+                run_id,
+            )
+            return False
+        retry_options = dict(context.get("submit_options") or {})
+        retry_options.update(
+            {
+                "check_duplicates": False,
+                "clear_current_input": False,
+                "user_message_meta": {
+                    "retry_of_run_id": run_id,
+                    "retry_of_user_message_id": original_message_id,
+                    "display_content": "重试上一轮未完成的请求",
+                },
+            }
+        )
+        original_user_text = str(context.get("original_user_text") or "").strip()
+        if not original_user_text:
+            self._show_conversation_notice(state, "原始请求内容已不存在，无法安全重试；请重新发送需求。", "error")
+            return False
+        retry_text = (
+            "请重试上一轮未完成的请求。先检查上一轮已经生成的文件和完成的操作，"
+            "不要重复已完成的外部操作；在保留有效结果的基础上继续，直到交付物完成。\n\n"
+            "[上一轮原始请求]\n"
+            f"{original_user_text}"
+        )
+        log_chat_runtime_debug(
+            "failed_run_retry_start",
+            session_id=state.session_id,
+            run_id=run_id,
+            source_user_message_id=original_message_id,
+            prompt_file_count=len(prompt_files),
+        )
+        submitted = self._submit_session_request(
+            state,
+            retry_text,
+            prompt_files,
+            **retry_options,
+        )
+        if not submitted:
+            log_chat_runtime_debug(
+                "failed_run_retry_error",
+                session_id=state.session_id,
+                run_id=run_id,
+                reason="submit_rejected",
+            )
+            self._show_retryable_run_failure(state, "重试未能启动，请检查提示后再次重试。", run_id)
+            return False
+        state.failed_run_retry_context = {}
+        self._show_conversation_notice(state, "正在重试上一轮请求…", "info")
+        log_chat_runtime_debug(
+            "failed_run_retry_run",
+            session_id=state.session_id,
+            run_id=run_id,
+        )
+        return True
 
     def _show_run_failure_details(self, session_id, event):
         self.activate_session(session_id)
@@ -42859,11 +43006,19 @@ a {{ overflow-wrap: anywhere; }}
             outcome=outcome,
             fallback_bubble=bubble,
         )
-        self._show_conversation_notice(
-            state,
-            "已停止" if str(outcome or "") == "interrupted" else str(reason_text or "本轮未完成，请重试"),
-            "neutral" if str(outcome or "") == "interrupted" else "error",
-        )
+        if str(outcome or "") == "interrupted":
+            active_retry_run_id = str(
+                (getattr(state, "active_run_retry_context", {}) or {}).get("source_run_id") or ""
+            )
+            if active_retry_run_id == str(run_id or ""):
+                state.active_run_retry_context = {}
+            self._show_conversation_notice(state, "已停止", "neutral")
+        else:
+            self._show_retryable_run_failure(
+                state,
+                str(reason_text or "本轮未完成，请重试"),
+                run_id,
+            )
         state.messages = self.chat_storage.normalize_messages(
             state.messages,
             conversation_id=state.session_id,
@@ -44775,6 +44930,8 @@ a {{ overflow-wrap: anywhere; }}
                 QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
         payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
+        if isinstance(user_message_meta, dict) and user_message_meta.get("display_content") is not None:
+            payload["display_content"] = str(user_message_meta.get("display_content") or "")
         user_text = payload.get("content") or ""
         if not user_text:
             log_chat_runtime_debug("submit_session_empty_user_text_after_payload", session_id=state.session_id)
@@ -44880,6 +45037,34 @@ a {{ overflow-wrap: anywhere; }}
                 and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(source_files[0]))
             ]
             state.office_conversion_template_file = template_candidates[0] if template_candidates else ""
+        run_retry_context = {
+            "source_run_id": submit_request_id,
+            "source_turn_id": str(next_turn_id),
+            "source_user_message_id": user_message_id,
+            "original_user_text": str(raw_user_text or ""),
+            "retry_of_run_id": str((user_message_meta or {}).get("retry_of_run_id") or "")
+            if isinstance(user_message_meta, dict)
+            else "",
+            "prompt_files": list(prompt_files),
+            "submit_options": {
+                "workflow_mode": normalized_workflow_mode,
+                "office_output_profile": normalize_office_output_profile(office_output_profile),
+                "office_conversion_target": office_conversion_target,
+                "ppt_agent_mode": ppt_agent_mode,
+                "ppt_agent_strategy": ppt_agent_strategy,
+                "ppt_agent_selected_strategy": ppt_agent_selected_strategy,
+                "ppt_agent_preference": ppt_agent_preference,
+                "ppt_agent_template_file": ppt_agent_template_file,
+                "ppt_agent_output_format": ppt_agent_output_format,
+                "ppt_agent_template_screenshots": list(ppt_agent_template_screenshots),
+                "ppt_agent_template_hash": ppt_agent_template_hash,
+                "ppt_agent_renderer": ppt_agent_renderer,
+                "ppt_agent_renderer_prog_id": ppt_agent_renderer_prog_id,
+                "ppt_agent_visual_status": ppt_agent_visual_status,
+                "ppt_agent_run_id": ppt_agent_run_id,
+                "task_model_id": task_model_id,
+            },
+        }
         state.step_records = []
         state.changed_files = []
         state.has_file_changes = False
@@ -45174,6 +45359,8 @@ a {{ overflow-wrap: anywhere; }}
         self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
+        state.active_run_retry_context = copy.deepcopy(run_retry_context)
+        state.failed_run_retry_context = {}
         state.active_turn_id = next_turn_id
         state.active_turn_request_id = submit_request_id
         state.active_turn_user_message_id = user_message_id
@@ -47674,10 +47861,10 @@ a {{ overflow-wrap: anywhere; }}
             if provider_succeeded:
                 self.set_session_phase("Completed", state.session_id)
                 self.set_session_status("completed", state.session_id, save=False)
-                self._show_conversation_notice(
+                self._show_retryable_run_failure(
                     state,
                     "本轮未完成，请重试",
-                    "error",
+                    run_id,
                 )
             else:
                 self.set_session_phase("Error", state.session_id)
@@ -48209,6 +48396,18 @@ a {{ overflow-wrap: anywhere; }}
         bubble.set_source_message_id(assistant_source_message_id)
         bubble.set_main_content(content, content_parts=content_parts, final=True)
         bubble.set_message_actions_enabled(not missing_final_content)
+        active_retry_context = getattr(state, "active_run_retry_context", {}) or {}
+        if active_retry_context.get("retry_of_run_id"):
+            log_chat_runtime_debug(
+                "failed_run_retry_finish",
+                session_id=state.session_id,
+                run_id=str(run_id or ""),
+                retry_of_run_id=str(active_retry_context.get("retry_of_run_id") or ""),
+            )
+            self._show_conversation_notice(state, "重试已完成", "success")
+        if str(active_retry_context.get("source_run_id") or "") == str(run_id or ""):
+            state.active_run_retry_context = {}
+        state.failed_run_retry_context = {}
         self._finish_office_draft_task_card(state, content=content, bubble=bubble)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""

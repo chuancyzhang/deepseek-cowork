@@ -1842,6 +1842,17 @@ class TestDeliverableScanning(unittest.TestCase):
 
                 self.assertTrue(submitted)
                 self.assertTrue(state.office_draft_preview_pending)
+                self.assertEqual(
+                    state.active_run_retry_context["source_user_message_id"],
+                    state.messages[-1]["id"],
+                )
+                self.assertTrue(
+                    state.active_run_retry_context["submit_options"]["ppt_agent_mode"]
+                )
+                self.assertEqual(
+                    state.active_run_retry_context["submit_options"]["ppt_agent_selected_strategy"],
+                    PPT_AGENT_STRATEGY_GUIZANG,
+                )
                 self.assertGreater(card.process_widget_count(), 1)
                 self.assertTrue(card.process_placeholder.isHidden())
                 window.process_agent_logic.assert_called_once()

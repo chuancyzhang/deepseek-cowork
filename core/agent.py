@@ -78,21 +78,15 @@ class SecurityError(Exception):
     pass
 
 
-_OPENAI_PROTOCOL_LOCK = threading.Lock()
 APPEND_ONLY_LEDGER_REVISION = 1
-
-
-def _needs_openai_protocol_lock(provider):
-    return getattr(provider, "protocol_family", "") == "openai-compatible"
-
-
-def _acquire_openai_protocol_lock(worker):
-    waited = False
-    while not worker.is_stopped:
-        if _OPENAI_PROTOCOL_LOCK.acquire(timeout=0.1):
-            return waited
-        waited = True
-    return None
+PROVIDER_SEMANTIC_CHUNK_TYPES = {
+    "reasoning",
+    "content",
+    "content_snapshot",
+    "tool_call",
+    "response_items",
+    "server_tool_status",
+}
 
 
 def _stable_json_hash(value):
@@ -713,6 +707,9 @@ class LLMWorker(QThread):
         # Flags for control
         self.is_paused = False
         self.is_stopped = False
+        self._provider_stream_lock = threading.Lock()
+        self._active_provider_stream = None
+        self._active_provider_stream_opened_at = 0.0
         self._guidance_lock = threading.Lock()
         self._pending_guidance = []
         self._guidance_open = True
@@ -1135,10 +1132,97 @@ class LLMWorker(QThread):
         self.is_paused = False
         self.step_signal.emit("System: Resumed.")
 
+    def _register_provider_stream(self, stream):
+        if stream is None:
+            raise RuntimeError("Provider returned an empty stream handle.")
+        with self._provider_stream_lock:
+            if self.is_stopped:
+                return False
+            if (
+                self._active_provider_stream is not None
+                and self._active_provider_stream is not stream
+            ):
+                raise RuntimeError("Worker attempted to open overlapping provider streams.")
+            self._active_provider_stream = stream
+            self._active_provider_stream_opened_at = time.time()
+            opened_at = self._active_provider_stream_opened_at
+        self.observability_signal.emit({
+            "type": "provider_stream_opened",
+            "run_id": self.request_id or self.turn_id or self.session_id,
+            "turn_id": self.turn_id,
+            "timestamp": opened_at,
+        })
+        return True
+
+    def _release_provider_stream(self, stream):
+        released_at = time.time()
+        with self._provider_stream_lock:
+            if self._active_provider_stream is not stream:
+                return False
+            opened_at = self._active_provider_stream_opened_at
+            self._active_provider_stream = None
+            self._active_provider_stream_opened_at = 0.0
+        self.observability_signal.emit({
+            "type": "provider_stream_released",
+            "run_id": self.request_id or self.turn_id or self.session_id,
+            "turn_id": self.turn_id,
+            "duration": max(0.0, released_at - opened_at) if opened_at else 0.0,
+            "timestamp": released_at,
+        })
+        return True
+
+    def _cancel_active_provider_stream(self):
+        with self._provider_stream_lock:
+            stream = self._active_provider_stream
+        if stream is None:
+            return {"active": False, "closed": False, "error": ""}
+        close = getattr(stream, "close", None)
+        if not callable(close):
+            return {
+                "active": True,
+                "closed": False,
+                "error": "Provider stream does not expose close().",
+            }
+        try:
+            close()
+        except Exception as exc:
+            return {"active": True, "closed": False, "error": str(exc)}
+        return {"active": True, "closed": True, "error": ""}
+
     def stop(self):
         self.is_stopped = True
         self.is_paused = False # Ensure loop breaks if paused
         self.step_signal.emit("System: Stopping...")
+        requested_at = time.time()
+        self.observability_signal.emit({
+            "type": "provider_cancel_requested",
+            "run_id": self.request_id or self.turn_id or self.session_id,
+            "turn_id": self.turn_id,
+            "timestamp": requested_at,
+        })
+        cancel_result = self._cancel_active_provider_stream()
+        cancel_event = {
+            "type": (
+                "provider_stream_cancelled"
+                if cancel_result["closed"]
+                else "provider_stream_cancel_failed"
+                if cancel_result["error"]
+                else "provider_stream_cancel_not_active"
+            ),
+            "run_id": self.request_id or self.turn_id or self.session_id,
+            "turn_id": self.turn_id,
+            "active": cancel_result["active"],
+            "timestamp": time.time(),
+        }
+        if cancel_result["error"]:
+            cancel_event["error"] = cancel_result["error"]
+            self.step_signal.emit(
+                f"System: Provider stream cancellation failed: {cancel_result['error']}"
+            )
+            self.output_signal.emit(
+                f"Provider stream cancellation failed: {cancel_result['error']}"
+            )
+        self.observability_signal.emit(cancel_event)
         self.abort_signal.emit()
 
     def steer(self, message, expected_turn_id=None):
@@ -2738,18 +2822,11 @@ class LLMWorker(QThread):
                     response_items_buffer = []
                     provider_error_message = None
                     provider_terminal_status = ""
-                    protocol_locked = False
                     tool_round_context = None
+                    stream = None
+                    first_semantic_sample_at = 0.0
 
                     try:
-                        if _needs_openai_protocol_lock(provider):
-                            waited_for_protocol = _acquire_openai_protocol_lock(self)
-                            if waited_for_protocol is None:
-                                final_content = "⚠️ Operation stopped by user."
-                                break
-                            protocol_locked = True
-                            if waited_for_protocol:
-                                self.step_signal.emit("Provider Protocol: waited for OpenAI-compatible stream lock.")
                         stream = self._provider_chat_stream(
                             provider,
                             sanitized_messages,
@@ -2760,6 +2837,8 @@ class LLMWorker(QThread):
                                 "run_id": self.request_id or self.turn_id or self.session_id,
                                 "turn_id": self.turn_id,
                                 "abort_check": lambda: self.is_stopped,
+                                "register_stream": self._register_provider_stream,
+                                "release_stream": self._release_provider_stream,
                             },
                         )
 
@@ -2771,6 +2850,30 @@ class LLMWorker(QThread):
                             if self.is_stopped: break
 
                             type_ = chunk.get("type")
+                            if (
+                                not first_semantic_sample_at
+                                and type_ in PROVIDER_SEMANTIC_CHUNK_TYPES
+                            ):
+                                first_semantic_sample_at = time.time()
+                                first_sample_latency = max(
+                                    0.0,
+                                    first_semantic_sample_at - start_time,
+                                )
+                                self._record_provider_attempt(attempt_id, {
+                                    "first_sample_at": first_semantic_sample_at,
+                                    "first_sample_latency": first_sample_latency,
+                                })
+                                self.observability_signal.emit({
+                                    "type": "provider_first_sample",
+                                    "request_id": attempt_id,
+                                    "run_id": self.request_id or self.turn_id or self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "provider": provider_name,
+                                    "model": getattr(provider, "model_name", ""),
+                                    "chunk_type": type_,
+                                    "latency": first_sample_latency,
+                                    "timestamp": first_semantic_sample_at,
+                                })
 
                             # 1. Handle Reasoning
                             if type_ == "reasoning":
@@ -3014,8 +3117,10 @@ class LLMWorker(QThread):
                                         + (f": {reason}" if reason else ".")
                                     )
                     finally:
-                        if protocol_locked:
-                            _OPENAI_PROTOCOL_LOCK.release()
+                        if stream is not None:
+                            close_stream = getattr(stream, "close", None)
+                            if callable(close_stream):
+                                close_stream()
 
                     end_time = time.time()
                     duration = end_time - start_time
@@ -3029,13 +3134,21 @@ class LLMWorker(QThread):
                         "model": getattr(provider, "model_name", ""),
                         "base_url": getattr(provider, "base_url", ""),
                         "protocol": getattr(provider, "api_protocol", "") or provider_name,
-                        "status": "error" if provider_error_message else "completed",
+                        "status": (
+                            "interrupted"
+                            if self.is_stopped
+                            else "error"
+                            if provider_error_message
+                            else "completed"
+                        ),
                         "duration": duration,
                         "timestamp": time.time(),
                     })
                     self._record_provider_attempt(attempt_id, {
                         "status": (
-                            provider_terminal_status
+                            "interrupted"
+                            if self.is_stopped
+                            else provider_terminal_status
                             or ("failed" if provider_error_message else "completed")
                         ),
                         "error": str(provider_error_message or ""),

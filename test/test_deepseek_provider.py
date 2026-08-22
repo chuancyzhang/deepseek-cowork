@@ -1154,13 +1154,86 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertNotIn({"type": "content", "content": "partial"}, chunks)
+        self.assertIn({"type": "content", "content": "partial"}, chunks)
         error = next(chunk for chunk in chunks if chunk["type"] == "error")
         self.assertIn("without a terminal event", error["content"])
         self.assertNotIn("background", client.responses.create.call_args.kwargs)
 
+    def test_chat_completions_publishes_first_content_before_stream_finishes(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+
+        def response_stream():
+            yield SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content="first",
+                        tool_calls=None,
+                    ),
+                    finish_reason=None,
+                )],
+            )
+            yield SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content=None,
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+            )
+
+        client.chat.completions.create.return_value = response_stream()
+        chunks = provider.chat_stream([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(next(chunks)["type"], "provider_request")
+        self.assertEqual(next(chunks), {"type": "content", "content": "first"})
+        self.assertEqual(next(chunks)["type"], "provider_terminal")
+
     @patch("core.llm.providers._wait_before_model_retry", return_value=True)
-    def test_responses_stream_read_error_retries_without_partial_leak(self, _wait):
+    def test_chat_completions_retries_before_semantic_output(self, _wait):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+        success_stream = [
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(
+                        reasoning_content=None,
+                        content="recovered",
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+            )
+        ]
+        client.chat.completions.create.side_effect = [
+            ConnectionError("connection reset"),
+            success_stream,
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+        self.assertEqual(
+            [chunk["attempt"] for chunk in chunks if chunk["type"] == "provider_retry"],
+            [1],
+        )
+        self.assertEqual(
+            [chunk["content"] for chunk in chunks if chunk["type"] == "content"],
+            ["recovered"],
+        )
+
+    @patch("core.llm.providers._wait_before_model_retry", return_value=True)
+    def test_responses_stream_read_error_after_semantic_output_does_not_retry(self, _wait):
         provider, client = self._build_provider(api_protocol=API_PROTOCOL_RESPONSES)
 
         def failed_stream():
@@ -1214,20 +1287,23 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream(messages))
 
-        self.assertEqual(client.responses.create.call_count, 2)
+        self.assertEqual(client.responses.create.call_count, 1)
         retries = [chunk for chunk in chunks if chunk["type"] == "provider_retry"]
-        self.assertEqual(len(retries), 1)
-        self.assertEqual(retries[0]["reason"], "stream_read_error")
+        self.assertEqual(retries, [])
         self.assertEqual(
             [chunk["content"] for chunk in chunks if chunk["type"] == "content"],
-            ["final"],
+            ["partial answer"],
         )
-        self.assertFalse(any(chunk["type"] == "reasoning" for chunk in chunks))
-        self.assertFalse(any(chunk["type"] == "tool_call" for chunk in chunks))
+        self.assertTrue(any(chunk["type"] == "reasoning" for chunk in chunks))
+        self.assertTrue(any(chunk["type"] == "tool_call" for chunk in chunks))
+        self.assertEqual(
+            [chunk["content"] for chunk in chunks if chunk["type"] == "error"],
+            ["stream_read_error"],
+        )
         request_inputs = [
             call.kwargs["input"] for call in client.responses.create.call_args_list
         ]
-        self.assertEqual(request_inputs, [request_inputs[0], request_inputs[0]])
+        self.assertEqual(request_inputs, [request_inputs[0]])
 
     @patch("core.llm.providers._wait_before_model_retry", return_value=True)
     def test_responses_stream_read_error_exhaustion_reports_one_error(self, _wait):
@@ -1242,7 +1318,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(errors, [{"type": "error", "content": "stream_read_error"}])
 
     @patch("core.llm.providers._wait_before_model_retry", return_value=True)
-    def test_chat_completions_retries_five_times_then_succeeds_without_partial_leak(
+    def test_chat_completions_does_not_retry_after_visible_partial_output(
         self,
         _wait,
     ):
@@ -1297,29 +1373,15 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
-        self.assertEqual(client.chat.completions.create.call_count, 6)
-        self.assertEqual(
-            [chunk["attempt"] for chunk in chunks if chunk["type"] == "provider_retry"],
-            [1, 2, 3, 4, 5],
-        )
-        self.assertEqual(
-            [
-                chunk["next_request_attempt"]
-                for chunk in chunks
-                if chunk["type"] == "provider_retry"
-            ],
-            [2, 3, 4, 5, 6],
-        )
-        self.assertTrue(
-            all(
-                chunk["max_request_attempts"] == 6
-                for chunk in chunks
-                if chunk["type"] == "provider_retry"
-            )
-        )
+        self.assertEqual(client.chat.completions.create.call_count, 1)
+        self.assertFalse(any(chunk["type"] == "provider_retry" for chunk in chunks))
         self.assertEqual(
             [chunk["content"] for chunk in chunks if chunk["type"] == "content"],
-            ["final"],
+            ["partial-1"],
+        )
+        self.assertEqual(
+            [chunk["content"] for chunk in chunks if chunk["type"] == "error"],
+            ["connection reset"],
         )
         request_messages = [
             call.kwargs["messages"] for call in client.chat.completions.create.call_args_list

@@ -74,6 +74,14 @@ MODEL_API_RETRY_BASE_DELAY_SECONDS = 0.5
 MODEL_API_RETRY_MAX_DELAY_SECONDS = 8.0
 MODEL_API_RETRY_AFTER_MAX_SECONDS = 30.0
 MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS = 60.0
+SEMANTIC_PROVIDER_CHUNK_TYPES = {
+    "reasoning",
+    "content",
+    "content_snapshot",
+    "tool_call",
+    "response_items",
+    "server_tool_status",
+}
 RESPONSES_WEB_SEARCH_TOOL_TYPES = {
     "web_search",
     "web_search_2025_08_26",
@@ -164,47 +172,100 @@ def _wait_before_model_retry(delay_seconds, request_context):
         time.sleep(min(remaining, 0.1))
 
 
-def retry_model_api_stream(stream_factory, request_context=None):
-    """Stage one provider attempt and publish it only after a valid completion.
+def _close_provider_stream(stream):
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return False
+    close()
+    return True
 
-    Retry notifications are yielded immediately as runtime-only events. All
-    other chunks from a failed attempt are discarded so content and tool calls
-    cannot be duplicated after a reconnect.
+
+def _register_provider_stream(request_context, stream):
+    callback = (request_context or {}).get("register_stream")
+    if not callable(callback):
+        return True
+    accepted = callback(stream)
+    if accepted is False:
+        if not _close_provider_stream(stream):
+            raise RuntimeError("Provider stream cannot be cancelled safely: close() is unavailable.")
+        return False
+    return True
+
+
+def _release_provider_stream(request_context, stream):
+    callback = (request_context or {}).get("release_stream")
+    if callable(callback):
+        callback(stream)
+
+
+def _iter_registered_provider_stream(request_context, stream):
+    try:
+        yield from stream
+    finally:
+        try:
+            _close_provider_stream(stream)
+        finally:
+            _release_provider_stream(request_context, stream)
+
+
+def retry_model_api_stream(stream_factory, request_context=None):
+    """Stream provider output immediately and retry only before semantic output.
+
+    Once content, reasoning, tool-call state, replay state, or a server-tool
+    status has been published, replaying the request could duplicate visible
+    text or side effects.  Fail that attempt explicitly instead of reconnecting.
     """
 
     context = request_context if isinstance(request_context, dict) else {}
     for attempt_index in range(MODEL_API_TRANSIENT_MAX_RETRIES + 1):
         if _retry_cancelled(context):
             return
-        staged_chunks = []
+        emitted_semantic_output = False
+        completed_terminal_seen = False
+        failed_terminal_chunks = []
         reported_error = None
         try:
             for chunk in stream_factory(attempt_index):
                 if not isinstance(chunk, dict):
                     continue
-                if str(chunk.get("type") or "") == "error":
+                chunk_type = str(chunk.get("type") or "")
+                if chunk_type == "error":
                     reported_error = ProviderStreamError(
                         str(chunk.get("content") or "Unknown provider stream error")
                     )
                     break
-                staged_chunks.append(chunk)
+                if chunk_type in SEMANTIC_PROVIDER_CHUNK_TYPES:
+                    emitted_semantic_output = True
+                if (
+                    chunk_type == "provider_terminal"
+                    and str(chunk.get("status") or "") == "completed"
+                ):
+                    completed_terminal_seen = True
+                if (
+                    chunk_type == "provider_terminal"
+                    and str(chunk.get("status") or "") != "completed"
+                    and not emitted_semantic_output
+                ):
+                    failed_terminal_chunks.append(chunk)
+                    continue
+                yield chunk
             if reported_error is not None:
                 raise reported_error
-            for chunk in staged_chunks:
-                yield chunk
+            if failed_terminal_chunks:
+                for chunk in failed_terminal_chunks:
+                    yield chunk
             return
         except Exception as exc:
+            if _retry_cancelled(context):
+                return
             can_retry = bool(
                 attempt_index < MODEL_API_TRANSIENT_MAX_RETRIES
+                and not emitted_semantic_output
+                and not completed_terminal_seen
                 and is_transient_model_api_error(exc)
             )
             if not can_retry:
-                terminal_chunks = [
-                    chunk
-                    for chunk in staged_chunks
-                    if str(chunk.get("type") or "") == "provider_terminal"
-                ]
-                for chunk in terminal_chunks:
+                for chunk in failed_terminal_chunks:
                     yield chunk
                 yield {"type": "error", "content": str(exc)}
                 return
@@ -546,70 +607,78 @@ class OpenAIProvider(LLMProvider):
             params["reasoning_effort"] = self.reasoning_effort
 
         stream = self._create_chat_completion_stream(params)
-        yield {
-            "type": "provider_request",
-            **self._stream_request_metadata(stream, client_request_id),
-        }
-        terminal_seen = False
-        for chunk in stream:
-            usage_payload = self._usage_payload(chunk)
-            if usage_payload:
-                yield {"type": "usage", "usage": usage_payload}
-            choices = getattr(chunk, "choices", None)
-            if not choices:
-                continue
-            choice = choices[0]
-            delta = choice.delta
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                yield {"type": "reasoning", "content": delta.reasoning_content}
-            delta_content = getattr(delta, "content", None)
-            if delta_content:
-                yield {"type": "content", "content": delta_content}
-            delta_tool_calls = getattr(delta, "tool_calls", None)
-            if delta_tool_calls:
-                for tc in delta_tool_calls:
-                    function = getattr(tc, "function", None)
-                    raw_arguments = getattr(function, "arguments", None) if function else None
-                    if raw_arguments is None:
-                        arguments = None
-                    elif isinstance(raw_arguments, str):
-                        arguments = raw_arguments
-                    else:
-                        try:
-                            arguments = json.dumps(raw_arguments, ensure_ascii=False)
-                        except Exception:
-                            arguments = str(raw_arguments)
-                    function_payload = {}
-                    name = getattr(function, "name", None) if function else None
-                    if name:
-                        function_payload["name"] = str(name)
-                    if arguments is not None:
-                        function_payload["arguments"] = arguments
-                    tool_call_payload = {
-                        "type": "tool_call",
-                        "index": getattr(tc, "index", 0),
-                        "function": function_payload,
+        if not _register_provider_stream(request_context, stream):
+            return
+        try:
+            yield {
+                "type": "provider_request",
+                **self._stream_request_metadata(stream, client_request_id),
+            }
+            terminal_seen = False
+            for chunk in stream:
+                usage_payload = self._usage_payload(chunk)
+                if usage_payload:
+                    yield {"type": "usage", "usage": usage_payload}
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.delta
+                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                    yield {"type": "reasoning", "content": delta.reasoning_content}
+                delta_content = getattr(delta, "content", None)
+                if delta_content:
+                    yield {"type": "content", "content": delta_content}
+                delta_tool_calls = getattr(delta, "tool_calls", None)
+                if delta_tool_calls:
+                    for tc in delta_tool_calls:
+                        function = getattr(tc, "function", None)
+                        raw_arguments = getattr(function, "arguments", None) if function else None
+                        if raw_arguments is None:
+                            arguments = None
+                        elif isinstance(raw_arguments, str):
+                            arguments = raw_arguments
+                        else:
+                            try:
+                                arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                            except Exception:
+                                arguments = str(raw_arguments)
+                        function_payload = {}
+                        name = getattr(function, "name", None) if function else None
+                        if name:
+                            function_payload["name"] = str(name)
+                        if arguments is not None:
+                            function_payload["arguments"] = arguments
+                        tool_call_payload = {
+                            "type": "tool_call",
+                            "index": getattr(tc, "index", 0),
+                            "function": function_payload,
+                        }
+                        tool_call_id = getattr(tc, "id", None)
+                        if tool_call_id:
+                            tool_call_payload["id"] = str(tool_call_id)
+                        yield tool_call_payload
+                finish_reason = getattr(choice, "finish_reason", None)
+                if finish_reason is not None:
+                    terminal_seen = True
+                    yield {
+                        "type": "provider_terminal",
+                        "status": (
+                            "completed"
+                            if str(finish_reason) in {"stop", "tool_calls"}
+                            else "incomplete"
+                        ),
+                        "finish_reason": str(finish_reason),
                     }
-                    tool_call_id = getattr(tc, "id", None)
-                    if tool_call_id:
-                        tool_call_payload["id"] = str(tool_call_id)
-                    yield tool_call_payload
-            finish_reason = getattr(choice, "finish_reason", None)
-            if finish_reason is not None:
-                terminal_seen = True
-                yield {
-                    "type": "provider_terminal",
-                    "status": (
-                        "completed"
-                        if str(finish_reason) in {"stop", "tool_calls"}
-                        else "incomplete"
-                    ),
-                    "finish_reason": str(finish_reason),
-                }
-        if not terminal_seen:
-            raise ProviderStreamError(
-                "Chat Completions stream ended without a finish_reason."
-            )
+            if not terminal_seen:
+                raise ProviderStreamError(
+                    "Chat Completions stream ended without a finish_reason."
+                )
+        finally:
+            try:
+                _close_provider_stream(stream)
+            finally:
+                _release_provider_stream(request_context, stream)
 
     def test_connection(self, timeout=20):
         if self.api_protocol == API_PROTOCOL_RESPONSES:
@@ -790,6 +859,8 @@ class OpenAIProvider(LLMProvider):
             params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
 
         stream = self.client.responses.create(**params)
+        if not _register_provider_stream(request_context, stream):
+            return
         yield {
             "type": "provider_request",
             **self._stream_request_metadata(stream, client_request_id),
@@ -799,7 +870,7 @@ class OpenAIProvider(LLMProvider):
         next_tool_index = 0
         streamed_output_text = ""
         terminal_seen = False
-        for event in stream:
+        for event in _iter_registered_provider_stream(request_context, stream):
             event_type = str(self._object_value(event, "type", "") or "")
             provider_sequence = self._object_value(event, "sequence_number")
             if event_type == "response.created":
@@ -1422,13 +1493,15 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = api_tools
 
         with self.client.messages.stream(**kwargs) as stream:
+            if not _register_provider_stream(request_context, stream):
+                return
             yield {
                 "type": "provider_request",
                 "client_request_id": str(
                     (request_context or {}).get("client_request_id") or ""
                 ),
             }
-            for event in stream:
+            for event in _iter_registered_provider_stream(request_context, stream):
                 if event.type == "content_block_delta":
                     delta_type = getattr(event.delta, "type", "")
                     if delta_type == "text_delta":

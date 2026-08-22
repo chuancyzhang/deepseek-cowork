@@ -16450,6 +16450,11 @@ class DaemonStopWorker(QThread):
                 raise RuntimeError(
                     str((response or {}).get("error") or "守护进程未确认停止请求")
                 )
+            if response.get("stopped") and not response.get("released"):
+                timeout_ms = int(response.get("release_timeout_ms") or 0)
+                raise RuntimeError(
+                    f"底层模型请求在 {timeout_ms / 1000:.1f} 秒内未释放"
+                )
             self.result_signal.emit(response, self.session_id)
         except Exception as exc:
             self.result_signal.emit({"status": "error", "error": str(exc)}, self.session_id)
@@ -22678,6 +22683,8 @@ class SessionState:
         self.llm_worker = None
         self.daemon_running = False
         self.daemon_worker = None
+        self.stop_pending = False
+        self.stop_pending_run_id = ""
         self.code_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
@@ -29483,6 +29490,7 @@ class MainWindow(QMainWindow):
                 (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
                 or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
                 or getattr(state, "daemon_running", False)
+                or getattr(state, "stop_pending", False)
             )
         )
 
@@ -42774,7 +42782,7 @@ a {{ overflow-wrap: anywhere; }}
 
     def _start_daemon_stop_worker(self, session_id, run_id=""):
         if not self.daemon_client or not str(session_id or "").strip():
-            return
+            return False
         worker = DaemonStopWorker(
             self.daemon_client,
             session_id,
@@ -42784,18 +42792,43 @@ a {{ overflow-wrap: anywhere; }}
         self._daemon_stop_workers.add(worker)
 
         def handle_result(result, stopped_session_id):
+            state = self.get_session(stopped_session_id)
+            result_run_id = str(result.get("run_id") or run_id or "")
+            pending_matches = bool(
+                state
+                and getattr(state, "stop_pending", False)
+                and (
+                    not getattr(state, "stop_pending_run_id", "")
+                    or str(getattr(state, "stop_pending_run_id", "")) == result_run_id
+                )
+            )
             if result.get("status") == "ok":
                 log_sub_agent_runtime(
                     "daemon_stop_confirmed",
                     session_id=stopped_session_id,
-                    run_id=str(result.get("run_id") or run_id or ""),
+                    run_id=result_run_id,
                     stopped=bool(result.get("stopped")),
+                    released=bool(result.get("released")),
                 )
+                if pending_matches:
+                    state.stop_pending = False
+                    state.stop_pending_run_id = ""
+                    self._show_conversation_notice(state, "已停止", "neutral")
+                    self.normalize_session_ui(state)
                 return
             error = str(result.get("error") or "未知错误")
             self.append_log(
                 f"守护进程未确认任务停止({stopped_session_id}): {error}"
             )
+            if pending_matches:
+                state.stop_pending = False
+                state.stop_pending_run_id = ""
+                self._show_conversation_notice(
+                    state,
+                    f"停止未完成：{error}",
+                    "error",
+                )
+                self.normalize_session_ui(state)
 
         def cleanup():
             self._daemon_stop_workers.discard(worker)
@@ -42804,6 +42837,7 @@ a {{ overflow-wrap: anywhere; }}
         worker.result_signal.connect(handle_result, Qt.QueuedConnection)
         worker.finished.connect(cleanup)
         worker.start()
+        return True
 
     @staticmethod
     def _visible_assistant_message_id(session_id, run_id, turn_id, group_id, stage_id):
@@ -42978,7 +43012,17 @@ a {{ overflow-wrap: anywhere; }}
         )
         return appended
 
-    def _finish_interrupted_turn(self, state, *, turn_id, run_id, bubble, reason_text, outcome):
+    def _finish_interrupted_turn(
+        self,
+        state,
+        *,
+        turn_id,
+        run_id,
+        bubble,
+        reason_text,
+        outcome,
+        stop_confirmed=True,
+    ):
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
         self._timeline_close_open_events(state, status=timeline_status)
         self._timeline_append_event(
@@ -43012,7 +43056,11 @@ a {{ overflow-wrap: anywhere; }}
             )
             if active_retry_run_id == str(run_id or ""):
                 state.active_run_retry_context = {}
-            self._show_conversation_notice(state, "已停止", "neutral")
+            self._show_conversation_notice(
+                state,
+                "已停止" if stop_confirmed else "正在停止…",
+                "neutral",
+            )
         else:
             self._show_retryable_run_failure(
                 state,
@@ -43054,14 +43102,23 @@ a {{ overflow-wrap: anywhere; }}
         code_worker = state.code_worker
         was_daemon_running = bool(state.daemon_running)
         needs_daemon_stop = bool(daemon_worker is not None or was_daemon_running)
+        daemon_stop_started = False
         if needs_daemon_stop:
+            state.stop_pending = True
+            state.stop_pending_run_id = stopped_run_id
             # Start the authoritative daemon cancellation before projecting a
             # terminal UI state. The request is scoped to this run so a late
             # stop can never cancel a newer turn in the same conversation.
-            self._start_daemon_stop_worker(
+            daemon_stop_started = self._start_daemon_stop_worker(
                 state.session_id,
                 run_id=stopped_run_id,
             )
+            if not daemon_stop_started:
+                state.stop_pending = False
+                state.stop_pending_run_id = ""
+                self.append_log(
+                    f"无法请求守护进程停止任务({state.session_id})：守护进程客户端不可用"
+                )
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
@@ -43123,7 +43180,14 @@ a {{ overflow-wrap: anywhere; }}
             bubble=stopped_bubble,
             reason_text="本轮已中断",
             outcome="interrupted",
+            stop_confirmed=not needs_daemon_stop,
         )
+        if needs_daemon_stop and not daemon_stop_started:
+            self._show_conversation_notice(
+                state,
+                "停止未完成：守护进程客户端不可用",
+                "error",
+            )
         self.save_chat_history(session_id=state.session_id)
         log_sub_agent_runtime(
             "ui_assistant_turn_interrupted",
@@ -43146,7 +43210,8 @@ a {{ overflow-wrap: anywhere; }}
         # Check if running
         is_running = (state.llm_worker and state.llm_worker.isRunning()) or \
                      (state.code_worker and state.code_worker.isRunning()) or \
-                     state.daemon_running
+                     state.daemon_running or \
+                     getattr(state, "stop_pending", False)
         
         if is_running:
             if getattr(state, "turn_steerable", False):
@@ -44745,6 +44810,14 @@ a {{ overflow-wrap: anywhere; }}
         prompt_files=None,
         **options,
     ):
+        if state is not None and getattr(state, "stop_pending", False):
+            self._show_conversation_notice(state, "正在停止上一轮，请稍候…", "neutral")
+            log_chat_runtime_debug(
+                "submit_session_request_stop_pending_rejected",
+                session_id=state.session_id,
+                run_id=str(getattr(state, "stop_pending_run_id", "") or ""),
+            )
+            return False
         if not state or getattr(state, "submit_in_progress", False):
             if state is not None:
                 log_chat_runtime_debug(

@@ -3019,6 +3019,29 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_daemon_stop_stays_pending_until_resource_release_confirmation(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_daemon_stop_pending")
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-stop-pending"
+            state.daemon_running = True
+            with patch.object(window, "_start_daemon_stop_worker", return_value=True):
+                window.stop_agent()
+
+            self.assertTrue(state.stop_pending)
+            self.assertEqual(state.stop_pending_run_id, "request-stop-pending")
+            self.assertEqual(state.conversation_notice.label.text(), "正在停止…")
+            self.assertTrue(window._session_is_busy(state))
+        finally:
+            state = window.get_current_session()
+            if state is not None:
+                state.stop_pending = False
+                state.stop_pending_run_id = ""
+            window.close()
+            window.deleteLater()
+
     def test_stop_persists_all_visible_stages_around_guidance_in_display_order(self):
         window = MainWindow()
         try:

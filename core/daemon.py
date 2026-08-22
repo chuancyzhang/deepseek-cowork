@@ -498,7 +498,14 @@ class DaemonState:
         )
         return True
     
-    def stop_session(self, session_id, expected_run_id=""):
+    def stop_session(
+        self,
+        session_id,
+        expected_run_id="",
+        *,
+        wait_for_release=False,
+        release_timeout_ms=5000,
+    ):
         expected_run_id = str(expected_run_id or "").strip()
         interrupted_run_ids = set()
         with self.lock:
@@ -575,12 +582,34 @@ class DaemonState:
                 except Exception as e:
                     _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
             stopped = bool(matched_execution or interrupted_run_ids)
+        release_targets = []
+        seen_worker_ids = set()
+        for candidate in [worker, *detached]:
+            if candidate is None or id(candidate) in seen_worker_ids:
+                continue
+            seen_worker_ids.add(id(candidate))
+            release_targets.append(candidate)
+        released = True
+        if wait_for_release and release_targets:
+            deadline = time.monotonic() + max(0.0, int(release_timeout_ms or 0) / 1000.0)
+            for candidate in release_targets:
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                if remaining_ms <= 0 or not candidate.wait(remaining_ms):
+                    released = False
+                    break
         _log_daemon(
             "stop_session handled "
             f"session_id={session_id} expected_run_id={expected_run_id or '-'} "
             f"matched_worker={bool(worker)} detached_workers={len(detached)} "
-            f"interrupted_runs={sorted(interrupted_run_ids)} stopped={stopped}"
+            f"interrupted_runs={sorted(interrupted_run_ids)} stopped={stopped} "
+            f"wait_for_release={bool(wait_for_release)} released={released}"
         )
+        if wait_for_release:
+            return {
+                "stopped": stopped,
+                "released": released,
+                "release_timeout_ms": int(release_timeout_ms or 0),
+            }
         return stopped
 
     def steer_session(self, session_id, expected_turn_id, message):
@@ -1762,13 +1791,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 self._send({"status": "error", "error": "Missing session_id"})
                 return
             expected_run_id = str(data.get("run_id") or "")
-            stopped = self.server.state.stop_session(
+            stop_result = self.server.state.stop_session(
                 session_id,
                 expected_run_id=expected_run_id,
+                wait_for_release=True,
             )
             self._send({
                 "status": "ok",
-                "stopped": stopped,
+                "stopped": bool(stop_result.get("stopped")),
+                "released": bool(stop_result.get("released")),
+                "release_timeout_ms": int(stop_result.get("release_timeout_ms") or 0),
                 "run_id": expected_run_id,
             })
             return
@@ -2036,7 +2068,7 @@ class DaemonClient:
         payload = {"action": "stop_session", "session_id": session_id}
         if run_id:
             payload["run_id"] = str(run_id)
-        return self._request(payload)
+        return self._request(payload, timeout=max(float(self.timeout or 0), 6.0))
 
     def attach_run(self, session_id, run_id, starting_after=0):
         return self._request(

@@ -3213,6 +3213,152 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_worker_stop_closes_active_provider_stream(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        class _BlockingStream:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.closed = threading.Event()
+
+            def __iter__(self):
+                self.entered.set()
+                self.closed.wait(5)
+                return
+                yield None
+
+            def close(self):
+                self.closed.set()
+
+        blocking_stream = _BlockingStream()
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def chat_stream(
+                self,
+                messages,
+                tools=None,
+                prompt_cache_key=None,
+                request_context=None,
+            ):
+                context = request_context or {}
+                if not context["register_stream"](blocking_stream):
+                    return
+                try:
+                    yield {"type": "provider_request"}
+                    yield from blocking_stream
+                finally:
+                    context["release_stream"](blocking_stream)
+
+        temp_dir = tempfile.mkdtemp()
+        worker = None
+        try:
+            with (
+                patch("core.agent.SkillManager", return_value=_SkillManagerStub()),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "wait"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    session_id="cancel-stream-session",
+                    turn_id="turn-1",
+                    request_id="run-1",
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.start()
+                self.assertTrue(blocking_stream.entered.wait(2))
+                worker.stop()
+                self.assertTrue(blocking_stream.closed.wait(1))
+                self.assertTrue(worker.wait(3000))
+                self.assertIsNone(worker._active_provider_stream)
+        finally:
+            if worker is not None and worker.isRunning():
+                worker.stop()
+                worker.wait(3000)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_parallel_workers_enter_provider_without_cross_session_lock(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        barrier = threading.Barrier(2)
+        entered_sessions = []
+        entered_lock = threading.Lock()
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                with entered_lock:
+                    entered_sessions.append(True)
+                barrier.wait(timeout=2)
+                yield {"type": "content", "content": "ok"}
+                yield {
+                    "type": "provider_terminal",
+                    "status": "completed",
+                    "finish_reason": "stop",
+                }
+
+        temp_dir = tempfile.mkdtemp()
+        workers = []
+        try:
+            with (
+                patch("core.agent.SkillManager", return_value=_SkillManagerStub()),
+                patch(
+                    "core.agent.LLMFactory.create_provider",
+                    side_effect=lambda *_args, **_kwargs: _ProviderStub(),
+                ),
+            ):
+                for index in range(2):
+                    worker = LLMWorker(
+                        [{"role": "user", "content": f"session-{index}"}],
+                        _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                        workspace_dir=temp_dir,
+                        session_id=f"parallel-session-{index}",
+                        turn_id="turn-1",
+                        request_id=f"run-{index}",
+                        run_context={"mode": RUN_MODE_EXECUTION},
+                    )
+                    workers.append(worker)
+                    worker.start()
+                self.assertTrue(all(worker.wait(5000) for worker in workers))
+                self.assertEqual(entered_sessions, [True, True])
+        finally:
+            for worker in workers:
+                if worker.isRunning():
+                    worker.stop()
+                    worker.wait(3000)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_deepseek_responses_worker_persists_and_replays_items_across_tool_turn(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
@@ -3901,6 +4047,41 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         run = self.state.runtime_journal.get_run(session_id, worker.request_id)
         self.assertEqual(run["status"], "interrupted")
         self.assertTrue(run["stop_requested"])
+
+    def test_stop_session_can_confirm_worker_resource_release(self):
+        class _Worker:
+            request_id = "release-run"
+
+            def __init__(self):
+                self.stopped = False
+                self.wait_timeout = None
+
+            def stop(self):
+                self.stopped = True
+
+            def wait(self, timeout_ms):
+                self.wait_timeout = timeout_ms
+                return self.stopped
+
+        session_id = "release-session"
+        worker = _Worker()
+        self.state.set_active_worker(
+            session_id,
+            worker,
+            turn_id="release-turn",
+            run_id=worker.request_id,
+        )
+
+        result = self.state.stop_session(
+            session_id,
+            wait_for_release=True,
+            release_timeout_ms=750,
+        )
+
+        self.assertTrue(result["stopped"])
+        self.assertTrue(result["released"])
+        self.assertGreater(worker.wait_timeout, 0)
+        self.assertLessEqual(worker.wait_timeout, 750)
 
     def test_stop_session_run_id_does_not_cancel_newer_active_run(self):
         class _Worker:

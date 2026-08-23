@@ -1988,6 +1988,16 @@ class LLMWorker(QThread):
                 renderer = str(self.run_context.get("ppt_agent_renderer") or "none").strip().lower()
                 visual_status = str(self.run_context.get("ppt_agent_visual_status") or "unverified").strip().lower()
                 screenshot_count = len(self.run_context.get("ppt_agent_template_screenshots") or [])
+                renderer_prog_ids = {
+                    "powerpoint": "PowerPoint.Application",
+                    "wps": "KWPP.Application / WPP.Application",
+                }
+                renderer_prog_id = renderer_prog_ids.get(renderer)
+                renderer_info_line = (
+                    f"- 本地渲染器: {renderer}（ProgID: {renderer_prog_id}）——可自行复用"
+                    if renderer_prog_id
+                    else f"- 本地渲染器: {renderer}"
+                )
                 dynamic_state_lines.extend(
                     [
                         "",
@@ -1998,10 +2008,9 @@ class LLMWorker(QThread):
                         "4. 优先克隆适合的模板页、形状 XML 和资源关系，再替换或叠加内容；具体实现由你根据模板判断，不要求固定操作 JSON。",
                         "5. 自主区分品牌元素、固定页眉页脚、示例文字和内容占位区域，尽量保持模板视觉语言。",
                         "6. 输出独立的新 PPTX，只保留生成页；不得覆盖或修改模板原文件。",
-                        "7. 完成后重新打开成品，检查 ZIP/OOXML、页面尺寸、幻灯片数量和关系目标，并明确给出完整路径。",
-                        "8. 结构校验通过不代表任务完成：必须等待系统用本机 PowerPoint 或 WPS 打开成品并逐页截图完成视觉校验；你不得跳过该环节，也不得声称已自行完成视觉校验。收到系统校验轮次时，请逐页对照生成截图与模板截图，发现图片缺失、错位、字体替换、文字溢出、遮挡、异常空白或品牌元素破坏等问题就修复同一个 PPTX 文件，再接受下一轮渲染校验。",
+                        "7. 完成后重新打开成品，检查 ZIP/OOXML、页面尺寸、幻灯片数量和关系目标；随后如本地有可用渲染器，优先用 run_python_code 或 bash 命令通过 COM 自动化驱动本机 PowerPoint 或 WPS 打开成品并逐页导出截图自检（ProgID 见下方渲染器信息行），发现问题就修复同一个 PPTX 文件并重导截图复核。",
                         f"- PPTX 模板: {template_file}",
-                        f"- 本地渲染器: {renderer}",
+                        renderer_info_line,
                         f"- 模板截图数量: {screenshot_count}",
                         f"- 视觉校验状态: {visual_status}",
                     ]

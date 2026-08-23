@@ -212,10 +212,20 @@ def build_ppt_agent_prompt(
         if not screenshot_lines:
             screenshot_lines = "- 当前没有本地演示渲染器，无法提供模板真实截图。"
         validation_line = (
-            "- 生成后系统会用同一个本地演示渲染器截图，并交给多模态模型继续校验。"
+            "- 生成后系统会用同一个本地演示渲染器（本机 PowerPoint 或 WPS）打开成品并逐页截图，交给多模态模型继续视觉校验；发现问题会自动发起修复轮次。"
             if visual_validation
             else "- 当前任务没有可用的 PowerPoint/WPS 渲染器；请完成结构校验，并明确说明成品未经视觉渲染校验。"
         )
+        renderer_name = str(renderer or "none").strip()
+        renderer_prog_ids = {
+            "powerpoint": "PowerPoint.Application",
+            "wps": "KWPP.Application / WPP.Application",
+        }
+        prog_id = renderer_prog_ids.get(renderer_name.lower())
+        if prog_id:
+            renderer_line = f"- 本地渲染器: {renderer_name}（ProgID: {prog_id}）——可自行复用\n"
+        else:
+            renderer_line = f"- 本地渲染器: {renderer_name or 'none'}\n"
         prompt = (
             "请以「PPT Agent」身份，根据用户材料和 PPTX 模板原文件直接生成新的 PPTX。"
             "本任务不要先生成 HTML，也不要使用默认 PPT Agent、Guizang PPT、Frontend Slides 或 Huashu Design 的 HTML-first 工作流。\n\n"
@@ -226,10 +236,10 @@ def build_ppt_agent_prompt(
             "4. 优先选择并克隆适合的模板页、形状 XML 和资源关系，再结合用户材料替换或叠加内容；具体实现由你根据模板决定。\n"
             "5. 自主判断固定品牌文案、页眉页脚、示例内容和可替换区域，并决定页面数量、模板页映射、图片及图表方式。\n"
             "6. 输出独立的新 PPTX，只保留生成页，不要覆盖或修改模板原文件。\n"
-            "7. 完成后重新打开生成文件，检查 ZIP/OOXML、幻灯片数量、页面尺寸和关系目标，并明确给出成品完整路径。\n\n"
+            "7. 完成后重新打开生成文件，检查 ZIP/OOXML、幻灯片数量、页面尺寸和关系目标；随后如本地有可用渲染器，优先用 run_python_code 或 bash 命令通过 COM 自动化驱动本机 PowerPoint 或 WPS 打开成品并逐页导出截图自检（ProgID 见下方渲染器信息），发现问题就修复同一个 PPTX 文件并重导截图复核，再明确给出成品完整路径。\n\n"
             "模板与渲染信息:\n"
             f"- PPTX 模板原文件: {template_file}\n"
-            f"- 本地渲染器: {str(renderer or 'none').strip()}\n"
+            f"{renderer_line}"
             f"{validation_line}\n"
             f"{screenshot_lines}\n\n"
             "[用户需求]\n"

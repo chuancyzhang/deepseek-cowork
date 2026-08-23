@@ -1999,6 +1999,7 @@ class LLMWorker(QThread):
                         "5. 自主区分品牌元素、固定页眉页脚、示例文字和内容占位区域，尽量保持模板视觉语言。",
                         "6. 输出独立的新 PPTX，只保留生成页；不得覆盖或修改模板原文件。",
                         "7. 完成后重新打开成品，检查 ZIP/OOXML、页面尺寸、幻灯片数量和关系目标，并明确给出完整路径。",
+                        "8. 结构校验通过不代表任务完成：必须等待系统用本机 PowerPoint 或 WPS 打开成品并逐页截图完成视觉校验；你不得跳过该环节，也不得声称已自行完成视觉校验。收到系统校验轮次时，请逐页对照生成截图与模板截图，发现图片缺失、错位、字体替换、文字溢出、遮挡、异常空白或品牌元素破坏等问题就修复同一个 PPTX 文件，再接受下一轮渲染校验。",
                         f"- PPTX 模板: {template_file}",
                         f"- 本地渲染器: {renderer}",
                         f"- 模板截图数量: {screenshot_count}",
@@ -2007,7 +2008,7 @@ class LLMWorker(QThread):
                 )
                 if renderer == "none":
                     dynamic_state_lines.append(
-                        "当前没有 PowerPoint/WPS 渲染器：不得声称视觉校验通过；请明确告知用户成品仅完成结构校验。"
+                        "当前没有 PowerPoint/WPS 渲染器：无法用本机 PowerPoint 或 WPS 打开成品做逐页截图的视觉校验；不得声称视觉校验通过，请明确告知用户成品仅完成结构校验。"
                     )
             else:
                 profile_guidance = {

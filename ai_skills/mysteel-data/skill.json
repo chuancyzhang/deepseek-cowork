@@ -1,0 +1,108 @@
+{
+  "version": 2,
+  "name": "mysteel-data",
+  "display_name": "钢联数据（Mysteel）",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "security_level": "high",
+  "description": "Mysteel commodity data skill pack for prices, news, market analysis, research reports, customs, weather, agricultural balances, business leads, and charts.",
+  "description_cn": "钢联数据大宗商品能力包，支持智能问数、实时资讯、市场分析、研报、海关、气象、农产品供需、商机和图表。",
+  "presentation": {
+    "category": "financial_research",
+    "short_name": "钢联数据",
+    "summary": "查询钢联大宗商品数据与资讯，并生成分析、研报和图表。",
+    "examples": ["查询钢联价格", "分析钢联市场", "生成钢联研报"],
+    "access_note": "查询文本、筛选条件和图表数据会发送到钢联数据服务；产物默认保存在当前会话工作区。"
+  },
+  "tags": [
+    "mysteel",
+    "commodity-data",
+    "market-data",
+    "钢联",
+    "钢联数据",
+    "大宗商品",
+    "智能问数",
+    "市场分析",
+    "行业资讯",
+    "研报"
+  ],
+  "triggers": [
+    "钢联数据",
+    "上海钢联",
+    "Mysteel",
+    "钢联智能问数",
+    "钢联实时资讯",
+    "钢联市场分析",
+    "钢联研报",
+    "钢联海关数据",
+    "钢联商机"
+  ],
+  "anti_triggers": ["东方财富", "Wind", "AKShare"],
+  "tool_refs": ["run_skill_script"],
+  "references": [
+    "SOURCE.md",
+    "customs-reporter/SKILL.md",
+    "balance-sheet-reporter/SKILL.md",
+    "weather-reporter/SKILL.md",
+    "bid-supply/SKILL.md",
+    "info-search/SKILL.md",
+    "market-analysis/SKILL.md",
+    "report-write/SKILL.md",
+    "chart-generation/SKILL.md",
+    "price-search/SKILL.md"
+  ],
+  "script_refs": [
+    "customs-reporter/customs_query.py",
+    "balance-sheet-reporter/balance_query.py",
+    "balance-sheet-reporter/balance_field_mapping.py",
+    "weather-reporter/weather_query.py",
+    "bid-supply/bidding_search.py",
+    "bid-supply/supply_demand_search.py",
+    "info-search/info_search.py",
+    "market-analysis/market_analysis.py",
+    "report-write/report_outline.py",
+    "chart-generation/chart_generate.py",
+    "chart-generation/chart_render.py",
+    "price-search/price_search.py"
+  ],
+  "script_entries": [
+    {"name": "customs_query", "path": "customs-reporter/customs_query.py", "runtime": "python", "description": "Query Mysteel customs import and export data."},
+    {"name": "balance_query", "path": "balance-sheet-reporter/balance_query.py", "runtime": "python", "description": "Query agricultural supply and demand balance data."},
+    {"name": "balance_field_mapping", "path": "balance-sheet-reporter/balance_field_mapping.py", "runtime": "python", "description": "Query balance-sheet field names and units."},
+    {"name": "weather_query", "path": "weather-reporter/weather_query.py", "runtime": "python", "description": "Query producing-area weather for an agricultural futures variety."},
+    {"name": "bidding_search", "path": "bid-supply/bidding_search.py", "runtime": "python", "description": "Search Mysteel bidding and tender data."},
+    {"name": "supply_demand_search", "path": "bid-supply/supply_demand_search.py", "runtime": "python", "description": "Search steel spot supply and purchase leads."},
+    {"name": "info_search", "path": "info-search/info_search.py", "runtime": "python", "description": "Search Mysteel commodity news and information."},
+    {"name": "market_analysis", "path": "market-analysis/market_analysis.py", "runtime": "python", "description": "Generate a Mysteel commodity market analysis."},
+    {"name": "report_outline", "path": "report-write/report_outline.py", "runtime": "python", "description": "Generate a Mysteel research-report outline."},
+    {"name": "chart_generate", "path": "chart-generation/chart_generate.py", "runtime": "python", "description": "Generate an ECharts option from text or structured data."},
+    {"name": "chart_render", "path": "chart-generation/chart_render.py", "runtime": "python", "description": "Render a generated ECharts option to a safe workspace HTML file."},
+    {"name": "price_search", "path": "price-search/price_search.py", "runtime": "python", "description": "Query Mysteel prices and indicators and optionally save filtered CSV files."}
+  ],
+  "config_fields": [
+    {
+      "name": "MYSTEEL_API_KEY",
+      "label": "钢联 API Key",
+      "kind": "secret",
+      "required": true,
+      "env": "MYSTEEL_API_KEY",
+      "help": "仅保存在 Cowork 本地能力配置中，运行脚本时临时注入。",
+      "placeholder": "请输入钢联 Skills API Key",
+      "action_label": "获取 API Key",
+      "action_url": "https://data.mysteel.com/skills/index.html"
+    }
+  ],
+  "python_dependencies": ["requests>=2.31,<3"],
+  "node_dependencies": [],
+  "workflow": [
+    "Read the matching vendored sub-skill reference before choosing arguments.",
+    "Use run_skill_script with one of the twelve declared Python entries.",
+    "Use only the Cowork-managed MYSTEEL_API_KEY; never pass or persist the key.",
+    "Keep generated files inside the active Cowork workspace and report their actual paths.",
+    "State that query text and supplied chart data are sent to Mysteel, and surface API errors without changing data sources."
+  ]
+}
+

@@ -23,7 +23,7 @@ from core.skill_manager import SkillManager
 from core.interaction import InteractionBridge, interaction_service, parse_interaction_reply
 from core import env_utils
 from core import sandbox_runtime
-from core.clarify_mode import RUN_MODE_EXECUTION
+from core.clarify_mode import RUN_MODE_EXECUTION, WORKFLOW_MODE_OFFICE_HTML_FIRST
 from core.agent import LLMWorker
 from core import daemon as daemon_module
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
@@ -1456,6 +1456,44 @@ class TestDaemonState(unittest.TestCase):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
         self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
 
+    def test_provider_error_appends_replay_safe_generated_messages(self):
+        messages = [{"id": "u1", "role": "user", "content": "start"}]
+        generated = [
+            {
+                "id": "a1",
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            },
+            {"id": "t1", "role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        ]
+
+        self.state.append_worker_result_messages(
+            "session-error-ledger",
+            messages,
+            {
+                "error": "provider failed",
+                "error_type": "RuntimeError",
+                "generated_messages": generated,
+            },
+            "test",
+        )
+
+        self.assertEqual([message.get("id") for message in messages], ["u1", "a1", "t1"])
+
+    def test_empty_worker_error_is_normalized_at_daemon_boundary(self):
+        result = daemon_module._normalize_worker_error({
+            "error": "",
+            "error_type": "PermissionError",
+        })
+
+        self.assertEqual(result["error"], "PermissionError: no message")
+        self.assertEqual(result["error_type"], "PermissionError")
+
     def test_request_messages_prefers_ui_snapshot_over_sqlite(self):
         session_id = "desktop-session"
         self.state.chat_storage.save_conversation(
@@ -1944,6 +1982,36 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 )
             )
             self.assertEqual(request_messages, current_messages)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_direct_pptx_runtime_context_ignores_visual_process_state(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            worker.run_context.update({
+                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                "office_output_profile": "ppt",
+                "ppt_agent_mode": True,
+                "ppt_agent_output_format": "pptx",
+                "ppt_agent_template_file": os.path.join(temp_dir, "template.pptx"),
+                "ppt_agent_renderer": "powerpoint",
+                "ppt_agent_visual_status": "validating",
+                "ppt_agent_template_screenshots": ["slide-1.png"],
+            })
+            first = worker._build_runtime_context_prompt({})
+            worker.run_context["ppt_agent_visual_status"] = "verified"
+            worker.run_context["ppt_agent_template_screenshots"] = [
+                "slide-1.png",
+                "slide-2.png",
+            ]
+            second = worker._build_runtime_context_prompt({})
+
+            self.assertEqual(first, second)
+            self.assertNotIn("模板截图数量", first)
+            self.assertNotIn("视觉校验状态", first)
+            self.assertIn("template.pptx", first)
+            self.assertIn("PowerPoint.Application", first)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -2444,6 +2512,106 @@ class TestAgentSystemPrompt(unittest.TestCase):
 
 
 class TestLLMWorkerToolLoopGuard(unittest.TestCase):
+    def test_tool_result_is_kept_when_final_journal_write_fails(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                self.calls = []
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [{
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "read",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }]
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                return skill_name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+            def get_tool_record(self, name):
+                return {"source_kind": "core_builtin"}
+
+            def call_tool(self, name, args, context=None):
+                self.calls.append((name, args))
+                return {"status": "ok", "content": f"result-{len(self.calls)}"}
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = "https://provider.example/v1"
+            api_protocol = "chat_completions"
+            thinking_enabled = False
+            requires_responses_replay = False
+            requires_deepseek_responses_replay = False
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                yield {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+                yield {
+                    "type": "tool_call",
+                    "index": 1,
+                    "id": "call-2",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        skill_manager = _SkillManagerStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", return_value=skill_manager),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read twice"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    session_id="journal-failure-session",
+                    turn_id="turn-1",
+                    request_id="run-1",
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                real_record_tool = worker.runtime_journal.record_tool
+
+                def fail_finished_record(session_id, execution_id, payload):
+                    if str((payload or {}).get("status") or "") == "succeeded":
+                        raise PermissionError("denied")
+                    return real_record_tool(session_id, execution_id, payload)
+
+                worker.runtime_journal.record_tool = fail_finished_record
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertEqual(len(skill_manager.calls), 1)
+            self.assertEqual(finished[0].get("error_type"), "RuntimeJournalWriteError")
+            generated = finished[0].get("generated_messages") or []
+            assistant = next(message for message in generated if message.get("tool_calls"))
+            self.assertEqual(len(assistant["tool_calls"]), 2)
+            tool_messages = [message for message in generated if message.get("role") == "tool"]
+            self.assertEqual({message.get("tool_call_id") for message in tool_messages}, {"call-1", "call-2"})
+            skipped = next(message for message in tool_messages if message.get("tool_call_id") == "call-2")
+            self.assertTrue((skipped.get("meta") or {}).get("not_executed"))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_provider_attempt_persists_request_ids_response_id_and_terminal(self):
         class _SkillManagerStub:
             def get_tool_definitions(self, *args, **kwargs):

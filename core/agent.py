@@ -1986,8 +1986,6 @@ class LLMWorker(QThread):
             if direct_pptx:
                 template_file = str(self.run_context.get("ppt_agent_template_file") or "").strip()
                 renderer = str(self.run_context.get("ppt_agent_renderer") or "none").strip().lower()
-                visual_status = str(self.run_context.get("ppt_agent_visual_status") or "unverified").strip().lower()
-                screenshot_count = len(self.run_context.get("ppt_agent_template_screenshots") or [])
                 renderer_prog_ids = {
                     "powerpoint": "PowerPoint.Application",
                     "wps": "KWPP.Application / WPP.Application",
@@ -2011,8 +2009,6 @@ class LLMWorker(QThread):
                         "7. 完成后重新打开成品，检查 ZIP/OOXML、页面尺寸、幻灯片数量和关系目标；随后如本地有可用渲染器，优先用 run_python_code 或 bash 命令通过 COM 自动化驱动本机 PowerPoint 或 WPS 打开成品并逐页导出截图自检（ProgID 见下方渲染器信息行），发现问题就修复同一个 PPTX 文件并重导截图复核。",
                         f"- PPTX 模板: {template_file}",
                         renderer_info_line,
-                        f"- 模板截图数量: {screenshot_count}",
-                        f"- 视觉校验状态: {visual_status}",
                     ]
                 )
                 if renderer == "none":
@@ -3480,6 +3476,7 @@ class LLMWorker(QThread):
                         failed_tool_results = []
                         completed_tool_call_ids = set()
                         unknown_tool_execution = False
+                        tool_journal_failure_error = ""
                         for tool in tool_calls:
                             # Check Control Flags inside tool loop
                             while self.is_paused:
@@ -3852,17 +3849,29 @@ class LLMWorker(QThread):
                             result_status = str(
                                 result_obj.get("status") or ""
                             ).lower() if isinstance(result_obj, dict) else ""
-                            self._record_tool_execution(execution_id, {
-                                "status": (
-                                    "unknown"
-                                    if result_status == "unknown"
-                                    else ("failed" if structured_failure else "succeeded")
-                                ),
-                                "finished_at": end_tool_time,
-                                "result_text": result_text,
+                            tool_msg = {
+                                "id": uuid.uuid4().hex,
+                                "role": "tool",
+                                "tool_call_id": tool.id,
+                                "content": result_text,
                                 "result_obj": result_obj,
-                            })
-                            
+                                "meta": {
+                                    "start_time": start_tool_time,
+                                    "end_time": end_tool_time,
+                                    "duration": duration_tool
+                                }
+                            }
+                            self._append_ledger_message(
+                                current_messages,
+                                generated_messages,
+                                tool_msg,
+                            )
+                            completed_tool_call_ids.add(str(tool.id or "").strip())
+                            if result_text.strip() and not structured_failure:
+                                successful_tool_results.append(name)
+                            if structured_failure:
+                                failed_tool_results.append(name)
+
                             # Emit Tool Result Signal
                             self.tool_result_signal.emit({
                                 "id": tool.id,
@@ -3892,28 +3901,51 @@ class LLMWorker(QThread):
                                 }
                             })
 
-                            tool_msg = {
-                                "id": uuid.uuid4().hex,
-                                "role": "tool",
-                                "tool_call_id": tool.id,
-                                "content": result_text,
-                                "result_obj": result_obj,
-                                "meta": {
-                                    "start_time": start_tool_time,
-                                    "end_time": end_tool_time,
-                                    "duration": duration_tool
-                                }
-                            }
-                            self._append_ledger_message(
-                                current_messages,
-                                generated_messages,
-                                tool_msg,
-                            )
-                            completed_tool_call_ids.add(str(tool.id or "").strip())
-                            if result_text.strip() and not structured_failure:
-                                successful_tool_results.append(name)
-                            if structured_failure:
-                                failed_tool_results.append(name)
+                            try:
+                                self._record_tool_execution(execution_id, {
+                                    "status": (
+                                        "unknown"
+                                        if result_status == "unknown"
+                                        else ("failed" if structured_failure else "succeeded")
+                                    ),
+                                    "finished_at": end_tool_time,
+                                    "result_text": result_text,
+                                    "result_obj": result_obj,
+                                })
+                            except Exception as exc:
+                                error_type = type(exc).__name__ or "RuntimeJournalWriteError"
+                                tool_journal_failure_error = (
+                                    str(exc).strip() or f"{error_type}: no message"
+                                )
+                                for pending_tool in tool_calls:
+                                    pending_id = str(pending_tool.id or "").strip()
+                                    if not pending_id or pending_id in completed_tool_call_ids:
+                                        continue
+                                    pending_name = str(pending_tool.function.name or "unknown_tool").strip()
+                                    skipped_result = {
+                                        "error": tool_journal_failure_error,
+                                        "status": "denied",
+                                        "blocked_tool": pending_name,
+                                        "content": "运行记录写入失败，本工具未执行。",
+                                    }
+                                    skipped_text = json.dumps(skipped_result, ensure_ascii=False)
+                                    self._append_ledger_message(
+                                        current_messages,
+                                        generated_messages,
+                                        {
+                                            "id": uuid.uuid4().hex,
+                                            "role": "tool",
+                                            "tool_call_id": pending_id,
+                                            "content": skipped_text,
+                                            "result_obj": skipped_result,
+                                            "meta": {
+                                                "not_executed": True,
+                                                "reason": "runtime_journal_write_failed",
+                                            },
+                                        },
+                                    )
+                                    completed_tool_call_ids.add(pending_id)
+                                break
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
                             self.step_signal.emit(f"Tool Result: {result_text}")
@@ -3959,6 +3991,21 @@ class LLMWorker(QThread):
                             break
                         completed_tool_round = tool_round_context
                         tool_round_context = None
+                        if tool_journal_failure_error:
+                            self.observability_signal.emit({
+                                "type": "tool_round_stopped_after_journal_error",
+                                "error": tool_journal_failure_error,
+                                "completed_tool_call_count": len(completed_tool_call_ids),
+                                "timestamp": time.time(),
+                            })
+                            self.finished_signal.emit({
+                                "error": tool_journal_failure_error,
+                                "error_type": "RuntimeJournalWriteError",
+                                "generated_messages": generated_messages,
+                                "turn_id": self.turn_id,
+                                "request_id": self.request_id,
+                            })
+                            return
                         if failed_tool_results:
                             marked_count = self._mark_tool_round_runtime_only(
                                 current_messages,
@@ -4095,17 +4142,21 @@ class LLMWorker(QThread):
                         tool_round_context,
                     )
                     self._append_pending_guidance(current_messages, generated_messages, close=True)
-                    self.output_signal.emit(f"Provider Exception: {e}")
+                    error_type = type(e).__name__ or "UnknownError"
+                    error_text = str(e).strip() or f"{error_type}: no message"
+                    self.output_signal.emit(f"Provider Exception: {error_text}")
                     self.observability_signal.emit({
                         "type": "provider_request_error",
                         "request_id": f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
                         "turn_id": self.turn_id,
                         "provider": locals().get("provider_name", ""),
-                        "error": str(e),
+                        "error": error_text,
+                        "error_type": error_type,
                         "timestamp": time.time(),
                     })
                     self.finished_signal.emit({
-                        "error": str(e),
+                        "error": error_text,
+                        "error_type": error_type,
                         "generated_messages": generated_messages,
                         "turn_id": self.turn_id,
                         "request_id": self.request_id,

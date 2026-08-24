@@ -67,6 +67,15 @@ def _log_daemon(message):
             return
 
 
+def _normalize_worker_error(result):
+    if not isinstance(result, dict) or "error" not in result:
+        return result
+    error_type = str(result.get("error_type") or "UnknownError").strip() or "UnknownError"
+    result["error_type"] = error_type
+    result["error"] = str(result.get("error") or "").strip() or f"{error_type}: no message"
+    return result
+
+
 def _compute_session_title(messages):
     title = "新对话"
     for msg in messages:
@@ -302,22 +311,13 @@ class DaemonState:
         return normalized_messages
 
     def append_worker_result_messages(self, session_id, messages, result, source):
-        if "error" in result:
-            _log_daemon(
-                "provider_error_without_ledger_append "
-                + json.dumps(
-                    {
-                        "session_id": session_id,
-                        "source": source,
-                        "error": str(result.get("error") or ""),
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return
         generated_messages = result.get("generated_messages", [])
+        if not isinstance(generated_messages, list):
+            generated_messages = []
+        persisted_count = 0
         if generated_messages:
             persistable_messages = filter_persistable_messages(generated_messages)
+            persisted_count = len(persistable_messages)
             filtered_count = len(generated_messages) - len(persistable_messages)
             if filtered_count:
                 _log_daemon(
@@ -334,6 +334,23 @@ class DaemonState:
                     )
                 )
             messages[:] = merge_messages_by_id(messages, persistable_messages)
+        if "error" in result:
+            _log_daemon(
+                "provider_error_with_ledger_append "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "source": source,
+                        "error": str(result.get("error") or ""),
+                        "error_type": str(result.get("error_type") or ""),
+                        "generated_message_count": len(generated_messages),
+                        "persisted_message_count": persisted_count,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        if generated_messages:
             return
         fallback = {
             "id": str(result.get("message_id") or uuid.uuid4().hex),
@@ -1166,6 +1183,7 @@ class DaemonState:
                 "turn_id": turn_id,
                 "request_id": request_id,
             }
+        result = _normalize_worker_error(result)
         provider_succeeded = "error" not in result
         terminal_status = (
             "completed"
@@ -1620,6 +1638,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "request_id": request_id,
                 }
             result = result_holder.get("result") or {"error": "No response"}
+            result = _normalize_worker_error(result)
             latest_run = state.runtime_journal.get_run(session_id, request_id) or {}
             if latest_run.get("stop_requested"):
                 result = {
@@ -1700,7 +1719,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 session_id,
                 request_id,
                 "terminal",
-                {"status": terminal_status, "source": "daemon_stream"},
+                {
+                    "status": terminal_status,
+                    "error": str(result.get("error") or "") if isinstance(result, dict) else "",
+                    "error_type": str(result.get("error_type") or "") if isinstance(result, dict) else "",
+                    "source": "daemon_stream",
+                },
             )
             if isinstance(result, dict):
                 result["_runtime_terminal"] = terminal_status

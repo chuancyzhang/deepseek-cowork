@@ -1629,7 +1629,83 @@ class TestDeliverableScanning(unittest.TestCase):
             card.deleteLater()
             app.processEvents()
 
-    def test_office_task_bootstrap_check_replaces_empty_process_placeholder(self):
+    def test_office_task_card_retry_failure_replaces_previous_notice(self):
+        app = QApplication.instance() or QApplication([])
+        card = OfficeDraftTaskCard("PPT")
+        first_calls = []
+        second_calls = []
+        try:
+            first_notice = card.set_retry_failure(
+                "第一次失败",
+                lambda: first_calls.append(True),
+            )
+            second_notice = card.set_retry_failure(
+                "第二次失败",
+                lambda: second_calls.append(True),
+            )
+
+            self.assertIs(first_notice, second_notice)
+            self.assertFalse(card.retry_failure_notice.isHidden())
+            self.assertEqual(card.retry_failure_notice.label.text(), "第二次失败")
+            self.assertNotIn("第一次失败", card.retry_failure_notice.label.text())
+            card.retry_failure_notice.action_button.click()
+            self.assertEqual(first_calls, [])
+            self.assertEqual(second_calls, [True])
+
+            card.clear_retry_failure()
+            self.assertTrue(card.retry_failure_notice.isHidden())
+            self.assertTrue(card.retry_failure_notice.action_button.isHidden())
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
+    def test_retry_failure_routes_only_office_workflow_to_task_card(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        card = OfficeDraftTaskCard("PPT")
+        state = type("_Session", (), {})()
+        state.session_id = "session-1"
+        state.office_draft_task_card = card
+        state.active_run_retry_context = {}
+        state.failed_run_retry_context = {
+            "source_run_id": "run-office",
+            "retry_of_run_id": "",
+            "submit_options": {"workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST},
+        }
+        window._show_conversation_notice = MagicMock(return_value="global")
+        try:
+            notice = MainWindow._show_retryable_run_failure(
+                window,
+                state,
+                "Office 失败",
+                "run-office",
+            )
+
+            self.assertIs(notice, card.retry_failure_notice)
+            self.assertEqual(card.retry_failure_notice.label.text(), "Office 失败")
+            window._show_conversation_notice.assert_not_called()
+
+            card.clear_retry_failure()
+            state.failed_run_retry_context = {
+                "source_run_id": "run-chat",
+                "retry_of_run_id": "",
+                "submit_options": {"workflow_mode": "execution"},
+            }
+            notice = MainWindow._show_retryable_run_failure(
+                window,
+                state,
+                "普通对话失败",
+                "run-chat",
+            )
+
+            self.assertEqual(notice, "global")
+            self.assertTrue(card.retry_failure_notice.isHidden())
+            window._show_conversation_notice.assert_called_once()
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
+    def test_office_task_bootstrap_check_does_not_add_explanatory_status(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
         state = type("_Session", (), {})()
@@ -1647,15 +1723,15 @@ class TestDeliverableScanning(unittest.TestCase):
 
             MainWindow._ensure_office_task_process_visible(window, "session-1")
 
-            self.assertEqual(card.process_widget_count(), 1)
-            self.assertTrue(card.process_placeholder.isHidden())
+            self.assertEqual(card.process_widget_count(), 0)
+            self.assertFalse(card.process_placeholder.isHidden())
             self.assertFalse(state._office_process_bootstrap_check_pending)
             process_text = "\n".join(
                 card.process_layout.itemAt(index).widget().text()
                 for index in range(card.process_layout.count())
                 if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
             )
-            self.assertIn("正在等待模型运行接管", process_text)
+            self.assertNotIn("正在等待模型运行接管", process_text)
         finally:
             card.deleteLater()
             app.processEvents()
@@ -1738,16 +1814,16 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertEqual(inserted, 1)
         card = state.office_draft_task_card
         self.assertIsNotNone(card)
-        self.assertGreater(card.process_widget_count(), 1)
+        self.assertEqual(card.process_widget_count(), 1)
         self.assertTrue(card.process_placeholder.isHidden())
         process_text = "\n".join(
             card.process_layout.itemAt(index).widget().text()
             for index in range(card.process_layout.count())
             if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
         )
-        self.assertIn("已提交 PPT Agent 请求", process_text)
-        self.assertIn("Guizang PPT Skill", process_text)
-        self.assertIn("ds官方 / deepseek-v4-flash", process_text)
+        self.assertNotIn("已提交 PPT Agent 请求", process_text)
+        self.assertNotIn("Guizang PPT Skill", process_text)
+        self.assertNotIn("ds官方 / deepseek-v4-flash", process_text)
         card.deleteLater()
         app.processEvents()
 
@@ -1853,7 +1929,7 @@ class TestDeliverableScanning(unittest.TestCase):
                     state.active_run_retry_context["submit_options"]["ppt_agent_selected_strategy"],
                     PPT_AGENT_STRATEGY_GUIZANG,
                 )
-                self.assertGreater(card.process_widget_count(), 1)
+                self.assertEqual(card.process_widget_count(), 1)
                 self.assertTrue(card.process_placeholder.isHidden())
                 window.process_agent_logic.assert_called_once()
                 process_text = "\n".join(
@@ -1861,7 +1937,7 @@ class TestDeliverableScanning(unittest.TestCase):
                     for index in range(card.process_layout.count())
                     if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
                 )
-                self.assertIn("已提交 PPT Agent 请求", process_text)
+                self.assertNotIn("已提交 PPT Agent 请求", process_text)
                 self.assertIn("渲染失败", process_text)
             finally:
                 card.deleteLater()

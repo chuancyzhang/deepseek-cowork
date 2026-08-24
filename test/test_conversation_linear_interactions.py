@@ -1081,6 +1081,27 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_prefix_and_journal_failures_have_actionable_safe_copy(self):
+        prefix_category, prefix_summary = MainWindow._run_failure_presentation(
+            "会话请求前缀被改写：first_difference_index=7",
+            False,
+            0,
+            0,
+        )
+        journal_category, journal_summary = MainWindow._run_failure_presentation(
+            "tool execution journal write failed: [Errno 13] Permission denied",
+            False,
+            0,
+            0,
+        )
+
+        self.assertEqual(prefix_category, "conversation_prefix_conflict")
+        self.assertIn("重新打开会话", prefix_summary)
+        self.assertNotIn("first_difference_index", prefix_summary)
+        self.assertEqual(journal_category, "runtime_journal_write_failed")
+        self.assertIn("写入权限", journal_summary)
+        self.assertNotIn("Errno", journal_summary)
+
     def test_provider_overload_has_specific_notice_without_message_append(self):
         window = MainWindow()
         try:
@@ -3524,6 +3545,64 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_office_failed_run_replaces_card_notice_and_clears_it_on_retry(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_office_retry_action")
+            state.session_status = "failed"
+            state.live_activity = False
+            state.messages = [{
+                "id": "user-office",
+                "role": "user",
+                "content": "生成 PPTX",
+                "meta": {"turn_id": "1", "request_id": "run-office"},
+            }]
+            state.active_run_retry_context = {
+                "source_run_id": "run-office",
+                "source_turn_id": "1",
+                "source_user_message_id": "user-office",
+                "original_user_text": "生成 PPTX",
+                "prompt_files": [],
+                "submit_options": {
+                    "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                    "ppt_agent_mode": True,
+                    "ppt_agent_output_format": PPT_AGENT_OUTPUT_PPTX,
+                },
+            }
+            card = window._create_office_draft_task_card(
+                state,
+                "PPT",
+                running=False,
+                target_format="pptx",
+            )
+
+            first_notice = window._show_retryable_run_failure(
+                state,
+                "第一次失败",
+                "run-office",
+            )
+            second_notice = window._show_retryable_run_failure(
+                state,
+                "第二次失败",
+                "run-office",
+            )
+
+            self.assertIs(first_notice, second_notice)
+            self.assertEqual(card.retry_failure_notice.label.text(), "第二次失败")
+            self.assertIsNone(state.conversation_notice)
+            with patch.object(window, "_submit_session_request", return_value=True) as submit:
+                card.retry_failure_notice.action_button.click()
+
+            submit.assert_called_once()
+            self.assertTrue(card.retry_failure_notice.isHidden())
+            self.assertEqual(state.failed_run_retry_context, {})
+            self.assertIsNone(state.conversation_notice)
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_internal_runtime_errors_never_enter_conversation_notice(self):
         forbidden = (
             "Provider",
@@ -3829,7 +3908,18 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.conversation_notice.label.text(), "本轮未完成，请重试")
             self.assertEqual(state.observability_events[-1]["category"], "missing_final_content")
             assistants = [message for message in state.messages if message.get("role") == "assistant"]
-            self.assertEqual(assistants, [])
+            self.assertEqual([message.get("id") for message in assistants], ["assistant-stage"])
+            self.assertTrue(assistants[0].get("tool_calls"))
+            self.assertTrue(
+                any(
+                    message.get("id") == "tool-result-live-missing-final"
+                    and message.get("role") == "tool"
+                    for message in state.messages
+                )
+            )
+            self.assertFalse(
+                any(message.get("id") == "assistant-empty-final" for message in state.messages)
+            )
             self.assertFalse(
                 any(
                     message.get("id") == "assistant-stage"

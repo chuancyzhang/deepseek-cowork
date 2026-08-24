@@ -21197,6 +21197,16 @@ class OfficeDraftTaskCard(QFrame):
         header_layout.addWidget(self.toggle_btn)
         layout.addWidget(header)
 
+        self.retry_failure_notice = ProductInlineNotice("", "error", self)
+        self.retry_failure_notice.setProperty("officeRetryFailure", True)
+        self.retry_failure_notice.setAccessibleName("任务失败与重试")
+        self.retry_failure_notice.setMinimumWidth(300)
+        self.retry_failure_notice.setMaximumWidth(520)
+        self.retry_failure_notice.label.setMinimumWidth(210)
+        self.retry_failure_notice.setVisible(False)
+        self._retry_failure_callback = None
+        layout.addWidget(self.retry_failure_notice, 0, Qt.AlignRight)
+
         self.result_container = QWidget()
         self.result_container.setVisible(False)
         self.result_container.setStyleSheet("background: transparent; border: none;")
@@ -21267,7 +21277,30 @@ class OfficeDraftTaskCard(QFrame):
         self.add_process_widget(label)
         return label
 
+    def set_retry_failure(self, text, callback=None):
+        self.clear_retry_failure()
+        self.retry_failure_notice.set_text(str(text or "本轮未完成，请重试"), "error")
+        self.retry_failure_notice.set_action("重试" if callback is not None else "")
+        self._retry_failure_callback = callback
+        if callback is not None:
+            self.retry_failure_notice.actionRequested.connect(callback)
+        self.retry_failure_notice.setVisible(True)
+        return self.retry_failure_notice
+
+    def clear_retry_failure(self):
+        callback = getattr(self, "_retry_failure_callback", None)
+        if callback is not None:
+            try:
+                self.retry_failure_notice.actionRequested.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self._retry_failure_callback = None
+        self.retry_failure_notice.set_action("")
+        self.retry_failure_notice.set_text("", "error")
+        self.retry_failure_notice.setVisible(False)
+
     def set_running(self):
+        self.clear_retry_failure()
         self.title_label.setText(self._running_title())
         self.open_btn.setVisible(False)
         self._render_result_cards([])
@@ -21278,6 +21311,7 @@ class OfficeDraftTaskCard(QFrame):
         self._render_result_cards([])
 
     def set_completed(self, paths=None):
+        self.clear_retry_failure()
         paths = self._merged_paths(paths)
         self.result_paths = paths
         primary = self._primary_html_path()
@@ -30601,32 +30635,8 @@ class MainWindow(QMainWindow):
                 or PPT_AGENT_STRATEGY_DEFAULT
             )
             ok, skill_name, status_message = self._ppt_agent_skill_status(selected_strategy)
-            skill_label = skill_name or "默认 PPT Agent"
-            card.add_process_note("已提交 PPT Agent 请求，正在准备生成 PPT 文稿。")
-            card.add_process_note(f"已选择内置 Skill: {ppt_agent_strategy_label(selected_strategy)} ({skill_label})")
             if not ok:
                 card.add_process_note(status_message, tone="error")
-        elif workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
-            target = str(meta.get("office_conversion_target") or (run_context or {}).get("office_conversion_target") or "").strip().upper()
-            card.add_process_note(f"已提交 {target or '办公文件'} 转换请求。")
-        else:
-            profile = meta.get("office_output_profile") or (run_context or {}).get("office_output_profile") or OFFICE_OUTPUT_PROFILE_FREE
-            card.add_process_note(f"已提交{self._office_profile_label(profile)}办公稿请求。")
-
-        attachment_count = len(prompt_files or []) or self._office_message_attachment_count(message)
-        if attachment_count:
-            card.add_process_note(f"已附加 {attachment_count} 个资料/模板文件。", tone="muted")
-        model_run_context = run_context
-        if not model_run_context and isinstance(meta, dict):
-            model_run_context = {
-                "selected_model_id": meta.get("selected_model_id"),
-                "selected_model_profile": meta.get("selected_model_profile"),
-            }
-        model_label, selected_model_id = self._current_model_process_label(state, model_run_context)
-        model_suffix = f"（{selected_model_id}）" if selected_model_id else ""
-        card.add_process_note(f"本轮模型: {model_label}{model_suffix}", tone="muted")
-        if runtime_note:
-            card.add_process_note(runtime_note, tone="muted")
         card._sync_process_placeholder()
         log_chat_runtime_debug(
             "office_process_init_done",
@@ -30677,10 +30687,8 @@ class MainWindow(QMainWindow):
                 process_widget_count=card.process_widget_count() if card is not None else -1,
             )
             return
-        card.add_process_note("任务已提交，正在等待模型运行接管。", tone="muted")
-        card._sync_process_placeholder()
         log_chat_runtime_debug(
-            "office_process_bootstrap_added_note",
+            "office_process_bootstrap_left_empty",
             session_id=session_id,
             process_widget_count=card.process_widget_count(),
         )
@@ -31722,20 +31730,8 @@ class MainWindow(QMainWindow):
                     item for item in (event.get("skill_contexts") or [])
                     if isinstance(item, dict)
                 ]
-                if self._is_office_workflow_enabled(state):
-                    skill_count = len(state.system_prompt_appends)
-                    suffix = f"，包含 {skill_count} 个 Skill 上下文" if skill_count else ""
-                    self._append_office_process_note(state, f"已收到系统提示词与运行时上下文{suffix}。", tone="success")
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
-                if self._is_office_workflow_enabled(state):
-                    names = [
-                        str(name)
-                        for name in (event.get("skill_names") or [])
-                        if str(name or "").strip()
-                    ]
-                    suffix = "：" + "、".join(names) if names else ""
-                    self._append_office_process_note(state, f"已注入 Skill 运行上下文{suffix}。", tone="success")
             elif event_type == "llm_usage":
                 self.apply_token_usage_event(
                     state,
@@ -36723,6 +36719,18 @@ class MainWindow(QMainWindow):
                 reason="retry_run_failed",
             )
         retry_callback = lambda sid=state.session_id, rid=run_id: self.retry_failed_run(sid, rid)
+        submit_options = context.get("submit_options") if isinstance(context.get("submit_options"), dict) else {}
+        if self._is_office_workflow_context(submit_options.get("workflow_mode")):
+            card = self._office_draft_card_for_state(state)
+            if card is not None:
+                card.set_failed(self._office_task_failed_title(state))
+                log_chat_runtime_debug(
+                    "office_retry_failure_presented",
+                    session_id=state.session_id,
+                    run_id=run_id,
+                    retry_of_run_id=str(context.get("retry_of_run_id") or ""),
+                )
+                return card.set_retry_failure(text, retry_callback)
         return self._show_conversation_notice(
             state,
             text,
@@ -36811,6 +36819,9 @@ class MainWindow(QMainWindow):
             source_user_message_id=original_message_id,
             prompt_file_count=len(prompt_files),
         )
+        retry_submit_options = context.get("submit_options") if isinstance(context.get("submit_options"), dict) else {}
+        office_retry = self._is_office_workflow_context(retry_submit_options.get("workflow_mode"))
+        failed_card = self._office_draft_card_for_state(state) if office_retry else None
         submitted = self._submit_session_request(
             state,
             retry_text,
@@ -36826,8 +36837,11 @@ class MainWindow(QMainWindow):
             )
             self._show_retryable_run_failure(state, "重试未能启动，请检查提示后再次重试。", run_id)
             return False
+        if failed_card is not None:
+            failed_card.clear_retry_failure()
         state.failed_run_retry_context = {}
-        self._show_conversation_notice(state, "正在重试上一轮请求…", "info")
+        if failed_card is None:
+            self._show_conversation_notice(state, "正在重试上一轮请求…", "info")
         log_chat_runtime_debug(
             "failed_run_retry_run",
             session_id=state.session_id,
@@ -43077,9 +43091,25 @@ a {{ overflow-wrap: anywhere; }}
     def _run_failure_presentation(error_text, interrupted, retry_attempt, retry_max):
         if interrupted:
             return "interrupted", "已停止"
-        if "our servers are currently overloaded" in str(error_text or "").strip().lower():
+        normalized_error = str(error_text or "").strip()
+        lowered_error = normalized_error.lower()
+        if "会话请求前缀被改写" in normalized_error:
+            return (
+                "conversation_prefix_conflict",
+                "会话历史不一致，本轮已停止。请重新打开会话后重试；仍失败请导出日志。",
+            )
+        if "journal" in lowered_error and (
+            "write failed" in lowered_error
+            or "permission denied" in lowered_error
+            or "errno 13" in lowered_error
+        ):
+            return (
+                "runtime_journal_write_failed",
+                "运行记录保存失败，本轮已停止。请检查会话历史目录写入权限后重试。",
+            )
+        if "our servers are currently overloaded" in lowered_error:
             return "provider_overloaded", "模型服务繁忙，请稍后再发送"
-        if str(error_text or "").strip() == "Provider completed without final assistant content.":
+        if normalized_error == "Provider completed without final assistant content.":
             return "missing_final_content", "本轮未完成，请重试"
         if int(retry_attempt or 0) > 0 and int(retry_max or 0) > 0:
             return "network_retry_exhausted", "暂时无法连接模型，请重试"
@@ -46514,7 +46544,6 @@ a {{ overflow-wrap: anywhere; }}
         self._attach_live_agent_stage(state, state.temp_thinking_bubble, create_group=True)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.add_process_note("本地模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
             log_chat_runtime_debug(
                 "process_agent_office_card_attached",
                 session_id=state.session_id,
@@ -46783,7 +46812,6 @@ a {{ overflow-wrap: anywhere; }}
         self._attach_live_agent_stage(state, state.temp_thinking_bubble, create_group=True)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.add_process_note("后台模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
             log_chat_runtime_debug(
                 "process_daemon_office_card_attached",
                 session_id=state.session_id,
@@ -47579,6 +47607,16 @@ a {{ overflow-wrap: anywhere; }}
         merged = merge_messages_by_id(existing, new_messages)
         return merged[len(existing):]
 
+    def _prepare_generated_messages_for_turn(self, state, generated_messages_raw):
+        raw_messages = generated_messages_raw if isinstance(generated_messages_raw, list) else []
+        persistable_messages = filter_persistable_messages(raw_messages)
+        self._annotate_generated_messages_for_unified_turn(state, persistable_messages)
+        persistable_messages = self._exclude_generated_rounds_committed_at_guidance(
+            state.messages,
+            persistable_messages,
+        )
+        return persistable_messages, len(raw_messages) - len(persistable_messages)
+
     def _annotate_generated_messages_for_unified_turn(self, state, generated_messages):
         """Attach UI-only projection metadata without changing provider wire messages."""
         if not state or not isinstance(generated_messages, list):
@@ -48020,7 +48058,10 @@ a {{ overflow-wrap: anywhere; }}
 
         if "error" in result:
             runtime_terminal = str(result.get("_runtime_terminal") or "").strip().lower()
-            error_text = str(result.get("error") or "未知错误")
+            error_type = str(result.get("error_type") or "UnknownError").strip() or "UnknownError"
+            error_text = str(result.get("error") or "").strip() or f"{error_type}: no message"
+            result["error_type"] = error_type
+            result["error"] = error_text
             interrupted = bool(
                 runtime_terminal in {"interrupted", "cancelled"}
                 or "interrupted by user" in error_text.lower()
@@ -48035,6 +48076,32 @@ a {{ overflow-wrap: anywhere; }}
                 retry_max,
             )
             failure_status = "interrupted" if interrupted else "failed"
+            generated_messages_raw = result.get("generated_messages", [])
+            persistable_generated_messages, persistence_filtered_count = (
+                self._prepare_generated_messages_for_turn(
+                    state,
+                    generated_messages_raw,
+                )
+            )
+            generated_messages = self._merge_generated_messages(
+                state.messages,
+                persistable_generated_messages,
+            )
+            if generated_messages:
+                state.messages.extend(generated_messages)
+            log_sub_agent_runtime(
+                "ui_failed_turn_ledger_appended",
+                session_id=state.session_id,
+                turn_id=str(turn_id or state.active_turn_id or ""),
+                run_id=run_id,
+                generated_message_count=len(generated_messages),
+                generated_message_count_raw=(
+                    len(generated_messages_raw)
+                    if isinstance(generated_messages_raw, list)
+                    else 0
+                ),
+                persistence_filtered_count=persistence_filtered_count,
+            )
             if run_id:
                 try:
                     self.runtime_journal.update_run(
@@ -48171,21 +48238,11 @@ a {{ overflow-wrap: anywhere; }}
                 finished_at=time.time(),
             )
         generated_messages_raw = result.get("generated_messages", [])
-        persistable_generated_messages = filter_persistable_messages(generated_messages_raw)
-        self._annotate_generated_messages_for_unified_turn(
-            state,
-            persistable_generated_messages,
-        )
-        persistable_generated_messages = (
-            self._exclude_generated_rounds_committed_at_guidance(
-                state.messages,
-                persistable_generated_messages,
+        persistable_generated_messages, persistence_filtered_count = (
+            self._prepare_generated_messages_for_turn(
+                state,
+                generated_messages_raw,
             )
-        )
-        persistence_filtered_count = (
-            len(generated_messages_raw) - len(persistable_generated_messages)
-            if isinstance(generated_messages_raw, list)
-            else 0
         )
         generated_messages = self._merge_generated_messages(
             state.messages,

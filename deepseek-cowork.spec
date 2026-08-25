@@ -457,8 +457,8 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
-SANDBOX_DOCUMENT_DISTS = []
-SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS
+SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]
+SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS
 MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
@@ -792,6 +792,10 @@ a = Analysis(
             'aibot',
             'qrcode',
             'httpx',
+            'docx',
+            'pptx',
+            'openpyxl',
+            'pypdf',
         ]
     ),
     hookspath=[],
@@ -803,7 +807,6 @@ a = Analysis(
         'duckduckgo_search', 
         'matplotlib',
         'scipy',
-        'lxml',
         'PySide6.Qt3DAnimation',
         'PySide6.Qt3DCore',
         'PySide6.Qt3DExtras',

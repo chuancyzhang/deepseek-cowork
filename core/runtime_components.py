@@ -37,6 +37,7 @@ TOOLKITS = {
         "packages": ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"],
         "imports": ["openpyxl", "docx", "pptx", "PIL.Image", "pypdf", "reportlab"],
         "skills": ["document-reader"],
+        "bundled": True,
     },
     "data-analysis": {
         "name": "数据分析工具包",
@@ -203,6 +204,8 @@ def _toolkit_marker_health(toolkit_id, marker):
 def installed_toolkit_paths():
     paths = []
     for toolkit_id in TOOLKITS:
+        if TOOLKITS[toolkit_id].get("bundled"):
+            continue
         path = toolkit_path(toolkit_id)
         marker = _read_toolkit_marker(toolkit_id)
         healthy, _error = _toolkit_marker_health(toolkit_id, marker)
@@ -225,6 +228,40 @@ def _directory_size(path):
 
 def toolkit_status(toolkit_id, include_size=False):
     spec = TOOLKITS[toolkit_id]
+    if spec.get("bundled"):
+        from core.sandbox_runtime import get_runtime_executable
+
+        python_exe = get_runtime_executable("python")
+        health_error = ""
+        healthy = False
+        if not python_exe:
+            health_error = "随应用安装的沙箱 Python 不可用，请重新安装完整的 Cowork 分发包。"
+        else:
+            runtime_site_packages = os.path.join(
+                os.path.dirname(os.path.abspath(python_exe)),
+                "Lib",
+                "site-packages",
+            )
+            try:
+                _verify_toolkit_candidate(python_exe, toolkit_id, runtime_site_packages)
+                healthy = True
+            except Exception as exc:
+                health_error = (
+                    "随应用安装的文档工具包不完整，请重新安装完整的 Cowork 分发包。"
+                    f"\n{exc}"
+                )
+        return {
+            "id": toolkit_id,
+            **spec,
+            "installed": True,
+            "healthy": healthy,
+            "needs_update": False,
+            "needs_repair": not healthy,
+            "health_error": health_error,
+            "missing_packages": [],
+            "source": "随应用安装",
+            "size": 0,
+        }
     root = os.path.dirname(toolkit_path(toolkit_id))
     marker = _read_toolkit_marker(toolkit_id)
     installed_packages = {
@@ -389,6 +426,8 @@ def _replace_toolkit_root(staged_root, target_root):
 def install_toolkit(toolkit_id, python_source, progress_callback=None, force=False):
     if toolkit_id not in TOOLKITS:
         raise KeyError(f"未知工具包：{toolkit_id}")
+    if TOOLKITS[toolkit_id].get("bundled"):
+        raise RuntimeError(f"{TOOLKITS[toolkit_id]['name']}随应用安装，不能单独安装或覆盖。")
     from core.sandbox_runtime import build_sandbox_env, get_runtime_executable
 
     python_exe = get_runtime_executable("python")
@@ -458,6 +497,8 @@ def install_toolkit(toolkit_id, python_source, progress_callback=None, force=Fal
 def uninstall_toolkit(toolkit_id):
     if toolkit_id not in TOOLKITS:
         raise KeyError(f"未知工具包：{toolkit_id}")
+    if TOOLKITS[toolkit_id].get("bundled"):
+        raise RuntimeError(f"{TOOLKITS[toolkit_id]['name']}随应用安装，不能单独卸载。")
     root = os.path.dirname(toolkit_path(toolkit_id))
     if os.path.isdir(root):
         shutil.rmtree(root)

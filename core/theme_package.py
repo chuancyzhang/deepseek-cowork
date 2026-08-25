@@ -103,7 +103,7 @@ CONTENT_DEFAULTS = {
     "home.card.browser.title": "浏览器自动化",
     "home.card.browser.description": "读取网页、提取数据和填写表单",
     "home.reminder.title": "需要处理文档或数据？",
-    "home.reminder.description": "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+    "home.reminder.description": "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
     "home.theme_reminder.title": "想换一种工作台风格？",
     "home.theme_reminder.description": (
         "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"

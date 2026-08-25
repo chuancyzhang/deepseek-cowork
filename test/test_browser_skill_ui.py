@@ -392,6 +392,18 @@ class BrowserSkillUiTests(unittest.TestCase):
             self.assertNotIn("可选浏览器能力", visible_copy)
             self.assertNotIn("Tencent BrowserSkill", visible_copy)
             self.assertNotIn("安装浏览器扩展", visible_copy)
+
+            page.update_component_row("documents", {
+                "known": True,
+                "bundled": True,
+                "installed": True,
+                "healthy": True,
+                "source": "随应用安装",
+            })
+            document_row = page.component_rows["documents"]
+            self.assertIn("随应用安装", document_row["status"].text())
+            self.assertEqual(document_row["action"].text(), "检测状态")
+            self.assertFalse(document_row["repair"].isVisible())
         finally:
             if hasattr(page, "_im_gateway_status_timer"):
                 page._im_gateway_status_timer.stop()

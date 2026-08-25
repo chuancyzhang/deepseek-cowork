@@ -10524,7 +10524,7 @@ class SettingsDialog(QDialog):
 
         components_page, components_layout = make_scroll_page(
             "组件与依赖",
-            "按需安装运行环境与常用工具包；其他 Skill 依赖仍会在首次使用时自动准备。",
+            "文档工具包随应用安装；其他运行环境、工具包与 Skill 依赖按需准备。",
         )
         self.components_scroll_area = components_page
         self.component_task_manager = getattr(self._main, "component_task_manager", None)
@@ -10611,7 +10611,7 @@ class SettingsDialog(QDialog):
         components_layout.addWidget(source_group)
 
         runtime_group, runtime_group_layout = build_settings_surface("运行环境", "Node.js 不再占用基础分发包体积。", radius=20, show_subtitle=False)
-        toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "工具包安装到沙箱 Python，可被代码执行和相关 Skill 共同使用。", radius=20, show_subtitle=False)
+        toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "文档工具包随应用安装；其他工具包按需安装到沙箱 Python。", radius=20, show_subtitle=False)
         def add_component_row(container, component_id, title_text, detail_text, status):
             panel = QFrame()
             panel.setStyleSheet("QFrame { background: transparent; border: none; }")
@@ -11194,14 +11194,23 @@ class SettingsDialog(QDialog):
             row["progress"].setVisible(False)
             return
         installed = bool(status.get("installed"))
+        bundled = bool(status.get("bundled") or (TOOLKITS.get(component_id) or {}).get("bundled"))
         needs_update = bool(status.get("needs_update"))
         needs_repair = bool(status.get("needs_repair"))
         size = int(status.get("size") or 0)
         suffix = f" · {format_file_size(size)}" if size else ""
         source = status.get("source") or ""
-        source_suffix = f" · {source}" if source else ""
-        state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
-        if needs_repair and status.get("health_error"):
+        source_suffix = f" · {source}" if source and not bundled else ""
+        state_text = (
+            "随应用安装"
+            if bundled and bool(status.get("healthy"))
+            else (
+                "随应用安装异常"
+                if bundled
+                else ("需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装")))
+            )
+        )
+        if (bundled or needs_repair) and status.get("health_error"):
             state_text += f"：{status['health_error']}"
         updated_at = int(status.get("updated_at") or 0)
         recorded_suffix = ""
@@ -11210,8 +11219,8 @@ class SettingsDialog(QDialog):
         cache_error = str(status.get("cache_write_error") or "")
         error_suffix = f" · 状态缓存未保存：{cache_error}" if cache_error else ""
         row["status"].setText(state_text + suffix + source_suffix + recorded_suffix + error_suffix)
-        row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
-        row["repair"].setVisible(installed)
+        row["action"].setText("检测状态" if bundled else ("更新" if needs_update else ("卸载" if installed else "安装")))
+        row["repair"].setVisible(installed and not bundled)
         row["progress"].setVisible(False)
 
     def toggle_component(self, component_id):
@@ -11219,6 +11228,9 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "组件管理", "后台组件任务管理器不可用。")
             return
         status = self._cached_component_status(component_id)
+        if (TOOLKITS.get(component_id) or {}).get("bundled"):
+            self.component_task_manager.probe_component(component_id)
+            return
         if not status.get("known"):
             self.component_task_manager.probe_component(component_id)
             return
@@ -17265,7 +17277,7 @@ class EmptyStateWidget(QWidget):
             "ToolkitInstallHint",
             "fa5s.puzzle-piece",
             "需要处理文档或数据？",
-            "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+            "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
             "打开设置",
             self.open_toolkit_settings,
         )
@@ -17396,7 +17408,7 @@ class EmptyStateWidget(QWidget):
         self.toolkit_desc_label.setText(
             content.get(
                 "home.reminder.description",
-                "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+                "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
             )
         )
         self._apply_home_hint_theme(

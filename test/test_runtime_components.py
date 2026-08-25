@@ -55,6 +55,7 @@ class TestRuntimeComponents(unittest.TestCase):
         self.assertIn("reportlab", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("Pillow", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("PIL.Image", runtime_components.TOOLKITS["documents"]["imports"])
+        self.assertTrue(runtime_components.TOOLKITS["documents"]["bundled"])
         self.assertEqual(
             runtime_components.TOOLKITS["web-research"]["packages"],
             ["tavily-python==0.7.26"],
@@ -63,29 +64,29 @@ class TestRuntimeComponents(unittest.TestCase):
 
     def test_toolkit_status_marks_stale_package_catalog_for_update(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):
-            target = runtime_components.toolkit_path("documents")
+            target = runtime_components.toolkit_path("data-analysis")
             os.makedirs(target)
             marker = os.path.join(os.path.dirname(target), "toolkit.json")
             old_packages = [
                 package
-                for package in runtime_components.TOOLKITS["documents"]["packages"]
-                if package != "reportlab"
+                for package in runtime_components.TOOLKITS["data-analysis"]["packages"]
+                if package != "scikit-learn"
             ]
             with open(marker, "w", encoding="utf-8") as handle:
                 json.dump({"packages": old_packages}, handle)
 
-            status = runtime_components.toolkit_status("documents")
+            status = runtime_components.toolkit_status("data-analysis")
 
             self.assertTrue(status["installed"])
             self.assertTrue(status["needs_update"])
-            self.assertEqual(status["missing_packages"], ["reportlab"])
+            self.assertEqual(status["missing_packages"], ["scikit-learn"])
 
-            healthy_marker = self._healthy_marker("documents")
+            healthy_marker = self._healthy_marker("data-analysis")
             with open(marker, "w", encoding="utf-8") as handle:
                 json.dump(healthy_marker, handle)
 
             with patch("core.sandbox_runtime.get_runtime_executable", return_value=healthy_marker["python_executable"]):
-                current_status = runtime_components.toolkit_status("documents")
+                current_status = runtime_components.toolkit_status("data-analysis")
             self.assertFalse(current_status["needs_update"])
             self.assertFalse(current_status["needs_repair"])
             self.assertTrue(current_status["healthy"])
@@ -93,25 +94,71 @@ class TestRuntimeComponents(unittest.TestCase):
 
     def test_toolkit_status_skips_directory_size_until_explicitly_requested(self):
         with patch.object(runtime_components, "_directory_size", return_value=321) as size_probe:
-            status = runtime_components.toolkit_status("documents")
+            status = runtime_components.toolkit_status("data-analysis")
             self.assertEqual(status["size"], 0)
             size_probe.assert_not_called()
 
-            status = runtime_components.toolkit_status("documents", include_size=True)
+            status = runtime_components.toolkit_status("data-analysis", include_size=True)
             self.assertEqual(status["size"], 321)
             size_probe.assert_called_once()
 
     def test_installed_toolkit_paths_require_verified_current_marker(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):
-            target = runtime_components.toolkit_path("documents")
+            target = runtime_components.toolkit_path("data-analysis")
             os.makedirs(target)
             self.assertNotIn(target, runtime_components.installed_toolkit_paths())
             marker = os.path.join(os.path.dirname(target), "toolkit.json")
-            healthy_marker = self._healthy_marker("documents")
+            healthy_marker = self._healthy_marker("data-analysis")
             with open(marker, "w", encoding="utf-8") as handle:
                 json.dump(healthy_marker, handle)
             with patch("core.sandbox_runtime.get_runtime_executable", return_value=healthy_marker["python_executable"]):
                 self.assertIn(target, runtime_components.installed_toolkit_paths())
+
+    def test_bundled_document_toolkit_reports_health_without_user_overlay(self):
+        python_exe = "C:\\runtime\\python.exe"
+        with patch(
+            "core.sandbox_runtime.get_runtime_executable",
+            return_value=python_exe,
+        ), patch.object(
+            runtime_components,
+            "_verify_toolkit_candidate",
+            return_value=runtime_components.TOOLKITS["documents"]["imports"],
+        ) as verify:
+            status = runtime_components.toolkit_status("documents", include_size=True)
+
+        self.assertTrue(status["bundled"])
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["healthy"])
+        self.assertFalse(status["needs_repair"])
+        self.assertEqual(status["source"], "随应用安装")
+        self.assertEqual(status["size"], 0)
+        verify.assert_called_once_with(
+            python_exe,
+            "documents",
+            "C:\\runtime\\Lib\\site-packages",
+        )
+
+    def test_bundled_document_toolkit_surfaces_distribution_damage(self):
+        with patch(
+            "core.sandbox_runtime.get_runtime_executable",
+            return_value="C:\\runtime\\python.exe",
+        ), patch.object(
+            runtime_components,
+            "_verify_toolkit_candidate",
+            side_effect=RuntimeError("missing reportlab"),
+        ):
+            status = runtime_components.toolkit_status("documents")
+
+        self.assertFalse(status["healthy"])
+        self.assertTrue(status["needs_repair"])
+        self.assertIn("重新安装完整的 Cowork 分发包", status["health_error"])
+        self.assertIn("missing reportlab", status["health_error"])
+
+    def test_bundled_document_toolkit_cannot_be_installed_or_uninstalled(self):
+        with self.assertRaisesRegex(RuntimeError, "不能单独安装或覆盖"):
+            runtime_components.install_toolkit("documents", {})
+        with self.assertRaisesRegex(RuntimeError, "不能单独卸载"):
+            runtime_components.uninstall_toolkit("documents")
 
     def test_verify_toolkit_candidate_uses_isolated_pythonpath(self):
         completed = type("Completed", (), {
@@ -145,7 +192,7 @@ class TestRuntimeComponents(unittest.TestCase):
              })()), \
              patch.object(runtime_components, "_verify_toolkit_candidate", side_effect=RuntimeError("broken PIL")), \
              patch.object(runtime_components, "_repair_python_runner_import_conflicts"):
-            target_root = os.path.join(temp_dir, "documents")
+            target_root = os.path.join(temp_dir, "data-analysis")
             os.makedirs(os.path.join(target_root, "site-packages"))
             sentinel = os.path.join(target_root, "site-packages", "keep.txt")
             with open(sentinel, "w", encoding="utf-8") as handle:
@@ -153,7 +200,7 @@ class TestRuntimeComponents(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "broken PIL"):
                 runtime_components.install_toolkit(
-                    "documents",
+                    "data-analysis",
                     {"name": "PyPI", "url": "https://pypi.org/simple"},
                 )
 

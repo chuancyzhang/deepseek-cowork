@@ -1,11 +1,16 @@
 import json
 import os
 
-from core.env_utils import ensure_package_installed
 from core.filesystem_ops import _build_error, _build_ok, record_full_read_state, resolve_path
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".xls", ".pdf"}
+
+
+def _bundled_dependency_error(package_name, exc):
+    raise RuntimeError(
+        f"随应用安装的文档读取组件缺少 {package_name}。请重新安装完整的 Cowork 分发包。"
+    ) from exc
 
 
 def _get_openpyxl():
@@ -13,11 +18,8 @@ def _get_openpyxl():
         import openpyxl
 
         return openpyxl
-    except ImportError:
-        ensure_package_installed("openpyxl", skill_id="document-reader")
-        import openpyxl
-
-        return openpyxl
+    except ImportError as exc:
+        _bundled_dependency_error("openpyxl", exc)
 
 
 def _get_docx_document():
@@ -25,11 +27,8 @@ def _get_docx_document():
         from docx import Document
 
         return Document
-    except ImportError:
-        ensure_package_installed("python-docx", import_name="docx", skill_id="document-reader")
-        from docx import Document
-
-        return Document
+    except ImportError as exc:
+        _bundled_dependency_error("python-docx", exc)
 
 
 def _get_presentation():
@@ -37,11 +36,8 @@ def _get_presentation():
         from pptx import Presentation
 
         return Presentation
-    except ImportError:
-        ensure_package_installed("python-pptx", import_name="pptx", skill_id="document-reader")
-        from pptx import Presentation
-
-        return Presentation
+    except ImportError as exc:
+        _bundled_dependency_error("python-pptx", exc)
 
 
 def _get_pdf_reader():
@@ -49,11 +45,8 @@ def _get_pdf_reader():
         from pypdf import PdfReader
 
         return PdfReader
-    except ImportError:
-        ensure_package_installed("pypdf", import_name="pypdf", skill_id="document-reader")
-        from pypdf import PdfReader
-
-        return PdfReader
+    except ImportError as exc:
+        _bundled_dependency_error("pypdf", exc)
 
 
 def _truncate_text(text, max_chars):

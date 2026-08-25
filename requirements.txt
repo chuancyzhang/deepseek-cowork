@@ -6,6 +6,8 @@ python-docx
 python-pptx
 openpyxl
 pypdf
+Pillow
+reportlab
 pandas
 duckduckgo-search
 beautifulsoup4

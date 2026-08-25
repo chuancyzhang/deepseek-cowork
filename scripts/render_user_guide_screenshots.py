@@ -1423,6 +1423,48 @@ def main_run():
             select_settings_page(settings, "更新")
             save_widget(window, "s36-update.png", 220)
             return
+        if SCREENSHOT_SCOPE == "component-settings":
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                window.resize(900, 720)
+            else:
+                window.resize(1280, 800)
+            window.component_task_manager._component_statuses = {
+                "documents": {
+                    "known": True,
+                    "bundled": True,
+                    "installed": True,
+                    "healthy": True,
+                    "needs_update": False,
+                    "needs_repair": False,
+                    "source": "随应用安装",
+                    "updated_at": 1787587200,
+                },
+            }
+            original_start_app_update = main.SettingsDialog.start_app_update
+            main.SettingsDialog.start_app_update = lambda *_args, **_kwargs: None
+            try:
+                window.open_settings("组件与依赖")
+            finally:
+                main.SettingsDialog.start_app_update = original_start_app_update
+            settings = window.product_pages[window.PAGE_SETTINGS]
+            settings._automatic_update_check_started = True
+            select_settings_page(settings, "组件与依赖")
+            settings.components_scroll_area.ensureWidgetVisible(
+                settings.component_rows["documents"]["status"],
+                24,
+                160,
+            )
+            component_scrollbar = settings.components_scroll_area.verticalScrollBar()
+            component_scrollbar.setValue(int(component_scrollbar.maximum() * 0.45))
+            process_events(120)
+            save_widget(
+                window,
+                "qa-component-documents-bundled-narrow.png"
+                if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1"
+                else "s38-component-status-cache.png",
+                220,
+            )
+            return
         if SCREENSHOT_SCOPE in {
             "enterprise-messages",
             "enterprise-messages-qa",

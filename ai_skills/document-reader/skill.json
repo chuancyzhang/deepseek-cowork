@@ -4,8 +4,8 @@
   "display_name": "本地文档读取",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
-  "description": "Optional bundled plugin for reading DOCX, PPTX, XLSX, XLS, and PDF through one unified tool.",
-  "description_cn": "可选随包插件：通过统一工具读取 DOCX、PPTX、XLSX、XLS 和 PDF。",
+  "description": "Bundled document reader for DOCX, PPTX, XLSX, XLS, and PDF through one unified tool.",
+  "description_cn": "随应用提供的文档读取能力：通过统一工具读取 DOCX、PPTX、XLSX、XLS 和 PDF。",
   "presentation": {
     "category": "docs_knowledge",
     "short_name": "文档读取",
@@ -14,15 +14,15 @@
     "access_note": "只读取当前工作区内你指定的文档，不会修改原文件。"
   },
   "source_type": "bundled_plugin",
-  "default_enabled": false,
+  "default_enabled": true,
   "tags": ["documents", "office", "pdf", "reader"],
   "triggers": ["docx", "pptx", "xlsx", "xls", "pdf", "document_read", "Office", "PDF"],
   "anti_triggers": ["write document", "create presentation", "edit spreadsheet"],
   "tool_refs": ["document_read"],
-  "python_dependencies": ["python-docx", "python-pptx", "openpyxl", "pypdf"],
+  "python_dependencies": [],
   "node_dependencies": [],
   "workflow": [
-    "Enable this plugin when a task requires reading DOCX, PPTX, XLSX, XLS, or PDF files.",
+    "Use this bundled capability when a task requires reading DOCX, PPTX, XLSX, XLS, or PDF files.",
     "Call document_read with the workspace-relative document path.",
     "For writing Office/PDF files, use run_python_code instead of expecting a document write tool."
   ]

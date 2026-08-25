@@ -68,6 +68,12 @@ QTWEBENGINE_LOCALE_ALLOWLIST = {
 REQUIRED_PATHS = (
     "deepseek-cowork.exe",
     "_internal/python_env/python.exe",
+    "_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
+    "_internal/python_env/Lib/site-packages/docx/__init__.py",
+    "_internal/python_env/Lib/site-packages/pptx/__init__.py",
+    "_internal/python_env/Lib/site-packages/PIL/__init__.py",
+    "_internal/python_env/Lib/site-packages/pypdf/__init__.py",
+    "_internal/python_env/Lib/site-packages/reportlab/__init__.py",
     "_internal/git_bash_env/bin/bash.exe",
     "_internal/PySide6/Qt6WebEngineCore.dll",
     "_internal/PySide6/QtWebEngineCore.pyd",

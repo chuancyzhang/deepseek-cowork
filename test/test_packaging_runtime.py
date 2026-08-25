@@ -23,16 +23,29 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         exec(compile(module, spec_path, "exec"), namespace)
         return namespace[function_name]
 
-    def test_document_preview_libraries_ship_with_packaged_app(self):
+    def test_document_libraries_ship_with_app_and_sandbox_runtime(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
             spec_text = handle.read()
+        with open(os.path.join(ROOT, "requirements.txt"), "r", encoding="utf-8") as handle:
+            requirements = handle.read()
+        with open(os.path.join(ROOT, "scripts", "package_release.py"), "r", encoding="utf-8") as handle:
+            release_text = handle.read()
 
-        self.assertIn('SANDBOX_DOCUMENT_DISTS = []', spec_text)
-        self.assertIn('SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS', spec_text)
+        self.assertIn(
+            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]',
+            spec_text,
+        )
+        self.assertIn('SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS', spec_text)
         self.assertIn('node_env = []', spec_text)
         excludes = spec_text.split("excludes=[", 1)[1].split("],", 1)[0]
         for module_name in ("docx", "pptx", "openpyxl", "pypdf"):
             self.assertNotIn(f"'{module_name}'", excludes)
+            self.assertIn(f"'{module_name}'", spec_text.split("hiddenimports=", 1)[1].split("hookspath=", 1)[0])
+        self.assertNotIn("'lxml'", excludes)
+        for package_name in ("Pillow", "reportlab"):
+            self.assertIn(package_name, requirements)
+        for import_path in ("openpyxl", "docx", "pptx", "PIL", "pypdf", "reportlab"):
+            self.assertIn(f"_internal/python_env/Lib/site-packages/{import_path}/__init__.py", release_text)
 
     def test_webengine_is_a_required_packaging_dependency(self):
         with open(os.path.join(ROOT, "requirements.txt"), "r", encoding="utf-8") as handle:

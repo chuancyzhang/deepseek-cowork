@@ -25,7 +25,7 @@ This built-in skill handles workspace path operations and plain text files only.
 ## Boundaries
 
 - `text_file_read` and `apply_patch` refuse DOCX, PPTX, XLSX, XLS, and PDF paths.
-- To read Office/PDF documents, enable the optional `document-reader` plugin and use `document_read`.
+- To read Office/PDF documents, use the bundled `document-reader` capability and `document_read`. If it was explicitly disabled, enable it in the capability store.
 - To create or modify Office/PDF documents, use `run_python_code` with the appropriate document library.
 - Path search is owned by `command-tools` through `glob` and `grep`.
 - User confirmation is owned by `interaction`; delete confirmation uses the shared interaction bridge internally.

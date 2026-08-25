@@ -46,6 +46,7 @@ from core.single_instance import (
 from core.chat_storage import ChatStorage
 from core.message_persistence import filter_persistable_messages
 from core.runtime_journal import RuntimeJournal
+from core.ppt_agent import validate_pptx_structure
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
 from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_MODEL,
@@ -4614,6 +4615,25 @@ class TestImDailySummaryStorage(unittest.TestCase):
         row2 = self.storage.get_im_daily_summary("feishu", "user-a", "chat-a", "2026-03-06")
         self.assertEqual(row2["summary_text"], "summary-b")
         self.assertEqual(row2["source_message_upto_pos"], 20)
+
+class TestPptxStructureValidation(unittest.TestCase):
+    def test_python_pptx_structure_validation_reopens_and_counts_slides(self):
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "generated.pptx")
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "标题"
+            presentation.save(path)
+
+            result = validate_pptx_structure(path)
+
+            self.assertEqual(result["page_count"], 1)
+            self.assertGreaterEqual(result["text_shape_count"], 1)
+            self.assertEqual(result["verification_level"], "structure_only")
+
 
 if __name__ == "__main__":
     unittest.main()

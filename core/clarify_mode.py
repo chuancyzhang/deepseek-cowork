@@ -210,6 +210,9 @@ def normalize_run_context(run_context):
         "ppt_agent_renderer_prog_id": str(ctx.get("ppt_agent_renderer_prog_id") or "").strip(),
         "ppt_agent_visual_status": str(ctx.get("ppt_agent_visual_status") or "").strip().lower(),
         "ppt_agent_run_id": str(ctx.get("ppt_agent_run_id") or "").strip(),
+        "ppt_agent_task_id": str(ctx.get("ppt_agent_task_id") or "").strip(),
+        "ppt_agent_internal_stage": str(ctx.get("ppt_agent_internal_stage") or "").strip().lower(),
+        "ppt_agent_verification_level": str(ctx.get("ppt_agent_verification_level") or "").strip().lower(),
         "ppt_agent_template_screenshots": [
             str(path or "").strip()
             for path in (ctx.get("ppt_agent_template_screenshots") or [])

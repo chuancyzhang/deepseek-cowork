@@ -65,6 +65,7 @@ from core.runtime_journal import RuntimeJournal
 from core.conversation_render import (
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
+    is_ppt_agent_internal_stage_message,
     is_same_turn_guidance_message,
 )
 from core.message_persistence import (
@@ -344,6 +345,7 @@ from core.ppt_agent import (
     ppt_agent_builtin_skill_names,
     ppt_agent_strategy_skill_name,
     ppt_agent_strategy_label,
+    validate_pptx_structure,
 )
 from core.presentation_renderer import (
     RENDERER_NONE,
@@ -21277,10 +21279,10 @@ class OfficeDraftTaskCard(QFrame):
         self.add_process_widget(label)
         return label
 
-    def set_retry_failure(self, text, callback=None):
+    def set_retry_failure(self, text, callback=None, action_text="重试"):
         self.clear_retry_failure()
         self.retry_failure_notice.set_text(str(text or "本轮未完成，请重试"), "error")
-        self.retry_failure_notice.set_action("重试" if callback is not None else "")
+        self.retry_failure_notice.set_action(str(action_text or "重试") if callback is not None else "")
         self._retry_failure_callback = callback
         if callback is not None:
             self.retry_failure_notice.actionRequested.connect(callback)
@@ -21307,6 +21309,11 @@ class OfficeDraftTaskCard(QFrame):
 
     def set_failed(self, message="生成失败"):
         self.title_label.setText(str(message or "生成失败"))
+        self.open_btn.setVisible(False)
+        self._render_result_cards([])
+
+    def set_interrupted(self, message="生成中断"):
+        self.title_label.setText(str(message or "生成中断"))
         self.open_btn.setVisible(False)
         self._render_result_cards([])
 
@@ -22800,6 +22807,7 @@ class SessionState:
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
+        self.ppt_task_cards = {}
         self.skill_capture_status_card = None
         self.pending_conversation_skill_result = None
         self.office_task_result_paths = []
@@ -22819,6 +22827,9 @@ class SessionState:
         self.ppt_agent_validation_round = 0
         self.ppt_agent_validation_worker = None
         self.ppt_agent_result_file = ""
+        self.ppt_agent_task_id = ""
+        self.ppt_agent_internal_stage = ""
+        self.ppt_agent_verification_level = ""
         self.active_run_retry_context = {}
         self.failed_run_retry_context = {}
         self.persisted_conversation_meta = {}
@@ -30541,6 +30552,79 @@ class MainWindow(QMainWindow):
             )
         }
 
+    def _ppt_tasks_for_state(self, state):
+        if not state:
+            return {}
+        meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        tasks = meta.get("ppt_tasks_v1")
+        if not isinstance(tasks, dict):
+            tasks = {}
+        meta["ppt_tasks_v1"] = tasks
+        state.persisted_conversation_meta = meta
+        return tasks
+
+    def _ppt_task_for_state(self, state, task_id=None):
+        task_id = str(task_id or getattr(state, "ppt_agent_task_id", "") or "").strip()
+        if not task_id:
+            return {}
+        task = self._ppt_tasks_for_state(state).get(task_id)
+        return copy.deepcopy(task) if isinstance(task, dict) else {}
+
+    def _update_ppt_task_checkpoint(self, state, task_id, *, persist=False, **patch):
+        task_id = str(task_id or "").strip()
+        if not state or not task_id:
+            raise ValueError("PPT 任务检查点缺少 task_id。")
+        tasks = self._ppt_tasks_for_state(state)
+        record = copy.deepcopy(tasks.get(task_id) or {})
+        record.update(copy.deepcopy(patch))
+        record.update({"task_id": task_id, "updated_at": time.time()})
+        tasks[task_id] = record
+        meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        meta["ppt_tasks_v1"] = tasks
+        state.persisted_conversation_meta = meta
+        state.ppt_agent_task_id = task_id
+        log_chat_runtime_debug(
+            "ppt_task_checkpoint",
+            session_id=state.session_id,
+            task_id=task_id,
+            task_stage=str(record.get("stage") or ""),
+            status=str(record.get("status") or ""),
+            validation_round=int(record.get("validation_round") or 0),
+            next_action=str(record.get("next_action") or ""),
+            persist=bool(persist),
+        )
+        if persist and not self.save_chat_history(session_id=state.session_id, flush=True):
+            raise RuntimeError("PPT 任务检查点无法安全写入会话记录。")
+        return record
+
+    def _ppt_task_file_snapshot(self, path):
+        value = str(path or "").strip()
+        normalized = os.path.normpath(value) if value else ""
+        if not normalized or not os.path.isfile(normalized):
+            return {"path": normalized, "sha256": ""}
+        return {"path": normalized, "sha256": sha256_file(normalized)}
+
+    def _restore_ppt_task_state(self, state, task):
+        if not state or not isinstance(task, dict):
+            return
+        state.ppt_agent_mode = True
+        state.ppt_agent_output_format = PPT_AGENT_OUTPUT_PPTX
+        state.ppt_agent_task_id = str(task.get("task_id") or "")
+        state.ppt_agent_run_id = str(task.get("ppt_agent_run_id") or "")
+        state.ppt_agent_template_file = str(task.get("template_file") or "")
+        state.ppt_agent_template_hash = str(task.get("template_hash") or "")
+        state.ppt_agent_template_screenshots = list(task.get("template_screenshots") or [])
+        state.ppt_agent_renderer = str(task.get("renderer") or RENDERER_NONE)
+        state.ppt_agent_renderer_prog_id = str(task.get("renderer_prog_id") or "")
+        state.ppt_agent_task_model_id = str(task.get("task_model_id") or "")
+        state.ppt_agent_validation_round = int(task.get("validation_round") or 0)
+        state.ppt_agent_visual_status = str(task.get("visual_status") or "")
+        state.ppt_agent_verification_level = str(task.get("verification_level") or "")
+        pptx_file = task.get("pptx") if isinstance(task.get("pptx"), dict) else {}
+        state.ppt_agent_result_file = str(pptx_file.get("path") or "")
+        if state.ppt_agent_result_file:
+            self._sync_office_task_card_paths(state, [state.ppt_agent_result_file])
+
     def _is_office_workflow_enabled(self, state):
         return bool(getattr(state, "office_draft_preview_pending", False))
 
@@ -30572,6 +30656,9 @@ class MainWindow(QMainWindow):
         if normalize_workflow_mode(meta.get("workflow_mode")) == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
             target = str(meta.get("office_conversion_target") or "").strip().lower()
             return target if target in {"pptx", "docx", "pdf"} else "file"
+        if bool(meta.get("ppt_agent_mode")):
+            target = normalize_ppt_agent_output_format(meta.get("ppt_agent_output_format"))
+            return target
         return "html"
 
     def _current_model_process_label(self, state=None, run_context=None):
@@ -30693,7 +30780,15 @@ class MainWindow(QMainWindow):
             process_widget_count=card.process_widget_count(),
         )
 
-    def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True, target_format=None):
+    def _create_office_draft_task_card(
+        self,
+        state,
+        profile_label=None,
+        insert_index=None,
+        running=True,
+        target_format=None,
+        task_id="",
+    ):
         if not state:
             return None
         card = OfficeDraftTaskCard(
@@ -30703,6 +30798,7 @@ class MainWindow(QMainWindow):
         card.deliverablePathActivated.connect(
             lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
         )
+        card.ppt_task_id = str(task_id or "").strip()
         if running:
             card.set_running()
         if insert_index is not None:
@@ -30710,6 +30806,12 @@ class MainWindow(QMainWindow):
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, card)
         state.office_draft_task_card = card
+        if card.ppt_task_id:
+            cards = getattr(state, "ppt_task_cards", None)
+            if not isinstance(cards, dict):
+                cards = {}
+                state.ppt_task_cards = cards
+            cards[card.ppt_task_id] = card
         log_chat_runtime_debug(
             "office_task_card_created",
             session_id=getattr(state, "session_id", ""),
@@ -30717,16 +30819,58 @@ class MainWindow(QMainWindow):
             target_format=target_format or getattr(state, "office_task_target_format", "html") or "html",
             running=running,
             insert_index=insert_index,
+            task_id=card.ppt_task_id,
         )
         if running:
             self._schedule_office_task_process_bootstrap_check(state)
         return card
 
-    def _office_draft_card_for_state(self, state):
+    def _office_draft_card_for_state(self, state, task_id=""):
+        task_id = str(task_id or "").strip()
+        if task_id:
+            card = (getattr(state, "ppt_task_cards", {}) or {}).get(task_id)
+            if card is not None and _qt_object_alive(card):
+                return card
         card = getattr(state, "office_draft_task_card", None)
         if card is not None and _qt_object_alive(card):
             return card
         return None
+
+    def _ppt_task_id_from_message(self, message):
+        if not isinstance(message, dict):
+            return ""
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        return str(meta.get("ppt_task_id") or "").strip()
+
+    def _apply_ppt_task_card_state(self, state, card, task_id, *, restored=False):
+        task = self._ppt_task_for_state(state, task_id)
+        if card is None or not task:
+            return False
+        status = str(task.get("status") or "").strip().lower()
+        pptx = task.get("pptx") if isinstance(task.get("pptx"), dict) else {}
+        pptx_value = str(pptx.get("path") or "").strip()
+        pptx_path = os.path.normpath(pptx_value) if pptx_value else ""
+        if status == "completed" and pptx_path and os.path.isfile(pptx_path):
+            card.set_completed([pptx_path])
+            return True
+        callback = lambda sid=state.session_id, tid=task_id: self.resume_ppt_task(sid, tid)
+        if status == "failed":
+            card.set_failed(self._office_task_failed_title(state))
+            card.set_retry_failure(
+                str(task.get("error") or "PPTX 生成失败，可从最后检查点重试。"),
+                callback,
+                action_text="重试",
+            )
+            return True
+        if restored or status in {"running", "paused", "interrupted"}:
+            card.set_interrupted("生成中断")
+            card.set_retry_failure(
+                "任务已中断，可从最后完成的阶段继续。",
+                callback,
+                action_text="继续生成",
+            )
+            return True
+        return False
 
     def _append_office_process_note(self, state, text, tone="info"):
         card = self._office_draft_card_for_state(state)
@@ -30779,9 +30923,14 @@ class MainWindow(QMainWindow):
                 card.set_failed(failed_message)
             return
         result_paths = self._collect_office_task_result_paths(state, content=content, bubble=bubble)
+        if (
+            getattr(state, "ppt_agent_mode", False)
+            and normalize_ppt_agent_output_format(getattr(state, "ppt_agent_output_format", "")) == PPT_AGENT_OUTPUT_PPTX
+        ):
+            self._handle_ppt_agent_validation_completion(state, content, result_paths)
+            return
         if card is not None:
             card.set_completed(result_paths)
-        self._handle_ppt_agent_validation_completion(state, content, result_paths)
 
     def _ppt_agent_generated_pptx(self, state, result_paths):
         template_key = os.path.normcase(os.path.abspath(str(getattr(state, "ppt_agent_template_file", "") or "")))
@@ -30794,6 +30943,133 @@ class MainWindow(QMainWindow):
                 continue
             candidates.append(normalized)
         return max(candidates, key=os.path.getmtime) if candidates else ""
+
+    def _fail_ppt_task(self, state, message, *, stage="failed", next_action=""):
+        task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+        text = str(message or "PPTX 生成失败。")
+        if task_id:
+            try:
+                checkpoint_patch = {
+                    "status": "failed",
+                    "stage": stage,
+                    "next_action": next_action,
+                    "error": text,
+                    "visual_status": "validation_failed",
+                    "failed_run_id": str(getattr(state, "active_turn_request_id", "") or ""),
+                }
+                result_file = str(getattr(state, "ppt_agent_result_file", "") or "")
+                if result_file and os.path.isfile(result_file):
+                    checkpoint_patch["pptx"] = self._ppt_task_file_snapshot(result_file)
+                self._update_ppt_task_checkpoint(
+                    state,
+                    task_id,
+                    persist=True,
+                    **checkpoint_patch,
+                )
+            except Exception as exc:
+                text = f"{text}；检查点写入失败：{exc}"
+        card = self._office_draft_card_for_state(state, task_id)
+        if card is not None:
+            card.add_process_note(text, tone="error")
+            card.set_failed(self._office_task_failed_title(state))
+            if task_id:
+                card.set_retry_failure(
+                    text,
+                    lambda sid=state.session_id, tid=task_id: self.resume_ppt_task(sid, tid),
+                    action_text="重试",
+                )
+        log_chat_runtime_debug(
+            "ppt_task_error",
+            session_id=state.session_id,
+            task_id=task_id,
+            task_stage=stage,
+            next_action=next_action,
+            error=text,
+        )
+        return False
+
+    def _complete_ppt_task(self, state, pptx_path, *, verification_level, visual_status):
+        task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+        snapshot = self._ppt_task_file_snapshot(pptx_path)
+        try:
+            self._update_ppt_task_checkpoint(
+                state,
+                task_id,
+                persist=True,
+                status="completed",
+                stage="completed",
+                last_completed_stage="completed",
+                next_action="",
+                pptx=snapshot,
+                verification_level=verification_level,
+                visual_status=visual_status,
+                error="",
+                current_run_id="",
+                failed_run_id="",
+            )
+        except Exception as exc:
+            return self._fail_ppt_task(
+                state,
+                f"PPTX 已生成，但完成检查点写入失败：{exc}",
+                stage="checkpoint_failed",
+                next_action="complete",
+            )
+        state.ppt_agent_verification_level = verification_level
+        state.ppt_agent_visual_status = visual_status
+        state.ppt_agent_result_file = snapshot.get("path") or pptx_path
+        self._sync_office_task_card_paths(state, [state.ppt_agent_result_file])
+        card = self._office_draft_card_for_state(state, task_id)
+        if card is not None:
+            card.set_completed([state.ppt_agent_result_file])
+        log_chat_runtime_debug(
+            "ppt_task_finish",
+            session_id=state.session_id,
+            task_id=task_id,
+            verification_level=verification_level,
+            visual_status=visual_status,
+            pptx_path=state.ppt_agent_result_file,
+        )
+        return True
+
+    def _validate_generated_pptx_structure(self, state, pptx_path):
+        task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+        try:
+            result = validate_pptx_structure(pptx_path)
+            snapshot = self._ppt_task_file_snapshot(pptx_path)
+            self._update_ppt_task_checkpoint(
+                state,
+                task_id,
+                persist=True,
+                status="running",
+                stage="structure_validated",
+                last_completed_stage="structure_validated",
+                next_action=(
+                    "complete"
+                    if str(getattr(state, "ppt_agent_renderer", RENDERER_NONE) or RENDERER_NONE) == RENDERER_NONE
+                    else "render"
+                ),
+                pptx=snapshot,
+                structure_validation=result,
+                verification_level="structure_only",
+                visual_status="unverified",
+                error="",
+            )
+            log_chat_runtime_debug(
+                "ppt_task_structure_validated",
+                session_id=state.session_id,
+                task_id=task_id,
+                page_count=int(result.get("page_count") or 0),
+                shape_count=int(result.get("shape_count") or 0),
+            )
+            return result
+        except Exception as exc:
+            self._fail_ppt_task(
+                state,
+                f"PPTX 结构校验失败：{exc}",
+                stage="structure_failed",
+                next_action="structure_validate",
+            )
+            return None
 
     def _handle_ppt_agent_validation_completion(self, state, content, result_paths):
         if not state or not getattr(state, "ppt_agent_mode", False):
@@ -30811,12 +31087,32 @@ class MainWindow(QMainWindow):
                     status="verified",
                     validation_round=getattr(state, "ppt_agent_validation_round", 0),
                 )
-                if card is not None:
-                    card.add_process_note("已完成逐页截图复核，PPTX 视觉校验通过。", tone="success")
+                self._complete_ppt_task(
+                    state,
+                    getattr(state, "ppt_agent_result_file", ""),
+                    verification_level="visual",
+                    visual_status="verified",
+                )
                 return
             if "[PPT_VALIDATION_REPAIRED]" in str(content or ""):
                 final_only = int(getattr(state, "ppt_agent_validation_round", 0) or 0) >= 2
                 state.ppt_agent_visual_status = "repair_render_pending"
+                try:
+                    self._update_ppt_task_checkpoint(
+                        state,
+                        getattr(state, "ppt_agent_task_id", ""),
+                        persist=True,
+                        status="running",
+                        stage="repaired",
+                        last_completed_stage="repaired",
+                        next_action="final_render" if final_only else "render",
+                        validation_round=int(getattr(state, "ppt_agent_validation_round", 0) or 0),
+                        visual_status="repair_render_pending",
+                        pptx=self._ppt_task_file_snapshot(getattr(state, "ppt_agent_result_file", "")),
+                    )
+                except Exception as exc:
+                    self._fail_ppt_task(state, f"修复结果检查点写入失败：{exc}", stage="checkpoint_failed", next_action="render")
+                    return
                 self._schedule_ppt_agent_result_render(state, result_paths, final_only=final_only)
                 return
             state.ppt_agent_visual_status = "validation_failed"
@@ -30826,18 +31122,49 @@ class MainWindow(QMainWindow):
                 status="marker_missing",
                 validation_round=getattr(state, "ppt_agent_validation_round", 0),
             )
-            if card is not None:
-                card.add_process_note("视觉复核未返回可识别结论，结果保持“未验证”，请人工检查。", tone="warning")
+            self._fail_ppt_task(
+                state,
+                "视觉复核未返回可识别结论。",
+                stage="validation_failed",
+                next_action="validate",
+            )
             return
-        if visual_status in {"verified", "validation_failed", "repair_limit_reached", "unverified"}:
-            if visual_status == "unverified" and card is not None:
-                card.add_process_note("未检测到 PowerPoint/WPS 渲染器；PPTX 已生成，但未做视觉校验。", tone="warning")
+        if visual_status in {"verified", "validation_failed", "repair_limit_reached"}:
+            return
+        pptx_path = self._ppt_agent_generated_pptx(state, result_paths)
+        if not pptx_path:
+            remembered = os.path.normpath(str(getattr(state, "ppt_agent_result_file", "") or ""))
+            if os.path.isfile(remembered) and os.path.splitext(remembered)[1].lower() == ".pptx":
+                pptx_path = remembered
+        if not pptx_path:
+            self._fail_ppt_task(state, "未找到独立生成的 PPTX 文件。", stage="generation_failed", next_action="generate")
+            return
+        state.ppt_agent_result_file = pptx_path
+        if self._validate_generated_pptx_structure(state, pptx_path) is None:
+            return
+        if str(getattr(state, "ppt_agent_renderer", RENDERER_NONE) or RENDERER_NONE) == RENDERER_NONE:
+            if card is not None:
+                card.add_process_note(
+                    "已完成 python-pptx 结构校验，未执行 PowerPoint/WPS 截图验收。",
+                    tone="muted",
+                )
+            self._complete_ppt_task(
+                state,
+                pptx_path,
+                verification_level="structure_only",
+                visual_status="unverified",
+            )
             return
         self._schedule_ppt_agent_result_render(state, result_paths, final_only=False)
 
     def _schedule_ppt_agent_result_render(self, state, result_paths, final_only=False):
         if str(getattr(state, "ppt_agent_renderer", RENDERER_NONE) or RENDERER_NONE) == RENDERER_NONE:
-            state.ppt_agent_visual_status = "unverified"
+            self._fail_ppt_task(
+                state,
+                "当前任务没有可用于截图验收的 PowerPoint/WPS 渲染器。",
+                stage="render_unavailable",
+                next_action="structure_validate",
+            )
             return
         if getattr(state, "ppt_agent_validation_worker", None) is not None:
             return
@@ -30849,8 +31176,12 @@ class MainWindow(QMainWindow):
         card = self._office_draft_card_for_state(state)
         if not pptx_path:
             state.ppt_agent_visual_status = "validation_failed"
-            if card is not None:
-                card.add_process_note("未找到独立生成的 PPTX 文件，无法开始视觉校验。", tone="error")
+            self._fail_ppt_task(
+                state,
+                "未找到独立生成的 PPTX 文件，无法开始视觉校验。",
+                stage="render_failed",
+                next_action="render",
+            )
             return
         state.ppt_agent_result_file = pptx_path
         next_round = max(1, int(getattr(state, "ppt_agent_validation_round", 0) or 0) + (0 if final_only else 1))
@@ -30869,8 +31200,28 @@ class MainWindow(QMainWindow):
         worker.completed.connect(lambda result, sid=state.session_id: self._handle_ppt_agent_result_rendered(sid, result))
         worker.failed.connect(lambda error, sid=state.session_id: self._handle_ppt_agent_result_render_failed(sid, error))
         worker.finished.connect(lambda sid=state.session_id, item=worker: self._finish_ppt_agent_validation_worker(sid, item))
-        if card is not None:
-            card.add_process_note("正在逐页渲染生成结果，准备交给同一多模态模型复核。", tone="muted")
+        try:
+            self._update_ppt_task_checkpoint(
+                state,
+                getattr(state, "ppt_agent_task_id", ""),
+                persist=True,
+                status="running",
+                stage="final_rendering" if final_only else "rendering",
+                next_action="final_render" if final_only else "render",
+                validation_round=next_round,
+                visual_status=str(getattr(state, "ppt_agent_visual_status", "") or ""),
+                pptx=self._ppt_task_file_snapshot(pptx_path),
+            )
+        except Exception as exc:
+            state.ppt_agent_validation_worker = None
+            worker.deleteLater()
+            self._fail_ppt_task(
+                state,
+                f"渲染检查点写入失败：{exc}",
+                stage="checkpoint_failed",
+                next_action="final_render" if final_only else "render",
+            )
+            return
         log_chat_runtime_debug(
             "ppt_agent_validation_render_start",
             session_id=state.session_id,
@@ -30896,9 +31247,12 @@ class MainWindow(QMainWindow):
             session_id=session_id,
             error=str(error),
         )
-        card = self._office_draft_card_for_state(state)
-        if card is not None:
-            card.add_process_note(f"PPTX 逐页渲染失败，结果未验证：{error}", tone="error")
+        self._fail_ppt_task(
+            state,
+            f"PPTX 逐页渲染失败：{error}",
+            stage="render_failed",
+            next_action="render",
+        )
 
     def _handle_ppt_agent_result_rendered(self, session_id, result):
         state = self.get_session(session_id)
@@ -30912,15 +31266,36 @@ class MainWindow(QMainWindow):
             self._handle_ppt_agent_result_render_failed(session_id, "渲染器未输出任何页面截图")
             return
         if result.get("final_only"):
-            state.ppt_agent_visual_status = "repair_limit_reached"
-            if card is not None:
-                card.add_process_note("已完成第二轮修复后的最终渲染；达到自动修复上限，请人工确认截图。", tone="warning")
+            state.ppt_agent_visual_status = "verified"
+            screenshot_manifest = [self._ppt_task_file_snapshot(path) for path in screenshots]
+            try:
+                self._update_ppt_task_checkpoint(
+                    state,
+                    getattr(state, "ppt_agent_task_id", ""),
+                    persist=True,
+                    status="running",
+                    stage="final_rendered",
+                    last_completed_stage="final_rendered",
+                    next_action="complete",
+                    validation_round=validation_round,
+                    screenshots=screenshot_manifest,
+                    screenshot_page_count=len(screenshot_manifest),
+                )
+            except Exception as exc:
+                self._fail_ppt_task(state, f"最终渲染检查点写入失败：{exc}", stage="checkpoint_failed", next_action="final_render")
+                return
             log_chat_runtime_debug(
                 "ppt_agent_validation_finish",
                 session_id=session_id,
-                status="repair_limit_reached",
+                status="verified_after_repair",
                 screenshot_count=len(screenshots),
                 validation_round=validation_round,
+            )
+            self._complete_ppt_task(
+                state,
+                getattr(state, "ppt_agent_result_file", ""),
+                verification_level="visual",
+                visual_status="verified",
             )
             return
         state.ppt_agent_validation_round = validation_round
@@ -30929,14 +31304,35 @@ class MainWindow(QMainWindow):
         template_screenshots = self._normalize_prompt_file_paths(
             getattr(state, "ppt_agent_template_screenshots", []) or []
         )
+        screenshot_manifest = [self._ppt_task_file_snapshot(path) for path in screenshots]
+        try:
+            self._update_ppt_task_checkpoint(
+                state,
+                getattr(state, "ppt_agent_task_id", ""),
+                persist=True,
+                status="running",
+                stage="rendered",
+                last_completed_stage="rendered",
+                next_action="validate",
+                validation_round=validation_round,
+                screenshots=screenshot_manifest,
+                screenshot_page_count=len(screenshot_manifest),
+                visual_status="validating",
+            )
+        except Exception as exc:
+            self._fail_ppt_task(state, f"截图检查点写入失败：{exc}", stage="checkpoint_failed", next_action="render")
+            return
         validation_prompt = (
             "这是 PPT Agent 自动视觉校验，请使用本任务原先选择的多模态模型完成。\n\n"
             f"当前是第 {validation_round} 轮（最多 2 轮自动修复）。请逐页查看生成 PPTX 的截图，并参考模板截图，"
-            "检查图片缺失、错位、字体替换、文字溢出、遮挡、异常空白以及品牌元素破坏。\n"
+            "检查图片缺失、错位、字体替换、文字溢出、遮挡、异常空白以及品牌元素破坏。模板只提供品牌规范、背景、色彩、页眉页脚和版式语言；"
+            "示例文案、示例图形、参考流程、金字塔、图标和占位符不需要作为默认保留内容。逐页确认固定品牌元素、可复用容器和示例内容已经正确区分，"
+            "不得在旧示例元素上叠加新内容；标题必须避开 Logo 和公司名称安全区，不适配的页面应以品牌框架空白页重建。\n"
             f"生成文件：{pptx_path}\n"
             "若所有页面渲染正常，不要改文件，并在回复第一行写 [PPT_VALIDATION_PASS]。\n"
-            "若发现问题，请直接修复同一个 PPTX 文件，重新执行结构检查，并在回复第一行写 "
-            "[PPT_VALIDATION_REPAIRED]。不要生成 HTML，不要调用默认 PPT/HTML Skill。"
+            "若发现模板文字残留、旧图形与新内容重叠、标题侵入品牌区、文本截断或元素遮挡，请直接修复同一个 PPTX，"
+            "使用本机 PowerPoint/WPS 重新导出全部页面截图并检查修复结果；只有修复后截图已通过时，才在回复第一行写 "
+            "[PPT_VALIDATION_REPAIRED]。无法确认通过时请明确报告失败，不要输出通过标记。不要生成 HTML，不要调用默认 PPT/HTML Skill。"
         )
         prompt_files = list(OrderedDict.fromkeys([pptx_path] + screenshots + template_screenshots))
         submitted = self._submit_session_request(
@@ -30959,16 +31355,26 @@ class MainWindow(QMainWindow):
             ppt_agent_renderer_prog_id=getattr(state, "ppt_agent_renderer_prog_id", ""),
             ppt_agent_visual_status="validating",
             ppt_agent_run_id=getattr(state, "ppt_agent_run_id", ""),
+            ppt_agent_task_id=getattr(state, "ppt_agent_task_id", ""),
+            ppt_agent_internal_stage="visual_validation",
+            ppt_agent_verification_level="visual",
             task_model_id=getattr(state, "ppt_agent_task_model_id", ""),
-            user_message_meta={"ppt_agent_visual_validation": True, "ppt_agent_validation_round": validation_round},
+            user_message_meta={
+                "ppt_agent_visual_validation": True,
+                "ppt_agent_validation_round": validation_round,
+                "ppt_task_id": getattr(state, "ppt_agent_task_id", ""),
+                "ppt_agent_internal_stage": "visual_validation",
+            },
         )
         if not submitted:
             state.ppt_agent_visual_status = "validation_failed"
-            if card is not None:
-                card.add_process_note("页面截图已生成，但视觉复核任务启动失败；结果保持未验证。", tone="error")
+            self._fail_ppt_task(
+                state,
+                "页面截图已生成，但视觉复核任务启动失败。",
+                stage="validation_failed",
+                next_action="validate",
+            )
             return
-        if card is not None:
-            card.add_process_note(f"已提交第 {validation_round} 轮逐页视觉复核。", tone="muted")
 
     def _office_task_failed_title(self, state):
         target = str(getattr(state, "office_task_target_format", "") or "").strip().upper()
@@ -33236,7 +33642,11 @@ class MainWindow(QMainWindow):
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
         state.office_draft_task_card = None
+        state.ppt_task_cards = {}
         state.office_task_result_paths = []
+        state.ppt_agent_task_id = ""
+        state.ppt_agent_internal_stage = ""
+        state.ppt_agent_verification_level = ""
         state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
         state.favorite_id = ""
@@ -33478,19 +33888,22 @@ class MainWindow(QMainWindow):
 
     def _render_history_office_summary(self, state, messages, start, end, insert_index=None):
         request_message = messages[0]
+        ppt_task_id = self._ppt_task_id_from_message(request_message)
         card = self._create_office_draft_task_card(
             state,
             self._office_profile_label_from_message(request_message),
             insert_index=insert_index,
             running=False,
             target_format=self._office_target_format_from_message(request_message),
+            task_id=ppt_task_id,
         )
         assistant_text = "\n\n".join(
             str(message.get("content") or "")
             for message in messages
             if isinstance(message, dict) and message.get("role") == "assistant"
         )
-        card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
+        if not self._apply_ppt_task_card_state(state, card, ppt_task_id, restored=True):
+            card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
         card._history_span_start = int(start)
         card._history_span_end = int(end)
         card._history_messages = copy.deepcopy(messages)
@@ -36721,7 +37134,10 @@ class MainWindow(QMainWindow):
         retry_callback = lambda sid=state.session_id, rid=run_id: self.retry_failed_run(sid, rid)
         submit_options = context.get("submit_options") if isinstance(context.get("submit_options"), dict) else {}
         if self._is_office_workflow_context(submit_options.get("workflow_mode")):
-            card = self._office_draft_card_for_state(state)
+            card = self._office_draft_card_for_state(
+                state,
+                str(submit_options.get("ppt_agent_task_id") or ""),
+            )
             if card is not None:
                 card.set_failed(self._office_task_failed_title(state))
                 log_chat_runtime_debug(
@@ -36791,6 +37207,11 @@ class MainWindow(QMainWindow):
             )
             return False
         retry_options = dict(context.get("submit_options") or {})
+        retry_task_id = str(retry_options.get("ppt_agent_task_id") or "").strip()
+        retry_internal_stage = str(retry_options.get("ppt_agent_internal_stage") or "").strip()
+        if retry_task_id and not retry_internal_stage:
+            retry_internal_stage = "retry"
+            retry_options["ppt_agent_internal_stage"] = retry_internal_stage
         retry_options.update(
             {
                 "check_duplicates": False,
@@ -36799,6 +37220,8 @@ class MainWindow(QMainWindow):
                     "retry_of_run_id": run_id,
                     "retry_of_user_message_id": original_message_id,
                     "display_content": "重试上一轮未完成的请求",
+                    "ppt_task_id": retry_task_id,
+                    "ppt_agent_internal_stage": retry_internal_stage,
                 },
             }
         )
@@ -36821,7 +37244,14 @@ class MainWindow(QMainWindow):
         )
         retry_submit_options = context.get("submit_options") if isinstance(context.get("submit_options"), dict) else {}
         office_retry = self._is_office_workflow_context(retry_submit_options.get("workflow_mode"))
-        failed_card = self._office_draft_card_for_state(state) if office_retry else None
+        failed_card = (
+            self._office_draft_card_for_state(
+                state,
+                str(retry_submit_options.get("ppt_agent_task_id") or ""),
+            )
+            if office_retry
+            else None
+        )
         submitted = self._submit_session_request(
             state,
             retry_text,
@@ -36848,6 +37278,212 @@ class MainWindow(QMainWindow):
             run_id=run_id,
         )
         return True
+
+    def resume_ppt_task(self, session_id, task_id):
+        state = self.get_session(session_id)
+        task_id = str(task_id or "").strip()
+        task = self._ppt_task_for_state(state, task_id) if state else {}
+        if not state or not task:
+            if state:
+                self._show_conversation_notice(state, "PPT 任务检查点不存在，无法继续。", "error")
+            return False
+        if self._session_is_busy(state):
+            self._show_conversation_notice(state, "当前任务仍在运行，结束后再继续。", "warning")
+            return False
+
+        self._restore_ppt_task_state(state, task)
+        state.office_draft_preview_pending = True
+        state.office_task_target_format = "pptx"
+        card = self._office_draft_card_for_state(state, task_id)
+        if card is not None:
+            card.set_running()
+
+        template_value = str(task.get("template_file") or "").strip()
+        template_file = os.path.normpath(template_value) if template_value else ""
+        template_hash = str(task.get("template_hash") or "")
+        if template_file:
+            if not os.path.isfile(template_file):
+                return self._fail_ppt_task(
+                    state,
+                    "模板文件已不存在，无法从断点继续。",
+                    stage="resume_blocked",
+                    next_action=str(task.get("next_action") or "generate"),
+                )
+            if template_hash:
+                try:
+                    current_template_hash = presentation_file_sha256(template_file)
+                except Exception as exc:
+                    return self._fail_ppt_task(
+                        state,
+                        f"无法校验模板文件：{exc}",
+                        stage="resume_blocked",
+                        next_action=str(task.get("next_action") or "generate"),
+                    )
+                if current_template_hash != template_hash:
+                    return self._fail_ppt_task(
+                        state,
+                        "模板文件已发生变化，无法从原检查点继续。",
+                        stage="resume_blocked",
+                        next_action=str(task.get("next_action") or "generate"),
+                    )
+
+        next_action = str(task.get("next_action") or "generate").strip().lower()
+        pptx = task.get("pptx") if isinstance(task.get("pptx"), dict) else {}
+        pptx_value = str(pptx.get("path") or "").strip()
+        pptx_path = os.path.normpath(pptx_value) if pptx_value else ""
+        if next_action != "generate":
+            if not pptx_path or not os.path.isfile(pptx_path):
+                return self._fail_ppt_task(
+                    state,
+                    "检查点中的 PPTX 文件已不存在，无法继续。",
+                    stage="resume_blocked",
+                    next_action=next_action,
+                )
+            expected_hash = str(pptx.get("sha256") or "")
+            if expected_hash:
+                try:
+                    current_pptx_hash = sha256_file(pptx_path)
+                except Exception as exc:
+                    return self._fail_ppt_task(state, f"无法校验检查点 PPTX：{exc}", stage="resume_blocked", next_action=next_action)
+                if current_pptx_hash != expected_hash:
+                    return self._fail_ppt_task(
+                        state,
+                        "检查点中的 PPTX 文件已被修改，无法安全继续。",
+                        stage="resume_blocked",
+                        next_action=next_action,
+                    )
+            state.ppt_agent_result_file = pptx_path
+
+        log_chat_runtime_debug(
+            "ppt_task_resume",
+            session_id=state.session_id,
+            task_id=task_id,
+            task_stage=str(task.get("stage") or ""),
+            next_action=next_action,
+        )
+        try:
+            self._update_ppt_task_checkpoint(
+                state,
+                task_id,
+                persist=True,
+                status="running",
+                stage="resuming",
+                error="",
+            )
+        except Exception as exc:
+            return self._fail_ppt_task(
+                state,
+                f"无法写入恢复检查点：{exc}",
+                stage="checkpoint_failed",
+                next_action=next_action,
+            )
+
+        if next_action == "generate":
+            prompt_files = [os.path.normpath(str(path or "")) for path in task.get("prompt_files") or []]
+            missing_files = [path for path in prompt_files if not os.path.isfile(path)]
+            if missing_files:
+                return self._fail_ppt_task(
+                    state,
+                    "继续生成所需附件已不存在：" + "、".join(os.path.basename(path) for path in missing_files[:3]),
+                    stage="resume_blocked",
+                    next_action="generate",
+                )
+            submitted = self._submit_session_request(
+                state,
+                str(task.get("original_prompt") or ""),
+                prompt_files,
+                check_duplicates=False,
+                clear_current_input=False,
+                workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+                ppt_agent_mode=True,
+                ppt_agent_strategy=task.get("ppt_agent_strategy") or PPT_AGENT_STRATEGY_AUTO,
+                ppt_agent_selected_strategy=task.get("ppt_agent_selected_strategy") or PPT_AGENT_STRATEGY_DEFAULT,
+                ppt_agent_preference=task.get("ppt_agent_preference") or PPT_AGENT_PREFERENCE_AUTO,
+                ppt_agent_template_file=template_file,
+                ppt_agent_output_format=PPT_AGENT_OUTPUT_PPTX,
+                ppt_agent_template_screenshots=list(task.get("template_screenshots") or []),
+                ppt_agent_template_hash=template_hash,
+                ppt_agent_renderer=task.get("renderer") or RENDERER_NONE,
+                ppt_agent_renderer_prog_id=task.get("renderer_prog_id") or "",
+                ppt_agent_visual_status="unverified",
+                ppt_agent_run_id=task.get("ppt_agent_run_id") or "",
+                ppt_agent_task_id=task_id,
+                ppt_agent_internal_stage="resume_generation",
+                ppt_agent_verification_level=task.get("verification_level") or "",
+                task_model_id=task.get("task_model_id") or "",
+                user_message_meta={
+                    "ppt_task_id": task_id,
+                    "ppt_agent_internal_stage": "resume_generation",
+                },
+            )
+            if not submitted:
+                return self._fail_ppt_task(state, "断点生成未能启动。", stage="resume_failed", next_action="generate")
+            return True
+
+        if next_action == "structure_validate":
+            if self._validate_generated_pptx_structure(state, pptx_path) is None:
+                return False
+            if str(getattr(state, "ppt_agent_renderer", RENDERER_NONE) or RENDERER_NONE) == RENDERER_NONE:
+                if card is not None:
+                    card.add_process_note(
+                        "已完成 python-pptx 结构校验，未执行 PowerPoint/WPS 截图验收。",
+                        tone="muted",
+                    )
+                return self._complete_ppt_task(
+                    state,
+                    pptx_path,
+                    verification_level="structure_only",
+                    visual_status="unverified",
+                )
+            self._schedule_ppt_agent_result_render(state, [pptx_path], final_only=False)
+            return True
+        if next_action in {"render", "final_render"}:
+            self._schedule_ppt_agent_result_render(
+                state,
+                [pptx_path],
+                final_only=next_action == "final_render",
+            )
+            return True
+        if next_action == "validate":
+            screenshot_records = task.get("screenshots") if isinstance(task.get("screenshots"), list) else []
+            screenshots = []
+            for item in screenshot_records:
+                record = item if isinstance(item, dict) else {"path": item, "sha256": ""}
+                path = os.path.normpath(str(record.get("path") or ""))
+                if not path or not os.path.isfile(path):
+                    return self._fail_ppt_task(state, "校验截图已不存在，无法继续视觉复核。", stage="resume_blocked", next_action="render")
+                if record.get("sha256"):
+                    try:
+                        current_screenshot_hash = sha256_file(path)
+                    except Exception as exc:
+                        return self._fail_ppt_task(state, f"无法校验截图文件：{exc}", stage="resume_blocked", next_action="render")
+                    if current_screenshot_hash != str(record.get("sha256")):
+                        return self._fail_ppt_task(state, "校验截图已被修改，无法安全继续。", stage="resume_blocked", next_action="render")
+                screenshots.append(path)
+            self._handle_ppt_agent_result_rendered(
+                state.session_id,
+                {
+                    "pptx_path": pptx_path,
+                    "screenshots": screenshots,
+                    "validation_round": max(1, int(task.get("validation_round") or 1)),
+                    "final_only": False,
+                },
+            )
+            return True
+        if next_action == "complete":
+            return self._complete_ppt_task(
+                state,
+                pptx_path,
+                verification_level=task.get("verification_level") or "structure_only",
+                visual_status=task.get("visual_status") or "unverified",
+            )
+        return self._fail_ppt_task(
+            state,
+            f"无法识别断点恢复阶段：{next_action}",
+            stage="resume_blocked",
+            next_action=next_action,
+        )
 
     def _show_run_failure_details(self, session_id, event):
         self.activate_session(session_id)
@@ -37065,6 +37701,7 @@ class MainWindow(QMainWindow):
                     insert_index=current_idx,
                     running=False,
                     target_format=self._office_target_format_from_message(messages[0]),
+                    task_id=self._ppt_task_id_from_message(messages[0]),
                 )
             target_layout = office_card.process_layout if office_card is not None else None
             if not bool(getattr(office_card, "_history_process_initialized", False)):
@@ -37141,8 +37778,12 @@ class MainWindow(QMainWindow):
             role = msg.get('role')
             content = msg.get('content')
             reasoning = msg.get('reasoning')
+            internal_ppt_stage = is_ppt_agent_internal_stage_message(msg)
             
             if role == 'user':
+                if internal_ppt_stage:
+                    finalize_active_bubble()
+                    continue
                 message_id = str(msg.get("id") or "").strip()
                 if target_layout is None and message_id:
                     existing_node = state.render_node_by_message_id.get(message_id)
@@ -37243,9 +37884,9 @@ class MainWindow(QMainWindow):
                     state.last_agent_bubble = active_agent_bubble
                 if reasoning:
                     active_agent_bubble.update_thinking(reasoning)
-                if content:
+                if content and not internal_ppt_stage:
                     pending_content_parts.append(content)
-                if isinstance(msg.get("content_parts"), list):
+                if isinstance(msg.get("content_parts"), list) and not internal_ppt_stage:
                     pending_struct_parts.extend(msg.get("content_parts") or [])
                 
                 tool_calls = msg.get('tool_calls')
@@ -37299,7 +37940,9 @@ class MainWindow(QMainWindow):
                 for msg in messages
                 if isinstance(msg, dict) and msg.get("role") == "assistant"
             )
-            office_card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
+            task_id = str(getattr(office_card, "ppt_task_id", "") or "")
+            if not self._apply_ppt_task_card_state(state, office_card, task_id, restored=True):
+                office_card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
             office_card._sync_process_placeholder()
         if insert_index is not None:
             state.last_agent_bubble = backup_last_agent
@@ -39466,6 +40109,23 @@ class MainWindow(QMainWindow):
             source="generated" if notify_user else "history",
             workspace_dir=workspace_dir,
         )
+        ppt_task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip() if state else ""
+        ppt_task = self._ppt_task_for_state(state, ppt_task_id) if ppt_task_id else {}
+        if (
+            notify_user
+            and ppt_task_id
+            and getattr(state, "ppt_agent_mode", False)
+            and normalize_ppt_agent_output_format(getattr(state, "ppt_agent_output_format", "")) == PPT_AGENT_OUTPUT_PPTX
+            and str(ppt_task.get("status") or "").lower() != "completed"
+        ):
+            self._sync_office_task_card_paths(state, valid_paths)
+            log_chat_runtime_debug(
+                "ppt_task_intermediate_deliverable_hidden",
+                session_id=state.session_id,
+                task_id=ppt_task_id,
+                path_count=len(valid_paths),
+            )
+            return
         if not notify_user:
             self.refresh_deliverables()
             return
@@ -41369,6 +42029,7 @@ a {{ overflow-wrap: anywhere; }}
         normalized_strategy = normalize_ppt_agent_strategy(strategy)
         selected_strategy = normalize_ppt_agent_strategy(prompt_result.get("selected_strategy"))
         normalized_preference = normalize_ppt_agent_preference(preference)
+        ppt_task_id = str(ppt_agent_run_id or uuid.uuid4().hex).strip()
         log_chat_runtime_debug(
             "ppt_agent_request_prompt_built",
             session_id=state.session_id,
@@ -41398,7 +42059,12 @@ a {{ overflow-wrap: anywhere; }}
             ppt_agent_renderer_prog_id=renderer_prog_id,
             ppt_agent_visual_status=visual_status,
             ppt_agent_run_id=ppt_agent_run_id,
+            ppt_agent_task_id=ppt_task_id,
             task_model_id=task_model_id,
+            user_message_meta={
+                "display_content": request,
+                "ppt_task_id": ppt_task_id,
+            },
         )
         log_chat_runtime_debug(
             "ppt_agent_request_submitted",
@@ -43260,6 +43926,9 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_renderer_prog_id="",
         ppt_agent_visual_status="",
         ppt_agent_run_id="",
+        ppt_agent_task_id="",
+        ppt_agent_internal_stage="",
+        ppt_agent_verification_level="",
         task_model_id="",
     ):
         effective_skill_names = normalize_selected_skill_names(
@@ -43338,6 +44007,9 @@ a {{ overflow-wrap: anywhere; }}
                 "ppt_agent_renderer_prog_id": str(ppt_agent_renderer_prog_id or "").strip(),
                 "ppt_agent_visual_status": str(ppt_agent_visual_status or "").strip().lower(),
                 "ppt_agent_run_id": str(ppt_agent_run_id or "").strip(),
+                "ppt_agent_task_id": str(ppt_agent_task_id or "").strip(),
+                "ppt_agent_internal_stage": str(ppt_agent_internal_stage or "").strip().lower(),
+                "ppt_agent_verification_level": str(ppt_agent_verification_level or "").strip().lower(),
             }
         )
 
@@ -44881,6 +45553,9 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_renderer_prog_id="",
         ppt_agent_visual_status="",
         ppt_agent_run_id="",
+        ppt_agent_task_id="",
+        ppt_agent_internal_stage="",
+        ppt_agent_verification_level="",
         task_model_id="",
         user_message_meta=None,
         history_rewrite_guard=None,
@@ -45091,6 +45766,11 @@ a {{ overflow-wrap: anywhere; }}
         ppt_agent_renderer_prog_id = str(ppt_agent_renderer_prog_id or "").strip()
         ppt_agent_visual_status = str(ppt_agent_visual_status or "").strip().lower()
         ppt_agent_run_id = str(ppt_agent_run_id or "").strip()
+        ppt_agent_task_id = str(ppt_agent_task_id or "").strip()
+        ppt_agent_internal_stage = str(ppt_agent_internal_stage or "").strip().lower()
+        ppt_agent_verification_level = str(ppt_agent_verification_level or "").strip().lower()
+        if ppt_agent_mode and ppt_agent_output_format == PPT_AGENT_OUTPUT_PPTX and not ppt_agent_task_id:
+            ppt_agent_task_id = ppt_agent_run_id or uuid.uuid4().hex
         state.ppt_agent_mode = ppt_agent_mode
         state.ppt_agent_strategy = ppt_agent_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_AUTO
         state.ppt_agent_selected_strategy = ppt_agent_selected_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_DEFAULT
@@ -45105,6 +45785,9 @@ a {{ overflow-wrap: anywhere; }}
         previous_ppt_run_id = str(getattr(state, "ppt_agent_run_id", "") or "")
         state.ppt_agent_run_id = ppt_agent_run_id if ppt_agent_mode else ""
         state.ppt_agent_task_model_id = task_model_id if ppt_agent_mode else ""
+        state.ppt_agent_task_id = ppt_agent_task_id if ppt_agent_mode else ""
+        state.ppt_agent_internal_stage = ppt_agent_internal_stage if ppt_agent_mode else ""
+        state.ppt_agent_verification_level = ppt_agent_verification_level if ppt_agent_mode else ""
         if ppt_agent_mode and ppt_agent_run_id and ppt_agent_run_id != previous_ppt_run_id:
             state.ppt_agent_validation_round = 0
             state.ppt_agent_result_file = ""
@@ -45157,6 +45840,9 @@ a {{ overflow-wrap: anywhere; }}
                 "ppt_agent_renderer_prog_id": ppt_agent_renderer_prog_id,
                 "ppt_agent_visual_status": ppt_agent_visual_status,
                 "ppt_agent_run_id": ppt_agent_run_id,
+                "ppt_agent_task_id": ppt_agent_task_id,
+                "ppt_agent_internal_stage": ppt_agent_internal_stage,
+                "ppt_agent_verification_level": ppt_agent_verification_level,
                 "task_model_id": task_model_id,
             },
         }
@@ -45173,7 +45859,8 @@ a {{ overflow-wrap: anywhere; }}
         state.office_task_target_format = office_conversion_target or (
             ppt_agent_output_format if ppt_agent_mode else ("html" if office_workflow else "")
         )
-        state.office_task_result_paths = []
+        if not ppt_agent_internal_stage:
+            state.office_task_result_paths = []
         turn_model_id = effective_model_id
         turn_model_profile = self._model_profile_snapshot_for_state(state, model_id=effective_model_id)
         message_payload = {
@@ -45235,8 +45922,40 @@ a {{ overflow-wrap: anywhere; }}
                     message_meta["ppt_agent_output_format"] = ppt_agent_output_format
                     message_meta["ppt_agent_renderer"] = ppt_agent_renderer
                     message_meta["ppt_agent_visual_status"] = ppt_agent_visual_status
+                    message_meta["ppt_task_id"] = ppt_agent_task_id
+                    message_meta["ppt_agent_internal_stage"] = ppt_agent_internal_stage
+                    message_meta["ppt_agent_verification_level"] = ppt_agent_verification_level
                     if ppt_agent_template_file:
                         message_meta["ppt_agent_template_file"] = ppt_agent_template_file
+        if ppt_agent_mode and ppt_agent_output_format == PPT_AGENT_OUTPUT_PPTX:
+            existing_task = self._ppt_task_for_state(state, ppt_agent_task_id)
+            checkpoint_patch = {
+                "status": "running",
+                "stage": "validating" if ppt_agent_internal_stage == "visual_validation" else "generating",
+                "next_action": "validate" if ppt_agent_internal_stage == "visual_validation" else "generate",
+                "current_run_id": submit_request_id,
+                "ppt_agent_run_id": ppt_agent_run_id,
+                "root_message_id": str(existing_task.get("root_message_id") or user_message_id),
+                "template_file": ppt_agent_template_file,
+                "template_hash": ppt_agent_template_hash,
+                "template_screenshots": list(ppt_agent_template_screenshots),
+                "renderer": ppt_agent_renderer,
+                "renderer_prog_id": ppt_agent_renderer_prog_id,
+                "task_model_id": task_model_id,
+                "ppt_agent_strategy": ppt_agent_strategy,
+                "ppt_agent_selected_strategy": ppt_agent_selected_strategy,
+                "ppt_agent_preference": ppt_agent_preference,
+                "verification_level": ppt_agent_verification_level,
+                "visual_status": ppt_agent_visual_status,
+                "prompt_files": list(existing_task.get("prompt_files") or prompt_files),
+                "original_prompt": str(existing_task.get("original_prompt") or raw_user_text or ""),
+            }
+            self._update_ppt_task_checkpoint(
+                state,
+                ppt_agent_task_id,
+                persist=False,
+                **checkpoint_patch,
+            )
         grill_started = bool(grill_armed)
         if grill_started:
             message_meta["grill_mode"] = True
@@ -45365,12 +46084,18 @@ a {{ overflow-wrap: anywhere; }}
         office_card = None
         if state.session_id == self.current_session_id and office_workflow:
             office_card_target = office_conversion_target or (ppt_agent_output_format if ppt_agent_mode else "html")
-            office_card = self._create_office_draft_task_card(
-                state,
-                office_card_target.upper() if office_card_target != "html" else self._office_profile_label(office_output_profile),
-                running=True,
-                target_format=office_card_target,
-            )
+            if ppt_agent_internal_stage and ppt_agent_task_id:
+                office_card = self._office_draft_card_for_state(state, ppt_agent_task_id)
+                if office_card is not None:
+                    office_card.set_running()
+            if office_card is None:
+                office_card = self._create_office_draft_task_card(
+                    state,
+                    office_card_target.upper() if office_card_target != "html" else self._office_profile_label(office_output_profile),
+                    running=True,
+                    target_format=office_card_target,
+                    task_id=ppt_agent_task_id,
+                )
             log_chat_runtime_debug(
                 "submit_session_office_card_ready",
                 session_id=state.session_id,
@@ -45396,7 +46121,7 @@ a {{ overflow-wrap: anywhere; }}
                 process_widget_count=office_card.process_widget_count(),
             )
         try:
-            if not existing_message_payload:
+            if not existing_message_payload and not ppt_agent_internal_stage:
                 if office_card is not None:
                     self.add_chat_bubble(
                         "User",
@@ -45419,7 +46144,11 @@ a {{ overflow-wrap: anywhere; }}
                 "submit_session_user_bubble_added",
                 session_id=state.session_id,
                 background=state.session_id != self.current_session_id,
-                target_layout="office_card" if office_card is not None else "chat",
+                target_layout=(
+                    "hidden_internal_stage"
+                    if ppt_agent_internal_stage
+                    else "office_card" if office_card is not None else "chat"
+                ),
                 process_widget_count=office_card.process_widget_count() if office_card is not None else -1,
             )
         except Exception as exc:
@@ -45596,6 +46325,9 @@ a {{ overflow-wrap: anywhere; }}
             ppt_agent_renderer_prog_id=ppt_agent_renderer_prog_id,
             ppt_agent_visual_status=ppt_agent_visual_status,
             ppt_agent_run_id=ppt_agent_run_id,
+            ppt_agent_task_id=ppt_agent_task_id,
+            ppt_agent_internal_stage=ppt_agent_internal_stage,
+            ppt_agent_verification_level=ppt_agent_verification_level,
             task_model_id=task_model_id,
         )
         log_chat_runtime_debug(
@@ -45620,7 +46352,6 @@ a {{ overflow-wrap: anywhere; }}
                     turn_id=current_turn_id,
                     runtime="daemon",
                 )
-            self._append_office_process_note(state, "正在启动后台模型流。", tone="muted")
             log_chat_runtime_debug("submit_session_dispatch_daemon", session_id=state.session_id, turn_id=current_turn_id)
             try:
                 self.process_daemon_logic(
@@ -45652,7 +46383,6 @@ a {{ overflow-wrap: anywhere; }}
                     turn_id=current_turn_id,
                     runtime="local",
                 )
-            self._append_office_process_note(state, "正在启动本地模型流。", tone="muted")
             log_chat_runtime_debug("submit_session_dispatch_local", session_id=state.session_id, turn_id=current_turn_id)
             try:
                 self.process_agent_logic(
@@ -47506,6 +48236,8 @@ a {{ overflow-wrap: anywhere; }}
         self._ensure_live_agent_stage(state)
         self._record_token_speed_delta(state, text, "content")
         state.current_content_buffer += text
+        if str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():
+            return
         self._timeline_append_text_delta(state, "content_fragment", text)
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
@@ -47522,6 +48254,8 @@ a {{ overflow-wrap: anywhere; }}
         self._ensure_live_agent_stage(state)
         state.current_content_buffer = canonical_content
         state.last_flushed_content_buffer = ""
+        if str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():
+            return
         event = self._timeline_find_event(state, kind="content_fragment", open_only=True)
         if event is None:
             event = self._timeline_append_event(state, "content_fragment", status="running")
@@ -47653,6 +48387,8 @@ a {{ overflow-wrap: anywhere; }}
             if event.get("kind") == "tool" and str(event.get("tool_call_id") or "")
         }
         last_key = ordered_stages[-1] if ordered_stages else ("", "")
+        ppt_task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+        ppt_internal_stage = str(getattr(state, "ppt_agent_internal_stage", "") or "").strip().lower()
         for message in generated_messages:
             if not isinstance(message, dict):
                 continue
@@ -47673,6 +48409,11 @@ a {{ overflow-wrap: anywhere; }}
                         else "error"
                     ),
                 })
+                if ppt_task_id and ppt_internal_stage:
+                    meta.update({
+                        "ppt_task_id": ppt_task_id,
+                        "ppt_agent_internal_stage": ppt_internal_stage,
+                    })
                 message["meta"] = meta
                 for tool_call in message.get("tool_calls") or []:
                     if isinstance(tool_call, dict) and tool_call.get("id"):
@@ -47685,6 +48426,11 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_turn_group_id": key[0],
                     "ui_stage_id": key[1],
                 })
+                if ppt_task_id and ppt_internal_stage:
+                    meta.update({
+                        "ppt_task_id": ppt_task_id,
+                        "ppt_agent_internal_stage": ppt_internal_stage,
+                    })
                 message["meta"] = meta
         return generated_messages
 
@@ -48076,6 +48822,33 @@ a {{ overflow-wrap: anywhere; }}
                 retry_max,
             )
             failure_status = "interrupted" if interrupted else "failed"
+            ppt_task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+            if ppt_task_id and getattr(state, "ppt_agent_mode", False):
+                task_record = self._ppt_task_for_state(state, ppt_task_id)
+                next_action = str(task_record.get("next_action") or "").strip()
+                if not next_action:
+                    next_action = (
+                        "validate"
+                        if str(getattr(state, "ppt_agent_internal_stage", "") or "") == "visual_validation"
+                        else "generate"
+                    )
+                checkpoint_patch = {
+                    "status": failure_status,
+                    "stage": failure_status,
+                    "next_action": next_action,
+                    "error": error_text,
+                    "current_run_id": str(run_id or ""),
+                    "failed_run_id": str(run_id or ""),
+                }
+                result_file = str(getattr(state, "ppt_agent_result_file", "") or "")
+                if result_file and os.path.isfile(result_file):
+                    checkpoint_patch["pptx"] = self._ppt_task_file_snapshot(result_file)
+                self._update_ppt_task_checkpoint(
+                    state,
+                    ppt_task_id,
+                    persist=False,
+                    **checkpoint_patch,
+                )
             generated_messages_raw = result.get("generated_messages", [])
             persistable_generated_messages, persistence_filtered_count = (
                 self._prepare_generated_messages_for_turn(
@@ -48146,6 +48919,15 @@ a {{ overflow-wrap: anywhere; }}
                 reason_text=failure_summary,
                 outcome=failure_status,
             )
+            if interrupted and ppt_task_id:
+                task_card = self._office_draft_card_for_state(state, ppt_task_id)
+                if task_card is not None:
+                    task_card.set_interrupted("生成中断")
+                    task_card.set_retry_failure(
+                        "任务已中断，可从最后完成的阶段继续。",
+                        lambda sid=state.session_id, tid=ppt_task_id: self.resume_ppt_task(sid, tid),
+                        action_text="继续生成",
+                    )
             if not interrupted:
                 failure_event = {
                     "type": "run_error",
@@ -48228,7 +49010,7 @@ a {{ overflow-wrap: anywhere; }}
             open_content_event["status"] = "saving"
             open_content_event["reply_kind"] = "final"
             open_content_event["finished_at"] = time.time()
-        elif (content or "").strip():
+        elif (content or "").strip() and not str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():
             final_content_event = self._timeline_append_event(
                 state,
                 "final_content",
@@ -48516,8 +49298,13 @@ a {{ overflow-wrap: anywhere; }}
         if final_content_event is not None:
             final_content_event["status"] = "completed"
         bubble.set_source_message_id(assistant_source_message_id)
-        bubble.set_main_content(content, content_parts=content_parts, final=True)
-        bubble.set_message_actions_enabled(not missing_final_content)
+        internal_ppt_stage = str(getattr(state, "ppt_agent_internal_stage", "") or "").strip()
+        bubble.set_main_content(
+            "" if internal_ppt_stage else content,
+            content_parts=[] if internal_ppt_stage else content_parts,
+            final=True,
+        )
+        bubble.set_message_actions_enabled(not missing_final_content and not internal_ppt_stage)
         active_retry_context = getattr(state, "active_run_retry_context", {}) or {}
         if active_retry_context.get("retry_of_run_id"):
             log_chat_runtime_debug(

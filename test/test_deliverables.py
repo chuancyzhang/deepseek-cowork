@@ -1,4 +1,5 @@
 import inspect
+import hashlib
 import os
 import tempfile
 import time
@@ -39,6 +40,7 @@ from main import (
     sidebar_symbol_icon,
 )
 from ui.primitives import ProductEmptyState
+from core.ppt_agent import build_ppt_agent_prompt
 
 
 class TestDeliverableScanning(unittest.TestCase):
@@ -820,6 +822,11 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
             self.assertEqual(submit_call.kwargs["ppt_agent_output_format"], PPT_AGENT_OUTPUT_PPTX)
             self.assertEqual(submit_call.kwargs["task_model_id"], "vision-1")
+            self.assertTrue(submit_call.kwargs["ppt_agent_task_id"])
+            self.assertEqual(
+                submit_call.kwargs["user_message_meta"]["display_content"],
+                "做一份高级感商业汇报",
+            )
             window.add_system_toast.assert_not_called()
 
     def test_ppt_agent_request_accepts_source_file_without_manual_prompt(self):
@@ -945,8 +952,15 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_pptx_visual_validation_pass_marks_result_verified(self):
         window = MainWindow.__new__(MainWindow)
-        card = type("_Card", (), {"add_process_note": MagicMock()})()
+        card = type(
+            "_Card",
+            (),
+            {"add_process_note": MagicMock(), "set_completed": MagicMock(), "set_failed": MagicMock()},
+        )()
         window._office_draft_card_for_state = MagicMock(return_value=card)
+        window._update_ppt_task_checkpoint = MagicMock(return_value={})
+        window._ppt_task_file_snapshot = MagicMock(return_value={"path": "generated.pptx", "sha256": "hash"})
+        window._sync_office_task_card_paths = MagicMock()
         state = type(
             "_Session",
             (),
@@ -956,6 +970,8 @@ class TestDeliverableScanning(unittest.TestCase):
                 "ppt_agent_output_format": PPT_AGENT_OUTPUT_PPTX,
                 "ppt_agent_visual_status": "validating",
                 "ppt_agent_validation_round": 1,
+                "ppt_agent_task_id": "ppt-task-1",
+                "ppt_agent_result_file": "generated.pptx",
             },
         )()
 
@@ -967,7 +983,8 @@ class TestDeliverableScanning(unittest.TestCase):
         )
 
         self.assertEqual(state.ppt_agent_visual_status, "verified")
-        card.add_process_note.assert_called_once()
+        card.add_process_note.assert_not_called()
+        card.set_completed.assert_called_once_with(["generated.pptx"])
 
     def test_pptx_rendered_result_starts_same_model_validation_turn(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -980,6 +997,8 @@ class TestDeliverableScanning(unittest.TestCase):
             window = MainWindow.__new__(MainWindow)
             window._normalize_prompt_file_paths = lambda paths: list(paths or [])
             window._submit_session_request = MagicMock(return_value=True)
+            window._update_ppt_task_checkpoint = MagicMock(return_value={})
+            window._ppt_task_file_snapshot = MagicMock(side_effect=lambda path: {"path": path, "sha256": "hash"})
             card = type("_Card", (), {"add_process_note": MagicMock()})()
             window._office_draft_card_for_state = MagicMock(return_value=card)
             state = type(
@@ -997,6 +1016,7 @@ class TestDeliverableScanning(unittest.TestCase):
                     "ppt_agent_renderer_prog_id": "PowerPoint.Application",
                     "ppt_agent_run_id": "run-1",
                     "ppt_agent_task_model_id": "vision-model",
+                    "ppt_agent_task_id": "ppt-task-1",
                 },
             )()
             window.get_session = MagicMock(return_value=state)
@@ -1016,8 +1036,153 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(state.ppt_agent_visual_status, "validating")
             self.assertEqual(submit.kwargs["task_model_id"], "vision-model")
             self.assertEqual(submit.kwargs["ppt_agent_output_format"], PPT_AGENT_OUTPUT_PPTX)
+            self.assertEqual(submit.kwargs["ppt_agent_task_id"], "ppt-task-1")
+            self.assertEqual(submit.kwargs["ppt_agent_internal_stage"], "visual_validation")
             self.assertIn(screenshot_path, submit.args[2])
             self.assertIn(template_screenshot, submit.args[2])
+
+    def test_direct_pptx_prompt_defines_template_content_boundaries(self):
+        result = build_ppt_agent_prompt(
+            "生成汇报",
+            template_file=r"D:\template.pptx",
+            output_format=PPT_AGENT_OUTPUT_PPTX,
+            renderer="none",
+            visual_validation=False,
+        )
+
+        prompt = result["prompt"]
+        self.assertIn("模板仅提供品牌规范、背景、色彩、页眉页脚和版式语言", prompt)
+        self.assertIn("示例文案、示例图形、参考流程、金字塔、图标和占位符不需要作为默认保留内容", prompt)
+        self.assertIn("不得在原示例元素上直接叠加新内容", prompt)
+        self.assertIn("标题安全区", prompt)
+        self.assertIn("品牌框架的空白页重建", prompt)
+
+    def test_no_renderer_completes_after_python_pptx_structure_validation(self):
+        from pptx import Presentation
+
+        with tempfile.TemporaryDirectory() as workspace:
+            pptx_path = os.path.join(workspace, "generated.pptx")
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(pptx_path)
+
+            window = MainWindow.__new__(MainWindow)
+            card = type(
+                "_Card",
+                (),
+                {
+                    "add_process_note": MagicMock(),
+                    "set_completed": MagicMock(),
+                    "set_failed": MagicMock(),
+                    "set_retry_failure": MagicMock(),
+                },
+            )()
+            window._office_draft_card_for_state = MagicMock(return_value=card)
+            window._update_ppt_task_checkpoint = MagicMock(return_value={})
+            window._sync_office_task_card_paths = MagicMock()
+            state = type(
+                "_Session",
+                (),
+                {
+                    "session_id": "session-1",
+                    "ppt_agent_mode": True,
+                    "ppt_agent_output_format": PPT_AGENT_OUTPUT_PPTX,
+                    "ppt_agent_visual_status": "unverified",
+                    "ppt_agent_validation_round": 0,
+                    "ppt_agent_renderer": "none",
+                    "ppt_agent_template_file": "",
+                    "ppt_agent_result_file": "",
+                    "ppt_agent_task_id": "ppt-task-1",
+                    "office_task_result_paths": [],
+                },
+            )()
+
+            MainWindow._handle_ppt_agent_validation_completion(window, state, "", [pptx_path])
+
+            self.assertEqual(state.ppt_agent_verification_level, "structure_only")
+            self.assertEqual(state.ppt_agent_visual_status, "unverified")
+            card.set_completed.assert_called_once_with([pptx_path])
+            self.assertIn("python-pptx 结构校验", card.add_process_note.call_args.args[0])
+            self.assertGreaterEqual(window._update_ppt_task_checkpoint.call_count, 2)
+
+    def test_intermediate_pptx_is_not_opened_before_task_completion(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            pptx_path = os.path.join(workspace, "generated.pptx")
+            with open(pptx_path, "wb") as handle:
+                handle.write(b"pending")
+            state = type("_Session", (), {})()
+            state.session_id = "session-1"
+            state.ppt_agent_mode = True
+            state.ppt_agent_output_format = PPT_AGENT_OUTPUT_PPTX
+            state.ppt_agent_task_id = "ppt-task-1"
+            state.office_task_result_paths = []
+            state.persisted_conversation_meta = {
+                "ppt_tasks_v1": {
+                    "ppt-task-1": {"task_id": "ppt-task-1", "status": "running"}
+                }
+            }
+            window = MainWindow.__new__(MainWindow)
+            window.current_session_id = "session-1"
+            window.get_session = MagicMock(return_value=state)
+            window._office_draft_card_for_state = MagicMock(return_value=None)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window.register_deliverable_paths = MagicMock(return_value=[pptx_path])
+            window._sync_office_task_card_paths = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            MainWindow.handle_chat_deliverable_paths_changed(
+                window,
+                [pptx_path],
+                "session-1",
+                notify_user=True,
+            )
+
+            window._sync_office_task_card_paths.assert_called_once_with(state, [pptx_path])
+            window.select_deliverable.assert_not_called()
+
+    def test_resume_structure_checkpoint_uses_existing_pptx(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            pptx_path = os.path.join(workspace, "generated.pptx")
+            with open(pptx_path, "wb") as handle:
+                handle.write(b"pptx-checkpoint")
+            digest = hashlib.sha256(b"pptx-checkpoint").hexdigest()
+            task = {
+                "task_id": "ppt-task-1",
+                "status": "interrupted",
+                "stage": "structure_failed",
+                "next_action": "structure_validate",
+                "template_file": "",
+                "pptx": {"path": pptx_path, "sha256": digest},
+                "renderer": "none",
+            }
+            state = type("_Session", (), {})()
+            state.session_id = "session-1"
+            state.persisted_conversation_meta = {"ppt_tasks_v1": {"ppt-task-1": task}}
+            state.ppt_agent_task_id = "ppt-task-1"
+            state.ppt_agent_renderer = "none"
+            state.ppt_agent_result_file = pptx_path
+            card = type("_Card", (), {"set_running": MagicMock(), "add_process_note": MagicMock()})()
+            window = MainWindow.__new__(MainWindow)
+            window.get_session = MagicMock(return_value=state)
+            window._session_is_busy = MagicMock(return_value=False)
+            window._office_draft_card_for_state = MagicMock(return_value=card)
+            window._restore_ppt_task_state = MagicMock(
+                side_effect=lambda _state, _task: setattr(_state, "ppt_agent_renderer", "none")
+            )
+            window._update_ppt_task_checkpoint = MagicMock(return_value={})
+            window._validate_generated_pptx_structure = MagicMock(return_value={"page_count": 1})
+            window._complete_ppt_task = MagicMock(return_value=True)
+
+            resumed = MainWindow.resume_ppt_task(window, "session-1", "ppt-task-1")
+
+            self.assertTrue(resumed)
+            window._validate_generated_pptx_structure.assert_called_once_with(state, pptx_path)
+            window._complete_ppt_task.assert_called_once_with(
+                state,
+                pptx_path,
+                verification_level="structure_only",
+                visual_status="unverified",
+            )
 
     def test_ppt_agent_missing_builtin_skill_reports_unavailable(self):
         window = MainWindow.__new__(MainWindow)
@@ -1659,6 +1824,41 @@ class TestDeliverableScanning(unittest.TestCase):
             card.deleteLater()
             app.processEvents()
 
+    def test_restored_ppt_task_card_offers_continue_from_checkpoint(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        card = OfficeDraftTaskCard("PPT", target_format="pptx")
+        state = type("_Session", (), {})()
+        state.session_id = "session-1"
+        state.persisted_conversation_meta = {
+            "ppt_tasks_v1": {
+                "ppt-task-1": {
+                    "task_id": "ppt-task-1",
+                    "status": "running",
+                    "stage": "rendering",
+                    "next_action": "render",
+                }
+            }
+        }
+        window.resume_ppt_task = MagicMock(return_value=True)
+        try:
+            applied = MainWindow._apply_ppt_task_card_state(
+                window,
+                state,
+                card,
+                "ppt-task-1",
+                restored=True,
+            )
+
+            self.assertTrue(applied)
+            self.assertEqual(card.title_label.text(), "生成中断")
+            self.assertEqual(card.retry_failure_notice.action_button.text(), "继续生成")
+            card.retry_failure_notice.action_button.click()
+            window.resume_ppt_task.assert_called_once_with("session-1", "ppt-task-1")
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
     def test_retry_failure_routes_only_office_workflow_to_task_card(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
@@ -1740,6 +1940,7 @@ class TestDeliverableScanning(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
         window.current_session_id = "session-1"
+        window.chat_storage = MagicMock()
         state = type("_Session", (), {})()
         state.session_id = "session-1"
         window.sessions = {"session-1": state}
@@ -1806,6 +2007,7 @@ class TestDeliverableScanning(unittest.TestCase):
                     "display_name": "deepseek-v4-flash",
                     "channel_display_name": "ds官方",
                 },
+                "is_skill_enabled": lambda _self, _name, default_enabled=False: default_enabled,
             },
         )()
 
@@ -1914,6 +2116,8 @@ class TestDeliverableScanning(unittest.TestCase):
                     office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
                     ppt_agent_mode=True,
                     ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_GUIZANG,
+                    ppt_agent_output_format=PPT_AGENT_OUTPUT_PPTX,
+                    ppt_agent_run_id="ppt-run-1",
                 )
 
                 self.assertTrue(submitted)
@@ -1929,6 +2133,9 @@ class TestDeliverableScanning(unittest.TestCase):
                     state.active_run_retry_context["submit_options"]["ppt_agent_selected_strategy"],
                     PPT_AGENT_STRATEGY_GUIZANG,
                 )
+                task_id = state.active_run_retry_context["submit_options"]["ppt_agent_task_id"]
+                self.assertTrue(task_id)
+                self.assertEqual(state.messages[-1]["meta"]["ppt_task_id"], task_id)
                 self.assertEqual(card.process_widget_count(), 1)
                 self.assertTrue(card.process_placeholder.isHidden())
                 window.process_agent_logic.assert_called_once()
@@ -1939,6 +2146,33 @@ class TestDeliverableScanning(unittest.TestCase):
                 )
                 self.assertNotIn("已提交 PPT Agent 请求", process_text)
                 self.assertIn("渲染失败", process_text)
+
+                window._office_draft_card_for_state = MagicMock(return_value=card)
+                window._create_office_draft_task_card.reset_mock()
+                window.add_chat_bubble.reset_mock()
+                submitted_validation = MainWindow._submit_session_request(
+                    window,
+                    state,
+                    "内部视觉校验提示",
+                    [],
+                    check_duplicates=False,
+                    workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+                    ppt_agent_mode=True,
+                    ppt_agent_output_format=PPT_AGENT_OUTPUT_PPTX,
+                    ppt_agent_run_id="ppt-run-1",
+                    ppt_agent_task_id=task_id,
+                    ppt_agent_internal_stage="visual_validation",
+                    user_message_meta={
+                        "ppt_task_id": task_id,
+                        "ppt_agent_internal_stage": "visual_validation",
+                    },
+                )
+
+                self.assertTrue(submitted_validation)
+                window._create_office_draft_task_card.assert_not_called()
+                window.add_chat_bubble.assert_not_called()
+                self.assertEqual(window.process_agent_logic.call_count, 2)
             finally:
                 card.deleteLater()
                 app.processEvents()

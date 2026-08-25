@@ -262,6 +262,43 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(spans, [{"start": 0, "end": 4}, {"start": 4, "end": 5}])
 
+    def test_ppt_internal_validation_stays_in_one_office_card_and_hides_prompt(self):
+        internal_meta = {
+            "workflow_mode": "office_html_first",
+            "ppt_agent_mode": True,
+            "ppt_task_id": "ppt-task-1",
+            "ppt_agent_internal_stage": "visual_validation",
+        }
+        messages = [
+            {
+                "id": "u1",
+                "role": "user",
+                "content": "生成 PPTX",
+                "meta": {
+                    "workflow_mode": "office_html_first",
+                    "ppt_agent_mode": True,
+                    "ppt_agent_output_format": "pptx",
+                    "ppt_task_id": "ppt-task-1",
+                },
+            },
+            {"id": "a1", "role": "assistant", "content": "初稿完成"},
+            {"id": "u2", "role": "user", "content": "内部校验提示", "meta": internal_meta},
+            {
+                "id": "a2",
+                "role": "assistant",
+                "content": "[PPT_VALIDATION_PASS]",
+                "reasoning": "逐页检查",
+                "meta": internal_meta,
+            },
+        ]
+
+        self.assertEqual(build_conversation_render_spans(messages), [{"start": 0, "end": 4}])
+        items = build_conversation_render_items(messages)
+        self.assertEqual([item["type"] for item in items], ["user", "assistant"])
+        self.assertNotIn("内部校验提示", str(items))
+        self.assertNotIn("PPT_VALIDATION_PASS", items[1]["content"])
+        self.assertIn("逐页检查", items[1]["reasoning"])
+
     def test_build_conversation_render_spans_keeps_office_conversion_turn_collapsible(self):
         spans = build_conversation_render_spans(
             [

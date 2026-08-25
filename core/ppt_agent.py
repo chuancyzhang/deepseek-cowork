@@ -1,4 +1,9 @@
+import os
+import posixpath
+import zipfile
 from dataclasses import dataclass
+from urllib.parse import unquote, urlparse
+from xml.etree import ElementTree
 
 
 PPT_AGENT_STRATEGY_AUTO = "auto"
@@ -171,6 +176,91 @@ def ppt_agent_builtin_skill_names():
     return [capability.skill_name for capability in PPT_HTML_CAPABILITIES.values()]
 
 
+def validate_pptx_structure(path):
+    """Validate PPTX structure without claiming to perform visual QA."""
+    pptx_path = os.path.abspath(str(path or "").strip())
+    if not pptx_path or not os.path.isfile(pptx_path):
+        raise ValueError("PPTX 文件不存在。")
+    if os.path.splitext(pptx_path)[1].lower() != ".pptx":
+        raise ValueError("结构校验仅支持 PPTX 文件。")
+
+    try:
+        import pptx
+    except Exception as exc:
+        raise RuntimeError(f"python-pptx 不可用：{exc}") from exc
+
+    required_members = {"[Content_Types].xml", "ppt/presentation.xml"}
+    with zipfile.ZipFile(pptx_path, "r") as archive:
+        members = set(archive.namelist())
+        missing_members = sorted(required_members - members)
+        if missing_members:
+            raise ValueError("PPTX 缺少必要结构：" + "、".join(missing_members))
+        corrupt_member = archive.testzip()
+        if corrupt_member:
+            raise ValueError(f"PPTX ZIP 成员损坏：{corrupt_member}")
+        for rels_name in sorted(name for name in members if name.endswith(".rels")):
+            try:
+                rels_root = ElementTree.fromstring(archive.read(rels_name))
+            except Exception as exc:
+                raise ValueError(f"PPTX 关系文件无法解析：{rels_name}: {exc}") from exc
+            rels_dir = posixpath.dirname(rels_name)
+            source_dir = posixpath.dirname(rels_dir) if posixpath.basename(rels_dir) == "_rels" else rels_dir
+            for relation in list(rels_root):
+                if str(relation.attrib.get("TargetMode") or "").lower() == "external":
+                    continue
+                target = unquote(str(relation.attrib.get("Target") or "").split("#", 1)[0])
+                if not target:
+                    continue
+                parsed = urlparse(target)
+                if parsed.scheme:
+                    continue
+                normalized = (
+                    target.lstrip("/")
+                    if target.startswith("/")
+                    else posixpath.normpath(posixpath.join(source_dir, target))
+                )
+                if normalized not in members:
+                    raise ValueError(f"PPTX 关系目标不存在：{rels_name} -> {target}")
+
+    try:
+        presentation = pptx.Presentation(pptx_path)
+    except Exception as exc:
+        raise ValueError(f"python-pptx 无法重新打开成品：{exc}") from exc
+    slide_width = int(presentation.slide_width or 0)
+    slide_height = int(presentation.slide_height or 0)
+    if slide_width <= 0 or slide_height <= 0:
+        raise ValueError("PPTX 页面尺寸无效。")
+    if len(presentation.slides) <= 0:
+        raise ValueError("PPTX 没有任何幻灯片。")
+
+    shape_count = 0
+    text_shape_count = 0
+    for slide_index, slide in enumerate(presentation.slides, start=1):
+        for shape in slide.shapes:
+            shape_count += 1
+            left = int(getattr(shape, "left", 0) or 0)
+            top = int(getattr(shape, "top", 0) or 0)
+            width = int(getattr(shape, "width", 0) or 0)
+            height = int(getattr(shape, "height", 0) or 0)
+            if width < 0 or height < 0:
+                raise ValueError(f"第 {slide_index} 页存在负尺寸形状。")
+            if bool(getattr(shape, "has_text_frame", False)):
+                text_shape_count += 1
+                _ = shape.text_frame.text
+                if left < 0 or top < 0 or left + width > slide_width or top + height > slide_height:
+                    raise ValueError(f"第 {slide_index} 页存在越出页面边界的文本框。")
+
+    return {
+        "path": pptx_path,
+        "page_count": len(presentation.slides),
+        "slide_width": slide_width,
+        "slide_height": slide_height,
+        "shape_count": shape_count,
+        "text_shape_count": text_shape_count,
+        "verification_level": "structure_only",
+    }
+
+
 def ppt_agent_capability_prompt_lines():
     lines = []
     for capability in PPT_HTML_CAPABILITIES.values():
@@ -230,13 +320,14 @@ def build_ppt_agent_prompt(
             "请以「PPT Agent」身份，根据用户材料和 PPTX 模板原文件直接生成新的 PPTX。"
             "本任务不要先生成 HTML，也不要使用默认 PPT Agent、Guizang PPT、Frontend Slides 或 Huashu Design 的 HTML-first 工作流。\n\n"
             "建议工作方式:\n"
-            "1. 先查看本轮附加的全部模板截图，理解模板的视觉语言、页面类型、品牌元素和内容安全区。\n"
+            "1. 先查看本轮附加的全部模板截图，理解模板的视觉语言、页面类型、品牌元素和内容安全区。模板仅提供品牌规范、背景、色彩、页眉页脚和版式语言；模板中的示例文案、示例图形、参考流程、金字塔、图标和占位符不需要作为默认保留内容。\n"
             "2. 使用 python-pptx 程序化读取模板的页面尺寸、每个形状的坐标和大小、字体字号颜色、占位符、图片资源关系、母版和版式。\n"
             "3. python-pptx 无法覆盖的结构，可以直接检查 PPTX ZIP 包内的 OOXML、关系文件和媒体资源。\n"
-            "4. 优先选择并克隆适合的模板页、形状 XML 和资源关系，再结合用户材料替换或叠加内容；具体实现由你根据模板决定。\n"
-            "5. 自主判断固定品牌文案、页眉页脚、示例内容和可替换区域，并决定页面数量、模板页映射、图片及图表方式。\n"
+            "4. 每页先区分固定保留元素、可复用版式容器和必须删除的示例内容元素。除固定品牌元素和明确复用的容器外，不得在原示例元素上直接叠加新内容。\n"
+            "5. 先读取 Logo、公司名称等品牌元素坐标并设置标题安全区，所有标题必须避开品牌区域。模板页不适配内容时，使用保留品牌框架的空白页重建。\n"
             "6. 输出独立的新 PPTX，只保留生成页，不要覆盖或修改模板原文件。\n"
-            "7. 完成后重新打开生成文件，检查 ZIP/OOXML、幻灯片数量、页面尺寸和关系目标；随后如本地有可用渲染器，优先用 run_python_code 或 bash 命令通过 COM 自动化驱动本机 PowerPoint 或 WPS 打开成品并逐页导出截图自检（ProgID 见下方渲染器信息），发现问题就修复同一个 PPTX 文件并重导截图复核，再明确给出成品完整路径。\n\n"
+            "7. 完成后使用 python-pptx 重新打开生成文件，并检查 ZIP/OOXML、幻灯片数量、页面尺寸、形状坐标、文本边界、关系目标和媒体资源。\n"
+            "8. 如本地有可用渲染器，必须通过 COM 自动化驱动本机 PowerPoint 或 WPS 实际打开成品并逐页导出全部截图。文件结构正确、能打开、页数正确均不能代替视觉验收。发现模板文字残留、旧图形与新内容重叠、标题侵入品牌区、文本截断或元素遮挡时，必须修复同一个 PPTX 后重新渲染并检查。\n\n"
             "模板与渲染信息:\n"
             f"- PPTX 模板原文件: {template_file}\n"
             f"{renderer_line}"

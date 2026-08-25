@@ -62,6 +62,15 @@ def is_same_turn_guidance_message(message):
     return bool(meta.get("same_turn_guidance"))
 
 
+def is_ppt_agent_internal_stage_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(str(meta.get("ppt_agent_internal_stage") or "").strip()) and bool(
+        str(meta.get("ppt_task_id") or "").strip()
+    )
+
+
 OFFICE_WORKFLOW_MODES = {"office_html_first", "office_file_conversion"}
 
 
@@ -137,7 +146,10 @@ def build_conversation_render_items(messages):
         if _is_hidden_context_message(raw_message):
             continue
         role = raw_message.get("role") or ""
+        internal_ppt_stage = is_ppt_agent_internal_stage_message(raw_message)
         if role == "user":
+            if internal_ppt_stage:
+                continue
             if is_same_turn_guidance_message(raw_message):
                 flush_group()
                 items.append({"type": "guidance", "message": raw_message})
@@ -152,7 +164,7 @@ def build_conversation_render_items(messages):
             reasoning = raw_message.get("reasoning_content") or raw_message.get("reasoning")
             if reasoning:
                 assistant_group["reasoning_segments"].append(reasoning)
-            content = raw_message.get("content") or ""
+            content = "" if internal_ppt_stage else raw_message.get("content") or ""
             if content:
                 assistant_group["content_segments"].append(content)
             content_parts = raw_message.get("content_parts")
@@ -220,6 +232,8 @@ def build_conversation_render_spans(messages):
             continue
         role = raw_message.get("role") or ""
         if role == "user":
+            if is_ppt_agent_internal_stage_message(raw_message):
+                continue
             if is_same_turn_guidance_message(raw_message):
                 if office_group_start is not None:
                     continue

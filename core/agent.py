@@ -57,8 +57,11 @@ from core.llm.deepseek import (
     is_deepseek_request,
 )
 from core.llm.responses_replay import (
+    PROVIDER_REPLAY_NAMESPACE_META_KEY,
     RESPONSES_REPLAY_INPUT_KEY,
     RESPONSES_REPLAY_META_KEY,
+    build_provider_replay_namespace,
+    provider_replay_namespaces_compatible,
 )
 from core.conversation_integrity import ensure_tool_call_sequence
 from core.filesystem_ops import (
@@ -243,9 +246,6 @@ def _reasoning_text_from_message(msg):
     reasoning_content = msg.get("reasoning_content")
     if isinstance(reasoning_content, str) and reasoning_content:
         return reasoning_content
-    reasoning = msg.get("reasoning")
-    if isinstance(reasoning, str) and reasoning:
-        return reasoning
     return ""
 
 
@@ -405,82 +405,173 @@ def repair_tool_call_sequence(messages):
 
     return cleaned
 
-def drop_invalid_tool_call_rounds_without_reasoning(messages):
-    cleaned = []
-    dropped_rounds = []
-
-    def process_turn(turn, start_index):
-        assistant_indices = []
-        tool_call_ids = set()
-        has_tool_calls = False
-        missing_reasoning = False
-
-        for offset, item in enumerate(turn):
-            if not isinstance(item, dict):
-                continue
-            if item.get("role") == "assistant":
-                if item.get("tool_calls"):
-                    has_tool_calls = True
-                    for tool_call in item.get("tool_calls") or []:
-                        if isinstance(tool_call, dict) and tool_call.get("id"):
-                            tool_call_ids.add(tool_call["id"])
-                assistant_indices.append(offset)
-
-        if has_tool_calls:
-            for offset in assistant_indices:
-                if not str(turn[offset].get("reasoning_content") or "").strip():
-                    missing_reasoning = True
-                    break
-
-        if not has_tool_calls or not missing_reasoning:
-            return [item.copy() for item in turn if isinstance(item, dict)], None
-
-        pruned = []
-        kept_assistant_count = 0
-        for item in turn:
-            if not isinstance(item, dict):
-                continue
-            role = item.get("role")
-            if role == "tool" and item.get("tool_call_id") in tool_call_ids:
-                continue
-            if role == "assistant" and item.get("tool_calls"):
-                continue
-            msg_copy = item.copy()
-            if role == "assistant":
-                msg_copy.pop("reasoning_content", None)
-                msg_copy.pop("reasoning", None)
-                kept_assistant_count += 1
-            pruned.append(msg_copy)
-
-        return pruned, {
-            "turn_start_index": start_index,
-            "tool_call_ids": sorted(tool_call_ids),
-            "kept_assistant_count": kept_assistant_count,
-        }
-
-    turn = []
-    turn_start_index = 0
-    for index, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+def find_tool_call_messages_without_reasoning(messages):
+    """Return malformed Chat replay locations without changing the ledger copy."""
+    missing = []
+    for index, message in enumerate(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        if msg.get("role") == "user" and turn:
-            processed, dropped = process_turn(turn, turn_start_index)
-            cleaned.extend(processed)
-            if dropped:
-                dropped_rounds.append(dropped)
-            turn = []
-            turn_start_index = index
-        elif not turn:
-            turn_start_index = index
-        turn.append(msg)
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls or _reasoning_text_from_message(message).strip():
+            continue
+        missing.append({
+            "message_index": index,
+            "message_id": str(message.get("id") or ""),
+            "tool_call_ids": [
+                str(tool_call.get("id") or "")
+                for tool_call in tool_calls
+                if isinstance(tool_call, dict)
+            ],
+        })
+    return missing
 
-    if turn:
-        processed, dropped = process_turn(turn, turn_start_index)
-        cleaned.extend(processed)
-        if dropped:
-            dropped_rounds.append(dropped)
 
-    return cleaned, dropped_rounds
+def _message_replay_is_compatible(meta, target_replay_namespace):
+    if not isinstance(meta, dict):
+        return False
+    source_namespace = meta.get(PROVIDER_REPLAY_NAMESPACE_META_KEY)
+    if source_namespace is not None:
+        return provider_replay_namespaces_compatible(
+            source_namespace,
+            target_replay_namespace,
+        )
+    if not isinstance(target_replay_namespace, dict):
+        return True
+    if str(target_replay_namespace.get("protocol") or "").lower() != "responses":
+        return False
+    target_family = str(target_replay_namespace.get("provider_family") or "").lower()
+    if target_family == "deepseek":
+        return meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY) is not None
+    return meta.get(RESPONSES_REPLAY_META_KEY) is not None
+
+
+def _tool_result_projection_text(tool_call, tool_message):
+    function = tool_call.get("function") if isinstance(tool_call, dict) else {}
+    function = function if isinstance(function, dict) else {}
+    name = str(function.get("name") or "tool")
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+    result = tool_message.get("content")
+    if not isinstance(result, str) or not result:
+        result_obj = tool_message.get("result_obj")
+        result = json.dumps(result_obj, ensure_ascii=False, sort_keys=True, default=str)
+    return f"- {name}({arguments})\n  结果：{result}"
+
+
+def _remove_native_replay_metadata(message):
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    if not meta:
+        return
+    meta.pop(RESPONSES_REPLAY_META_KEY, None)
+    meta.pop(DEEPSEEK_RESPONSES_REPLAY_META_KEY, None)
+    meta.pop(PROVIDER_REPLAY_NAMESPACE_META_KEY, None)
+    if meta:
+        message["meta"] = meta
+    else:
+        message.pop("meta", None)
+
+
+def project_incompatible_completed_tool_rounds(
+    messages,
+    *,
+    target_replay_namespace,
+    require_reasoning_replay=False,
+):
+    """Project completed tool facts for a target protocol without mutating history."""
+    projected = []
+    projections = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if not isinstance(message, dict):
+            index += 1
+            continue
+        copied = json_copy(message, {})
+        if copied.get("role") != "assistant":
+            projected.append(copied)
+            index += 1
+            continue
+
+        meta = copied.get("meta") if isinstance(copied.get("meta"), dict) else {}
+        replay_compatible = _message_replay_is_compatible(
+            meta,
+            target_replay_namespace,
+        )
+        if replay_compatible:
+            projected.append(copied)
+            index += 1
+            continue
+        has_provider_replay_provenance = bool(
+            meta.get(PROVIDER_REPLAY_NAMESPACE_META_KEY) is not None
+            or meta.get(RESPONSES_REPLAY_META_KEY) is not None
+            or meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY) is not None
+        )
+        target_protocol = str(
+            (target_replay_namespace or {}).get("protocol") or ""
+        ).lower()
+        legacy_non_responses_history = bool(
+            target_protocol == "responses" and not has_provider_replay_provenance
+        )
+        _remove_native_replay_metadata(copied)
+        if has_provider_replay_provenance or legacy_non_responses_history:
+            copied.pop("reasoning_content", None)
+            copied.pop("reasoning", None)
+        if not copied.get("tool_calls"):
+            projected.append(copied)
+            index += 1
+            continue
+        if _reasoning_text_from_message(copied).strip():
+            projected.append(copied)
+            index += 1
+            continue
+        if not require_reasoning_replay:
+            projected.append(copied)
+            index += 1
+            continue
+
+        calls = [item for item in copied.get("tool_calls") or [] if isinstance(item, dict)]
+        call_ids = [str(item.get("id") or "").strip() for item in calls]
+        tool_messages = []
+        cursor = index + 1
+        while cursor < len(messages) and len(tool_messages) < len(call_ids):
+            candidate = messages[cursor]
+            if not isinstance(candidate, dict) or candidate.get("role") != "tool":
+                break
+            tool_messages.append(candidate)
+            cursor += 1
+        results_by_id = {
+            str(item.get("tool_call_id") or "").strip(): item
+            for item in tool_messages
+        }
+        if any(call_id not in results_by_id for call_id in call_ids):
+            raise ValueError(
+                "跨协议历史包含未闭环的 Tool 调用，不能安全投影；"
+                "请使用原模型继续。原历史不会被修改。"
+            )
+
+        projection_lines = [
+            _tool_result_projection_text(call, results_by_id[call_id])
+            for call, call_id in zip(calls, call_ids)
+        ]
+        existing_content = str(copied.get("content") or "").strip()
+        projection_content = "[已完成的历史工具记录]\n" + "\n".join(projection_lines)
+        copied["content"] = (
+            existing_content + "\n\n" + projection_content
+            if existing_content
+            else projection_content
+        )
+        copied.pop("tool_calls", None)
+        copied.pop("reasoning_content", None)
+        copied.pop("reasoning", None)
+        projected.append(copied)
+        projections.append({
+            "message_index": index,
+            "message_id": str(message.get("id") or ""),
+            "tool_call_ids": call_ids,
+        })
+        index = cursor
+    return projected, projections
 
 
 def project_responses_replay_to_chat_messages(messages):
@@ -622,6 +713,7 @@ def sanitize_llm_messages(
     preserve_legacy_deepseek_replay=False,
     strict_reasoning_replay=False,
     project_responses_replay_to_chat=False,
+    target_replay_namespace=None,
 ):
     ledger_messages = [
         json_copy(message, {})
@@ -630,20 +722,52 @@ def sanitize_llm_messages(
     ]
     if project_responses_replay_to_chat:
         ledger_messages = project_responses_replay_to_chat_messages(ledger_messages)
-    dropped_rounds = []
-    if require_reasoning_replay:
-        ledger_messages, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(
-            ledger_messages
-        )
     if strict_reasoning_replay:
         _validate_deepseek_responses_tool_results(ledger_messages)
     ensure_tool_call_sequence(
         ledger_messages,
-        context=(
-            "LLM provider request after reasoning projection"
-            if dropped_rounds
-            else "LLM provider request"
-        ),
+        context="LLM provider request before protocol projection",
+    )
+    protocol_projections = []
+    if isinstance(target_replay_namespace, dict):
+        ledger_messages, protocol_projections = project_incompatible_completed_tool_rounds(
+            ledger_messages,
+            target_replay_namespace=target_replay_namespace,
+            require_reasoning_replay=require_reasoning_replay,
+        )
+    if require_reasoning_replay:
+        missing_reasoning = find_tool_call_messages_without_reasoning(ledger_messages)
+        if strict_reasoning_replay:
+            missing_reasoning = [
+                item
+                for item in missing_reasoning
+                if not (
+                    isinstance(ledger_messages[item["message_index"]].get("meta"), dict)
+                    and (
+                        ledger_messages[item["message_index"]]["meta"].get(
+                            RESPONSES_REPLAY_META_KEY
+                        ) is not None
+                        or ledger_messages[item["message_index"]]["meta"].get(
+                            DEEPSEEK_RESPONSES_REPLAY_META_KEY
+                        ) is not None
+                    )
+                )
+            ]
+        if missing_reasoning:
+            call_ids = sorted({
+                call_id
+                for item in missing_reasoning
+                for call_id in item.get("tool_call_ids") or []
+                if call_id
+            })
+            raise ValueError(
+                "工具调用历史缺少目标模型所需的 reasoning，不能安全原样续接"
+                + (f"（call_id: {', '.join(call_ids)}）" if call_ids else "")
+                + "。请使用原模型继续；原历史不会被静默裁剪。"
+            )
+    ensure_tool_call_sequence(
+        ledger_messages,
+        context="LLM provider request after protocol projection",
     )
     cleaned = _clean_reasoning_content_by_turn(
         ledger_messages,
@@ -653,7 +777,7 @@ def sanitize_llm_messages(
         preserve_legacy_deepseek_replay=preserve_legacy_deepseek_replay,
     )
     if return_metadata:
-        return cleaned, {"dropped_incomplete_reasoning_rounds": dropped_rounds}
+        return cleaned, {"protocol_tool_round_projections": protocol_projections}
     return cleaned
 
 class LLMWorker(QThread):
@@ -2784,6 +2908,21 @@ class LLMWorker(QThread):
                     preserve_deepseek_responses = bool(
                         getattr(provider, "requires_deepseek_responses_replay", False)
                     )
+                    provider_model = getattr(provider, "model_name", "")
+                    provider_base_url = getattr(provider, "base_url", "")
+                    provider_protocol = str(
+                        getattr(provider, "api_protocol", "") or provider_name
+                    ).strip().lower()
+                    provider_replay_namespace = build_provider_replay_namespace(
+                        provider_family=(
+                            "deepseek"
+                            if is_deepseek_request(provider_model, provider_base_url)
+                            else provider_name
+                        ),
+                        base_url=provider_base_url,
+                        model=provider_model,
+                        protocol=provider_protocol,
+                    )
                     sanitized_messages, sanitization_meta = sanitize_llm_messages(
                         request_messages,
                         require_reasoning_replay=require_reasoning_replay,
@@ -2793,28 +2932,28 @@ class LLMWorker(QThread):
                         preserve_legacy_deepseek_replay=preserve_deepseek_responses,
                         strict_reasoning_replay=preserve_deepseek_responses,
                         project_responses_replay_to_chat=(
-                            str(getattr(provider, "api_protocol", "") or "").strip().lower()
-                            == "chat_completions"
+                            provider_protocol == "chat_completions"
                         ),
+                        target_replay_namespace=provider_replay_namespace,
                     )
-                    dropped_reasoning_rounds = sanitization_meta.get(
-                        "dropped_incomplete_reasoning_rounds"
+                    protocol_projections = sanitization_meta.get(
+                        "protocol_tool_round_projections"
                     ) or []
-                    if dropped_reasoning_rounds:
+                    if protocol_projections:
                         self._record_provider_attempt(
                             attempt_id,
-                            {"reasoning_projection": dropped_reasoning_rounds},
+                            {"protocol_projection": protocol_projections},
                         )
                         self.observability_signal.emit({
-                            "type": "reasoning_history_projected",
-                            "dropped_round_count": len(dropped_reasoning_rounds),
+                            "type": "provider_history_protocol_projected",
+                            "projected_round_count": len(protocol_projections),
                             "timestamp": time.time(),
                         })
                     if previous_provider_messages is None:
                         previous_provider_messages = self._previous_request_prefix_from_ledger(
                             request_messages,
                             sanitized_messages,
-                            allow_projection=bool(dropped_reasoning_rounds),
+                            allow_projection=bool(protocol_projections),
                         )
                     previous_provider_messages = self._verify_request_prefix(
                         previous_provider_messages,
@@ -3312,7 +3451,10 @@ class LLMWorker(QThread):
                     assistant_msg = {
                         "id": uuid.uuid4().hex,
                         "role": "assistant",
-                        "content": content
+                        "content": content,
+                        "meta": {
+                            PROVIDER_REPLAY_NAMESPACE_META_KEY: provider_replay_namespace,
+                        },
                     }
                     # CRITICAL: For tool calls WITHIN the same turn, DeepSeek requires reasoning_content
                     # We must use current_turn_reasoning, NOT full_reasoning, to avoid duplication in history
@@ -3326,7 +3468,7 @@ class LLMWorker(QThread):
                             if preserve_deepseek_responses
                             else RESPONSES_REPLAY_META_KEY
                         )
-                        assistant_msg["meta"] = {replay_meta_key: response_items_buffer}
+                        assistant_msg["meta"][replay_meta_key] = response_items_buffer
                         
                     if tool_calls:
                          # For history, we need the dict representation

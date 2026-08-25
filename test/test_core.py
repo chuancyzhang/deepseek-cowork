@@ -3734,6 +3734,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 }
 
         from core.llm.responses_replay import (
+            PROVIDER_REPLAY_NAMESPACE_META_KEY,
             RESPONSES_REPLAY_INPUT_KEY,
             RESPONSES_REPLAY_META_KEY,
         )
@@ -3772,6 +3773,16 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             self.assertEqual(
                 generated_assistant["meta"][RESPONSES_REPLAY_META_KEY][0]["call_id"],
                 "call-1",
+            )
+            self.assertEqual(
+                generated_assistant["meta"][PROVIDER_REPLAY_NAMESPACE_META_KEY],
+                {
+                    "version": 1,
+                    "provider_family": "gpt responses",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-5.6",
+                    "protocol": "responses",
+                },
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

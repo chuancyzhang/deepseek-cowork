@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.agent import (
     clear_reasoning_content,
-    drop_invalid_tool_call_rounds_without_reasoning,
+    find_tool_call_messages_without_reasoning,
     repair_tool_call_sequence,
     sanitize_llm_messages,
 )
@@ -31,8 +31,10 @@ from core.llm.providers import (
     is_transient_model_api_error,
 )
 from core.llm.responses_replay import (
+    PROVIDER_REPLAY_NAMESPACE_META_KEY,
     RESPONSES_REPLAY_INPUT_KEY,
     RESPONSES_REPLAY_META_KEY,
+    build_provider_replay_namespace,
 )
 
 
@@ -1794,7 +1796,20 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
         self.assertEqual(sanitized[0][RESPONSES_REPLAY_INPUT_KEY], replay_items)
         self.assertNotIn(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY, sanitized[0])
 
-    def test_sanitize_deepseek_responses_projects_missing_reasoning_round(self):
+    def test_sanitize_deepseek_responses_accepts_function_call_only_replay(self):
+        namespace = build_provider_replay_namespace(
+            provider_family="deepseek",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+            protocol="responses",
+        )
+        replay_items = [{
+            "id": "fc_1",
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "demo",
+            "arguments": "{}",
+        }]
         sanitized, metadata = sanitize_llm_messages(
             [
                 {"role": "user", "content": "use tool"},
@@ -1807,6 +1822,10 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
                         "type": "function",
                         "function": {"name": "demo", "arguments": "{}"},
                     }],
+                    "meta": {
+                        DEEPSEEK_RESPONSES_REPLAY_META_KEY: replay_items,
+                        PROVIDER_REPLAY_NAMESPACE_META_KEY: namespace,
+                    },
                 },
                 {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
             ],
@@ -1814,11 +1833,19 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
             return_metadata=True,
             preserve_all_reasoning=True,
             preserve_responses_replay=True,
+            preserve_legacy_deepseek_replay=True,
             strict_reasoning_replay=True,
+            target_replay_namespace=namespace,
         )
 
-        self.assertEqual(sanitized, [{"role": "user", "content": "use tool"}])
-        self.assertEqual(metadata["dropped_incomplete_reasoning_rounds"][0]["tool_call_ids"], ["call-1"])
+        self.assertEqual(len(sanitized), 3)
+        self.assertEqual(
+            sanitized[1][DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY],
+            replay_items,
+        )
+        self.assertNotIn("meta", sanitized[1])
+        self.assertNotIn(PROVIDER_REPLAY_NAMESPACE_META_KEY, sanitized[1])
+        self.assertEqual(metadata["protocol_tool_round_projections"], [])
 
     def test_sanitize_deepseek_responses_rejects_missing_function_result(self):
         replay_items = [
@@ -1860,8 +1887,8 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
                 strict_reasoning_replay=True,
             )
 
-    def test_drop_invalid_tool_call_rounds_without_reasoning(self):
-        cleaned, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning([
+    def test_find_tool_call_rounds_without_reasoning_does_not_mutate(self):
+        messages = [
             {"role": "user", "content": "hi"},
             {
                 "role": "assistant",
@@ -1876,46 +1903,47 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
             },
             {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
             {"role": "assistant", "content": "done"},
-        ])
+        ]
+        missing = find_tool_call_messages_without_reasoning(messages)
 
-        self.assertEqual(
-            cleaned,
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "done"},
-            ],
+        self.assertEqual(len(messages), 4)
+        self.assertEqual(missing[0]["tool_call_ids"], ["call-1"])
+
+    def test_sanitize_llm_messages_projects_ui_only_reasoning_in_request_copy(self):
+        namespace = build_provider_replay_namespace(
+            provider_family="deepseek",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+            protocol="chat_completions",
         )
-        self.assertEqual(len(dropped_rounds), 1)
-        self.assertEqual(dropped_rounds[0]["tool_call_ids"], ["call-1"])
-
-    def test_sanitize_llm_messages_projects_ui_only_reasoning_rounds(self):
+        source = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "ui-only",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "demo", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "assistant", "content": "final"},
+        ]
         sanitized, metadata = sanitize_llm_messages([
-                {"role": "user", "content": "hi"},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning": "ui-only",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "demo", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
-                {"role": "assistant", "content": "final"},
-            ], require_reasoning_replay=True, return_metadata=True)
+                *source,
+            ], require_reasoning_replay=True, return_metadata=True,
+            target_replay_namespace=namespace)
 
+        self.assertEqual(len(sanitized), 3)
+        self.assertIn("已完成的历史工具记录", sanitized[1]["content"])
+        self.assertEqual(source[1]["reasoning"], "ui-only")
+        self.assertIn("tool_calls", source[1])
         self.assertEqual(
-            sanitized,
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "final"},
-            ],
-        )
-        self.assertEqual(
-            metadata["dropped_incomplete_reasoning_rounds"][0]["tool_call_ids"],
+            metadata["protocol_tool_round_projections"][0]["tool_call_ids"],
             ["call-1"],
         )
 

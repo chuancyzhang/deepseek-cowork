@@ -869,6 +869,7 @@ class ProductTooltipController(QObject):
         self.app = app
         self.bubble = None
         self._hiding = False
+        self._disposed = False
         app.installEventFilter(self)
 
     def _item_view_for(self, widget):
@@ -948,11 +949,16 @@ class ProductTooltipController(QObject):
             self._hiding = False
 
     def dispose(self):
+        if self._disposed:
+            return
+        self._disposed = True
         self.app.removeEventFilter(self)
         self.hide()
         self.bubble = None
 
     def eventFilter(self, obj, event):
+        if self._disposed:
+            return False
         event_type = event.type()
         if event_type == QEvent.ToolTip and isinstance(obj, QWidget):
             text = self._tooltip_text(obj, event)
@@ -969,7 +975,7 @@ class ProductTooltipController(QObject):
             QEvent.FocusOut,
         }:
             self.hide()
-        return super().eventFilter(obj, event)
+        return False
 
 
 def product_button_style(kind="secondary", radius=None):

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
+from PySide6.QtCore import QEvent, QMimeData, QPoint, Qt, QUrl
 from PySide6.QtGui import QHelpEvent, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
@@ -856,6 +856,18 @@ class ProductExperienceFixTests(unittest.TestCase):
             controller.hide()
             host.close()
             controller.dispose()
+
+    def test_product_tooltip_filter_ignores_deferred_delete_and_disposes_twice(self):
+        controller = ProductTooltipController(self.app)
+        watched = QWidget()
+        try:
+            self.assertFalse(controller.eventFilter(watched, QEvent(QEvent.DeferredDelete)))
+            controller.dispose()
+            controller.dispose()
+            self.assertFalse(controller.eventFilter(watched, QEvent(QEvent.MouseMove)))
+        finally:
+            controller.dispose()
+            watched.deleteLater()
 
     def test_input_paste_routes_clipboard_image_to_window(self):
         host = QWidget()

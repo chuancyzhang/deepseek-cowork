@@ -1001,6 +1001,48 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_clear_chat_layout_stops_bubble_timers_before_delete(self):
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        bubble = ChatBubble("Agent", "", thinking="...")
+        layout.addWidget(bubble)
+        window = MainWindow.__new__(MainWindow)
+
+        self.assertTrue(bubble.think_timer.isActive())
+        MainWindow.clear_chat_layout(window, layout)
+
+        self.assertFalse(bubble.think_timer.isActive())
+        self.assertEqual(layout.count(), 1)
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(main_module._qt_object_alive(bubble))
+        host.deleteLater()
+
+    def test_deleted_bubble_is_ignored_by_queued_flush(self):
+        bubble = ChatBubble("Agent", "", thinking="...")
+        bubble.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(main_module._qt_object_alive(bubble))
+
+        state = SimpleNamespace(
+            session_id="session-deleted-bubble",
+            temp_thinking_bubble=bubble,
+            last_agent_bubble=bubble,
+            current_content_buffer="late content",
+            last_flushed_content_buffer="",
+            pending_thinking_delta="late thinking",
+        )
+        window = MainWindow.__new__(MainWindow)
+        window.get_session = lambda session_id: state if session_id == state.session_id else None
+        window.request_session_scroll_to_bottom = MagicMock()
+
+        MainWindow.flush_session_content(window, state.session_id)
+        MainWindow.flush_session_thinking(window, state.session_id)
+
+        self.assertIsNone(state.temp_thinking_bubble)
+        self.assertIsNone(state.last_agent_bubble)
+        self.assertEqual(state.last_flushed_content_buffer, "late content")
+        self.assertEqual(state.pending_thinking_delta, "")
+
     def test_background_provider_retry_does_not_change_foreground_status(self):
         window = MainWindow()
         try:

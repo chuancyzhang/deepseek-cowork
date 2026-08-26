@@ -20,6 +20,7 @@ import markdown
 import socket
 import threading
 import unicodedata
+from shiboken6 import isValid as is_qt_object_valid
 from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -930,10 +931,12 @@ def _qt_object_alive(obj):
     if obj is None:
         return False
     try:
-        obj.objectName()
-        return True
+        return bool(is_qt_object_valid(obj))
     except RuntimeError:
         return False
+    except TypeError:
+        # Some tests use lightweight Python doubles in place of QObjects.
+        return True
     except Exception:
         return True
 
@@ -3077,6 +3080,25 @@ class SafeApplication(QApplication):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.main_window = None
+        self._ui_error_toast_pending = False
+
+    def _show_pending_ui_error_toast(self):
+        self._ui_error_toast_pending = False
+        window = self.main_window
+        if not _qt_object_alive(window):
+            if window is not None:
+                self.main_window = None
+            return
+        try:
+            window.add_system_toast("程序遇到异常，详情已写入 ui_error.log", "error")
+        except Exception:
+            print("Failed to show UI exception toast", file=sys.stderr)
+
+    def _queue_ui_error_toast(self):
+        if self._ui_error_toast_pending:
+            return
+        self._ui_error_toast_pending = True
+        QTimer.singleShot(0, self._show_pending_ui_error_toast)
 
     def notify(self, receiver, event):
         if isinstance(receiver, QEvent) and isinstance(event, QObject):
@@ -3087,11 +3109,7 @@ class SafeApplication(QApplication):
             exception_text = traceback.format_exc()
             print(exception_text, file=sys.stderr, end="")
             log_ui_exception(receiver, event, exception_text)
-            if self.main_window:
-                try:
-                    self.main_window.add_system_toast("程序遇到异常，详情已写入 ui_error.log", "error")
-                except Exception:
-                    pass
+            self._queue_ui_error_toast()
             return False
 
 class _LegacySettingsDialog(QDialog):
@@ -20690,6 +20708,8 @@ class ChatBubble(QFrame):
             parent.sync_stage_visibility()
 
     def _refresh_conversation_geometry(self):
+        if not _qt_object_alive(self):
+            return
         for widget in (self.think_container, self.thinking_widget, self.content_col, self):
             if widget is None:
                 continue
@@ -21125,7 +21145,14 @@ class ChatBubble(QFrame):
             return
         QApplication.clipboard().setText(text)
         self.copy_result_btn.setText("已复制")
-        QTimer.singleShot(1200, lambda: self.copy_result_btn.setText("复制结果"))
+        QTimer.singleShot(1200, self._reset_copy_result_button)
+
+    def _reset_copy_result_button(self):
+        if not _qt_object_alive(self):
+            return
+        button = getattr(self, "copy_result_btn", None)
+        if _qt_object_alive(button):
+            button.setText("复制结果")
         
     def add_tool_card(self, card_widget, session_id=None):
         self.think_container_layout.addWidget(card_widget)
@@ -22949,7 +22976,16 @@ class DeliverableWebPreview(QWidget):
         if app is None:
             raise RuntimeError("HTML 预览滚轮控制需要已初始化的 QApplication")
         app.installEventFilter(self)
+        self._application_event_filter_installed = True
         bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def dispose_event_filter(self):
+        if not self._application_event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._application_event_filter_installed = False
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
@@ -23009,7 +23045,7 @@ class DeliverableWebPreview(QWidget):
             )
             event.accept()
             return True
-        return super().eventFilter(obj, event)
+        return False
 
     def _handle_wheel_result(self, result, delta_x, delta_y):
         if result == "page":
@@ -23613,6 +23649,8 @@ class FileTabStrip(QWidget):
         self._tab_bodies = {}
 
     def _sync_tab_widths(self):
+        if not _qt_object_alive(self):
+            return
         count = len(self._tab_frames)
         if not count:
             self.tabs_host.setMinimumWidth(0)
@@ -23732,6 +23770,8 @@ class FileTabStrip(QWidget):
             self.overflow_menu.addAction(action)
 
     def _sync_overflow(self):
+        if not _qt_object_alive(self):
+            return
         if not self.paths:
             self.overflow_btn.hide()
             return
@@ -23743,6 +23783,8 @@ class FileTabStrip(QWidget):
             QTimer.singleShot(0, self._sync_tab_widths)
 
     def ensure_active_visible(self):
+        if not _qt_object_alive(self):
+            return
         frame = self._tab_frames.get(self._path_key(self.active_path)) if self.active_path else None
         if frame is not None and _qt_object_alive(frame):
             self.scroll.ensureWidgetVisible(frame, 8, 0)
@@ -23782,8 +23824,17 @@ class FileWorkbench(QWidget):
         if app is None:
             raise RuntimeError("文件导航浮层需要已初始化的 QApplication")
         app.installEventFilter(self)
+        self._application_event_filter_installed = True
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def dispose_event_filter(self):
+        if not self._application_event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._application_event_filter_installed = False
 
     def set_auto_dismiss_anchors(self, *widgets):
         self._auto_dismiss_anchors = [widget for widget in widgets if widget is not None]
@@ -23854,7 +23905,7 @@ class FileWorkbench(QWidget):
                 global_position = None
             if not self._is_internal_pointer_event(watched, global_position):
                 self.autoDismissRequested.emit("outside_click")
-        return super().eventFilter(watched, event)
+        return False
 
     def refresh_theme(self, _resolved=None):
         self.navigator.setStyleSheet(
@@ -29727,8 +29778,7 @@ class MainWindow(QMainWindow):
             item = state.chat_layout.takeAt(start)
             widget = item.widget() if item is not None else None
             if widget is not None:
-                widget.hide()
-                widget.deleteLater()
+                self._retire_chat_widget(widget)
         for offset, widget in enumerate(snapshot.get("widgets") or []):
             state.chat_layout.insertWidget(start + offset, widget)
             widget.show()
@@ -29768,8 +29818,7 @@ class MainWindow(QMainWindow):
 
     def _commit_history_rewrite(self, snapshot):
         for widget in snapshot.get("widgets") or []:
-            if _qt_object_alive(widget):
-                widget.deleteLater()
+            self._retire_chat_widget(widget)
 
     def _history_rewrite_guard(self, state):
         committed_messages = self.chat_storage.get_messages(state.session_id)
@@ -33061,6 +33110,7 @@ class MainWindow(QMainWindow):
     def quit_app(self):
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
+        self._dispose_application_event_filters()
         preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
         if not preserved_daemon_runs:
             if self.daemon_client and self.daemon_available:
@@ -33070,6 +33120,16 @@ class MainWindow(QMainWindow):
         if self.tray_icon:
             self.tray_icon.hide()
         QApplication.quit()
+
+    def _dispose_application_event_filters(self):
+        for attribute in ("deliverable_web_preview", "file_workbench"):
+            target = getattr(self, attribute, None)
+            if target is not None and _qt_object_alive(target):
+                target.dispose_event_filter()
+        app = QApplication.instance()
+        controller = getattr(app, "product_tooltip_controller", None) if app is not None else None
+        if controller is not None and _qt_object_alive(controller):
+            controller.dispose()
 
     def stop_daemon_process(self):
         if not self.daemon_process:
@@ -33172,6 +33232,7 @@ class MainWindow(QMainWindow):
             if not self.confirm_leave_deliverable_edit("退出应用"):
                 event.ignore()
                 return
+            self._dispose_application_event_filters()
             self.skill_catalog_service.stop_watching()
             preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
             if not preserved_daemon_runs:
@@ -33454,8 +33515,22 @@ class MainWindow(QMainWindow):
         while chat_layout.count():
             item = chat_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None: widget.deleteLater()
+            self._retire_chat_widget(widget)
         chat_layout.addStretch()
+
+    def _retire_chat_widget(self, widget):
+        if widget is None or not _qt_object_alive(widget):
+            return
+        bubbles = [widget] if isinstance(widget, ChatBubble) else []
+        bubbles.extend(widget.findChildren(ChatBubble))
+        for bubble in bubbles:
+            if hasattr(bubble, "think_timer"):
+                bubble.stop_thinking_timers()
+            render_timer = getattr(bubble, "_main_content_render_timer", None)
+            if render_timer is not None:
+                render_timer.stop()
+        widget.hide()
+        widget.deleteLater()
 
     def _compute_session_title(self, messages):
         fallback = ""
@@ -48315,10 +48390,17 @@ a {{ overflow-wrap: anywhere; }}
             return
         if not final and state.current_content_buffer == getattr(state, "last_flushed_content_buffer", ""):
             return
-        if state.temp_thinking_bubble:
-            state.temp_thinking_bubble.set_main_content(state.current_content_buffer, final=final)
-        elif state.last_agent_bubble:
-            state.last_agent_bubble.set_main_content(state.current_content_buffer, final=final)
+        bubble = state.temp_thinking_bubble
+        if bubble is not None and not _qt_object_alive(bubble):
+            state.temp_thinking_bubble = None
+            bubble = None
+        if bubble is None:
+            bubble = state.last_agent_bubble
+            if bubble is not None and not _qt_object_alive(bubble):
+                state.last_agent_bubble = None
+                bubble = None
+        if bubble is not None:
+            bubble.set_main_content(state.current_content_buffer, final=final)
         state.last_flushed_content_buffer = state.current_content_buffer
         if not final:
             self._checkpoint_live_chat(state)
@@ -48332,10 +48414,17 @@ a {{ overflow-wrap: anywhere; }}
         state.pending_thinking_delta = ""
         if not delta:
             return
-        if state.temp_thinking_bubble:
-            state.temp_thinking_bubble.update_thinking(delta)
-        elif state.last_agent_bubble:
-            state.last_agent_bubble.update_thinking(delta)
+        bubble = state.temp_thinking_bubble
+        if bubble is not None and not _qt_object_alive(bubble):
+            state.temp_thinking_bubble = None
+            bubble = None
+        if bubble is None:
+            bubble = state.last_agent_bubble
+            if bubble is not None and not _qt_object_alive(bubble):
+                state.last_agent_bubble = None
+                bubble = None
+        if bubble is not None:
+            bubble.update_thinking(delta)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def _merge_generated_messages(self, existing_messages, generated_messages):

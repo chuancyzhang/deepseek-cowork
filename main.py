@@ -60,7 +60,18 @@ from core.single_instance import (
     notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage, ConversationWriteConflict
-from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
+from core.chat_save_queue import (
+    ChatSaveRequest,
+    ChatSaveWorker,
+    SAVE_ERROR_BUSY,
+    SAVE_ERROR_CONFLICT,
+    SAVE_ERROR_CORRUPT,
+    SAVE_ERROR_NO_SPACE,
+    SAVE_ERROR_PATH_UNAVAILABLE,
+    SAVE_ERROR_PERMISSION,
+    SAVE_ERROR_UNKNOWN,
+    classify_chat_save_error,
+)
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.runtime_journal import RuntimeJournal
 from core.conversation_render import (
@@ -37193,6 +37204,20 @@ class MainWindow(QMainWindow):
             notice.actionRequested.connect(action_callback)
         return notice
 
+    def _clear_scoped_conversation_notice(self, state, *, kind, revision):
+        notice = getattr(state, "conversation_notice", None) if state else None
+        if notice is None or not _qt_object_alive(notice):
+            return False
+        if str(getattr(notice, "_conversation_notice_kind", "") or "") != str(kind or ""):
+            return False
+        notice_revision = int(getattr(notice, "_conversation_notice_revision", 0) or 0)
+        if int(revision or 0) < notice_revision:
+            return False
+        notice.hide()
+        notice.deleteLater()
+        state.conversation_notice = None
+        return True
+
     def _mark_run_retryable_failure(self, state, run_id):
         if not state:
             return {}
@@ -38351,7 +38376,58 @@ class MainWindow(QMainWindow):
             revision=max(0, int(revision or 0)),
         )
 
-    def _stage_chat_save_request(self, state, *, messages=None, status=None):
+    @staticmethod
+    def _chat_save_failure_reason(category):
+        reasons = {
+            SAVE_ERROR_BUSY: "其他任务正在使用对话记录，内容暂时无法加入历史。请稍后重试。",
+            SAVE_ERROR_NO_SPACE: "设备存储空间不足，内容暂时无法加入历史。请释放空间后重试。",
+            SAVE_ERROR_PERMISSION: "应用无法写入对话记录，内容暂时无法加入历史。请检查数据目录权限后重试。",
+            SAVE_ERROR_PATH_UNAVAILABLE: "对话记录位置当前不可用。请恢复该目录后重试。",
+            SAVE_ERROR_CONFLICT: "对话记录已发生变化。为避免覆盖新内容，本次未保存，请重新打开会话后重试。",
+            SAVE_ERROR_CORRUPT: "对话记录文件当前无法安全读取。内容未被覆盖，请查看技术详情。",
+            SAVE_ERROR_UNKNOWN: "保存对话时出现异常。请重试；仍失败可查看技术详情。",
+        }
+        return reasons.get(str(category or ""), reasons[SAVE_ERROR_UNKNOWN])
+
+    @staticmethod
+    def _chat_save_failure_cause(category):
+        causes = {
+            SAVE_ERROR_BUSY: "其他任务正在使用对话记录",
+            SAVE_ERROR_NO_SPACE: "设备存储空间不足",
+            SAVE_ERROR_PERMISSION: "应用无法写入对话记录，请检查数据目录权限",
+            SAVE_ERROR_PATH_UNAVAILABLE: "对话记录位置当前不可用",
+            SAVE_ERROR_CONFLICT: "对话记录已发生变化，为避免覆盖新内容",
+            SAVE_ERROR_CORRUPT: "对话记录文件当前无法安全读取",
+            SAVE_ERROR_UNKNOWN: "保存对话时出现异常",
+        }
+        return causes.get(str(category or ""), causes[SAVE_ERROR_UNKNOWN])
+
+    def _chat_save_failure_message(
+        self,
+        category,
+        *,
+        recovery_snapshot_saved,
+        before_submit=False,
+    ):
+        reason = self._chat_save_failure_reason(category)
+        if before_submit:
+            cause = self._chat_save_failure_cause(category)
+            return f"暂时无法保存这条消息，因为{cause}。内容仍在输入区，请处理后重试。"
+        if recovery_snapshot_saved:
+            return f"这段内容已安全保留，但历史记录暂未更新。{reason}"
+        return (
+            "这段内容仍在当前窗口，但尚未保存到历史记录。请暂时不要关闭应用。"
+            f"{reason}"
+        )
+
+    def _stage_chat_save_request(
+        self,
+        state,
+        *,
+        messages=None,
+        status=None,
+        failure_context="background",
+    ):
         if not state:
             return None
         state.chat_save_revision = max(0, int(getattr(state, "chat_save_revision", 0) or 0)) + 1
@@ -38369,7 +38445,10 @@ class MainWindow(QMainWindow):
             self.handle_chat_save_failed(
                 state.session_id,
                 request.revision,
-                f"恢复日志写入失败：{exc}",
+                classify_chat_save_error(exc),
+                str(exc),
+                recovery_snapshot_saved=False,
+                before_submit=failure_context == "before_submit",
             )
             return None
         log_ui_navigation(
@@ -38390,7 +38469,9 @@ class MainWindow(QMainWindow):
                 self.handle_chat_save_failed(
                     request.session_id,
                     request.revision,
-                    "保存队列拒绝了会话快照",
+                    SAVE_ERROR_UNKNOWN,
+                    "chat save queue rejected snapshot",
+                    recovery_snapshot_saved=True,
                 )
             else:
                 log_ui_navigation(
@@ -38413,7 +38494,9 @@ class MainWindow(QMainWindow):
             self.handle_chat_save_failed(
                 request.session_id,
                 request.revision,
+                classify_chat_save_error(exc),
                 str(exc),
+                recovery_snapshot_saved=True,
             )
             return False
 
@@ -38486,34 +38569,73 @@ class MainWindow(QMainWindow):
             timeout_ms=timeout_ms,
         )
 
-    def handle_chat_save_failed(self, session_id, revision, error):
+    def handle_chat_save_failed(
+        self,
+        session_id,
+        revision,
+        category,
+        error="",
+        *,
+        recovery_snapshot_saved=True,
+        before_submit=False,
+    ):
         session_id = str(session_id or "").strip()
+        revision = int(revision or 0)
+        category = str(category or SAVE_ERROR_UNKNOWN)
         self.append_log(
-            f"会话保存失败({session_id or 'unknown'}, revision={int(revision or 0)}): {error}"
+            f"会话保存失败({session_id or 'unknown'}, revision={revision}, "
+            f"category={category}, recovery_snapshot_saved={bool(recovery_snapshot_saved)}): {error}"
         )
         log_ui_navigation(
             "chat_save_failed",
             session_id=session_id or "unknown",
-            revision=int(revision or 0),
+            revision=revision,
+            category=category,
+            recovery_snapshot_saved=bool(recovery_snapshot_saved),
             error=str(error or "unknown error"),
         )
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if not isinstance(notified, dict):
             self._chat_save_failure_notified_at = {}
             notified = self._chat_save_failure_notified_at
-        if session_id in notified:
+        previous = notified.get(session_id) or {}
+        if revision < int(previous.get("revision") or 0):
             return
         notified[session_id] = {
-            "revision": int(revision or 0),
+            "revision": revision,
+            "category": category,
             "error": str(error or ""),
         }
         state = self.get_session(session_id)
-        if state:
-            self._show_conversation_notice(
+        if not state or revision < int(getattr(state, "chat_save_revision", 0) or 0):
+            return
+        pending_bubble = getattr(state, "last_agent_bubble", None)
+        pending_revision = int(
+            getattr(pending_bubble, "_pending_chat_save_revision", 0) or 0
+        ) if pending_bubble is not None else 0
+        if pending_revision == revision and category != SAVE_ERROR_BUSY:
+            self._fail_terminal_persistence(
                 state,
-                "聊天记录保存失败，正在等待下一次保存重试。",
-                "warning",
+                pending_bubble,
+                getattr(pending_bubble, "_pending_final_content_event", None),
+                error,
+                category=category,
+                recovery_snapshot_saved=recovery_snapshot_saved,
             )
+            return
+        if category == SAVE_ERROR_BUSY:
+            return
+        notice = self._show_conversation_notice(
+            state,
+            self._chat_save_failure_message(
+                category,
+                recovery_snapshot_saved=recovery_snapshot_saved,
+                before_submit=before_submit,
+            ),
+            "error",
+        )
+        notice._conversation_notice_kind = "chat_save"
+        notice._conversation_notice_revision = revision
 
     def handle_chat_save_blocked(self, session_id, revision, error):
         """Surface a permanent history conflict instead of retrying forever."""
@@ -38545,15 +38667,22 @@ class MainWindow(QMainWindow):
             self.append_log(
                 f"会话冲突快照隔离失败({session_id or 'unknown'}): {quarantine_exc}"
             )
-        # A conflict is an internal ledger-protection event.  The committed
-        # SQLite history remains authoritative, so do not present the
-        # quarantined technical snapshot as if the user's chat were lost.
+        self.handle_chat_save_failed(
+            session_id,
+            revision,
+            SAVE_ERROR_CONFLICT,
+            error,
+            recovery_snapshot_saved=True,
+        )
 
     def handle_chat_save_completed(self, session_id, revision):
         session_id = str(session_id or "").strip()
+        revision = int(revision or 0)
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if isinstance(notified, dict):
-            notified.pop(session_id, None)
+            failure = notified.get(session_id) or {}
+            if revision >= int(failure.get("revision") or 0):
+                notified.pop(session_id, None)
         acknowledged = False
         try:
             acknowledged = self.chat_recovery_journal.acknowledge(session_id, revision)
@@ -38595,6 +38724,28 @@ class MainWindow(QMainWindow):
         )
         state = self.get_session(session_id)
         if state:
+            self._clear_scoped_conversation_notice(
+                state,
+                kind="chat_save",
+                revision=revision,
+            )
+            pending_bubble = getattr(state, "last_agent_bubble", None)
+            pending_revision = int(
+                getattr(pending_bubble, "_pending_chat_save_revision", 0) or 0
+            ) if pending_bubble is not None else 0
+            if pending_revision and revision >= pending_revision:
+                pending_event = getattr(
+                    pending_bubble,
+                    "_pending_final_content_event",
+                    None,
+                )
+                if isinstance(pending_event, dict):
+                    pending_event["status"] = "completed"
+                pending_bubble.set_message_actions_enabled(
+                    bool(getattr(pending_bubble, "_pending_message_actions_enabled", False))
+                )
+                pending_bubble._pending_chat_save_revision = 0
+                pending_bubble._pending_final_content_event = None
             log_sub_agent_runtime(
                 "ui_commit_completed",
                 session_id=session_id,
@@ -38626,7 +38777,9 @@ class MainWindow(QMainWindow):
                     self.handle_chat_save_failed(
                         request.session_id,
                         request.revision,
+                        classify_chat_save_error(exc),
                         str(exc),
+                        recovery_snapshot_saved=False,
                     )
                     return False
             self.update_skill_capture_button_state()
@@ -43859,7 +44012,7 @@ a {{ overflow-wrap: anywhere; }}
         ):
             return (
                 "runtime_journal_write_failed",
-                "运行记录保存失败，本轮已停止。请检查会话历史目录写入权限后重试。",
+                "本轮未完成，请重试。",
             )
         if "our servers are currently overloaded" in lowered_error:
             return "provider_overloaded", "模型服务繁忙，请稍后再发送"
@@ -45442,6 +45595,13 @@ a {{ overflow-wrap: anywhere; }}
                 state, message, payload.get("display_content") or "", payload.get("attachments") or []
             )
             guidance_revision = max(0, int(getattr(state, "chat_save_revision", 0) or 0))
+            saving_notice = self._show_conversation_notice(
+                state,
+                "正在保存刚才的内容，完成后即可继续。",
+                "info",
+            )
+            saving_notice._conversation_notice_kind = "chat_save"
+            saving_notice._conversation_notice_revision = guidance_revision
             if not self.wait_for_chat_save_revision(
                 state.session_id,
                 guidance_revision,
@@ -45459,6 +45619,11 @@ a {{ overflow-wrap: anywhere; }}
                 self._reject_unapplied_guidance(state, restore_input=False)
                 self._persist_pending_guidance(state)
                 return True
+            self._clear_scoped_conversation_notice(
+                state,
+                kind="chat_save",
+                revision=guidance_revision,
+            )
             log_chat_runtime_debug(
                 "turn_guidance_commit_barrier_passed",
                 session_id=state.session_id,
@@ -46081,6 +46246,7 @@ a {{ overflow-wrap: anywhere; }}
                 state,
                 messages=staged_messages,
                 status="running",
+                failure_context="before_submit",
             )
         if staged_save_request is None:
             if grill_started:
@@ -46090,12 +46256,6 @@ a {{ overflow-wrap: anywhere; }}
                     "grill_error",
                     session_id=state.session_id,
                     phase="persistence",
-                )
-            if state.session_id == self.current_session_id:
-                self._show_conversation_notice(
-                    state,
-                    "消息无法安全保存，已保留输入且未启动任务。请检查磁盘空间和目录权限。",
-                    "error",
                 )
             return False
         try:
@@ -46145,7 +46305,10 @@ a {{ overflow-wrap: anywhere; }}
             self.handle_chat_save_failed(
                 state.session_id,
                 staged_save_request.revision,
-                f"运行恢复日志写入失败：{exc}",
+                classify_chat_save_error(exc),
+                str(exc),
+                recovery_snapshot_saved=False,
+                before_submit=True,
             )
             return False
         previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
@@ -48636,14 +48799,31 @@ a {{ overflow-wrap: anywhere; }}
         )
         return message_id
 
-    def _fail_terminal_persistence(self, state, bubble, final_content_event, error):
+    def _fail_terminal_persistence(
+        self,
+        state,
+        bubble,
+        final_content_event,
+        error,
+        *,
+        category=None,
+        recovery_snapshot_saved=False,
+    ):
+        category = str(category or classify_chat_save_error(error))
         if final_content_event is not None:
             final_content_event["status"] = "save_failed"
         bubble.set_message_actions_enabled(False)
-        self._show_conversation_notice(
+        notice = self._show_conversation_notice(
             state,
-            "结果尚未保存，已保留在当前窗口。请检查磁盘空间和目录权限后重试。",
+            self._chat_save_failure_message(
+                category,
+                recovery_snapshot_saved=recovery_snapshot_saved,
+            ),
             "error",
+        )
+        notice._conversation_notice_kind = "chat_save"
+        notice._conversation_notice_revision = int(
+            getattr(bubble, "_pending_chat_save_revision", 0) or 0
         )
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
@@ -48755,10 +48935,16 @@ a {{ overflow-wrap: anywhere; }}
             or getattr(state, "active_turn_request_id", "")
             or ""
         ).strip()
+        daemon_terminal_owned = str(result.get("_runtime_terminal") or "").strip().lower() in {
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+        }
         if provider_succeeded:
             self.set_session_status("finalizing", state.session_id)
             self.set_session_phase("Wrapping up", state.session_id)
-            if run_id:
+            if run_id and not daemon_terminal_owned:
                 try:
                     run_record = self.runtime_journal.get_run(state.session_id, run_id) or {}
                     run_status = str(run_record.get("status") or "running")
@@ -48923,8 +49109,22 @@ a {{ overflow-wrap: anywhere; }}
                 retry_attempt,
                 retry_max,
             )
+            if failure_category == "runtime_journal_write_failed":
+                visible_content = str(
+                    getattr(state, "current_content_buffer", "") or ""
+                ).strip()
+                if not visible_content and hasattr(bubble, "content_edit"):
+                    visible_content = bubble.content_edit.toPlainText().strip()
+                failure_summary = (
+                    "本轮未完成，已显示内容已保留。"
+                    if visible_content
+                    else "本轮未完成，请重试。"
+                )
             failure_status = "interrupted" if interrupted else "failed"
             ppt_task_id = str(getattr(state, "ppt_agent_task_id", "") or "").strip()
+            ppt_interrupted = bool(
+                interrupted or failure_category == "runtime_journal_write_failed"
+            )
             if ppt_task_id and getattr(state, "ppt_agent_mode", False):
                 task_record = self._ppt_task_for_state(state, ppt_task_id)
                 next_action = str(task_record.get("next_action") or "").strip()
@@ -48935,8 +49135,8 @@ a {{ overflow-wrap: anywhere; }}
                         else "generate"
                     )
                 checkpoint_patch = {
-                    "status": failure_status,
-                    "stage": failure_status,
+                    "status": "interrupted" if ppt_interrupted else failure_status,
+                    "stage": "interrupted" if ppt_interrupted else failure_status,
                     "next_action": next_action,
                     "error": error_text,
                     "current_run_id": str(run_id or ""),
@@ -48977,7 +49177,13 @@ a {{ overflow-wrap: anywhere; }}
                 ),
                 persistence_filtered_count=persistence_filtered_count,
             )
-            if run_id:
+            daemon_terminal_owned = str(result.get("_runtime_terminal") or "").strip().lower() in {
+                "completed",
+                "failed",
+                "interrupted",
+                "cancelled",
+            }
+            if run_id and not daemon_terminal_owned:
                 try:
                     self.runtime_journal.update_run(
                         state.session_id,
@@ -49021,7 +49227,7 @@ a {{ overflow-wrap: anywhere; }}
                 reason_text=failure_summary,
                 outcome=failure_status,
             )
-            if interrupted and ppt_task_id:
+            if ppt_interrupted and ppt_task_id:
                 task_card = self._office_draft_card_for_state(state, ppt_task_id)
                 if task_card is not None:
                     task_card.set_interrupted("生成中断")
@@ -49301,7 +49507,28 @@ a {{ overflow-wrap: anywhere; }}
             previous_render_count,
             previous_render_total,
         )
-        if run_id:
+        history_commit_error = str(result.get("_history_commit_error") or "").strip()
+        if history_commit_error:
+            bubble.set_source_message_id(assistant_source_message_id)
+            bubble.set_main_content(content, content_parts=content_parts, final=True)
+            self._fail_terminal_persistence(
+                state,
+                bubble,
+                final_content_event,
+                history_commit_error,
+                category=str(
+                    result.get("_history_commit_error_category") or SAVE_ERROR_UNKNOWN
+                ),
+                recovery_snapshot_saved=False,
+            )
+            return
+        daemon_terminal_owned = str(result.get("_runtime_terminal") or "").strip().lower() in {
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+        }
+        if run_id and not daemon_terminal_owned:
             try:
                 self.runtime_journal.update_run(
                     state.session_id,
@@ -49369,7 +49596,7 @@ a {{ overflow-wrap: anywhere; }}
             )
             if not commit_confirmed:
                 log_sub_agent_runtime(
-                    "ui_terminal_commit_failed",
+                    "ui_terminal_commit_pending",
                     session_id=state.session_id,
                     turn_id=str(turn_id or state.active_turn_id or ""),
                     run_id=run_id,
@@ -49380,24 +49607,37 @@ a {{ overflow-wrap: anywhere; }}
                     revision=commit_revision,
                     save_accepted=bool(save_accepted),
                 )
-                self._fail_terminal_persistence(
-                    state,
-                    bubble,
-                    final_content_event,
-                    "terminal assistant SQLite revision was not acknowledged",
+                if not save_accepted or commit_revision <= previous_save_revision:
+                    self._fail_terminal_persistence(
+                        state,
+                        bubble,
+                        final_content_event,
+                        RuntimeError("terminal save request was not accepted"),
+                        category=SAVE_ERROR_UNKNOWN,
+                        recovery_snapshot_saved=False,
+                    )
+                    return
+                bubble._pending_chat_save_revision = commit_revision
+                bubble._pending_final_content_event = final_content_event
+                bubble._pending_message_actions_enabled = bool(
+                    not missing_final_content
+                    and not str(getattr(state, "ppt_agent_internal_stage", "") or "").strip()
                 )
-                return
-            log_sub_agent_runtime(
-                "ui_terminal_commit_acknowledged",
-                session_id=state.session_id,
-                turn_id=str(turn_id or state.active_turn_id or ""),
-                run_id=run_id,
-                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
-                stage_id=str(getattr(bubble, "ui_stage_id", "")),
-                message_id=assistant_source_message_id,
-                revision=commit_revision,
-            )
-        if final_content_event is not None:
+            else:
+                log_sub_agent_runtime(
+                    "ui_terminal_commit_acknowledged",
+                    session_id=state.session_id,
+                    turn_id=str(turn_id or state.active_turn_id or ""),
+                    run_id=run_id,
+                    group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                    stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                    message_id=assistant_source_message_id,
+                    revision=commit_revision,
+                )
+        terminal_save_confirmed = bool(
+            history_writer_owner == "daemon" or commit_confirmed
+        )
+        if final_content_event is not None and terminal_save_confirmed:
             final_content_event["status"] = "completed"
         bubble.set_source_message_id(assistant_source_message_id)
         internal_ppt_stage = str(getattr(state, "ppt_agent_internal_stage", "") or "").strip()
@@ -49406,7 +49646,11 @@ a {{ overflow-wrap: anywhere; }}
             content_parts=[] if internal_ppt_stage else content_parts,
             final=True,
         )
-        bubble.set_message_actions_enabled(not missing_final_content and not internal_ppt_stage)
+        bubble.set_message_actions_enabled(
+            terminal_save_confirmed
+            and not missing_final_content
+            and not internal_ppt_stage
+        )
         active_retry_context = getattr(state, "active_run_retry_context", {}) or {}
         if active_retry_context.get("retry_of_run_id"):
             log_chat_runtime_debug(

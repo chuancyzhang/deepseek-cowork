@@ -1,4 +1,6 @@
+import errno
 import os
+import sqlite3
 import tempfile
 import unittest
 import gc
@@ -8,11 +10,43 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
+from core.chat_save_queue import (
+    ChatSaveRequest,
+    ChatSaveWorker,
+    SAVE_ERROR_BUSY,
+    SAVE_ERROR_CORRUPT,
+    SAVE_ERROR_NO_SPACE,
+    SAVE_ERROR_PATH_UNAVAILABLE,
+    SAVE_ERROR_PERMISSION,
+    SAVE_ERROR_UNKNOWN,
+    classify_chat_save_error,
+)
 from core.chat_storage import ChatStorage, ConversationWriteConflict
 
 
 class TestChatSaveQueue(unittest.TestCase):
+    def test_save_error_classifier_uses_typed_error_codes(self):
+        busy = sqlite3.OperationalError("busy")
+        busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        corrupt = sqlite3.DatabaseError("corrupt")
+        corrupt.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+
+        self.assertEqual(classify_chat_save_error(busy), SAVE_ERROR_BUSY)
+        self.assertEqual(classify_chat_save_error(corrupt), SAVE_ERROR_CORRUPT)
+        self.assertEqual(
+            classify_chat_save_error(OSError(errno.ENOSPC, "full")),
+            SAVE_ERROR_NO_SPACE,
+        )
+        self.assertEqual(
+            classify_chat_save_error(PermissionError(errno.EACCES, "denied")),
+            SAVE_ERROR_PERMISSION,
+        )
+        self.assertEqual(
+            classify_chat_save_error(FileNotFoundError(errno.ENOENT, "missing")),
+            SAVE_ERROR_PATH_UNAVAILABLE,
+        )
+        self.assertEqual(classify_chat_save_error(RuntimeError("unknown")), SAVE_ERROR_UNKNOWN)
+
     def test_retry_delay_uses_bounded_exponential_backoff(self):
         worker = ChatSaveWorker("unused.sqlite", debounce_ms=100)
 
@@ -223,8 +257,8 @@ class TestChatSaveQueue(unittest.TestCase):
                 )
             )
             worker.save_failed.connect(
-                lambda session_id, revision, error: retryable.append(
-                    (session_id, revision, error)
+                lambda session_id, revision, category, error: retryable.append(
+                    (session_id, revision, category, error)
                 )
             )
             request = ChatSaveRequest(

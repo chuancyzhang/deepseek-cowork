@@ -1,5 +1,7 @@
+import errno
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -8,6 +10,57 @@ from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
 from .chat_storage import ChatStorage, ConversationWriteConflict
+
+
+SAVE_ERROR_BUSY = "busy"
+SAVE_ERROR_NO_SPACE = "no_space"
+SAVE_ERROR_PERMISSION = "permission"
+SAVE_ERROR_PATH_UNAVAILABLE = "path_unavailable"
+SAVE_ERROR_CONFLICT = "conflict"
+SAVE_ERROR_CORRUPT = "corrupt"
+SAVE_ERROR_UNKNOWN = "unknown"
+
+
+def classify_chat_save_error(exc):
+    """Return a stable persistence error category from typed error metadata."""
+
+    if isinstance(exc, ConversationWriteConflict):
+        return SAVE_ERROR_CONFLICT
+
+    sqlite_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(sqlite_code, int):
+        primary_code = sqlite_code & 0xFF
+        if primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            return SAVE_ERROR_BUSY
+        if primary_code == sqlite3.SQLITE_FULL:
+            return SAVE_ERROR_NO_SPACE
+        if primary_code == sqlite3.SQLITE_READONLY:
+            return SAVE_ERROR_PERMISSION
+        if primary_code == sqlite3.SQLITE_CANTOPEN:
+            return SAVE_ERROR_PATH_UNAVAILABLE
+        if primary_code in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+            return SAVE_ERROR_CORRUPT
+
+    os_errno = getattr(exc, "errno", None)
+    if os_errno in {errno.EBUSY, getattr(errno, "ETXTBSY", -1)}:
+        return SAVE_ERROR_BUSY
+    if os_errno == errno.ENOSPC:
+        return SAVE_ERROR_NO_SPACE
+    if os_errno in {errno.EACCES, errno.EPERM, getattr(errno, "EROFS", -1)}:
+        return SAVE_ERROR_PERMISSION
+    if os_errno in {errno.ENOENT, errno.ENOTDIR}:
+        return SAVE_ERROR_PATH_UNAVAILABLE
+
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {32, 33}:
+        return SAVE_ERROR_BUSY
+    if winerror == 112:
+        return SAVE_ERROR_NO_SPACE
+    if winerror == 5:
+        return SAVE_ERROR_PERMISSION
+    if winerror in {2, 3, 53, 67}:
+        return SAVE_ERROR_PATH_UNAVAILABLE
+    return SAVE_ERROR_UNKNOWN
 
 
 @dataclass
@@ -22,7 +75,7 @@ class ChatSaveRequest:
 
 
 class ChatSaveWorker(QThread):
-    save_failed = Signal(str, int, str)
+    save_failed = Signal(str, int, str, str)
     save_blocked = Signal(str, int, str)
     save_completed = Signal(str, int)
 
@@ -248,7 +301,12 @@ class ChatSaveWorker(QThread):
                         request.ready_at = time.monotonic() + retry_delay
                         self._pending[request.session_id] = request
                     self._condition.notify_all()
-                self.save_failed.emit(request.session_id, int(request.revision or 0), str(exc))
+                self.save_failed.emit(
+                    request.session_id,
+                    int(request.revision or 0),
+                    classify_chat_save_error(exc),
+                    str(exc),
+                )
                 continue
 
             with self._condition:

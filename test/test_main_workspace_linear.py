@@ -332,12 +332,45 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         toast.assert_not_called()
         self.assertEqual(
             state.conversation_notice.label.text(),
-            "聊天记录保存失败，正在等待下一次保存重试。",
+            "这段内容已安全保留，但历史记录暂未更新。"
+            "对话记录已发生变化。为避免覆盖新内容，本次未保存，请重新打开会话后重试。",
         )
         self.assertEqual(
             self.window._chat_save_failure_notified_at[state.session_id]["revision"],
-            3,
+            4,
         )
+        with (
+            patch.object(self.window.chat_recovery_journal, "acknowledge", return_value=False),
+            patch.object(self.window.runtime_journal, "load_manifest", return_value={}),
+            patch.object(self.window.runtime_journal, "update_manifest"),
+        ):
+            self.window.handle_chat_save_completed(state.session_id, 3)
+            self.assertIsNotNone(state.conversation_notice)
+            self.window.handle_chat_save_completed(state.session_id, 4)
+        self.assertIsNone(state.conversation_notice)
+
+    def test_chat_save_failure_copy_explains_safety_and_concrete_cause(self):
+        safe = self.window._chat_save_failure_message(
+            "permission",
+            recovery_snapshot_saved=True,
+        )
+        window_only = self.window._chat_save_failure_message(
+            "no_space",
+            recovery_snapshot_saved=False,
+        )
+        before_submit = self.window._chat_save_failure_message(
+            "path_unavailable",
+            recovery_snapshot_saved=False,
+            before_submit=True,
+        )
+
+        self.assertIn("已安全保留", safe)
+        self.assertIn("数据目录权限", safe)
+        self.assertIn("仍在当前窗口", window_only)
+        self.assertIn("暂时不要关闭应用", window_only)
+        self.assertIn("存储空间不足", window_only)
+        self.assertIn("内容仍在输入区", before_submit)
+        self.assertIn("对话记录位置当前不可用", before_submit)
 
     def test_pending_skill_draft_is_owned_by_its_session(self):
         first = self.window.get_current_session()

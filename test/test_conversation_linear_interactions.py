@@ -1141,7 +1141,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertIn("重新打开会话", prefix_summary)
         self.assertNotIn("first_difference_index", prefix_summary)
         self.assertEqual(journal_category, "runtime_journal_write_failed")
-        self.assertIn("写入权限", journal_summary)
+        self.assertEqual(journal_summary, "本轮未完成，请重试。")
         self.assertNotIn("Errno", journal_summary)
 
     def test_provider_overload_has_specific_notice_without_message_append(self):
@@ -1521,10 +1521,56 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertEqual(bubble.main_content_text, "已显示但未保存")
             self.assertFalse(bubble.message_actions_enabled)
-            self.assertFalse(bubble._pending_main_content_final)
-            self.assertEqual(bubble.source_message_id, "")
-            self.assertEqual(state.session_status, "error")
-            self.assertIn("结果尚未保存", state.conversation_notice.label.text())
+            self.assertTrue(bubble._pending_main_content_final)
+            self.assertTrue(bubble.source_message_id)
+            self.assertEqual(state.session_status, "completed")
+            self.assertIsNone(state.conversation_notice)
+            self.assertGreater(int(bubble._pending_chat_save_revision), 0)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_daemon_history_commit_error_keeps_visible_answer_with_reason(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_daemon_commit_error")
+            state.active_turn_id = 1
+            state.active_turn_request_id = "request-daemon-save-failed"
+            state.messages = [{
+                "id": "user-daemon-save-failed",
+                "role": "user",
+                "content": "继续",
+                "meta": {"turn_id": "1", "request_id": "request-daemon-save-failed"},
+            }]
+            bubble = window._append_live_thinking_segment(state)
+
+            with patch.object(
+                window,
+                "_history_writer_owner_for_session",
+                return_value="daemon",
+            ):
+                window.handle_llm_response(
+                    {
+                        "request_id": "request-daemon-save-failed",
+                        "role": "assistant",
+                        "content": "已显示的结果",
+                        "generated_messages": [],
+                        "_runtime_terminal": "completed",
+                        "_history_commit_error": "[Errno 13] denied",
+                        "_history_commit_error_category": "permission",
+                    },
+                    state.session_id,
+                    turn_id=1,
+                    request_id="request-daemon-save-failed",
+                )
+
+            self.assertEqual(bubble.main_content_text, "已显示的结果")
+            self.assertTrue(bubble._pending_main_content_final)
+            self.assertFalse(bubble.message_actions_enabled)
+            self.assertIn("仍在当前窗口", state.conversation_notice.label.text())
+            self.assertIn("数据目录权限", state.conversation_notice.label.text())
+            self.assertNotIn("Errno", state.conversation_notice.label.text())
         finally:
             window.close()
             window.deleteLater()

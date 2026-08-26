@@ -4190,6 +4190,43 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             self.state.daemon_instance_id,
         )
 
+    def test_attach_interrupts_running_record_when_registered_worker_has_finished(self):
+        from PySide6.QtCore import QThread
+
+        class _FinishedWorker(QThread):
+            request_id = "finished-worker-run"
+
+            def run(self):
+                return
+
+        session_id = "finished-worker-session"
+        worker = _FinishedWorker()
+        self.state.runtime_journal.begin_run(
+            session_id,
+            worker.request_id,
+            turn_id="finished-worker-turn",
+            writer_owner="daemon:test",
+            base_messages=[],
+            extra={
+                "execution_backend": "daemon",
+                "daemon_instance_id": self.state.daemon_instance_id,
+            },
+        )
+        self.state.set_active_worker(
+            session_id,
+            worker,
+            turn_id="finished-worker-turn",
+            run_id=worker.request_id,
+        )
+        worker.start()
+        self.assertTrue(worker.wait(1000))
+
+        attached = self.client.attach_run(session_id, worker.request_id)
+
+        self.assertFalse(attached["worker_active"])
+        self.assertEqual(attached["run"]["status"], "interrupted")
+        self.assertNotIn(session_id, self.state.active_workers)
+
     def test_stop_session_atomically_interrupts_runtime_before_worker_stop(self):
         class _Worker:
             request_id = "stop-runtime-run"
@@ -4495,6 +4532,105 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         run = runs[0]
         self.assertEqual(run.get("status"), "completed")
+
+    def test_terminal_journal_failure_keeps_provider_success_and_clears_worker(self):
+        from PySide6.QtCore import QThread, Signal
+
+        class _SuccessfulWorker(QThread):
+            thinking_signal = Signal(str)
+            content_signal = Signal(str)
+            tool_call_signal = Signal(dict)
+            tool_result_signal = Signal(dict)
+            observability_signal = Signal(dict)
+            agent_state_signal = Signal(dict)
+            output_signal = Signal(str)
+            finished_signal = Signal(object)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+            def run(self):
+                self.finished_signal.emit({"content": "durable visible answer"})
+
+        session_id = "terminal-journal-failure-session"
+        real_update_run = self.state.runtime_journal.update_run
+
+        def fail_terminal_update(target_session_id, run_id, patch):
+            if str((patch or {}).get("status") or "") in {"finalizing", "completed"}:
+                raise PermissionError(13, "denied")
+            return real_update_run(target_session_id, run_id, patch)
+
+        with (
+            patch("core.daemon.LLMWorker", _SuccessfulWorker),
+            patch.object(
+                self.state.runtime_journal,
+                "update_run",
+                side_effect=fail_terminal_update,
+            ),
+        ):
+            chunks = list(
+                self.client.send_message_stream(
+                    session_id,
+                    "hello",
+                    workspace_dir=self.temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                    writer_owner="ui:4242",
+                )
+            )
+
+        final_result = next(
+            chunk["result"] for chunk in chunks if chunk.get("type") == "final"
+        )
+        self.assertEqual(final_result.get("content"), "durable visible answer")
+        self.assertNotIn("error", final_result)
+        self.assertEqual(final_result.get("_runtime_terminal"), "completed")
+        self.assertIn("_runtime_journal_warning", final_result)
+        self.assertNotIn(session_id, self.state.active_workers)
+
+    def test_daemon_commit_failure_preserves_answer_and_reports_typed_save_error(self):
+        from PySide6.QtCore import QThread, Signal
+
+        class _SuccessfulWorker(QThread):
+            thinking_signal = Signal(str)
+            content_signal = Signal(str)
+            tool_call_signal = Signal(dict)
+            tool_result_signal = Signal(dict)
+            observability_signal = Signal(dict)
+            agent_state_signal = Signal(dict)
+            output_signal = Signal(str)
+            finished_signal = Signal(object)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+            def run(self):
+                self.finished_signal.emit({"content": "visible answer"})
+
+        with (
+            patch("core.daemon.LLMWorker", _SuccessfulWorker),
+            patch.object(
+                self.state.chat_storage,
+                "save_conversation_safely",
+                side_effect=PermissionError(13, "denied"),
+            ),
+        ):
+            chunks = list(
+                self.client.send_message_stream(
+                    "daemon-commit-failure-session",
+                    "hello",
+                    workspace_dir=self.temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                    writer_owner="daemon:test",
+                )
+            )
+
+        final_result = next(
+            chunk["result"] for chunk in chunks if chunk.get("type") == "final"
+        )
+        self.assertEqual(final_result.get("content"), "visible answer")
+        self.assertNotIn("error", final_result)
+        self.assertEqual(final_result.get("_history_commit_error_category"), "permission")
+        self.assertIn("denied", final_result.get("_history_commit_error", ""))
 
     def test_socket_disconnect_does_not_stop_daemon_worker(self):
         from PySide6.QtCore import QThread, Signal

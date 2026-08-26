@@ -1672,6 +1672,67 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 window.close()
                 window.deleteLater()
 
+    def test_submitting_run_without_backend_is_not_recovered_as_previous_process(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow.__new__(MainWindow)
+            state = SimpleNamespace(
+                session_id="session-submitting",
+                submit_in_progress=True,
+                live_activity=False,
+                daemon_running=False,
+                llm_worker=None,
+                code_worker=None,
+                daemon_worker=None,
+            )
+            window.runtime_journal = RuntimeJournal(root)
+            window.append_log = MagicMock()
+            window.runtime_journal.begin_run(
+                state.session_id,
+                "request-submitting",
+                turn_id="1",
+                writer_owner="ui:test",
+            )
+
+            self.assertFalse(window.attach_active_daemon_run_if_needed(state))
+            run = window.runtime_journal.get_run(
+                state.session_id,
+                "request-submitting",
+            )
+            self.assertNotIn("execution_backend", run)
+            self.assertEqual(run["status"], "running")
+
+    def test_stale_run_without_backend_is_interrupted_after_submit_boundary(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow.__new__(MainWindow)
+            state = SimpleNamespace(
+                session_id="session-stale",
+                submit_in_progress=False,
+                live_activity=False,
+                daemon_running=False,
+                llm_worker=None,
+                code_worker=None,
+                daemon_worker=None,
+            )
+            window.runtime_journal = RuntimeJournal(root)
+            window.append_log = MagicMock()
+            window.runtime_journal.begin_run(
+                state.session_id,
+                "request-stale",
+                turn_id="1",
+                writer_owner="ui:previous-process",
+            )
+
+            self.assertFalse(window.attach_active_daemon_run_if_needed(state))
+            run = window.runtime_journal.get_run(
+                state.session_id,
+                "request-stale",
+            )
+            self.assertEqual(run["status"], "interrupted")
+            self.assertEqual(
+                run["terminal_error"],
+                "The local UI worker did not survive the application restart.",
+            )
+
     def test_render_failure_after_provider_success_keeps_completed_terminal(self):
         window = MainWindow()
         try:

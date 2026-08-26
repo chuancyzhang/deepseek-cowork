@@ -29713,7 +29713,8 @@ class MainWindow(QMainWindow):
         code_worker = getattr(state, "code_worker", None)
         daemon_worker = getattr(state, "daemon_worker", None)
         return bool(
-            getattr(state, "live_activity", False)
+            getattr(state, "submit_in_progress", False)
+            or getattr(state, "live_activity", False)
             or getattr(state, "daemon_running", False)
             or (llm_worker is not None and llm_worker.isRunning())
             or (code_worker is not None and code_worker.isRunning())

@@ -17003,8 +17003,8 @@ class EmptyStateWidget(QWidget):
         self.actions_data = [
             {
                 "id": "ppt",
-                "title": "PPT Agent",
-                "description": "进入 PPT Mode",
+                "title": "PPT 助手",
+                "description": "创建或整理演示文稿",
                 "prompt": "让 PPT Agent 生成演示文稿 HTML 工作稿，再从交付物预览导出 PPTX、DOCX 或 PDF。",
                 "icon": "fa5s.file-powerpoint",
             },
@@ -17391,7 +17391,7 @@ class EmptyStateWidget(QWidget):
         content = resolved.get("content") or {}
         self.title_label.setText(content.get("home.title", "从一个任务开始"))
         defaults = {
-            "ppt": ("PPT Agent", "进入 PPT Mode"),
+            "ppt": ("PPT 助手", "创建或整理演示文稿"),
             "finance": ("进行金融分析", "万得 + 东方财富（需配置 Key）"),
             "data": ("数据分析", "分析工作区数据，可构建机器学习模型"),
             "browser": ("浏览器自动化", "读取网页、提取数据和填写表单"),
@@ -17596,62 +17596,129 @@ class PptAgentModeDialog(QDialog):
         self.visual_status = "unverified"
         self.run_id = uuid.uuid4().hex
         self.prepare_worker = None
-        self.setWindowTitle("PPT Mode")
+        self._preparing = False
+        self._resource_remove_buttons = []
+        self.setWindowTitle("PPT 助手")
         self.setModal(True)
-        self.resize(720, 680)
+        self.resize(760, 700)
+        self.setMinimumSize(640, 560)
         apply_product_dialog(self, "PptAgentModeDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.content_scroll = QScrollArea(self)
+        self.content_scroll.setObjectName("PptAgentContentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content_scroll.setStyleSheet(
+            "QScrollArea#PptAgentContentScroll { background: transparent; border: none; }"
+        )
+        content = QWidget(self.content_scroll)
+        content.setObjectName("PptAgentContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 22, 24, 16)
+        content_layout.setSpacing(14)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        icon = QLabel()
-        icon.setPixmap(qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary).pixmap(28, 28))
-        header.addWidget(icon, 0, Qt.AlignTop)
+        self.header_icon = QLabel()
+        header.addWidget(self.header_icon, 0, Qt.AlignTop)
 
         title_box = QVBoxLayout()
         title_box.setSpacing(4)
-        title = QLabel("PPT Agent")
-        title.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {DesignTokens.text_primary};")
-        desc = QLabel("让智能体根据你的内容和目标自动选择最合适的 PPT 生成方式。")
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
-        title_box.addWidget(title)
-        title_box.addWidget(desc)
+        self.title_label = QLabel("PPT 助手")
+        self.desc_label = QLabel("描述目标并添加资料，助手会为你生成完整演示文稿。")
+        self.desc_label.setWordWrap(True)
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(self.desc_label)
         header.addLayout(title_box, 1)
-        layout.addLayout(header)
+        content_layout.addLayout(header)
 
         self.request_edit = QPlainTextEdit()
-        self.request_edit.setPlaceholderText("描述你要做的 PPT，例如：把这份调研资料做成 12 页路演 BP，风格高级、适合投资人快速理解。")
-        self.request_edit.setMinimumHeight(150)
-        self.request_edit.setStyleSheet(
-            f"""
-            QPlainTextEdit {{
-                background: {DesignTokens.bg_main};
-                color: {DesignTokens.text_primary};
-                border: 1px solid {DesignTokens.border};
-                border-radius: 8px;
-                padding: 10px 12px;
-                font-size: 13px;
-            }}
-            QPlainTextEdit:focus {{
-                border-color: {rgba_from_hex(DesignTokens.primary, 0.42)};
-                background: {DesignTokens.bg_main};
-            }}
-            """
+        self.request_edit.setPlaceholderText(
+            "例如：把调研资料整理成 12 页投资人路演，先讲结论，风格简洁专业。"
         )
-        layout.addWidget(self._field_block("需求", self.request_edit))
+        self.request_edit.setMinimumHeight(132)
+        content_layout.addWidget(self._field_block("你想制作什么 PPT？", self.request_edit))
 
-        primary_options = QHBoxLayout()
-        primary_options.setContentsMargins(0, 0, 0, 0)
-        primary_options.setSpacing(12)
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("PPTX（模板驱动）", PPT_AGENT_OUTPUT_PPTX)
         self.output_format_combo.addItem("16:9 演示型 HTML", PPT_AGENT_OUTPUT_HTML)
         apply_settings_combo_style(self.output_format_combo)
-        primary_options.addWidget(self._field_block("输出格式", self.output_format_combo), 1)
+        content_layout.addWidget(self._field_block("输出格式", self.output_format_combo))
+
+        self.resources_section = ProductSection(
+            "资料与模板",
+            "资料用于组织内容；生成 PPTX 时还需要一份模板原文件。",
+            kind="panel",
+        )
+        source_header = QHBoxLayout()
+        source_header.setContentsMargins(4, 0, 4, 0)
+        source_header.setSpacing(8)
+        self.source_section_label = QLabel("参考资料（可选）")
+        source_header.addWidget(self.source_section_label)
+        source_header.addStretch()
+        self.add_source_btn = QPushButton("添加资料")
+        self.add_source_btn.setIcon(qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary))
+        self.add_source_btn.clicked.connect(self.add_source_files)
+        source_header.addWidget(self.add_source_btn)
+        self.clear_files_btn = QPushButton("清空全部")
+        self.clear_files_btn.clicked.connect(self.clear_files)
+        source_header.addWidget(self.clear_files_btn)
+        self.resources_section.layout.addLayout(source_header)
+
+        self.source_files_host = QWidget()
+        self.source_files_layout = QVBoxLayout(self.source_files_host)
+        self.source_files_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_files_layout.setSpacing(0)
+        self.resources_section.layout.addWidget(self.source_files_host)
+        self.source_empty_notice = ProductInlineNotice("尚未添加资料，可直接描述需求后生成。")
+        self.resources_section.layout.addWidget(self.source_empty_notice)
+
+        self.template_block = QWidget()
+        template_layout = QVBoxLayout(self.template_block)
+        template_layout.setContentsMargins(0, 4, 0, 0)
+        template_layout.setSpacing(6)
+        template_header = QHBoxLayout()
+        template_header.setContentsMargins(4, 0, 4, 0)
+        template_header.setSpacing(8)
+        self.template_section_label = QLabel("PPTX 模板（必选）")
+        template_header.addWidget(self.template_section_label)
+        template_header.addStretch()
+        self.choose_template_btn = QPushButton("选择模板")
+        self.choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
+        self.choose_template_btn.clicked.connect(self.choose_template_file)
+        template_header.addWidget(self.choose_template_btn)
+        template_layout.addLayout(template_header)
+        self.template_row_host = QWidget()
+        self.template_row_layout = QVBoxLayout(self.template_row_host)
+        self.template_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.template_row_layout.setSpacing(0)
+        template_layout.addWidget(self.template_row_host)
+        self.template_empty_notice = ProductInlineNotice("请选择用于品牌、配色和版式参考的 PPTX 模板。", tone="warning")
+        template_layout.addWidget(self.template_empty_notice)
+        self.resources_section.layout.addWidget(self.template_block)
+
+        # Retain the legacy summary label for compatibility with callers that
+        # inspect it, while the visible UI is rendered as removable rows.
+        self.files_label = QLabel("未附加资料或模板")
+        self.files_label.hide()
+        content_layout.addWidget(self.resources_section)
+
+        self.generation_options_toggle = QPushButton("更多设置")
+        self.generation_options_toggle.setCheckable(True)
+        self.generation_options_toggle.setChecked(False)
+        self.generation_options_toggle.toggled.connect(self._sync_generation_options_visibility)
+        content_layout.addWidget(self.generation_options_toggle)
+
+        self.generation_options_panel = QFrame()
+        self.generation_options_panel.setProperty("productSurface", "subtle")
+        generation_options_layout = QVBoxLayout(self.generation_options_panel)
+        generation_options_layout.setContentsMargins(12, 12, 12, 12)
+        generation_options_layout.setSpacing(12)
 
         self.task_model_combo = QComboBox()
         for profile in self.model_profiles:
@@ -17664,22 +17731,7 @@ class PptAgentModeDialog(QDialog):
             if selected_index >= 0:
                 self.task_model_combo.setCurrentIndex(selected_index)
         apply_settings_combo_style(self.task_model_combo)
-        primary_options.addWidget(self._field_block("本次多模态模型", self.task_model_combo), 1)
-        layout.addLayout(primary_options)
-
-        self.generation_options_toggle = QPushButton("生成选项")
-        self.generation_options_toggle.setCheckable(True)
-        self.generation_options_toggle.setChecked(True)
-        self.generation_options_toggle.setStyleSheet(apple_button_style("ghost", align="left"))
-        self.generation_options_toggle.setIcon(qta.icon("fa5s.sliders-h", color=DesignTokens.text_secondary))
-        layout.addWidget(self.generation_options_toggle)
-
-        self.generation_options_panel = QFrame()
-        self.generation_options_panel.setProperty("productSurface", "subtle")
-        self.generation_options_panel.setStyleSheet(product_surface_style("subtle"))
-        generation_options_layout = QVBoxLayout(self.generation_options_panel)
-        generation_options_layout.setContentsMargins(12, 12, 12, 12)
-        generation_options_layout.setSpacing(12)
+        generation_options_layout.addWidget(self._field_block("生成模型", self.task_model_combo))
 
         option_row = QHBoxLayout()
         option_row.setContentsMargins(0, 0, 0, 0)
@@ -17697,7 +17749,7 @@ class PptAgentModeDialog(QDialog):
 
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItem("自动选择", PPT_AGENT_STRATEGY_AUTO)
-        self.strategy_combo.addItem("默认 PPT Agent", PPT_AGENT_STRATEGY_DEFAULT)
+        self.strategy_combo.addItem("默认 PPT 助手", PPT_AGENT_STRATEGY_DEFAULT)
         self.strategy_combo.addItem("Guizang PPT Skill（已内置 Skill）", PPT_AGENT_STRATEGY_GUIZANG)
         self.strategy_combo.addItem("Frontend Slides（已内置 Skill）", PPT_AGENT_STRATEGY_FRONTEND_SLIDES)
         self.strategy_combo.addItem("Huashu Design（已内置 Skill）", PPT_AGENT_STRATEGY_HUASHU)
@@ -17705,75 +17757,39 @@ class PptAgentModeDialog(QDialog):
         self.strategy_block = self._field_block("内置 Skill", self.strategy_combo)
         option_row.addWidget(self.strategy_block, 1)
         generation_options_layout.addLayout(option_row)
-
-        files_bar = QFrame()
-        files_bar.setObjectName("PptAgentFilesBar")
-        files_bar.setProperty("uiSurface", True)
-        files_bar.setStyleSheet(product_surface_style("subtle", radius=8))
-        files_layout = QVBoxLayout(files_bar)
-        files_layout.setContentsMargins(14, 12, 14, 12)
-        files_layout.setSpacing(10)
-
-        file_actions = QHBoxLayout()
-        file_actions.setContentsMargins(0, 0, 0, 0)
-        add_source_btn = QPushButton("添加资料")
-        add_source_btn.setIcon(qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary))
-        add_source_btn.setStyleSheet(product_button_style("secondary", radius=8))
-        add_source_btn.clicked.connect(self.add_source_files)
-        file_actions.addWidget(add_source_btn)
-
-        self.choose_template_btn = QPushButton("选择 PPTX 模板（必选）")
-        self.choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
-        self.choose_template_btn.setStyleSheet(product_button_style("secondary", radius=8))
-        self.choose_template_btn.clicked.connect(self.choose_template_file)
-        file_actions.addWidget(self.choose_template_btn)
-
-        clear_files_btn = QPushButton("清空")
-        clear_files_btn.setStyleSheet(product_button_style("ghost", radius=8))
-        clear_files_btn.clicked.connect(self.clear_files)
-        file_actions.addWidget(clear_files_btn)
-        file_actions.addStretch()
-        files_layout.addLayout(file_actions)
-
-        self.files_label = QLabel("未附加资料或模板")
-        self.files_label.setWordWrap(True)
-        self.files_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-        files_layout.addWidget(self.files_label)
-        generation_options_layout.addWidget(files_bar)
         self.workflow_hint = QLabel()
         self.workflow_hint.setWordWrap(True)
-        self.workflow_hint.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         generation_options_layout.addWidget(self.workflow_hint)
+        self.generation_options_panel.setVisible(False)
+        content_layout.addWidget(self.generation_options_panel)
+        content_layout.addStretch()
+        self.content_scroll.setWidget(content)
+        layout.addWidget(self.content_scroll, 1)
 
-        self.preflight_status = QLabel()
-        self.preflight_status.setWordWrap(True)
+        bottom = QWidget(self)
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.setContentsMargins(24, 0, 24, 20)
+        bottom_layout.setSpacing(8)
+        self.preflight_notice = ProductInlineNotice()
+        self.preflight_status = self.preflight_notice.label
         self.preflight_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-        generation_options_layout.addWidget(self.preflight_status)
-        self.open_dependencies_btn = QPushButton("打开设置 → 组件与依赖")
-        self.open_dependencies_btn.setStyleSheet(product_button_style("secondary", radius=8))
+        self.open_dependencies_btn = self.preflight_notice.action_button
         self.open_dependencies_btn.clicked.connect(self.open_dependency_settings)
-        self.open_dependencies_btn.setVisible(False)
-        generation_options_layout.addWidget(self.open_dependencies_btn, 0, Qt.AlignLeft)
-
-        self.generation_options_panel.setVisible(True)
-        self.generation_options_toggle.toggled.connect(self.generation_options_panel.setVisible)
-        layout.addWidget(self.generation_options_panel)
-
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 4, 0, 0)
-        action_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(product_button_style("secondary", radius=8))
-        cancel_btn.clicked.connect(self.reject)
-        action_row.addWidget(cancel_btn)
+        bottom_layout.addWidget(self.preflight_notice)
+        self.action_bar = ProductActionBar()
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.action_bar.layout.addWidget(self.cancel_btn)
         self.submit_btn = QPushButton("生成 PPTX")
-        self.submit_btn.setIcon(qta.icon("fa5s.magic", color="white"))
-        self.submit_btn.setStyleSheet(product_button_style("primary", radius=8))
         self.submit_btn.clicked.connect(self.handle_submit)
-        action_row.addWidget(self.submit_btn)
-        layout.addLayout(action_row)
+        self.action_bar.layout.addWidget(self.submit_btn)
+        bottom_layout.addWidget(self.action_bar)
+        layout.addWidget(bottom)
+
         self.output_format_combo.currentIndexChanged.connect(self.sync_output_mode)
+        bind_theme(self, self.refresh_theme, surface="management")
+        self.refresh_theme()
+        self._sync_generation_options_visibility(False)
         self.sync_output_mode()
 
     def current_output_format(self):
@@ -17783,22 +17799,41 @@ class PptAgentModeDialog(QDialog):
         is_pptx = self.current_output_format() == PPT_AGENT_OUTPUT_PPTX
         self.preference_block.setVisible(not is_pptx)
         self.strategy_block.setVisible(not is_pptx)
+        self.template_block.setVisible(is_pptx)
         self.choose_template_btn.setVisible(is_pptx)
         self.submit_btn.setText("生成 PPTX" if is_pptx else "生成演示型 HTML")
-        self.submit_btn.setEnabled(bool(self.model_profiles))
+        self.submit_btn.setEnabled(not self._preparing and bool(self.model_profiles))
         self.workflow_hint.setText(
             "先对模板逐页截图并交给多模态模型，再建议 AI 使用 python-pptx/OOXML 直接生成 PPTX；生成后继续截图校验。"
             if is_pptx
             else "生成单个 16:9 分页 HTML；此模式不读取或提交 PPTX 模板。"
         )
         if not self.model_profiles:
-            self.preflight_status.setText("没有已配置且支持图片理解的模型。请先到设置添加多模态模型。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
+            self._set_preflight("没有已配置且支持图片理解的模型。请先到设置添加多模态模型。", "error")
         else:
-            self.preflight_status.setText("PPTX 会优先使用 PowerPoint 渲染，WPS 可作为备用。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-        self.open_dependencies_btn.setVisible(False)
+            self._set_preflight(
+                "已准备好。生成前会检查模板和本机渲染环境。"
+                if is_pptx
+                else "已准备好。HTML 模式不会读取或提交 PPTX 模板。",
+                "neutral",
+            )
         self.refresh_files_label()
+
+    def _sync_generation_options_visibility(self, checked):
+        checked = bool(checked)
+        self.generation_options_panel.setVisible(checked)
+        self.generation_options_toggle.setIcon(
+            qta.icon(
+                "fa5s.chevron-down" if checked else "fa5s.chevron-right",
+                color=DesignTokens.text_secondary,
+            )
+        )
+
+    def _set_preflight(self, text, tone="neutral", show_dependency_action=False):
+        self.preflight_notice.set_text(text, tone)
+        self.preflight_notice.set_action(
+            "打开设置 → 组件与依赖" if show_dependency_action else ""
+        )
 
     def open_dependency_settings(self):
         parent = self.parent()
@@ -17807,24 +17842,35 @@ class PptAgentModeDialog(QDialog):
             QTimer.singleShot(0, lambda: parent.open_settings("组件与依赖"))
 
     def _set_preparing(self, preparing):
+        self._preparing = bool(preparing)
         self.submit_btn.setEnabled(not preparing and bool(self.model_profiles))
         self.output_format_combo.setEnabled(not preparing)
         self.task_model_combo.setEnabled(not preparing)
+        self.preference_combo.setEnabled(not preparing)
+        self.strategy_combo.setEnabled(not preparing)
         self.request_edit.setEnabled(not preparing)
+        self.add_source_btn.setEnabled(not preparing)
+        self.clear_files_btn.setEnabled(not preparing)
         self.choose_template_btn.setEnabled(not preparing)
         self.generation_options_toggle.setEnabled(not preparing)
+        for button in self._resource_remove_buttons:
+            button.setEnabled(not preparing)
         if preparing:
             self.submit_btn.setText("正在渲染模板…")
+        else:
+            self.submit_btn.setText(
+                "生成 PPTX"
+                if self.current_output_format() == PPT_AGENT_OUTPUT_PPTX
+                else "生成演示型 HTML"
+            )
 
     def handle_submit(self):
         request = self.request_edit.toPlainText().strip()
         if not request and not self.source_files:
-            self.preflight_status.setText("请先描述需求，或添加至少一份资料。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.warning_text};")
+            self._set_preflight("请先描述需求，或添加至少一份资料。", "warning")
             return
         if self.task_model_combo.currentIndex() < 0:
-            self.preflight_status.setText("没有可用于本次任务的多模态模型。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
+            self._set_preflight("没有可用于本次任务的多模态模型。", "error")
             return
         if self.current_output_format() == PPT_AGENT_OUTPUT_HTML:
             self.template_screenshots = []
@@ -17834,17 +17880,16 @@ class PptAgentModeDialog(QDialog):
             self.accept()
             return
         if not self.template_file or not os.path.isfile(self.template_file):
-            self.preflight_status.setText("生成 PPTX 必须选择有效的模板原文件。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.warning_text};")
+            self._set_preflight("生成 PPTX 必须选择有效的模板原文件。", "warning")
             return
         if not python_pptx_available():
-            self.preflight_status.setText("缺少 python-pptx。请到“设置 → 组件与依赖”安装文档工具包后重试。")
-            self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.error_text};")
-            self.open_dependencies_btn.setVisible(True)
+            self._set_preflight(
+                "缺少 python-pptx。请到“设置 → 组件与依赖”安装文档工具包后重试。",
+                "error",
+                show_dependency_action=True,
+            )
             return
-        self.open_dependencies_btn.setVisible(False)
-        self.preflight_status.setText("正在探测 PowerPoint/WPS，并逐页导出模板截图…")
-        self.preflight_status.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        self._set_preflight("正在探测 PowerPoint/WPS，并逐页导出模板截图…", "neutral")
         self._set_preparing(True)
         worker = PptTemplatePrepareWorker(self.template_file, self.run_id, self)
         self.prepare_worker = worker
@@ -17927,6 +17972,49 @@ class PptAgentModeDialog(QDialog):
         block_layout.addWidget(widget)
         return block
 
+    @staticmethod
+    def _clear_widget_layout(target_layout):
+        while target_layout.count():
+            item = target_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _resource_row(self, path, remove_callback):
+        normalized = os.path.normpath(str(path or ""))
+        parent_dir = os.path.dirname(normalized)
+        row = ProductDataRow(
+            os.path.basename(normalized) or normalized,
+            parent_dir or normalized,
+        )
+        row.setToolTip(normalized)
+        remove_btn = QPushButton("移除")
+        remove_btn.setAccessibleName(f"移除 {os.path.basename(normalized) or normalized}")
+        remove_btn.clicked.connect(lambda checked=False, value=normalized: remove_callback(value))
+        remove_btn.setEnabled(not self._preparing)
+        remove_btn.setStyleSheet(product_button_style("ghost", radius=DesignTokens.radius_sm))
+        row.row_layout.addWidget(remove_btn, 0, Qt.AlignVCenter)
+        self._resource_remove_buttons.append(remove_btn)
+        return row
+
+    def _rebuild_resource_rows(self):
+        self._resource_remove_buttons = []
+        self._clear_widget_layout(self.source_files_layout)
+        for path in self.source_files:
+            self.source_files_layout.addWidget(
+                self._resource_row(path, self.remove_source_file)
+            )
+        self.source_empty_notice.setVisible(not self.source_files)
+
+        self._clear_widget_layout(self.template_row_layout)
+        if self.template_file:
+            self.template_row_layout.addWidget(
+                self._resource_row(self.template_file, lambda _path: self.remove_template_file())
+            )
+        self.template_empty_notice.setVisible(not bool(self.template_file))
+        self.choose_template_btn.setText("更换模板" if self.template_file else "选择模板")
+        self.clear_files_btn.setVisible(bool(self.source_files or self.template_file))
+
     def _start_dir(self):
         return self.workspace_dir if self.workspace_dir and os.path.isdir(self.workspace_dir) else os.path.expanduser("~")
 
@@ -17959,6 +18047,17 @@ class PptAgentModeDialog(QDialog):
         self.template_file = ""
         self.refresh_files_label()
 
+    def remove_source_file(self, path):
+        normalized = os.path.normpath(str(path or ""))
+        self.source_files = [item for item in self.source_files if item != normalized]
+        self.refresh_files_label()
+
+    def remove_template_file(self):
+        self.template_file = ""
+        self.template_screenshots = []
+        self.template_hash = ""
+        self.refresh_files_label()
+
     def refresh_files_label(self):
         parts = []
         if self.source_files:
@@ -17966,6 +18065,56 @@ class PptAgentModeDialog(QDialog):
         if self.template_file and self.current_output_format() == PPT_AGENT_OUTPUT_PPTX:
             parts.append("模板: " + os.path.basename(self.template_file))
         self.files_label.setText("\n".join(parts) if parts else "未附加资料或模板")
+        self._rebuild_resource_rows()
+
+    def refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "PptAgentModeDialog")
+        self.content_scroll.setStyleSheet(
+            "QScrollArea#PptAgentContentScroll { background: transparent; border: none; }"
+        )
+        self.header_icon.setPixmap(
+            qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary).pixmap(28, 28)
+        )
+        self.title_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_hero}px; font-weight: {DesignTokens.font_weight_bold}; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        self.desc_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        for label in (self.source_section_label, self.template_section_label):
+            label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; "
+                f"font-weight: {DesignTokens.font_weight_semibold}; color: {DesignTokens.text_primary};"
+            )
+        self.workflow_hint.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.generation_options_panel.setStyleSheet(product_surface_style("subtle"))
+        self.generation_options_toggle.setStyleSheet(
+            product_button_style("ghost", radius=DesignTokens.radius_md)
+            + "QPushButton { text-align: left; }"
+        )
+        self.add_source_btn.setStyleSheet(product_button_style("secondary"))
+        self.clear_files_btn.setStyleSheet(product_button_style("ghost"))
+        self.choose_template_btn.setStyleSheet(product_button_style("secondary"))
+        self.cancel_btn.setStyleSheet(product_button_style("secondary"))
+        self.submit_btn.setStyleSheet(product_button_style("primary"))
+        self.submit_btn.setIcon(qta.icon("fa5s.magic", color=DesignTokens.text_inverse))
+        self.add_source_btn.setIcon(qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary))
+        self.choose_template_btn.setIcon(
+            qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary)
+        )
+        for combo in (
+            self.output_format_combo,
+            self.task_model_combo,
+            self.preference_combo,
+            self.strategy_combo,
+        ):
+            apply_settings_combo_style(combo)
+        for button in self._resource_remove_buttons:
+            button.setStyleSheet(product_button_style("ghost", radius=DesignTokens.radius_sm))
+        self._sync_generation_options_visibility(self.generation_options_toggle.isChecked())
 
     def values(self):
         return {
@@ -18069,7 +18218,7 @@ class AgentModuleDialog(QDialog):
         row.addWidget(icon, 0, Qt.AlignTop)
         text_box = QVBoxLayout()
         text_box.setSpacing(5)
-        title = QLabel("PPT Agent")
+        title = QLabel("PPT 助手")
         title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary}; background: transparent; border: none;")
         desc = QLabel("默认基于 PPTX 模板直接生成并视觉校验，也可生成单文件 16:9 演示型 HTML。")
         desc.setWordWrap(True)
@@ -18089,7 +18238,7 @@ class AgentModuleDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         if not self.agent_profiles:
-            empty = QLabel("暂无可用自定义智能体。可在设置里创建，也可以先使用内置 PPT Agent。")
+            empty = QLabel("暂无可用自定义智能体。可在设置里创建，也可以先使用内置 PPT 助手。")
             empty.setWordWrap(True)
             empty.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
             layout.addWidget(empty)
@@ -30957,14 +31106,14 @@ class MainWindow(QMainWindow):
             return True, "", ""
         manager = getattr(self, "skill_manager", None)
         if manager is None:
-            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 未找到: 技能管理器尚未初始化。"
+            return False, skill_name, f"PPT 助手内置 Skill `{skill_name}` 未找到: 技能管理器尚未初始化。"
         finder = getattr(manager, "_find_skill_path", None)
         skill_path = finder(skill_name) if callable(finder) else ""
         if not skill_path:
-            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 未找到，请检查 ai_skills 目录。"
+            return False, skill_name, f"PPT 助手内置 Skill `{skill_name}` 未找到，请检查 ai_skills 目录。"
         enabled_checker = getattr(manager, "_is_skill_enabled_for_path", None)
         if callable(enabled_checker) and not enabled_checker(skill_name, skill_path):
-            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 已被关闭，请先在能力商城开启。"
+            return False, skill_name, f"PPT 助手内置 Skill `{skill_name}` 已被关闭，请先在能力商城开启。"
         return True, skill_name, ""
 
     def _fail_office_request_before_worker(self, state, message, title=None):
@@ -41935,7 +42084,7 @@ a {{ overflow-wrap: anywhere; }}
         menu = create_styled_menu(self)
         ppt_action = QAction(
             qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary),
-            "PPT Agent",
+            "PPT 助手",
             self,
         )
         ppt_action.setToolTip("从主题、资料或模板生成演示文稿")
@@ -42206,7 +42355,7 @@ a {{ overflow-wrap: anywhere; }}
         missing_screenshots = [path for path in template_screenshots if not os.path.isfile(path)]
         if missing_screenshots:
             self.add_system_toast(
-                "模板截图不可用，请重新打开 PPT Agent 生成预览。",
+                "模板截图不可用，请重新打开 PPT 助手生成预览。",
                 "error",
                 session_id=state.session_id,
                 auto_close_ms=6000,
@@ -45929,7 +46078,7 @@ a {{ overflow-wrap: anywhere; }}
             )
             if state.session_id == self.current_session_id:
                 if has_configured_models:
-                    model_scope = "PPT Agent 任务模型" if task_model_id else "当前对话选择的模型"
+                    model_scope = "PPT 助手任务模型" if task_model_id else "当前对话选择的模型"
                     self._show_conversation_notice(state, f"{model_scope}不可用，请重新选择模型。", "error")
                     self.refresh_model_selector()
                 else:
@@ -46553,7 +46702,7 @@ a {{ overflow-wrap: anywhere; }}
                 self._fail_office_request_before_worker(
                     state,
                     status_message,
-                    title="PPT Agent 启动失败",
+                    title="PPT 助手启动失败",
                 )
                 return True
         if not self.daemon_available:

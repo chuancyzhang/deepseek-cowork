@@ -94,8 +94,8 @@ PROTECTED_COMPONENTS = {
 CONTENT_DEFAULTS = {
     "brand.title": "DeepSeek Cowork",
     "home.title": "从一个任务开始",
-    "home.card.ppt.title": "PPT Agent",
-    "home.card.ppt.description": "进入 PPT Mode",
+    "home.card.ppt.title": "PPT 助手",
+    "home.card.ppt.description": "创建或整理演示文稿",
     "home.card.finance.title": "进行金融分析",
     "home.card.finance.description": "万得 + 东方财富（需配置 Key）",
     "home.card.data.title": "数据分析",

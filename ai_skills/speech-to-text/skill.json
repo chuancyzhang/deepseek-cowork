@@ -1,0 +1,82 @@
+{
+  "version": 2,
+  "name": "speech-to-text",
+  "display_name": "语音转文字",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "cowork",
+  "default_enabled": true,
+  "description": "Transcribe local audio and video files into speaker-separated text, with an explicit fully-local or current-model-polished output choice.",
+  "description_cn": "将本地音频或视频转成带说话人标签的文字，并由用户选择完全本地输出或交给当前模型润色。",
+  "presentation": {
+    "category": "content_creation",
+    "short_name": "语音转文字",
+    "summary": "本地识别音视频，分离说话人，并按选择生成原始稿或 AI 润色稿。",
+    "examples": [
+      "转录会议录音并区分说话人",
+      "把 M4A 语音转成文字",
+      "本地转录，不要把正文交给云端 AI"
+    ],
+    "access_note": "音频始终由本地模型处理；只有选择 AI 润色时，转录文字才会交给当前模型。"
+  },
+  "tags": [
+    "asr",
+    "speech-to-text",
+    "transcription",
+    "speaker-diarization",
+    "audio",
+    "语音转文字",
+    "转录",
+    "说话人分离"
+  ],
+  "triggers": [
+    "语音转文字",
+    "转录音频",
+    "识别音频",
+    "区分说话人",
+    "说话人分离",
+    "transcribe",
+    "ASR",
+    "speaker diarization"
+  ],
+  "anti_triggers": [
+    "文字转语音",
+    "TTS",
+    "实时麦克风",
+    "生成播客"
+  ],
+  "tool_refs": [
+    "transcribe_audio",
+    "save_transcript_result"
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [
+    "@marswave/coli@0.0.20",
+    "ffmpeg-static@5.3.0",
+    "sherpa-onnx-node@1.12.33"
+  ],
+  "references": [],
+  "script_refs": [
+    "scripts/transcribe.mjs"
+  ],
+  "script_entries": [],
+  "asset_refs": [],
+  "experience_policy": {
+    "entry_storage": "experience/entries.jsonl",
+    "summary_sync": "frontmatter_experience"
+  },
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Ask whether the user wants fully local raw output or current-model AI polishing before transcription.",
+    "Call transcribe_audio with the explicit polish choice and speaker diarization enabled by default.",
+    "For local-only output, report the generated path without reading the transcript back into model context.",
+    "For AI polish, preserve speaker labels and timestamps, then call save_transcript_result.",
+    "If polishing cannot be completed reliably, show the raw transcript and promote the local raw file as the final result."
+  ]
+}
+

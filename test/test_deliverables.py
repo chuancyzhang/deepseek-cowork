@@ -23,6 +23,7 @@ from main import (
     QMessageBox,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
+    PPT_AGENT_OUTPUT_HTML,
     PPT_AGENT_OUTPUT_PPTX,
     PPT_AGENT_PREFERENCE_BUSINESS,
     PPT_AGENT_STRATEGY_AUTO,
@@ -482,7 +483,7 @@ class TestDeliverableScanning(unittest.TestCase):
         widget = EmptyStateWidget(main_window)
         try:
             titles = [item["title"] for item in widget.actions_data]
-            self.assertEqual(titles, ["PPT Agent", "进行金融分析", "数据分析", "浏览器自动化"])
+            self.assertEqual(titles, ["PPT 助手", "进行金融分析", "数据分析", "浏览器自动化"])
             widget.action_cards[0].click()
             self.assertTrue(main_window.ppt_opened)
             finance_card = next(item for item in widget.actions_data if item["id"] == "finance")
@@ -772,6 +773,143 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             dialog.deleteLater()
             app.processEvents()
+
+    def test_ppt_agent_dialog_manages_files_individually_and_preserves_template_across_modes(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            source_a = os.path.join(workspace, "research.md")
+            source_b = os.path.join(workspace, "notes.pdf")
+            template_path = os.path.join(workspace, "brand-template.pptx")
+            for path in (source_a, source_b, template_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"test")
+            dialog = PptAgentModeDialog(
+                workspace_dir=workspace,
+                model_profiles=[
+                    {"id": "vision", "model_name": "vision-model", "supports_vision": True}
+                ],
+            )
+            try:
+                with patch(
+                    "main.QFileDialog.getOpenFileNames",
+                    return_value=([source_a, source_a, source_b], ""),
+                ):
+                    dialog.add_source_files()
+                self.assertEqual(dialog.source_files, [source_a, source_b])
+                self.assertEqual(dialog.source_files_layout.count(), 2)
+                self.assertFalse(dialog.clear_files_btn.isHidden())
+
+                dialog.template_file = template_path
+                dialog.refresh_files_label()
+                self.assertEqual(dialog.template_row_layout.count(), 1)
+                self.assertEqual(dialog.choose_template_btn.text(), "更换模板")
+
+                dialog.remove_source_file(source_a)
+                self.assertEqual(dialog.source_files, [source_b])
+                self.assertEqual(dialog.template_file, template_path)
+
+                html_index = dialog.output_format_combo.findData(PPT_AGENT_OUTPUT_HTML)
+                dialog.output_format_combo.setCurrentIndex(html_index)
+                self.assertTrue(dialog.template_block.isHidden())
+                self.assertEqual(dialog.values()["template_file"], "")
+                self.assertEqual(dialog.template_file, template_path)
+
+                dialog.generation_options_toggle.setChecked(True)
+                self.assertFalse(dialog.generation_options_panel.isHidden())
+                self.assertEqual(dialog.values()["source_files"], [source_b])
+                dialog.generation_options_toggle.setChecked(False)
+                self.assertTrue(dialog.generation_options_panel.isHidden())
+
+                pptx_index = dialog.output_format_combo.findData(PPT_AGENT_OUTPUT_PPTX)
+                dialog.output_format_combo.setCurrentIndex(pptx_index)
+                self.assertFalse(dialog.template_block.isHidden())
+                self.assertEqual(dialog.values()["template_file"], template_path)
+
+                dialog.remove_template_file()
+                self.assertEqual(dialog.template_file, "")
+                self.assertEqual(dialog.source_files, [source_b])
+                dialog.clear_files()
+                self.assertEqual(dialog.source_files, [])
+                self.assertEqual(dialog.template_file, "")
+                self.assertTrue(dialog.clear_files_btn.isHidden())
+            finally:
+                dialog.deleteLater()
+                app.processEvents()
+
+    def test_ppt_agent_dialog_keeps_status_visible_and_disables_file_actions_while_preparing(self):
+        app = QApplication.instance() or QApplication([])
+        dialog = PptAgentModeDialog(
+            model_profiles=[
+                {"id": "vision", "model_name": "vision-model", "supports_vision": True}
+            ],
+        )
+        try:
+            self.assertTrue(dialog.generation_options_panel.isHidden())
+            dialog.handle_submit()
+            self.assertIn("请先描述需求", dialog.preflight_status.text())
+            self.assertFalse(dialog.preflight_notice.isHidden())
+
+            dialog.source_files = [os.path.normpath("C:/workspace/research.md")]
+            dialog.refresh_files_label()
+            dialog._set_preparing(True)
+            self.assertFalse(dialog.request_edit.isEnabled())
+            self.assertFalse(dialog.output_format_combo.isEnabled())
+            self.assertFalse(dialog.add_source_btn.isEnabled())
+            self.assertFalse(dialog.clear_files_btn.isEnabled())
+            self.assertFalse(dialog.choose_template_btn.isEnabled())
+            self.assertTrue(dialog._resource_remove_buttons)
+            self.assertTrue(all(not button.isEnabled() for button in dialog._resource_remove_buttons))
+
+            dialog._set_preparing(False)
+            self.assertTrue(dialog.request_edit.isEnabled())
+            self.assertTrue(dialog.add_source_btn.isEnabled())
+            self.assertTrue(all(button.isEnabled() for button in dialog._resource_remove_buttons))
+        finally:
+            dialog.deleteLater()
+            app.processEvents()
+
+    def test_ppt_agent_dialog_preserves_existing_validation_and_html_submission(self):
+        app = QApplication.instance() or QApplication([])
+        no_model_dialog = PptAgentModeDialog(model_profiles=[])
+        try:
+            self.assertFalse(no_model_dialog.submit_btn.isEnabled())
+            self.assertIn("没有已配置", no_model_dialog.preflight_status.text())
+            self.assertFalse(no_model_dialog.preflight_notice.isHidden())
+        finally:
+            no_model_dialog.deleteLater()
+            app.processEvents()
+
+        with tempfile.TemporaryDirectory() as workspace:
+            template_path = os.path.join(workspace, "template.pptx")
+            with open(template_path, "wb") as handle:
+                handle.write(b"pptx")
+            dialog = PptAgentModeDialog(
+                workspace_dir=workspace,
+                model_profiles=[
+                    {"id": "vision", "model_name": "vision-model", "supports_vision": True}
+                ],
+            )
+            try:
+                dialog.request_edit.setPlainText("生成一份产品介绍")
+                dialog.handle_submit()
+                self.assertIn("必须选择有效的模板", dialog.preflight_status.text())
+
+                dialog.template_file = template_path
+                dialog.refresh_files_label()
+                with patch("main.python_pptx_available", return_value=False):
+                    dialog.handle_submit()
+                self.assertIn("缺少 python-pptx", dialog.preflight_status.text())
+                self.assertFalse(dialog.open_dependencies_btn.isHidden())
+
+                html_index = dialog.output_format_combo.findData(PPT_AGENT_OUTPUT_HTML)
+                dialog.output_format_combo.setCurrentIndex(html_index)
+                dialog.handle_submit()
+                self.assertEqual(dialog.result(), 1)
+                self.assertEqual(dialog.values()["template_file"], "")
+                self.assertEqual(dialog.template_file, template_path)
+            finally:
+                dialog.deleteLater()
+                app.processEvents()
 
     def test_ppt_agent_request_submits_ppt_office_workflow(self):
         with tempfile.TemporaryDirectory() as workspace:

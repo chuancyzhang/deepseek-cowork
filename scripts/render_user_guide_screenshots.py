@@ -21,7 +21,7 @@ APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 from PySide6.QtTest import QTest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QFontDatabase, QImage
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
@@ -619,6 +619,10 @@ def main_run():
     pdf_path.write_bytes(b"%PDF-1.4\n% demo")
 
     app = QApplication.instance() or QApplication([])
+    if "Microsoft YaHei UI" not in QFontDatabase.families():
+        windows_yahei = Path(os.environ.get("WINDIR") or "C:/Windows") / "Fonts" / "msyh.ttc"
+        if windows_yahei.is_file() and QFontDatabase.addApplicationFont(str(windows_yahei)) < 0:
+            raise RuntimeError(f"Unable to load screenshot font: {windows_yahei}")
     main.initialize_desktop_theme(app)
     original_show_event = main.MainWindow.showEvent
     main.MainWindow.showEvent = quiet_show_event
@@ -1265,7 +1269,7 @@ def main_run():
                     "brand.title": "DeepSeek Cowork · 星图",
                     "home.title": "今晚，从一件重要的事开始",
                     "home.card.ppt.title": "星图演示",
-                    "home.card.ppt.description": "进入固定行为的 PPT Mode",
+                    "home.card.ppt.description": "进入固定行为的 PPT 助手模式",
                     "home.card.finance.title": "星图研究",
                     "home.card.browser.title": "自动操作网页",
                     "home.reminder.title": "主题改变呈现，不改变能力边界",
@@ -1506,6 +1510,10 @@ def main_run():
         if SCREENSHOT_SCOPE == "ppt-agent":
             template_path = workspace / "品牌汇报模板.pptx"
             template_path.write_bytes(b"pptx-preview-placeholder")
+            research_path = workspace / "市场调研与用户访谈摘要.pdf"
+            research_path.write_bytes(b"pdf-preview-placeholder")
+            notes_path = workspace / "产品定位与商业目标.md"
+            notes_path.write_text("# 产品定位与商业目标", encoding="utf-8")
             ppt_agent = main.PptAgentModeDialog(
                 str(workspace),
                 model_profiles=[
@@ -1521,8 +1529,13 @@ def main_run():
                 parent=window,
             )
             ppt_agent.request_edit.setPlainText("基于调研资料生成 12 页投资人路演，保留模板品牌元素和版式语言。")
+            ppt_agent.source_files = [str(research_path), str(notes_path)]
             ppt_agent.template_file = str(template_path)
             ppt_agent.refresh_files_label()
+            ppt_agent.resize(
+                640 if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1" else 760,
+                560 if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1" else 900,
+            )
             save_widget(ppt_agent, "s24-ppt-agent.png", 220)
             ppt_agent.hide()
             return

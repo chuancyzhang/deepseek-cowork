@@ -40,24 +40,41 @@ SPEECH_TO_TEXT_NODE_DEPENDENCIES = [
 SPEECH_TO_TEXT_NPM_REGISTRY = "https://registry.npmmirror.com"
 
 SPEECH_TO_TEXT_ASSETS = {
-    "sensevoice": {
-        "filename": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-        "size": 163_002_883,
-        "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
-        "github_url": (
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
-            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+    "sensevoice_model": {
+        "filename": "model.int8.onnx",
+        "size": 239_233_841,
+        "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+        "official_url": (
+            "https://huggingface.co/csukuangfj/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/"
+            "6a65851692da9706cbddfac66ea9b96ebb1dee21/model.int8.onnx"
         ),
-        "modelscope_url": (
-            "https://modelscope.cn/models/zhaochaoqun/sherpa-onnx-asr-models/resolve/master/"
-            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+        "mirror_url": (
+            "https://hf-mirror.com/csukuangfj/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/"
+            "6a65851692da9706cbddfac66ea9b96ebb1dee21/model.int8.onnx"
+        ),
+    },
+    "sensevoice_tokens": {
+        "filename": "tokens.txt",
+        "size": 315_894,
+        "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+        "official_url": (
+            "https://huggingface.co/csukuangfj/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/"
+            "6a65851692da9706cbddfac66ea9b96ebb1dee21/tokens.txt"
+        ),
+        "mirror_url": (
+            "https://hf-mirror.com/csukuangfj/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/"
+            "6a65851692da9706cbddfac66ea9b96ebb1dee21/tokens.txt"
         ),
     },
     "segmentation": {
         "filename": "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
         "size": 6_958_444,
         "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
-        "github_url": (
+        "official_url": (
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
             "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
         ),
@@ -66,7 +83,7 @@ SPEECH_TO_TEXT_ASSETS = {
         "filename": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
         "size": 39_593_761,
         "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
-        "github_url": (
+        "official_url": (
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
             "speaker-recongition-models/"
             "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
@@ -75,13 +92,13 @@ SPEECH_TO_TEXT_ASSETS = {
 }
 
 SPEECH_TO_TEXT_MODEL_SOURCES = {
-    "modelscope": {
-        "id": "modelscope",
-        "name": "ModelScope 国内镜像 + sherpa-onnx 官方源",
+    "hf-mirror": {
+        "id": "hf-mirror",
+        "name": "HF-Mirror 国内加速 + sherpa-onnx 官方源",
     },
-    "github": {
-        "id": "github",
-        "name": "sherpa-onnx GitHub 官方源",
+    "official": {
+        "id": "official",
+        "name": "Hugging Face + sherpa-onnx 官方源",
     },
 }
 
@@ -181,7 +198,7 @@ def _sha256_file(path):
 
 
 def _speech_source(source=None):
-    source_id = str((source or {}).get("id") or "modelscope").strip().lower()
+    source_id = str((source or {}).get("id") or "hf-mirror").strip().lower()
     if source_id not in SPEECH_TO_TEXT_MODEL_SOURCES:
         raise ValueError(f"未知语音模型下载源：{source_id}")
     return dict(SPEECH_TO_TEXT_MODEL_SOURCES[source_id])
@@ -189,9 +206,32 @@ def _speech_source(source=None):
 
 def _speech_asset_url(asset_name, source_id):
     spec = SPEECH_TO_TEXT_ASSETS[asset_name]
-    if asset_name == "sensevoice" and source_id == "modelscope":
-        return spec["modelscope_url"]
-    return spec["github_url"]
+    if asset_name in {"sensevoice_model", "sensevoice_tokens"} and source_id == "hf-mirror":
+        return spec["mirror_url"]
+    return spec["official_url"]
+
+
+def _probe_speech_asset_urls(source_id, progress_callback=None):
+    for index, asset_name in enumerate(SPEECH_TO_TEXT_ASSETS):
+        spec = SPEECH_TO_TEXT_ASSETS[asset_name]
+        url = _speech_asset_url(asset_name, source_id)
+        if progress_callback:
+            progress_callback(f"正在检查 {spec['filename']} 下载地址…", 1 + index)
+        with requests.get(
+            url,
+            stream=True,
+            timeout=(15, 30),
+            allow_redirects=True,
+            headers={
+                "User-Agent": "deepseek-cowork-components",
+                "Range": "bytes=0-0",
+            },
+        ) as response:
+            response.raise_for_status()
+            if response.status_code not in {200, 206}:
+                raise RuntimeError(
+                    f"{spec['filename']} 下载地址检查失败：HTTP {response.status_code}"
+                )
 
 
 def _download_verified_speech_asset(asset_name, target, source_id, progress_callback=None, progress_range=(0, 100)):
@@ -350,8 +390,12 @@ def install_speech_to_text_component(source=None, progress_callback=None, force=
     from core.sandbox_runtime import install_skill_dependencies
 
     selected = _speech_source(source)
+    try:
+        _probe_speech_asset_urls(selected["id"], progress_callback)
+    except Exception as exc:
+        raise RuntimeError(f"语音模型下载源检查失败：{exc}") from exc
     if progress_callback:
-        progress_callback("正在从 npmmirror 准备本地语音运行依赖…", 2)
+        progress_callback("正在从 npmmirror 准备本地语音运行依赖…", 6)
     dependency_status = install_skill_dependencies(
         SPEECH_TO_TEXT_SKILL_ID,
         node_dependencies=SPEECH_TO_TEXT_NODE_DEPENDENCIES,
@@ -372,33 +416,32 @@ def install_speech_to_text_component(source=None, progress_callback=None, force=
     downloads = os.path.join(staged_root, "downloads")
     os.makedirs(downloads, exist_ok=True)
     try:
-        sense_archive = os.path.join(downloads, SPEECH_TO_TEXT_ASSETS["sensevoice"]["filename"])
         segmentation_archive = os.path.join(downloads, SPEECH_TO_TEXT_ASSETS["segmentation"]["filename"])
-        embedding_target = speech_to_text_component_paths(staged_root)["embedding"]
+        staged_paths = speech_to_text_component_paths(staged_root)
         asset_records = {
-            "sensevoice": _download_verified_speech_asset(
-                "sensevoice", sense_archive, selected["id"], progress_callback, (8, 62)
+            "sensevoice_model": _download_verified_speech_asset(
+                "sensevoice_model",
+                staged_paths["sensevoice_model"],
+                selected["id"],
+                progress_callback,
+                (10, 62),
+            ),
+            "sensevoice_tokens": _download_verified_speech_asset(
+                "sensevoice_tokens",
+                staged_paths["sensevoice_tokens"],
+                selected["id"],
+                progress_callback,
+                (62, 64),
             ),
             "segmentation": _download_verified_speech_asset(
-                "segmentation", segmentation_archive, selected["id"], progress_callback, (62, 72)
+                "segmentation", segmentation_archive, selected["id"], progress_callback, (64, 74)
             ),
             "embedding": _download_verified_speech_asset(
-                "embedding", embedding_target, selected["id"], progress_callback, (72, 88)
+                "embedding", staged_paths["embedding"], selected["id"], progress_callback, (74, 88)
             ),
         }
-        staged_paths = speech_to_text_component_paths(staged_root)
         if progress_callback:
             progress_callback("正在解压并验证本地语音模型…", 90)
-        _extract_named_tar_member(
-            sense_archive,
-            "/model.int8.onnx",
-            staged_paths["sensevoice_model"],
-        )
-        _extract_named_tar_member(
-            sense_archive,
-            "/tokens.txt",
-            staged_paths["sensevoice_tokens"],
-        )
         _extract_named_tar_member(
             segmentation_archive,
             "/model.onnx",

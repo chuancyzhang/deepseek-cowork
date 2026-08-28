@@ -20,6 +20,7 @@ import markdown
 import socket
 import threading
 import unicodedata
+from decimal import Decimal, InvalidOperation
 from shiboken6 import isValid as is_qt_object_valid
 from urllib.parse import unquote
 from collections import OrderedDict
@@ -251,6 +252,14 @@ from core.memory_update import (
 )
 from core.memory_store import MemoryStore
 from core.token_speed import TokenSpeedTracker
+from core.deepseek_billing import (
+    DEEPSEEK_PRICING_VERSION,
+    DeepSeekBalanceError,
+    billing_snapshot_for_persistence,
+    estimate_deepseek_request_cost,
+    fetch_deepseek_balance,
+    normalize_deepseek_billing_snapshot,
+)
 from core.mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
     TRANSPORT_STDIO,
@@ -1459,7 +1468,47 @@ def format_token_speed_rate(rate):
     return f"{value:.1f} tok/s"
 
 
-def format_token_usage_chip_text(summary, speed_snapshot=None):
+def _deepseek_billing_currency(snapshot):
+    billing = normalize_deepseek_billing_snapshot(snapshot)
+    balance = billing.get("balance") if isinstance(billing.get("balance"), dict) else {}
+    infos = balance.get("balance_infos") if isinstance(balance.get("balance_infos"), list) else []
+    available = {
+        str(item.get("currency") or "").strip().upper()
+        for item in infos
+        if isinstance(item, dict)
+    }
+    if "CNY" in available:
+        return "CNY"
+    if "USD" in available:
+        return "USD"
+    costs = billing.get("costs") if isinstance(billing.get("costs"), dict) else {}
+    return "CNY" if "CNY" in costs else "USD" if "USD" in costs else ""
+
+
+def _format_billing_money(value, currency, balance=False):
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return ""
+    symbol = "¥" if currency == "CNY" else "$" if currency == "USD" else currency
+    if balance:
+        return f"{symbol}{amount:.2f}"
+    if Decimal("0") < amount < Decimal("0.0001"):
+        return f"＜{symbol}0.0001"
+    text = f"{amount:.4f}".rstrip("0").rstrip(".")
+    return f"{symbol}{text or '0'}"
+
+
+def _deepseek_balance_info(snapshot, currency):
+    billing = normalize_deepseek_billing_snapshot(snapshot)
+    balance = billing.get("balance") if isinstance(billing.get("balance"), dict) else {}
+    for info in balance.get("balance_infos", []) if isinstance(balance.get("balance_infos"), list) else []:
+        if isinstance(info, dict) and str(info.get("currency") or "").upper() == currency:
+            return info
+    return {}
+
+
+def format_token_usage_chip_text(summary, speed_snapshot=None, billing_snapshot=None):
     usage = normalize_token_usage_summary(summary)
     total_tokens = usage.get("total_tokens", 0)
     cached_tokens = usage.get("cached_input_tokens", 0)
@@ -1468,18 +1517,29 @@ def format_token_usage_chip_text(summary, speed_snapshot=None):
         text = f"{compact_token_count(total_tokens)} tokens · 缓存 {compact_token_count(cached_tokens)} / {rate:.0f}%"
     else:
         text = f"{compact_token_count(total_tokens)} tokens · 缓存 0"
-    if not isinstance(speed_snapshot, dict):
-        return text
-    if str(speed_snapshot.get("unavailable_reason") or "").strip():
-        return text + " · 速度不可用"
-    if speed_snapshot.get("active"):
-        return text + " · 速度 " + format_token_speed_rate(speed_snapshot.get("current_rate"))
-    if speed_snapshot.get("last_rate") is not None:
-        return text + " · 最近 " + format_token_speed_rate(speed_snapshot.get("last_rate"))
+    if isinstance(speed_snapshot, dict):
+        if str(speed_snapshot.get("unavailable_reason") or "").strip():
+            text += " · 速度不可用"
+        elif speed_snapshot.get("active"):
+            text += " · 速度 " + format_token_speed_rate(speed_snapshot.get("current_rate"))
+        elif speed_snapshot.get("last_rate") is not None:
+            text += " · 最近 " + format_token_speed_rate(speed_snapshot.get("last_rate"))
+    billing = normalize_deepseek_billing_snapshot(billing_snapshot)
+    currency = _deepseek_billing_currency(billing)
+    costs = billing.get("costs") if isinstance(billing.get("costs"), dict) else {}
+    if billing.get("cost_status") == "available" and currency in costs:
+        cost_text = _format_billing_money(costs.get(currency), currency)
+        if cost_text:
+            text += " · 本轮 " + cost_text
+    if billing.get("balance_status") == "succeeded" and currency:
+        info = _deepseek_balance_info(billing, currency)
+        balance_text = _format_billing_money(info.get("total_balance"), currency, balance=True)
+        if balance_text:
+            text += " · 余 " + balance_text
     return text
 
 
-def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None):
+def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None, billing_snapshot=None):
     usage = normalize_token_usage_summary(summary)
     lines = [
         "当前统计桶累计 token 用量（按 Provider / 模型 / 协议隔离）",
@@ -1548,6 +1608,75 @@ def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None):
             lines.append("缓存口径：" + cache_status)
         if str(last.get("request_id") or "").strip():
             lines.append("request_id：" + str(last.get("request_id")))
+    billing = normalize_deepseek_billing_snapshot(billing_snapshot)
+    if billing:
+        lines.extend(["", "本次运行费用（DeepSeek 官方目录价计算）"])
+        run_usage = billing.get("usage") if isinstance(billing.get("usage"), dict) else {}
+        lines.extend(
+            [
+                f"输入：{int(run_usage.get('input_tokens') or 0):,}",
+                f"输出：{int(run_usage.get('output_tokens') or 0):,}",
+                f"缓存输入：{int(run_usage.get('cached_input_tokens') or 0):,}",
+                f"未缓存输入：{int(run_usage.get('uncached_input_tokens') or 0):,}",
+                f"模型请求：{int(run_usage.get('request_count') or 0):,}",
+            ]
+        )
+        periods = list(dict.fromkeys(billing.get("pricing_periods") or []))
+        if periods:
+            labels = {"peak": "高峰", "off_peak": "空闲"}
+            lines.append("计价时段：" + " / ".join(labels.get(item, item) for item in periods))
+        if billing.get("pricing_version"):
+            lines.append("价格版本：" + str(billing.get("pricing_version")))
+        currency = _deepseek_billing_currency(billing)
+        costs = billing.get("costs") if isinstance(billing.get("costs"), dict) else {}
+        if billing.get("cost_status") == "available" and currency in costs:
+            lines.append("本轮预估：" + _format_billing_money(costs.get(currency), currency))
+        else:
+            reason_labels = {
+                "unknown_model": "当前模型没有已核验价格",
+                "missing_usage": "模型未返回完整 token 用量",
+                "missing_cache_usage": "模型未返回可计价的缓存明细",
+                "inconsistent_usage": "token 用量与缓存明细不一致",
+                "missing_request_start": "缺少请求开始时间",
+            }
+            reason = reason_labels.get(
+                str(billing.get("cost_reason_code") or ""),
+                "费用不可计算",
+            )
+            lines.append("本轮预估：不可用（" + reason + "）")
+        balance_status = str(billing.get("balance_status") or "")
+        if balance_status == "succeeded" and currency:
+            balance = billing.get("balance") if isinstance(billing.get("balance"), dict) else {}
+            info = _deepseek_balance_info(billing, currency)
+            lines.append(
+                "运行结束时余额："
+                + _format_billing_money(info.get("total_balance"), currency, balance=True)
+            )
+            lines.append(
+                "其中赠金："
+                + _format_billing_money(info.get("granted_balance"), currency, balance=True)
+                + "；充值余额："
+                + _format_billing_money(info.get("topped_up_balance"), currency, balance=True)
+            )
+            fetched_at = float(balance.get("fetched_at") or 0.0)
+            if fetched_at > 0:
+                lines.append("余额查询时间：" + datetime.fromtimestamp(fetched_at).strftime("%Y-%m-%d %H:%M:%S"))
+            if not bool(balance.get("is_available", True)):
+                lines.append("账户状态：余额不足，当前不可调用 API")
+        elif balance_status == "querying":
+            lines.append("余额：正在后台查询")
+        elif balance_status == "failed":
+            error_labels = {
+                "missing_key": "未配置 API Key",
+                "authentication": "API Key 无权查询余额",
+                "timeout": "查询超时",
+                "network": "网络连接失败",
+                "http_status": "官方接口返回错误",
+                "invalid_response": "官方响应格式异常",
+            }
+            category = str(billing.get("balance_error_category") or "")
+            lines.append("余额：查询失败（" + error_labels.get(category, "未知错误") + "）")
+            lines.append("说明：不影响本轮结果；下次运行结束后会重新查询。")
     return "\n".join(lines)
 
 
@@ -5475,6 +5604,52 @@ class ModelCatalogFetchWorker(QThread):
                 "error_type": type(exc).__name__,
                 "elapsed": elapsed,
             })
+
+
+class DeepSeekBalanceWorker(QThread):
+    result_signal = Signal(dict)
+
+    def __init__(self, session_id, run_id, profile_id, api_key, parent=None):
+        super().__init__(parent)
+        self.session_id = str(session_id or "")
+        self.run_id = str(run_id or "")
+        self.profile_id = str(profile_id or "")
+        self._api_key = str(api_key or "")
+
+    def run(self):
+        try:
+            balance = fetch_deepseek_balance(self._api_key, timeout=6.0)
+            self.result_signal.emit(
+                {
+                    "ok": True,
+                    "session_id": self.session_id,
+                    "run_id": self.run_id,
+                    "profile_id": self.profile_id,
+                    "balance": balance,
+                }
+            )
+        except DeepSeekBalanceError as exc:
+            self.result_signal.emit(
+                {
+                    "ok": False,
+                    "session_id": self.session_id,
+                    "run_id": self.run_id,
+                    "profile_id": self.profile_id,
+                    "error_category": exc.category,
+                }
+            )
+        except Exception:
+            self.result_signal.emit(
+                {
+                    "ok": False,
+                    "session_id": self.session_id,
+                    "run_id": self.run_id,
+                    "profile_id": self.profile_id,
+                    "error_category": "unknown",
+                }
+            )
+        finally:
+            self._api_key = ""
 
 
 class ModelImportDialog(QDialog):
@@ -23073,6 +23248,8 @@ class SessionState:
         self.last_token_usage = {}
         self.token_speed_tracker = TokenSpeedTracker()
         self.token_speed_timer = None
+        self.current_deepseek_billing = {}
+        self.last_deepseek_billing = {}
         self.chat_save_revision = 0
         self.last_chat_recovery_checkpoint_at = 0.0
         self.composer_draft = ""
@@ -29356,6 +29533,343 @@ class MainWindow(QMainWindow):
         )
         return accepted_paths
 
+    def _start_deepseek_billing_run(self, state, run_id):
+        if not state:
+            return
+        state.current_deepseek_billing = {}
+        state.last_deepseek_billing = {}
+        self.refresh_token_usage_label(state.session_id)
+        profile = self._model_profile_snapshot_for_state(state)
+        base_url = str(profile.get("base_url") or "").strip()
+        if not is_deepseek_official_base_url(base_url):
+            return
+        profile_id = str(
+            profile.get("profile_id")
+            or profile.get("id")
+            or profile.get("name")
+            or ""
+        ).strip()
+        state.current_deepseek_billing = {
+            "run_id": str(run_id or "").strip(),
+            "profile_id": profile_id,
+            "model": str(profile.get("model_name") or "").strip(),
+            "base_url": base_url,
+            "request_started_at": {},
+            "counted_request_ids": set(),
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 0,
+                "request_count": 0,
+            },
+            "cost_status": "available",
+            "cost_reason_code": "",
+            "costs": {"CNY": "0", "USD": "0"},
+            "pricing_version": DEEPSEEK_PRICING_VERSION,
+            "pricing_periods": [],
+            "finalized": False,
+        }
+        log_chat_runtime_debug(
+            "billing_started",
+            session_id=state.session_id,
+            run_id=str(run_id or ""),
+            profile_id=profile_id,
+            model=str(profile.get("model_name") or ""),
+        )
+
+    def _safe_start_deepseek_billing_run(self, state, run_id):
+        try:
+            self._start_deepseek_billing_run(state, run_id)
+        except Exception as exc:
+            if state:
+                state.current_deepseek_billing = {}
+                state.last_deepseek_billing = {}
+            log_chat_runtime_debug(
+                "billing_start_failed",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                run_id=str(run_id or ""),
+                error_type=type(exc).__name__,
+            )
+
+    def _record_deepseek_billing_request_start(self, state, event):
+        billing = getattr(state, "current_deepseek_billing", {}) if state else {}
+        if not isinstance(billing, dict) or billing.get("finalized"):
+            return
+        request_id = str((event or {}).get("request_id") or "").strip()
+        if not request_id:
+            return
+        if not is_deepseek_official_base_url((event or {}).get("base_url")):
+            return
+        if str((event or {}).get("model") or "").strip().lower() != str(
+            billing.get("model") or ""
+        ).strip().lower():
+            return
+        try:
+            started_at = float((event or {}).get("timestamp") or time.time())
+        except (TypeError, ValueError):
+            return
+        billing.setdefault("request_started_at", {})[request_id] = started_at
+
+    def _record_deepseek_billing_usage(self, state, usage):
+        billing = getattr(state, "current_deepseek_billing", {}) if state else {}
+        if not isinstance(billing, dict) or billing.get("finalized"):
+            return
+        source = dict(usage) if isinstance(usage, dict) else {}
+        request_id = str(source.get("request_id") or "").strip()
+        if not request_id:
+            return
+        counted_ids = billing.setdefault("counted_request_ids", set())
+        if request_id in counted_ids:
+            return
+        if not is_deepseek_official_base_url(source.get("base_url")):
+            return
+        if str(source.get("model") or "").strip().lower() != str(
+            billing.get("model") or ""
+        ).strip().lower():
+            return
+        source_profile_id = str(source.get("profile_id") or "").strip()
+        if source_profile_id and source_profile_id != str(billing.get("profile_id") or ""):
+            return
+        counted_ids.add(request_id)
+        run_usage = billing.setdefault("usage", {})
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "uncached_input_tokens",
+        ):
+            try:
+                run_usage[key] = int(run_usage.get(key) or 0) + max(0, int(source.get(key) or 0))
+            except (TypeError, ValueError):
+                billing["cost_status"] = "unavailable"
+                billing["cost_reason_code"] = "missing_usage"
+        run_usage["request_count"] = int(run_usage.get("request_count") or 0) + 1
+        started_at = billing.get("request_started_at", {}).get(request_id)
+        if started_at is None:
+            billing["cost_status"] = "unavailable"
+            billing["cost_reason_code"] = "missing_request_start"
+            billing["costs"] = {}
+        elif billing.get("cost_status") == "available":
+            estimate = estimate_deepseek_request_cost(source, started_at)
+            if not estimate.get("ok"):
+                billing["cost_status"] = "unavailable"
+                billing["cost_reason_code"] = str(estimate.get("reason_code") or "unknown")
+                billing["costs"] = {}
+            else:
+                totals = billing.setdefault("costs", {})
+                for currency, amount in (estimate.get("amounts") or {}).items():
+                    totals[currency] = str(
+                        Decimal(str(totals.get(currency) or "0")) + Decimal(str(amount or "0"))
+                    )
+                period = str(estimate.get("period") or "")
+                if period and period not in billing.setdefault("pricing_periods", []):
+                    billing["pricing_periods"].append(period)
+        log_chat_runtime_debug(
+            "usage_recorded",
+            session_id=state.session_id,
+            run_id=str(billing.get("run_id") or ""),
+            request_id=request_id,
+            request_count=int(run_usage.get("request_count") or 0),
+            cost_status=str(billing.get("cost_status") or ""),
+        )
+
+    def _persist_deepseek_billing_state(self, state):
+        if not state:
+            return
+        snapshot = billing_snapshot_for_persistence(
+            getattr(state, "last_deepseek_billing", {})
+        )
+        meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        if snapshot:
+            meta["last_deepseek_billing"] = snapshot
+        else:
+            meta.pop("last_deepseek_billing", None)
+        state.persisted_conversation_meta = meta
+        if not self.chat_storage.has_conversation(state.session_id):
+            return
+        if self._history_writer_owner_for_session(state.session_id) == "daemon":
+            self.chat_storage.update_conversation_meta(
+                state.session_id,
+                {"last_deepseek_billing": snapshot},
+            )
+        else:
+            self.save_chat_history(session_id=state.session_id)
+
+    def _release_deepseek_balance_worker(self, worker_key, worker):
+        workers = getattr(self, "_deepseek_balance_workers", None)
+        if isinstance(workers, dict) and workers.get(worker_key) is worker:
+            workers.pop(worker_key, None)
+        worker.deleteLater()
+
+    def _handle_deepseek_balance_result(self, result):
+        if not isinstance(result, dict):
+            return
+        state = self.get_session(result.get("session_id"))
+        if not state:
+            return
+        billing = normalize_deepseek_billing_snapshot(
+            getattr(state, "last_deepseek_billing", {})
+        )
+        if (
+            str(billing.get("run_id") or "") != str(result.get("run_id") or "")
+            or str(billing.get("profile_id") or "") != str(result.get("profile_id") or "")
+        ):
+            log_chat_runtime_debug(
+                "billing_balance_stale_rejected",
+                session_id=state.session_id,
+                run_id=str(result.get("run_id") or ""),
+                profile_id=str(result.get("profile_id") or ""),
+            )
+            return
+        if result.get("ok") and isinstance(result.get("balance"), dict):
+            billing["balance_status"] = "succeeded"
+            billing["balance"] = result.get("balance")
+            billing.pop("balance_error_category", None)
+            state.last_deepseek_billing = normalize_deepseek_billing_snapshot(billing)
+            self._persist_deepseek_billing_state(state)
+            log_chat_runtime_debug(
+                "balance_succeeded",
+                session_id=state.session_id,
+                run_id=str(result.get("run_id") or ""),
+                profile_id=str(result.get("profile_id") or ""),
+                currency_count=len((result.get("balance") or {}).get("balance_infos") or []),
+            )
+        else:
+            billing["balance_status"] = "failed"
+            billing["balance_error_category"] = str(result.get("error_category") or "unknown")
+            billing.pop("balance", None)
+            state.last_deepseek_billing = normalize_deepseek_billing_snapshot(billing)
+            log_chat_runtime_debug(
+                "balance_failed",
+                session_id=state.session_id,
+                run_id=str(result.get("run_id") or ""),
+                profile_id=str(result.get("profile_id") or ""),
+                error_category=str(result.get("error_category") or "unknown"),
+            )
+        self.refresh_token_usage_label(state.session_id)
+
+    def _safe_handle_deepseek_balance_result(self, result):
+        try:
+            self._handle_deepseek_balance_result(result)
+        except Exception as exc:
+            state = self.get_session((result or {}).get("session_id")) if isinstance(result, dict) else None
+            log_chat_runtime_debug(
+                "billing_balance_handler_failed",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                run_id=str((result or {}).get("run_id") or "") if isinstance(result, dict) else "",
+                error_type=type(exc).__name__,
+            )
+            if state:
+                self.refresh_token_usage_label(state.session_id)
+
+    def _finalize_deepseek_billing(self, state, run_id):
+        billing = getattr(state, "current_deepseek_billing", {}) if state else {}
+        if not isinstance(billing, dict) or not billing or billing.get("finalized"):
+            return False
+        if str(billing.get("run_id") or "") != str(run_id or ""):
+            return False
+        billing["finalized"] = True
+        request_count = int((billing.get("usage") or {}).get("request_count") or 0)
+        if request_count <= 0:
+            log_chat_runtime_debug(
+                "finalized",
+                session_id=state.session_id,
+                run_id=str(run_id or ""),
+                outcome="no_usage",
+            )
+            return False
+        snapshot = normalize_deepseek_billing_snapshot(
+            {
+                "run_id": billing.get("run_id"),
+                "profile_id": billing.get("profile_id"),
+                "model": billing.get("model"),
+                "cost_status": billing.get("cost_status"),
+                "cost_reason_code": billing.get("cost_reason_code"),
+                "costs": billing.get("costs"),
+                "usage": billing.get("usage"),
+                "pricing_version": billing.get("pricing_version"),
+                "pricing_periods": billing.get("pricing_periods"),
+                "completed_at": time.time(),
+                "balance_status": "querying",
+            }
+        )
+        state.last_deepseek_billing = snapshot
+        self._persist_deepseek_billing_state(state)
+        self.refresh_token_usage_label(state.session_id)
+        profile = self._model_profile_for_state(
+            state,
+            model_id=str(billing.get("profile_id") or ""),
+        )
+        resolved_profile_id = str(
+            (profile or {}).get("profile_id")
+            or (profile or {}).get("id")
+            or (profile or {}).get("name")
+            or ""
+        ).strip()
+        profile_matches_run = bool(
+            isinstance(profile, dict)
+            and resolved_profile_id == str(billing.get("profile_id") or "")
+            and str(profile.get("model_name") or "").strip().lower()
+            == str(billing.get("model") or "").strip().lower()
+            and str(profile.get("base_url") or "").strip()
+            == str(billing.get("base_url") or "").strip()
+            and is_deepseek_official_base_url(profile.get("base_url"))
+        )
+        api_key = str(profile.get("api_key") or "").strip() if profile_matches_run else ""
+        worker = DeepSeekBalanceWorker(
+            state.session_id,
+            billing.get("run_id"),
+            billing.get("profile_id"),
+            api_key,
+            self,
+        )
+        worker_key = (
+            state.session_id,
+            str(billing.get("run_id") or ""),
+            str(billing.get("profile_id") or ""),
+        )
+        workers = getattr(self, "_deepseek_balance_workers", None)
+        if not isinstance(workers, dict):
+            self._deepseek_balance_workers = {}
+            workers = self._deepseek_balance_workers
+        workers[worker_key] = worker
+        worker.result_signal.connect(self._safe_handle_deepseek_balance_result)
+        worker.finished.connect(
+            lambda key=worker_key, current=worker: self._release_deepseek_balance_worker(key, current)
+        )
+        log_chat_runtime_debug(
+            "billing_balance_query_started",
+            session_id=state.session_id,
+            run_id=str(billing.get("run_id") or ""),
+            profile_id=str(billing.get("profile_id") or ""),
+        )
+        worker.start()
+        log_chat_runtime_debug(
+            "finalized",
+            session_id=state.session_id,
+            run_id=str(run_id or ""),
+            outcome="balance_query_started",
+            request_count=request_count,
+            cost_status=str(snapshot.get("cost_status") or ""),
+        )
+        return True
+
+    def _safe_finalize_deepseek_billing(self, state, run_id):
+        try:
+            return self._finalize_deepseek_billing(state, run_id)
+        except Exception as exc:
+            billing = getattr(state, "current_deepseek_billing", {}) if state else {}
+            if isinstance(billing, dict):
+                billing["finalized"] = True
+            log_chat_runtime_debug(
+                "billing_finalize_failed",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                run_id=str(run_id or ""),
+                error_type=type(exc).__name__,
+            )
+            return False
+
     def _cleanup_orphan_attachment_dirs(self):
         root = self._managed_attachment_root()
         if not os.path.isdir(root):
@@ -29424,6 +29938,15 @@ class MainWindow(QMainWindow):
     def _start_token_speed_monitor(self, state, event):
         if not state:
             return
+        try:
+            self._record_deepseek_billing_request_start(state, event)
+        except Exception as exc:
+            log_chat_runtime_debug(
+                "billing_request_start_failed",
+                session_id=state.session_id,
+                request_id=str((event or {}).get("request_id") or ""),
+                error_type=type(exc).__name__,
+            )
         request_id = str((event or {}).get("request_id") or "").strip()
         try:
             state.token_speed_tracker.begin(request_id, time.monotonic())
@@ -29537,12 +30060,14 @@ class MainWindow(QMainWindow):
         summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
         state.token_usage_summary = summary
         speed_snapshot = self._token_speed_snapshot(state)
-        label.setText(format_token_usage_chip_text(summary, speed_snapshot))
+        billing_snapshot = getattr(state, "last_deepseek_billing", {})
+        label.setText(format_token_usage_chip_text(summary, speed_snapshot, billing_snapshot))
         label.setDetailText(
             format_token_usage_tooltip(
                 summary,
                 getattr(state, "last_token_usage", {}),
                 speed_snapshot,
+                billing_snapshot,
             )
         )
         has_speed = bool(
@@ -29590,6 +30115,15 @@ class MainWindow(QMainWindow):
                 state.counted_usage_request_ids = counted_request_ids
             state.last_token_usage = dict(last)
             state.last_token_usage["cache_bucket"] = bucket_key
+            try:
+                self._record_deepseek_billing_usage(state, usage)
+            except Exception as exc:
+                log_chat_runtime_debug(
+                    "billing_usage_record_failed",
+                    session_id=state.session_id,
+                    request_id=usage_request_id,
+                    error_type=type(exc).__name__,
+                )
         else:
             current["missing_usage_count"] += 1
             state.last_token_usage = {}
@@ -33978,6 +34512,8 @@ class MainWindow(QMainWindow):
         state.token_usage_buckets = {}
         state.counted_usage_request_ids = set()
         state.last_token_usage = {}
+        state.current_deepseek_billing = {}
+        state.last_deepseek_billing = {}
         if state.token_speed_timer is not None and state.token_speed_timer.isActive():
             state.token_speed_timer.stop()
         state.token_speed_tracker.clear()
@@ -34763,6 +35299,9 @@ class MainWindow(QMainWindow):
             normalize_last_token_usage(conversation_meta.get("last_token_usage"))
             if isinstance(conversation_meta.get("last_token_usage"), dict)
             else {}
+        )
+        state.last_deepseek_billing = normalize_deepseek_billing_snapshot(
+            conversation_meta.get("last_deepseek_billing")
         )
         try:
             state.chat_save_revision = max(
@@ -38525,6 +39064,13 @@ class MainWindow(QMainWindow):
             meta["last_token_usage"] = normalize_last_token_usage(last_token_usage)
         else:
             meta.pop("last_token_usage", None)
+        last_deepseek_billing = billing_snapshot_for_persistence(
+            getattr(state, "last_deepseek_billing", {})
+        )
+        if last_deepseek_billing:
+            meta["last_deepseek_billing"] = last_deepseek_billing
+        else:
+            meta.pop("last_deepseek_billing", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         timeline_events = copy.deepcopy(getattr(state, "ui_timeline_events", []) or [])
@@ -44337,6 +44883,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         self.set_session_phase("Interrupted", state.session_id)
         self.set_session_status("interrupted", state.session_id, save=True)
+        self._safe_finalize_deepseek_billing(state, stopped_run_id)
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
         self.normalize_session_ui(state)
@@ -46748,6 +47295,7 @@ a {{ overflow-wrap: anywhere; }}
             return False
         self._ensure_session_visible_in_history(state)
         self.update_session_tab_title(state.session_id)
+        self._safe_start_deepseek_billing_run(state, submit_request_id)
         run_mode = RUN_MODE_GRILLING if grill_started else RUN_MODE_EXECUTION
         state.pending_clarify_questions = []
         state.clarify_source_user_text = user_text
@@ -49230,7 +49778,10 @@ a {{ overflow-wrap: anywhere; }}
                         f"模型成功终态确认失败({state.session_id}, run={run_id}): {exc}"
                     )
         try:
-            return self._handle_llm_response_impl(result, session_id, turn_id)
+            response_value = self._handle_llm_response_impl(result, session_id, turn_id)
+            if getattr(state, "code_worker", None) is None:
+                self._safe_finalize_deepseek_billing(state, run_id)
+            return response_value
         except Exception as exc:
             log_chat_runtime_debug(
                 "llm_response_finalize_failed",
@@ -49261,6 +49812,8 @@ a {{ overflow-wrap: anywhere; }}
                 )
             if state.session_id == self.current_session_id:
                 self.normalize_session_ui(state)
+            if getattr(state, "code_worker", None) is None:
+                self._safe_finalize_deepseek_billing(state, run_id)
             return None
 
     def _handle_llm_response_impl(self, result, session_id=None, turn_id=None):
@@ -50059,6 +50612,7 @@ a {{ overflow-wrap: anywhere; }}
             self._finish_grill_mode(state, "completed")
             self.set_session_phase("Completed", state.session_id)
             self.set_session_status("completed", state.session_id, save=True)
+            self._safe_finalize_deepseek_billing(state, request_id)
             diagnostic_turn_id = getattr(state, "first_submit_diagnostic_turn_id", 0)
             if diagnostic_turn_id:
                 log_ui_navigation(

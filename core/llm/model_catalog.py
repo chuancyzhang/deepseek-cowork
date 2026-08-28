@@ -60,7 +60,13 @@ def is_deepseek_official_base_url(base_url):
         return False
     if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "api.deepseek.com":
         return False
-    if parsed.port not in (None, 443) or parsed.username or parsed.password:
+    if (
+        parsed.port not in (None, 443)
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
         return False
     return (parsed.path or "").rstrip("/").lower() in {"", "/v1"}
 

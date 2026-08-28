@@ -117,6 +117,7 @@ from core.deliverable_editing import (
     serialize_editor_payload,
 )
 from core.file_capabilities import TEXT_FILE_MAX_BYTES
+from core.audio_attachments import is_audio_attachment, partition_model_visible_attachments
 from core.html_render import extract_renderable_html_response
 from core.inline_visualization import (
     build_visualization_document,
@@ -197,7 +198,9 @@ from core.updater import (
 from core.runtime_components import (
     NODE_SOURCES,
     PYTHON_SOURCES,
+    SPEECH_TO_TEXT_COMPONENT_ID,
     TOOLKITS,
+    install_speech_to_text_component,
     install_node_runtime,
     install_toolkit,
     node_runtime_status,
@@ -205,7 +208,9 @@ from core.runtime_components import (
     selected_source,
     source_options,
     test_source,
+    speech_to_text_component_status,
     toolkit_status,
+    uninstall_speech_to_text_component,
     uninstall_node_runtime,
     uninstall_toolkit,
 )
@@ -8889,6 +8894,8 @@ class RuntimeComponentWorker(QThread):
     def _status(self, include_size=False):
         if self.component_id == "node":
             return node_runtime_status()
+        if self.component_id == SPEECH_TO_TEXT_COMPONENT_ID:
+            return speech_to_text_component_status(include_size=include_size)
         if self.component_id == BROWSER_SKILL_COMPONENT_ID:
             return browser_skill_status(run_diagnostics=False)
         return toolkit_status(self.component_id, include_size=include_size)
@@ -8926,6 +8933,16 @@ class RuntimeComponentWorker(QThread):
             progress = lambda message, percent: self.progress_signal.emit(str(message), int(percent))
             if self.component_id == "node":
                 result = install_node_runtime(self.source, progress) if self.action in {"install", "repair"} else uninstall_node_runtime()
+            elif self.component_id == SPEECH_TO_TEXT_COMPONENT_ID:
+                result = (
+                    install_speech_to_text_component(
+                        self.source,
+                        progress,
+                        force=self.action == "repair",
+                    )
+                    if self.action in {"install", "repair"}
+                    else uninstall_speech_to_text_component()
+                )
             elif self.component_id == BROWSER_SKILL_COMPONENT_ID:
                 if self.action in {"install", "repair"}:
                     result = install_browser_skill(progress)
@@ -9078,7 +9095,7 @@ class ComponentTaskManager(QObject):
 
     def refresh_all_component_statuses(self):
         accepted = False
-        for component_id in ["node", *TOOLKITS.keys()]:
+        for component_id in ["node", SPEECH_TO_TEXT_COMPONENT_ID, *TOOLKITS.keys()]:
             accepted = self.enqueue("probe", component_id) or accepted
         return accepted
 
@@ -9146,6 +9163,8 @@ class ComponentTaskManager(QObject):
     def _component_name(self, component_id):
         if component_id == "node":
             return "Node.js"
+        if component_id == SPEECH_TO_TEXT_COMPONENT_ID:
+            return "语音转文字组件"
         if component_id == BROWSER_SKILL_COMPONENT_ID:
             return "浏览器自动化"
         return (TOOLKITS.get(component_id) or {}).get("name") or component_id
@@ -10690,6 +10709,14 @@ class SettingsDialog(QDialog):
             "JavaScript 执行、npm / npx 与 Node Skill",
             self.component_status_cache.get("node", {}),
         )
+        add_component_row(
+            toolkit_group_layout,
+            SPEECH_TO_TEXT_COMPONENT_ID,
+            "语音转文字组件",
+            "SenseVoice 本地识别、FFmpeg 音频解码和说话人分离\n"
+            "关联：语音转文字 · 模型：ModelScope 国内镜像（SHA-256 校验）",
+            self.component_status_cache.get(SPEECH_TO_TEXT_COMPONENT_ID, {}),
+        )
         for toolkit_id, spec in TOOLKITS.items():
             packages = "、".join(spec["packages"])
             skills = "、".join(spec["skills"]) or "通用 Python 任务"
@@ -11285,7 +11312,8 @@ class SettingsDialog(QDialog):
         try:
             source = (
                 self._current_component_source("node" if component_id == "node" else "python")
-                if action in {"install", "repair"} and component_id != BROWSER_SKILL_COMPONENT_ID
+                if action in {"install", "repair"}
+                and component_id not in {BROWSER_SKILL_COMPONENT_ID, SPEECH_TO_TEXT_COMPONENT_ID}
                 else {}
             )
         except Exception as exc:
@@ -29649,6 +29677,7 @@ class MainWindow(QMainWindow):
         supports_vision=False,
         *,
         resolve_text_references=True,
+        keep_audio_local=False,
     ):
         display_text = str(user_text or "").strip()
         normalized_files = self._normalize_prompt_file_paths(file_paths)
@@ -29659,18 +29688,29 @@ class MainWindow(QMainWindow):
         )
         if referenced_images:
             normalized_files = self._normalize_prompt_file_paths(normalized_files + referenced_images)
+        model_visible_files, local_audio_files = partition_model_visible_attachments(
+            normalized_files,
+            keep_audio_local=bool(keep_audio_local),
+        )
         image_paths = [path for path in normalized_files if self._is_supported_image_attachment(path)]
-        regular_files = [path for path in normalized_files if path not in image_paths]
+        model_image_paths = [path for path in model_visible_files if path in image_paths]
+        regular_files = [path for path in model_visible_files if path not in image_paths]
         content_blocks = []
-        if normalized_files:
-            content_blocks.append(self._build_user_added_files_prompt(normalized_files))
+        if model_visible_files:
+            content_blocks.append(self._build_user_added_files_prompt(model_visible_files))
+        if local_audio_files:
+            content_blocks.append(
+                "[本地音频附件]\n"
+                "本轮音频附件仅授权给本地语音转文字工具；"
+                "未向当前模型提供文件名、路径、大小或音频内容。"
+            )
         if display_text:
             content_blocks.append(display_text)
         content = "\n\n".join([block for block in content_blocks if block]).strip()
         content_parts = []
         if display_text:
             content_parts.append({"type": "text", "text": display_text})
-        for path in image_paths:
+        for path in model_image_paths:
             content_parts.append(
                 {
                     "type": "input_image",
@@ -29693,6 +29733,9 @@ class MainWindow(QMainWindow):
             meta["display_content"] = display_text
         if normalized_files:
             meta["user_added_files"] = normalized_files
+        if local_audio_files:
+            meta["local_only_audio_files"] = local_audio_files
+            meta["local_only_audio_count"] = len(local_audio_files)
         if image_paths:
             meta["user_added_images"] = image_paths
             meta["vision_requested"] = bool(supports_vision)
@@ -29711,6 +29754,29 @@ class MainWindow(QMainWindow):
             "content_parts": content_parts or None,
             "meta": meta or None,
         }
+
+    def _ensure_speech_component_before_submit(self, state, file_paths, *, keep_audio_local):
+        if not keep_audio_local or not any(is_audio_attachment(path) for path in file_paths or []):
+            return True
+        status = speech_to_text_component_status(include_size=False)
+        if status.get("ready"):
+            return True
+        detail = str(status.get("health_error") or "语音转文字组件尚未安装。")
+        log_chat_runtime_debug(
+            "speech_component_preflight_blocked",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            needs_update=bool(status.get("needs_update")),
+            needs_repair=bool(status.get("needs_repair")),
+            error=detail,
+        )
+        self._show_conversation_notice(
+            state,
+            f"{detail} 请先安装或修复“语音转文字组件”，本次录音尚未提交给 AI。",
+            "warning",
+            action_text="打开组件与依赖",
+            action_callback=lambda: self.open_settings("组件与依赖"),
+        )
+        return False
 
     def _message_user_attachments(self, message):
         if not isinstance(message, dict):
@@ -45287,6 +45353,10 @@ a {{ overflow-wrap: anywhere; }}
             prompt_files,
             supports_vision=self._selected_model_supports_vision(state),
             resolve_text_references=False,
+            keep_audio_local=(
+                "speech-to-text"
+                in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+            ),
         )
         if not payload.get("content"):
             return None
@@ -45306,6 +45376,8 @@ a {{ overflow-wrap: anywhere; }}
             "user_added_images",
             "vision_requested",
             "workspace_referenced_images",
+            "local_only_audio_files",
+            "local_only_audio_count",
         ):
             meta.pop(key, None)
         meta.update(payload.get("meta") or {})
@@ -45692,10 +45764,21 @@ a {{ overflow-wrap: anywhere; }}
             return False
         if not self._ensure_vision_attachment_support(state, prompt_files):
             return False
+        keep_audio_local = (
+            "speech-to-text"
+            in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        )
+        if not self._ensure_speech_component_before_submit(
+            state,
+            prompt_files,
+            keep_audio_local=keep_audio_local,
+        ):
+            return False
         payload = self._build_user_message_payload(
             raw_user_text,
             prompt_files,
             supports_vision=self._selected_model_supports_vision(state),
+            keep_audio_local=keep_audio_local,
         )
         if not payload.get("content"):
             return False
@@ -46101,7 +46184,22 @@ a {{ overflow-wrap: anywhere; }}
             if state.session_id == self.current_session_id:
                 QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
-        payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
+        keep_audio_local = (
+            "speech-to-text"
+            in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        )
+        if not self._ensure_speech_component_before_submit(
+            state,
+            prompt_files,
+            keep_audio_local=keep_audio_local,
+        ):
+            return False
+        payload = self._build_user_message_payload(
+            raw_user_text,
+            prompt_files,
+            supports_vision=supports_vision,
+            keep_audio_local=keep_audio_local,
+        )
         if isinstance(user_message_meta, dict) and user_message_meta.get("display_content") is not None:
             payload["display_content"] = str(user_message_meta.get("display_content") or "")
         user_text = payload.get("content") or ""
@@ -46143,6 +46241,7 @@ a {{ overflow-wrap: anywhere; }}
             delegated_text,
             prompt_files,
             supports_vision=supports_vision,
+            keep_audio_local=keep_audio_local,
         ).get("content") or delegated_text
         if check_duplicates:
             # Compatibility flag retained for existing callers.  Idempotency

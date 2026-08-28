@@ -1,16 +1,14 @@
 import json
 import os
 import re
-import tarfile
 import tempfile
-import threading
 import time
-import urllib.request
 from datetime import date
 
 from PySide6.QtCore import QObject, Qt
 
-from core.env_utils import get_app_data_dir
+from core.audio_attachments import is_audio_attachment
+from core.runtime_components import speech_to_text_component_status
 from core.sandbox_runtime import run_skill_script_in_sandbox
 
 
@@ -19,18 +17,10 @@ SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"
 SUPPORTED_EXTENSIONS = {
     ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".webm"
 }
-MODELS_VERSION = "v1"
-SEGMENTATION_ARCHIVE_URL = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
-)
-SEGMENTATION_ARCHIVE_SIZE = 6_958_444
-EMBEDDING_MODEL_URL = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
-)
-EMBEDDING_MODEL_SIZE = 39_593_761
-_MODEL_LOCK = threading.RLock()
+
+
+class ComponentNotReadyError(RuntimeError):
+    pass
 
 
 def _json(payload):
@@ -81,22 +71,32 @@ def _is_within(path, root):
 
 
 def _attachment_paths(context):
-    paths = set()
+    paths = []
+    seen = set()
     if not isinstance(context, dict):
         return paths
-    for message in context.get("current_messages_snapshot") or []:
+    for message in reversed(context.get("current_messages_snapshot") or []):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
         for value in meta.get("user_added_files") or []:
             if value:
-                paths.add(os.path.normcase(os.path.abspath(str(value))))
+                resolved = os.path.abspath(str(value))
+                key = os.path.normcase(resolved)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(resolved)
         for part in message.get("content_parts") or []:
             if not isinstance(part, dict) or part.get("type") not in {"input_file", "input_audio"}:
                 continue
             value = part.get("path")
             if value:
-                paths.add(os.path.normcase(os.path.abspath(str(value))))
+                resolved = os.path.abspath(str(value))
+                key = os.path.normcase(resolved)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(resolved)
+        break
     return paths
 
 
@@ -106,16 +106,30 @@ def _resolve_audio_path(audio_path, workspace_dir, context):
         raise ValueError("当前工作区不可用。")
     raw = os.path.expandvars(os.path.expanduser(str(audio_path or "").strip()))
     if not raw:
-        raise ValueError("audio_path 不能为空。")
-    resolved = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(workspace_root, raw))
+        candidates = [
+            path
+            for path in _attachment_paths(context)
+            if is_audio_attachment(path) and os.path.isfile(path)
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                "未指定 audio_path 时，本轮必须恰好包含一个本地音频附件。"
+                f"当前找到 {len(candidates)} 个。"
+            )
+        resolved = candidates[0]
+        auto_selected = True
+    else:
+        resolved = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(workspace_root, raw))
+        auto_selected = False
     if not os.path.isfile(resolved):
         raise FileNotFoundError(f"音频文件不存在：{resolved}")
     if os.path.splitext(resolved)[1].lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError("不支持该文件格式。支持 WAV、MP3、M4A、AAC、FLAC、OGG、Opus、MP4 和 WebM。")
+    attachment_keys = {os.path.normcase(path) for path in _attachment_paths(context)}
     key = os.path.normcase(resolved)
-    if not _is_within(resolved, workspace_root) and key not in _attachment_paths(context):
+    if not _is_within(resolved, workspace_root) and key not in attachment_keys:
         raise PermissionError("只能读取当前工作区文件或本会话中用户明确附加的文件。")
-    return workspace_root, resolved
+    return workspace_root, resolved, auto_selected
 
 
 def _safe_stem(path):
@@ -161,118 +175,22 @@ def _atomic_write_text(path, content):
         raise
 
 
-def _model_paths():
-    root = os.path.join(get_app_data_dir(), "speech-to-text", "models", MODELS_VERSION)
-    return {
-        "root": root,
-        "segmentation": os.path.join(root, "segmentation", "model.onnx"),
-        "embedding": os.path.join(root, "embedding", "3dspeaker.onnx"),
-    }
-
-
 def _raise_if_aborted(abort_state):
     if isinstance(abort_state, dict) and abort_state.get("aborted"):
         raise InterruptedError("用户已停止语音转文字任务。")
 
 
-def _download_to_temp(url, expected_size, directory, abort_state):
-    _raise_if_aborted(abort_state)
-    os.makedirs(directory, exist_ok=True)
-    handle, temp_path = tempfile.mkstemp(prefix=".model-download-", suffix=".tmp", dir=directory)
-    os.close(handle)
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "DeepSeekCowork/speech-to-text"})
-        with urllib.request.urlopen(request, timeout=120) as response, open(temp_path, "wb") as output:
-            while True:
-                _raise_if_aborted(abort_state)
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                output.write(chunk)
-        actual_size = os.path.getsize(temp_path)
-        if actual_size != expected_size:
-            raise RuntimeError(f"模型下载大小不匹配：期望 {expected_size}，实际 {actual_size}")
-        return temp_path
-    except Exception:
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _install_segmentation_model(target, context, abort_state):
-    _emit_step(context, "首次使用说话人分离：正在下载本地分段模型（约 7 MB）…")
-    archive_path = _download_to_temp(
-        SEGMENTATION_ARCHIVE_URL,
-        SEGMENTATION_ARCHIVE_SIZE,
-        os.path.dirname(target),
-        abort_state,
-    )
-    extracted_temp = ""
-    try:
-        with tarfile.open(archive_path, mode="r:bz2") as archive:
-            candidates = [
-                member for member in archive.getmembers()
-                if member.isfile() and member.name.replace("\\", "/").endswith("/model.onnx")
-            ]
-            if len(candidates) != 1:
-                raise RuntimeError("说话人分段模型归档结构无效。")
-            source = archive.extractfile(candidates[0])
-            if source is None:
-                raise RuntimeError("无法读取说话人分段模型。")
-            handle, extracted_temp = tempfile.mkstemp(
-                prefix=".segmentation-", suffix=".onnx", dir=os.path.dirname(target)
-            )
-            with os.fdopen(handle, "wb") as output:
-                while True:
-                    _raise_if_aborted(abort_state)
-                    chunk = source.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-            if os.path.getsize(extracted_temp) < 1024 * 1024:
-                raise RuntimeError("说话人分段模型文件异常。")
-            os.replace(extracted_temp, target)
-            extracted_temp = ""
-    finally:
-        for path in (archive_path, extracted_temp):
-            if path:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-
-
-def _install_embedding_model(target, context, abort_state):
-    _emit_step(context, "首次使用说话人分离：正在下载本地声纹嵌入模型（约 40 MB）…")
-    temp_path = _download_to_temp(
-        EMBEDDING_MODEL_URL,
-        EMBEDDING_MODEL_SIZE,
-        os.path.dirname(target),
-        abort_state,
-    )
-    try:
-        os.replace(temp_path, target)
-        temp_path = ""
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-
-
-def _ensure_diarization_models(context, abort_state):
-    paths = _model_paths()
-    with _MODEL_LOCK:
-        _raise_if_aborted(abort_state)
-        os.makedirs(os.path.dirname(paths["segmentation"]), exist_ok=True)
-        os.makedirs(os.path.dirname(paths["embedding"]), exist_ok=True)
-        if not os.path.isfile(paths["segmentation"]):
-            _install_segmentation_model(paths["segmentation"], context, abort_state)
-        if not os.path.isfile(paths["embedding"]):
-            _install_embedding_model(paths["embedding"], context, abort_state)
+def _require_component():
+    status = speech_to_text_component_status(include_size=False)
+    if not status.get("ready"):
+        detail = str(status.get("health_error") or "语音转文字组件尚未安装。")
+        raise ComponentNotReadyError(
+            f"{detail} 请前往“设置 → 组件与依赖”安装或修复“语音转文字组件”。"
+        )
+    paths = status.get("model_paths") if isinstance(status.get("model_paths"), dict) else {}
+    required = {"sensevoice_model", "sensevoice_tokens", "segmentation", "embedding"}
+    if not required.issubset(paths):
+        raise ComponentNotReadyError("语音转文字组件状态缺少模型路径，请在“组件与依赖”中修复。")
     return paths
 
 
@@ -348,22 +266,29 @@ def transcribe_audio(
         if not isinstance(polish, bool):
             raise ValueError("polish 必须是布尔值，并且必须来自用户对是否 AI 润色的明确选择。")
         model = str(model or "sensevoice").strip().lower()
-        if model not in {"sensevoice", "whisper"}:
-            raise ValueError("model 只能是 sensevoice 或 whisper。")
+        if model != "sensevoice":
+            raise ValueError("model 目前只支持 sensevoice。")
         language = str(language or "auto").strip().lower()
         if language not in {"auto", "zh", "en", "ja", "ko", "yue"}:
             raise ValueError("language 只能是 auto、zh、en、ja、ko 或 yue。")
-        if model == "whisper" and language not in {"auto", "en"}:
-            raise ValueError("Whisper tiny.en 只支持英文；language 必须是 auto 或 en。")
         speaker_count = int(speaker_count or 0)
         if speaker_count < 0 or speaker_count > 20:
             raise ValueError("speaker_count 必须是 0（自动估算）或 1 到 20。")
         timeout_seconds = max(30, min(int(timeout_seconds or 1800), 3600))
-        workspace_root, source_path = _resolve_audio_path(audio_path, workspace_dir, context)
+        model_paths = _require_component()
+        workspace_root, source_path, auto_selected = _resolve_audio_path(
+            audio_path,
+            workspace_dir,
+            context,
+        )
         final_path = _resolve_workspace_markdown(
             output_path,
             workspace_root,
-            f"{_safe_stem(source_path)}-transcript.md",
+            (
+                f"local-audio-transcript-{int(started_at)}.md"
+                if auto_selected
+                else f"{_safe_stem(source_path)}-transcript.md"
+            ),
         )
         raw_path = _raw_sidecar_path(final_path) if polish else final_path
         _check_write_target(final_path, bool(overwrite))
@@ -382,14 +307,11 @@ def transcribe_audio(
         abort_state = _init_abort_state(context)
         _raise_if_aborted(abort_state)
         _emit_diagnostic(context, "start", started_at, operation="local_transcription_pipeline")
-        model_paths = {"segmentation": "", "embedding": ""}
-        if diarize:
-            model_paths = _ensure_diarization_models(context, abort_state)
-
         args = [
             "--input", source_path,
-            "--model", model,
             "--language", language,
+            "--sensevoice-model", model_paths["sensevoice_model"],
+            "--sensevoice-tokens", model_paths["sensevoice_tokens"],
             "--diarize", "true" if diarize else "false",
             "--speaker-count", str(speaker_count),
         ]
@@ -437,11 +359,20 @@ def transcribe_audio(
             privacy="local-raw" if polish else "local-only",
         )
         _atomic_write_text(raw_path, raw_markdown)
+        if polish:
+            fallback_markdown = _render_markdown(
+                source_path,
+                payload,
+                transcript,
+                polished=False,
+                privacy="local-raw-fallback",
+            )
+            _atomic_write_text(final_path, fallback_markdown)
 
         response = {
             "ok": True,
             "status": "completed",
-            "output_path": final_path if not polish else "",
+            "output_path": final_path,
             "raw_transcript_path": raw_path,
             "suggested_output_path": final_path if polish else "",
             "model": payload.get("model") or model,
@@ -473,6 +404,13 @@ def transcribe_audio(
             polish=polish,
         )
         return _json(response)
+    except ComponentNotReadyError as exc:
+        _emit_diagnostic(context, "error", started_at, error_type=type(exc).__name__)
+        return _json(_error(
+            "component_not_ready",
+            str(exc),
+            "打开“设置 → 组件与依赖”，安装或修复“语音转文字组件”后重试。",
+        ))
     except InterruptedError as exc:
         _emit_diagnostic(context, "finish", started_at, outcome="aborted")
         return _json(_error("aborted", str(exc), "可重新发起转录。"))
@@ -481,7 +419,7 @@ def transcribe_audio(
         return _json(_error(
             "transcription_failed",
             str(exc),
-            "检查文件、网络和 Skill 依赖状态后重试；依赖失败可在 AI 能力商城使用“重试依赖”。",
+            "检查音频文件与“设置 → 组件与依赖 → 语音转文字组件”的状态后重试。",
         ))
 
 
@@ -545,8 +483,20 @@ def save_transcript_result(
             raise ValueError("原始转录文件必须是由 transcribe_audio 生成的 .raw.md 文件。")
         _emit_diagnostic(context, "start", started_at, operation="save_transcript_result")
         final_path = _resolve_workspace_markdown(output_path, workspace_root, default_output)
-        _check_write_target(final_path, bool(overwrite))
         frontmatter, raw_body = _read_markdown_parts(raw_path)
+        generated_fallback = False
+        if os.path.isfile(final_path) and os.path.normcase(final_path) == os.path.normcase(default_output):
+            try:
+                fallback_frontmatter, fallback_body = _read_markdown_parts(final_path)
+                generated_fallback = (
+                    fallback_body == raw_body
+                    and 'privacy: "local-raw-fallback"' in fallback_frontmatter
+                    and "ai_polished: false" in fallback_frontmatter
+                )
+            except (OSError, ValueError):
+                generated_fallback = False
+        if not generated_fallback:
+            _check_write_target(final_path, bool(overwrite))
         if polished:
             body = str(polished_text or "").strip()
             if not body:
@@ -591,20 +541,23 @@ TOOL_EXPORTS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "audio_path": {"type": "string", "description": "Workspace-relative path or exact user attachment path."},
+                "audio_path": {
+                    "type": "string",
+                    "description": "Optional workspace-relative path or exact attachment path. Omit it to use the single local audio attachment from the current user turn."
+                },
                 "polish": {
                     "type": "boolean",
                     "description": "Required explicit user choice. False keeps transcript text out of model context; true returns it for current-model polishing."
                 },
                 "diarize": {"type": "boolean", "description": "Separate speakers. Defaults to true."},
                 "speaker_count": {"type": "integer", "minimum": 0, "maximum": 20, "description": "Known number of speakers, or 0 for automatic estimation."},
-                "model": {"type": "string", "enum": ["sensevoice", "whisper"], "description": "Local ASR model. Defaults to sensevoice."},
+                "model": {"type": "string", "enum": ["sensevoice"], "description": "Verified local ASR model. Defaults to sensevoice."},
                 "language": {"type": "string", "enum": ["auto", "zh", "en", "ja", "ko", "yue"], "description": "Language hint for SenseVoice."},
                 "output_path": {"type": "string", "description": "Optional workspace-relative Markdown output path."},
                 "overwrite": {"type": "boolean", "description": "Overwrite existing output only after explicit user approval."},
                 "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3600}
             },
-            "required": ["audio_path", "polish"]
+            "required": ["polish"]
         },
         "destructive": False,
         "read_only": False,

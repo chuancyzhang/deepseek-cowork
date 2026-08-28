@@ -824,6 +824,7 @@ def install_skill_dependencies(
     node_dependencies=None,
     force=False,
     timeout_seconds=300,
+    node_registry_url=None,
 ):
     python_dependencies = [p for p in (python_dependencies or []) if isinstance(p, str) and p.strip()]
     node_dependencies = [p for p in (node_dependencies or []) if isinstance(p, str) and p.strip()]
@@ -865,7 +866,13 @@ def install_skill_dependencies(
                 raise RuntimeError("Sandbox npm runtime is missing.")
             node_root = _skill_node_root(skill_id)
             os.makedirs(node_root, exist_ok=True)
-            cmd = _node_script_command(npm_exe) + ["install", "--prefix", node_root] + node_dependencies
+            cmd = _node_script_command(npm_exe) + ["install", "--prefix", node_root]
+            registry_url = str(node_registry_url or "").strip().rstrip("/")
+            if registry_url:
+                if not registry_url.lower().startswith("https://"):
+                    raise ValueError("npm registry must use HTTPS.")
+                cmd.extend(["--registry", registry_url])
+            cmd.extend(node_dependencies)
             out = subprocess.check_output(
                 cmd,
                 env=env,

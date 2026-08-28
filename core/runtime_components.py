@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from datetime import datetime, timezone
 import zipfile
@@ -29,6 +30,60 @@ NODE_VERSION = "v24.14.1"
 NODE_ARCHIVE = "node-v24.14.1-win-x64.zip"
 NODE_SHA256 = "6E50CE5498C0CEBC20FD39AB3FF5DF836ED2F8A31AA093CECAD8497CFF126D70"
 TOOLKIT_MARKER_SCHEMA = 2
+SPEECH_TO_TEXT_COMPONENT_ID = "speech-to-text"
+SPEECH_TO_TEXT_COMPONENT_SCHEMA = 1
+SPEECH_TO_TEXT_SKILL_ID = "speech-to-text"
+SPEECH_TO_TEXT_NODE_DEPENDENCIES = [
+    "ffmpeg-static@5.3.0",
+    "sherpa-onnx-node@1.12.33",
+]
+SPEECH_TO_TEXT_NPM_REGISTRY = "https://registry.npmmirror.com"
+
+SPEECH_TO_TEXT_ASSETS = {
+    "sensevoice": {
+        "filename": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        "size": 163_002_883,
+        "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+        "github_url": (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+        ),
+        "modelscope_url": (
+            "https://modelscope.cn/models/zhaochaoqun/sherpa-onnx-asr-models/resolve/master/"
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+        ),
+    },
+    "segmentation": {
+        "filename": "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+        "size": 6_958_444,
+        "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+        "github_url": (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+        ),
+    },
+    "embedding": {
+        "filename": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        "size": 39_593_761,
+        "sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+        "github_url": (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-recongition-models/"
+            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+        ),
+    },
+}
+
+SPEECH_TO_TEXT_MODEL_SOURCES = {
+    "modelscope": {
+        "id": "modelscope",
+        "name": "ModelScope 国内镜像 + sherpa-onnx 官方源",
+    },
+    "github": {
+        "id": "github",
+        "name": "sherpa-onnx GitHub 官方源",
+    },
+}
 
 TOOLKITS = {
     "documents": {
@@ -61,6 +116,339 @@ TOOLKITS = {
         "skills": ["web-search"],
     },
 }
+
+
+def speech_to_text_component_root():
+    return os.path.join(
+        get_app_data_dir(),
+        "runtime_sandbox",
+        "v1",
+        "components",
+        SPEECH_TO_TEXT_COMPONENT_ID,
+    )
+
+
+def speech_to_text_component_paths(root=None):
+    base = os.path.abspath(root or speech_to_text_component_root())
+    return {
+        "root": base,
+        "marker": os.path.join(base, "component.json"),
+        "sensevoice_model": os.path.join(base, "models", "sensevoice", "model.int8.onnx"),
+        "sensevoice_tokens": os.path.join(base, "models", "sensevoice", "tokens.txt"),
+        "segmentation": os.path.join(base, "models", "diarization", "segmentation.onnx"),
+        "embedding": os.path.join(base, "models", "diarization", "embedding.onnx"),
+    }
+
+
+def _speech_to_text_definition_hash():
+    payload = {
+        "schema": SPEECH_TO_TEXT_COMPONENT_SCHEMA,
+        "node_dependencies": SPEECH_TO_TEXT_NODE_DEPENDENCIES,
+        "npm_registry": SPEECH_TO_TEXT_NPM_REGISTRY,
+        "assets": {
+            name: {
+                "filename": item["filename"],
+                "size": item["size"],
+                "sha256": item["sha256"],
+            }
+            for name, item in SPEECH_TO_TEXT_ASSETS.items()
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_speech_to_text_marker(root=None):
+    marker_path = speech_to_text_component_paths(root)["marker"]
+    try:
+        with open(marker_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _speech_source(source=None):
+    source_id = str((source or {}).get("id") or "modelscope").strip().lower()
+    if source_id not in SPEECH_TO_TEXT_MODEL_SOURCES:
+        raise ValueError(f"未知语音模型下载源：{source_id}")
+    return dict(SPEECH_TO_TEXT_MODEL_SOURCES[source_id])
+
+
+def _speech_asset_url(asset_name, source_id):
+    spec = SPEECH_TO_TEXT_ASSETS[asset_name]
+    if asset_name == "sensevoice" and source_id == "modelscope":
+        return spec["modelscope_url"]
+    return spec["github_url"]
+
+
+def _download_verified_speech_asset(asset_name, target, source_id, progress_callback=None, progress_range=(0, 100)):
+    spec = SPEECH_TO_TEXT_ASSETS[asset_name]
+    url = _speech_asset_url(asset_name, source_id)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    digest = hashlib.sha256()
+    downloaded = 0
+    expected_size = int(spec["size"])
+    start_progress, end_progress = progress_range
+    with requests.get(
+        url,
+        stream=True,
+        timeout=(15, 120),
+        headers={"User-Agent": "deepseek-cowork-components"},
+    ) as response:
+        response.raise_for_status()
+        with open(target, "wb") as handle:
+            for chunk in response.iter_content(1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                digest.update(chunk)
+                downloaded += len(chunk)
+                if progress_callback and expected_size:
+                    ratio = min(1.0, downloaded / expected_size)
+                    progress_callback(
+                        f"正在下载 {spec['filename']}…",
+                        int(start_progress + (end_progress - start_progress) * ratio),
+                    )
+    if downloaded != expected_size:
+        raise RuntimeError(
+            f"{spec['filename']} 大小校验失败：期望 {expected_size}，实际 {downloaded}"
+        )
+    actual_hash = digest.hexdigest().lower()
+    if actual_hash != spec["sha256"]:
+        raise RuntimeError(
+            f"{spec['filename']} SHA-256 校验失败："
+            f"期望 {spec['sha256']}，实际 {actual_hash}"
+        )
+    return {"url": url, "size": downloaded, "sha256": actual_hash}
+
+
+def _extract_named_tar_member(archive_path, suffix, target):
+    normalized_suffix = str(suffix).replace("\\", "/")
+    with tarfile.open(archive_path, mode="r:bz2") as archive:
+        candidates = [
+            member
+            for member in archive.getmembers()
+            if member.isfile()
+            and member.name.replace("\\", "/").endswith(normalized_suffix)
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"模型归档 {os.path.basename(archive_path)} 中未找到唯一的 {normalized_suffix}。"
+            )
+        source = archive.extractfile(candidates[0])
+        if source is None:
+            raise RuntimeError(f"无法读取模型归档成员：{normalized_suffix}")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+
+
+def _speech_component_file_records(paths):
+    root = paths["root"]
+    records = {}
+    for key in ("sensevoice_model", "sensevoice_tokens", "segmentation", "embedding"):
+        path = paths[key]
+        if not os.path.isfile(path):
+            raise RuntimeError(f"语音组件缺少文件：{path}")
+        records[key] = {
+            "path": os.path.relpath(path, root).replace("\\", "/"),
+            "size": os.path.getsize(path),
+            "sha256": _sha256_file(path),
+        }
+    return records
+
+
+def speech_to_text_component_status(include_size=False):
+    from core.sandbox_runtime import read_skill_dependency_status, skill_dependency_hash
+
+    paths = speech_to_text_component_paths()
+    root_exists = os.path.isdir(paths["root"])
+    marker = _read_speech_to_text_marker()
+    installed = bool(root_exists and marker)
+    definition_hash = _speech_to_text_definition_hash()
+    needs_update = bool(installed and marker.get("definition_hash") != definition_hash)
+    errors = []
+    if root_exists and not marker:
+        errors.append("缺少语音组件健康标记。")
+    if installed and int(marker.get("schema") or 0) != SPEECH_TO_TEXT_COMPONENT_SCHEMA:
+        errors.append("语音组件由旧版本安装，需要更新。")
+    if needs_update:
+        errors.append("语音组件定义已变化，需要更新。")
+
+    file_records = marker.get("files") if isinstance(marker.get("files"), dict) else {}
+    if installed and not needs_update:
+        for key in ("sensevoice_model", "sensevoice_tokens", "segmentation", "embedding"):
+            expected = file_records.get(key) if isinstance(file_records.get(key), dict) else {}
+            path = paths[key]
+            if not expected or not os.path.isfile(path):
+                errors.append(f"缺少已验证模型文件：{key}")
+                continue
+            if os.path.getsize(path) != int(expected.get("size") or -1):
+                errors.append(f"模型文件大小异常：{key}")
+                continue
+            if include_size and _sha256_file(path) != str(expected.get("sha256") or "").lower():
+                errors.append(f"模型文件 SHA-256 异常：{key}")
+
+    dependency_status = read_skill_dependency_status(SPEECH_TO_TEXT_SKILL_ID)
+    dependency_hash = skill_dependency_hash([], SPEECH_TO_TEXT_NODE_DEPENDENCIES)
+    dependencies_ready = bool(
+        dependency_status.get("ok")
+        and dependency_status.get("hash") == dependency_hash
+    )
+    if installed and not dependencies_ready:
+        errors.append("语音转文字 Node 依赖未就绪。")
+
+    healthy = bool(installed and not needs_update and dependencies_ready and not errors)
+    return {
+        "id": SPEECH_TO_TEXT_COMPONENT_ID,
+        "name": "语音转文字组件",
+        "description": "SenseVoice 本地识别、FFmpeg 音频解码与说话人分离",
+        "skills": [SPEECH_TO_TEXT_SKILL_ID],
+        "installed": installed,
+        "healthy": healthy,
+        "ready": healthy,
+        "needs_update": needs_update,
+        "needs_repair": bool(root_exists and not healthy and not needs_update),
+        "health_error": "\n".join(errors),
+        "source": str(marker.get("source_name") or ""),
+        "source_id": str(marker.get("source_id") or ""),
+        "size": (
+            _directory_size(paths["root"])
+            + _directory_size(
+                os.path.join(
+                    get_app_data_dir(),
+                    "runtime_sandbox",
+                    "v1",
+                    "skills",
+                    SPEECH_TO_TEXT_SKILL_ID,
+                )
+            )
+            if include_size
+            else 0
+        ),
+        "model_paths": {
+            key: paths[key]
+            for key in ("sensevoice_model", "sensevoice_tokens", "segmentation", "embedding")
+        } if healthy else {},
+    }
+
+
+def install_speech_to_text_component(source=None, progress_callback=None, force=False):
+    from core.sandbox_runtime import install_skill_dependencies
+
+    selected = _speech_source(source)
+    if progress_callback:
+        progress_callback("正在从 npmmirror 准备本地语音运行依赖…", 2)
+    dependency_status = install_skill_dependencies(
+        SPEECH_TO_TEXT_SKILL_ID,
+        node_dependencies=SPEECH_TO_TEXT_NODE_DEPENDENCIES,
+        force=bool(force),
+        timeout_seconds=1800,
+        node_registry_url=SPEECH_TO_TEXT_NPM_REGISTRY,
+    )
+    if not dependency_status.get("ok"):
+        raise RuntimeError(
+            "语音转文字 Node 依赖安装失败："
+            + str(dependency_status.get("message") or "未知错误")
+        )
+
+    target_root = speech_to_text_component_root()
+    components_root = os.path.dirname(target_root)
+    os.makedirs(components_root, exist_ok=True)
+    staged_root = tempfile.mkdtemp(prefix=".speech-to-text-", dir=components_root)
+    downloads = os.path.join(staged_root, "downloads")
+    os.makedirs(downloads, exist_ok=True)
+    try:
+        sense_archive = os.path.join(downloads, SPEECH_TO_TEXT_ASSETS["sensevoice"]["filename"])
+        segmentation_archive = os.path.join(downloads, SPEECH_TO_TEXT_ASSETS["segmentation"]["filename"])
+        embedding_target = speech_to_text_component_paths(staged_root)["embedding"]
+        asset_records = {
+            "sensevoice": _download_verified_speech_asset(
+                "sensevoice", sense_archive, selected["id"], progress_callback, (8, 62)
+            ),
+            "segmentation": _download_verified_speech_asset(
+                "segmentation", segmentation_archive, selected["id"], progress_callback, (62, 72)
+            ),
+            "embedding": _download_verified_speech_asset(
+                "embedding", embedding_target, selected["id"], progress_callback, (72, 88)
+            ),
+        }
+        staged_paths = speech_to_text_component_paths(staged_root)
+        if progress_callback:
+            progress_callback("正在解压并验证本地语音模型…", 90)
+        _extract_named_tar_member(
+            sense_archive,
+            "/model.int8.onnx",
+            staged_paths["sensevoice_model"],
+        )
+        _extract_named_tar_member(
+            sense_archive,
+            "/tokens.txt",
+            staged_paths["sensevoice_tokens"],
+        )
+        _extract_named_tar_member(
+            segmentation_archive,
+            "/model.onnx",
+            staged_paths["segmentation"],
+        )
+        file_records = _speech_component_file_records(staged_paths)
+        marker = {
+            "schema": SPEECH_TO_TEXT_COMPONENT_SCHEMA,
+            "id": SPEECH_TO_TEXT_COMPONENT_ID,
+            "definition_hash": _speech_to_text_definition_hash(),
+            "verified": True,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "source_id": selected["id"],
+            "source_name": selected["name"],
+            "npm_registry": SPEECH_TO_TEXT_NPM_REGISTRY,
+            "assets": asset_records,
+            "files": file_records,
+        }
+        with open(staged_paths["marker"], "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, ensure_ascii=False, indent=2)
+        shutil.rmtree(downloads)
+        _replace_toolkit_root(staged_root, target_root)
+        staged_root = ""
+        if progress_callback:
+            progress_callback("语音转文字组件已安装并通过完整性验证。", 100)
+    finally:
+        if staged_root and os.path.isdir(staged_root):
+            shutil.rmtree(staged_root, ignore_errors=True)
+    status = speech_to_text_component_status(include_size=True)
+    if not status.get("healthy"):
+        raise RuntimeError(status.get("health_error") or "语音转文字组件安装后未通过健康检查。")
+    return status
+
+
+def uninstall_speech_to_text_component():
+    from core.sandbox_runtime import reset_native_library_dir_caches
+
+    component_root = speech_to_text_component_root()
+    skill_root = os.path.join(
+        get_app_data_dir(),
+        "runtime_sandbox",
+        "v1",
+        "skills",
+        SPEECH_TO_TEXT_SKILL_ID,
+    )
+    for target in (component_root, skill_root):
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+    reset_native_library_dir_caches(SPEECH_TO_TEXT_SKILL_ID)
+    return speech_to_text_component_status(include_size=True)
 
 
 def default_download_sources():

@@ -51,20 +51,6 @@ function run(executable, args, options = {}) {
   return String(result.stdout || '');
 }
 
-function extractJson(text) {
-  const value = String(text || '').trim();
-  try {
-    return JSON.parse(value);
-  } catch {
-    const start = value.indexOf('{');
-    const end = value.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      return JSON.parse(value.slice(start, end + 1));
-    }
-    throw new Error('coli did not return valid JSON output.');
-  }
-}
-
 function timestampValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -184,14 +170,13 @@ async function main() {
   }
   const args = parseArgs(process.argv.slice(2));
   const input = path.resolve(args.input || '');
-  const model = args.model || 'sensevoice';
   const language = args.language || 'auto';
   const diarize = args.diarize !== 'false';
   const speakerCount = Number.parseInt(args['speaker-count'] || '0', 10);
   const nodeModules = nodeModulesRoot();
   const require = createRequire(import.meta.url);
   const ffmpegPath = require(path.join(nodeModules, 'ffmpeg-static'));
-  const coliCli = path.join(nodeModules, '@marswave', 'coli', 'distribution', 'source', 'cli.js');
+  const sherpa = require(path.join(nodeModules, 'sherpa-onnx-node'));
   const tempRoot = mkdtempSync(path.join(tmpdir(), 'cowork-speech-to-text-'));
   const wavePath = path.join(tempRoot, 'normalized.wav');
   try {
@@ -199,17 +184,30 @@ async function main() {
       '-hide_banner', '-loglevel', 'error', '-y', '-i', input,
       '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wavePath,
     ]);
-    const cliArgs = [coliCli, 'asr', '-j', '--model', model];
-    if (model === 'sensevoice') {
-      cliArgs.push('--language', language);
-    }
-    cliArgs.push(wavePath);
-    const asr = extractJson(run(process.execPath, cliArgs, {
-      env: {
-        ...process.env,
-        PATH: `${path.dirname(ffmpegPath)}${path.delimiter}${process.env.PATH || ''}`,
+    const wave = sherpa.readWave(wavePath);
+    const duration = wave.samples.length / wave.sampleRate;
+    const recognizer = new sherpa.OfflineRecognizer({
+      featConfig: {
+        sampleRate: 16000,
+        featureDim: 80,
       },
-    }));
+      modelConfig: {
+        senseVoice: {
+          model: path.resolve(args['sensevoice-model'] || ''),
+          language,
+          useInverseTextNormalization: 1,
+        },
+        tokens: path.resolve(args['sensevoice-tokens'] || ''),
+        numThreads: 2,
+        provider: 'cpu',
+        debug: 0,
+      },
+      decodingMethod: 'greedy_search',
+    });
+    const asrStream = recognizer.createStream();
+    asrStream.acceptWaveform({sampleRate: wave.sampleRate, samples: wave.samples});
+    recognizer.decode(asrStream);
+    const asr = recognizer.getResult(asrStream);
     const rawText = String(asr.text || '').trim();
     if (!rawText) {
       throw new Error('The local ASR model returned empty text.');
@@ -220,7 +218,6 @@ async function main() {
     let segments = [];
     let actualSpeakerCount = 0;
     if (diarize) {
-      const sherpa = require(path.join(nodeModules, 'sherpa-onnx-node'));
       const diarizer = new sherpa.OfflineSpeakerDiarization({
         segmentation: {
           pyannote: {
@@ -236,7 +233,6 @@ async function main() {
         minDurationOn: 0.2,
         minDurationOff: 0.5,
       });
-      const wave = sherpa.readWave(wavePath);
       if (diarizer.sampleRate !== wave.sampleRate) {
         throw new Error(`Diarization expected ${diarizer.sampleRate} Hz but received ${wave.sampleRate} Hz.`);
       }
@@ -248,7 +244,7 @@ async function main() {
       if (!segments.length) {
         throw new Error('Speaker diarization returned no segments.');
       }
-      turns = alignTokens(asr.tokens, asr.timestamps, segments, asr.duration);
+      turns = alignTokens(asr.tokens, asr.timestamps, segments, duration);
       transcript = formatTurns(turns);
       actualSpeakerCount = new Set(segments.map(segment => segment.speaker)).size;
       if (!actualSpeakerCount) {
@@ -260,11 +256,11 @@ async function main() {
       ok: true,
       transcript,
       raw_text: rawText,
-      model: asr.model || model,
+      model: 'sensevoice',
       lang: asr.lang || '',
       emotion: asr.emotion || '',
       event: asr.event || '',
-      duration: Number(asr.duration || 0),
+      duration,
       diarized: diarize,
       speaker_count: actualSpeakerCount,
       turn_count: turns.length,

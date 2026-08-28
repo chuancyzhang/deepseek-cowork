@@ -1433,6 +1433,14 @@ def main_run():
             else:
                 window.resize(1280, 800)
             window.component_task_manager._component_statuses = {
+                main.SPEECH_TO_TEXT_COMPONENT_ID: {
+                    "known": True,
+                    "installed": False,
+                    "healthy": False,
+                    "needs_update": False,
+                    "needs_repair": False,
+                    "updated_at": 1787587200,
+                },
                 "documents": {
                     "known": True,
                     "bundled": True,
@@ -1454,12 +1462,12 @@ def main_run():
             settings._automatic_update_check_started = True
             select_settings_page(settings, "组件与依赖")
             settings.components_scroll_area.ensureWidgetVisible(
-                settings.component_rows["documents"]["status"],
+                settings.component_rows[main.SPEECH_TO_TEXT_COMPONENT_ID]["status"],
                 24,
                 160,
             )
             component_scrollbar = settings.components_scroll_area.verticalScrollBar()
-            component_scrollbar.setValue(int(component_scrollbar.maximum() * 0.45))
+            component_scrollbar.setValue(int(component_scrollbar.maximum() * 0.28))
             process_events(120)
             save_widget(
                 window,

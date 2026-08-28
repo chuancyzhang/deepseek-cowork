@@ -51,11 +51,7 @@
     "save_transcript_result"
   ],
   "python_dependencies": [],
-  "node_dependencies": [
-    "@marswave/coli@0.0.20",
-    "ffmpeg-static@5.3.0",
-    "sherpa-onnx-node@1.12.33"
-  ],
+  "node_dependencies": [],
   "references": [],
   "script_refs": [
     "scripts/transcribe.mjs"
@@ -73,10 +69,9 @@
   },
   "workflow": [
     "Ask whether the user wants fully local raw output or current-model AI polishing before transcription.",
-    "Call transcribe_audio with the explicit polish choice and speaker diarization enabled by default.",
+    "Require the verified speech-to-text component, then call transcribe_audio with the explicit polish choice and speaker diarization enabled by default.",
     "For local-only output, report the generated path without reading the transcript back into model context.",
     "For AI polish, preserve speaker labels and timestamps, then call save_transcript_result.",
     "If polishing cannot be completed reliably, show the raw transcript and promote the local raw file as the final result."
   ]
 }
-

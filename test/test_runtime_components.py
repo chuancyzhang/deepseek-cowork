@@ -1,5 +1,7 @@
 import json
+import io
 import os
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -249,6 +251,92 @@ class TestRuntimeComponents(unittest.TestCase):
     def test_node_source_uses_fixed_archive_and_hash(self):
         self.assertEqual(runtime_components.NODE_ARCHIVE, "node-v24.14.1-win-x64.zip")
         self.assertEqual(len(runtime_components.NODE_SHA256), 64)
+
+    def test_speech_component_defaults_to_verified_domestic_asr_source(self):
+        source = runtime_components._speech_source({})
+        sensevoice = runtime_components.SPEECH_TO_TEXT_ASSETS["sensevoice"]
+
+        self.assertEqual(source["id"], "modelscope")
+        self.assertIn("modelscope.cn", runtime_components._speech_asset_url("sensevoice", source["id"]))
+        self.assertEqual(len(sensevoice["sha256"]), 64)
+        self.assertEqual(
+            runtime_components._speech_asset_url("segmentation", source["id"]),
+            runtime_components.SPEECH_TO_TEXT_ASSETS["segmentation"]["github_url"],
+        )
+
+    def test_speech_component_install_prepares_dependencies_and_models_as_one_unit(self):
+        def write_tar(path, members):
+            with tarfile.open(path, mode="w:bz2") as archive:
+                for name, content in members.items():
+                    data = content.encode("utf-8") if isinstance(content, str) else content
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+
+        def fake_download(asset_name, target, source_id, progress_callback=None, progress_range=(0, 100)):
+            del progress_callback, progress_range
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if asset_name == "sensevoice":
+                write_tar(target, {
+                    "sensevoice/model.int8.onnx": b"sensevoice-model",
+                    "sensevoice/tokens.txt": "token-a\ntoken-b\n",
+                })
+            elif asset_name == "segmentation":
+                write_tar(target, {"segmentation/model.onnx": b"segmentation-model"})
+            else:
+                with open(target, "wb") as handle:
+                    handle.write(b"embedding-model")
+            return {"url": f"https://example.test/{asset_name}", "size": os.path.getsize(target), "sha256": "test"}
+
+        from core.sandbox_runtime import skill_dependency_hash
+        expected_dependency_hash = skill_dependency_hash(
+            [],
+            runtime_components.SPEECH_TO_TEXT_NODE_DEPENDENCIES,
+        )
+        with tempfile.TemporaryDirectory() as data_dir, patch.object(
+            runtime_components,
+            "get_app_data_dir",
+            return_value=data_dir,
+        ), patch.object(
+            runtime_components,
+            "_download_verified_speech_asset",
+            side_effect=fake_download,
+        ), patch(
+            "core.sandbox_runtime.install_skill_dependencies",
+            return_value={"ok": True, "hash": expected_dependency_hash},
+        ) as install_dependencies, patch(
+            "core.sandbox_runtime.read_skill_dependency_status",
+            return_value={"ok": True, "hash": expected_dependency_hash},
+        ):
+            status = runtime_components.install_speech_to_text_component()
+
+            self.assertTrue(status["ready"], status["health_error"])
+            self.assertEqual(status["source_id"], "modelscope")
+            self.assertTrue(os.path.isfile(status["model_paths"]["sensevoice_model"]))
+            self.assertTrue(os.path.isfile(status["model_paths"]["segmentation"]))
+            self.assertTrue(os.path.isfile(status["model_paths"]["embedding"]))
+            self.assertEqual(
+                install_dependencies.call_args.kwargs["node_registry_url"],
+                runtime_components.SPEECH_TO_TEXT_NPM_REGISTRY,
+            )
+
+    def test_speech_component_status_does_not_claim_partial_files_are_ready(self):
+        with tempfile.TemporaryDirectory() as data_dir, patch.object(
+            runtime_components,
+            "get_app_data_dir",
+            return_value=data_dir,
+        ):
+            paths = runtime_components.speech_to_text_component_paths()
+            os.makedirs(os.path.dirname(paths["sensevoice_model"]), exist_ok=True)
+            with open(paths["sensevoice_model"], "wb") as handle:
+                handle.write(b"partial")
+
+            status = runtime_components.speech_to_text_component_status()
+
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["installed"])
+        self.assertTrue(status["needs_repair"])
+        self.assertIn("健康标记", status["health_error"])
 
 
 if __name__ == "__main__":

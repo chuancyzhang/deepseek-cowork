@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from core.skill_manager import SkillManager
 
@@ -78,8 +78,13 @@ class TestSpeechToTextSkill(unittest.TestCase):
         }
         with patch.object(
             self.module,
-            "_ensure_diarization_models",
-            return_value={"segmentation": "segmentation.onnx", "embedding": "embedding.onnx"},
+            "_require_component",
+            return_value={
+                "sensevoice_model": "sensevoice.onnx",
+                "sensevoice_tokens": "tokens.txt",
+                "segmentation": "segmentation.onnx",
+                "embedding": "embedding.onnx",
+            },
         ), patch.object(
             self.module,
             "run_skill_script_in_sandbox",
@@ -99,7 +104,7 @@ class TestSpeechToTextSkill(unittest.TestCase):
         self.assertEqual(manifest["source_type"], "bundled_plugin")
         self.assertEqual(
             manifest["node_dependencies"],
-            ["@marswave/coli@0.0.20", "ffmpeg-static@5.3.0", "sherpa-onnx-node@1.12.33"],
+            [],
         )
         self.assertEqual(manifest["tool_refs"], ["transcribe_audio", "save_transcript_result"])
 
@@ -145,9 +150,13 @@ class TestSpeechToTextSkill(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["transcript"], self.payload["transcript"])
-        self.assertEqual(result["output_path"], "")
+        self.assertTrue(Path(result["output_path"]).is_file())
         self.assertTrue(Path(result["raw_transcript_path"]).is_file())
-        self.assertFalse(Path(result["suggested_output_path"]).exists())
+        fallback_frontmatter, fallback_body = self.module._read_markdown_parts(
+            result["suggested_output_path"]
+        )
+        self.assertIn('privacy: "local-raw-fallback"', fallback_frontmatter)
+        self.assertEqual(fallback_body, self.payload["transcript"])
 
         observability = SignalStub()
         saved = json.loads(self.module.save_transcript_result(
@@ -197,8 +206,13 @@ class TestSpeechToTextSkill(unittest.TestCase):
         }
         with patch.object(
             self.module,
-            "_ensure_diarization_models",
-            return_value={"segmentation": "segmentation.onnx", "embedding": "embedding.onnx"},
+            "_require_component",
+            return_value={
+                "sensevoice_model": "sensevoice.onnx",
+                "sensevoice_tokens": "tokens.txt",
+                "segmentation": "segmentation.onnx",
+                "embedding": "embedding.onnx",
+            },
         ), patch.object(
             self.module,
             "run_skill_script_in_sandbox",
@@ -225,11 +239,21 @@ class TestSpeechToTextSkill(unittest.TestCase):
         outside_audio = os.path.join(outside_dir, "attached.wav")
         Path(outside_audio).write_bytes(b"attached-audio")
 
-        rejected = json.loads(self.module.transcribe_audio(
-            outside_audio,
-            False,
-            workspace_dir=self.workspace_dir,
-        ))
+        with patch.object(
+            self.module,
+            "_require_component",
+            return_value={
+                "sensevoice_model": "sensevoice.onnx",
+                "sensevoice_tokens": "tokens.txt",
+                "segmentation": "segmentation.onnx",
+                "embedding": "embedding.onnx",
+            },
+        ):
+            rejected = json.loads(self.module.transcribe_audio(
+                outside_audio,
+                False,
+                workspace_dir=self.workspace_dir,
+            ))
         self.assertFalse(rejected["ok"])
         self.assertIn("本会话中用户明确附加", rejected["error"]["message"])
 
@@ -246,16 +270,40 @@ class TestSpeechToTextSkill(unittest.TestCase):
         )
         self.assertTrue(accepted["ok"])
 
-    def test_download_checks_abort_before_network_access(self):
-        with patch.object(self.module.urllib.request, "urlopen") as urlopen:
-            with self.assertRaisesRegex(InterruptedError, "用户已停止"):
-                self.module._download_to_temp(
-                    "https://example.invalid/model.onnx",
-                    1,
-                    self.workspace_dir,
-                    {"aborted": True},
-                )
-        urlopen.assert_not_called()
+    def test_missing_component_fails_before_local_script_and_points_to_settings(self):
+        with patch.object(
+            self.module,
+            "speech_to_text_component_status",
+            return_value={"ready": False, "health_error": "语音组件尚未安装。"},
+        ), patch.object(self.module, "run_skill_script_in_sandbox") as runner:
+            result = json.loads(self.module.transcribe_audio(
+                "meeting.wav",
+                False,
+                workspace_dir=self.workspace_dir,
+            ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "component_not_ready")
+        self.assertIn("设置 → 组件与依赖", result["error"]["message"])
+        runner.assert_not_called()
+
+    def test_omitted_audio_path_uses_single_current_attachment_without_exposing_name(self):
+        context = {
+            "current_messages_snapshot": [{
+                "role": "user",
+                "meta": {"user_added_files": [self.audio_path]},
+            }]
+        }
+        result, runner = self._run_transcription(
+            polish=False,
+            context=context,
+            audio_path="",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("meeting", result["output_path"])
+        args = runner.call_args.kwargs["args"]
+        self.assertEqual(args[args.index("--input") + 1], self.audio_path)
 
     def test_node_alignment_self_test(self):
         candidates = [

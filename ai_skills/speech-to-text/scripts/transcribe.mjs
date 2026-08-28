@@ -48,7 +48,59 @@ function run(executable, args, options = {}) {
     const detail = String(result.stderr || result.stdout || `exit code ${result.status}`).trim();
     throw new Error(detail.slice(-4000));
   }
-  return String(result.stdout || '');
+  return {
+    stdout: String(result.stdout || ''),
+    stderr: String(result.stderr || ''),
+  };
+}
+
+const ASR_CHUNK_SECONDS = 25;
+
+function recognizeInChunks(recognizer, wave) {
+  const chunkSampleCount = Math.max(1, Math.floor(wave.sampleRate * ASR_CHUNK_SECONDS));
+  const texts = [];
+  const tokens = [];
+  const timestamps = [];
+  let lang = '';
+  let emotion = '';
+  let event = '';
+  let decodedChunks = 0;
+  for (let startSample = 0; startSample < wave.samples.length; startSample += chunkSampleCount) {
+    const endSample = Math.min(wave.samples.length, startSample + chunkSampleCount);
+    const samples = wave.samples.subarray(startSample, endSample);
+    const stream = recognizer.createStream();
+    stream.acceptWaveform({sampleRate: wave.sampleRate, samples});
+    recognizer.decode(stream);
+    const result = recognizer.getResult(stream);
+    const text = String(result.text || '').trim();
+    if (!text) {
+      continue;
+    }
+    decodedChunks += 1;
+    texts.push(text);
+    lang ||= String(result.lang || '');
+    emotion ||= String(result.emotion || '');
+    event ||= String(result.event || '');
+    if (Array.isArray(result.tokens) && Array.isArray(result.timestamps) &&
+        result.tokens.length === result.timestamps.length) {
+      const offsetSeconds = startSample / wave.sampleRate;
+      for (let index = 0; index < result.tokens.length; index += 1) {
+        tokens.push(result.tokens[index]);
+        const timestamp = timestampValue(result.timestamps[index]);
+        timestamps.push(Number.isFinite(timestamp) ? timestamp + offsetSeconds : Number.NaN);
+      }
+    }
+  }
+  return {
+    text: texts.join('\n\n'),
+    tokens,
+    timestamps,
+    lang,
+    emotion,
+    event,
+    chunkCount: Math.ceil(wave.samples.length / chunkSampleCount),
+    decodedChunks,
+  };
 }
 
 function timestampValue(value) {
@@ -160,7 +212,22 @@ function selfTest() {
   if (turns.length !== 2 || turns[0].speaker !== 'Speaker 1' || turns[1].speaker !== 'Speaker 2') {
     throw new Error('Speaker alignment self-test failed.');
   }
-  process.stdout.write(JSON.stringify({ok: true, turns}));
+  let decodeIndex = 0;
+  const chunked = recognizeInChunks({
+    createStream: () => ({acceptWaveform: () => {}}),
+    decode: () => {},
+    getResult: () => {
+      decodeIndex += 1;
+      return {text: `chunk-${decodeIndex}`, tokens: [`${decodeIndex}`], timestamps: [0.1]};
+    },
+  }, {
+    sampleRate: 10,
+    samples: new Float32Array(510),
+  });
+  if (chunked.chunkCount !== 3 || chunked.timestamps[1] !== 25.1 || chunked.decodedChunks !== 3) {
+    throw new Error('Long-audio chunking self-test failed.');
+  }
+  process.stdout.write(JSON.stringify({ok: true, turns, chunked}));
 }
 
 async function main() {
@@ -180,10 +247,16 @@ async function main() {
   const tempRoot = mkdtempSync(path.join(tmpdir(), 'cowork-speech-to-text-'));
   const wavePath = path.join(tempRoot, 'normalized.wav');
   try {
-    run(ffmpegPath, [
+    const ffmpegResult = run(ffmpegPath, [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', input,
       '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wavePath,
     ]);
+    const warnings = [];
+    if (/input buffer exhausted|invalid data|error submitting packet/i.test(ffmpegResult.stderr)) {
+      warnings.push(
+        'FFmpeg detected damaged audio packets; the transcript covers only the decodable portion of the source file.',
+      );
+    }
     const wave = sherpa.readWave(wavePath);
     const duration = wave.samples.length / wave.sampleRate;
     const recognizer = new sherpa.OfflineRecognizer({
@@ -204,10 +277,7 @@ async function main() {
       },
       decodingMethod: 'greedy_search',
     });
-    const asrStream = recognizer.createStream();
-    asrStream.acceptWaveform({sampleRate: wave.sampleRate, samples: wave.samples});
-    recognizer.decode(asrStream);
-    const asr = recognizer.getResult(asrStream);
+    const asr = recognizeInChunks(recognizer, wave);
     const rawText = String(asr.text || '').trim();
     if (!rawText) {
       throw new Error('The local ASR model returned empty text.');
@@ -260,11 +330,14 @@ async function main() {
       lang: asr.lang || '',
       emotion: asr.emotion || '',
       event: asr.event || '',
+      warnings,
       duration,
       diarized: diarize,
       speaker_count: actualSpeakerCount,
       turn_count: turns.length,
       segment_count: segments.length,
+      asr_chunk_count: asr.chunkCount,
+      decoded_chunk_count: asr.decodedChunks,
     }));
   } finally {
     rmSync(tempRoot, {recursive: true, force: true});

@@ -10889,7 +10889,7 @@ class SettingsDialog(QDialog):
             SPEECH_TO_TEXT_COMPONENT_ID,
             "语音转文字组件",
             "SenseVoice 本地识别、FFmpeg 音频解码和说话人分离\n"
-            "关联：语音转文字 · 模型：ModelScope 国内镜像（SHA-256 校验）",
+            "关联：语音转文字 · 模型：HF-Mirror 国内加速（SHA-256 校验）",
             self.component_status_cache.get(SPEECH_TO_TEXT_COMPONENT_ID, {}),
         )
         for toolkit_id, spec in TOOLKITS.items():

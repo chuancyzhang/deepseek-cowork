@@ -4,7 +4,7 @@ import os
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core import runtime_components
 
@@ -254,14 +254,17 @@ class TestRuntimeComponents(unittest.TestCase):
 
     def test_speech_component_defaults_to_verified_domestic_asr_source(self):
         source = runtime_components._speech_source({})
-        sensevoice = runtime_components.SPEECH_TO_TEXT_ASSETS["sensevoice"]
+        sensevoice = runtime_components.SPEECH_TO_TEXT_ASSETS["sensevoice_model"]
 
-        self.assertEqual(source["id"], "modelscope")
-        self.assertIn("modelscope.cn", runtime_components._speech_asset_url("sensevoice", source["id"]))
+        self.assertEqual(source["id"], "hf-mirror")
+        self.assertIn(
+            "hf-mirror.com",
+            runtime_components._speech_asset_url("sensevoice_model", source["id"]),
+        )
         self.assertEqual(len(sensevoice["sha256"]), 64)
         self.assertEqual(
             runtime_components._speech_asset_url("segmentation", source["id"]),
-            runtime_components.SPEECH_TO_TEXT_ASSETS["segmentation"]["github_url"],
+            runtime_components.SPEECH_TO_TEXT_ASSETS["segmentation"]["official_url"],
         )
 
     def test_speech_component_install_prepares_dependencies_and_models_as_one_unit(self):
@@ -276,11 +279,12 @@ class TestRuntimeComponents(unittest.TestCase):
         def fake_download(asset_name, target, source_id, progress_callback=None, progress_range=(0, 100)):
             del progress_callback, progress_range
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            if asset_name == "sensevoice":
-                write_tar(target, {
-                    "sensevoice/model.int8.onnx": b"sensevoice-model",
-                    "sensevoice/tokens.txt": "token-a\ntoken-b\n",
-                })
+            if asset_name == "sensevoice_model":
+                with open(target, "wb") as handle:
+                    handle.write(b"sensevoice-model")
+            elif asset_name == "sensevoice_tokens":
+                with open(target, "w", encoding="utf-8") as handle:
+                    handle.write("token-a\ntoken-b\n")
             elif asset_name == "segmentation":
                 write_tar(target, {"segmentation/model.onnx": b"segmentation-model"})
             else:
@@ -301,6 +305,9 @@ class TestRuntimeComponents(unittest.TestCase):
             runtime_components,
             "_download_verified_speech_asset",
             side_effect=fake_download,
+        ), patch.object(
+            runtime_components,
+            "_probe_speech_asset_urls",
         ), patch(
             "core.sandbox_runtime.install_skill_dependencies",
             return_value={"ok": True, "hash": expected_dependency_hash},
@@ -311,7 +318,7 @@ class TestRuntimeComponents(unittest.TestCase):
             status = runtime_components.install_speech_to_text_component()
 
             self.assertTrue(status["ready"], status["health_error"])
-            self.assertEqual(status["source_id"], "modelscope")
+            self.assertEqual(status["source_id"], "hf-mirror")
             self.assertTrue(os.path.isfile(status["model_paths"]["sensevoice_model"]))
             self.assertTrue(os.path.isfile(status["model_paths"]["segmentation"]))
             self.assertTrue(os.path.isfile(status["model_paths"]["embedding"]))
@@ -319,6 +326,25 @@ class TestRuntimeComponents(unittest.TestCase):
                 install_dependencies.call_args.kwargs["node_registry_url"],
                 runtime_components.SPEECH_TO_TEXT_NPM_REGISTRY,
             )
+
+    def test_speech_component_source_probe_fails_before_dependency_install(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.raise_for_status.side_effect = runtime_components.requests.HTTPError(
+            "404 Client Error"
+        )
+        with patch.object(
+            runtime_components.requests,
+            "get",
+            return_value=response,
+        ), patch(
+            "core.sandbox_runtime.install_skill_dependencies",
+        ) as install_dependencies:
+            with self.assertRaisesRegex(RuntimeError, "下载源检查失败.*404"):
+                runtime_components.install_speech_to_text_component()
+
+        install_dependencies.assert_not_called()
 
     def test_speech_component_status_does_not_claim_partial_files_are_ready(self):
         with tempfile.TemporaryDirectory() as data_dir, patch.object(

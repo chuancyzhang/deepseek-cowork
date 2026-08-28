@@ -218,6 +218,7 @@ def _frontmatter_value(value):
 
 
 def _render_markdown(source_path, payload, transcript, polished, privacy):
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     metadata = {
         "source": os.path.basename(source_path),
         "date": date.today().isoformat(),
@@ -228,6 +229,7 @@ def _render_markdown(source_path, payload, transcript, polished, privacy):
         "speaker_diarization": bool(payload.get("diarized")),
         "ai_polished": bool(polished),
         "privacy": privacy,
+        "source_warning": "；".join(str(item) for item in warnings if item),
     }
     header = "\n".join(f"{key}: {_frontmatter_value(value)}" for key, value in metadata.items())
     return f"---\n{header}\n---\n\n{str(transcript or '').strip()}\n"
@@ -320,7 +322,14 @@ def transcribe_audio(
                 "--segmentation-model", model_paths["segmentation"],
                 "--embedding-model", model_paths["embedding"],
             ])
-        _emit_step(context, "正在本地识别音频并分离说话人…" if diarize else "正在本地识别音频…")
+        _emit_step(
+            context,
+            (
+                "正在本地分块识别音频并分离说话人；长录音可能需要数分钟…"
+                if diarize
+                else "正在本地分块识别音频；长录音可能需要数分钟…"
+            ),
+        )
         _emit_diagnostic(context, "run", started_at, operation="local_asr")
         result = run_skill_script_in_sandbox(
             SKILL_ID,
@@ -380,6 +389,9 @@ def transcribe_audio(
             "speaker_count": int(payload.get("speaker_count") or 0),
             "diarized": bool(payload.get("diarized")),
             "ai_polish_requested": polish,
+            "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
+            "asr_chunk_count": int(payload.get("asr_chunk_count") or 0),
+            "decoded_chunk_count": int(payload.get("decoded_chunk_count") or 0),
         }
         if polish:
             response.update({

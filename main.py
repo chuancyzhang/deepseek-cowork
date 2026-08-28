@@ -36088,15 +36088,154 @@ class MainWindow(QMainWindow):
         session_id = str(getattr(state, "session_id", "") or "").strip()
         if not session_id:
             return
+        started_at = time.perf_counter()
+        if self._sync_existing_history_session_row(state):
+            log_ui_navigation(
+                "history_sidebar_session_synced",
+                session_id=session_id,
+                mode="in_place",
+                elapsed_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            )
+            return
         optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
         if not isinstance(optimistic_ids, set):
             self.optimistic_history_session_ids = set()
             optimistic_ids = self.optimistic_history_session_ids
         optimistic_ids.add(session_id)
+        if self._history_query_text():
+            log_ui_navigation(
+                "history_sidebar_session_synced",
+                session_id=session_id,
+                mode="filtered",
+                elapsed_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            )
+            return
         workspace_dir = self._workspace_dir_for_state(state)
         if workspace_dir and self._session_workspace_source(state) == "project":
             self.project_preview_paths.add(workspace_dir)
         self.refresh_history_list()
+        log_ui_navigation(
+            "history_sidebar_session_synced",
+            session_id=session_id,
+            mode="structural_rebuild",
+            elapsed_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+        )
+
+    @staticmethod
+    def _reorder_sidebar_widgets(layout, marker_name, sort_key):
+        if layout is None:
+            return False
+        indexed = []
+        for index in range(layout.count()):
+            widget = layout.itemAt(index).widget()
+            if widget is not None and getattr(widget, marker_name, None) is not None:
+                indexed.append((index, widget))
+        if len(indexed) < 2:
+            return False
+        original = [widget for _index, widget in indexed]
+        original_order = {id(widget): index for index, widget in enumerate(original)}
+        ordered = sorted(
+            original,
+            key=lambda widget: (*sort_key(widget), original_order[id(widget)]),
+        )
+        if ordered == original:
+            return False
+        insert_at = indexed[0][0]
+        for widget in original:
+            layout.removeWidget(widget)
+        for offset, widget in enumerate(ordered):
+            layout.insertWidget(insert_at + offset, widget)
+        layout.invalidate()
+        layout.activate()
+        return True
+
+    def _restore_history_session_anchor(self, session_id, anchor_y, generation):
+        if generation != self._history_sidebar_refresh_generation:
+            return
+        row = getattr(self, "history_rows", {}).get(session_id)
+        scroll = getattr(self, "history_scroll", None)
+        if not _qt_object_alive(row) or not _qt_object_alive(scroll):
+            return
+        viewport = scroll.viewport()
+        current_y = row.mapTo(viewport, QPoint(0, 0)).y()
+        scrollbar = scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.value() + current_y - int(anchor_y))
+
+    def _sync_existing_history_session_row(self, state):
+        if state is None:
+            return False
+        session_id = str(getattr(state, "session_id", "") or "").strip()
+        row = getattr(self, "history_rows", {}).get(session_id)
+        button = getattr(self, "history_buttons", {}).get(session_id)
+        if not session_id or not _qt_object_alive(row) or not _qt_object_alive(button):
+            return False
+
+        workspace_key = ""
+        workspace_dir = self._workspace_dir_for_state(state)
+        if workspace_dir and self._session_workspace_source(state) == "project":
+            workspace_key = self._project_key(workspace_dir)
+        if str(getattr(row, "_history_workspace_key", "") or "") != workspace_key:
+            return False
+
+        scroll = getattr(self, "history_scroll", None)
+        anchor_y = None
+        if _qt_object_alive(scroll):
+            anchor_y = row.mapTo(scroll.viewport(), QPoint(0, 0)).y()
+
+        title = self._resolved_session_title(state)
+        if button.text() != title:
+            button.setText(title)
+        timestamp = self._last_message_timestamp(getattr(state, "messages", []))
+        if timestamp:
+            row._history_updated_at = int(timestamp)
+            self.history_age_timestamps[session_id] = int(timestamp)
+            self.refresh_history_age_labels(session_id)
+        self.update_history_selection()
+        self.refresh_session_activity_indicator(session_id)
+
+        parent = row.parentWidget()
+        parent_layout = parent.layout() if parent is not None else None
+        reordered = self._reorder_sidebar_widgets(
+            parent_layout,
+            "_history_session_id",
+            lambda widget: (
+                not bool(getattr(widget, "_history_pinned", False)),
+                -int(getattr(widget, "_history_updated_at", 0) or 0),
+            ),
+        )
+
+        if workspace_key:
+            project_row = next(
+                (
+                    project_widget
+                    for path, project_widget in getattr(self, "project_rows", {}).items()
+                    if self._project_key(path) == workspace_key and _qt_object_alive(project_widget)
+                ),
+                None,
+            )
+            if project_row is not None:
+                project_row._history_project_updated_at = max(
+                    int(getattr(project_row, "_history_project_updated_at", 0) or 0),
+                    int(timestamp or 0),
+                )
+                if getattr(self, "sidebar_sort_mode", "recent") == "recent":
+                    reordered = self._reorder_sidebar_widgets(
+                        self.history_layout,
+                        "_history_project_key",
+                        lambda widget: (
+                            not bool(getattr(widget, "_history_project_pinned", False)),
+                            -int(getattr(widget, "_history_project_updated_at", 0) or 0),
+                            str(getattr(widget, "_history_project_name", "") or "").lower(),
+                        ),
+                    ) or reordered
+
+        if reordered and anchor_y is not None:
+            QTimer.singleShot(
+                0,
+                lambda sid=session_id, y=anchor_y, token=self._history_sidebar_refresh_generation:
+                self._restore_history_session_anchor(sid, y, token),
+            )
+        return True
 
     def _history_disclosure_key(self, group_type, path=""):
         if group_type == "project":
@@ -36237,6 +36376,10 @@ class MainWindow(QMainWindow):
         session_id = entry["id"]
         selected = session_id == self.current_session_id
         row = ConversationHistoryRow()
+        row._history_session_id = session_id
+        row._history_pinned = bool(entry.get("pinned"))
+        row._history_updated_at = int(entry.get("updated_at") or 0)
+        row._history_workspace_key = self._project_key(entry.get("workspace_dir")) if entry.get("workspace_dir") else ""
         row.setObjectName("HistoryRow")
         set_stylesheet_if_changed(row, apple_history_row_style(selected))
         row_layout = QHBoxLayout(row)
@@ -36320,6 +36463,10 @@ class MainWindow(QMainWindow):
         query_active = bool(query)
         previewed = query_active or normalized_path in self.project_preview_paths
         row = QFrame()
+        row._history_project_key = self._project_key(path)
+        row._history_project_name = name
+        row._history_project_pinned = bool(project.get("pinned"))
+        row._history_project_updated_at = int(project.get("updated_at") or 0)
         row.setObjectName("ProjectRow")
         row.setMinimumWidth(0)
         row.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -39476,7 +39623,9 @@ class MainWindow(QMainWindow):
         optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
         if acknowledged and isinstance(optimistic_ids, set) and session_id in optimistic_ids:
             optimistic_ids.discard(session_id)
-            self.refresh_history_list()
+            state = self.get_session(session_id)
+            if state is not None:
+                self._sync_existing_history_session_row(state)
         log_ui_navigation(
             "chat_save_acknowledged",
             session_id=session_id,

@@ -981,6 +981,177 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         rebuild.assert_not_called()
         label.deleteLater()
 
+    def test_existing_long_history_submit_syncs_sidebar_row_in_place(self):
+        state = self.window.get_current_session()
+        state.messages = [
+            {
+                "id": f"message-{index}",
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": "长上下文" * 200,
+                "created_at": 4_000_000_000 + index,
+            }
+            for index in range(200)
+        ]
+        self.window.refresh_history_list()
+        original_row = self.window.history_rows[state.session_id]
+        original_button = self.window.history_buttons[state.session_id]
+
+        state.messages.append(
+            {
+                "id": "latest-message",
+                "role": "user",
+                "content": "继续处理",
+                "created_at": 4_000_000_500,
+            }
+        )
+        state.session_status = "running"
+        with patch.object(self.window, "refresh_history_list") as rebuild:
+            self.window._ensure_session_visible_in_history(state)
+
+        rebuild.assert_not_called()
+        self.assertIs(self.window.history_rows[state.session_id], original_row)
+        self.assertIs(self.window.history_buttons[state.session_id], original_button)
+        self.assertEqual(
+            self.window.history_age_timestamps[state.session_id],
+            4_000_000_500,
+        )
+        self.assertEqual(
+            len(
+                {
+                    id(widget)
+                    for widget in self.window.history_rows.values()
+                    if widget is not None
+                }
+            ),
+            len(self.window.history_rows),
+        )
+
+    def test_existing_history_row_moves_to_recent_position_without_rebuild(self):
+        current = self.window.get_current_session()
+        current.messages = [
+            {
+                "id": "current-old",
+                "role": "user",
+                "content": "旧任务",
+                "created_at": 4_000_000_100,
+            }
+        ]
+        other_id = self.window.create_new_session(
+            session_id="sidebar-recent-other",
+            make_current=False,
+            workspace_dir="",
+        )
+        other = self.window.get_session(other_id)
+        self.assertIsNotNone(other)
+        other.messages = [
+            {
+                "id": "other-new",
+                "role": "user",
+                "content": "较新任务",
+                "created_at": 4_000_000_200,
+            }
+        ]
+        self.window.refresh_history_list()
+        original_row = self.window.history_rows[current.session_id]
+
+        current.messages.append(
+            {
+                "id": "current-new",
+                "role": "user",
+                "content": "最新消息",
+                "created_at": 4_000_000_300,
+            }
+        )
+        with patch.object(self.window, "refresh_history_list") as rebuild:
+            self.window._ensure_session_visible_in_history(current)
+
+        rebuild.assert_not_called()
+        ordered_ids = []
+        for index in range(self.window.history_layout.count()):
+            widget = self.window.history_layout.itemAt(index).widget()
+            session_id = getattr(widget, "_history_session_id", "") if widget is not None else ""
+            if session_id in {current.session_id, other.session_id}:
+                ordered_ids.append(session_id)
+        self.assertEqual(ordered_ids, [current.session_id, other.session_id])
+        self.assertIs(self.window.history_rows[current.session_id], original_row)
+
+    def test_existing_project_history_submit_keeps_project_and_session_widgets(self):
+        with tempfile.TemporaryDirectory() as project_dir:
+            session_id = self.window.create_new_session(
+                make_current=True,
+                workspace_dir=project_dir,
+            )
+            state = self.window.get_session(session_id)
+            state.messages = [
+                {
+                    "id": "project-first",
+                    "role": "user",
+                    "content": "项目长上下文",
+                    "created_at": 4_000_000_100,
+                }
+            ]
+            self.window._ensure_session_visible_in_history(state)
+            original_session_row = self.window.history_rows[session_id]
+            original_project_row = next(
+                row
+                for path, row in self.window.project_rows.items()
+                if self.window._project_key(path) == self.window._project_key(project_dir)
+            )
+
+            state.messages.append(
+                {
+                    "id": "project-latest",
+                    "role": "user",
+                    "content": "继续项目任务",
+                    "created_at": 4_000_000_200,
+                }
+            )
+            with patch.object(self.window, "refresh_history_list") as rebuild:
+                self.window._ensure_session_visible_in_history(state)
+
+            rebuild.assert_not_called()
+            self.assertIs(self.window.history_rows[session_id], original_session_row)
+            self.assertIs(
+                next(
+                    row
+                    for path, row in self.window.project_rows.items()
+                    if self.window._project_key(path) == self.window._project_key(project_dir)
+                ),
+                original_project_row,
+            )
+
+    def test_first_history_projection_rebuilds_once_and_save_ack_does_not_rebuild(self):
+        state = self.window.get_current_session()
+        state.messages = [
+            {
+                "id": "first-visible",
+                "role": "user",
+                "content": "首次显示",
+                "created_at": 4_000_000_000,
+            }
+        ]
+        self.assertNotIn(state.session_id, self.window.history_rows)
+
+        original_refresh = self.window.refresh_history_list
+        with patch.object(self.window, "refresh_history_list", wraps=original_refresh) as rebuild:
+            self.window._ensure_session_visible_in_history(state)
+        rebuild.assert_called_once_with()
+        original_row = self.window.history_rows[state.session_id]
+        self.assertIn(state.session_id, self.window.optimistic_history_session_ids)
+
+        with (
+            patch.object(self.window.chat_recovery_journal, "acknowledge", return_value=True),
+            patch.object(self.window.runtime_journal, "load_manifest", return_value={}),
+            patch.object(self.window.runtime_journal, "update_manifest"),
+            patch.object(self.window.chat_storage, "get_messages", return_value=state.messages),
+            patch.object(self.window, "refresh_history_list") as ack_rebuild,
+        ):
+            self.window.handle_chat_save_completed(state.session_id, 1)
+
+        ack_rebuild.assert_not_called()
+        self.assertNotIn(state.session_id, self.window.optimistic_history_session_ids)
+        self.assertIs(self.window.history_rows[state.session_id], original_row)
+
     def test_first_valid_submit_projects_session_into_sidebar_before_worker_runs(self):
         state = self.window.get_current_session()
         staged = SimpleNamespace(

@@ -87,6 +87,14 @@ Provider Adapter 只负责协议转换：把 Cowork 消息、Tool 和上下文�
 请求，再把 reasoning、正文、函数调用、用量和错误投影回统一事件。Agent Loop
 不为某个 Provider 复制一套执行逻辑。
 
+OpenAI-compatible 模型可显式配置 `supports_image_generation`。该能力仅允许与
+Responses 协议组合；启用后 Provider 在现有 Tool 数组末尾稳定加入并去重
+`{"type":"image_generation"}`，不修改 system/developer prompt。完成事件中的
+`image_generation_call.result` 只在进程内传递给 Agent：Agent 严格校验 base64、
+25 MiB 上限和 PNG/JPEG/WEBP 格式后原子写入会话附件目录。持久化消息使用
+`output_image` content part，Responses 回放元数据只保留调用 `id`，避免 base64
+进入 SQLite、运行日志或后续上下文。纯图片响应同样属于有效终态。
+
 ### 3.2 DeepSeek Responses 兼容
 
 官方 DeepSeek Responses 按无状态协议处理。流结束后，Provider 从完整 response

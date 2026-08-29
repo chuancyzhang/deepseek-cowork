@@ -70,6 +70,7 @@ from core.filesystem_ops import (
     decode_text_bytes,
     resolve_path,
 )
+from core.generated_images import GeneratedImageError, persist_generated_image
 
 try:
     from openai import OpenAI
@@ -89,6 +90,7 @@ PROVIDER_SEMANTIC_CHUNK_TYPES = {
     "tool_call",
     "response_items",
     "server_tool_status",
+    "output_image",
 }
 
 
@@ -2799,6 +2801,7 @@ class LLMWorker(QThread):
         
         full_reasoning = ""
         final_content = ""
+        final_content_parts = []
         turn_count = 0
         total_duration = 0
         generated_messages = []
@@ -2965,6 +2968,7 @@ class LLMWorker(QThread):
                     chunk_content = ""
                     tool_calls_buffer = {} # Index -> ToolCall object (dict)
                     response_items_buffer = []
+                    output_image_parts_buffer = []
                     provider_error_message = None
                     provider_terminal_status = ""
                     tool_round_context = None
@@ -2972,6 +2976,16 @@ class LLMWorker(QThread):
                     first_semantic_sample_at = 0.0
 
                     try:
+                        if bool(getattr(provider, "supports_image_generation", False)):
+                            self.step_signal.emit("Image Generation: available for this request")
+                            self.observability_signal.emit({
+                                "type": "image_generation_requested",
+                                "turn_id": self.turn_id,
+                                "request_id": self.request_id,
+                                "provider": provider_name,
+                                "model": getattr(provider, "model_name", ""),
+                                "timestamp": time.time(),
+                            })
                         stream = self._provider_chat_stream(
                             provider,
                             sanitized_messages,
@@ -3045,6 +3059,44 @@ class LLMWorker(QThread):
                                     "canonical_length": len(canonical_content),
                                     "timestamp": time.time(),
                                 })
+
+                            elif type_ == "output_image":
+                                item_id = str(chunk.get("item_id") or "").strip()
+                                self.step_signal.emit(f"Image Generation: saving ({item_id})")
+                                self.observability_signal.emit({
+                                    "type": "image_generation_save_start",
+                                    "item_id": item_id,
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                    "timestamp": time.time(),
+                                })
+                                try:
+                                    image_part = persist_generated_image(
+                                        self.config_manager.get_chat_history_dir(),
+                                        self.session_id,
+                                        item_id,
+                                        chunk.get("image_base64"),
+                                    )
+                                except GeneratedImageError as exc:
+                                    self.observability_signal.emit({
+                                        "type": "image_generation_save_error",
+                                        "item_id": item_id,
+                                        "error_type": type(exc).__name__,
+                                        "turn_id": self.turn_id,
+                                        "request_id": self.request_id,
+                                        "timestamp": time.time(),
+                                    })
+                                    raise
+                                output_image_parts_buffer.append(image_part)
+                                self.observability_signal.emit({
+                                    "type": "image_generation_save_finish",
+                                    "item_id": item_id,
+                                    "mime_type": image_part.get("mime_type") or "",
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                    "timestamp": time.time(),
+                                })
+                                self.step_signal.emit(f"Image Generation: saved ({item_id})")
 
                             # 3. Handle Tool Calls
                             elif type_ == "tool_call":
@@ -3412,7 +3464,12 @@ class LLMWorker(QThread):
                     if tool_calls:
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills, generated_messages)
 
-                    if (not tool_calls) and (not (content or "").strip()) and (not provider_error_message):
+                    if (
+                        (not tool_calls)
+                        and (not (content or "").strip())
+                        and (not output_image_parts_buffer)
+                        and (not provider_error_message)
+                    ):
                         if preserve_responses and response_items_buffer:
                             self.finished_signal.emit({
                                 "error": (
@@ -3456,6 +3513,10 @@ class LLMWorker(QThread):
                             PROVIDER_REPLAY_NAMESPACE_META_KEY: provider_replay_namespace,
                         },
                     }
+                    if output_image_parts_buffer:
+                        assistant_msg["content_parts"] = json_copy(
+                            output_image_parts_buffer, []
+                        )
                     # CRITICAL: For tool calls WITHIN the same turn, DeepSeek requires reasoning_content
                     # We must use current_turn_reasoning, NOT full_reasoning, to avoid duplication in history
                     # Always include the key, even if empty, to satisfy API requirements
@@ -4275,6 +4336,7 @@ class LLMWorker(QThread):
                             force_reply_attempted = False
                             continue
                         final_content = content
+                        final_content_parts = json_copy(output_image_parts_buffer, [])
                         break
                         
                 except Exception as e:
@@ -4324,6 +4386,7 @@ class LLMWorker(QThread):
         self.finished_signal.emit({
             "reasoning": full_reasoning.strip(),
             "content": final_content,
+            "content_parts": final_content_parts,
             "role": "assistant",
             "duration": total_duration,
             "generated_messages": generated_messages,

@@ -104,6 +104,19 @@ class TestLLMFactory(unittest.TestCase):
         self.assertEqual(provider.provider_name, "OpenAI Responses")
         self.assertFalse(provider.supports_vision)
 
+    def test_create_provider_exposes_image_generation_capability(self):
+        provider = LLMFactory.create_provider_from_profile({
+            "provider_type": "openai",
+            "api_key": "profile_key",
+            "base_url": "https://profile.url",
+            "model_name": "profile-model",
+            "api_protocol": "responses",
+            "supports_image_generation": True,
+        })
+
+        self.assertTrue(provider.supports_image_generation)
+        self.assertEqual(provider.api_protocol, "responses")
+
     def test_create_provider_accepts_runtime_reasoning_override(self):
         self.mock_config.get_model_profile.return_value = {
             "provider_type": "openai",

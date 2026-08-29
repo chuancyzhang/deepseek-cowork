@@ -27,6 +27,7 @@ from main import (
     ChannelQrWorker,
     FeishuQrDialog,
     FileChip,
+    GeneratedImageCard,
     ImagePreviewDialog,
     ImagePreviewError,
     MainWindow,
@@ -34,6 +35,7 @@ from main import (
     SettingsDialog,
     WINDOWS_APP_USER_MODEL_ID,
     skill_center_config_state,
+    ChatBubble,
 )
 from ui.primitives import ProductMasterDetail, ProductTooltipController
 
@@ -56,6 +58,42 @@ class ProductExperienceFixTests(unittest.TestCase):
         payload = json.loads(append_log.call_args.args[1])
         self.assertEqual(payload["stage"], "first_submit_error")
         self.assertEqual(payload["phase"], "run")
+
+    def test_assistant_bubble_renders_image_only_output_and_missing_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "generated.png")
+            self.assertTrue(QImage(16, 12, QImage.Format_RGB32).save(image_path))
+            bubble = ChatBubble("Agent", "")
+            try:
+                bubble.set_main_content(
+                    "",
+                    content_parts=[{
+                        "type": "output_image",
+                        "path": image_path,
+                        "mime_type": "image/png",
+                        "source_item_id": "ig_1",
+                    }],
+                    final=True,
+                )
+                self.assertTrue(bubble.generated_images_container.isVisibleTo(bubble))
+                card = bubble.generated_images_layout.itemAt(0).widget()
+                self.assertIsInstance(card, GeneratedImageCard)
+                self.assertFalse(card._pixmap.isNull())
+                self.assertTrue(bubble.has_visible_stage_content())
+
+                bubble.set_main_content(
+                    "",
+                    content_parts=[{
+                        "type": "output_image",
+                        "path": os.path.join(temp_dir, "missing.png"),
+                        "source_item_id": "ig_missing",
+                    }],
+                    final=True,
+                )
+                missing_card = bubble.generated_images_layout.itemAt(0).widget()
+                self.assertIn("不可用", missing_card.caption_label.text())
+            finally:
+                bubble.close()
 
     def test_skill_center_reports_remote_required_config_as_pending(self):
         self.assertEqual(

@@ -31,6 +31,7 @@ DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES = {
     "message",
     "function_call",
     "web_search_call",
+    "image_generation_call",
 }
 TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "network_error",
@@ -81,6 +82,7 @@ SEMANTIC_PROVIDER_CHUNK_TYPES = {
     "tool_call",
     "response_items",
     "server_tool_status",
+    "output_image",
 }
 RESPONSES_WEB_SEARCH_TOOL_TYPES = {
     "web_search",
@@ -499,6 +501,7 @@ class OpenAIProvider(LLMProvider):
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
         supports_vision=False,
+        supports_image_generation=False,
         stream_usage_enabled=True,
         prompt_cache_key_param="",
         api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
@@ -519,6 +522,7 @@ class OpenAIProvider(LLMProvider):
         self.thinking_enabled = bool(thinking_enabled)
         self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self.supports_vision = bool(supports_vision)
+        self.supports_image_generation = bool(supports_image_generation)
         self.stream_usage_enabled = bool(stream_usage_enabled)
         self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
         self.api_protocol = normalize_openai_api_protocol(api_protocol)
@@ -557,6 +561,12 @@ class OpenAIProvider(LLMProvider):
             ensure_tool_call_sequence(messages, context=f"{provider_name} request")
         except Exception as exc:
             yield {"type": "error", "content": str(exc)}
+            return
+        if self.supports_image_generation and self.api_protocol != API_PROTOCOL_RESPONSES:
+            yield {
+                "type": "error",
+                "content": "图片生成能力仅支持 OpenAI Responses API，请修正模型协议配置。",
+            }
             return
         if self.api_protocol == API_PROTOCOL_RESPONSES:
             stream_factory = lambda _attempt: self._responses_stream(
@@ -811,6 +821,20 @@ class OpenAIProvider(LLMProvider):
                     or not isinstance(item.get("action"), dict)
                 ):
                     raise RuntimeError("DeepSeek Responses returned an invalid web_search_call item.")
+            elif item_type == "image_generation_call":
+                if (
+                    not str(item.get("id") or "").strip()
+                    or (
+                        source != "history"
+                        and (
+                            not isinstance(item.get("result"), str)
+                            or not str(item.get("result") or "").strip()
+                        )
+                    )
+                ):
+                    raise RuntimeError(
+                        "DeepSeek Responses returned an invalid image_generation_call item."
+                    )
             normalized.append(item)
 
         return normalized
@@ -916,6 +940,24 @@ class OpenAIProvider(LLMProvider):
                     payload["output_index"] = output_index
                 yield payload
                 continue
+            if event_type in {
+                "response.image_generation_call.in_progress",
+                "response.image_generation_call.generating",
+                "response.image_generation_call.completed",
+            }:
+                payload = {
+                    "type": "server_tool_status",
+                    "name": "image_generation",
+                    "status": event_type.rsplit(".", 1)[-1],
+                }
+                item_id = str(self._object_value(event, "item_id", "") or "")
+                if item_id:
+                    payload["id"] = item_id
+                output_index = self._object_value(event, "output_index")
+                if output_index is not None:
+                    payload["output_index"] = output_index
+                yield payload
+                continue
             if event_type == "response.output_item.added":
                 item = self._object_value(event, "item")
                 if str(self._object_value(item, "type", "") or "") != "function_call":
@@ -972,6 +1014,27 @@ class OpenAIProvider(LLMProvider):
                 replay_items = self._normalize_responses_replay_items(
                     self._object_value(response, "output"),
                 )
+                sanitized_replay_items = []
+                for item in replay_items:
+                    if item.get("type") != "image_generation_call":
+                        sanitized_replay_items.append(item)
+                        continue
+                    item_id = str(item.get("id") or "").strip()
+                    encoded_image = item.get("result")
+                    if not item_id or not isinstance(encoded_image, str) or not encoded_image.strip():
+                        raise RuntimeError(
+                            "Responses returned an incomplete image_generation_call result."
+                        )
+                    yield {
+                        "type": "output_image",
+                        "item_id": item_id,
+                        "image_base64": encoded_image,
+                    }
+                    sanitized_replay_items.append({
+                        "type": "image_generation_call",
+                        "id": item_id,
+                    })
+                replay_items = sanitized_replay_items
                 completed_text_parts = []
                 for item in replay_items:
                     if item.get("type") != "message":
@@ -1132,6 +1195,14 @@ class OpenAIProvider(LLMProvider):
             if not has_web_search:
                 deduped.append({"type": "web_search"})
             prepared = deduped
+        if self.supports_image_generation:
+            has_image_generation = any(
+                isinstance(tool, dict)
+                and str(tool.get("type") or "") == "image_generation"
+                for tool in prepared
+            )
+            if not has_image_generation:
+                prepared.append({"type": "image_generation"})
         return prepared
 
     def _prepare_responses_input(self, messages):
@@ -1388,6 +1459,7 @@ class MoonshotProvider(OpenAIProvider):
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
         supports_vision=False,
+        supports_image_generation=False,
         stream_usage_enabled=True,
         prompt_cache_key_param="",
         api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
@@ -1402,6 +1474,7 @@ class MoonshotProvider(OpenAIProvider):
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
             supports_vision=supports_vision,
+            supports_image_generation=supports_image_generation,
             stream_usage_enabled=stream_usage_enabled,
             prompt_cache_key_param=prompt_cache_key_param,
             api_protocol=api_protocol,

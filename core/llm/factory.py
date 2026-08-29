@@ -26,6 +26,9 @@ class LLMFactory:
                     "deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT
                 ),
                 "supports_vision": config_manager.get("supports_vision", False),
+                "supports_image_generation": config_manager.get(
+                    "supports_image_generation", False
+                ),
                 "stream_usage_enabled": config_manager.get("stream_usage_enabled", True),
                 "prompt_cache_key_param": config_manager.get("prompt_cache_key_param", ""),
                 "api_protocol": config_manager.get("api_protocol", "chat_completions"),
@@ -49,6 +52,7 @@ class LLMFactory:
                 else profile.get("reasoning_effort", profile.get("deepseek_reasoning_effort", ""))
             ),
             "supports_vision": profile.get("supports_vision", False),
+            "supports_image_generation": profile.get("supports_image_generation", False),
             "stream_usage_enabled": profile.get("stream_usage_enabled", True),
             "prompt_cache_key_param": profile.get("prompt_cache_key_param", ""),
             "api_protocol": profile.get("api_protocol", "chat_completions"),

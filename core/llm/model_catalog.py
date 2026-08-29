@@ -95,10 +95,11 @@ def build_new_model_defaults(provider_type, base_url, model_name):
 
     provider = _normalized_provider_type(provider_type)
     if provider != "openai":
-        return {"supports_vision": False}
+        return {"supports_vision": False, "supports_image_generation": False}
     if not is_deepseek_official_base_url(base_url):
         return {
             "supports_vision": False,
+            "supports_image_generation": False,
             "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
             "deepseek_thinking_enabled": False,
             "deepseek_reasoning_effort": "",
@@ -108,6 +109,7 @@ def build_new_model_defaults(provider_type, base_url, model_name):
     normalized_name = str(model_name or "").strip().lower()
     return {
         "supports_vision": normalized_name == DEEPSEEK_VISION_MODEL,
+        "supports_image_generation": False,
         "api_protocol": API_PROTOCOL_RESPONSES,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT,

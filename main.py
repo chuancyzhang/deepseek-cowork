@@ -119,6 +119,7 @@ from core.deliverable_editing import (
 )
 from core.file_capabilities import TEXT_FILE_MAX_BYTES
 from core.audio_attachments import is_audio_attachment, partition_model_visible_attachments
+from core.generated_images import has_visible_assistant_output, output_image_parts
 from core.html_render import extract_renderable_html_response
 from core.inline_visualization import (
     build_visualization_document,
@@ -5805,6 +5806,7 @@ class BatchModelCapabilityDialog(QDialog):
         form.addRow(build_form_row_label("图片理解"), self.vision_combo)
 
         self.protocol_combo = None
+        self.image_generation_combo = None
         self.reasoning_mode_combo = None
         self.reasoning_checks = {}
         self.reasoning_combo = None
@@ -5815,6 +5817,13 @@ class BatchModelCapabilityDialog(QDialog):
             self.protocol_combo.addItem("Chat Completions", API_PROTOCOL_CHAT_COMPLETIONS)
             self.protocol_combo.addItem("Responses", API_PROTOCOL_RESPONSES)
             form.addRow(build_form_row_label("API 协议"), self.protocol_combo)
+
+            self.image_generation_combo = QComboBox()
+            apply_settings_combo_style(self.image_generation_combo)
+            self.image_generation_combo.addItem("不修改", None)
+            self.image_generation_combo.addItem("支持图片生成", True)
+            self.image_generation_combo.addItem("不支持图片生成", False)
+            form.addRow(build_form_row_label("图片生成"), self.image_generation_combo)
 
             self.reasoning_mode_combo = QComboBox()
             apply_settings_combo_style(self.reasoning_mode_combo)
@@ -5872,6 +5881,17 @@ class BatchModelCapabilityDialog(QDialog):
             self.reasoning_combo.setCurrentIndex(self.reasoning_combo.findData(allowed[0]))
 
     def accept(self):
+        if (
+            self.image_generation_combo
+            and self.image_generation_combo.currentData() is True
+            and self.protocol_combo.currentData() != API_PROTOCOL_RESPONSES
+        ):
+            QMessageBox.warning(
+                self,
+                "批量配置",
+                "启用图片生成时，请同时将 API 协议设置为 Responses。",
+            )
+            return
         if self.reasoning_mode_combo and self.reasoning_mode_combo.currentData() == "enabled":
             efforts = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
             if not efforts:
@@ -5888,6 +5908,10 @@ class BatchModelCapabilityDialog(QDialog):
             changes["supports_vision"] = bool(self.vision_combo.currentData())
         if self.protocol_combo and self.protocol_combo.currentData():
             changes["api_protocol"] = self.protocol_combo.currentData()
+        if self.image_generation_combo and self.image_generation_combo.currentData() is not None:
+            changes["supports_image_generation"] = bool(
+                self.image_generation_combo.currentData()
+            )
         if self.reasoning_mode_combo:
             mode = self.reasoning_mode_combo.currentData()
             if mode == "disabled":
@@ -6167,6 +6191,14 @@ class ModelEditDialog(QDialog):
                 )
             )
 
+        self.image_generation_check = None
+        if provider_id == "openai":
+            self.image_generation_check = QCheckBox("支持通过 Responses 生成图片")
+            self.image_generation_check.setChecked(
+                bool(model.get("supports_image_generation", False))
+            )
+            form.addRow(build_form_row_label("图片生成"), self.image_generation_check)
+
         self.thinking_check = None
         self.reasoning_combo = None
         self.reasoning_checks = {}
@@ -6253,6 +6285,10 @@ class ModelEditDialog(QDialog):
             "display_name": display_name,
             "model_name": model_name,
             "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
+            "supports_image_generation": bool(
+                self.image_generation_check
+                and self.image_generation_check.isChecked()
+            ),
         }
         if self.provider_id == "openai":
             item["api_protocol"] = normalize_openai_api_protocol(
@@ -6278,6 +6314,17 @@ class ModelEditDialog(QDialog):
             if not any(check.isChecked() for check in self.reasoning_checks.values()):
                 QMessageBox.warning(self, "模型配置", "请至少选择一个推理强度档位。")
                 return
+        if (
+            self.image_generation_check
+            and self.image_generation_check.isChecked()
+            and self.api_protocol_combo.currentData() != API_PROTOCOL_RESPONSES
+        ):
+            QMessageBox.warning(
+                self,
+                "模型配置",
+                "图片生成仅支持 Responses API，请先将 API 协议切换为 Responses。",
+            )
+            return
         super().accept()
 
 
@@ -6606,7 +6653,16 @@ class ModelChannelEditor(QFrame):
             protocol_label = "Responses" if protocol == API_PROTOCOL_RESPONSES else "Chat Completions"
             suffix = f"  ·  {protocol_label}" if self._provider_type() == "openai" else ""
             recommendation = "  ·  推荐" if str(model.get("model_name") or "") == recommended else ""
-            capability = "  ·  图片" if model.get("supports_vision") else ""
+            image_capabilities = []
+            if model.get("supports_vision"):
+                image_capabilities.append("图片理解")
+            if model.get("supports_image_generation"):
+                image_capabilities.append("图片生成")
+            capability = (
+                "  ·  " + " / ".join(image_capabilities)
+                if image_capabilities
+                else ""
+            )
             efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
             reasoning = f"  ·  推理 {'/'.join(efforts)}" if efforts else ""
             item = QListWidgetItem(
@@ -19196,6 +19252,108 @@ class FileChip(QFrame):
                 f"QToolButton:hover {{ color: {DesignTokens.icon_primary}; }}"
             )
 
+class GeneratedImageCard(QFrame):
+    """Theme-aware inline preview for a generated conversation image."""
+
+    def __init__(self, image_part, parent=None):
+        super().__init__(parent)
+        self.image_part = dict(image_part or {})
+        configured_path = str(self.image_part.get("path") or "").strip()
+        self.path = (
+            os.path.abspath(os.path.normpath(configured_path))
+            if configured_path
+            else ""
+        )
+        self._preview_dialog = None
+        self._pixmap = QPixmap(self.path) if self.path and os.path.isfile(self.path) else QPixmap()
+        self.setObjectName("GeneratedImageCard")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setMaximumWidth(460)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 7)
+        layout.setSpacing(6)
+        self.image_label = ClickableImageLabel()
+        self.image_label.setObjectName("GeneratedImageThumbnail")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.image_label.setToolTip("点击查看大图")
+        self.image_label.activated.connect(self._open_preview)
+        layout.addWidget(self.image_label)
+
+        self.caption_label = QLabel()
+        self.caption_label.setObjectName("GeneratedImageCaption")
+        self.caption_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.caption_label.setWordWrap(True)
+        layout.addWidget(self.caption_label)
+
+        if self._pixmap.isNull():
+            self.image_label.setVisible(False)
+            self.caption_label.setText(
+                f"生成图片不可用：文件不存在或已损坏\n{self.path or '未提供路径'}"
+            )
+        else:
+            self.caption_label.setText(
+                f"生成图片 · {self._pixmap.width()} × {self._pixmap.height()}"
+            )
+            self._render_thumbnail()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def _render_thumbnail(self):
+        if self._pixmap.isNull():
+            return
+        available_width = max(1, min(440, self.width() - 16))
+        scaled = self._pixmap.scaled(
+            available_width,
+            320,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.image_label.setFixedHeight(max(1, scaled.height()))
+        self.image_label.setPixmap(scaled)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_thumbnail()
+
+    def _open_preview(self):
+        if self._pixmap.isNull():
+            QMessageBox.warning(
+                self.window(),
+                "无法预览图片",
+                f"生成图片文件不存在或已损坏：\n{self.path or '未提供路径'}",
+            )
+            return
+        if _qt_object_alive(self._preview_dialog):
+            self._preview_dialog.show()
+            self._preview_dialog.raise_()
+            self._preview_dialog.activateWindow()
+            return
+        try:
+            dialog = ImagePreviewDialog(self.path, parent=self.window())
+        except ImagePreviewError as exc:
+            QMessageBox.warning(self.window(), "无法预览图片", str(exc))
+            return
+        self._preview_dialog = dialog
+        dialog.open()
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#GeneratedImageCard {{ background: {DesignTokens.bg_secondary}; "
+            f"border: 1px solid {DesignTokens.chat_border}; "
+            f"border-radius: {DesignTokens.radius_md}px; }}"
+        )
+        self.image_label.setStyleSheet(
+            f"QLabel#GeneratedImageThumbnail {{ background: {DesignTokens.bg_main}; "
+            f"border: none; border-radius: {DesignTokens.radius_sm}px; }}"
+        )
+        color = DesignTokens.chat_text_muted if not self._pixmap.isNull() else DesignTokens.error_text
+        self.caption_label.setStyleSheet(
+            f"QLabel#GeneratedImageCaption {{ color: {color}; "
+            f"font-size: {DesignTokens.font_size_meta}px; border: none; background: transparent; }}"
+        )
+
+
 class GuidanceTimelineEvent(QFrame):
     """Always-visible user guidance row between conversational reasoning segments."""
 
@@ -20534,6 +20692,16 @@ class ChatBubble(QFrame):
             self.content_plain_edit.setVisible(False)
             col_layout.addWidget(self.content_rich_edit)
             col_layout.addWidget(self.content_plain_edit)
+            self.generated_images_container = QWidget()
+            self.generated_images_container.setObjectName("GeneratedImagesContainer")
+            self.generated_images_container.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Maximum
+            )
+            self.generated_images_layout = QVBoxLayout(self.generated_images_container)
+            self.generated_images_layout.setContentsMargins(0, 0, 0, 0)
+            self.generated_images_layout.setSpacing(8)
+            self.generated_images_container.setVisible(False)
+            col_layout.addWidget(self.generated_images_container)
             if self.visualize_enabled or (
                 "::cowork-inline-vis{file=" in str(text or "")
                 and self.chat_storage is not None
@@ -20547,6 +20715,7 @@ class ChatBubble(QFrame):
             self._pending_main_content_parts = None
             self._pending_main_content_final = False
             self._rendered_main_content_text = None
+            self._rendered_main_content_parts_signature = None
             self._rendered_main_content_final = False
             self._rendered_main_content_mode = None
             self._last_main_content_render_ts = 0.0
@@ -21056,6 +21225,9 @@ class ChatBubble(QFrame):
             return True
         if bool((getattr(self, "main_content_text", "") or "").strip()):
             return True
+        generated_images = getattr(self, "generated_images_container", None)
+        if generated_images is not None and not generated_images.isHidden():
+            return True
         if self.thinking_widget is not None and not self.thinking_widget.isHidden():
             return True
         if self.timeline_events:
@@ -21267,8 +21439,10 @@ class ChatBubble(QFrame):
         if getattr(self, "skill_capture_btn", None) is not None:
             self.skill_capture_btn.setVisible(bool(actions_visible and self.source_message_id))
 
+        parts_signature = self._output_image_parts_signature(content_parts)
         already_rendered = (
             self._rendered_main_content_text == text
+            and self._rendered_main_content_parts_signature == parts_signature
             and (self._rendered_main_content_final or not final)
         )
         if already_rendered:
@@ -21299,8 +21473,10 @@ class ChatBubble(QFrame):
 
     def _render_main_content(self, text, content_parts=None, final=False):
         text = text or ""
+        parts_signature = self._output_image_parts_signature(content_parts)
         already_rendered = (
             self._rendered_main_content_text == text
+            and self._rendered_main_content_parts_signature == parts_signature
             and (self._rendered_main_content_final or not final)
         )
         if already_rendered:
@@ -21338,7 +21514,9 @@ class ChatBubble(QFrame):
         finally:
             self.content_edit.setUpdatesEnabled(True)
 
+        self._sync_generated_image_cards(content_parts)
         self._rendered_main_content_text = text
+        self._rendered_main_content_parts_signature = parts_signature
         self._rendered_main_content_final = bool(final)
         self._rendered_main_content_mode = render_mode
         self._last_main_content_render_ts = time.time()
@@ -21352,6 +21530,33 @@ class ChatBubble(QFrame):
             parent = self.parentWidget()
             if isinstance(parent, AssistantTurnGroup):
                 parent.complete_pending_process_finalization(self)
+
+    @staticmethod
+    def _output_image_parts_signature(content_parts):
+        return tuple(
+            (
+                str(part.get("source_item_id") or ""),
+                str(part.get("path") or ""),
+                str(part.get("mime_type") or ""),
+            )
+            for part in output_image_parts(content_parts)
+        )
+
+    def _sync_generated_image_cards(self, content_parts):
+        container = getattr(self, "generated_images_container", None)
+        layout = getattr(self, "generated_images_layout", None)
+        if container is None or layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        images = output_image_parts(content_parts)
+        for image_part in images:
+            layout.addWidget(GeneratedImageCard(image_part, container), 0, Qt.AlignLeft)
+        container.setVisible(bool(images))
+        self._notify_stage_visibility_changed()
 
     def _sync_inline_visualizations(self, text):
         marker = "::cowork-inline-vis{file="
@@ -34658,7 +34863,9 @@ class MainWindow(QMainWindow):
             final_message = next(
                 (
                     message for message in reversed(assistant_messages)
-                    if str(message.get("content") or "").strip() and not message.get("tool_calls")
+                    if has_visible_assistant_output(
+                        message.get("content"), message.get("content_parts")
+                    ) and not message.get("tool_calls")
                 ),
                 None,
             )
@@ -34694,7 +34901,12 @@ class MainWindow(QMainWindow):
             )
 
         final_content = str((final_message or {}).get("content") or "")
-        if not final_content.strip():
+        final_content_parts = (
+            (final_message or {}).get("content_parts")
+            if isinstance((final_message or {}).get("content_parts"), list)
+            else None
+        )
+        if not has_visible_assistant_output(final_content, final_content_parts):
             final_content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
         final_bubble = self.add_chat_bubble(
             "Agent",
@@ -34707,8 +34919,7 @@ class MainWindow(QMainWindow):
         if final_bubble is not None:
             final_bubble.set_main_content(
                 final_content,
-                content_parts=(final_message or {}).get("content_parts")
-                if isinstance((final_message or {}).get("content_parts"), list) else None,
+                content_parts=final_content_parts,
                 final=True,
             )
             final_bubble.update_thinking(duration=None, is_final=True)
@@ -38606,16 +38817,23 @@ class MainWindow(QMainWindow):
                     )
                     is_stage = reply_kind != "final" or bool(message.get("tool_calls"))
                     content = str(message.get("content") or "")
-                    missing_final = not is_stage and not content.strip()
+                    message_content_parts = (
+                        message.get("content_parts")
+                        if isinstance(message.get("content_parts"), list)
+                        else None
+                    )
+                    missing_final = not is_stage and not has_visible_assistant_output(
+                        content, message_content_parts
+                    )
                     if missing_final:
                         reply_kind = "error"
                         is_stage = True
                         content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
                     active_bubble.set_message_actions_enabled(not is_stage)
-                    if content:
+                    if has_visible_assistant_output(content, message_content_parts):
                         active_bubble.set_main_content(
                             content,
-                            content_parts=message.get("content_parts") if isinstance(message.get("content_parts"), list) else None,
+                            content_parts=message_content_parts,
                             final=True,
                         )
                     for tool_call in message.get("tool_calls") or []:
@@ -38775,7 +38993,10 @@ class MainWindow(QMainWindow):
             # Intelligent Fallback: Check if content is empty
             # If so, check if tools were executed
             current_text = active_agent_bubble.content_edit.toPlainText().strip() if hasattr(active_agent_bubble, "content_edit") else ""
-            if not final_content and not current_text:
+            if (
+                not has_visible_assistant_output(final_content, pending_struct_parts)
+                and not current_text
+            ):
                 has_tools = False
                 if hasattr(active_agent_bubble, 'think_container_layout'):
                      has_tools = active_agent_bubble.think_container_layout.count() > 0
@@ -38882,7 +39103,12 @@ class MainWindow(QMainWindow):
                 state.last_agent_bubble = None
                 
             elif role == 'assistant':
-                if not active_agent_bubble and (content or reasoning or msg.get('tool_calls')):
+                if not active_agent_bubble and (
+                    content
+                    or reasoning
+                    or msg.get('tool_calls')
+                    or output_image_parts(msg.get("content_parts"))
+                ):
                     active_agent_bubble = self.add_chat_bubble(
                         'Agent',
                         "",
@@ -49615,7 +49841,9 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_stage_id": key[1],
                     "ui_reply_kind": (
                         "stage" if message.get("tool_calls")
-                        else "final" if str(message.get("content") or "").strip()
+                        else "final" if has_visible_assistant_output(
+                            message.get("content"), message.get("content_parts")
+                        )
                         else "error"
                     ),
                 })
@@ -49645,9 +49873,10 @@ a {{ overflow-wrap: anywhere; }}
         return generated_messages
 
     @staticmethod
-    def _final_assistant_for_content(messages, content):
+    def _final_assistant_for_content(messages, content, content_parts=None):
         expected_content = str(content or "").strip()
-        if not expected_content:
+        expected_images = MainWindow._output_image_identity(content_parts)
+        if not expected_content and not expected_images:
             return None
         for message in reversed(list(messages or [])):
             if not isinstance(message, dict):
@@ -49656,9 +49885,23 @@ a {{ overflow-wrap: anywhere; }}
                 continue
             if message.get("tool_calls"):
                 continue
-            if str(message.get("content") or "").strip() == expected_content:
+            message_content = str(message.get("content") or "").strip()
+            message_images = MainWindow._output_image_identity(
+                message.get("content_parts")
+            )
+            if message_content == expected_content and message_images == expected_images:
                 return message
         return None
+
+    @staticmethod
+    def _output_image_identity(content_parts):
+        return tuple(
+            (
+                str(part.get("source_item_id") or ""),
+                str(part.get("path") or ""),
+            )
+            for part in output_image_parts(content_parts)
+        )
 
     def _ensure_terminal_assistant_message(
         self,
@@ -49674,7 +49917,9 @@ a {{ overflow-wrap: anywhere; }}
         bubble,
     ):
         """Return the canonical message id for the final text already shown."""
-        final_message = self._final_assistant_for_content(generated_messages, content)
+        final_message = self._final_assistant_for_content(
+            generated_messages, content, content_parts
+        )
         decision = "generated"
         if final_message is None:
             turn_key = str(turn_id or getattr(state, "active_turn_id", "") or "")
@@ -49861,13 +50106,17 @@ a {{ overflow-wrap: anywhere; }}
             return
         provider_succeeded = "error" not in result
         if provider_succeeded:
-            has_final_content = bool(str(result.get("content") or "").strip())
+            has_final_content = has_visible_assistant_output(
+                result.get("content"), result.get("content_parts")
+            )
             if not has_final_content:
                 has_final_content = any(
                     isinstance(message, dict)
                     and message.get("role") == "assistant"
                     and not message.get("tool_calls")
-                    and bool(str(message.get("content") or "").strip())
+                    and has_visible_assistant_output(
+                        message.get("content"), message.get("content_parts")
+                    )
                     for message in reversed(result.get("generated_messages") or [])
                 )
             if not has_final_content:
@@ -50289,16 +50538,21 @@ a {{ overflow-wrap: anywhere; }}
             persistable_generated_messages,
         )
 
-        if not (content or "").strip() and generated_messages:
+        if not has_visible_assistant_output(content, content_parts) and generated_messages:
             for msg in reversed(generated_messages):
-                if msg.get("role") == "assistant":
+                if (
+                    msg.get("role") == "assistant"
+                    and not msg.get("tool_calls")
+                    and has_visible_assistant_output(
+                        msg.get("content"), msg.get("content_parts")
+                    )
+                ):
                     msg_content = msg.get("content") or ""
-                    if msg_content.strip():
-                        content = msg_content
-                        if isinstance(msg.get("content_parts"), list):
-                            content_parts = msg.get("content_parts") or content_parts
-                        if not (reasoning or "").strip():
-                            reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
+                    content = msg_content
+                    if isinstance(msg.get("content_parts"), list):
+                        content_parts = msg.get("content_parts") or content_parts
+                    if not (reasoning or "").strip():
+                        reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
                     break
         tool_results = {}
         if generated_messages:
@@ -50316,7 +50570,7 @@ a {{ overflow-wrap: anywhere; }}
                 tool_calls.extend(msg.get("tool_calls") or [])
         assistant_source_message_id = ""
 
-        missing_final_content = not (content or "").strip()
+        missing_final_content = not has_visible_assistant_output(content, content_parts)
         if missing_final_content:
             content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
             if open_content_event is not None:

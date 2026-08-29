@@ -316,6 +316,7 @@ class ModelConfigurationUiTests(unittest.TestCase):
             self.assertTrue(dialog.vision_check.isChecked())
             dialog.model_name_input.setText("deepseek-v4-flash")
             self.assertFalse(dialog.vision_check.isChecked())
+            self.assertFalse(dialog.image_generation_check.isChecked())
         finally:
             dialog.close()
 
@@ -393,6 +394,7 @@ class ModelConfigurationUiTests(unittest.TestCase):
             self.assertEqual(dialog.changes(), {})
             dialog.vision_combo.setCurrentIndex(1)
             dialog.protocol_combo.setCurrentIndex(2)
+            dialog.image_generation_combo.setCurrentIndex(1)
             dialog.reasoning_mode_combo.setCurrentIndex(1)
             dialog.reasoning_checks["high"].setChecked(True)
             dialog.reasoning_checks["max"].setChecked(True)
@@ -400,6 +402,7 @@ class ModelConfigurationUiTests(unittest.TestCase):
             changes = dialog.changes()
             self.assertTrue(changes["supports_vision"])
             self.assertEqual(changes["api_protocol"], "responses")
+            self.assertTrue(changes["supports_image_generation"])
             self.assertEqual(changes["reasoning_efforts"], ["high", "max"])
             self.assertEqual(changes["reasoning_effort"], "max")
         finally:

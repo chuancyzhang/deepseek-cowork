@@ -53,6 +53,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             thinking_enabled=kwargs.get("thinking_enabled", True),
             reasoning_effort=kwargs.get("reasoning_effort", "high"),
             supports_vision=kwargs.get("supports_vision", False),
+            supports_image_generation=kwargs.get("supports_image_generation", False),
             api_protocol=kwargs.get("api_protocol", "chat_completions"),
         )
         self.assertIn("openai", sys.modules)
@@ -257,6 +258,63 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         params = client.responses.create.call_args.kwargs
         self.assertEqual(params["prompt_cache_key"], "conv-1")
+
+    def test_responses_image_generation_tool_and_result_are_stable_and_sanitized(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-image-capable",
+            api_protocol=API_PROTOCOL_RESPONSES,
+            supports_image_generation=True,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.image_generation_call.in_progress",
+                item_id="ig_1",
+                output_index=0,
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    id="resp_1",
+                    output=[{
+                        "type": "image_generation_call",
+                        "id": "ig_1",
+                        "status": "completed",
+                        "result": "Zm9v",
+                    }],
+                    usage=None,
+                ),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "画一只猫"}]))
+
+        self.assertEqual(
+            client.responses.create.call_args.kwargs["tools"],
+            [{"type": "image_generation"}],
+        )
+        self.assertIn({
+            "type": "server_tool_status",
+            "name": "image_generation",
+            "status": "in_progress",
+            "id": "ig_1",
+            "output_index": 0,
+        }, chunks)
+        image_chunk = next(chunk for chunk in chunks if chunk["type"] == "output_image")
+        self.assertEqual(image_chunk["item_id"], "ig_1")
+        self.assertEqual(image_chunk["image_base64"], "Zm9v")
+        replay = next(chunk for chunk in chunks if chunk["type"] == "response_items")
+        self.assertEqual(replay["items"], [{"type": "image_generation_call", "id": "ig_1"}])
+        self.assertNotIn("result", replay["items"][0])
+
+    def test_image_generation_configuration_rejects_chat_completions(self):
+        provider, client = self._build_provider(supports_image_generation=True)
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "画图"}]))
+
+        self.assertEqual(chunks[0]["type"], "error")
+        self.assertIn("Responses", chunks[0]["content"])
+        client.chat.completions.create.assert_not_called()
 
     def test_responses_completed_output_repairs_missing_function_call_stream_events(self):
         provider, client = self._build_provider(

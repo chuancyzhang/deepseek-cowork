@@ -3787,6 +3787,80 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_responses_image_only_worker_persists_content_part_and_sanitized_replay(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "GPT Responses"
+            model_name = "gpt-image-capable"
+            base_url = "https://api.openai.com/v1"
+            api_protocol = "responses"
+            thinking_enabled = False
+            supports_image_generation = True
+            requires_responses_replay = True
+            requires_deepseek_responses_replay = False
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                from io import BytesIO
+                from PIL import Image
+
+                buffer = BytesIO()
+                Image.new("RGB", (5, 4), (30, 80, 180)).save(buffer, format="PNG")
+                yield {
+                    "type": "output_image",
+                    "item_id": "ig_worker_1",
+                    "image_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+                }
+                yield {
+                    "type": "response_items",
+                    "items": [{"type": "image_generation_call", "id": "ig_worker_1"}],
+                }
+
+        from core.llm.responses_replay import RESPONSES_REPLAY_META_KEY
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        try:
+            with (
+                patch("core.agent.SkillManager", side_effect=_SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "画一张图"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    session_id="image-session",
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertNotIn("error", finished[0])
+            self.assertEqual(finished[0]["content"], "")
+            self.assertEqual(len(finished[0]["content_parts"]), 1)
+            assistant = next(
+                message for message in finished[0]["generated_messages"]
+                if message.get("role") == "assistant"
+            )
+            image_part = assistant["content_parts"][0]
+            self.assertTrue(os.path.isfile(image_part["path"]))
+            replay = assistant["meta"][RESPONSES_REPLAY_META_KEY]
+            self.assertEqual(
+                replay,
+                [{"type": "image_generation_call", "id": "ig_worker_1"}],
+            )
+            self.assertNotIn("result", replay[0])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_responses_stop_keeps_partial_text_out_of_provider_ledger(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

@@ -689,6 +689,9 @@ class ConfigManager:
             "display_name": display_name or model_name,
             "model_name": model_name,
             "supports_vision": bool(source.get("supports_vision", False)),
+            "supports_image_generation": bool(
+                source.get("supports_image_generation", False)
+            ),
         }
         if provider_id == "openai":
             entry["api_protocol"] = normalize_openai_api_protocol(

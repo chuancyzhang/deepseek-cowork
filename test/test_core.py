@@ -2614,6 +2614,8 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_provider_attempt_persists_request_ids_response_id_and_terminal(self):
+        provider_calls = []
+
         class _SkillManagerStub:
             def get_tool_definitions(self, *args, **kwargs):
                 return []
@@ -2647,6 +2649,13 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 prompt_cache_key=None,
                 request_context=None,
             ):
+                provider_calls.append(
+                    {
+                        "messages": messages,
+                        "tools": tools,
+                        "request_context": request_context,
+                    }
+                )
                 yield {
                     "type": "provider_request",
                     "client_request_id": request_context.get("client_request_id"),
@@ -2681,7 +2690,11 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     session_id="attempt-session",
                     turn_id="attempt-turn",
                     request_id="attempt-run",
-                    run_context={"mode": RUN_MODE_EXECUTION},
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "ppt_agent_mode": False,
+                        "ppt_agent_strategy": "should-not-reach-provider",
+                    },
                 )
                 worker.finished_signal.connect(finished.append)
                 worker.run()
@@ -2697,6 +2710,20 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             self.assertEqual(attempt.get("response_id"), "response-1")
             self.assertEqual(attempt.get("last_provider_sequence"), 9)
             self.assertEqual(attempt.get("status"), "completed")
+            self.assertEqual(len(provider_calls), 1)
+            self.assertNotIn("run_context", provider_calls[0]["request_context"])
+            self.assertNotIn("ppt_agent_mode", provider_calls[0]["request_context"])
+            self.assertEqual(
+                set(provider_calls[0]["request_context"]),
+                {
+                    "client_request_id",
+                    "run_id",
+                    "turn_id",
+                    "abort_check",
+                    "register_stream",
+                    "release_stream",
+                },
+            )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -4160,6 +4187,54 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=1)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_daemon_client_request_omits_inactive_ppt_agent_details(self):
+        with patch.object(self.client, "_request", return_value={"status": "ok"}) as request:
+            self.client.send_message(
+                "session-wire-context",
+                "hello",
+                run_context={
+                    "mode": RUN_MODE_EXECUTION,
+                    "ppt_agent_mode": False,
+                    "ppt_agent_strategy": "huashu",
+                    "ppt_agent_template_file": "unused.pptx",
+                },
+            )
+
+        payload = request.call_args.args[0]
+        self.assertIs(payload["run_context"]["ppt_agent_mode"], False)
+        self.assertEqual(
+            [key for key in payload["run_context"] if key.startswith("ppt_agent_")],
+            ["ppt_agent_mode"],
+        )
+
+    def test_daemon_stream_request_preserves_active_ppt_agent_details(self):
+        fake_socket = MagicMock()
+        fake_reader = MagicMock()
+        fake_reader.__iter__.return_value = iter([])
+        fake_socket.makefile.return_value.__enter__.return_value = fake_reader
+
+        with patch("core.daemon.socket.create_connection", return_value=fake_socket):
+            list(
+                self.client.send_message_stream(
+                    "session-wire-context",
+                    "hello",
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "ppt_agent_mode": True,
+                        "ppt_agent_strategy": " huashu ",
+                        "ppt_agent_template_file": " template.pptx ",
+                    },
+                )
+            )
+
+        wire_payload = json.loads(fake_socket.sendall.call_args.args[0].decode("utf-8"))
+        self.assertIs(wire_payload["run_context"]["ppt_agent_mode"], True)
+        self.assertEqual(wire_payload["run_context"]["ppt_agent_strategy"], "huashu")
+        self.assertEqual(
+            wire_payload["run_context"]["ppt_agent_template_file"],
+            "template.pptx",
+        )
 
     def test_get_pending_interaction_and_respond_roundtrip(self):
         result_holder = {}

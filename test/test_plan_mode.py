@@ -99,6 +99,63 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["workflow_mode"], "")
         self.assertEqual(ctx["office_output_profile"], "free")
 
+    def test_normalize_run_context_omits_inactive_ppt_agent_details(self):
+        ctx = normalize_run_context(
+            {
+                "mode": RUN_MODE_EXECUTION,
+                "ppt_agent_mode": False,
+                "ppt_agent_strategy": "huashu",
+                "ppt_agent_template_file": "should-not-cross-the-wire.pptx",
+                "ppt_agent_template_screenshots": ["slide-1.png"],
+            }
+        )
+
+        self.assertIs(ctx["ppt_agent_mode"], False)
+        self.assertEqual(
+            [key for key in ctx if key.startswith("ppt_agent_")],
+            ["ppt_agent_mode"],
+        )
+        self.assertEqual(normalize_run_context(ctx), ctx)
+
+    def test_normalize_run_context_preserves_active_ppt_agent_details(self):
+        ctx = normalize_run_context(
+            {
+                "mode": RUN_MODE_EXECUTION,
+                "ppt_agent_mode": True,
+                "ppt_agent_strategy": " huashu ",
+                "ppt_agent_selected_strategy": " guizang ",
+                "ppt_agent_preference": " business ",
+                "ppt_agent_template_file": " template.pptx ",
+                "ppt_agent_output_format": " PPTX ",
+                "ppt_agent_template_hash": " hash ",
+                "ppt_agent_renderer": " PowerPoint ",
+                "ppt_agent_renderer_prog_id": " PowerPoint.Application ",
+                "ppt_agent_visual_status": " VERIFIED ",
+                "ppt_agent_run_id": " run-1 ",
+                "ppt_agent_task_id": " task-1 ",
+                "ppt_agent_internal_stage": " VISUAL_VALIDATION ",
+                "ppt_agent_verification_level": " FULL ",
+                "ppt_agent_template_screenshots": [" slide-1.png ", ""],
+            }
+        )
+
+        self.assertIs(ctx["ppt_agent_mode"], True)
+        self.assertEqual(ctx["ppt_agent_strategy"], "huashu")
+        self.assertEqual(ctx["ppt_agent_selected_strategy"], "guizang")
+        self.assertEqual(ctx["ppt_agent_preference"], "business")
+        self.assertEqual(ctx["ppt_agent_template_file"], "template.pptx")
+        self.assertEqual(ctx["ppt_agent_output_format"], "pptx")
+        self.assertEqual(ctx["ppt_agent_template_hash"], "hash")
+        self.assertEqual(ctx["ppt_agent_renderer"], "powerpoint")
+        self.assertEqual(ctx["ppt_agent_renderer_prog_id"], "PowerPoint.Application")
+        self.assertEqual(ctx["ppt_agent_visual_status"], "verified")
+        self.assertEqual(ctx["ppt_agent_run_id"], "run-1")
+        self.assertEqual(ctx["ppt_agent_task_id"], "task-1")
+        self.assertEqual(ctx["ppt_agent_internal_stage"], "visual_validation")
+        self.assertEqual(ctx["ppt_agent_verification_level"], "full")
+        self.assertEqual(ctx["ppt_agent_template_screenshots"], ["slide-1.png"])
+        self.assertEqual(normalize_run_context(ctx), ctx)
+
 
 class TestAppendOnlySkillStateLedger(unittest.TestCase):
     def test_skill_enable_disable_reenable_upgrade_and_duplicate_events(self):

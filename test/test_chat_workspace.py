@@ -208,6 +208,11 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             ctx = window._build_run_context(state, RUN_MODE_EXECUTION)
 
             self.assertEqual(ctx["workspace_mode"], "project")
+            self.assertIs(ctx["ppt_agent_mode"], False)
+            self.assertEqual(
+                [key for key in ctx if key.startswith("ppt_agent_")],
+                ["ppt_agent_mode"],
+            )
             self.assertEqual(state.workspace_source, "chat")
             self.assertTrue(state.workspace_dir.endswith(os.path.join("conversation_workspaces", "history-session")))
             self.assertTrue(os.path.isdir(state.workspace_dir))

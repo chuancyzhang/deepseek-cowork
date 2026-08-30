@@ -6,6 +6,10 @@ ARTIFACT_DELIVERY_NATIVE = "native"
 ARTIFACT_DELIVERY_LINK = "link"
 ARTIFACT_DELIVERY_NONE = "none"
 
+SCHEDULED_DELIVERY_NATIVE = "native"
+SCHEDULED_DELIVERY_TEXT = "text"
+SCHEDULED_DELIVERY_NONE = "none"
+
 
 @dataclass(frozen=True)
 class ProviderFieldSpec:
@@ -35,6 +39,7 @@ class ProviderSpec:
     reconnect_label: str = "重新接入"
     capabilities: Tuple[str, ...] = ("文字", "链接")
     artifact_delivery_mode: str = ARTIFACT_DELIVERY_NONE
+    scheduled_delivery_mode: str = SCHEDULED_DELIVERY_NONE
 
     def is_configured(self, value) -> bool:
         config = value if isinstance(value, dict) else {}
@@ -57,6 +62,7 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         reconnect_label="重新扫码",
         capabilities=("文字", "链接", "文件", "图片"),
         artifact_delivery_mode=ARTIFACT_DELIVERY_NATIVE,
+        scheduled_delivery_mode=SCHEDULED_DELIVERY_NATIVE,
     ),
     ProviderSpec(
         provider_id="dingtalk",
@@ -114,6 +120,7 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         connect_label="连接钉钉",
         reconnect_label="保存并重新连接",
         artifact_delivery_mode=ARTIFACT_DELIVERY_LINK,
+        scheduled_delivery_mode=SCHEDULED_DELIVERY_TEXT,
     ),
     ProviderSpec(
         provider_id="wecom",
@@ -144,6 +151,7 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         connect_label="连接企业微信",
         reconnect_label="保存并重新连接",
         artifact_delivery_mode=ARTIFACT_DELIVERY_LINK,
+        scheduled_delivery_mode=SCHEDULED_DELIVERY_TEXT,
     ),
     ProviderSpec(
         provider_id="qq",
@@ -200,4 +208,17 @@ def artifact_capable_provider_ids():
         spec.provider_id
         for spec in IM_PROVIDER_SPECS
         if spec.artifact_delivery_mode != ARTIFACT_DELIVERY_NONE
+    )
+
+
+def provider_scheduled_delivery_mode(provider_id):
+    spec = get_provider_spec(provider_id)
+    return spec.scheduled_delivery_mode if spec else SCHEDULED_DELIVERY_NONE
+
+
+def scheduled_delivery_provider_ids():
+    return tuple(
+        spec.provider_id
+        for spec in IM_PROVIDER_SPECS
+        if spec.scheduled_delivery_mode != SCHEDULED_DELIVERY_NONE
     )

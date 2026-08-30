@@ -26,6 +26,7 @@ allowed-tools: [list_favorites, upsert_favorite, configure_favorite_schedule, de
 - `execution_mode="chat"` 时不要填写或推断 `workspace_dir`；聊天不会携带项目工作区。
 - `execution_mode="workspace"` 时必须使用已经存在的项目目录。
 - 每个常用项最多一个 `schedule`。
+- `schedule.delivery` 只能引用桌面端通过一次性绑定码创建的 `binding_id`；不要生成或猜测绑定 ID。用户尚未绑定时，引导其在常用编辑器中完成绑定。
 - 没有常用提示词的能力组合若要定时运行，计划必须使用 `prompt_mode="custom"` 并提供 `custom_prompt`。
 - 定时计划继承常用项的能力组合和执行位置，不单独存储 Agent、模型或附件。
 - 新计划默认暂停；只有用户明确要求启用时才设 `enabled=true`。

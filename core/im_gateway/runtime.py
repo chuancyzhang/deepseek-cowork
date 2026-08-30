@@ -6,6 +6,7 @@ import json
 import requests
 import os
 import re
+import mimetypes
 import uuid
 import time
 import threading
@@ -25,7 +26,18 @@ from core.im_gateway_registry import (
     provider_artifact_delivery_mode,
     provider_title,
 )
-from core.im_gateway_status import write_im_gateway_status
+from core.im_gateway_status import read_im_gateway_status, write_im_gateway_status
+from core.favorite_delivery import (
+    FAVORITE_DELIVERY_MAX_ATTEMPTS,
+    FAVORITE_DELIVERY_STATUS_COMPLETED,
+    FAVORITE_DELIVERY_STATUS_FAILED,
+    FAVORITE_DELIVERY_STATUS_PARTIAL,
+    FAVORITE_DELIVERY_STATUS_RETRY_WAIT,
+    FAVORITE_DELIVERY_STATUS_UNKNOWN,
+    FavoriteDeliveryService,
+    parse_favorite_binding_command,
+    prepare_binding_target,
+)
 from core.im_gateway.wechat_ilink import (
     WeChatIlinkClient,
     WeChatIlinkError,
@@ -458,6 +470,9 @@ class IMProvider:
     def send_message(self, text, event=None):
         return self.build_reply(text)
 
+    def send_favorite_delivery_item(self, item, target):
+        raise RuntimeError("当前企业消息渠道不支持常用任务主动投递。")
+
 class FeishuProvider(IMProvider):
     name = "feishu"
 
@@ -823,6 +838,111 @@ class FeishuProvider(IMProvider):
             return {"code": 0, "msg": "success"}
         return self.build_reply(text)
 
+    def _create_proactive_message(self, target, msg_type, content, idempotency_key):
+        receive_id_type = str((target or {}).get("target_type") or "").strip()
+        receive_id = str((target or {}).get("target_value") or "").strip()
+        if receive_id_type not in {"chat_id", "open_id", "user_id"} or not receive_id:
+            return {"ok": False, "retryable": False, "error": "飞书投递目标无效。"}
+        tenant_token = self._get_tenant_token()
+        if not tenant_token:
+            return {"ok": False, "retryable": True, "error": "飞书应用认证暂不可用。"}
+        payload = {
+            "receive_id": receive_id,
+            "msg_type": msg_type,
+            "content": json.dumps(content, ensure_ascii=False),
+            "uuid": str(idempotency_key or uuid.uuid4().hex),
+        }
+        try:
+            resp = requests.post(
+                f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+                headers={"Authorization": f"Bearer {tenant_token}"},
+                json=payload,
+                timeout=12,
+            )
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"message": _truncate_text(getattr(resp, "text", ""))}
+            ok = bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None))
+            if ok:
+                return {"ok": True}
+            return {
+                "ok": False,
+                "retryable": resp.status_code >= 500 or resp.status_code == 429,
+                "error": _safe_json_dump(body),
+            }
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            # The stable Feishu uuid makes retrying a timed-out create safe.
+            return {"ok": False, "retryable": True, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "retryable": False, "error": str(exc)}
+
+    def _upload_favorite_artifact(self, path):
+        path = os.path.abspath(os.path.normpath(str(path or "")))
+        if not os.path.isfile(path):
+            return None, None, "文件不存在。"
+        size = os.path.getsize(path)
+        if size <= 0:
+            return None, None, "文件为空。"
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        is_image = mime.startswith("image/")
+        limit = 10 * 1024 * 1024 if is_image else 30 * 1024 * 1024
+        if size > limit:
+            return None, None, "图片超过 10MB。" if is_image else "文件超过 30MB。"
+        tenant_token = self._get_tenant_token()
+        if not tenant_token:
+            return None, None, "飞书应用认证暂不可用。"
+        endpoint = "images" if is_image else "files"
+        field = "image" if is_image else "file"
+        data = {"image_type": "message"} if is_image else {
+            "file_type": "stream",
+            "file_name": os.path.basename(path),
+        }
+        try:
+            with open(path, "rb") as handle:
+                resp = requests.post(
+                    f"https://open.feishu.cn/open-apis/im/v1/{endpoint}",
+                    headers={"Authorization": f"Bearer {tenant_token}"},
+                    data=data,
+                    files={field: (os.path.basename(path), handle, mime)},
+                    timeout=30,
+                )
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"message": _truncate_text(getattr(resp, "text", ""))}
+            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
+                key_name = "image_key" if is_image else "file_key"
+                key = str((body.get("data") or {}).get(key_name) or "")
+                if key:
+                    return ("image" if is_image else "file"), key, ""
+            return None, None, _safe_json_dump(body)
+        except Exception as exc:
+            return None, None, str(exc)
+
+    def send_favorite_delivery_item(self, item, target):
+        item = item if isinstance(item, dict) else {}
+        if item.get("type") == "text":
+            return self._create_proactive_message(
+                target,
+                "text",
+                {"text": str(item.get("text") or "")},
+                item.get("idempotency_key"),
+            )
+        if item.get("type") != "artifact":
+            return {"ok": False, "retryable": False, "error": "未知飞书投递项目。"}
+        msg_type, key, error = self._upload_favorite_artifact(item.get("path"))
+        if not key:
+            retryable = "认证" in str(error or "")
+            return {"ok": False, "retryable": retryable, "error": error}
+        content_key = "image_key" if msg_type == "image" else "file_key"
+        return self._create_proactive_message(
+            target,
+            msg_type,
+            {content_key: key},
+            item.get("idempotency_key"),
+        )
+
 
 class DingTalkProvider(IMProvider):
     name = "dingtalk"
@@ -896,16 +1016,13 @@ class DingTalkProvider(IMProvider):
     def _signed_webhook_url(self, url):
         if not url or not self.secret:
             return url
-        try:
-            ts = str(round(time.time() * 1000))
-            string_to_sign = f"{ts}\n{self.secret}"
-            sign = base64.b64encode(
-                hmac.new(self.secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
-            ).decode("utf-8")
-            joiner = "&" if "?" in url else "?"
-            return f"{url}{joiner}timestamp={ts}&sign={requests.utils.quote(sign, safe='')}"
-        except Exception:
-            return url
+        ts = str(round(time.time() * 1000))
+        string_to_sign = f"{ts}\n{self.secret}"
+        sign = base64.b64encode(
+            hmac.new(self.secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
+        ).decode("utf-8")
+        joiner = "&" if "?" in url else "?"
+        return f"{url}{joiner}timestamp={ts}&sign={requests.utils.quote(sign, safe='')}"
 
     def send_message(self, text, event=None):
         url = (event or {}).get("reply_url") or self.webhook_url
@@ -917,8 +1034,38 @@ class DingTalkProvider(IMProvider):
             _log_gateway(f"dingtalk send status={resp.status_code} ok={resp.ok}")
             return {"code": 0 if resp.ok else resp.status_code, "ok": bool(resp.ok)}
         except Exception as e:
-            _log_gateway(f"dingtalk send failed: {e}")
-            return {"code": -1, "error": str(e)}
+            safe_error = _redact_log_text(e)
+            _log_gateway(f"dingtalk send failed: {safe_error}")
+            return {"code": -1, "error": safe_error}
+
+    def send_favorite_delivery_item(self, item, target):
+        if (item or {}).get("type") != "text":
+            return {"ok": False, "retryable": False, "error": "钉钉不支持投递本地产物。"}
+        url = str((target or {}).get("target_value") or "").strip()
+        if not url:
+            return {"ok": False, "retryable": False, "error": "钉钉固定 Webhook 不可用。"}
+        try:
+            resp = requests.post(
+                self._signed_webhook_url(url),
+                json=self.build_reply(str((item or {}).get("text") or "")),
+                timeout=12,
+            )
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            app_ok = not isinstance(body, dict) or body.get("errcode") in (None, 0, "0")
+            if resp.ok and app_ok:
+                return {"ok": True}
+            return {
+                "ok": False,
+                "retryable": resp.status_code >= 500 or resp.status_code == 429,
+                "error": _safe_json_dump(body or {"status": resp.status_code}),
+            }
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            return {"ok": False, "ambiguous": True, "error": _redact_log_text(exc)}
+        except Exception as exc:
+            return {"ok": False, "retryable": False, "error": _redact_log_text(exc)}
 
 
 class WeComProvider(IMProvider):
@@ -1048,6 +1195,29 @@ class WeComProvider(IMProvider):
 
     def send_message(self, text, event=None):
         return self.send_card_reply(event, card_content=text)
+
+    def send_favorite_delivery_item(self, item, target):
+        if (item or {}).get("type") != "text":
+            return {"ok": False, "retryable": False, "error": "企业微信不支持投递本地产物。"}
+        if not self._ws_client or not self._event_loop:
+            return {"ok": False, "retryable": True, "error": "企业微信长连接尚未就绪。"}
+        chat_id = str((target or {}).get("target_value") or "").strip()
+        if not chat_id:
+            return {"ok": False, "retryable": False, "error": "企业微信投递目标无效。"}
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._ws_client.send_message(
+                    chat_id,
+                    {"msgtype": "markdown", "markdown": {"content": str((item or {}).get("text") or "")}},
+                ),
+                self._event_loop,
+            )
+            future.result(timeout=20)
+            return {"ok": True}
+        except TimeoutError as exc:
+            return {"ok": False, "ambiguous": True, "error": str(exc) or "企业微信发送确认超时。"}
+        except Exception as exc:
+            return {"ok": False, "retryable": True, "error": str(exc)}
 
 class QQProvider(IMProvider):
     name = "qq"
@@ -1568,6 +1738,174 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
     return {"error": "Daemon stream closed"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
 
 
+def _favorite_delivery_target(job):
+    payload = (job or {}).get("payload") if isinstance(job, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "target_type": str(payload.get("target_type") or ""),
+        "target_value": str(payload.get("target_value") or ""),
+    }
+
+
+def _process_favorite_delivery_job(service, provider, job):
+    payload = dict((job or {}).get("payload") or {})
+    items = [dict(item or {}) for item in payload.get("items") or []]
+    payload["items"] = items
+    target = _favorite_delivery_target(job)
+    permanent_failure = False
+    ambiguous_error = ""
+    last_error = ""
+    for item in items:
+        if item.get("status") == "sent":
+            continue
+        item["status"] = "sending"
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        payload["items"] = items
+        service.save_job_state(job["id"], payload, "sending")
+        _log_gateway(
+            f"favorite_delivery_item_start job_id={job['id']} item_id={item.get('id')} "
+            f"provider={job.get('provider')} type={item.get('type')}"
+        )
+        try:
+            result = provider.send_favorite_delivery_item(item, target)
+        except Exception as exc:
+            result = {"ok": False, "ambiguous": True, "error": str(exc)}
+        result = result if isinstance(result, dict) else {"ok": bool(result)}
+        if result.get("ok"):
+            item["status"] = "sent"
+            item["error"] = ""
+            _log_gateway(
+                f"favorite_delivery_item_finish job_id={job['id']} item_id={item.get('id')} status=sent"
+            )
+        elif result.get("ambiguous"):
+            item["status"] = "unknown"
+            item["error"] = str(result.get("error") or "发送结果未知。")[:800]
+            ambiguous_error = item["error"]
+            _log_gateway(
+                f"favorite_delivery_item_error job_id={job['id']} item_id={item.get('id')} status=unknown"
+            )
+        else:
+            item["status"] = "pending" if result.get("retryable") else "failed"
+            item["error"] = str(result.get("error") or "发送失败。")[:800]
+            last_error = item["error"]
+            permanent_failure = permanent_failure or not bool(result.get("retryable"))
+            _log_gateway(
+                f"favorite_delivery_item_error job_id={job['id']} item_id={item.get('id')} "
+                f"retryable={bool(result.get('retryable'))}"
+            )
+        payload["items"] = items
+        service.save_job_state(job["id"], payload, "sending", error=item.get("error") or "")
+        if ambiguous_error:
+            break
+
+    sent_count = sum(1 for item in items if item.get("status") == "sent")
+    failed_count = sum(1 for item in items if item.get("status") in {"failed", "pending"})
+    if ambiguous_error:
+        service.save_job_state(
+            job["id"], payload, FAVORITE_DELIVERY_STATUS_UNKNOWN, error=ambiguous_error
+        )
+        return
+    if failed_count == 0:
+        service.save_job_state(job["id"], payload, FAVORITE_DELIVERY_STATUS_COMPLETED)
+        _log_gateway(f"favorite_delivery_finish job_id={job['id']} status=completed")
+        return
+    if permanent_failure:
+        status = FAVORITE_DELIVERY_STATUS_PARTIAL if sent_count else FAVORITE_DELIVERY_STATUS_FAILED
+        service.save_job_state(job["id"], payload, status, error=last_error)
+        _log_gateway(f"favorite_delivery_finish job_id={job['id']} status={status}")
+        return
+    attempt_count = int((service.get_job(job["id"]) or job).get("attempt_count") or 0)
+    if attempt_count >= FAVORITE_DELIVERY_MAX_ATTEMPTS:
+        status = FAVORITE_DELIVERY_STATUS_PARTIAL if sent_count else FAVORITE_DELIVERY_STATUS_FAILED
+        service.save_job_state(job["id"], payload, status, error=last_error)
+        _log_gateway(f"favorite_delivery_finish job_id={job['id']} status={status} attempts={attempt_count}")
+        return
+    next_attempt_at = int(time.time()) + service.retry_delay(attempt_count)
+    service.save_job_state(
+        job["id"],
+        payload,
+        FAVORITE_DELIVERY_STATUS_RETRY_WAIT,
+        error=last_error,
+        next_attempt_at=next_attempt_at,
+    )
+    _log_gateway(
+        f"favorite_delivery_retry job_id={job['id']} attempt={attempt_count} next_attempt_at={next_attempt_at}"
+    )
+
+
+def _favorite_delivery_worker_loop(service, provider, stop_event):
+    provider_name = str(getattr(provider, "name", "") or "")
+    _log_gateway(f"favorite_delivery_worker_start provider={provider_name}")
+    while not stop_event.wait(1.5):
+        try:
+            runtime_status = read_im_gateway_status()
+            ready = provider_name == "dingtalk" or (
+                runtime_status.get("provider") == provider_name
+                and runtime_status.get("state") == "connected"
+            )
+            if not ready:
+                continue
+            job = service.claim_next_job(provider_name)
+            if not job:
+                continue
+            _log_gateway(
+                f"favorite_delivery_start job_id={job['id']} provider={provider_name} "
+                f"attempt={job.get('attempt_count')}"
+            )
+            _process_favorite_delivery_job(service, provider, job)
+        except Exception as exc:
+            _log_gateway(f"favorite_delivery_worker_error provider={provider_name} error={exc}")
+    _log_gateway(f"favorite_delivery_worker_finish provider={provider_name}")
+
+
+def _handle_favorite_binding_command(event, provider, config_manager, service):
+    code = parse_favorite_binding_command((event or {}).get("text"))
+    if not code:
+        return False
+    provider_name = str(getattr(provider, "name", "") or "").strip().lower()
+    request = service.find_pending_request(code)
+    if not request:
+        provider.send_card_reply(
+            event,
+            card_content="绑定码无效或已过期，请在桌面端重新生成。",
+            title="常用任务绑定",
+        )
+        _log_gateway(f"favorite_binding_rejected provider={provider_name} reason=invalid_or_expired")
+        return True
+    try:
+        target = prepare_binding_target(
+            provider_name,
+            event,
+            _provider_config(config_manager, provider_name),
+        )
+        confirmation_item = {
+            "id": "binding-confirmation",
+            "type": "text",
+            "text": "常用任务接收位置验证成功，桌面端将显示该绑定结果。",
+            "idempotency_key": hashlib.sha256(
+                f"binding:{request['request_id']}".encode("utf-8")
+            ).hexdigest()[:32],
+        }
+        confirmation = provider.send_favorite_delivery_item(confirmation_item, target)
+        if not isinstance(confirmation, dict) or not confirmation.get("ok"):
+            raise RuntimeError(str((confirmation or {}).get("error") or "绑定确认消息发送失败。"))
+        binding = service.claim_binding_request(
+            request["request_id"], provider_name, target
+        )
+        _log_gateway(
+            f"favorite_binding_claimed provider={provider_name} binding_id={binding.get('id')}"
+        )
+    except Exception as exc:
+        safe_error = _redact_log_text(exc)
+        provider.send_card_reply(
+            event,
+            card_content=f"绑定失败：{safe_error}",
+            title="常用任务绑定",
+        )
+        _log_gateway(f"favorite_binding_error provider={provider_name} error={safe_error}")
+    return True
+
+
 def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_client):
     provider_name = (getattr(provider, "name", "") or "feishu").strip().lower()
     _log_gateway(f"{provider_name} handle_im_event payload={_safe_json_dump(payload)}")
@@ -1580,6 +1918,13 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     if "challenge" in event:
         _log_gateway(f"{provider_name} handle_im_event ignored: challenge")
         return None
+    if parse_favorite_binding_command(event.get("text")):
+        chat_storage = getattr(session_mapper, "chat_storage", None)
+        if chat_storage is None:
+            raise RuntimeError("企业消息绑定存储不可用。")
+        delivery_service = FavoriteDeliveryService(chat_storage)
+        if _handle_favorite_binding_command(event, provider, config_manager, delivery_service):
+            return None
     event_type = event.get("event_type")
     if provider_name == "feishu" and (event_type == "card.action.trigger" or event_type == "card.action.trigger_v1"):
         action_data = event.get("event") or {}
@@ -2290,10 +2635,26 @@ def run():
     provider = providers[0]
     context = (config_manager, session_mapper, daemon_client, provider)
     provider_name = getattr(provider, "name", "")
+    delivery_service = FavoriteDeliveryService(session_mapper.chat_storage)
+    recovered_count = delivery_service.recover_interrupted_jobs()
+    if recovered_count:
+        _log_gateway(
+            f"favorite_delivery_recovered provider={provider_name} count={recovered_count}"
+        )
+    delivery_stop_event = threading.Event()
+    delivery_thread = threading.Thread(
+        target=_favorite_delivery_worker_loop,
+        args=(delivery_service, provider, delivery_stop_event),
+        name=f"favorite-delivery-{provider_name}",
+        daemon=True,
+    )
+    delivery_thread.start()
     write_im_gateway_status(provider_name, "connecting")
     try:
         _start_provider(context)
     finally:
+        delivery_stop_event.set()
+        delivery_thread.join(timeout=2)
         _log_gateway(f"im_gateway finish provider={provider_name}")
 
 

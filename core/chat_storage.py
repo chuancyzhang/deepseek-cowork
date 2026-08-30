@@ -250,6 +250,74 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS favorite_delivery_bindings (
+                    id TEXT PRIMARY KEY,
+                    favorite_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_value TEXT NOT NULL,
+                    display_name TEXT,
+                    status TEXT NOT NULL,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_favorite_delivery_bindings_favorite
+                ON favorite_delivery_bindings(favorite_id, updated_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS favorite_delivery_binding_requests (
+                    id TEXT PRIMARY KEY,
+                    favorite_id TEXT NOT NULL,
+                    binding_id TEXT NOT NULL,
+                    code_salt TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER,
+                    claimed_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_favorite_delivery_binding_requests_status
+                ON favorite_delivery_binding_requests(status, expires_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS favorite_delivery_jobs (
+                    id TEXT PRIMARY KEY,
+                    run_history_id TEXT NOT NULL UNIQUE,
+                    favorite_id TEXT NOT NULL,
+                    session_id TEXT,
+                    binding_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    finished_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_favorite_delivery_jobs_ready
+                ON favorite_delivery_jobs(provider, status, next_attempt_at, created_at)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS im_daily_summaries (
                     provider TEXT NOT NULL,
                     im_user_id TEXT NOT NULL,

@@ -672,6 +672,27 @@ def main_run():
                     },
                 ]
             )
+            binding_request = window.favorite_delivery_service.create_binding_request(
+                "fav-weekly-report"
+            )
+            pending_binding = window.favorite_delivery_service.find_pending_request(
+                binding_request["code"]
+            )
+            bound_target = window.favorite_delivery_service.claim_binding_request(
+                pending_binding["request_id"],
+                "feishu",
+                {
+                    "target_type": "chat_id",
+                    "target_value": "guide-weekly-report-chat",
+                    "display_name": "产品周报群",
+                },
+            )
+            scheduled_favorite = window.config_manager.get_favorite("fav-weekly-report")
+            scheduled_favorite["schedule"]["delivery"] = {
+                "enabled": True,
+                "binding_id": bound_target["id"],
+            }
+            window.config_manager.upsert_favorite(scheduled_favorite)
             window.open_favorites()
             window.resize(1280, 760)
             save_widget(window, "s40-favorites-library.png", 220)
@@ -682,9 +703,14 @@ def main_run():
             editor.run_options_toggle.setChecked(True)
             process_events(160)
             editor_scroll = editor.findChild(main.QScrollArea)
-            editor_scroll.verticalScrollBar().setValue(editor_scroll.verticalScrollBar().maximum())
+            editor_scroll.verticalScrollBar().setValue(
+                max(0, editor_scroll.verticalScrollBar().maximum() // 2)
+            )
             process_events(120)
             save_widget(window, "s42-favorite-schedule.png", 180)
+            editor_scroll.verticalScrollBar().setValue(editor_scroll.verticalScrollBar().maximum())
+            process_events(120)
+            save_widget(window, "s43-favorite-message-delivery.png", 180)
             if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
                 window.resize(760, 720)
                 save_widget(window, "favorites-editor-narrow.png", 180)

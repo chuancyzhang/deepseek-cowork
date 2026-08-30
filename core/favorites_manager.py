@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from .clarify_mode import normalize_selected_skill_names
+from .favorite_delivery import normalize_favorite_delivery
 
 try:
     from croniter import croniter
@@ -335,6 +336,7 @@ def normalize_favorite_schedule(schedule, favorite_prompt="", now_ts=None):
         "last_run_at": int(source.get("last_run_at") or 0),
         "last_missed_at": int(source.get("last_missed_at") or 0),
         "last_history_id": str(source.get("last_history_id") or "").strip(),
+        "delivery": normalize_favorite_delivery(source.get("delivery")),
     }
     normalized["next_run_at"] = int(source.get("next_run_at") or 0) or compute_next_run_at(normalized, now_ts=now_ts)
     normalized["schedule_summary"] = describe_schedule(normalized)
@@ -406,6 +408,9 @@ def normalize_favorite_run_record(record):
         "finished_at": int(source.get("finished_at") or 0),
         "summary": str(source.get("summary") or "").strip(),
         "error": str(source.get("error") or "").strip(),
+        "delivery_id": str(source.get("delivery_id") or "").strip(),
+        "delivery_status": str(source.get("delivery_status") or "").strip(),
+        "delivery_error": str(source.get("delivery_error") or "").strip(),
         "created_at": created_at,
     }
 

@@ -43,6 +43,18 @@ from core.im_gateway.wechat_ilink import (
     WeChatIlinkClient,
     WeChatIlinkError,
 )
+from core.favorite_delivery import (
+    FAVORITE_DELIVERY_STATUS_BLOCKED,
+    FAVORITE_DELIVERY_STATUS_COMPLETED,
+    FAVORITE_DELIVERY_STATUS_FAILED,
+    FAVORITE_DELIVERY_STATUS_PARTIAL,
+    FAVORITE_DELIVERY_STATUS_PENDING,
+    FAVORITE_DELIVERY_STATUS_RETRY_WAIT,
+    FAVORITE_DELIVERY_STATUS_SENDING,
+    FAVORITE_DELIVERY_STATUS_UNKNOWN,
+    FavoriteDeliveryService,
+    collect_feishu_artifacts,
+)
 from core.skill_manager import SkillManager
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
@@ -7546,7 +7558,17 @@ class MultiLineElidedLabel(QWidget):
 
 
 class FavoriteEditorPage(QDialog):
-    def __init__(self, skills=None, projects=None, favorite=None, history=None, prefill=None, parent=None):
+    def __init__(
+        self,
+        skills=None,
+        projects=None,
+        favorite=None,
+        history=None,
+        prefill=None,
+        delivery_service=None,
+        active_provider_callback=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setObjectName("FavoriteEditorPage")
         self.setWindowTitle("常用")
@@ -7554,10 +7576,19 @@ class FavoriteEditorPage(QDialog):
         self.skills = list(skills or [])
         self.projects = list(projects or [])
         self.favorite = dict(favorite or prefill or {})
+        self.favorite.setdefault("id", f"fav-{uuid.uuid4().hex[:10]}")
         self.history = list(history or [])
+        self.delivery_service = delivery_service
+        self.active_provider_callback = active_provider_callback
+        self.delivery_binding_id = ""
+        self.delivery_binding_command = ""
+        self.delivery_binding_expires_at = 0
+        self._delivery_expiration_logged = False
+        self._delivery_binding_to_unbind = ""
         self.submit_callback = None
         self.run_schedule_callback = None
         self.open_history_callback = None
+        self.retry_delivery_callback = None
         apply_product_dialog(self, "FavoriteEditorPage")
 
         root = QVBoxLayout(self)
@@ -7862,6 +7893,63 @@ class FavoriteEditorPage(QDialog):
         self.schedule_preview_label.setProperty("favoriteCaption", True)
         self.schedule_preview_label.setStyleSheet(apple_caption_style())
         schedule_layout.addWidget(self.schedule_preview_label)
+
+        delivery_separator = QFrame()
+        delivery_separator.setFrameShape(QFrame.HLine)
+        delivery_separator.setStyleSheet(f"color: {DesignTokens.separator};")
+        schedule_layout.addWidget(delivery_separator)
+        delivery_state_row = QHBoxLayout()
+        delivery_title_box = QVBoxLayout()
+        delivery_title_box.setSpacing(2)
+        delivery_title = QLabel("发送到企业消息")
+        delivery_title.setProperty("favoriteSectionTitle", True)
+        delivery_title.setStyleSheet(apple_section_title_style(size=14))
+        delivery_hint = QLabel("飞书可同时发送正文和本地产物；钉钉、企业微信只发送正文。")
+        delivery_hint.setWordWrap(True)
+        delivery_hint.setProperty("favoriteCaption", True)
+        delivery_hint.setStyleSheet(apple_caption_style())
+        delivery_title_box.addWidget(delivery_title)
+        delivery_title_box.addWidget(delivery_hint)
+        delivery_state_row.addLayout(delivery_title_box, 1)
+        self.delivery_enabled_check = AppleSwitch()
+        self.delivery_enabled_check.toggled.connect(self._refresh_delivery_state)
+        delivery_state_row.addWidget(self.delivery_enabled_check)
+        schedule_layout.addLayout(delivery_state_row)
+
+        self.delivery_binding_status = QLabel("尚未绑定接收位置")
+        self.delivery_binding_status.setWordWrap(True)
+        self.delivery_binding_status.setProperty("favoriteCaption", True)
+        self.delivery_binding_status.setStyleSheet(apple_caption_style())
+        schedule_layout.addWidget(self.delivery_binding_status)
+
+        self.delivery_binding_command_label = QLabel("")
+        self.delivery_binding_command_label.setWordWrap(True)
+        self.delivery_binding_command_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.delivery_binding_command_label.setProperty("favoriteCaption", True)
+        self.delivery_binding_command_label.setStyleSheet(apple_caption_style())
+        self.delivery_binding_command_label.hide()
+        schedule_layout.addWidget(self.delivery_binding_command_label)
+
+        delivery_actions = QHBoxLayout()
+        self.delivery_bind_btn = QPushButton("生成绑定码")
+        self.delivery_bind_btn.setObjectName("SecondaryBtn")
+        self.delivery_bind_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        self.delivery_bind_btn.clicked.connect(self._create_delivery_binding)
+        self.delivery_copy_btn = QPushButton("复制命令")
+        self.delivery_copy_btn.setProperty("favoriteGhostButton", True)
+        self.delivery_copy_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.delivery_copy_btn.clicked.connect(self._copy_delivery_binding_command)
+        self.delivery_copy_btn.hide()
+        self.delivery_unbind_btn = QPushButton("解除绑定")
+        self.delivery_unbind_btn.setProperty("favoriteGhostButton", True)
+        self.delivery_unbind_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.delivery_unbind_btn.clicked.connect(self._stage_delivery_unbind)
+        self.delivery_unbind_btn.hide()
+        delivery_actions.addWidget(self.delivery_bind_btn)
+        delivery_actions.addWidget(self.delivery_copy_btn)
+        delivery_actions.addWidget(self.delivery_unbind_btn)
+        delivery_actions.addStretch()
+        schedule_layout.addLayout(delivery_actions)
         run_options_layout.addWidget(self.schedule_card)
         layout.addWidget(self.run_options_content)
 
@@ -7884,7 +7972,23 @@ class FavoriteEditorPage(QDialog):
                     FAVORITE_RUN_STATUS_INTERRUPTED: "已停止",
                     FAVORITE_RUN_STATUS_MISSED: "已错过",
                 }.get(str(record.get("status") or ""), "状态未知")
-                label = QLabel(f"{when_text} · {status_text}" + (f" · {record.get('error')}" if record.get("error") else ""))
+                delivery_status = str(record.get("delivery_status") or "")
+                delivery_label = {
+                    FAVORITE_DELIVERY_STATUS_PENDING: "企业消息待发送",
+                    FAVORITE_DELIVERY_STATUS_SENDING: "企业消息发送中",
+                    FAVORITE_DELIVERY_STATUS_RETRY_WAIT: "企业消息等待重试",
+                    FAVORITE_DELIVERY_STATUS_COMPLETED: "企业消息已送达",
+                    FAVORITE_DELIVERY_STATUS_PARTIAL: "企业消息部分送达",
+                    FAVORITE_DELIVERY_STATUS_FAILED: "企业消息发送失败",
+                    FAVORITE_DELIVERY_STATUS_UNKNOWN: "企业消息状态未知",
+                    FAVORITE_DELIVERY_STATUS_BLOCKED: "企业消息待切换渠道",
+                }.get(delivery_status, "")
+                label_text = f"{when_text} · {status_text}" + (f" · {record.get('error')}" if record.get("error") else "")
+                if delivery_label:
+                    label_text += f"\n{delivery_label}"
+                    if record.get("delivery_error"):
+                        label_text += f" · {record.get('delivery_error')}"
+                label = QLabel(label_text)
                 label.setWordWrap(True)
                 label.setProperty("favoriteCaption", True)
                 label.setStyleSheet(apple_caption_style())
@@ -7897,6 +8001,19 @@ class FavoriteEditorPage(QDialog):
                         lambda checked=False, sid=record.get("session_id"): self._open_history_session(sid)
                     )
                     row.addWidget(open_btn)
+                if delivery_status in {
+                    FAVORITE_DELIVERY_STATUS_PARTIAL,
+                    FAVORITE_DELIVERY_STATUS_FAILED,
+                    FAVORITE_DELIVERY_STATUS_UNKNOWN,
+                    FAVORITE_DELIVERY_STATUS_BLOCKED,
+                } and record.get("delivery_id"):
+                    retry_btn = QPushButton("重新发送")
+                    retry_btn.setProperty("favoriteGhostButton", True)
+                    retry_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+                    retry_btn.clicked.connect(
+                        lambda checked=False, did=record.get("delivery_id"): self._retry_delivery(did)
+                    )
+                    row.addWidget(retry_btn)
                 history_layout.addLayout(row)
             layout.addWidget(history_card)
 
@@ -7926,6 +8043,11 @@ class FavoriteEditorPage(QDialog):
         self._connect_dirty_tracking()
         self._refresh_dirty()
         bind_theme(self, self.refresh_theme, surface="management")
+        self.delivery_binding_timer = QTimer(self)
+        self.delivery_binding_timer.setInterval(1500)
+        self.delivery_binding_timer.timeout.connect(self._refresh_delivery_binding_status)
+        self.delivery_binding_timer.start()
+        self._refresh_delivery_binding_status()
 
     def _kicker(self, text):
         label = QLabel(text)
@@ -7999,10 +8121,14 @@ class FavoriteEditorPage(QDialog):
         if schedule.get("one_time_at"):
             self.once_datetime_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(schedule.get("one_time_at"))))
         self.cron_expression_input.setText(str(schedule.get("cron_expression") or "0 9 * * *"))
+        delivery = dict(schedule.get("delivery") or {})
+        self.delivery_binding_id = str(delivery.get("binding_id") or "")
+        self.delivery_enabled_check.setChecked(bool(delivery.get("enabled")))
         self._refresh_execution_mode()
         self._refresh_schedule_visibility()
         self._refresh_schedule_prompt_mode()
         self._refresh_schedule_type()
+        self._refresh_delivery_state()
 
     def _connect_dirty_tracking(self):
         callback = lambda *_args: self._refresh_dirty()
@@ -8043,6 +8169,12 @@ class FavoriteEditorPage(QDialog):
         elif schedule_type == FAVORITE_SCHEDULE_MONTHLY:
             time_of_day = self.monthly_time_input.text().strip()
         previous = dict(self.favorite.get("schedule") or {})
+        delivery = None
+        if self.delivery_binding_id or self.delivery_enabled_check.isChecked():
+            delivery = {
+                "enabled": self.delivery_enabled_check.isChecked(),
+                "binding_id": self.delivery_binding_id,
+            }
         return {
             "enabled": self.schedule_enabled_check.isChecked(),
             "prompt_mode": str(self.schedule_prompt_mode_combo.currentData() or FAVORITE_PROMPT_INHERIT),
@@ -8059,6 +8191,7 @@ class FavoriteEditorPage(QDialog):
             "last_run_at": previous.get("last_run_at") or 0,
             "last_missed_at": previous.get("last_missed_at") or 0,
             "last_history_id": previous.get("last_history_id") or "",
+            "delivery": delivery,
         }
 
     def favorite_payload(self):
@@ -8098,10 +8231,14 @@ class FavoriteEditorPage(QDialog):
             "interval_minutes": self.interval_minutes_spin.value(),
             "one_time_at": int(self.once_datetime_edit.dateTime().toSecsSinceEpoch()),
             "cron_expression": self.cron_expression_input.text(),
+            "delivery_enabled": self.delivery_enabled_check.isChecked(),
+            "delivery_binding_id": self.delivery_binding_id,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
     def _refresh_dirty(self):
+        if not hasattr(self, "_baseline"):
+            return
         self._dirty = self._signature() != self._baseline
         self.save_btn.setEnabled(self._dirty)
 
@@ -8127,6 +8264,8 @@ class FavoriteEditorPage(QDialog):
         self.schedule_attached_check.setText("移除计划" if attached else "添加计划")
         if hasattr(self, "run_options_toggle"):
             self._refresh_run_options_visibility()
+        if hasattr(self, "delivery_enabled_check"):
+            self._refresh_delivery_state()
 
     def _refresh_schedule_prompt_mode(self):
         custom = self.schedule_prompt_mode_combo.currentData() == FAVORITE_PROMPT_CUSTOM
@@ -8148,6 +8287,126 @@ class FavoriteEditorPage(QDialog):
         except Exception as exc:
             preview = f"计划无效：{exc}"
         self.schedule_preview_label.setText(preview)
+
+    def _refresh_delivery_state(self):
+        attached = self.schedule_attached_check.isChecked()
+        enabled = attached and self.delivery_enabled_check.isChecked()
+        self.delivery_enabled_check.setEnabled(attached)
+        self.delivery_bind_btn.setEnabled(attached)
+        if not attached:
+            self.delivery_binding_status.setText("添加定时计划后可绑定企业消息。")
+        elif enabled and not self.delivery_binding_id:
+            self.delivery_binding_status.setText("请先生成绑定码并在目标企业消息会话中完成绑定。")
+        self._refresh_dirty()
+
+    def _refresh_delivery_binding_status(self):
+        if not self.schedule_attached_check.isChecked():
+            self._refresh_delivery_state()
+            return
+        binding = None
+        if self.delivery_service is not None and self.delivery_binding_id:
+            binding = self.delivery_service.get_binding(self.delivery_binding_id)
+        if binding and binding.get("status") == "active":
+            provider = str(binding.get("provider") or "")
+            text = f"已绑定 · {provider_title(provider)} · {binding.get('display_name') or '企业消息会话'}"
+            active_provider = ""
+            if callable(self.active_provider_callback):
+                active_provider = str(self.active_provider_callback() or "")
+            if active_provider != provider:
+                text += "\n当前未启用该渠道；任务完成后会标记为待切换渠道，切换后需手动重新发送。"
+            self.delivery_binding_status.setText(text)
+            self.delivery_binding_command = ""
+            self.delivery_binding_expires_at = 0
+            self.delivery_binding_command_label.hide()
+            self.delivery_copy_btn.hide()
+            self.delivery_unbind_btn.show()
+            self.delivery_bind_btn.setText("重新绑定")
+            return
+        self.delivery_unbind_btn.setVisible(bool(self.delivery_binding_id))
+        self.delivery_bind_btn.setText("重新生成绑定码" if self.delivery_binding_id else "生成绑定码")
+        now_ts = int(time.time())
+        if self.delivery_binding_command and self.delivery_binding_expires_at > now_ts:
+            remaining = max(0, self.delivery_binding_expires_at - now_ts)
+            self.delivery_binding_status.setText(f"等待绑定 · 绑定码约 {max(1, (remaining + 59) // 60)} 分钟后失效")
+            self.delivery_binding_command_label.setText(
+                f"请在目标群聊或私聊中发送：{self.delivery_binding_command}"
+            )
+            self.delivery_binding_command_label.show()
+            self.delivery_copy_btn.show()
+            return
+        if self.delivery_binding_expires_at and self.delivery_binding_expires_at <= now_ts:
+            self.delivery_binding_status.setText("绑定码已失效，请重新生成。")
+            if not self._delivery_expiration_logged:
+                log_favorites_runtime(
+                    "favorite_binding_expired",
+                    favorite_id=self.favorite.get("id"),
+                    binding_id=self.delivery_binding_id,
+                )
+                self._delivery_expiration_logged = True
+        elif self.delivery_enabled_check.isChecked():
+            self.delivery_binding_status.setText("尚未完成绑定。")
+        else:
+            self.delivery_binding_status.setText("尚未绑定接收位置。")
+        self.delivery_binding_command_label.hide()
+        self.delivery_copy_btn.hide()
+
+    def _create_delivery_binding(self):
+        if self.delivery_service is None:
+            QMessageBox.warning(self, "无法绑定", "企业消息绑定服务不可用。")
+            return
+        if not self.schedule_attached_check.isChecked():
+            QMessageBox.information(self, "请先添加计划", "添加定时计划后才能绑定企业消息。")
+            return
+        existing = self.delivery_service.get_binding(self.delivery_binding_id) if self.delivery_binding_id else None
+        if existing and existing.get("status") == "active":
+            self._delivery_binding_to_unbind = self.delivery_binding_id
+        try:
+            request = self.delivery_service.create_binding_request(self.favorite.get("id") or "")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法生成绑定码", str(exc))
+            return
+        self.delivery_binding_id = str(request.get("binding_id") or "")
+        self.delivery_binding_command = str(request.get("command") or "")
+        self.delivery_binding_expires_at = int(request.get("expires_at") or 0)
+        self._delivery_expiration_logged = False
+        self.delivery_enabled_check.setChecked(True)
+        log_favorites_runtime(
+            "favorite_binding_created",
+            favorite_id=self.favorite.get("id"),
+            binding_id=self.delivery_binding_id,
+            expires_at=self.delivery_binding_expires_at,
+        )
+        self._refresh_delivery_binding_status()
+        self._refresh_dirty()
+
+    def _copy_delivery_binding_command(self):
+        if not self.delivery_binding_command:
+            return
+        QApplication.clipboard().setText(self.delivery_binding_command)
+        self.delivery_copy_btn.setText("已复制")
+        QTimer.singleShot(1500, lambda: self.delivery_copy_btn.setText("复制命令"))
+
+    def _stage_delivery_unbind(self):
+        if self.delivery_binding_id:
+            self._delivery_binding_to_unbind = self.delivery_binding_id
+            log_favorites_runtime(
+                "favorite_binding_unbind_staged",
+                favorite_id=self.favorite.get("id"),
+                binding_id=self.delivery_binding_id,
+            )
+        self.delivery_binding_id = ""
+        self.delivery_binding_command = ""
+        self.delivery_binding_expires_at = 0
+        self.delivery_enabled_check.setChecked(False)
+        self._refresh_delivery_binding_status()
+        self._refresh_dirty()
+
+    def binding_to_unbind(self):
+        return str(self._delivery_binding_to_unbind or "")
+
+    def _retry_delivery(self, delivery_id):
+        if callable(self.retry_delivery_callback):
+            self.retry_delivery_callback(str(delivery_id or ""))
 
     def _filter_skills(self, text):
         query = str(text or "").strip().casefold()
@@ -8171,6 +8430,13 @@ class FavoriteEditorPage(QDialog):
             if payload.get("schedule") and payload["schedule"].get("enabled"):
                 if payload.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE and not os.path.isdir(payload.get("workspace_dir") or ""):
                     raise ValueError("启用定时运行前必须选择有效工作区。")
+            delivery = dict((payload.get("schedule") or {}).get("delivery") or {})
+            if delivery.get("enabled"):
+                if self.delivery_service is None:
+                    raise ValueError("企业消息绑定服务不可用。")
+                binding = self.delivery_service.get_binding(delivery.get("binding_id"))
+                if not binding or binding.get("status") != "active":
+                    raise ValueError("请先在目标企业消息会话中发送绑定命令并完成绑定。")
         except Exception as exc:
             QMessageBox.warning(self, "无法保存常用", str(exc))
             return
@@ -8371,6 +8637,17 @@ class FavoritesPage(QDialog):
             execution = f"在「{project_name}」项目中"
         meta_parts = [execution]
         meta_parts.append(f"{len(skills)} 项能力" if skills else "不额外使用能力")
+        delivery = dict(((favorite.get("schedule") or {}).get("delivery") or {}))
+        if delivery.get("enabled"):
+            binding = None
+            service = getattr(self._main, "favorite_delivery_service", None)
+            if service is not None:
+                binding = service.get_binding(delivery.get("binding_id"))
+            meta_parts.append(
+                f"发送到{provider_title((binding or {}).get('provider'))}"
+                if binding and binding.get("status") == "active"
+                else "企业消息绑定不可用"
+            )
         meta = QLabel(" · ".join(meta_parts))
         meta.setStyleSheet(apple_caption_style())
         meta.setWordWrap(True)
@@ -27274,6 +27551,7 @@ class MainWindow(QMainWindow):
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
+        self.favorite_delivery_service = FavoriteDeliveryService(self.chat_storage)
         self.runtime_journal = RuntimeJournal(self.chat_history_dir)
         self.chat_recovery_journal = ChatRecoveryJournal(
             self.chat_history_dir,
@@ -32724,16 +33002,28 @@ class MainWindow(QMainWindow):
                     f"任务已结束，但过程视图收尾失败：{exc}",
                     "warning",
                 )
-        if status in {"completed", "error", "failed", "interrupted"}:
-            self._mark_session_favorite_run_completed(state, status, error=error)
-        if save and state.messages:
-            saved = self.save_chat_history(session_id=state.session_id)
+        terminal_status = status in {"completed", "error", "failed", "interrupted"}
+        favorite_terminal = terminal_status and bool(getattr(state, "favorite_run_id", ""))
+        persistence_succeeded = True
+        if (save and state.messages) or favorite_terminal:
+            saved = self.save_chat_history(
+                session_id=state.session_id,
+                flush=bool(favorite_terminal),
+            )
+            persistence_succeeded = bool(saved)
             if not saved:
                 log_sub_agent_runtime(
                     "ui_terminal_save_not_queued",
                     session_id=state.session_id,
                     lifecycle_status=status,
                 )
+        if terminal_status:
+            self._mark_session_favorite_run_completed(
+                state,
+                status,
+                error=error,
+                delivery_persistence_succeeded=persistence_succeeded,
+            )
 
     def _finalize_live_turn_process_groups(self, state):
         groups = list(getattr(state, "live_agent_turn_groups", []) or [])
@@ -33539,6 +33829,137 @@ class MainWindow(QMainWindow):
             break
         self._running_favorite_history_ids.discard(target_id)
 
+    def _update_favorite_delivery_history_record(self, history_id, delivery_id, status, error=""):
+        history = self.config_manager.get_favorite_run_history()
+        target_id = str(history_id or "").strip()
+        changed = False
+        for record in history:
+            if str(record.get("id") or "").strip() != target_id:
+                continue
+            values = {
+                "delivery_id": str(delivery_id or "").strip(),
+                "delivery_status": str(status or "").strip(),
+                "delivery_error": str(error or "").strip(),
+            }
+            for key, value in values.items():
+                if str(record.get(key) or "") != value:
+                    record[key] = value
+                    changed = True
+            break
+        if changed:
+            self.config_manager.set_favorite_run_history(history)
+
+    def _sync_favorite_delivery_history(self):
+        history = self.config_manager.get_favorite_run_history()
+        delivery_ids = [record.get("delivery_id") for record in history if record.get("delivery_id")]
+        if not delivery_ids:
+            return False
+        jobs = {
+            job.get("id"): job
+            for job in self.favorite_delivery_service.get_jobs(delivery_ids)
+            if job and job.get("id")
+        }
+        changed = False
+        for record in history:
+            job = jobs.get(record.get("delivery_id"))
+            if not job:
+                continue
+            status = str(job.get("status") or "")
+            error = str(job.get("error") or "")
+            if record.get("delivery_status") != status or record.get("delivery_error") != error:
+                record["delivery_status"] = status
+                record["delivery_error"] = error
+                changed = True
+        if changed:
+            self.config_manager.set_favorite_run_history(history)
+        return changed
+
+    def _favorite_terminal_output(self, state):
+        if not state:
+            return "", []
+        content = ""
+        content_parts = []
+        for message in reversed(getattr(state, "messages", []) or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            candidate = str(self._message_display_content(message) or "").strip()
+            parts = message.get("content_parts") if isinstance(message.get("content_parts"), list) else []
+            if candidate or parts:
+                content = candidate
+                content_parts = parts
+                break
+        workspace_dir = self._workspace_dir_for_state(state)
+        candidate_paths = []
+        for part in content_parts:
+            if not isinstance(part, dict) or str(part.get("type") or "").lower() not in {"file", "image"}:
+                continue
+            path = str(part.get("path") or "").strip()
+            if path:
+                candidate_paths.append(path)
+        candidate_paths.extend(path for _start, _end, path in iter_workspace_file_paths(content, workspace_dir))
+        return content, collect_feishu_artifacts(candidate_paths, workspace_dir)
+
+    def _enqueue_favorite_delivery(self, state, favorite, run_id, terminal_status, error=""):
+        schedule = dict((favorite or {}).get("schedule") or {})
+        delivery = dict(schedule.get("delivery") or {})
+        if not delivery.get("enabled"):
+            return None
+        content, artifacts = self._favorite_terminal_output(state)
+        try:
+            job = self.favorite_delivery_service.enqueue_delivery(
+                run_history_id=run_id,
+                favorite_id=favorite.get("id") or "",
+                session_id=state.session_id,
+                binding_id=delivery.get("binding_id") or "",
+                favorite_name=favorite.get("name") or "常用任务",
+                terminal_status=terminal_status,
+                content=content,
+                error=error,
+                artifacts=artifacts,
+            )
+            active_provider = str(
+                ((normalize_im_gateway_config(self.config_manager.get("im_gateway", {})).get("enabled_providers") or [""])[0])
+                or ""
+            )
+            if active_provider != job.get("provider"):
+                blocked_error = "绑定渠道当前未启用；请切换到该渠道后在运行历史中重新发送。"
+                job = self.favorite_delivery_service.save_job_state(
+                    job["id"],
+                    job.get("payload") or {},
+                    FAVORITE_DELIVERY_STATUS_BLOCKED,
+                    error=blocked_error,
+                )
+            self._update_favorite_delivery_history_record(
+                run_id,
+                job.get("id") or "",
+                job.get("status") or FAVORITE_DELIVERY_STATUS_PENDING,
+                job.get("error") or "",
+            )
+            log_favorites_runtime(
+                "favorite_delivery_enqueued",
+                favorite_id=favorite.get("id"),
+                run_id=run_id,
+                delivery_id=job.get("id"),
+                provider=job.get("provider"),
+                status=job.get("status"),
+                artifact_count=len(artifacts) if job.get("provider") == "feishu" else 0,
+            )
+            return job
+        except Exception as exc:
+            self._update_favorite_delivery_history_record(
+                run_id,
+                "",
+                FAVORITE_DELIVERY_STATUS_FAILED,
+                str(exc),
+            )
+            log_favorites_runtime(
+                "favorite_delivery_error",
+                favorite_id=favorite.get("id"),
+                run_id=run_id,
+                error=str(exc),
+            )
+            return None
+
     def _favorite_summary_from_state(self, state):
         if not state:
             return ""
@@ -33549,12 +33970,19 @@ class MainWindow(QMainWindow):
                     return re.sub(r"\s+", " ", content)[:240]
         return ""
 
-    def _mark_session_favorite_run_completed(self, state, status, error=""):
+    def _mark_session_favorite_run_completed(
+        self,
+        state,
+        status,
+        error="",
+        delivery_persistence_succeeded=True,
+    ):
         if not state or not getattr(state, "favorite_run_id", ""):
             return
         mapped_status = {
             "completed": FAVORITE_RUN_STATUS_COMPLETED,
             "error": FAVORITE_RUN_STATUS_ERROR,
+            "failed": FAVORITE_RUN_STATUS_ERROR,
             "interrupted": FAVORITE_RUN_STATUS_INTERRUPTED,
         }.get(status)
         if not mapped_status:
@@ -33581,6 +34009,31 @@ class MainWindow(QMainWindow):
             favorite["schedule"]["last_run_at"] = int(time.time())
             favorite["schedule"]["last_history_id"] = run_id
             self._update_favorite_record(favorite)
+            delivery = dict((favorite.get("schedule") or {}).get("delivery") or {})
+            if delivery.get("enabled") and not delivery_persistence_succeeded:
+                delivery_error = "最终消息未可靠持久化，未创建企业消息投递任务。"
+                self._update_favorite_delivery_history_record(
+                    run_id,
+                    "",
+                    FAVORITE_DELIVERY_STATUS_FAILED,
+                    delivery_error,
+                )
+                log_favorites_runtime(
+                    "favorite_delivery_error",
+                    favorite_id=favorite_id,
+                    run_id=run_id,
+                    error="terminal_persistence_failed",
+                )
+            else:
+                self._enqueue_favorite_delivery(
+                    state,
+                    favorite,
+                    run_id,
+                    "completed" if mapped_status == FAVORITE_RUN_STATUS_COMPLETED else (
+                        "interrupted" if mapped_status == FAVORITE_RUN_STATUS_INTERRUPTED else "error"
+                    ),
+                    error=error,
+                )
         state.favorite_run_id = ""
         state.favorite_id = ""
         state.favorite_trigger_source = ""
@@ -33667,6 +34120,38 @@ class MainWindow(QMainWindow):
 
     def run_favorite_schedule_now(self, favorite_id):
         return self._trigger_favorite_schedule(favorite_id, trigger_source="manual", scheduled_at=0)
+
+    def retry_favorite_delivery(self, delivery_id):
+        job = self.favorite_delivery_service.get_job(delivery_id)
+        if not job:
+            self.add_system_toast("未找到这条企业消息投递记录", "error", auto_close_ms=5000)
+            return False
+        active_provider = str(
+            ((normalize_im_gateway_config(self.config_manager.get("im_gateway", {})).get("enabled_providers") or [""])[0])
+            or ""
+        )
+        if active_provider != job.get("provider"):
+            self.add_system_toast("请先在企业消息设置中启用绑定渠道", "error", auto_close_ms=6000)
+            return False
+        retried = self.favorite_delivery_service.retry_job(delivery_id)
+        if not retried:
+            self.add_system_toast("当前投递状态不能重新发送", "error", auto_close_ms=5000)
+            return False
+        self._update_favorite_delivery_history_record(
+            retried.get("run_history_id"),
+            retried.get("id"),
+            retried.get("status"),
+            retried.get("error"),
+        )
+        log_favorites_runtime(
+            "favorite_delivery_retry_requested",
+            favorite_id=retried.get("favorite_id"),
+            run_id=retried.get("run_history_id"),
+            delivery_id=retried.get("id"),
+            provider=retried.get("provider"),
+        )
+        self.add_system_toast("已重新提交企业消息投递", "success", auto_close_ms=4000)
+        return True
 
     def _trigger_favorite_schedule(self, favorite_id, trigger_source="scheduler", scheduled_at=0):
         favorite = self.config_manager.get_favorite(favorite_id)
@@ -33759,6 +34244,7 @@ class MainWindow(QMainWindow):
         return True
 
     def check_favorite_schedules(self):
+        self._sync_favorite_delivery_history()
         favorites = self.config_manager.get_favorites()
         if not favorites:
             return
@@ -42681,6 +43167,7 @@ a {{ overflow-wrap: anywhere; }}
         page = self.product_pages.get(self.PAGE_FAVORITES)
         if page is None:
             return False
+        self._sync_favorite_delivery_history()
         favorite = self.config_manager.get_favorite(favorite_id) if favorite_id else None
         editor = FavoriteEditorPage(
             [skill for skill in self._available_session_skills() if session_skill_is_selectable(skill)],
@@ -42688,6 +43175,11 @@ a {{ overflow-wrap: anywhere; }}
             favorite=favorite,
             history=self.config_manager.get_favorite_run_history(),
             prefill=prefill,
+            delivery_service=self.favorite_delivery_service,
+            active_provider_callback=lambda: str(
+                ((normalize_im_gateway_config(self.config_manager.get("im_gateway", {})).get("enabled_providers") or [""])[0])
+                or ""
+            ),
             parent=self,
         )
         editor.setParent(self.main_page_stack)
@@ -42707,6 +43199,16 @@ a {{ overflow-wrap: anywhere; }}
 
         def submit(payload):
             self.config_manager.upsert_favorite(payload)
+            old_binding_id = editor.binding_to_unbind()
+            if old_binding_id and old_binding_id != str(
+                (((payload.get("schedule") or {}).get("delivery") or {}).get("binding_id") or "")
+            ):
+                if self.favorite_delivery_service.unbind(old_binding_id):
+                    log_favorites_runtime(
+                        "favorite_binding_unbound",
+                        favorite_id=str(payload.get("id") or ""),
+                        binding_id=old_binding_id,
+                    )
             log_favorites_runtime(
                 "favorite_save",
                 favorite_id=str(payload.get("id") or ""),
@@ -42720,6 +43222,7 @@ a {{ overflow-wrap: anywhere; }}
 
         editor.submit_callback = submit
         editor.run_schedule_callback = self.run_favorite_schedule_now
+        editor.retry_delivery_callback = self.retry_favorite_delivery
 
         def open_history(session_id):
             if not session_id:

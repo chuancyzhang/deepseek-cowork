@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget
 
 from core.config_manager import ConfigManager
+from core.favorite_delivery import FavoriteDeliveryService
 from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
 from core.theme_service import ThemeRepository
 from main import (
@@ -95,6 +96,39 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertFalse(editor.is_dirty())
         finally:
             editor.deleteLater()
+
+    def test_editor_binding_code_becomes_saved_delivery_target(self):
+        window = self._create_window()
+        editor = FavoriteEditorPage(
+            favorite={
+                "id": "fav-bind-ui",
+                "name": "日报",
+                "prompt": "生成日报",
+                "schedule": {"enabled": True, "schedule_type": "daily", "time_of_day": "09:00"},
+            },
+            delivery_service=window.favorite_delivery_service,
+            active_provider_callback=lambda: "feishu",
+        )
+        try:
+            editor._create_delivery_binding()
+            self.assertTrue(editor.delivery_binding_command.startswith("绑定常用 "))
+            code = editor.delivery_binding_command.rsplit(" ", 1)[-1]
+            pending = window.favorite_delivery_service.find_pending_request(code)
+            window.favorite_delivery_service.claim_binding_request(
+                pending["request_id"],
+                "feishu",
+                {"target_type": "chat_id", "target_value": "chat-ui", "display_name": "测试群"},
+            )
+            editor._refresh_delivery_binding_status()
+            payload = editor.favorite_payload()
+            self.assertTrue(payload["schedule"]["delivery"]["enabled"])
+            self.assertEqual(payload["schedule"]["delivery"]["binding_id"], pending["binding_id"])
+            self.assertIn("已绑定", editor.delivery_binding_status.text())
+            self.assertIn("飞书", editor.delivery_binding_status.text())
+        finally:
+            editor.deleteLater()
+            window.close()
+            window.deleteLater()
 
     def test_editor_uses_task_first_flow_and_progressive_run_options(self):
         editor = FavoriteEditorPage(
@@ -319,6 +353,99 @@ class FavoritesUiTests(unittest.TestCase):
             finished = window.config_manager.get_favorite_run_history()[0]
             self.assertEqual(finished["status"], "error")
             self.assertEqual(finished["error"], "provider unavailable")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_scheduled_terminal_result_is_enqueued_after_completion(self):
+        window = self._create_window()
+        try:
+            window.config_manager.config["im_gateway"] = {
+                "enabled_providers": ["feishu"],
+                "providers": {
+                    "feishu": {"enabled": True, "app_id": "app", "app_secret": "secret"},
+                },
+            }
+            window.config_manager.save_config()
+            request = window.favorite_delivery_service.create_binding_request("fav-delivery")
+            pending = window.favorite_delivery_service.find_pending_request(request["code"])
+            binding = window.favorite_delivery_service.claim_binding_request(
+                pending["request_id"],
+                "feishu",
+                {"target_type": "chat_id", "target_value": "chat-delivery", "display_name": "日报群"},
+            )
+            saved = window.config_manager.upsert_favorite(
+                {
+                    "id": "fav-delivery",
+                    "name": "发送日报",
+                    "prompt": "生成日报",
+                    "execution_mode": FAVORITE_EXECUTION_CHAT,
+                    "schedule": {
+                        "enabled": True,
+                        "schedule_type": "daily",
+                        "time_of_day": "09:00",
+                        "delivery": {"enabled": True, "binding_id": binding["id"]},
+                    },
+                }
+            )
+            with patch.object(window, "_submit_session_request", return_value=True):
+                self.assertTrue(window._trigger_favorite_schedule(saved["id"], "scheduler", 123))
+            running = window.config_manager.get_favorite_run_history()[0]
+            state = window.get_session(running["session_id"])
+            artifact = os.path.join(state.workspace_dir, "日报.txt")
+            with open(artifact, "w", encoding="utf-8") as handle:
+                handle.write("日报")
+            state.messages = [
+                {"id": "assistant-final", "role": "assistant", "content": f"日报完成：{artifact}"}
+            ]
+            lifecycle_events = []
+            original_save = window.save_chat_history
+            original_enqueue = window.favorite_delivery_service.enqueue_delivery
+
+            def save_then_record(*args, **kwargs):
+                result = original_save(*args, **kwargs)
+                lifecycle_events.append("persisted")
+                return result
+
+            def enqueue_then_record(*args, **kwargs):
+                lifecycle_events.append("enqueued")
+                return original_enqueue(*args, **kwargs)
+
+            with patch.object(window, "save_chat_history", side_effect=save_then_record) as save:
+                with patch.object(
+                    window.favorite_delivery_service,
+                    "enqueue_delivery",
+                    side_effect=enqueue_then_record,
+                ):
+                    window.set_session_status("completed", state.session_id)
+            self.assertTrue(save.call_args.kwargs["flush"])
+            self.assertEqual(lifecycle_events, ["persisted", "enqueued"])
+            finished = window.config_manager.get_favorite_run_history()[0]
+            self.assertTrue(finished["delivery_id"])
+            self.assertEqual(finished["delivery_status"], "pending")
+            job = window.favorite_delivery_service.get_job(finished["delivery_id"])
+            self.assertEqual(job["provider"], "feishu")
+            self.assertEqual([item["type"] for item in job["payload"]["items"]], ["text", "artifact"])
+            self.assertIn("日报完成", job["payload"]["items"][0]["text"])
+
+            with patch.object(window, "_submit_session_request", return_value=True):
+                self.assertTrue(window._trigger_favorite_schedule(saved["id"], "scheduler", 456))
+            failed_persistence_run = window.config_manager.get_favorite_run_history()[0]
+            failed_state = window.get_session(failed_persistence_run["session_id"])
+            failed_state.messages = [
+                {"id": "assistant-unsaved", "role": "assistant", "content": "尚未可靠保存"}
+            ]
+            with patch.object(window, "save_chat_history", return_value=False):
+                with patch.object(
+                    window.favorite_delivery_service,
+                    "enqueue_delivery",
+                ) as enqueue:
+                    window.set_session_status("completed", failed_state.session_id)
+            enqueue.assert_not_called()
+            failed_finished = window.config_manager.get_favorite_run_history()[0]
+            self.assertEqual(failed_finished["status"], "completed")
+            self.assertEqual(failed_finished["delivery_status"], "failed")
+            self.assertIn("未可靠持久化", failed_finished["delivery_error"])
         finally:
             window.close()
             window.deleteLater()

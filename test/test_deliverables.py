@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPixmap, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
@@ -325,6 +326,66 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(first_button.text(), "季度报告.html")
             first_button.click()
             self.assertEqual(activated, [os.path.normpath(report)])
+
+    def test_agent_bubble_renders_workspace_images_and_opens_them_as_deliverables(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            png_path = os.path.join(workspace, "sunset-mountains.png")
+            svg_path = os.path.join(workspace, "sunset-mountains.svg")
+            report_path = os.path.join(workspace, "notes.md")
+            pixmap = QPixmap(120, 80)
+            pixmap.fill(QColor("#5b6ee1"))
+            self.assertTrue(pixmap.save(png_path))
+            with open(svg_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">'
+                    '<rect width="120" height="80" fill="#5b6ee1"/></svg>'
+                )
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write("ready")
+
+            bubble = ChatBubble("Agent", "", workspace_dir=workspace, session_id="session-1")
+            activated = []
+            registered = []
+            bubble.deliverablePathActivated.connect(activated.append)
+            bubble.deliverablePathsChanged.connect(registered.append)
+            bubble.set_main_content(
+                f"PNG: [view png]({png_path})\nSVG: [view svg]({svg_path})\nNotes: {report_path}",
+                final=True,
+            )
+            bubble.resize(900, 600)
+            bubble.show()
+            app.processEvents()
+
+            self.assertEqual(bubble.generated_images_layout.count(), 2)
+            self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
+            self.assertEqual(
+                registered[-1],
+                [os.path.normpath(png_path), os.path.normpath(svg_path), os.path.normpath(report_path)],
+            )
+            png_card = bubble.generated_images_layout.itemAt(0).widget()
+            svg_card = bubble.generated_images_layout.itemAt(1).widget()
+            self.assertFalse(png_card._pixmap.isNull())
+            self.assertFalse(svg_card._pixmap.isNull())
+            link_cursor = bubble.content_rich_edit.document().find("view png")
+            self.assertFalse(link_cursor.isNull())
+            link_cursor.setPosition(link_cursor.selectionStart() + 1)
+            QTest.mouseClick(
+                bubble.content_rich_edit.viewport(),
+                Qt.LeftButton,
+                pos=bubble.content_rich_edit.cursorRect(link_cursor).center(),
+            )
+            QTest.mouseClick(png_card.image_label, Qt.LeftButton)
+            QTest.mouseClick(svg_card.image_label, Qt.LeftButton)
+            self.assertEqual(
+                activated,
+                [
+                    os.path.normpath(png_path),
+                    os.path.normpath(png_path),
+                    os.path.normpath(svg_path),
+                ],
+            )
+            bubble.close()
 
     def test_agent_bubble_dispatches_only_file_and_web_links(self):
         app = QApplication.instance() or QApplication([])
@@ -1542,9 +1603,12 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_chat_file_link_opens_deliverable_in_single_workbench(self):
         with tempfile.TemporaryDirectory() as workspace:
-            path = os.path.join(workspace, "报告.doc")
-            with open(path, "wb") as handle:
-                handle.write(b"doc")
+            path = os.path.join(workspace, "sunset.svg")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">'
+                    '<rect width="120" height="80" fill="#5b6ee1"/></svg>'
+                )
             window = MainWindow.__new__(MainWindow)
             state = type("_Session", (), {"selected_deliverable_path": ""})()
             window.get_session = MagicMock(return_value=state)

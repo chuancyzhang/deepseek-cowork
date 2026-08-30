@@ -19532,9 +19532,12 @@ class FileChip(QFrame):
 class GeneratedImageCard(QFrame):
     """Theme-aware inline preview for a generated conversation image."""
 
-    def __init__(self, image_part, parent=None):
+    pathActivated = Signal(str)
+
+    def __init__(self, image_part, parent=None, *, open_in_deliverables=False):
         super().__init__(parent)
         self.image_part = dict(image_part or {})
+        self.open_in_deliverables = bool(open_in_deliverables)
         configured_path = str(self.image_part.get("path") or "").strip()
         self.path = (
             os.path.abspath(os.path.normpath(configured_path))
@@ -19545,6 +19548,7 @@ class GeneratedImageCard(QFrame):
         self._pixmap = QPixmap(self.path) if self.path and os.path.isfile(self.path) else QPixmap()
         self.setObjectName("GeneratedImageCard")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setMinimumWidth(320)
         self.setMaximumWidth(460)
 
         layout = QVBoxLayout(self)
@@ -19554,7 +19558,10 @@ class GeneratedImageCard(QFrame):
         self.image_label.setObjectName("GeneratedImageThumbnail")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.image_label.setToolTip("点击查看大图")
+        self.image_label.setToolTip("点击在右侧查看" if self.open_in_deliverables else "点击查看大图")
+        self.image_label.setAccessibleName(
+            f"查看图片 {os.path.basename(self.path)}" if self.path else "查看生成图片"
+        )
         self.image_label.activated.connect(self._open_preview)
         layout.addWidget(self.image_label)
 
@@ -19570,9 +19577,8 @@ class GeneratedImageCard(QFrame):
                 f"生成图片不可用：文件不存在或已损坏\n{self.path or '未提供路径'}"
             )
         else:
-            self.caption_label.setText(
-                f"生成图片 · {self._pixmap.width()} × {self._pixmap.height()}"
-            )
+            prefix = os.path.basename(self.path) if self.open_in_deliverables else "生成图片"
+            self.caption_label.setText(f"{prefix} · {self._pixmap.width()} × {self._pixmap.height()}")
             self._render_thumbnail()
         bind_theme(self, self.refresh_theme, surface="conversation")
 
@@ -19594,6 +19600,9 @@ class GeneratedImageCard(QFrame):
         self._render_thumbnail()
 
     def _open_preview(self):
+        if self.open_in_deliverables:
+            self.pathActivated.emit(self.path)
+            return
         if self._pixmap.isNull():
             QMessageBox.warning(
                 self.window(),
@@ -21791,7 +21800,7 @@ class ChatBubble(QFrame):
         finally:
             self.content_edit.setUpdatesEnabled(True)
 
-        self._sync_generated_image_cards(content_parts)
+        self._sync_generated_image_cards(text, content_parts, final=final)
         self._rendered_main_content_text = text
         self._rendered_main_content_parts_signature = parts_signature
         self._rendered_main_content_final = bool(final)
@@ -21819,7 +21828,7 @@ class ChatBubble(QFrame):
             for part in output_image_parts(content_parts)
         )
 
-    def _sync_generated_image_cards(self, content_parts):
+    def _sync_generated_image_cards(self, text, content_parts, *, final=False):
         container = getattr(self, "generated_images_container", None)
         layout = getattr(self, "generated_images_layout", None)
         if container is None or layout is None:
@@ -21829,11 +21838,40 @@ class ChatBubble(QFrame):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        images = output_image_parts(content_parts)
-        for image_part in images:
-            layout.addWidget(GeneratedImageCard(image_part, container), 0, Qt.AlignLeft)
+        images = [(image_part, False) for image_part in output_image_parts(content_parts)]
+        seen_paths = {
+            os.path.normcase(os.path.abspath(str(image_part.get("path") or "")))
+            for image_part, _open_in_deliverables in images
+            if str(image_part.get("path") or "").strip()
+        }
+        if final:
+            for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir):
+                extension = os.path.splitext(path)[1].lower()
+                kind = DELIVERABLE_EXTENSIONS.get(extension, ("file", "", ""))[0]
+                path_key = os.path.normcase(os.path.abspath(path))
+                if kind != "image" or path_key in seen_paths:
+                    continue
+                images.append(({"type": "workspace_image", "path": path}, True))
+                seen_paths.add(path_key)
+        for image_part, open_in_deliverables in images:
+            card = GeneratedImageCard(
+                image_part,
+                container,
+                open_in_deliverables=open_in_deliverables,
+            )
+            if open_in_deliverables:
+                card.pathActivated.connect(self._activate_workspace_image)
+            layout.addWidget(card, 0, Qt.AlignLeft)
         container.setVisible(bool(images))
         self._notify_stage_visibility_changed()
+
+    def _activate_workspace_image(self, path):
+        log_ui_navigation(
+            "chat_workspace_image_open_requested",
+            session_id=self.session_id or "",
+            extension=os.path.splitext(str(path or ""))[1].lower(),
+        )
+        self.deliverablePathActivated.emit(str(path or ""))
 
     def _sync_inline_visualizations(self, text):
         marker = "::cowork-inline-vis{file="
@@ -21931,11 +21969,14 @@ class ChatBubble(QFrame):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        visible_card_count = 0
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
             kind, type_label, icon_name = DELIVERABLE_EXTENSIONS.get(
                 ext, ("file", ext.lstrip(".").upper() or "文件", "fa5s.file")
             )
+            if kind == "image":
+                continue
             button = QPushButton(os.path.basename(path))
             button.setCursor(Qt.PointingHandCursor)
             button.setIcon(qta.icon(icon_name, color=DesignTokens.primary))
@@ -21967,8 +22008,9 @@ class ChatBubble(QFrame):
             button.setStatusTip(type_label)
             button.clicked.connect(lambda checked=False, value=path: self.deliverablePathActivated.emit(value))
             self.deliverable_cards_layout.addWidget(button)
+            visible_card_count += 1
         self._deliverable_paths = paths
-        self.deliverable_cards.setVisible(bool(paths))
+        self.deliverable_cards.setVisible(bool(visible_card_count))
         self.deliverablePathsChanged.emit(list(paths))
 
     def _render_plain_stream_content(self, text):
@@ -41934,6 +41976,11 @@ class MainWindow(QMainWindow):
         workspace_dir = self._workspace_dir_for_state(state)
         normalized = normalize_workspace_file(path, workspace_dir)
         if not normalized:
+            log_ui_navigation(
+                "chat_deliverable_open_rejected",
+                session_id=session_id or "",
+                extension=os.path.splitext(str(path or ""))[1].lower(),
+            )
             self.add_system_toast(
                 "文件不存在、格式不受支持，或已不在当前项目内。",
                 "warning",
@@ -41951,6 +41998,11 @@ class MainWindow(QMainWindow):
         self.set_file_navigator_visible(False, reason="chat_file_open")
         self.show_context_drawer(self.RIGHT_TAB_FILES)
         self.select_deliverable(normalized, render_html=True)
+        log_ui_navigation(
+            "chat_deliverable_opened",
+            session_id=session_id or "",
+            extension=os.path.splitext(normalized)[1].lower(),
+        )
 
     def handle_chat_deliverable_paths_changed(self, paths, session_id=None, notify_user=True):
         if session_id != getattr(self, "current_session_id", None):

@@ -30,6 +30,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
         self.assertIn(".md", DELIVERABLE_TYPES)
         self.assertIn(".markdown", DELIVERABLE_TYPES)
         self.assertIn(".bmp", DELIVERABLE_TYPES)
+        self.assertEqual(DELIVERABLE_TYPES[".svg"][0], "image")
         for extension in (".txt", ".json", ".xml", ".yaml", ".yml", ".log", ".csv", ".tsv"):
             self.assertIn(extension, DELIVERABLE_TYPES)
         for extension in (".py", ".js", ".ts", ".css", ".sql", ".toml", ".cpp", ".jsonl"):

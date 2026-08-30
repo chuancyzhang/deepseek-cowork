@@ -59,6 +59,7 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             "PySide6.QtPositioning",
             "PySide6.QtPdf",
             "PySide6.QtPdfWidgets",
+            "PySide6.QtSvg",
             "PySide6.QtWebChannel",
             "PySide6.QtWebEngineCore",
             "PySide6.QtWebEngineWidgets",

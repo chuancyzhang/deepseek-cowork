@@ -183,6 +183,7 @@ _CAPABILITIES.extend(
         _capability(".gif", "image", "图片", "fa5s.file-image"),
         _capability(".webp", "image", "图片", "fa5s.file-image"),
         _capability(".bmp", "image", "图片", "fa5s.file-image"),
+        _capability(".svg", "image", "SVG", "fa5s.file-image"),
         _capability(".pdf", "pdf", "PDF", "fa5s.file-pdf"),
         _capability(
             ".doc", "doc", "DOC", "fa5s.file-word", office_family="word"

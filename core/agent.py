@@ -1843,6 +1843,17 @@ class LLMWorker(QThread):
                 names.append(name)
         return list(dict.fromkeys(names))
 
+    def _available_macro_variable_names(self):
+        """返回本机已保存的宏变量名称列表（仅名称，不含值）。"""
+        manager = self.config_manager
+        if manager is None or not hasattr(manager, "get_macro_variable_names"):
+            return []
+        try:
+            names = manager.get_macro_variable_names()
+            return [str(name) for name in (names or []) if str(name).strip()]
+        except Exception:
+            return []
+
     def _build_stable_system_prompt(self):
         provider_id = (
             self.run_context.get("im_provider")
@@ -2240,6 +2251,19 @@ class LLMWorker(QThread):
                     "",
                     "这些用户指定能力的简版说明如下：",
                     "\n\n".join([item for item in selected_skill_briefs if item]),
+                ]
+            )
+
+        macro_names = self._available_macro_variable_names()
+        if macro_names:
+            macro_lines = [f"- `{name}`" for name in macro_names]
+            dynamic_state_lines.extend(
+                [
+                    "",
+                    "# 本地宏变量",
+                    "用户已在本机保存以下宏变量（AK / token / key，仅列出名称，不含值）：",
+                    *macro_lines,
+                    "需要用到某个密钥时，先调用 `list_macro_variables` 查看详情，再用 `get_macro_variable` 按名称读取明文值；读取到的明文仅供当前任务内部使用，禁止在回复中回显给用户。",
                 ]
             )
 

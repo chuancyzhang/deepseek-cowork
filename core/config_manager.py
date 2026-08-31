@@ -42,6 +42,7 @@ from .mcp_client import (
 )
 from .runtime_components import default_download_sources, normalize_download_sources
 from .im_gateway_config import normalize_im_gateway_config
+from .macro_vault import MacroVault
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
@@ -257,6 +258,7 @@ class ConfigManager:
         # Use centralized data directory logic
         self.data_dir = get_app_data_dir()
         self.config_path = os.path.join(self.data_dir, self.config_file)
+        self.macro_vault = MacroVault(self.data_dir)
         self._loaded_config_keys = set()
         self._save_batch_depth = 0
         self._save_pending = False
@@ -318,6 +320,25 @@ class ConfigManager:
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)
+
+    def get_macro_vault(self):
+        return self.macro_vault
+
+    def get_macro_variables(self):
+        """返回宏变量的公开信息（不含明文值）。"""
+        return self.macro_vault.public_entries()
+
+    def get_macro_variable_names(self):
+        return self.macro_vault.names()
+
+    def get_macro_variable_value(self, name):
+        return self.macro_vault.get_value(name)
+
+    def set_macro_variable(self, name, value, label="", scope="", description=""):
+        return self.macro_vault.upsert(name, value, label=label, scope=scope, description=description)
+
+    def delete_macro_variable(self, name):
+        return self.macro_vault.delete(name)
 
     def set_god_mode(self, enabled: bool):
         self._set_config_value("god_mode", bool(enabled))

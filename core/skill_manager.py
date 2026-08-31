@@ -1321,6 +1321,134 @@ class SkillManager:
                 "source_kind": record.source_kind,
             }
 
+        list_macro_schema = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+        record = self.tool_registry.register(
+            "list_macro_variables",
+            self._list_macro_variables,
+            "List locally stored macro variables (names, labels, scopes and masked values only, never the secret itself). Use this to discover which AK/token/key are available for the current task.",
+            list_macro_schema,
+            skill_name="builtin",
+            kind="builtin_macro_vault",
+            search_hint="list macro variables secrets ak token key",
+            read_only=True,
+            destructive=False,
+            allowed_modes=["execution"],
+            should_defer=False,
+            always_load=True,
+            runtime_binding={"type": "builtin_method"},
+            skill_refs=["builtin"],
+            source_kind=TOOL_SOURCE_CORE_BUILTIN,
+        )
+        if record:
+            self.tools["list_macro_variables"] = self._list_macro_variables
+            self.tool_records["list_macro_variables"] = {
+                "name": record.name,
+                "description": record.description,
+                "kind": record.kind,
+                "parameters_schema": record.parameters_schema,
+                "aliases": list(record.aliases),
+                "search_hint": record.search_hint,
+                "read_only": record.read_only,
+                "destructive": record.destructive,
+                "allowed_modes": sorted(record.allowed_modes),
+                "should_defer": record.should_defer,
+                "always_load": record.always_load,
+                "runtime_binding": record.runtime_binding,
+                "skill_refs": list(record.skill_refs),
+                "source_kind": record.source_kind,
+            }
+
+        get_macro_schema = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The exact name of the macro variable to read, e.g. \"百度地图AK\" or \"腾讯文档Token\".",
+                }
+            },
+            "required": ["name"],
+        }
+        record = self.tool_registry.register(
+            "get_macro_variable",
+            self._get_macro_variable,
+            "Read the plaintext value of a locally stored macro variable by name (e.g. Baidu Map AK, Tencent Docs token). The value is returned only to the model for the current task; never echo it to the user.",
+            get_macro_schema,
+            skill_name="builtin",
+            kind="builtin_macro_vault",
+            search_hint="read macro variable secret ak token key value",
+            read_only=True,
+            destructive=False,
+            allowed_modes=["execution"],
+            should_defer=False,
+            always_load=True,
+            runtime_binding={"type": "builtin_method"},
+            skill_refs=["builtin"],
+            source_kind=TOOL_SOURCE_CORE_BUILTIN,
+        )
+        if record:
+            self.tools["get_macro_variable"] = self._get_macro_variable
+            self.tool_records["get_macro_variable"] = {
+                "name": record.name,
+                "description": record.description,
+                "kind": record.kind,
+                "parameters_schema": record.parameters_schema,
+                "aliases": list(record.aliases),
+                "search_hint": record.search_hint,
+                "read_only": record.read_only,
+                "destructive": record.destructive,
+                "allowed_modes": sorted(record.allowed_modes),
+                "should_defer": record.should_defer,
+                "always_load": record.always_load,
+                "runtime_binding": record.runtime_binding,
+                "skill_refs": list(record.skill_refs),
+                "source_kind": record.source_kind,
+            }
+
+    def _macro_vault(self):
+        manager = self.config_manager
+        if manager is None or not hasattr(manager, "get_macro_vault"):
+            return None
+        vault = manager.get_macro_vault()
+        return vault
+
+    def _list_macro_variables(self, _context=None):
+        vault = self._macro_vault()
+        if vault is None:
+            return {"status": "unavailable", "message": "宏变量功能不可用。", "variables": []}
+        variables = vault.public_entries()
+        return {
+            "status": "ok",
+            "count": len(variables),
+            "variables": variables,
+            "message": "以上为本地已保存的宏变量（仅掩码，不含明文值）。",
+        }
+
+    def _get_macro_variable(self, name, _context=None):
+        vault = self._macro_vault()
+        if vault is None:
+            return {"status": "unavailable", "message": "宏变量功能不可用。"}
+        name = str(name or "").strip()
+        if not name:
+            return {"status": "error", "message": "缺少宏变量名称。"}
+        value = vault.get_value(name)
+        if value is None:
+            available = vault.names()
+            hint = ("、".join(available) if available else "无")
+            return {
+                "status": "not_found",
+                "message": f"未找到名为“{name}”的宏变量。当前可用：{hint}",
+            }
+        return {
+            "status": "ok",
+            "name": name,
+            "value": value,
+            "message": "已读取该宏变量的值，请仅在当前任务内部使用，不要向用户回显明文。",
+        }
+
     def _tool_search(self, query, limit=8, include_loaded=False, _context=None):
         context = _context if isinstance(_context, dict) else {}
         run_context = context.get("run_context") if isinstance(context.get("run_context"), dict) else {}

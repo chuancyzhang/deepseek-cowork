@@ -11164,6 +11164,260 @@ class FeishuQrDialog(ChannelQrDialog):
         )
 
 
+class MacroVaultManager(QWidget):
+    """宏变量管理页：本地保存各平台 AK / token / key，密码掩码显示。"""
+
+    changed = Signal()
+
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        intro_group, intro_layout = build_settings_surface(
+            "宏变量",
+            "把百度地图、腾讯文档等平台的 AK / token / key 保存在本机（加密存储），"
+            "会话中可让助手按需读取，无需每次重复提供。",
+            radius=20,
+            show_subtitle=True,
+        )
+        layout.addWidget(intro_group)
+
+        add_group, add_group_layout = build_settings_surface(
+            "添加宏变量",
+            "名称建议使用便于识别的中文，例如“百度地图AK”。",
+            radius=20,
+            show_subtitle=True,
+        )
+        add_form = QFormLayout()
+        add_form.setSpacing(10)
+        configure_responsive_form_layout(add_form)
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如：百度地图AK")
+        add_form.addRow(build_form_row_label("名称"), self.name_input)
+
+        self.label_input = QLineEdit()
+        self.label_input.setPlaceholderText("可选，例如：百度地图开放平台")
+        add_form.addRow(build_form_row_label("标签"), self.label_input)
+
+        self.scope_input = QLineEdit()
+        self.scope_input.setPlaceholderText("可选，例如：百度地图 / 腾讯文档")
+        add_form.addRow(build_form_row_label("所属平台"), self.scope_input)
+
+        self.value_input = QLineEdit()
+        self.value_input.setEchoMode(QLineEdit.Password)
+        self.value_input.setPlaceholderText("AK / token / key 的值")
+        add_form.addRow(build_form_row_label("值"), self.value_input)
+
+        self.desc_input = QLineEdit()
+        self.desc_input.setPlaceholderText("可选，说明用途")
+        add_form.addRow(build_form_row_label("说明"), self.desc_input)
+
+        add_group_layout.addLayout(add_form)
+
+        add_actions = QHBoxLayout()
+        add_actions.addStretch()
+        self.add_btn = QPushButton("添加")
+        self.add_btn.setObjectName("PrimaryBtn")
+        self.add_btn.clicked.connect(self._on_add)
+        add_actions.addWidget(self.add_btn)
+        add_group_layout.addLayout(add_actions)
+        layout.addWidget(add_group)
+
+        list_group, list_group_layout = build_settings_surface(
+            "已保存的宏变量",
+            "列表仅显示掩码后的值；编辑时值留空表示保持不变。",
+            radius=20,
+            show_subtitle=True,
+        )
+        self.macro_list = QListWidget()
+        self.macro_list.setStyleSheet(
+            apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6)
+        )
+        self.macro_list.setMinimumHeight(200)
+        list_group_layout.addWidget(self.macro_list)
+
+        list_actions = QHBoxLayout()
+        self.edit_btn = QPushButton("编辑")
+        self.edit_btn.setObjectName("SecondaryBtn")
+        self.edit_btn.clicked.connect(self._on_edit)
+        self.delete_btn = QPushButton("删除")
+        self.delete_btn.setObjectName("SecondaryBtn")
+        self.delete_btn.clicked.connect(self._on_delete)
+        list_actions.addWidget(self.edit_btn)
+        list_actions.addWidget(self.delete_btn)
+        list_actions.addStretch()
+        list_group_layout.addLayout(list_actions)
+        layout.addWidget(list_group)
+        layout.addStretch()
+
+        self.macro_list.itemSelectionChanged.connect(self._update_action_state)
+        self._reload_list()
+        self._update_action_state()
+
+    # ------------------------------------------------------------------ #
+    def _vault(self):
+        return self.config_manager.get_macro_vault()
+
+    def _reload_list(self):
+        self.macro_list.clear()
+        for entry in self._vault().public_entries():
+            name = entry.get("name") or ""
+            label = entry.get("label") or ""
+            scope = entry.get("scope") or ""
+            masked = entry.get("value_masked") or ""
+            description = entry.get("description") or ""
+            title = name
+            if label and label != name:
+                title = f"{name}（{label}）"
+            detail_parts = []
+            if scope:
+                detail_parts.append(scope)
+            if description:
+                detail_parts.append(description)
+            detail = " · ".join(detail_parts)
+            text = f"{title}\n值：{masked}" + (f"\n{detail}" if detail else "")
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, entry.get("id"))
+            self.macro_list.addItem(item)
+
+    def _current_entry(self):
+        item = self.macro_list.currentItem()
+        if not item:
+            return None
+        entry_id = item.data(Qt.UserRole)
+        for entry in self._vault().list_entries():
+            if entry.get("id") == entry_id:
+                return entry
+        return None
+
+    def _update_action_state(self):
+        has_selection = self.macro_list.currentItem() is not None
+        self.edit_btn.setEnabled(has_selection)
+        self.delete_btn.setEnabled(has_selection)
+
+    def _clear_form(self):
+        self.name_input.clear()
+        self.label_input.clear()
+        self.scope_input.clear()
+        self.value_input.clear()
+        self.desc_input.clear()
+
+    def _on_add(self):
+        name = self.name_input.text().strip()
+        value = self.value_input.text()
+        if not name:
+            QMessageBox.warning(self, "宏变量", "请填写名称。")
+            return
+        if not value:
+            QMessageBox.warning(self, "宏变量", "请填写宏变量的值。")
+            return
+        try:
+            self._vault().upsert(
+                name,
+                value,
+                label=self.label_input.text().strip(),
+                scope=self.scope_input.text().strip(),
+                description=self.desc_input.text().strip(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "宏变量", str(exc))
+            return
+        self._clear_form()
+        self._reload_list()
+        self.changed.emit()
+
+    def _on_edit(self):
+        entry = self._current_entry()
+        if not entry:
+            return
+        name = entry.get("name") or ""
+        label = entry.get("label") or ""
+        scope = entry.get("scope") or ""
+        description = entry.get("description") or ""
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("编辑宏变量")
+        dialog.setMinimumWidth(460)
+        apply_product_dialog(dialog, "SettingsDialog")
+        form = QFormLayout(dialog)
+        form.setContentsMargins(20, 20, 20, 20)
+        form.setSpacing(10)
+
+        name_edit = QLineEdit(name)
+        label_edit = QLineEdit(label)
+        scope_edit = QLineEdit(scope)
+        value_edit = QLineEdit()
+        value_edit.setEchoMode(QLineEdit.Password)
+        value_edit.setPlaceholderText("留空表示保持不变")
+        desc_edit = QLineEdit(description)
+        form.addRow(build_form_row_label("名称"), name_edit)
+        form.addRow(build_form_row_label("标签"), label_edit)
+        form.addRow(build_form_row_label("所属平台"), scope_edit)
+        form.addRow(build_form_row_label("值（留空保持不变）"), value_edit)
+        form.addRow(build_form_row_label("说明"), desc_edit)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        ok_btn = QPushButton("保存")
+        ok_btn.setObjectName("PrimaryBtn")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+        form.addRow(buttons)
+
+        def accept():
+            new_name = name_edit.text().strip()
+            if not new_name:
+                QMessageBox.warning(dialog, "宏变量", "名称不能为空。")
+                return
+            new_value = value_edit.text()
+            if new_value == "":
+                new_value = None
+            try:
+                self._vault().upsert(
+                    new_name,
+                    new_value,
+                    label=label_edit.text().strip(),
+                    scope=scope_edit.text().strip(),
+                    description=desc_edit.text().strip(),
+                    entry_id=entry.get("id"),
+                )
+            except ValueError as exc:
+                QMessageBox.warning(dialog, "宏变量", str(exc))
+                return
+            dialog.accept()
+
+        ok_btn.clicked.connect(accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        if dialog.exec() == QDialog.Accepted:
+            self._reload_list()
+            self.changed.emit()
+
+    def _on_delete(self):
+        entry = self._current_entry()
+        if not entry:
+            return
+        name = entry.get("name") or ""
+        reply = QMessageBox.question(
+            self,
+            "删除宏变量",
+            f"确定删除宏变量“{name}”吗？此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._vault().delete(entry.get("id"))
+        self._reload_list()
+        self.changed.emit()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
@@ -11847,6 +12101,14 @@ class SettingsDialog(QDialog):
         self._im_gateway_status_timer.start()
         im_layout.addStretch()
 
+        macro_page, macro_layout = make_scroll_page(
+            "宏变量",
+            "把各平台的 AK / token / key 保存在本机，会话中按需读取，无需每次重复提供。",
+        )
+        self.macro_vault_manager = MacroVaultManager(self.config_manager, parent=self)
+        macro_layout.addWidget(self.macro_vault_manager)
+        macro_layout.addStretch()
+
         add_settings_page("外观", "fa5s.palette", appearance_page)
         add_settings_page("模型与服务", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
@@ -11854,6 +12116,7 @@ class SettingsDialog(QDialog):
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("MCP", "fa5s.plug", mcp_page)
+        add_settings_page("宏变量", "fa5s.key", macro_page)
         add_settings_page("企业消息", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)

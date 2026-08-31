@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget
 
 from core.config_manager import ConfigManager
@@ -19,6 +20,7 @@ from main import (
     FavoritesPage,
     MainWindow,
     MultiLineElidedLabel,
+    favorite_delivery_readiness,
 )
 
 
@@ -139,21 +141,23 @@ class FavoritesUiTests(unittest.TestCase):
         try:
             self.assertTrue(editor.run_options_content.isHidden())
             self.assertEqual(editor.execution_mode_combo.currentText(), "独立聊天")
-            self.assertEqual(editor.schedule_attached_check.text(), "添加计划")
+            self.assertEqual(editor.schedule_attached_check.text(), "添加定时计划")
             self.assertEqual(editor.schedule_prompt_mode_combo.itemText(0), "使用上面的任务内容")
             self.assertEqual(editor.skill_list.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
             self.assertIn("数据可视化\n生成清晰图表", editor.skill_list.item(0).text())
+            self.assertTrue(editor.skill_list.isHidden())
+            self.assertEqual(editor.add_skills_btn.text(), "添加能力")
 
             editor.run_options_toggle.setChecked(True)
             editor.schedule_attached_check.setChecked(True)
             self.assertFalse(editor.run_options_content.isHidden())
             self.assertFalse(editor.schedule_card.isHidden())
-            self.assertEqual(editor.schedule_attached_check.text(), "移除计划")
+            self.assertEqual(editor.schedule_attached_check.text(), "删除计划")
             self.assertIsNotNone(editor.favorite_payload()["schedule"])
         finally:
             editor.deleteLater()
 
-    def test_favorite_cards_have_equal_height_for_odd_and_even_counts(self):
+    def test_favorite_cards_are_compact_and_content_sized_for_odd_and_even_counts(self):
         manager = self._create_window().config_manager
         page = None
         try:
@@ -175,8 +179,9 @@ class FavoritesUiTests(unittest.TestCase):
                 self.app.processEvents()
                 cards = page.findChildren(type(page.container), "FavoriteCard")
                 self.assertEqual(len(cards), count)
-                self.assertEqual({card.height() for card in cards}, {page.card_height()})
-                self.assertTrue(all(card.sizePolicy().verticalPolicy() == QSizePolicy.Fixed for card in cards))
+                self.assertEqual(len({card.height() for card in cards}), 1)
+                self.assertTrue(all(card.height() >= page.card_height() for card in cards))
+                self.assertTrue(all(card.sizePolicy().verticalPolicy() == QSizePolicy.Maximum for card in cards))
                 self.assertEqual(len(page.findChildren(QWidget, "FavoriteDeleteButton")), count)
                 self.assertEqual(len(page.findChildren(QWidget, "FavoriteMoreButton")), 0)
                 summaries = page.findChildren(MultiLineElidedLabel, "FavoriteSummary")
@@ -195,7 +200,8 @@ class FavoritesUiTests(unittest.TestCase):
             ]
             self.assertEqual(page._grid_columns, 1)
             self.assertEqual(len(cards), 5)
-            self.assertEqual({card.height() for card in cards}, {page.card_height()})
+            self.assertEqual(len({card.height() for card in cards}), 1)
+            self.assertTrue(all(card.height() >= page.card_height() for card in cards))
         finally:
             if page is not None:
                 page.deleteLater()
@@ -203,6 +209,168 @@ class FavoritesUiTests(unittest.TestCase):
                 if isinstance(widget, MainWindow):
                     widget.close()
                     widget.deleteLater()
+
+    def test_favorite_value_controls_send_closed_wheel_to_page(self):
+        editor = FavoriteEditorPage(
+            favorite={
+                "id": "fav-wheel",
+                "name": "滚轮测试",
+                "prompt": "执行测试",
+                "schedule": {"enabled": True, "schedule_type": "monthly", "time_of_day": "09:00"},
+            }
+        )
+        try:
+            editor.resize(640, 380)
+            editor.show()
+            editor.run_options_toggle.setChecked(True)
+            self.app.processEvents()
+            scrollbar = editor.scroll.verticalScrollBar()
+            self.assertGreater(scrollbar.maximum(), 0)
+            controls = (
+                editor.execution_mode_combo,
+                editor.schedule_prompt_mode_combo,
+                editor.schedule_type_combo,
+                editor.monthly_day_spin,
+                editor.interval_minutes_spin,
+                editor.once_datetime_edit,
+            )
+            for control in controls:
+                before = (
+                    control.currentIndex() if hasattr(control, "currentIndex")
+                    else control.value() if hasattr(control, "value")
+                    else control.dateTime().toSecsSinceEpoch()
+                )
+                scrollbar.setValue(0)
+                event = QWheelEvent(
+                    QPointF(4, 4),
+                    QPointF(4, 4),
+                    QPoint(0, 0),
+                    QPoint(0, -120),
+                    Qt.NoButton,
+                    Qt.NoModifier,
+                    Qt.ScrollUpdate,
+                    False,
+                )
+                control.wheelEvent(event)
+                after = (
+                    control.currentIndex() if hasattr(control, "currentIndex")
+                    else control.value() if hasattr(control, "value")
+                    else control.dateTime().toSecsSinceEpoch()
+                )
+                self.assertEqual(after, before)
+                self.assertGreater(scrollbar.value(), 0)
+        finally:
+            editor.close()
+            editor.deleteLater()
+
+    def test_favorites_history_view_separates_run_and_delivery_status(self):
+        window = self._create_window()
+        page = None
+        try:
+            window.config_manager.set_favorites(
+                [{"id": "fav-history", "name": "日报", "prompt": "生成日报"}]
+            )
+            window.config_manager.set_favorite_run_history(
+                [{
+                    "id": "run-history",
+                    "favorite_id": "fav-history",
+                    "favorite_name": "日报",
+                    "trigger_source": "scheduler",
+                    "status": "completed",
+                    "started_at": 100,
+                    "delivery_id": "delivery-history",
+                    "delivery_status": "failed",
+                    "delivery_error": "飞书渠道未连接",
+                }]
+            )
+            page = FavoritesPage(window.config_manager, window)
+            page.show_history("fav-history")
+            page.show()
+            self.app.processEvents()
+            rows = page.findChildren(QWidget, "FavoriteHistoryRow")
+            self.assertEqual(len(rows), 1)
+            text = " ".join(label.text() for label in rows[0].findChildren(QWidget) if hasattr(label, "text"))
+            self.assertIn("任务已完成", text)
+            self.assertIn("企业消息发送失败", text)
+            self.assertIn("飞书渠道未连接", text)
+        finally:
+            if page is not None:
+                page.deleteLater()
+            window.close()
+            window.deleteLater()
+
+    def test_delivery_readiness_requires_enterprise_message_configuration(self):
+        window = self._create_window()
+        editor = None
+        try:
+            state = favorite_delivery_readiness(window.config_manager)
+            self.assertEqual(state["state"], "unconfigured")
+            editor = FavoriteEditorPage(
+                favorite={
+                    "id": "fav-setup",
+                    "name": "日报",
+                    "prompt": "生成日报",
+                    "schedule": {"enabled": True, "schedule_type": "daily", "time_of_day": "09:00"},
+                },
+                delivery_service=window.favorite_delivery_service,
+                delivery_readiness_callback=lambda: favorite_delivery_readiness(window.config_manager),
+            )
+            self.assertFalse(editor.delivery_bind_btn.isEnabled())
+            self.assertFalse(editor.delivery_settings_btn.isHidden())
+            self.assertIn("尚未就绪", editor.delivery_binding_status.text())
+        finally:
+            if editor is not None:
+                editor.deleteLater()
+            window.close()
+            window.deleteLater()
+
+    def test_enterprise_settings_round_trip_preserves_unsaved_favorite_editor(self):
+        window = self._create_window()
+        try:
+            window.open_favorites()
+            self.assertTrue(window.show_favorite_editor())
+            editor = window.product_pages["favorite_editor"]
+            editor.name_input.setText("未保存日报")
+            editor.prompt_edit.setPlainText("生成未保存的日报")
+            editor.run_options_toggle.setChecked(True)
+            editor.schedule_attached_check.setChecked(True)
+            self.assertTrue(editor.is_dirty())
+
+            self.assertTrue(window._open_favorite_delivery_settings(editor))
+            self.assertEqual(window.current_product_route, window.PAGE_SETTINGS)
+            self.assertEqual(window.current_product_subroute, "favorite_delivery_setup")
+            self.assertTrue(window.handle_product_back())
+            self.assertIs(window.product_pages["favorite_editor"], editor)
+            self.assertEqual(editor.name_input.text(), "未保存日报")
+            self.assertEqual(editor.prompt_edit.toPlainText(), "生成未保存的日报")
+            self.assertTrue(editor.is_dirty())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_binding_instruction_and_clipboard_use_complete_message(self):
+        window = self._create_window()
+        editor = FavoriteEditorPage(
+            favorite={
+                "id": "fav-complete-command",
+                "name": "日报",
+                "prompt": "生成日报",
+                "schedule": {"enabled": True, "schedule_type": "daily", "time_of_day": "09:00"},
+            },
+            delivery_service=window.favorite_delivery_service,
+        )
+        try:
+            editor._create_delivery_binding()
+            command = editor.delivery_binding_command
+            self.assertRegex(command, r"^绑定常用 \d{6}$")
+            self.assertIn(command, editor.delivery_binding_command_label.text())
+            self.assertIn("完整消息", editor.delivery_copy_btn.text())
+            editor._copy_delivery_binding_command()
+            self.assertEqual(QApplication.clipboard().text(), command)
+        finally:
+            editor.deleteLater()
+            window.close()
+            window.deleteLater()
 
     def test_favorites_follow_theme_preview_and_restore_without_changing_data(self):
         previous_manager = getattr(self.app, "theme_manager", None)

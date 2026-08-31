@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -693,9 +694,40 @@ def main_run():
                 "binding_id": bound_target["id"],
             }
             window.config_manager.upsert_favorite(scheduled_favorite)
+            now_ts = int(time.time())
+            window.config_manager.set_favorite_run_history(
+                [
+                    {
+                        "id": "run-weekly-report",
+                        "favorite_id": "fav-weekly-report",
+                        "favorite_name": "产品周报",
+                        "trigger_source": "scheduler",
+                        "status": "completed",
+                        "started_at": now_ts - 180,
+                        "finished_at": now_ts - 120,
+                        "summary": "产品周报已生成。",
+                        "delivery_id": "delivery-weekly-report",
+                        "delivery_status": "completed",
+                    },
+                    {
+                        "id": "run-research",
+                        "favorite_id": "fav-research",
+                        "favorite_name": "快速研究",
+                        "trigger_source": "manual",
+                        "status": "error",
+                        "started_at": now_ts - 3600,
+                        "finished_at": now_ts - 3540,
+                        "error": "网页搜索服务暂时不可用，请检查连接后重试。",
+                    },
+                ]
+            )
             window.open_favorites()
             window.resize(1280, 760)
             save_widget(window, "s40-favorites-library.png", 220)
+            favorites_page = window.product_pages[window.PAGE_FAVORITES]
+            favorites_page.show_history()
+            save_widget(window, "s40b-favorites-history.png", 220)
+            favorites_page._set_view(False)
             window.show_favorite_editor(favorite_id="fav-weekly-report")
             editor = window.product_pages["favorite_editor"]
             editor.run_options_toggle.setChecked(False)

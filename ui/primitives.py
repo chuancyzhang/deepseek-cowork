@@ -12,7 +12,10 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal, QT
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractScrollArea,
     QApplication,
+    QComboBox,
+    QDateTimeEdit,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QScrollArea,
     QScrollBar,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -36,6 +40,46 @@ from PySide6.QtWidgets import (
 )
 
 from core.theme import DesignTokens, bind_theme
+
+
+class _PageScrollSafeWheelMixin:
+    """Keep closed value controls from consuming page-scroll gestures."""
+
+    def wheelEvent(self, event):
+        popup_visible = (
+            isinstance(self, QComboBox)
+            and self.view() is not None
+            and self.view().isVisible()
+        )
+        if popup_visible:
+            super().wheelEvent(event)
+            return
+        ancestor = self.parentWidget()
+        while ancestor is not None and not isinstance(ancestor, QAbstractScrollArea):
+            ancestor = ancestor.parentWidget()
+        if ancestor is None:
+            event.ignore()
+            return
+        scrollbar = ancestor.verticalScrollBar()
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        step = max(scrollbar.singleStep() * 3, 24)
+        scrollbar.setValue(scrollbar.value() - (step if delta > 0 else -step))
+        event.accept()
+
+
+class PageScrollSafeComboBox(_PageScrollSafeWheelMixin, QComboBox):
+    """A combo box whose closed state never changes from mouse-wheel input."""
+
+
+class PageScrollSafeSpinBox(_PageScrollSafeWheelMixin, QSpinBox):
+    """A spin box that leaves mouse-wheel input to its containing page."""
+
+
+class PageScrollSafeDateTimeEdit(_PageScrollSafeWheelMixin, QDateTimeEdit):
+    """A date-time field that leaves mouse-wheel input to its containing page."""
 
 
 class ProductGrabScrollBar(QScrollBar):

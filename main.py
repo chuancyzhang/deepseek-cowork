@@ -36,6 +36,7 @@ from core.im_gateway_registry import (
     IM_PROVIDER_SPECS,
     get_provider_spec,
     provider_title,
+    scheduled_delivery_provider_ids,
 )
 from core.im_gateway_registration import register_feishu_app
 from core.im_gateway_status import read_im_gateway_status, write_im_gateway_status
@@ -167,6 +168,9 @@ from ui.primitives import (
     SidebarInlineNameEditor,
     ProductToolbar,
     ProductTooltipController,
+    PageScrollSafeComboBox,
+    PageScrollSafeDateTimeEdit,
+    PageScrollSafeSpinBox,
     ProductInputDialog,
     ProductMessageBox,
     ProductMessageDialog,
@@ -770,6 +774,77 @@ def log_favorites_runtime(stage, **fields):
         )
     except Exception:
         pass
+
+
+def favorite_delivery_readiness(config_manager):
+    """Describe whether the active enterprise channel can claim a favorite binding."""
+    config = normalize_im_gateway_config(config_manager.get("im_gateway", {}))
+    providers = config.get("providers") or {}
+    supported = set(scheduled_delivery_provider_ids())
+    active = str((config.get("enabled_providers") or [""])[0] or "")
+    configured_supported = []
+    partially_configured = False
+    for provider_name in supported:
+        provider_config = dict(providers.get(provider_name) or {})
+        spec = get_provider_spec(provider_name)
+        if any(
+            str(value or "").strip()
+            for key, value in provider_config.items()
+            if key not in {"enabled", "long_connection"}
+        ):
+            partially_configured = True
+        configured = bool(spec and spec.is_configured(provider_config))
+        if provider_name == "dingtalk":
+            webhook = str(provider_config.get("webhook_url") or "").strip()
+            configured = configured and webhook.lower().startswith("https://")
+        if configured:
+            configured_supported.append(provider_name)
+    if not active:
+        if configured_supported:
+            return {
+                "state": "inactive",
+                "provider": configured_supported[0],
+                "message": f"{provider_title(configured_supported[0])}已配置，但当前没有启用。",
+            }
+        return {
+            "state": "incomplete" if partially_configured else "unconfigured",
+            "provider": "",
+            "message": "企业消息配置尚未完成。" if partially_configured else "尚未配置企业消息渠道。",
+        }
+    if active not in supported:
+        return {
+            "state": "unsupported",
+            "provider": active,
+            "message": f"当前{provider_title(active)}渠道暂不支持定时任务结果投递。",
+        }
+    provider_config = dict(providers.get(active) or {})
+    spec = get_provider_spec(active)
+    if not spec or not spec.is_configured(provider_config):
+        return {
+            "state": "incomplete",
+            "provider": active,
+            "message": f"{provider_title(active)}配置尚未完成。",
+        }
+    if active == "dingtalk":
+        webhook = str(provider_config.get("webhook_url") or "").strip()
+        if not webhook.lower().startswith("https://"):
+            return {
+                "state": "incomplete",
+                "provider": active,
+                "message": "钉钉定时投递需要先配置固定 HTTPS Webhook。",
+            }
+    runtime = read_im_gateway_status()
+    if runtime.get("provider") == active and runtime.get("state") in {"error", "disconnected", "stopped"}:
+        return {
+            "state": "disconnected",
+            "provider": active,
+            "message": f"{provider_title(active)}已配置，但消息渠道尚未连接。",
+        }
+    return {
+        "state": "ready",
+        "provider": active,
+        "message": f"{provider_title(active)}已就绪，可以绑定接收会话。",
+    }
 
 
 def log_ui_exception(receiver, event, exception_text):
@@ -7567,6 +7642,8 @@ class FavoriteEditorPage(QDialog):
         prefill=None,
         delivery_service=None,
         active_provider_callback=None,
+        delivery_readiness_callback=None,
+        open_delivery_settings_callback=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -7580,6 +7657,8 @@ class FavoriteEditorPage(QDialog):
         self.history = list(history or [])
         self.delivery_service = delivery_service
         self.active_provider_callback = active_provider_callback
+        self.delivery_readiness_callback = delivery_readiness_callback
+        self.open_delivery_settings_callback = open_delivery_settings_callback
         self.delivery_binding_id = ""
         self.delivery_binding_command = ""
         self.delivery_binding_expires_at = 0
@@ -7588,6 +7667,7 @@ class FavoriteEditorPage(QDialog):
         self.submit_callback = None
         self.run_schedule_callback = None
         self.open_history_callback = None
+        self.open_all_history_callback = None
         self.retry_delivery_callback = None
         apply_product_dialog(self, "FavoriteEditorPage")
 
@@ -7595,6 +7675,7 @@ class FavoriteEditorPage(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         scroll = QScrollArea()
+        self.scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -7619,7 +7700,7 @@ class FavoriteEditorPage(QDialog):
         basics_layout = QVBoxLayout(basics)
         basics_layout.setContentsMargins(16, 16, 16, 16)
         basics_layout.setSpacing(12)
-        basics_layout.addWidget(self._kicker("名称与用途"))
+        basics_layout.addWidget(self._kicker("任务"))
         form = QFormLayout()
         configure_responsive_form_layout(form)
         form.setSpacing(12)
@@ -7628,7 +7709,7 @@ class FavoriteEditorPage(QDialog):
         self.description_input = QLineEdit()
         self.description_input.setPlaceholderText("例如：每周汇总进展、风险和下周计划（可选）")
         form.addRow("任务名称", self.name_input)
-        form.addRow("一句话用途", self.description_input)
+        form.addRow("补充说明（可选）", self.description_input)
         basics_layout.addLayout(form)
         layout.addWidget(basics)
 
@@ -7646,11 +7727,11 @@ class FavoriteEditorPage(QDialog):
         execution_layout.addWidget(execution_hint)
         execution_form = QFormLayout()
         configure_responsive_form_layout(execution_form)
-        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo = PageScrollSafeComboBox()
         self.execution_mode_combo.addItem("独立聊天", FAVORITE_EXECUTION_CHAT)
         self.execution_mode_combo.addItem("在项目中运行", FAVORITE_EXECUTION_WORKSPACE)
         self.execution_mode_combo.currentIndexChanged.connect(self._refresh_execution_mode)
-        self.workspace_combo = QComboBox()
+        self.workspace_combo = PageScrollSafeComboBox()
         self.workspace_combo.addItem("请选择工作区", "")
         known_paths = set()
         for project in self.projects:
@@ -7700,7 +7781,7 @@ class FavoriteEditorPage(QDialog):
         self.skill_search_input.setPlaceholderText("搜索可用能力")
         self.skill_search_input.setClearButtonEnabled(True)
         self.skill_search_input.textChanged.connect(self._filter_skills)
-        skills_layout.addWidget(self.skill_search_input)
+        self.skill_search_input.hide()
         self.skill_list = QListWidget()
         self.skill_list.setMinimumHeight(130)
         self.skill_list.setMaximumHeight(210)
@@ -7749,7 +7830,17 @@ class FavoriteEditorPage(QDialog):
             item.setCheckState(Qt.Checked)
             item.setToolTip("该能力已被删除或停用，请先恢复能力或从常用项中移除。")
             self.skill_list.addItem(item)
-        skills_layout.addWidget(self.skill_list)
+        self.skill_list.hide()
+        self.selected_skills_summary = QLabel("未选择额外能力")
+        self.selected_skills_summary.setWordWrap(True)
+        self.selected_skills_summary.setProperty("favoriteCaption", True)
+        self.selected_skills_summary.setStyleSheet(apple_caption_style())
+        skills_layout.addWidget(self.selected_skills_summary)
+        self.add_skills_btn = QPushButton("添加能力")
+        self.add_skills_btn.setObjectName("SecondaryBtn")
+        self.add_skills_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        self.add_skills_btn.clicked.connect(self._show_skill_picker)
+        skills_layout.addWidget(self.add_skills_btn, 0, Qt.AlignLeft)
         layout.addWidget(skills_card)
 
         self.run_options_toggle = QPushButton()
@@ -7769,10 +7860,10 @@ class FavoriteEditorPage(QDialog):
         schedule_toggle_row.setContentsMargins(2, 2, 2, 2)
         schedule_title_box = QVBoxLayout()
         schedule_title_box.setSpacing(2)
-        schedule_title = QLabel("定时运行")
+        schedule_title = QLabel("自动化")
         schedule_title.setProperty("favoriteSectionTitle", True)
         schedule_title.setStyleSheet(apple_section_title_style(size=15))
-        schedule_hint = QLabel("需要时添加计划；它会沿用上面的任务、能力和运行位置。")
+        schedule_hint = QLabel("需要时让任务按计划运行，并可把结果发送到企业消息。")
         schedule_hint.setProperty("favoriteCaption", True)
         schedule_hint.setStyleSheet(apple_caption_style())
         schedule_title_box.addWidget(schedule_title)
@@ -7808,7 +7899,7 @@ class FavoriteEditorPage(QDialog):
 
         prompt_mode_form = QFormLayout()
         configure_responsive_form_layout(prompt_mode_form)
-        self.schedule_prompt_mode_combo = QComboBox()
+        self.schedule_prompt_mode_combo = PageScrollSafeComboBox()
         self.schedule_prompt_mode_combo.addItem("使用上面的任务内容", FAVORITE_PROMPT_INHERIT)
         self.schedule_prompt_mode_combo.addItem("为定时运行单独填写", FAVORITE_PROMPT_CUSTOM)
         self.schedule_prompt_mode_combo.currentIndexChanged.connect(self._refresh_schedule_prompt_mode)
@@ -7821,7 +7912,7 @@ class FavoriteEditorPage(QDialog):
 
         schedule_form = QFormLayout()
         configure_responsive_form_layout(schedule_form)
-        self.schedule_type_combo = QComboBox()
+        self.schedule_type_combo = PageScrollSafeComboBox()
         for label, value in (
             ("每天", FAVORITE_SCHEDULE_DAILY),
             ("每周", FAVORITE_SCHEDULE_WEEKLY),
@@ -7856,7 +7947,7 @@ class FavoriteEditorPage(QDialog):
         monthly_page = QWidget()
         monthly_layout = QHBoxLayout(monthly_page)
         monthly_layout.setContentsMargins(0, 0, 0, 0)
-        self.monthly_day_spin = QSpinBox()
+        self.monthly_day_spin = PageScrollSafeSpinBox()
         self.monthly_day_spin.setRange(1, 31)
         self.monthly_time_input = QLineEdit("09:00")
         monthly_layout.addWidget(QLabel("每月"))
@@ -7868,7 +7959,7 @@ class FavoriteEditorPage(QDialog):
         interval_page = QWidget()
         interval_layout = QHBoxLayout(interval_page)
         interval_layout.setContentsMargins(0, 0, 0, 0)
-        self.interval_minutes_spin = QSpinBox()
+        self.interval_minutes_spin = PageScrollSafeSpinBox()
         self.interval_minutes_spin.setRange(1, 1440)
         self.interval_minutes_spin.setValue(60)
         interval_layout.addWidget(QLabel("每隔"))
@@ -7879,7 +7970,7 @@ class FavoriteEditorPage(QDialog):
         once_page = QWidget()
         once_layout = QHBoxLayout(once_page)
         once_layout.setContentsMargins(0, 0, 0, 0)
-        self.once_datetime_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+        self.once_datetime_edit = PageScrollSafeDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
         self.once_datetime_edit.setCalendarPopup(True)
         self.once_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         once_layout.addWidget(self.once_datetime_edit)
@@ -7922,6 +8013,10 @@ class FavoriteEditorPage(QDialog):
         self.delivery_binding_status.setStyleSheet(apple_caption_style())
         schedule_layout.addWidget(self.delivery_binding_status)
 
+        self.delivery_setup_notice = ProductInlineNotice("", "warning")
+        self.delivery_setup_notice.hide()
+        schedule_layout.addWidget(self.delivery_setup_notice)
+
         self.delivery_binding_command_label = QLabel("")
         self.delivery_binding_command_label.setWordWrap(True)
         self.delivery_binding_command_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -7935,7 +8030,7 @@ class FavoriteEditorPage(QDialog):
         self.delivery_bind_btn.setObjectName("SecondaryBtn")
         self.delivery_bind_btn.setStyleSheet(apple_button_style("secondary", radius=7))
         self.delivery_bind_btn.clicked.connect(self._create_delivery_binding)
-        self.delivery_copy_btn = QPushButton("复制命令")
+        self.delivery_copy_btn = QPushButton("复制完整消息")
         self.delivery_copy_btn.setProperty("favoriteGhostButton", True)
         self.delivery_copy_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.delivery_copy_btn.clicked.connect(self._copy_delivery_binding_command)
@@ -7945,9 +8040,15 @@ class FavoriteEditorPage(QDialog):
         self.delivery_unbind_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.delivery_unbind_btn.clicked.connect(self._stage_delivery_unbind)
         self.delivery_unbind_btn.hide()
+        self.delivery_settings_btn = QPushButton("去设置企业消息")
+        self.delivery_settings_btn.setObjectName("SecondaryBtn")
+        self.delivery_settings_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        self.delivery_settings_btn.clicked.connect(self._open_delivery_settings)
+        self.delivery_settings_btn.hide()
         delivery_actions.addWidget(self.delivery_bind_btn)
         delivery_actions.addWidget(self.delivery_copy_btn)
         delivery_actions.addWidget(self.delivery_unbind_btn)
+        delivery_actions.addWidget(self.delivery_settings_btn)
         delivery_actions.addStretch()
         schedule_layout.addLayout(delivery_actions)
         run_options_layout.addWidget(self.schedule_card)
@@ -7961,7 +8062,7 @@ class FavoriteEditorPage(QDialog):
             history_layout = QVBoxLayout(history_card)
             history_layout.setContentsMargins(16, 16, 16, 16)
             history_layout.addWidget(self._kicker("最近运行"))
-            for record in matching_history[:5]:
+            for record in matching_history[:3]:
                 when = int(record.get("started_at") or record.get("scheduled_at") or 0)
                 when_text = datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M") if when else "时间未知"
                 row = QHBoxLayout()
@@ -8015,6 +8116,11 @@ class FavoriteEditorPage(QDialog):
                     )
                     row.addWidget(retry_btn)
                 history_layout.addLayout(row)
+            self.view_all_history_btn = QPushButton("查看全部历史")
+            self.view_all_history_btn.setProperty("favoriteGhostButton", True)
+            self.view_all_history_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+            self.view_all_history_btn.clicked.connect(self._open_all_history)
+            history_layout.addWidget(self.view_all_history_btn, 0, Qt.AlignLeft)
             layout.addWidget(history_card)
 
         actions = ProductActionBar()
@@ -8034,6 +8140,7 @@ class FavoriteEditorPage(QDialog):
         root.addWidget(actions)
 
         self._load()
+        self._refresh_selected_skills_summary()
         self.run_options_toggle.setChecked(bool(
             self.favorite.get("schedule")
             or self.favorite.get("execution_mode") == FAVORITE_EXECUTION_WORKSPACE
@@ -8146,6 +8253,7 @@ class FavoriteEditorPage(QDialog):
         for spin in self.findChildren(QSpinBox):
             spin.valueChanged.connect(callback)
         self.once_datetime_edit.dateTimeChanged.connect(callback)
+        self.skill_list.itemChanged.connect(callback)
         for editor in (self.daily_time_input, self.weekly_time_input, self.monthly_time_input, self.cron_expression_input):
             editor.textChanged.connect(self._refresh_schedule_type)
         for check in self.weekday_checks:
@@ -8160,6 +8268,78 @@ class FavoriteEditorPage(QDialog):
             for index in range(self.skill_list.count())
             if self.skill_list.item(index).checkState() == Qt.Checked
         ])
+
+    def _refresh_selected_skills_summary(self):
+        selected = []
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.text().split("\n", 1)[0])
+        self.selected_skills_summary.setText(
+            "已选择 " + str(len(selected)) + " 项能力\n" + " · ".join(selected)
+            if selected else "未选择额外能力"
+        )
+        self.add_skills_btn.setText("调整能力" if selected else "添加能力")
+
+    def _show_skill_picker(self):
+        popover = ProductPopover(self.window(), width=480)
+        picker_layout = QVBoxLayout(popover)
+        picker_layout.setContentsMargins(12, 10, 12, 12)
+        picker_layout.setSpacing(8)
+        picker_layout.addWidget(QLabel("添加能力"))
+        search = QLineEdit()
+        search.setPlaceholderText("搜索能力名称或用途")
+        search.setClearButtonEnabled(True)
+        picker_layout.addWidget(search)
+        results = QListWidget()
+        results.setMinimumHeight(240)
+        results.setMaximumHeight(340)
+        results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        apply_apple_checkable_list_behavior(
+            results,
+            radius=8,
+            bg=DesignTokens.bg_main,
+            padding=4,
+            row_height=56,
+        )
+        mirror_items = []
+        for index in range(self.skill_list.count()):
+            source = self.skill_list.item(index)
+            row = QListWidgetItem(source.text())
+            row.setData(Qt.UserRole, source.data(Qt.UserRole))
+            row.setData(Qt.UserRole + 1, source.data(Qt.UserRole + 1))
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(source.checkState())
+            row.setToolTip(source.toolTip())
+            results.addItem(row)
+            mirror_items.append(row)
+        picker_layout.addWidget(results)
+
+        def filter_rows(text):
+            query = str(text or "").strip().casefold()
+            for row in mirror_items:
+                row.setHidden(bool(query and query not in str(row.data(Qt.UserRole + 1) or "")))
+
+        def sync_selection(row):
+            skill_name = str(row.data(Qt.UserRole) or "")
+            for source_index in range(self.skill_list.count()):
+                source = self.skill_list.item(source_index)
+                if str(source.data(Qt.UserRole) or "") == skill_name:
+                    source.setCheckState(row.checkState())
+                    break
+            self._refresh_selected_skills_summary()
+            self._refresh_dirty()
+
+        search.textChanged.connect(filter_rows)
+        results.itemChanged.connect(sync_selection)
+        self._skill_picker = popover
+        popover.show_for(self.add_skills_btn, prefer_above=False)
+        QTimer.singleShot(0, search.setFocus)
+
+    def _open_all_history(self):
+        callback = getattr(self, "open_all_history_callback", None)
+        if callable(callback):
+            callback(str(self.favorite.get("id") or ""))
 
     def _schedule_payload(self):
         schedule_type = str(self.schedule_type_combo.currentData() or FAVORITE_SCHEDULE_DAILY)
@@ -8241,6 +8421,14 @@ class FavoriteEditorPage(QDialog):
             return
         self._dirty = self._signature() != self._baseline
         self.save_btn.setEnabled(self._dirty)
+        if hasattr(self, "run_schedule_btn"):
+            can_run = bool(
+                self.favorite.get("id")
+                and self.favorite.get("schedule")
+                and not self._dirty
+            )
+            self.run_schedule_btn.setEnabled(can_run)
+            self.run_schedule_btn.setToolTip("" if can_run else "保存当前修改后可立即运行计划")
 
     def is_dirty(self):
         return bool(getattr(self, "_dirty", False))
@@ -8254,14 +8442,14 @@ class FavoriteEditorPage(QDialog):
         expanded = self.run_options_toggle.isChecked()
         self.run_options_content.setVisible(expanded)
         self.run_options_toggle.setText(
-            ("▾" if expanded else "▸") + " 运行选项"
+            ("▾" if expanded else "▸") + " 运行环境与自动化"
             + (" · 已设置" if self.schedule_attached_check.isChecked() else "")
         )
 
     def _refresh_schedule_visibility(self):
         attached = self.schedule_attached_check.isChecked()
         self.schedule_card.setVisible(attached)
-        self.schedule_attached_check.setText("移除计划" if attached else "添加计划")
+        self.schedule_attached_check.setText("删除计划" if attached else "添加定时计划")
         if hasattr(self, "run_options_toggle"):
             self._refresh_run_options_visibility()
         if hasattr(self, "delivery_enabled_check"):
@@ -8291,13 +8479,47 @@ class FavoriteEditorPage(QDialog):
     def _refresh_delivery_state(self):
         attached = self.schedule_attached_check.isChecked()
         enabled = attached and self.delivery_enabled_check.isChecked()
-        self.delivery_enabled_check.setEnabled(attached)
-        self.delivery_bind_btn.setEnabled(attached)
+        readiness = self._delivery_readiness()
+        has_active_binding = bool(
+            self.delivery_service
+            and self.delivery_binding_id
+            and (self.delivery_service.get_binding(self.delivery_binding_id) or {}).get("status") == "active"
+        )
+        ready = readiness.get("state") == "ready" or has_active_binding
+        self.delivery_enabled_check.setEnabled(attached and ready)
+        self.delivery_bind_btn.setEnabled(attached and ready)
+        needs_setup = attached and not ready
+        self.delivery_settings_btn.setVisible(needs_setup)
+        self.delivery_setup_notice.setVisible(needs_setup)
+        if needs_setup:
+            self.delivery_setup_notice.set_text(
+                str(readiness.get("message") or "请先配置企业消息渠道。")
+                + " 先完成企业消息设置，才能绑定接收会话。",
+                "warning",
+            )
         if not attached:
             self.delivery_binding_status.setText("添加定时计划后可绑定企业消息。")
+            self.delivery_setup_notice.hide()
+            self.delivery_settings_btn.hide()
+        elif needs_setup:
+            self.delivery_binding_status.setText("企业消息渠道尚未就绪。")
         elif enabled and not self.delivery_binding_id:
             self.delivery_binding_status.setText("请先生成绑定码并在目标企业消息会话中完成绑定。")
         self._refresh_dirty()
+
+    def _delivery_readiness(self):
+        if callable(self.delivery_readiness_callback):
+            try:
+                value = self.delivery_readiness_callback()
+                if isinstance(value, dict):
+                    return value
+            except Exception as exc:
+                return {"state": "error", "provider": "", "message": str(exc)}
+        return {"state": "ready", "provider": "", "message": ""}
+
+    def _open_delivery_settings(self):
+        if callable(self.open_delivery_settings_callback):
+            self.open_delivery_settings_callback(self)
 
     def _refresh_delivery_binding_status(self):
         if not self.schedule_attached_check.isChecked():
@@ -8306,6 +8528,9 @@ class FavoriteEditorPage(QDialog):
         binding = None
         if self.delivery_service is not None and self.delivery_binding_id:
             binding = self.delivery_service.get_binding(self.delivery_binding_id)
+        if not (binding and binding.get("status") == "active") and self._delivery_readiness().get("state") != "ready":
+            self._refresh_delivery_state()
+            return
         if binding and binding.get("status") == "active":
             provider = str(binding.get("provider") or "")
             text = f"已绑定 · {provider_title(provider)} · {binding.get('display_name') or '企业消息会话'}"
@@ -8329,7 +8554,9 @@ class FavoriteEditorPage(QDialog):
             remaining = max(0, self.delivery_binding_expires_at - now_ts)
             self.delivery_binding_status.setText(f"等待绑定 · 绑定码约 {max(1, (remaining + 59) // 60)} 分钟后失效")
             self.delivery_binding_command_label.setText(
-                f"请在目标群聊或私聊中发送：{self.delivery_binding_command}"
+                "请在目标群聊或私聊中发送以下完整消息：\n"
+                f"{self.delivery_binding_command}\n"
+                "10 分钟内有效，仅可成功使用一次。"
             )
             self.delivery_binding_command_label.show()
             self.delivery_copy_btn.show()
@@ -8353,6 +8580,14 @@ class FavoriteEditorPage(QDialog):
     def _create_delivery_binding(self):
         if self.delivery_service is None:
             QMessageBox.warning(self, "无法绑定", "企业消息绑定服务不可用。")
+            return
+        readiness = self._delivery_readiness()
+        if readiness.get("state") != "ready":
+            QMessageBox.information(
+                self,
+                "请先配置企业消息",
+                str(readiness.get("message") or "请先在设置中完成企业消息渠道配置。"),
+            )
             return
         if not self.schedule_attached_check.isChecked():
             QMessageBox.information(self, "请先添加计划", "添加定时计划后才能绑定企业消息。")
@@ -8383,8 +8618,8 @@ class FavoriteEditorPage(QDialog):
         if not self.delivery_binding_command:
             return
         QApplication.clipboard().setText(self.delivery_binding_command)
-        self.delivery_copy_btn.setText("已复制")
-        QTimer.singleShot(1500, lambda: self.delivery_copy_btn.setText("复制命令"))
+        self.delivery_copy_btn.setText("完整消息已复制")
+        QTimer.singleShot(1500, lambda: self.delivery_copy_btn.setText("复制完整消息"))
 
     def _stage_delivery_unbind(self):
         if self.delivery_binding_id:
@@ -8467,6 +8702,9 @@ class FavoritesPage(QDialog):
         self._main = parent
         self.favorites = list(config_manager.get_favorites())
         self._filter_scheduled = False
+        self._view_history = False
+        self._history_status_filter = "all"
+        self._history_favorite_id = ""
         self._grid_columns = 0
         apply_product_dialog(self, "FavoritesPage")
         layout = QVBoxLayout(self)
@@ -8489,6 +8727,19 @@ class FavoritesPage(QDialog):
         header.addWidget(self.create_btn)
         layout.addLayout(header)
 
+        view_tabs = QHBoxLayout()
+        self.tasks_view_btn = QPushButton("常用任务")
+        self.history_view_btn = QPushButton("运行历史")
+        for button in (self.tasks_view_btn, self.history_view_btn):
+            button.setCheckable(True)
+            button.setStyleSheet(apple_segmented_button_style())
+        self.tasks_view_btn.clicked.connect(lambda: self._set_view(False))
+        self.history_view_btn.clicked.connect(lambda: self._set_view(True))
+        view_tabs.addWidget(self.tasks_view_btn)
+        view_tabs.addWidget(self.history_view_btn)
+        view_tabs.addStretch()
+        layout.addLayout(view_tabs)
+
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索任务名称或用途")
@@ -8496,6 +8747,17 @@ class FavoritesPage(QDialog):
         self.search_input.setStyleSheet(apple_search_field_style())
         self.search_input.textChanged.connect(self.refresh_cards)
         toolbar.addWidget(self.search_input, 1)
+        self.history_status_combo = PageScrollSafeComboBox()
+        for label, value in (
+            ("全部状态", "all"),
+            ("运行中", "running"),
+            ("失败或中断", "failed"),
+            ("投递异常", "delivery_error"),
+        ):
+            self.history_status_combo.addItem(label, value)
+        self.history_status_combo.currentIndexChanged.connect(self._set_history_status_filter)
+        self.history_status_combo.hide()
+        toolbar.addWidget(self.history_status_combo)
         self.all_btn = QPushButton("全部")
         self.scheduled_btn = QPushButton("定时运行")
         for button in (self.all_btn, self.scheduled_btn):
@@ -8520,7 +8782,7 @@ class FavoritesPage(QDialog):
         self.grid.setColumnStretch(1, 1)
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
-        self._set_filter(False)
+        self._set_view(False)
         bind_theme(self, self.refresh_theme, surface="management")
 
     def refresh_theme(self, _resolved=None):
@@ -8528,7 +8790,31 @@ class FavoritesPage(QDialog):
         self.search_input.setStyleSheet(apple_search_field_style())
         for button in (self.all_btn, self.scheduled_btn):
             button.setStyleSheet(apple_segmented_button_style())
+        for button in (self.tasks_view_btn, self.history_view_btn):
+            button.setStyleSheet(apple_segmented_button_style())
         self.refresh_cards()
+
+    def _set_view(self, history):
+        self._view_history = bool(history)
+        self.tasks_view_btn.setChecked(not self._view_history)
+        self.history_view_btn.setChecked(self._view_history)
+        self.all_btn.setVisible(not self._view_history)
+        self.scheduled_btn.setVisible(not self._view_history)
+        self.history_status_combo.setVisible(self._view_history)
+        self.search_input.setPlaceholderText(
+            "搜索任务名称" if self._view_history else "搜索任务名称或用途"
+        )
+        if not self._view_history:
+            self._history_favorite_id = ""
+        self.refresh_cards()
+
+    def _set_history_status_filter(self):
+        self._history_status_filter = str(self.history_status_combo.currentData() or "all")
+        self.refresh_cards()
+
+    def show_history(self, favorite_id=""):
+        self._history_favorite_id = str(favorite_id or "")
+        self._set_view(True)
 
     def _set_filter(self, scheduled):
         self._filter_scheduled = bool(scheduled)
@@ -8545,11 +8831,16 @@ class FavoritesPage(QDialog):
                 item.widget().deleteLater()
 
     def refresh(self):
+        if self._main and hasattr(self._main, "_sync_favorite_delivery_history"):
+            self._main._sync_favorite_delivery_history()
         self.favorites = list(self.config_manager.get_favorites())
         self.refresh_cards()
 
     def refresh_cards(self):
         self._clear_grid()
+        if self._view_history:
+            self._refresh_history_rows()
+            return
         query = self.search_input.text().strip().casefold() if hasattr(self, "search_input") else ""
         visible = []
         for favorite in self.favorites:
@@ -8585,6 +8876,132 @@ class FavoritesPage(QDialog):
         spacer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.grid.addWidget(spacer, spacer_row, 0, 1, columns)
 
+    def _refresh_history_rows(self):
+        query = self.search_input.text().strip().casefold()
+        records = self.config_manager.get_favorite_run_history()
+        visible = []
+        delivery_problem_states = {
+            FAVORITE_DELIVERY_STATUS_PARTIAL,
+            FAVORITE_DELIVERY_STATUS_FAILED,
+            FAVORITE_DELIVERY_STATUS_UNKNOWN,
+            FAVORITE_DELIVERY_STATUS_BLOCKED,
+        }
+        for record in records:
+            if self._history_favorite_id and str(record.get("favorite_id") or "") != self._history_favorite_id:
+                continue
+            if query and query not in str(record.get("favorite_name") or "").casefold():
+                continue
+            status = str(record.get("status") or "")
+            delivery_status = str(record.get("delivery_status") or "")
+            if self._history_status_filter == "running" and status != FAVORITE_RUN_STATUS_RUNNING:
+                continue
+            if self._history_status_filter == "failed" and status not in {
+                FAVORITE_RUN_STATUS_ERROR,
+                FAVORITE_RUN_STATUS_INTERRUPTED,
+                FAVORITE_RUN_STATUS_MISSED,
+            }:
+                continue
+            if self._history_status_filter == "delivery_error" and delivery_status not in delivery_problem_states:
+                continue
+            visible.append(record)
+        if not visible:
+            detail = "清除当前任务筛选或调整状态后再试。" if self._history_favorite_id else "运行定时计划或立即运行计划后，会在这里记录结果。"
+            empty = ProductEmptyState("暂无匹配的运行记录", detail)
+            self.grid.addWidget(empty, 0, 0, 1, 2)
+            return
+        self._grid_columns = 1
+        for row_index, record in enumerate(visible):
+            self.grid.addWidget(self._build_history_row(record), row_index, 0, 1, 2)
+        self.grid.setColumnStretch(0, 1)
+
+    def _build_history_row(self, record):
+        delivery_problem_states = {
+            FAVORITE_DELIVERY_STATUS_PARTIAL,
+            FAVORITE_DELIVERY_STATUS_FAILED,
+            FAVORITE_DELIVERY_STATUS_UNKNOWN,
+            FAVORITE_DELIVERY_STATUS_BLOCKED,
+        }
+        row = QFrame()
+        row.setObjectName("FavoriteHistoryRow")
+        row.setProperty("uiSurface", True)
+        row.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(7)
+        top = QHBoxLayout()
+        name = QLabel(str(record.get("favorite_name") or "未命名常用"))
+        name.setStyleSheet(apple_section_title_style(size=14))
+        top.addWidget(name, 1)
+        when = int(record.get("started_at") or record.get("scheduled_at") or record.get("created_at") or 0)
+        when_label = QLabel(datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M") if when else "时间未知")
+        when_label.setStyleSheet(apple_caption_style())
+        top.addWidget(when_label)
+        layout.addLayout(top)
+        status_text = {
+            FAVORITE_RUN_STATUS_RUNNING: "任务运行中",
+            FAVORITE_RUN_STATUS_COMPLETED: "任务已完成",
+            FAVORITE_RUN_STATUS_ERROR: "任务失败",
+            FAVORITE_RUN_STATUS_INTERRUPTED: "任务已停止",
+            FAVORITE_RUN_STATUS_MISSED: "任务已错过",
+        }.get(str(record.get("status") or ""), "任务状态未知")
+        delivery_text = {
+            FAVORITE_DELIVERY_STATUS_PENDING: "企业消息待发送",
+            FAVORITE_DELIVERY_STATUS_SENDING: "企业消息发送中",
+            FAVORITE_DELIVERY_STATUS_RETRY_WAIT: "企业消息等待重试",
+            FAVORITE_DELIVERY_STATUS_COMPLETED: "企业消息已送达",
+            FAVORITE_DELIVERY_STATUS_PARTIAL: "企业消息部分送达",
+            FAVORITE_DELIVERY_STATUS_FAILED: "企业消息发送失败",
+            FAVORITE_DELIVERY_STATUS_UNKNOWN: "企业消息状态未知",
+            FAVORITE_DELIVERY_STATUS_BLOCKED: "企业消息待切换渠道",
+        }.get(str(record.get("delivery_status") or ""), "未配置企业消息投递")
+        source_text = "定时运行" if str(record.get("trigger_source") or "") == "scheduler" else "立即运行计划"
+        state = QLabel(f"{source_text} · {status_text} · {delivery_text}")
+        state.setWordWrap(True)
+        state.setStyleSheet(apple_caption_style())
+        layout.addWidget(state)
+        detail_text = str(record.get("error") or record.get("delivery_error") or record.get("summary") or "").strip()
+        if detail_text:
+            detail = QLabel(detail_text)
+            detail.setWordWrap(True)
+            detail.setProperty("favoriteCaption", True)
+            detail.setStyleSheet(apple_caption_style())
+            layout.addWidget(detail)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        if record.get("session_id"):
+            open_btn = QPushButton("打开任务")
+            open_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+            open_btn.clicked.connect(lambda checked=False, sid=record.get("session_id"): self._open_history_session(sid))
+            actions.addWidget(open_btn)
+        delivery_status = str(record.get("delivery_status") or "")
+        if delivery_status in delivery_problem_states and record.get("delivery_id"):
+            retry_text = "确认重新发送" if delivery_status == FAVORITE_DELIVERY_STATUS_UNKNOWN else "重新发送未成功项"
+            retry_btn = QPushButton(retry_text)
+            retry_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+            retry_btn.clicked.connect(lambda checked=False, rec=dict(record): self._retry_history_delivery(rec))
+            actions.addWidget(retry_btn)
+        layout.addLayout(actions)
+        return row
+
+    def _open_history_session(self, session_id):
+        if self._main and hasattr(self._main, "activate_session"):
+            self._main.activate_session(str(session_id or ""))
+
+    def _retry_history_delivery(self, record):
+        if str(record.get("delivery_status") or "") == FAVORITE_DELIVERY_STATUS_UNKNOWN:
+            reply = QMessageBox.question(
+                self,
+                "确认重新发送",
+                "消息可能已经送达，重新发送可能造成重复。仍要继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        if self._main and hasattr(self._main, "retry_favorite_delivery"):
+            self._main.retry_favorite_delivery(str(record.get("delivery_id") or ""))
+            self.refresh()
+
     @staticmethod
     def card_height():
         title_font = QFont(QApplication.font())
@@ -8593,15 +9010,15 @@ class FavoritesPage(QDialog):
         meta_font.setPixelSize(DesignTokens.font_size_meta)
         title_height = QFontMetrics(title_font).lineSpacing()
         meta_height = QFontMetrics(meta_font).lineSpacing()
-        return max(196, 28 + title_height + meta_height * 4 + DesignTokens.control_height + 40)
+        return max(154, 24 + title_height + meta_height * 3 + DesignTokens.control_height + 30)
 
     def _build_card(self, favorite):
         card = QFrame()
         card.setObjectName("FavoriteCard")
         card.setProperty("uiSurface", True)
         card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        card.setFixedHeight(self.card_height())
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        card.setMinimumHeight(self.card_height())
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
@@ -8656,6 +9073,43 @@ class FavoritesPage(QDialog):
         summary_label = MultiLineElidedLabel(re.sub(r"\s+", " ", summary), max_lines=3)
         summary_label.setObjectName("FavoriteSummary")
         layout.addWidget(summary_label)
+        schedule = dict(favorite.get("schedule") or {})
+        if schedule:
+            next_run = int(schedule.get("next_run_at") or 0)
+            schedule_line = (
+                "下次运行：" + datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M")
+                if schedule.get("enabled") and next_run
+                else "自动运行已暂停"
+            )
+            schedule_label = QLabel(schedule_line)
+            schedule_label.setStyleSheet(apple_caption_style())
+            layout.addWidget(schedule_label)
+        latest = next(
+            (
+                item for item in self.config_manager.get_favorite_run_history()
+                if str(item.get("favorite_id") or "") == str(favorite.get("id") or "")
+            ),
+            None,
+        )
+        if latest:
+            latest_status = {
+                FAVORITE_RUN_STATUS_RUNNING: "运行中",
+                FAVORITE_RUN_STATUS_COMPLETED: "已完成",
+                FAVORITE_RUN_STATUS_ERROR: "失败",
+                FAVORITE_RUN_STATUS_INTERRUPTED: "已停止",
+                FAVORITE_RUN_STATUS_MISSED: "已错过",
+            }.get(str(latest.get("status") or ""), "状态未知")
+            delivery_suffix = {
+                FAVORITE_DELIVERY_STATUS_COMPLETED: " · 企业消息已送达",
+                FAVORITE_DELIVERY_STATUS_PARTIAL: " · 企业消息部分送达",
+                FAVORITE_DELIVERY_STATUS_FAILED: " · 企业消息发送失败",
+                FAVORITE_DELIVERY_STATUS_UNKNOWN: " · 企业消息状态未知",
+                FAVORITE_DELIVERY_STATUS_BLOCKED: " · 待切换企业消息渠道",
+            }.get(str(latest.get("delivery_status") or ""), "")
+            latest_label = QLabel(f"最近运行：{latest_status}{delivery_suffix}")
+            latest_label.setWordWrap(True)
+            latest_label.setStyleSheet(apple_caption_style())
+            layout.addWidget(latest_label)
         layout.addStretch(1)
         actions = QHBoxLayout()
         edit_btn = QPushButton("编辑")
@@ -8681,6 +9135,8 @@ class FavoritesPage(QDialog):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._view_history:
+            return
         expected = 2 if self.scroll.viewport().width() >= 880 else 1
         if self._grid_columns and expected != self._grid_columns:
             QTimer.singleShot(0, self.refresh_cards)
@@ -33853,7 +34309,15 @@ class MainWindow(QMainWindow):
         saved = self.config_manager.append_favorite_run_history(record)
         if saved and saved.get("status") == FAVORITE_RUN_STATUS_RUNNING:
             self._running_favorite_history_ids.add(saved.get("id"))
+        self._refresh_favorites_runtime_view()
         return saved
+
+    def _refresh_favorites_runtime_view(self):
+        page = (getattr(self, "product_pages", {}) or {}).get(self.PAGE_FAVORITES)
+        if page is not None and _qt_object_alive(page):
+            page.favorites = list(self.config_manager.get_favorites())
+            if self.main_page_stack.currentWidget() is page:
+                page.refresh_cards()
 
     def _finalize_favorite_history_record(self, history_id, status, summary="", error=""):
         history = self.config_manager.get_favorite_run_history()
@@ -33870,6 +34334,7 @@ class MainWindow(QMainWindow):
             self.config_manager.set_favorite_run_history(history)
             break
         self._running_favorite_history_ids.discard(target_id)
+        self._refresh_favorites_runtime_view()
 
     def _update_favorite_delivery_history_record(self, history_id, delivery_id, status, error=""):
         history = self.config_manager.get_favorite_run_history()
@@ -33890,6 +34355,7 @@ class MainWindow(QMainWindow):
             break
         if changed:
             self.config_manager.set_favorite_run_history(history)
+            self._refresh_favorites_runtime_view()
 
     def _sync_favorite_delivery_history(self):
         history = self.config_manager.get_favorite_run_history()
@@ -43118,9 +43584,27 @@ a {{ overflow-wrap: anywhere; }}
         if self.current_product_route != self.PAGE_SETTINGS:
             return True
         page = self.product_pages.get(self.PAGE_SETTINGS)
-        if page is None or not getattr(page, "_settings_dirty", False):
-            return True
-        return bool(page._confirm_discard_settings())
+        if page is not None and getattr(page, "_settings_dirty", False):
+            if not page._confirm_discard_settings():
+                return False
+        if self.current_product_subroute == "favorite_delivery_setup":
+            editor = self.product_pages.get("favorite_editor")
+            if editor is not None and editor.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "还有未保存的常用项",
+                    "离开后将丢弃尚未保存的常用配置，确定继续吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return False
+            editor = self.product_pages.pop("favorite_editor", None)
+            if editor is not None:
+                self.main_page_stack.removeWidget(editor)
+                editor.deleteLater()
+            self.current_product_subroute = ""
+        return True
 
     def _discard_product_page(self, route):
         page = self.product_pages.pop(route, None)
@@ -43130,6 +43614,24 @@ a {{ overflow-wrap: anywhere; }}
         page.deleteLater()
 
     def handle_product_back(self):
+        if self.current_product_route == self.PAGE_SETTINGS and self.current_product_subroute == "favorite_delivery_setup":
+            settings_page = self.product_pages.get(self.PAGE_SETTINGS)
+            if settings_page is not None and getattr(settings_page, "_settings_dirty", False):
+                if not settings_page._confirm_discard_settings():
+                    return False
+            editor = self.product_pages.get("favorite_editor")
+            if editor is None:
+                return self.show_product_page(self.PAGE_FAVORITES)
+            self.current_product_route = self.PAGE_FAVORITES
+            self.current_product_subroute = "favorite_editor"
+            self.main_page_stack.setCurrentWidget(editor)
+            self.workspace_title_label.setText("编辑常用")
+            self.workspace_subtitle_label.setText("说明要完成的任务；需要时再选择项目、能力和定时计划。")
+            for key, button in self.product_nav_buttons.items():
+                button.setChecked(key == self.PAGE_FAVORITES)
+            editor._refresh_delivery_state()
+            editor._refresh_delivery_binding_status()
+            return True
         if self.current_product_route == self.PAGE_CAPABILITIES:
             if self.current_product_subroute == "workbench":
                 workbench = self.product_pages.pop("capability_workbench", None)
@@ -43232,6 +43734,8 @@ a {{ overflow-wrap: anywhere; }}
                 ((normalize_im_gateway_config(self.config_manager.get("im_gateway", {})).get("enabled_providers") or [""])[0])
                 or ""
             ),
+            delivery_readiness_callback=lambda: favorite_delivery_readiness(self.config_manager),
+            open_delivery_settings_callback=self._open_favorite_delivery_settings,
             parent=self,
         )
         editor.setParent(self.main_page_stack)
@@ -43275,6 +43779,7 @@ a {{ overflow-wrap: anywhere; }}
         editor.submit_callback = submit
         editor.run_schedule_callback = self.run_favorite_schedule_now
         editor.retry_delivery_callback = self.retry_favorite_delivery
+        editor.open_all_history_callback = self.show_favorite_history
 
         def open_history(session_id):
             if not session_id:
@@ -43290,6 +43795,44 @@ a {{ overflow-wrap: anywhere; }}
         self.workspace_title_label.setText("编辑常用" if favorite else "新建常用")
         self.workspace_subtitle_label.setText("说明要完成的任务；需要时再选择项目、能力和定时计划。")
         self.main_page_stack.setCurrentWidget(editor)
+        return True
+
+    def _open_favorite_delivery_settings(self, editor):
+        if editor is not self.product_pages.get("favorite_editor"):
+            return False
+        try:
+            page = self._ensure_product_page(self.PAGE_SETTINGS, section="企业消息")
+        except Exception as exc:
+            self.add_system_toast(f"无法打开企业消息设置：{exc}", "error", auto_close_ms=7000)
+            return False
+        page.select_initial_page("企业消息")
+        self.current_product_route = self.PAGE_SETTINGS
+        self.current_product_subroute = "favorite_delivery_setup"
+        self.main_page_stack.setCurrentWidget(page)
+        self.workspace_title_label.setText("设置企业消息")
+        self.workspace_subtitle_label.setText("完成渠道配置后，点击返回即可继续当前常用配置。")
+        for key, button in self.product_nav_buttons.items():
+            button.setChecked(key == self.PAGE_SETTINGS)
+        log_ui_navigation("favorite_delivery_settings_open")
+        return True
+
+    def show_favorite_history(self, favorite_id=""):
+        editor = self.product_pages.get("favorite_editor")
+        if editor is not None and editor.is_dirty():
+            reply = QMessageBox.question(
+                self,
+                "还有未保存的常用项",
+                "查看历史将离开编辑页并丢弃尚未保存的修改，确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+        self._close_favorite_editor()
+        page = self.product_pages.get(self.PAGE_FAVORITES)
+        if page is not None:
+            page.refresh()
+            page.show_history(favorite_id)
         return True
 
     def show_capability_detail(self, skill):

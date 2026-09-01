@@ -221,8 +221,11 @@ def build_package(
             ]
             if offline:
                 install_command.append("--offline")
+            install_env = dict(os.environ)
+            install_env["PATH"] = str(node_dirs[0]) + os.pathsep + install_env.get("PATH", "")
             completed = subprocess.run(
                 install_command,
+                env=install_env,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

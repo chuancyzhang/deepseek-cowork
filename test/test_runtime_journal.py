@@ -67,6 +67,104 @@ class TestRuntimeJournal(unittest.TestCase):
             run = journal.get_run("session-1", "run-1")
             self.assertEqual(run["last_event_sequence"], 2)
 
+    def test_event_log_is_sequence_authority_without_per_event_atomic_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-many", "run-many", writer_owner="ui:1")
+
+            with patch.object(journal, "_atomic_write", wraps=journal._atomic_write) as atomic:
+                for index in range(1_000):
+                    event = journal.append_event(
+                        "session-many",
+                        "run-many",
+                        "content",
+                        {"index": index},
+                    )
+
+            self.assertEqual(event["sequence"], 1_000)
+            self.assertEqual(atomic.call_count, 0)
+
+            restarted = RuntimeJournal(temp_dir)
+            self.assertEqual(
+                restarted.get_run("session-many", "run-many")["last_event_sequence"],
+                1_000,
+            )
+            next_event = restarted.append_event(
+                "session-many",
+                "run-many",
+                "content",
+                {"index": 1_000},
+            )
+            self.assertEqual(next_event["sequence"], 1_001)
+            replay = restarted.read_events(
+                "session-many",
+                "run-many",
+                starting_after=999,
+            )
+            self.assertEqual([item["sequence"] for item in replay], [1_000, 1_001])
+
+            restarted.update_run("session-many", "run-many", {"status": "completed"})
+            run_path = restarted._record_path("session-many", "runs", "run-many")
+            self.assertEqual(restarted._read(run_path)["last_event_sequence"], 1_001)
+
+    def test_provider_attempt_is_an_append_only_patch_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-attempt", "run-attempt", writer_owner="daemon:2")
+
+            with patch.object(journal, "_atomic_write", wraps=journal._atomic_write) as atomic:
+                journal.record_attempt(
+                    "session-attempt",
+                    "attempt-1",
+                    {"run_id": "run-attempt", "status": "running"},
+                )
+                journal.record_attempt(
+                    "session-attempt",
+                    "attempt-1",
+                    {"first_stream_sample_at": 10.0},
+                )
+                result = journal.record_attempt(
+                    "session-attempt",
+                    "attempt-1",
+                    {"status": "completed", "finished_at": 20.0},
+                )
+
+            self.assertEqual(atomic.call_count, 0)
+            self.assertEqual(result["run_id"], "run-attempt")
+            self.assertEqual(result["first_stream_sample_at"], 10.0)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                RuntimeJournal(temp_dir).get_attempt("session-attempt", "attempt-1"),
+                result,
+            )
+            self.assertTrue(
+                journal._attempt_path("session-attempt", "attempt-1").endswith(".jsonl")
+            )
+
+    def test_provider_attempt_append_failure_is_explicit_and_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.begin_run("session-denied", "run-denied", writer_owner="daemon:22")
+
+            with patch.object(
+                journal,
+                "_append_jsonl",
+                side_effect=PermissionError(13, "denied"),
+            ):
+                with self.assertRaises(RuntimeJournalError) as raised:
+                    journal.record_attempt(
+                        "session-denied",
+                        "attempt-denied",
+                        {"run_id": "run-denied", "status": "running"},
+                    )
+
+            message = str(raised.exception)
+            self.assertIn("operation=append_provider_attempt", message)
+            self.assertIn("process_role=", message)
+            self.assertIn("run_id=run-denied", message)
+            self.assertIn("writer_owner=daemon:22", message)
+            self.assertIn("errno=13", message)
+
     def test_corrupt_event_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             journal = RuntimeJournal(temp_dir)

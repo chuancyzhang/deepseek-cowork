@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -116,6 +117,18 @@ class RuntimeJournal:
             f"{self._safe_id(record_id, f'{category}_id')}.json",
         )
 
+    def _jsonl_path(self, session_id, category, record_id):
+        return os.path.join(
+            self._category_dir(session_id, category),
+            f"{self._safe_id(record_id, f'{category}_id')}.jsonl",
+        )
+
+    def _event_path(self, session_id, run_id):
+        return self._jsonl_path(session_id, "events", run_id)
+
+    def _attempt_path(self, session_id, attempt_id):
+        return self._jsonl_path(session_id, "attempts", attempt_id)
+
     @staticmethod
     def _envelope(payload):
         return {
@@ -171,6 +184,71 @@ class RuntimeJournal:
         if envelope.get("checksum") != self.checksum(payload):
             raise RuntimeJournalError(f"runtime journal checksum mismatch: {path}")
         return payload
+
+    def _decode_jsonl_payload(self, raw_line, path, record_type):
+        try:
+            envelope = json.loads(raw_line)
+        except Exception as exc:
+            raise RuntimeJournalError(
+                f"invalid runtime {record_type} JSON: {path} | {exc}"
+            ) from exc
+        if int(envelope.get("journal_version") or 0) != RUNTIME_JOURNAL_VERSION:
+            raise RuntimeJournalError(
+                f"unsupported runtime {record_type} version: {path}"
+            )
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict) or envelope.get("checksum") != self.checksum(payload):
+            raise RuntimeJournalError(
+                f"runtime {record_type} checksum mismatch: {path}"
+            )
+        return payload
+
+    def _append_jsonl(self, path, payload):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(self._canonical_json(self._envelope(payload)) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _last_nonempty_line(path):
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return ""
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            buffer = b""
+            while position > 0:
+                size = min(8192, position)
+                position -= size
+                handle.seek(position)
+                buffer = handle.read(size) + buffer
+                stripped = buffer.rstrip(b"\r\n")
+                if b"\n" in stripped or position == 0:
+                    raw = stripped.rsplit(b"\n", 1)[-1].rstrip(b"\r")
+                    return raw.decode("utf-8")
+        return ""
+
+    @staticmethod
+    def _process_role():
+        return "daemon" if "--daemon" in sys.argv else "ui"
+
+    def _write_error(
+        self,
+        *,
+        operation,
+        path,
+        exc,
+        run_id="",
+        writer_owner="",
+    ):
+        return RuntimeJournalError(
+            f"runtime journal write failed: operation={operation} path={path} "
+            f"pid={os.getpid()} process_role={self._process_role()} "
+            f"run_id={str(run_id or '')} writer_owner={str(writer_owner or '')} "
+            f"errno={getattr(exc, 'errno', None)} "
+            f"winerror={getattr(exc, 'winerror', None)} error={exc}"
+        )
 
     @classmethod
     def _thread_lock(cls, path):
@@ -406,7 +484,17 @@ class RuntimeJournal:
         return record
 
     def get_run(self, session_id, run_id):
-        return self._read(self._record_path(session_id, "runs", run_id), default=None)
+        with self.session_lock(session_id):
+            record = self._read(
+                self._record_path(session_id, "runs", run_id),
+                default=None,
+            )
+            if record is not None:
+                record["last_event_sequence"] = self._last_event_sequence_unlocked(
+                    session_id,
+                    run_id,
+                )
+            return record
 
     def list_runs(self, session_id):
         """Return runtime records newest-first for terminal reconciliation."""
@@ -431,6 +519,10 @@ class RuntimeJournal:
             record = self._read(path, default=None)
             if record is None:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            record["last_event_sequence"] = self._last_event_sequence_unlocked(
+                session_id,
+                run_id,
+            )
             incoming = dict(patch or {})
             if record.get("stop_requested"):
                 incoming.pop("status", None)
@@ -476,6 +568,10 @@ class RuntimeJournal:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
             if str(record.get("status") or "") in RUN_TERMINAL_STATUSES:
                 return record
+            record["last_event_sequence"] = self._last_event_sequence_unlocked(
+                session_id,
+                run_id,
+            )
             record.update(dict(patch or {}))
             record.update({
                 "status": "interrupted",
@@ -502,7 +598,7 @@ class RuntimeJournal:
             record = self._read(run_path, default=None)
             if record is None:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
-            sequence = int(record.get("last_event_sequence") or 0) + 1
+            sequence = self._last_event_sequence_unlocked(session_id, run_id) + 1
             event = {
                 "sequence": sequence,
                 "type": str(event_type or "event"),
@@ -510,17 +606,17 @@ class RuntimeJournal:
                 "provider_sequence": provider_sequence,
                 "created_at": time.time(),
             }
-            event_path = os.path.join(
-                self._category_dir(session_id, "events"),
-                f"{self._safe_id(run_id, 'run_id')}.jsonl",
-            )
-            with open(event_path, "a", encoding="utf-8") as handle:
-                handle.write(self._canonical_json(self._envelope(event)) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            record["last_event_sequence"] = sequence
-            record["updated_at"] = time.time()
-            self._atomic_write(run_path, record)
+            event_path = self._event_path(session_id, run_id)
+            try:
+                self._append_jsonl(event_path, event)
+            except Exception as exc:
+                raise self._write_error(
+                    operation=f"append_{event['type']}",
+                    path=event_path,
+                    exc=exc,
+                    run_id=run_id,
+                    writer_owner=record.get("writer_owner"),
+                ) from exc
             return event
 
     def read_events(self, session_id, run_id, starting_after=0):
@@ -528,10 +624,7 @@ class RuntimeJournal:
             return self._read_events_unlocked(session_id, run_id, starting_after)
 
     def _read_events_unlocked(self, session_id, run_id, starting_after=0):
-        path = os.path.join(
-            self._category_dir(session_id, "events"),
-            f"{self._safe_id(run_id, 'run_id')}.jsonl",
-        )
+        path = self._event_path(session_id, run_id)
         if not os.path.isfile(path):
             return []
         events = []
@@ -539,36 +632,71 @@ class RuntimeJournal:
             for line in handle:
                 if not line.strip():
                     continue
-                envelope = json.loads(line)
-                if int(envelope.get("journal_version") or 0) != RUNTIME_JOURNAL_VERSION:
-                    raise RuntimeJournalError(f"unsupported runtime event version: {path}")
-                event = envelope.get("payload")
-                if not isinstance(event, dict) or envelope.get("checksum") != self.checksum(event):
-                    raise RuntimeJournalError(f"runtime event checksum mismatch: {path}")
+                event = self._decode_jsonl_payload(line, path, "event")
                 if int(event.get("sequence") or 0) > int(starting_after or 0):
                     events.append(event)
         return events
 
+    def _last_event_sequence_unlocked(self, session_id, run_id):
+        path = self._event_path(session_id, run_id)
+        line = self._last_nonempty_line(path)
+        if not line:
+            return 0
+        event = self._decode_jsonl_payload(line, path, "event")
+        sequence = int(event.get("sequence") or 0)
+        if sequence < 1:
+            raise RuntimeJournalError(f"invalid runtime event sequence: {path}")
+        return sequence
+
     def record_attempt(self, session_id, attempt_id, payload):
-        record = dict(payload or {})
-        record.update({
+        patch = dict(payload or {})
+        patch.update({
             "session_id": str(session_id),
             "attempt_id": str(attempt_id),
             "updated_at": time.time(),
         })
-        path = self._record_path(session_id, "attempts", attempt_id)
+        path = self._attempt_path(session_id, attempt_id)
         with self.session_lock(session_id):
-            existing = self._read(path, default={}) or {}
-            existing.update(record)
-            existing.setdefault("created_at", time.time())
-            self._atomic_write(path, existing)
-        return existing
+            existing = self._read_attempt_unlocked(session_id, attempt_id) or {}
+            patch.setdefault("created_at", existing.get("created_at") or time.time())
+            try:
+                self._append_jsonl(path, patch)
+            except Exception as exc:
+                manifest = self.load_manifest(session_id)
+                raise self._write_error(
+                    operation="append_provider_attempt",
+                    path=path,
+                    exc=exc,
+                    run_id=patch.get("run_id") or existing.get("run_id"),
+                    writer_owner=manifest.get("writer_owner"),
+                ) from exc
+            existing.update(patch)
+            return existing
 
     def get_attempt(self, session_id, attempt_id):
-        return self._read(
-            self._record_path(session_id, "attempts", attempt_id),
-            default=None,
-        )
+        with self.session_lock(session_id):
+            return self._read_attempt_unlocked(session_id, attempt_id)
+
+    def _read_attempt_unlocked(self, session_id, attempt_id):
+        path = self._attempt_path(session_id, attempt_id)
+        if not os.path.isfile(path):
+            return None
+        record = {}
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                patch = self._decode_jsonl_payload(line, path, "provider attempt")
+                if str(patch.get("session_id") or "") != str(session_id):
+                    raise RuntimeJournalError(
+                        f"runtime provider attempt session mismatch: {path}"
+                    )
+                if str(patch.get("attempt_id") or "") != str(attempt_id):
+                    raise RuntimeJournalError(
+                        f"runtime provider attempt id mismatch: {path}"
+                    )
+                record.update(patch)
+        return record or None
 
     def record_tool(self, session_id, execution_id, payload):
         record = dict(payload or {})

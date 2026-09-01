@@ -73,6 +73,69 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(captured["reasoning_effort"], "max")
         self.assertEqual(captured["extra_body"]["thinking"]["type"], "enabled")
 
+    def test_official_deepseek_chat_projects_later_configuration_roles(self):
+        provider, _client = self._build_provider()
+        messages = [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "task"},
+            {"role": "system", "content": "runtime"},
+            {"role": "developer", "content": "instruction"},
+        ]
+
+        prepared, projection_count = provider._prepare_chat_completions_messages(messages)
+
+        self.assertEqual(
+            [message["role"] for message in prepared],
+            ["system", "user", "user", "user"],
+        )
+        self.assertEqual([message["content"] for message in prepared], [
+            "stable",
+            "task",
+            "runtime",
+            "instruction",
+        ])
+        self.assertEqual(projection_count, 2)
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["system", "user", "system", "developer"],
+        )
+
+    def test_official_deepseek_chat_projection_keeps_wire_prefix_stable(self):
+        provider, _client = self._build_provider()
+        first_request = [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "task"},
+            {"role": "system", "content": "runtime-1"},
+        ]
+        second_request = first_request + [
+            {"role": "assistant", "content": "working"},
+            {"role": "system", "content": "runtime-2"},
+        ]
+
+        first_wire, _first_count = provider._prepare_chat_completions_messages(first_request)
+        second_wire, _second_count = provider._prepare_chat_completions_messages(second_request)
+
+        self.assertEqual(second_wire[:len(first_wire)], first_wire)
+
+    def test_chat_projection_does_not_change_other_hosts_or_responses(self):
+        compatible, _client = self._build_provider(
+            base_url="https://compatible.example/v1",
+            model_name="compatible-model",
+        )
+        messages = [
+            {"role": "system", "content": "stable"},
+            {"role": "developer", "content": "later"},
+        ]
+        compatible_wire, projection_count = (
+            compatible._prepare_chat_completions_messages(messages)
+        )
+        self.assertEqual([item["role"] for item in compatible_wire], ["system", "developer"])
+        self.assertEqual(projection_count, 0)
+
+        responses, _client = self._build_provider(api_protocol=API_PROTOCOL_RESPONSES)
+        responses_input = responses._prepare_responses_input(messages)
+        self.assertEqual([item["role"] for item in responses_input], ["developer", "developer"])
+
     def test_openai_stream_read_timeout_is_sixty_seconds(self):
         self._build_provider()
         timeout = sys.modules["openai"].OpenAI.call_args.kwargs["timeout"]

@@ -3158,6 +3158,13 @@ class LLMWorker(QThread):
                                     attempt_patch["last_provider_sequence"] = chunk.get(
                                         "provider_sequence"
                                     )
+                                for field in (
+                                    "protocol",
+                                    "message_count",
+                                    "chat_cache_projection_count",
+                                ):
+                                    if chunk.get(field) is not None:
+                                        attempt_patch[field] = chunk.get(field)
                                 if attempt_patch:
                                     self._record_provider_attempt(attempt_id, attempt_patch)
                             elif type_ == "provider_retry":

@@ -593,7 +593,9 @@ class OpenAIProvider(LLMProvider):
     ):
         request_context = request_context if isinstance(request_context, dict) else {}
         client_request_id = str(request_context.get("client_request_id") or "")[:512]
-        clean_messages = self._prepare_messages(messages)
+        clean_messages, cache_projection_count = self._prepare_chat_completions_messages(
+            messages
+        )
         params = {
             "model": self.model_name,
             "messages": clean_messages,
@@ -623,6 +625,9 @@ class OpenAIProvider(LLMProvider):
             yield {
                 "type": "provider_request",
                 **self._stream_request_metadata(stream, client_request_id),
+                "protocol": self.api_protocol,
+                "message_count": len(clean_messages),
+                "chat_cache_projection_count": cache_projection_count,
             }
             terminal_seen = False
             for chunk in stream:
@@ -1445,6 +1450,33 @@ class OpenAIProvider(LLMProvider):
                 
             clean.append(m)
         return clean
+
+    def _prepare_chat_completions_messages(self, messages):
+        """Prepare the final Chat wire messages without mutating the ledger.
+
+        DeepSeek Chat templates treat later system/developer messages as prompt
+        configuration.  Appending one can therefore rewrite the provider's
+        token prefix even though the canonical message list is append-only.
+        Keep only the leading system message in that role and project later
+        configuration messages into the conversational tail.
+        """
+
+        clean = self._prepare_messages(messages)
+        if not is_official_deepseek_api(self.base_url):
+            return clean, 0
+
+        projected = []
+        projection_count = 0
+        for index, message in enumerate(clean):
+            item = message.copy()
+            role = str(item.get("role") or "").strip().lower()
+            if role in {"system", "developer"} and not (
+                index == 0 and role == "system"
+            ):
+                item["role"] = "user"
+                projection_count += 1
+            projected.append(item)
+        return projected, projection_count
 
 class MoonshotProvider(OpenAIProvider):
     """

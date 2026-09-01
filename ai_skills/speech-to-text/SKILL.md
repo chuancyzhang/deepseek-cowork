@@ -44,9 +44,9 @@ allowed-tools: [transcribe_audio, save_transcript_result]
 
 ## 首次使用
 
-语音模型和运行依赖统一由“设置 → 组件与依赖 → 语音转文字组件”管理，可以提前下载安装。组件会准备 SenseVoice、FFmpeg、sherpa-onnx 和说话人分离模型，并在完成 SHA-256 与运行依赖校验后才标记为可用。
+语音模型和运行依赖统一由“设置 → 组件与依赖 → 语音转文字组件”管理。用户从 Cowork GitHub Release 获取独立的 Windows x64 语音组件 ZIP，再点击“选择安装包”离线部署。组件会一次准备 Node.js、SenseVoice、FFmpeg、sherpa-onnx 和说话人分离模型，并在完成文件清单、SHA-256 与运行依赖校验后才标记为可用。
 
-如果组件未安装或损坏，`transcribe_audio` 会明确返回 `component_not_ready`，提醒用户安装或修复；不得在 Tool 调用期间静默下载模型或临时切换下载源。组件就绪后直接使用本地文件，不再联网。
+如果组件未安装或损坏，`transcribe_audio` 会明确返回 `component_not_ready`，提醒用户选择 Release 安装包进行安装或修复；不得在 Tool 调用期间或组件安装期间静默下载模型、运行 npm 或切换下载源。组件就绪后只使用本地文件。
 
 ## 边界
 

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -32,6 +33,12 @@ NODE_SHA256 = "6E50CE5498C0CEBC20FD39AB3FF5DF836ED2F8A31AA093CECAD8497CFF126D70"
 TOOLKIT_MARKER_SCHEMA = 2
 SPEECH_TO_TEXT_COMPONENT_ID = "speech-to-text"
 SPEECH_TO_TEXT_COMPONENT_SCHEMA = 1
+SPEECH_TO_TEXT_PACKAGE_SCHEMA = 1
+SPEECH_TO_TEXT_PACKAGE_PLATFORM = "win32-x64"
+SPEECH_TO_TEXT_PACKAGE_FILENAME = "deepseek-cowork-speech-to-text-v1-win-x64.zip"
+SPEECH_TO_TEXT_PACKAGE_MANIFEST = "speech-to-text-package.json"
+SPEECH_TO_TEXT_PACKAGE_MAX_FILES = 50_000
+SPEECH_TO_TEXT_PACKAGE_MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 SPEECH_TO_TEXT_SKILL_ID = "speech-to-text"
 SPEECH_TO_TEXT_NODE_DEPENDENCIES = [
     "ffmpeg-static@5.3.0",
@@ -155,6 +162,16 @@ def speech_to_text_component_paths(root=None):
         "segmentation": os.path.join(base, "models", "diarization", "segmentation.onnx"),
         "embedding": os.path.join(base, "models", "diarization", "embedding.onnx"),
     }
+
+
+def speech_to_text_skill_runtime_root():
+    return os.path.join(
+        get_app_data_dir(),
+        "runtime_sandbox",
+        "v1",
+        "skills",
+        SPEECH_TO_TEXT_SKILL_ID,
+    )
 
 
 def _speech_to_text_definition_hash():
@@ -350,8 +367,27 @@ def speech_to_text_component_status(include_size=False):
     )
     if installed and not dependencies_ready:
         errors.append("语音转文字 Node 依赖未就绪。")
+    node_status = node_runtime_status()
+    node_ready = bool(
+        node_status.get("installed")
+        and str(node_status.get("version") or "") == NODE_VERSION
+    )
+    if installed and not node_ready:
+        errors.append(f"语音组件需要 Node.js {NODE_VERSION} Windows x64 运行时。")
 
-    healthy = bool(installed and not needs_update and dependencies_ready and not errors)
+    skill_runtime_root = speech_to_text_skill_runtime_root()
+    for package_name in ("ffmpeg-static", "sherpa-onnx-node"):
+        package_manifest = os.path.join(
+            skill_runtime_root,
+            "node",
+            "node_modules",
+            package_name,
+            "package.json",
+        )
+        if installed and not os.path.isfile(package_manifest):
+            errors.append(f"语音组件缺少离线 Node 依赖：{package_name}。")
+
+    healthy = bool(installed and not needs_update and dependencies_ready and node_ready and not errors)
     return {
         "id": SPEECH_TO_TEXT_COMPONENT_ID,
         "name": "语音转文字组件",
@@ -365,6 +401,8 @@ def speech_to_text_component_status(include_size=False):
         "health_error": "\n".join(errors),
         "source": str(marker.get("source_name") or ""),
         "source_id": str(marker.get("source_id") or ""),
+        "package_name": str(marker.get("package_name") or ""),
+        "node_version": str(node_status.get("version") or ""),
         "size": (
             _directory_size(paths["root"])
             + _directory_size(
@@ -386,107 +424,317 @@ def speech_to_text_component_status(include_size=False):
     }
 
 
-def install_speech_to_text_component(source=None, progress_callback=None, force=False):
-    from core.sandbox_runtime import install_skill_dependencies
+def _normalize_speech_package_path(value):
+    raw = str(value or "").replace("\\", "/")
+    normalized = raw.strip("/")
+    if (
+        not normalized
+        or raw.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:", raw)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise RuntimeError(f"语音组件安装包包含不安全路径：{value}")
+    return normalized
 
-    selected = _speech_source(source)
-    try:
-        _probe_speech_asset_urls(selected["id"], progress_callback)
-    except Exception as exc:
-        raise RuntimeError(f"语音模型下载源检查失败：{exc}") from exc
+
+def _verify_speech_package_archive(package_path, extract_root, progress_callback=None):
+    package_path = os.path.abspath(str(package_path or ""))
+    if not os.path.isfile(package_path):
+        raise RuntimeError(f"语音组件安装包不存在：{package_path or '未提供路径'}")
+    if platform.system() != "Windows" or platform.machine().lower() not in {"amd64", "x86_64"}:
+        raise RuntimeError("语音转文字组件安装包仅支持 Windows x64。")
     if progress_callback:
-        progress_callback("正在从 npmmirror 准备本地语音运行依赖…", 6)
-    dependency_status = install_skill_dependencies(
-        SPEECH_TO_TEXT_SKILL_ID,
-        node_dependencies=SPEECH_TO_TEXT_NODE_DEPENDENCIES,
-        force=bool(force),
-        timeout_seconds=1800,
-        node_registry_url=SPEECH_TO_TEXT_NPM_REGISTRY,
-    )
-    if not dependency_status.get("ok"):
-        raise RuntimeError(
-            "语音转文字 Node 依赖安装失败："
-            + str(dependency_status.get("message") or "未知错误")
-        )
-
-    target_root = speech_to_text_component_root()
-    components_root = os.path.dirname(target_root)
-    os.makedirs(components_root, exist_ok=True)
-    staged_root = tempfile.mkdtemp(prefix=".speech-to-text-", dir=components_root)
-    downloads = os.path.join(staged_root, "downloads")
-    os.makedirs(downloads, exist_ok=True)
+        progress_callback("正在验证语音组件安装包…", 5)
     try:
-        segmentation_archive = os.path.join(downloads, SPEECH_TO_TEXT_ASSETS["segmentation"]["filename"])
-        staged_paths = speech_to_text_component_paths(staged_root)
-        asset_records = {
-            "sensevoice_model": _download_verified_speech_asset(
-                "sensevoice_model",
-                staged_paths["sensevoice_model"],
-                selected["id"],
-                progress_callback,
-                (10, 62),
-            ),
-            "sensevoice_tokens": _download_verified_speech_asset(
-                "sensevoice_tokens",
-                staged_paths["sensevoice_tokens"],
-                selected["id"],
-                progress_callback,
-                (62, 64),
-            ),
-            "segmentation": _download_verified_speech_asset(
-                "segmentation", segmentation_archive, selected["id"], progress_callback, (64, 74)
-            ),
-            "embedding": _download_verified_speech_asset(
-                "embedding", staged_paths["embedding"], selected["id"], progress_callback, (74, 88)
-            ),
+        archive = zipfile.ZipFile(package_path, "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"语音组件安装包不是有效 ZIP：{exc}") from exc
+    with archive:
+        infos = [item for item in archive.infolist() if not item.is_dir()]
+        if len(infos) > SPEECH_TO_TEXT_PACKAGE_MAX_FILES:
+            raise RuntimeError("语音组件安装包文件数量超出限制。")
+        if sum(max(0, int(item.file_size)) for item in infos) > SPEECH_TO_TEXT_PACKAGE_MAX_UNPACKED_BYTES:
+            raise RuntimeError("语音组件安装包解压后体积超出限制。")
+        archive_files = {}
+        for info in infos:
+            path = _normalize_speech_package_path(info.filename)
+            if ((int(info.external_attr) >> 16) & 0o170000) == 0o120000:
+                raise RuntimeError(f"语音组件安装包不允许符号链接：{path}")
+            if path in archive_files:
+                raise RuntimeError(f"语音组件安装包包含重复路径：{path}")
+            archive_files[path] = info
+        manifest_info = archive_files.get(SPEECH_TO_TEXT_PACKAGE_MANIFEST)
+        if manifest_info is None or manifest_info.file_size > 5 * 1024 * 1024:
+            raise RuntimeError("语音组件安装包缺少有效 manifest。")
+        try:
+            manifest = json.loads(archive.read(manifest_info).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"语音组件安装包 manifest 无法解析：{exc}") from exc
+        if not isinstance(manifest, dict):
+            raise RuntimeError("语音组件安装包 manifest 必须是 JSON 对象。")
+        expected_identity = {
+            "schema": SPEECH_TO_TEXT_PACKAGE_SCHEMA,
+            "component_id": SPEECH_TO_TEXT_COMPONENT_ID,
+            "platform": SPEECH_TO_TEXT_PACKAGE_PLATFORM,
+            "definition_hash": _speech_to_text_definition_hash(),
+            "node_version": NODE_VERSION,
         }
+        mismatches = [key for key, value in expected_identity.items() if manifest.get(key) != value]
+        if mismatches:
+            raise RuntimeError("语音组件安装包不兼容：" + "、".join(mismatches))
+        if list(manifest.get("node_dependencies") or []) != SPEECH_TO_TEXT_NODE_DEPENDENCIES:
+            raise RuntimeError("语音组件安装包 Node 依赖版本不匹配。")
+        records = manifest.get("files")
+        if not isinstance(records, list) or not records:
+            raise RuntimeError("语音组件安装包 manifest 缺少文件清单。")
+        expected_files = {}
+        for record in records:
+            if not isinstance(record, dict):
+                raise RuntimeError("语音组件安装包文件清单格式无效。")
+            path = _normalize_speech_package_path(record.get("path"))
+            try:
+                size = int(record["size"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"语音组件安装包文件大小无效：{path}") from exc
+            sha256 = str(record.get("sha256") or "").strip().lower()
+            if path in expected_files or size < 0 or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                raise RuntimeError(f"语音组件安装包文件记录无效：{path}")
+            expected_files[path] = {"size": size, "sha256": sha256}
+        actual_payload = set(archive_files) - {SPEECH_TO_TEXT_PACKAGE_MANIFEST}
+        if actual_payload != set(expected_files):
+            missing = sorted(set(expected_files) - actual_payload)
+            extra = sorted(actual_payload - set(expected_files))
+            raise RuntimeError(f"语音组件安装包文件清单不一致：缺少 {missing}；多余 {extra}")
+        required_paths = {
+            f"assets/{item['filename']}" for item in SPEECH_TO_TEXT_ASSETS.values()
+        } | {
+            f"node-runtime/{NODE_ARCHIVE}",
+            "skill-runtime/node/package.json",
+            "skill-runtime/node/node_modules/ffmpeg-static/package.json",
+            "skill-runtime/node/node_modules/sherpa-onnx-node/package.json",
+        }
+        if not required_paths.issubset(expected_files):
+            raise RuntimeError("语音组件安装包缺少模型、Node.js 或离线依赖。")
+        for asset_name, spec in SPEECH_TO_TEXT_ASSETS.items():
+            record = expected_files[f"assets/{spec['filename']}"]
+            if record != {"size": int(spec["size"]), "sha256": str(spec["sha256"]).lower()}:
+                raise RuntimeError(f"语音模型固定校验信息不匹配：{asset_name}")
+        node_record = expected_files[f"node-runtime/{NODE_ARCHIVE}"]
+        if node_record["sha256"].upper() != NODE_SHA256:
+            raise RuntimeError("语音组件安装包内 Node.js SHA-256 不匹配。")
+        for index, (path, record) in enumerate(sorted(expected_files.items()), start=1):
+            info = archive_files[path]
+            if int(info.file_size) != record["size"]:
+                raise RuntimeError(f"语音组件安装包文件大小不匹配：{path}")
+            digest = hashlib.sha256()
+            with archive.open(info, "r") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest().lower() != record["sha256"]:
+                raise RuntimeError(f"语音组件安装包文件 SHA-256 不匹配：{path}")
+            if progress_callback and index % max(1, len(expected_files) // 20) == 0:
+                progress_callback("正在校验语音组件文件…", 5 + int(index * 35 / len(expected_files)))
+        expected_dependency_versions = {
+            item.rsplit("@", 1)[0]: item.rsplit("@", 1)[1]
+            for item in SPEECH_TO_TEXT_NODE_DEPENDENCIES
+        }
+        try:
+            runtime_package = json.loads(
+                archive.read("skill-runtime/node/package.json").decode("utf-8")
+            )
+            installed_versions = {
+                name: str(version)
+                for name, version in dict(runtime_package.get("dependencies") or {}).items()
+            }
+            if installed_versions != expected_dependency_versions:
+                raise RuntimeError("语音组件安装包 package.json 依赖版本不匹配。")
+            for dependency_name, expected_version in expected_dependency_versions.items():
+                package_path = f"skill-runtime/node/node_modules/{dependency_name}/package.json"
+                dependency_package = json.loads(archive.read(package_path).decode("utf-8"))
+                if str(dependency_package.get("version") or "") != expected_version:
+                    raise RuntimeError(f"语音组件安装包依赖版本不匹配：{dependency_name}")
+        except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+            raise RuntimeError(f"语音组件安装包依赖信息无效：{exc}") from exc
+        for path, info in archive_files.items():
+            target = os.path.abspath(os.path.join(extract_root, *path.split("/")))
+            if os.path.commonpath([os.path.abspath(extract_root), target]) != os.path.abspath(extract_root):
+                raise RuntimeError(f"语音组件安装包包含不安全路径：{path}")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with archive.open(info, "r") as source_handle, open(target, "wb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+    return manifest
+
+
+def _replace_speech_roots_transactionally(pairs, health_check):
+    committed = []
+    try:
+        for staged, target in pairs:
+            backup = target + ".speech-previous"
+            if os.path.isdir(backup):
+                shutil.rmtree(backup)
+            had_existing = os.path.isdir(target)
+            if had_existing:
+                os.replace(target, backup)
+            try:
+                os.replace(staged, target)
+            except Exception:
+                if had_existing and os.path.isdir(backup) and not os.path.exists(target):
+                    os.replace(backup, target)
+                raise
+            committed.append((target, backup, had_existing))
+        result = health_check()
+    except Exception:
+        for target, backup, had_existing in reversed(committed):
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            if had_existing and os.path.isdir(backup):
+                os.replace(backup, target)
+        raise
+    for _target, backup, _had_existing in committed:
+        if os.path.isdir(backup):
+            shutil.rmtree(backup)
+    return result
+
+
+def install_speech_to_text_component(source=None, progress_callback=None, force=False):
+    del force
+    from core.sandbox_runtime import reset_native_library_dir_caches, reset_runtime_cache, skill_dependency_hash
+
+    package_path = (
+        str(source.get("package_path") or "")
+        if isinstance(source, dict)
+        else str(source or "")
+    )
+    sandbox_root = os.path.join(get_app_data_dir(), "runtime_sandbox", "v1")
+    os.makedirs(sandbox_root, exist_ok=True)
+    transaction_root = tempfile.mkdtemp(prefix=".speech-package-", dir=sandbox_root)
+    try:
+        unpacked = os.path.join(transaction_root, "unpacked")
+        os.makedirs(unpacked)
+        manifest = _verify_speech_package_archive(package_path, unpacked, progress_callback)
         if progress_callback:
-            progress_callback("正在解压并验证本地语音模型…", 90)
-        _extract_named_tar_member(
-            segmentation_archive,
-            "/model.onnx",
-            staged_paths["segmentation"],
-        )
-        file_records = _speech_component_file_records(staged_paths)
+            progress_callback("正在准备本地语音模型和运行环境…", 45)
+        staged_component = os.path.join(transaction_root, "component.next")
+        staged_skill = os.path.join(transaction_root, "skill.next")
+        staged_node = os.path.join(transaction_root, "node.next")
+        staged_paths = speech_to_text_component_paths(staged_component)
+        os.makedirs(os.path.dirname(staged_paths["sensevoice_model"]), exist_ok=True)
+        os.makedirs(os.path.dirname(staged_paths["segmentation"]), exist_ok=True)
+        asset_records = {}
+        for asset_name in ("sensevoice_model", "sensevoice_tokens", "embedding"):
+            spec = SPEECH_TO_TEXT_ASSETS[asset_name]
+            source_path = os.path.join(unpacked, "assets", spec["filename"])
+            target_path = staged_paths[asset_name]
+            shutil.copy2(source_path, target_path)
+            asset_records[asset_name] = {
+                "filename": spec["filename"],
+                "size": int(spec["size"]),
+                "sha256": str(spec["sha256"]).lower(),
+            }
+        segmentation_spec = SPEECH_TO_TEXT_ASSETS["segmentation"]
+        segmentation_archive = os.path.join(unpacked, "assets", segmentation_spec["filename"])
+        _extract_named_tar_member(segmentation_archive, "/model.onnx", staged_paths["segmentation"])
+        asset_records["segmentation"] = {
+            "filename": segmentation_spec["filename"],
+            "size": int(segmentation_spec["size"]),
+            "sha256": str(segmentation_spec["sha256"]).lower(),
+        }
+        shutil.copytree(os.path.join(unpacked, "skill-runtime"), staged_skill)
+        dependency_status = {
+            "ok": True,
+            "hash": skill_dependency_hash([], SPEECH_TO_TEXT_NODE_DEPENDENCIES),
+            "message": "Installed from verified local release package.",
+            "installed": True,
+        }
+        with open(os.path.join(staged_skill, "dependency_status.json"), "w", encoding="utf-8") as handle:
+            json.dump(dependency_status, handle, ensure_ascii=False, indent=2)
+        node_extract = os.path.join(transaction_root, "node-extract")
+        os.makedirs(node_extract)
+        with zipfile.ZipFile(os.path.join(unpacked, "node-runtime", NODE_ARCHIVE), "r") as archive:
+            _safe_extract(archive, node_extract)
+        node_dirs = [item.path for item in os.scandir(node_extract) if item.is_dir()]
+        if len(node_dirs) != 1 or not os.path.isfile(os.path.join(node_dirs[0], "node.exe")):
+            raise RuntimeError("语音组件安装包内 Node.js 结构无效。")
+        shutil.move(node_dirs[0], staged_node)
+        with open(os.path.join(staged_node, ".cowork_runtime_source"), "w", encoding="utf-8") as handle:
+            handle.write(f"{NODE_VERSION}|local-release-package")
         marker = {
             "schema": SPEECH_TO_TEXT_COMPONENT_SCHEMA,
             "id": SPEECH_TO_TEXT_COMPONENT_ID,
             "definition_hash": _speech_to_text_definition_hash(),
             "verified": True,
             "verified_at": datetime.now(timezone.utc).isoformat(),
-            "source_id": selected["id"],
-            "source_name": selected["name"],
-            "npm_registry": SPEECH_TO_TEXT_NPM_REGISTRY,
+            "source_id": "local-release-package",
+            "source_name": "本地 Release 安装包",
+            "package_name": os.path.basename(package_path),
+            "package_schema": int(manifest.get("schema") or 0),
             "assets": asset_records,
-            "files": file_records,
+            "files": _speech_component_file_records(staged_paths),
         }
         with open(staged_paths["marker"], "w", encoding="utf-8") as handle:
             json.dump(marker, handle, ensure_ascii=False, indent=2)
-        shutil.rmtree(downloads)
-        _replace_toolkit_root(staged_root, target_root)
-        staged_root = ""
         if progress_callback:
-            progress_callback("语音转文字组件已安装并通过完整性验证。", 100)
+            progress_callback("正在部署已验证的语音组件…", 85)
+        runtime_node_target = os.path.join(sandbox_root, "runtimes", "node")
+        component_target = speech_to_text_component_root()
+        skill_target = speech_to_text_skill_runtime_root()
+        for target in (runtime_node_target, component_target, skill_target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+
+        def health_check():
+            reset_runtime_cache()
+            reset_native_library_dir_caches(SPEECH_TO_TEXT_SKILL_ID)
+            status = speech_to_text_component_status(include_size=True)
+            if not status.get("healthy"):
+                raise RuntimeError(status.get("health_error") or "语音组件健康检查失败。")
+            node_exe = str(node_runtime_status().get("path") or "")
+            module_root = os.path.join(skill_target, "node", "node_modules")
+            probe = subprocess.run(
+                [
+                    node_exe,
+                    "-e",
+                    "require('ffmpeg-static'); require('sherpa-onnx-node');",
+                ],
+                cwd=os.path.join(skill_target, "node"),
+                env={**os.environ, "NODE_PATH": module_root},
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **subprocess_kwargs_no_window(),
+            )
+            if probe.returncode != 0:
+                raise RuntimeError(
+                    "语音组件离线 Node 依赖验收失败："
+                    + (probe.stderr or probe.stdout or "未知错误").strip()
+                )
+            return status
+
+        try:
+            status = _replace_speech_roots_transactionally(
+                [
+                    (staged_node, runtime_node_target),
+                    (staged_component, component_target),
+                    (staged_skill, skill_target),
+                ],
+                health_check,
+            )
+        except Exception:
+            reset_runtime_cache()
+            reset_native_library_dir_caches(SPEECH_TO_TEXT_SKILL_ID)
+            raise
+        if progress_callback:
+            progress_callback("语音转文字组件已从本地安装包部署并验证完成。", 100)
+        return status
     finally:
-        if staged_root and os.path.isdir(staged_root):
-            shutil.rmtree(staged_root, ignore_errors=True)
-    status = speech_to_text_component_status(include_size=True)
-    if not status.get("healthy"):
-        raise RuntimeError(status.get("health_error") or "语音转文字组件安装后未通过健康检查。")
-    return status
+        shutil.rmtree(transaction_root, ignore_errors=True)
 
 
 def uninstall_speech_to_text_component():
     from core.sandbox_runtime import reset_native_library_dir_caches
 
     component_root = speech_to_text_component_root()
-    skill_root = os.path.join(
-        get_app_data_dir(),
-        "runtime_sandbox",
-        "v1",
-        "skills",
-        SPEECH_TO_TEXT_SKILL_ID,
-    )
+    skill_root = speech_to_text_skill_runtime_root()
     for target in (component_root, skill_root):
         if os.path.isdir(target):
             shutil.rmtree(target)
@@ -939,7 +1187,23 @@ def uninstall_toolkit(toolkit_id):
 def node_runtime_status():
     from core.sandbox_runtime import get_runtime_executable
     path = get_runtime_executable("node")
-    return {"installed": bool(path), "path": path, "version": NODE_VERSION if path else ""}
+    version = ""
+    if path:
+        try:
+            completed = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                **subprocess_kwargs_no_window(),
+            )
+            if completed.returncode == 0:
+                version = str(completed.stdout or completed.stderr or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            version = ""
+    return {"installed": bool(path and version), "path": path, "version": version}
 
 
 def _safe_extract(archive, target):

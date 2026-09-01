@@ -391,7 +391,8 @@ class MainWorkspaceLinearTests(unittest.TestCase):
     def test_capability_page_keeps_advanced_management_visible(self):
         from main import SkillsCenterDialog
         page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
-        self.assertEqual(page.advanced_btn.text(), "高级管理")
+        self.assertEqual(page.advanced_btn.text(), "开发与诊断")
+        self.assertEqual(page.import_skill_btn.text(), "导入 Skill")
         self.assertIsNone(page.advanced_btn.menu())
         self.assertEqual(page.mode_control.buttons["library"].text(), "发现能力")
         self.assertEqual(page.mode_control.buttons["mine"].text(), "我的能力")
@@ -431,6 +432,44 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsInstance(detail, CapabilityWorkbenchDialog)
         self.assertTrue(detail.simple_mode)
         self.assertEqual(self.window.current_product_subroute, "detail")
+
+    def test_capability_exports_use_skill_name_for_single_and_collection_name_for_multiple(self):
+        from main import AdvancedSkillsCenterDialog, SkillsCenterDialog
+
+        page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
+        with patch("main.QFileDialog.getSaveFileName", return_value=("report-builder.zip", "")) as save_dialog, patch.object(
+            page.skill_manager, "export_skill", return_value=(True, "ok")
+        ) as export_skill, patch("main.QMessageBox.information"):
+            self.assertTrue(page._export_skill({"name": "report-builder", "display_name": "报告生成"}))
+        self.assertEqual(save_dialog.call_args.args[2], "report-builder.zip")
+        export_skill.assert_called_once_with("report-builder", "report-builder.zip")
+        page.deleteLater()
+
+        advanced = AdvancedSkillsCenterDialog(
+            self.window.skill_manager,
+            self.window.config_manager,
+            self.window,
+        )
+        advanced.selected_skill_names = {"report-builder", "claim-helper"}
+        with patch("main.QFileDialog.getSaveFileName", return_value=("cowork-skills.zip", "")) as collection_dialog, patch.object(
+            advanced.skill_manager, "export_skill_collection", return_value=(True, "ok")
+        ), patch("main.QMessageBox.information"):
+            advanced.export_selected_skills()
+        self.assertEqual(collection_dialog.call_args.args[2], "cowork-skills.zip")
+        advanced.deleteLater()
+
+    def test_user_skill_management_opens_final_workbench_directly(self):
+        from main import SkillsCenterDialog
+
+        page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
+        skill = {"name": "report-builder", "display_name": "报告生成"}
+        with patch.object(self.window, "show_capability_workbench", return_value=True) as open_workbench, patch.object(
+            self.window, "show_capability_detail"
+        ) as open_detail:
+            page._open_management(skill)
+        open_workbench.assert_called_once_with(skill)
+        open_detail.assert_not_called()
+        page.deleteLater()
 
     def test_project_preview_keeps_five_conversations_and_hidden_actions(self):
         with tempfile.TemporaryDirectory() as project_dir:

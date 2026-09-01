@@ -11662,7 +11662,13 @@ class SettingsDialog(QDialog):
                 "progress": progress_bar,
             }
             action_btn.clicked.connect(lambda _checked=False, cid=component_id: self.toggle_component(cid))
-            repair_btn.clicked.connect(lambda _checked=False, cid=component_id: self.start_component_action("repair", cid))
+            repair_btn.clicked.connect(
+                lambda _checked=False, cid=component_id: (
+                    self.choose_speech_component_package("repair")
+                    if cid == SPEECH_TO_TEXT_COMPONENT_ID
+                    else self.start_component_action("repair", cid)
+                )
+            )
             container.addWidget(panel)
             self.update_component_row(component_id, status)
 
@@ -11678,7 +11684,7 @@ class SettingsDialog(QDialog):
             SPEECH_TO_TEXT_COMPONENT_ID,
             "语音转文字组件",
             "SenseVoice 本地识别、FFmpeg 音频解码和说话人分离\n"
-            "关联：语音转文字 · 模型：HF-Mirror 国内加速（SHA-256 校验）",
+            "关联：语音转文字 · 从 GitHub Release 下载独立安装包后在此选择，安装过程无需联网",
             self.component_status_cache.get(SPEECH_TO_TEXT_COMPONENT_ID, {}),
         )
         for toolkit_id, spec in TOOLKITS.items():
@@ -12239,7 +12245,12 @@ class SettingsDialog(QDialog):
         cache_error = str(status.get("cache_write_error") or "")
         error_suffix = f" · 状态缓存未保存：{cache_error}" if cache_error else ""
         row["status"].setText(state_text + suffix + source_suffix + recorded_suffix + error_suffix)
-        row["action"].setText("检测状态" if bundled else ("更新" if needs_update else ("卸载" if installed else "安装")))
+        if component_id == SPEECH_TO_TEXT_COMPONENT_ID:
+            row["action"].setText("卸载" if installed and not needs_update and not needs_repair else "选择安装包")
+            row["repair"].setText("重新安装")
+        else:
+            row["action"].setText("检测状态" if bundled else ("更新" if needs_update else ("卸载" if installed else "安装")))
+            row["repair"].setText("修复")
         row["repair"].setVisible(installed and not bundled)
         row["progress"].setVisible(False)
 
@@ -12255,6 +12266,9 @@ class SettingsDialog(QDialog):
             self.component_task_manager.probe_component(component_id)
             return
         action = "repair" if status.get("needs_update") or status.get("needs_repair") else ("uninstall" if status.get("installed") else "install")
+        if component_id == SPEECH_TO_TEXT_COMPONENT_ID and action in {"install", "repair"}:
+            self.choose_speech_component_package(action)
+            return
         if action == "uninstall":
             reply = QMessageBox.question(
                 self,
@@ -12266,6 +12280,31 @@ class SettingsDialog(QDialog):
             if reply != QMessageBox.Yes:
                 return
         self.start_component_action(action, component_id)
+
+    def choose_speech_component_package(self, action="install"):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择语音转文字组件安装包",
+            "",
+            "Cowork 语音组件 (deepseek-cowork-speech-to-text-v*-win-x64.zip);;ZIP 文件 (*.zip)",
+        )
+        if not path:
+            return False
+        if not self.component_task_manager or self.component_task_manager.has_task(SPEECH_TO_TEXT_COMPONENT_ID):
+            QMessageBox.warning(self, "语音组件", "当前已有语音组件任务正在运行。")
+            return False
+        log_sub_agent_runtime(
+            "speech_component_package_selected",
+            action=str(action or "install"),
+            package=os.path.basename(path),
+        )
+        return bool(
+            self.component_task_manager.enqueue(
+                str(action or "install"),
+                SPEECH_TO_TEXT_COMPONENT_ID,
+                {"package_path": os.path.abspath(path)},
+            )
+        )
 
     def start_component_action(self, action, component_id):
         if not self.component_task_manager:
@@ -14471,7 +14510,12 @@ class SkillsCenterDialog(QDialog):
         header_row.setSpacing(12)
         header = ProductPageHeader("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力")
         header_row.addWidget(header, 1, Qt.AlignTop)
-        self.advanced_btn = QPushButton("高级管理")
+        self.import_skill_btn = QPushButton("导入 Skill")
+        self.import_skill_btn.setObjectName("CapabilityImportSkill")
+        self.import_skill_btn.setStyleSheet(product_button_style("primary"))
+        self.import_skill_btn.clicked.connect(self._import_skill_zip)
+        header_row.addWidget(self.import_skill_btn, 0, Qt.AlignTop)
+        self.advanced_btn = QPushButton("开发与诊断")
         self.advanced_btn.setObjectName("CapabilityAdvancedManagement")
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self.advanced_btn.clicked.connect(self._open_advanced_management)
@@ -14542,6 +14586,7 @@ class SkillsCenterDialog(QDialog):
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "SkillsCenterDialog")
         self.search_input.setStyleSheet(product_field_style())
+        self.import_skill_btn.setStyleSheet(product_button_style("primary"))
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self._render_content()
 
@@ -14666,7 +14711,7 @@ class SkillsCenterDialog(QDialog):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
-        columns = self._column_count
+        columns = 1 if user_owned else self._column_count
         for index, skill in enumerate(skills):
             grid.addWidget(
                 self._capability_row(skill, user_owned=user_owned),
@@ -14832,6 +14877,22 @@ class SkillsCenterDialog(QDialog):
             )
             actions.addWidget(status)
             actions.addStretch()
+            if user_owned:
+                manage_btn = QPushButton("管理")
+                manage_btn.setObjectName("CapabilityManageSkill")
+                manage_btn.setStyleSheet(product_button_style("ghost"))
+                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
+                actions.addWidget(manage_btn)
+                export_btn = QPushButton("导出")
+                export_btn.setObjectName("CapabilityExportSkill")
+                export_btn.setStyleSheet(product_button_style("ghost"))
+                export_btn.clicked.connect(lambda checked=False, value=dict(skill): self._export_skill(value))
+                actions.addWidget(export_btn)
+                delete_btn = QPushButton("删除")
+                delete_btn.setObjectName("CapabilityDeleteSkill")
+                delete_btn.setStyleSheet(product_button_style("danger"))
+                delete_btn.clicked.connect(lambda checked=False, value=dict(skill): self._delete_skill(value))
+                actions.addWidget(delete_btn)
             if is_browser_automation or skill.get("config_fields"):
                 settings_btn = QPushButton("设置")
                 if is_browser_automation:
@@ -14857,9 +14918,20 @@ class SkillsCenterDialog(QDialog):
             actions.addStretch()
             if user_owned:
                 manage_btn = QPushButton("管理")
+                manage_btn.setObjectName("CapabilityManageSkill")
                 manage_btn.setStyleSheet(product_button_style("ghost"))
-                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
+                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
                 actions.addWidget(manage_btn)
+                export_btn = QPushButton("导出")
+                export_btn.setObjectName("CapabilityExportSkill")
+                export_btn.setStyleSheet(product_button_style("ghost"))
+                export_btn.clicked.connect(lambda checked=False, value=dict(skill): self._export_skill(value))
+                actions.addWidget(export_btn)
+                delete_btn = QPushButton("删除")
+                delete_btn.setObjectName("CapabilityDeleteSkill")
+                delete_btn.setStyleSheet(product_button_style("danger"))
+                delete_btn.clicked.connect(lambda checked=False, value=dict(skill): self._delete_skill(value))
+                actions.addWidget(delete_btn)
             action = QPushButton("设置后开启" if needs_config else "开启")
             action.setObjectName("CapabilityEnableAction")
             action.setStyleSheet(product_button_style("primary"))
@@ -14925,6 +14997,98 @@ class SkillsCenterDialog(QDialog):
         if self._main is not None and hasattr(self._main, "show_capability_detail"):
             self._main.show_capability_detail(skill)
 
+    def _open_management(self, skill):
+        if self._main is not None and hasattr(self._main, "show_capability_workbench"):
+            self._main.show_capability_workbench(skill)
+
+    def _import_skill_zip(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 Skill ZIP 文件",
+            "",
+            "ZIP 文件 (*.zip)",
+        )
+        if not path:
+            return False
+        log_ui_navigation("capability_import_begin", source="store", package=os.path.basename(path))
+        success, message = self.skill_manager.import_skill(path)
+        if not success:
+            log_ui_navigation("capability_import_error", source="store", error=str(message or ""))
+            QMessageBox.warning(self, "导入 Skill 失败", message or "无法导入所选 Skill。")
+            return False
+        names = list(getattr(self.skill_manager, "last_imported_skill_names", []) or [])
+        if self._main is not None and names:
+            self._main.publish_ui_skill_changes(names, "created")
+            self.skill_manager = self._main.skill_manager
+        self.search_input.clear()
+        self.current_mode = "mine"
+        self.mode_control.set_current("mine")
+        self.scene_control.setVisible(False)
+        self.refresh_list()
+        log_ui_navigation("capability_import_done", source="store", skill_count=len(names))
+        QMessageBox.information(self, "导入 Skill", message or "Skill 已导入。")
+        return True
+
+    def _export_skill(self, skill):
+        skill_name = str((skill or {}).get("name") or "").strip()
+        if not skill_name:
+            QMessageBox.warning(self, "导出 Skill", "无法识别 Skill 的实际名称。")
+            return False
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出 Skill",
+            f"{skill_name}.zip",
+            "ZIP 文件 (*.zip)",
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        log_ui_navigation("capability_export_begin", skill_name=skill_name)
+        success, message = self.skill_manager.export_skill(skill_name, path)
+        if success:
+            log_ui_navigation("capability_export_done", skill_name=skill_name)
+            QMessageBox.information(self, "导出 Skill", message or "Skill 已导出。")
+            return True
+        log_ui_navigation("capability_export_error", skill_name=skill_name, error=str(message or ""))
+        QMessageBox.warning(self, "导出 Skill 失败", message or "无法导出 Skill。")
+        return False
+
+    def _delete_skill(self, skill):
+        skill_name = str((skill or {}).get("name") or "").strip()
+        if not skill_name or skill_name not in self._user_owned_names:
+            QMessageBox.warning(self, "删除 Skill", "只能删除用户可编辑的 Skill。")
+            return False
+        reply = QMessageBox.question(
+            self,
+            "删除 Skill",
+            f"确定删除 {skill_name}？\n此操作会移除本地 Skill，无法在应用内撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return False
+        log_ui_navigation("capability_delete_begin", skill_name=skill_name)
+        result = self.skill_manager.delete_skill_collection([skill_name])
+        deleted = [
+            str(item.get("skill_name") or "")
+            for item in ((result.get("summary") or {}).get("deleted") or [])
+            if isinstance(item, dict)
+        ]
+        if skill_name not in deleted:
+            message = str(result.get("message") or "Skill 未被删除。")
+            log_ui_navigation("capability_delete_error", skill_name=skill_name, error=message)
+            QMessageBox.warning(self, "删除 Skill 失败", message)
+            self.refresh_list()
+            return False
+        if self._main is not None:
+            self._main.publish_ui_skill_changes([skill_name], "deleted")
+            self.skill_manager = self._main.skill_manager
+        self.refresh_list()
+        log_ui_navigation("capability_delete_done", skill_name=skill_name)
+        QMessageBox.information(self, "删除 Skill", result.get("message") or "Skill 已删除。")
+        return True
+
     def _open_advanced_management(self):
         if self._main is not None and hasattr(self._main, "show_advanced_capabilities"):
             self._main.show_advanced_capabilities()
@@ -14939,7 +15103,7 @@ class SkillsCenterDialog(QDialog):
                 self.content_layout.addWidget(
                     ProductEmptyState(
                         "还没有自己的能力" if not self.search_text.strip() else "没有匹配的能力",
-                        "可以在对话中让 AI 创建能力，或前往高级管理导入已有能力。"
+                        "可以在对话中让 AI 创建能力，或点击右上角“导入 Skill”。"
                         if not self.search_text.strip()
                         else "调整关键词后再试。",
                     )
@@ -16339,22 +16503,34 @@ class ConversationSkillWizardDialog(QDialog):
 
 
 class ConversationSkillEvidenceDialog(QDialog):
-    def __init__(self, evidence, skills, parent=None, submit_handler=None):
+    def __init__(self, evidence, skills, parent=None, submit_handler=None, initial_destination=None):
         super().__init__(parent)
         self.evidence = dict(evidence or {})
+        self.initial_destination = dict(initial_destination or {})
         self.submit_handler = submit_handler
         self._submitting = False
         self.discard_requested = False
         self.resource_checks = []
         self.setObjectName("ConversationSkillEvidenceDialog")
         self.setWindowTitle("确认复用分析")
-        self.resize(760, 700)
-        self.setMinimumSize(620, 560)
+        self.resize(840, 760)
+        self.setMinimumSize(680, 600)
         apply_product_dialog(self, "ConversationSkillEvidenceDialog")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(24, 20, 24, 20)
+        root_layout.setSpacing(12)
+        scroll = QScrollArea()
+        scroll.setObjectName("ConversationSkillEvidenceScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_body = QWidget()
+        layout = QVBoxLayout(scroll_body)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        scroll.setWidget(scroll_body)
+        root_layout.addWidget(scroll, 1)
         title = QLabel("确认复用分析")
         title.setProperty("roleTitle", True)
         confidence = str(self.evidence.get("confidence") or "low")
@@ -16365,10 +16541,19 @@ class ConversationSkillEvidenceDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        summary_hint = QLabel("可直接修改下面的内容，Skill 草稿会以你确认后的全文为准。")
+        summary_hint.setWordWrap(True)
+        summary_hint.setStyleSheet(apple_caption_style())
+        layout.addWidget(summary_hint)
         summary = QTextEdit()
-        summary.setReadOnly(True)
-        summary.setStyleSheet(apple_code_edit_style(subtle=True))
-        summary.setFixedHeight(150)
+        self.analysis_editor = summary
+        summary.setObjectName("ConversationSkillEvidenceEditor")
+        summary.setReadOnly(False)
+        summary.setStyleSheet(
+            apple_code_edit_style(subtle=True)
+            + "QTextEdit#ConversationSkillEvidenceEditor { min-height: 240px; }"
+        )
+        summary.setMinimumHeight(240)
         lines = []
         goal = self.evidence.get("task_goal") if isinstance(self.evidence.get("task_goal"), dict) else {}
         outcome = self.evidence.get("outcome") if isinstance(self.evidence.get("outcome"), dict) else {}
@@ -16388,8 +16573,13 @@ class ConversationSkillEvidenceDialog(QDialog):
         privacy = self.evidence.get("privacy_findings") or []
         if privacy:
             lines.extend(["", f"隐私处理：已遮蔽 {len(privacy)} 项敏感或本地信息"])
-        summary.setPlainText("\n".join(lines))
-        layout.addWidget(summary)
+        generated_analysis = "\n".join(lines)
+        summary.setPlainText(
+            str(self.initial_destination.get("confirmed_analysis") or "").strip()
+            or generated_analysis
+        )
+        self._generated_analysis = generated_analysis
+        layout.addWidget(summary, 2)
 
         self.options = ConversationSkillOptionsDialog(skills, self)
         self.options.setParent(self)
@@ -16410,9 +16600,19 @@ class ConversationSkillEvidenceDialog(QDialog):
                 item = options_layout.itemAt(index)
                 if item is not None and item.spacerItem() is not None:
                     options_layout.takeAt(index)
-        self.options.setMinimumSize(0, 0)
+        self.options.setMinimumSize(0, 170)
         self.options.setMaximumHeight(220)
-        layout.addWidget(self.options, 1)
+        self.options.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(self.options)
+        initial_mode = str(self.initial_destination.get("mode") or "create")
+        self.options._set_mode(initial_mode)
+        initial_target = str(self.initial_destination.get("target_skill") or "")
+        if initial_target:
+            self.options.target_combo.setCurrentData(initial_target)
+        initial_strategy = str(self.initial_destination.get("update_strategy") or "")
+        strategy_index = self.options.strategy_combo.findData(initial_strategy)
+        if strategy_index >= 0:
+            self.options.strategy_combo.setCurrentIndex(strategy_index)
 
         resources = self.evidence.get("resource_candidates") or []
         if resources:
@@ -16459,7 +16659,7 @@ class ConversationSkillEvidenceDialog(QDialog):
         actions.layout.addWidget(discard_btn)
         actions.layout.addWidget(later_btn)
         actions.layout.addWidget(compile_btn)
-        layout.addWidget(actions)
+        root_layout.addWidget(actions)
 
     def _discard(self):
         self.discard_requested = True
@@ -16469,6 +16669,10 @@ class ConversationSkillEvidenceDialog(QDialog):
         options = self.options.selected_options()
         if options["mode"] == "update" and not options.get("target_skill"):
             QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
+            return
+        if not self.analysis_editor.toPlainText().strip():
+            QMessageBox.warning(self, "无法编译", "请保留或填写要沉淀为 Skill 的内容。")
+            self.analysis_editor.setFocus()
             return
         if self._submitting:
             return
@@ -16518,7 +16722,13 @@ class ConversationSkillEvidenceDialog(QDialog):
                 resource = dict(getattr(check, "_conversation_skill_resource", {}) or {})
                 resource["selected"] = True
                 resources.append(resource)
-        return {**options, "selected_resources": resources}
+        confirmed_analysis = self.analysis_editor.toPlainText().strip()
+        return {
+            **options,
+            "selected_resources": resources,
+            "confirmed_analysis": confirmed_analysis,
+            "confirmed_analysis_modified": confirmed_analysis != self._generated_analysis.strip(),
+        }
 
 
 class ConversationSkillPreviewDialog(QDialog):
@@ -19838,6 +20048,7 @@ class ImagePreviewDialog(QDialog):
 class FileChip(QFrame):
     removeRequested = Signal(str)
     previewRequested = Signal(str)
+    activated = Signal(str)
 
     def __init__(self, path, removable=False, parent=None):
         super().__init__(parent)
@@ -19845,6 +20056,8 @@ class FileChip(QFrame):
         self._preview_dialog = None
         self.setObjectName("FileChip")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setStyleSheet(
             f"QFrame#FileChip {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; "
             f"border-radius: 7px; }}"
@@ -19873,7 +20086,6 @@ class FileChip(QFrame):
                 icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
             icon_label.setObjectName("FileChipImageThumbnail")
             icon_label.setToolTip("点击查看大图")
-            icon_label.activated.connect(lambda: self.previewRequested.emit(self.path))
         else:
             icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
         layout.addWidget(icon_label)
@@ -19884,6 +20096,10 @@ class FileChip(QFrame):
         text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
         text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         layout.addWidget(text_label)
+
+        self._activation_targets = (icon_label, text_label)
+        for target in self._activation_targets:
+            target.installEventFilter(self)
 
         self.remove_btn = None
         if removable:
@@ -19902,7 +20118,50 @@ class FileChip(QFrame):
 
         self.setToolTip(self.path)
         self.previewRequested.connect(self._open_image_preview)
+        self.activated.connect(self._activate)
         bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def eventFilter(self, watched, event):
+        if watched in getattr(self, "_activation_targets", ()):
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self.activated.emit(self.path)
+                return True
+            if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self.activated.emit(self.path)
+                return True
+        return super().eventFilter(watched, event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.activated.emit(self.path)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.activated.emit(self.path)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _activate(self, path):
+        log_attachment_event("attachment_open_begin", path=path, image=bool(self._is_image))
+        if not path or not os.path.isfile(path):
+            message = f"附件不存在或已被移动：\n{path or '未提供路径'}"
+            log_attachment_event("attachment_open_failed", path=path, error=message)
+            QMessageBox.warning(self.window(), "无法打开附件", message)
+            return
+        if self._is_image:
+            self.previewRequested.emit(path)
+            return
+        opened = bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        if opened:
+            log_attachment_event("attachment_opened", path=path, image=False)
+            return
+        message = f"系统没有可用于打开此附件的应用：\n{path}"
+        log_attachment_event("attachment_open_failed", path=path, error=message)
+        QMessageBox.warning(self.window(), "无法打开附件", message)
 
     def _open_image_preview(self, path):
         if not self._is_image:
@@ -19936,12 +20195,17 @@ class FileChip(QFrame):
             )
         )
         dialog.open()
+        log_attachment_event("attachment_opened", path=path, image=True)
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
             f"QFrame#FileChip {{ background: {DesignTokens.bg_main}; "
             f"border: 1px solid {DesignTokens.chat_border}; "
             f"border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QFrame#FileChip:hover {{ background: {DesignTokens.bg_hover}; "
+            f"border-color: {DesignTokens.border}; }}"
+            f"QFrame#FileChip:focus {{ border: {DesignTokens.focus_ring_width}px solid "
+            f"{DesignTokens.primary_focus}; }}"
         )
         self.text_label.setStyleSheet(
             f"color: {DesignTokens.chat_text}; "
@@ -25971,6 +26235,7 @@ class ConversationSkillDraftWorker(QThread):
         evidence=None,
         target_snapshot=None,
         selected_resources=None,
+        confirmed_analysis="",
         parent=None,
     ):
         super().__init__(parent)
@@ -25987,6 +26252,7 @@ class ConversationSkillDraftWorker(QThread):
         self.evidence = dict(evidence or {})
         self.target_snapshot = dict(target_snapshot or {})
         self.selected_resources = list(selected_resources or [])
+        self.confirmed_analysis = str(confirmed_analysis or "").strip()
 
     def run(self):
         try:
@@ -26050,6 +26316,7 @@ class ConversationSkillDraftWorker(QThread):
                 target_skill_snapshot=self.target_snapshot,
                 update_strategy=self.update_strategy,
                 selected_resources=self.selected_resources,
+                confirmed_analysis=self.confirmed_analysis,
                 capture_id=self.capture_id,
                 source_session_id=self.session_id,
             )
@@ -43642,7 +43909,7 @@ a {{ overflow-wrap: anywhere; }}
                 if advanced is not None:
                     advanced.refresh_list()
                     self.current_product_subroute = "advanced"
-                    self.workspace_title_label.setText("高级能力管理")
+                    self.workspace_title_label.setText("开发与诊断")
                     self.workspace_subtitle_label.setText("管理来源、文件、依赖和调试工具。")
                     self.main_page_stack.setCurrentWidget(advanced)
                     return True
@@ -43896,7 +44163,7 @@ a {{ overflow-wrap: anywhere; }}
         self.main_page_stack.addWidget(page)
         self.product_pages["capability_advanced"] = page
         self.current_product_subroute = "advanced"
-        self.workspace_title_label.setText("高级能力管理")
+        self.workspace_title_label.setText("开发与诊断")
         self.workspace_subtitle_label.setText("管理来源、文件、依赖和调试工具。")
         self.main_page_stack.setCurrentWidget(page)
         log_ui_navigation("capability_advanced_open")
@@ -44071,7 +44338,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         if skill is None:
             self.add_system_toast(
-                "未找到浏览器自动化能力，请在高级管理中检查能力信息。",
+                "未找到浏览器自动化能力，请在开发与诊断中检查能力信息。",
                 "error",
                 auto_close_ms=8000,
             )
@@ -44698,7 +44965,7 @@ a {{ overflow-wrap: anywhere; }}
                 return self._show_home_action_setup_required(
                     state,
                     action_id,
-                    "已填入主题设计需求，但未找到 Theme Customizer。请在高级能力管理中检查内置能力。",
+                    "已填入主题设计需求，但未找到 Theme Customizer。请在开发与诊断中检查内置能力。",
                     ["theme_customizer_missing"],
                 )
             if not bool(theme_skill.get("enabled")):
@@ -44775,7 +45042,7 @@ a {{ overflow-wrap: anywhere; }}
                 return self._show_home_action_setup_required(
                     state,
                     action_id,
-                    "已填入数据分析任务，但未找到 Python 数据处理能力，请在高级能力管理中检查。",
+                    "已填入数据分析任务，但未找到 Python 数据处理能力，请在开发与诊断中检查。",
                     ["python_runner_missing"],
                 )
             if not bool(python_skill.get("enabled")):
@@ -45683,6 +45950,11 @@ a {{ overflow-wrap: anywhere; }}
 
         if phase == "analysis_ready":
             evidence = capture.get("evidence") if isinstance(capture.get("evidence"), dict) else {}
+            saved_destination = (
+                capture.get("destination")
+                if isinstance(capture.get("destination"), dict)
+                else {}
+            )
             query_parts = [
                 str((evidence.get("task_goal") or {}).get("text") or ""),
                 *[
@@ -45704,6 +45976,14 @@ a {{ overflow-wrap: anywhere; }}
                 skills_by_name[name] for name in matched_names
                 if name in skills_by_name and self.skill_manager.is_skill_editable(name)
             ]
+            saved_target = str(saved_destination.get("target_skill") or "")
+            if (
+                saved_target
+                and saved_target in skills_by_name
+                and self.skill_manager.is_skill_editable(saved_target)
+                and all(str(item.get("name") or "") != saved_target for item in matched_skills)
+            ):
+                matched_skills.insert(0, skills_by_name[saved_target])
             def begin_background_compile(destination):
                 destination = dict(destination or {})
                 target_skill = destination.get("target_skill") or ""
@@ -45713,7 +45993,6 @@ a {{ overflow-wrap: anywhere; }}
                     if not target_record:
                         raise RuntimeError("目标 Skill 已不可用，请重新选择。")
                     target_snapshot = build_target_skill_snapshot(target_record)
-                previous_capture = copy.deepcopy(capture)
                 capture["destination"] = copy.deepcopy(destination)
                 capture["target_snapshot"] = copy.deepcopy(target_snapshot)
                 capture["phase"] = "compiling"
@@ -45742,6 +46021,7 @@ a {{ overflow-wrap: anywhere; }}
                     evidence=evidence,
                     target_snapshot=target_snapshot,
                     selected_resources=destination.get("selected_resources") or [],
+                    confirmed_analysis=destination.get("confirmed_analysis") or "",
                     parent=self,
                 )
                 worker.progress_signal.connect(self.handle_conversation_skill_progress)
@@ -45752,7 +46032,8 @@ a {{ overflow-wrap: anywhere; }}
                     worker.start()
                 except Exception:
                     self.conversation_skill_worker = None
-                    self.conversation_skill_capture_repository.save(previous_capture)
+                    capture["phase"] = "analysis_ready"
+                    self.conversation_skill_capture_repository.save(capture)
                     state.pending_conversation_skill_result = {
                         "capture_id": capture_id,
                         "phase": "analysis_ready",
@@ -45773,6 +46054,8 @@ a {{ overflow-wrap: anywhere; }}
                     mode=destination.get("mode") or "create",
                     update_strategy=destination.get("update_strategy") or "merge_guidance",
                     resource_count=len(destination.get("selected_resources") or []),
+                    confirmed_analysis_modified=bool(destination.get("confirmed_analysis_modified")),
+                    confirmed_analysis_length=len(str(destination.get("confirmed_analysis") or "")),
                 )
                 self.update_skill_capture_button_state()
                 return True
@@ -45782,6 +46065,7 @@ a {{ overflow-wrap: anywhere; }}
                 matched_skills,
                 self,
                 submit_handler=begin_background_compile,
+                initial_destination=saved_destination,
             )
             if dialog.exec() != QDialog.Accepted:
                 if dialog.discard_requested:
@@ -45793,6 +46077,8 @@ a {{ overflow-wrap: anywhere; }}
                     self.refresh_skill_capture_sidebar_indicator(state.session_id)
                     self.add_system_toast("已丢弃 Skill 沉淀草稿", "info", auto_close_ms=3200)
                 else:
+                    capture["destination"] = copy.deepcopy(dialog.selected_destination())
+                    self.conversation_skill_capture_repository.save(capture)
                     state.pending_conversation_skill_result = {
                         "capture_id": capture_id,
                         "phase": "analysis_ready",

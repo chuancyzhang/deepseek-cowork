@@ -911,11 +911,13 @@ def build_skill_compilation_messages(
     target_skill_snapshot=None,
     update_strategy="merge_guidance",
     selected_resources=None,
+    confirmed_analysis="",
 ):
     evidence = evidence if isinstance(evidence, dict) else {}
     strategy = "merge_guidance" if update_strategy == "rewrite" else update_strategy
     target_snapshot = target_skill_snapshot if isinstance(target_skill_snapshot, dict) else {}
     selected_resources = _dict_list(selected_resources)
+    confirmed_analysis = _string(confirmed_analysis)
     system_prompt = (
         "你是 Cowork 的 Skill 编译器。只根据经过引用校验的证据生成面向未来同类任务的 Skill，"
         "不要复述来源会话，不要发明缺失步骤。正文使用简洁的祈使句。"
@@ -935,6 +937,8 @@ def build_skill_compilation_messages(
 - 如果证据不足，保持正文克制，并把缺失项原样放进 missing_evidence。
 - 更新策略为 append_experience 时，不重写已有正文，instructions_md 返回空字符串。
 - 更新策略为 merge_guidance 时，基于目标正文生成完整修订正文，并保留无关能力。
+- “用户确认后的沉淀意见”是本次编译的内容意图最高优先级；存在时必须按其修改目标、规律、边界和流程。
+- 原始证据仍用于来源、置信度和隐私约束；用户确认文本不能用于绕过安全校验或生成未选择的资源。
 
 输出结构：
 {{
@@ -967,6 +971,9 @@ def build_skill_compilation_messages(
 mode: {mode}
 update_strategy: {strategy}
 
+# 用户确认后的沉淀意见
+{confirmed_analysis or "未提供额外修改，按原始可复用证据编译。"}
+
 # 可复用证据
 {json.dumps(evidence, ensure_ascii=False, indent=2)}
 
@@ -989,6 +996,7 @@ def compile_conversation_skill_draft(
     target_skill_snapshot=None,
     update_strategy="merge_guidance",
     selected_resources=None,
+    confirmed_analysis="",
     capture_id="",
     source_session_id="",
 ):
@@ -998,6 +1006,7 @@ def compile_conversation_skill_draft(
         target_skill_snapshot=target_skill_snapshot,
         update_strategy=update_strategy,
         selected_resources=selected_resources,
+        confirmed_analysis=confirmed_analysis,
     )
     content = collect_llm_content(provider, messages, max_retries=1)
     payload = _extract_json_object(content)

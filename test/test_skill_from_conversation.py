@@ -463,6 +463,7 @@ class TestSkillFromConversation(unittest.TestCase):
         draft = compile_conversation_skill_draft(
             provider,
             evidence,
+            confirmed_analysis="必须先核对输入，再生成并打开成品验收。",
             capture_id="capture-1",
             source_session_id="s1",
         )
@@ -470,6 +471,8 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertEqual(len(provider.calls), 2)
         compiler_input = provider.calls[1][1]["content"]
         self.assertNotIn("RAW_TRANSCRIPT_MARKER", compiler_input)
+        self.assertIn("必须先核对输入，再生成并打开成品验收。", compiler_input)
+        self.assertIn("内容意图最高优先级", compiler_input)
         self.assertEqual(draft["quality"], "high")
         self.assertIn("when a user requests", draft["description"])
 
@@ -649,6 +652,9 @@ class TestSkillFromConversation(unittest.TestCase):
         destination = dialog.selected_destination()
         self.assertEqual(destination["mode"], "create")
         self.assertEqual(destination["selected_resources"], [])
+        self.assertIn("Build reports", destination["confirmed_analysis"])
+        self.assertGreaterEqual(dialog.analysis_editor.minimumHeight(), 240)
+        self.assertFalse(dialog.analysis_editor.isReadOnly())
         self.assertEqual(dialog.objectName(), "ConversationSkillEvidenceDialog")
         self.assertTrue(dialog.findChildren(main.ProductActionBar))
 
@@ -696,11 +702,15 @@ class TestSkillFromConversation(unittest.TestCase):
         )
         self.addCleanup(dialog.deleteLater)
 
+        dialog.analysis_editor.setPlainText("按用户修改后的流程沉淀，并保留失败边界。")
+
         dialog._accept_if_valid()
 
         self.assertEqual(dialog.result(), QDialog.Accepted)
         self.assertEqual(received[0]["mode"], "create")
         self.assertEqual(received[0]["selected_resources"], [])
+        self.assertEqual(received[0]["confirmed_analysis"], "按用户修改后的流程沉淀，并保留失败边界。")
+        self.assertTrue(received[0]["confirmed_analysis_modified"])
 
     def test_conversation_skill_evidence_keeps_dialog_open_when_compile_handoff_fails(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

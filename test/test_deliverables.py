@@ -732,7 +732,7 @@ class TestDeliverableScanning(unittest.TestCase):
         with patch("main.log_ui_navigation"):
             self.assertFalse(missing_window.prepare_home_action("theme"))
         self.assertIn("未找到 Theme Customizer", missing_window.add_system_toast.call_args.args[0])
-        self.assertIn("高级能力管理", missing_window.add_system_toast.call_args.args[0])
+        self.assertIn("开发与诊断", missing_window.add_system_toast.call_args.args[0])
 
         loading_window, _state = self._home_action_window()
         loading_window.skill_manager_ready = False

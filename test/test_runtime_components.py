@@ -1,9 +1,11 @@
 import json
+import hashlib
 import io
 import os
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import MagicMock, patch
 
 from core import runtime_components
@@ -252,98 +254,92 @@ class TestRuntimeComponents(unittest.TestCase):
         self.assertEqual(runtime_components.NODE_ARCHIVE, "node-v24.14.1-win-x64.zip")
         self.assertEqual(len(runtime_components.NODE_SHA256), 64)
 
-    def test_speech_component_defaults_to_verified_domestic_asr_source(self):
-        source = runtime_components._speech_source({})
-        sensevoice = runtime_components.SPEECH_TO_TEXT_ASSETS["sensevoice_model"]
-
-        self.assertEqual(source["id"], "hf-mirror")
-        self.assertIn(
-            "hf-mirror.com",
-            runtime_components._speech_asset_url("sensevoice_model", source["id"]),
-        )
-        self.assertEqual(len(sensevoice["sha256"]), 64)
+    def test_speech_component_uses_versioned_windows_release_package(self):
+        self.assertEqual(runtime_components.SPEECH_TO_TEXT_PACKAGE_SCHEMA, 1)
+        self.assertEqual(runtime_components.SPEECH_TO_TEXT_PACKAGE_PLATFORM, "win32-x64")
         self.assertEqual(
-            runtime_components._speech_asset_url("segmentation", source["id"]),
-            runtime_components.SPEECH_TO_TEXT_ASSETS["segmentation"]["official_url"],
+            runtime_components.SPEECH_TO_TEXT_PACKAGE_FILENAME,
+            "deepseek-cowork-speech-to-text-v1-win-x64.zip",
         )
 
-    def test_speech_component_install_prepares_dependencies_and_models_as_one_unit(self):
-        def write_tar(path, members):
-            with tarfile.open(path, mode="w:bz2") as archive:
-                for name, content in members.items():
-                    data = content.encode("utf-8") if isinstance(content, str) else content
-                    info = tarfile.TarInfo(name=name)
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
+    def test_speech_component_package_verifies_local_payload_without_network(self):
+        def digest(data):
+            return hashlib.sha256(data).hexdigest()
 
-        def fake_download(asset_name, target, source_id, progress_callback=None, progress_range=(0, 100)):
-            del progress_callback, progress_range
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            if asset_name == "sensevoice_model":
-                with open(target, "wb") as handle:
-                    handle.write(b"sensevoice-model")
-            elif asset_name == "sensevoice_tokens":
-                with open(target, "w", encoding="utf-8") as handle:
-                    handle.write("token-a\ntoken-b\n")
-            elif asset_name == "segmentation":
-                write_tar(target, {"segmentation/model.onnx": b"segmentation-model"})
-            else:
-                with open(target, "wb") as handle:
-                    handle.write(b"embedding-model")
-            return {"url": f"https://example.test/{asset_name}", "size": os.path.getsize(target), "sha256": "test"}
+        asset_payloads = {
+            "sensevoice_model": ("model.onnx", b"model"),
+            "sensevoice_tokens": ("tokens.txt", b"tokens"),
+            "segmentation": ("segmentation.tar.bz2", b"segmentation"),
+            "embedding": ("embedding.onnx", b"embedding"),
+        }
+        specs = {
+            key: {"filename": filename, "size": len(data), "sha256": digest(data)}
+            for key, (filename, data) in asset_payloads.items()
+        }
+        node_buffer = io.BytesIO()
+        with zipfile.ZipFile(node_buffer, "w") as nested:
+            nested.writestr("node-test/node.exe", b"node")
+        node_bytes = node_buffer.getvalue()
+        runtime_package = json.dumps(
+            {
+                "dependencies": {
+                    "ffmpeg-static": "5.3.0",
+                    "sherpa-onnx-node": "1.12.33",
+                }
+            }
+        ).encode("utf-8")
+        payload = {
+            **{f"assets/{filename}": data for filename, data in asset_payloads.values()},
+            f"node-runtime/{runtime_components.NODE_ARCHIVE}": node_bytes,
+            "skill-runtime/node/package.json": runtime_package,
+            "skill-runtime/node/node_modules/ffmpeg-static/package.json": b'{"version":"5.3.0"}',
+            "skill-runtime/node/node_modules/sherpa-onnx-node/package.json": b'{"version":"1.12.33"}',
+        }
+        records = [
+            {"path": name, "size": len(data), "sha256": digest(data)}
+            for name, data in sorted(payload.items())
+        ]
+        manifest = {
+            "schema": runtime_components.SPEECH_TO_TEXT_PACKAGE_SCHEMA,
+            "component_id": runtime_components.SPEECH_TO_TEXT_COMPONENT_ID,
+            "platform": runtime_components.SPEECH_TO_TEXT_PACKAGE_PLATFORM,
+            "definition_hash": "test-definition",
+            "node_version": runtime_components.NODE_VERSION,
+            "node_dependencies": runtime_components.SPEECH_TO_TEXT_NODE_DEPENDENCIES,
+            "files": records,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = os.path.join(temp_dir, "speech.zip")
+            with zipfile.ZipFile(package_path, "w") as archive:
+                archive.writestr(runtime_components.SPEECH_TO_TEXT_PACKAGE_MANIFEST, json.dumps(manifest))
+                for name, data in payload.items():
+                    archive.writestr(name, data)
+            extract_root = os.path.join(temp_dir, "extract")
+            os.makedirs(extract_root)
+            with patch.object(runtime_components, "SPEECH_TO_TEXT_ASSETS", specs), patch.object(
+                runtime_components, "NODE_SHA256", digest(node_bytes).upper()
+            ), patch.object(
+                runtime_components, "_speech_to_text_definition_hash", return_value="test-definition"
+            ), patch.object(runtime_components.platform, "system", return_value="Windows"), patch.object(
+                runtime_components.platform, "machine", return_value="AMD64"
+            ), patch.object(runtime_components.requests, "get") as network:
+                verified = runtime_components._verify_speech_package_archive(package_path, extract_root)
 
-        from core.sandbox_runtime import skill_dependency_hash
-        expected_dependency_hash = skill_dependency_hash(
-            [],
-            runtime_components.SPEECH_TO_TEXT_NODE_DEPENDENCIES,
-        )
-        with tempfile.TemporaryDirectory() as data_dir, patch.object(
-            runtime_components,
-            "get_app_data_dir",
-            return_value=data_dir,
-        ), patch.object(
-            runtime_components,
-            "_download_verified_speech_asset",
-            side_effect=fake_download,
-        ), patch.object(
-            runtime_components,
-            "_probe_speech_asset_urls",
-        ), patch(
-            "core.sandbox_runtime.install_skill_dependencies",
-            return_value={"ok": True, "hash": expected_dependency_hash},
-        ) as install_dependencies, patch(
-            "core.sandbox_runtime.read_skill_dependency_status",
-            return_value={"ok": True, "hash": expected_dependency_hash},
-        ):
-            status = runtime_components.install_speech_to_text_component()
+        self.assertEqual(verified["component_id"], runtime_components.SPEECH_TO_TEXT_COMPONENT_ID)
+        network.assert_not_called()
 
-            self.assertTrue(status["ready"], status["health_error"])
-            self.assertEqual(status["source_id"], "hf-mirror")
-            self.assertTrue(os.path.isfile(status["model_paths"]["sensevoice_model"]))
-            self.assertTrue(os.path.isfile(status["model_paths"]["segmentation"]))
-            self.assertTrue(os.path.isfile(status["model_paths"]["embedding"]))
-            self.assertEqual(
-                install_dependencies.call_args.kwargs["node_registry_url"],
-                runtime_components.SPEECH_TO_TEXT_NPM_REGISTRY,
-            )
-
-    def test_speech_component_source_probe_fails_before_dependency_install(self):
-        response = MagicMock()
-        response.__enter__.return_value = response
-        response.__exit__.return_value = False
-        response.raise_for_status.side_effect = runtime_components.requests.HTTPError(
-            "404 Client Error"
-        )
-        with patch.object(
-            runtime_components.requests,
-            "get",
-            return_value=response,
-        ), patch(
-            "core.sandbox_runtime.install_skill_dependencies",
+    def test_speech_component_missing_local_package_never_uses_network_or_npm(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            runtime_components, "get_app_data_dir", return_value=temp_dir
+        ), patch.object(runtime_components.requests, "get") as network, patch(
+            "core.sandbox_runtime.install_skill_dependencies"
         ) as install_dependencies:
-            with self.assertRaisesRegex(RuntimeError, "下载源检查失败.*404"):
-                runtime_components.install_speech_to_text_component()
+            with self.assertRaisesRegex(RuntimeError, "安装包不存在"):
+                runtime_components.install_speech_to_text_component(
+                    {"package_path": os.path.join(temp_dir, "missing.zip")}
+                )
 
+        network.assert_not_called()
         install_dependencies.assert_not_called()
 
     def test_speech_component_status_does_not_claim_partial_files_are_ready(self):

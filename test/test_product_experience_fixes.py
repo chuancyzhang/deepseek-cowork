@@ -1097,6 +1097,26 @@ class ProductExperienceFixTests(unittest.TestCase):
                 chip.close()
                 chip.deleteLater()
 
+    def test_non_image_file_chip_opens_with_system_application(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"pptx")
+            chip = FileChip(path)
+            chip.show()
+            self.app.processEvents()
+            try:
+                with patch("main.QDesktopServices.openUrl", return_value=True) as open_url:
+                    QTest.mouseClick(chip.text_label, Qt.LeftButton)
+                open_url.assert_called_once()
+                self.assertEqual(
+                    os.path.normcase(os.path.normpath(open_url.call_args.args[0].toLocalFile())),
+                    os.path.normcase(os.path.normpath(path)),
+                )
+            finally:
+                chip.close()
+                chip.deleteLater()
+
     def test_image_preview_dialog_supports_fit_and_bounded_manual_zoom(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "large-shot.png")
@@ -1172,6 +1192,9 @@ class ProductExperienceFixTests(unittest.TestCase):
 
             def _selected_model_supports_vision(self, state):
                 return False
+
+            def _model_profile_for_state(self, state):
+                return {"supports_vision": False}
 
             def _model_id_for_state(self, state):
                 return "text-only"

@@ -442,6 +442,14 @@ Windows x64 发行包固定包含 `@wecom/cli-win32-x64@1.1.0`。构建同时校
 
 诊断事件覆盖授权的生成、等待、完成、取消、错误，以及 CLI 调用的开始、运行、完成和错误。日志只保留阶段、耗时、命令类别和退出码，不记录二维码、Bot ID、Secret、Token、URL 参数、CLI 参数或业务响应。
 
+### 9.5 全局变量与 MCP 凭据绑定
+
+`VariableStore` 独立于 `config.json`：普通变量明文保存，敏感凭据由当前 Windows 用户的 DPAPI 加密，写入使用同目录临时文件原子替换，并保留单份上一版。读取、校验、解密和写入错误均显式失败，不以 Base64 或空值降级。
+
+`lookup_app_variable` 是 `optional + deferred` Tool，只能通过 `tool_search` 按需披露。它只接受准确名称，只返回普通变量；敏感凭据返回 `restricted`。本地交互式主会话显式携带访问标记，Agent profile、企业消息、子 Agent 与未授权运行上下文默认没有该能力。变量清单和值都不进入稳定或动态 prompt，因此 CRUD 不改变对话前缀；只有首次披露 Tool Schema 的请求可能降低该次缓存命中。
+
+MCP 的 `variable_bindings` 只持久化稳定变量 ID。stdio 只允许 env，Streamable HTTP 只允许 Header，Header 格式仅为 `raw` 或 `bearer`；同一目标不允许同时存在字面量与绑定。启动前在内存副本中解析，缺失引用或 DPAPI 失败会阻止启动。解析出的敏感值不会进入 transport 配置之外的持久状态，MCP 返回值和异常在进入 Tool 结果、日志及历史前执行精确替换脱敏。
+
 ## 10. 主题与设置事务
 
 主题包通过 Schema、资产白名单、稳定 Surface/Component ID 和

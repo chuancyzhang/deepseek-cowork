@@ -188,6 +188,7 @@ def normalize_run_context(run_context):
         "reasoning_effort": str(ctx.get("reasoning_effort") or "").strip().lower(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),
+        "app_variable_access": bool(ctx.get("app_variable_access")),
         "workspace_mode": "chat_only" if str(ctx.get("workspace_mode") or "").strip().lower() == "chat_only" else "project",
         "workflow_mode": normalize_workflow_mode(ctx.get("workflow_mode")),
         "office_output_profile": normalize_office_output_profile(

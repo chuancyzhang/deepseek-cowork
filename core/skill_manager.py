@@ -1321,9 +1321,93 @@ class SkillManager:
                 "source_kind": record.source_kind,
             }
 
-    def _tool_search(self, query, limit=8, include_loaded=False, _context=None):
+        lookup_schema = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact user-defined application variable name.",
+                }
+            },
+            "required": ["name"],
+        }
+        record = self.tool_registry.register(
+            "lookup_app_variable",
+            self._lookup_app_variable,
+            "Read one global plain-text application variable by its exact name. Secret credentials are never returned.",
+            lookup_schema,
+            skill_name="builtin",
+            kind="builtin_app_variable",
+            search_hint="application variable global variable saved text setting lookup 全局变量 普通变量 查询",
+            read_only=True,
+            destructive=False,
+            allowed_modes=["execution"],
+            should_defer=True,
+            always_load=False,
+            runtime_binding={"type": "builtin_method"},
+            skill_refs=["builtin"],
+            source_kind=TOOL_SOURCE_OPTIONAL,
+        )
+        if record:
+            self.tools["lookup_app_variable"] = self._lookup_app_variable
+            self.tool_records["lookup_app_variable"] = {
+                "name": record.name,
+                "description": record.description,
+                "kind": record.kind,
+                "parameters_schema": record.parameters_schema,
+                "aliases": list(record.aliases),
+                "search_hint": record.search_hint,
+                "read_only": record.read_only,
+                "destructive": record.destructive,
+                "allowed_modes": sorted(record.allowed_modes),
+                "should_defer": record.should_defer,
+                "always_load": record.always_load,
+                "runtime_binding": record.runtime_binding,
+                "skill_refs": list(record.skill_refs),
+                "source_kind": record.source_kind,
+            }
+
+    def _lookup_app_variable(self, name, _context=None):
         context = _context if isinstance(_context, dict) else {}
         run_context = context.get("run_context") if isinstance(context.get("run_context"), dict) else {}
+        if not run_context.get("app_variable_access") or context.get("is_subagent"):
+            return {
+                "status": "denied",
+                "message": "当前运行上下文不允许读取全局普通变量。",
+            }
+        manager = self.config_manager
+        if manager is None or not hasattr(manager, "get_variable_store"):
+            return {"status": "unavailable", "message": "全局变量存储不可用。"}
+        exact_name = str(name or "").strip()
+        if not exact_name:
+            return {"status": "error", "message": "必须提供准确的变量名称。"}
+        store = manager.get_variable_store()
+        try:
+            value = store.get_text_exact(exact_name)
+        except KeyError:
+            return {
+                "status": "not_found",
+                "name": exact_name,
+                "message": "未找到该名称的全局变量；不会返回其他变量列表。",
+            }
+        if value is None:
+            return {
+                "status": "restricted",
+                "name": exact_name,
+                "message": "该名称对应敏感凭据，只能通过已绑定的 MCP 认证位置使用，不能读取明文。",
+            }
+        return {
+            "status": "ok",
+            "name": exact_name,
+            "value": value,
+            "message": "该普通变量值已进入当前 Tool 结果和会话历史。",
+        }
+
+    def _tool_search(self, query, limit=8, include_loaded=False, _context=None):
+        context = _context if isinstance(_context, dict) else {}
+        run_context = dict(context.get("run_context")) if isinstance(context.get("run_context"), dict) else {}
+        if context.get("is_subagent"):
+            run_context["app_variable_access"] = False
         run_mode = run_context.get("mode")
         discovered = context.get("discovered_tool_names")
         if discovered is None:
@@ -3160,10 +3244,12 @@ class SkillManager:
         return bool(source_skill and source_skill in allowed_skill_names)
 
     def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
+        resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
+        if resolved_name == "lookup_app_variable":
+            return bool((run_context or {}).get("app_variable_access"))
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:
             return True
-        resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
         if resolved_name in self.ALWAYS_ALLOWED_SCOPE_TOOLS:
             return True
         skill_name = self.tool_to_skill_map.get(resolved_name)

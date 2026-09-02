@@ -26,6 +26,10 @@ from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
+from core.variable_store import (
+    VARIABLE_KIND_SECRET,
+    VARIABLE_KIND_TEXT,
+)
 from core.im_gateway_config import (
     IM_PROVIDER_ORDER,
     disable_im_gateway,
@@ -5365,7 +5369,7 @@ class CapabilityWorkbenchDialog(QDialog):
         if not self.mcp_server:
             QMessageBox.warning(self, "MCP 调试", "未找到 MCP 配置。")
             return
-        dialog = McpServerEditDialog(self.mcp_server, self)
+        dialog = McpServerEditDialog(self.mcp_server, self, config_manager=self.config_manager)
         if dialog.exec() != QDialog.Accepted:
             return
         updated = dialog.get_server_config()
@@ -9326,10 +9330,109 @@ class McpJsonImportDialog(QDialog):
         return self.editor.toPlainText().strip()
 
 
+class McpVariableBindingDialog(QDialog):
+    def __init__(self, config_manager, transport, binding=None, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.transport = transport
+        self.binding = dict(binding or {})
+        self.setWindowTitle("绑定变量")
+        self.setMinimumWidth(440)
+        apply_product_dialog(self, "McpVariableBindingDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        title = QLabel("绑定变量到 MCP")
+        title.setProperty("roleTitle", True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        configure_responsive_form_layout(form)
+        self.target = "env" if transport == TRANSPORT_STDIO else "headers"
+        self.target_input = QLineEdit()
+        self.target_input.setPlaceholderText("例如：API_KEY" if self.target == "env" else "Authorization")
+        self.target_input.setText(str(self.binding.get("target_key") or ""))
+        form.addRow(build_form_row_label("环境变量" if self.target == "env" else "Header"), self.target_input)
+
+        self.variable_combo = QComboBox()
+        apply_settings_combo_style(self.variable_combo)
+        try:
+            variables = config_manager.list_app_variables()
+        except Exception as exc:
+            variables = []
+            self.variable_combo.addItem(f"变量读取失败：{exc}", "")
+            self.variable_combo.setEnabled(False)
+        for variable in variables:
+            kind_label = "凭据" if variable.get("kind") == VARIABLE_KIND_SECRET else "普通变量"
+            self.variable_combo.addItem(f"{variable.get('name')} · {kind_label}", variable.get("id"))
+        if not variables and self.variable_combo.count() == 0:
+            self.variable_combo.addItem("暂无可用变量", "")
+            self.variable_combo.setEnabled(False)
+        current_id = str(self.binding.get("variable_id") or "")
+        current_index = self.variable_combo.findData(current_id)
+        if current_index >= 0:
+            self.variable_combo.setCurrentIndex(current_index)
+        form.addRow(build_form_row_label("变量"), self.variable_combo)
+
+        self.scheme_combo = QComboBox()
+        apply_settings_combo_style(self.scheme_combo)
+        self.scheme_combo.addItem("raw", "raw")
+        if self.target == "headers":
+            self.scheme_combo.addItem("bearer", "bearer")
+        scheme_index = self.scheme_combo.findData(str(self.binding.get("scheme") or "raw"))
+        self.scheme_combo.setCurrentIndex(max(0, scheme_index))
+        form.addRow(build_form_row_label("格式"), self.scheme_combo)
+        layout.addLayout(form)
+
+        note = ProductInlineNotice(
+            "配置只保存变量 ID；凭据仅在 MCP 启动前于内存中解析。",
+            "neutral",
+        )
+        layout.addWidget(note)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("绑定")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.setEnabled(self.variable_combo.isEnabled())
+        save_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        layout.addLayout(buttons)
+
+    def get_binding(self):
+        return {
+            "target": self.target,
+            "target_key": self.target_input.text().strip(),
+            "variable_id": str(self.variable_combo.currentData() or "").strip(),
+            "scheme": str(self.scheme_combo.currentData() or "raw"),
+        }
+
+    def accept(self):
+        binding = self.get_binding()
+        if not binding["target_key"]:
+            QMessageBox.warning(self, "绑定变量", "请填写目标名称。")
+            return
+        if not binding["variable_id"]:
+            QMessageBox.warning(self, "绑定变量", "请选择一个可用变量。")
+            return
+        super().accept()
+
+
 class McpServerEditDialog(QDialog):
-    def __init__(self, server=None, parent=None):
+    def __init__(self, server=None, parent=None, config_manager=None):
         super().__init__(parent)
         self.server = json.loads(json.dumps(server or {}, ensure_ascii=False))
+        self.config_manager = config_manager
+        raw_bindings = self.server.get("variable_bindings") or {}
+        self.variable_bindings = {
+            "env": dict(raw_bindings.get("env") or {}),
+            "headers": dict(raw_bindings.get("headers") or {}),
+        }
         self._editing_existing = bool(server)
         self.setWindowTitle("MCP Server")
         self.resize(620, 700)
@@ -9474,6 +9577,32 @@ class McpServerEditDialog(QDialog):
         http_page_layout.addWidget(http_card)
         self.transport_stack.addWidget(http_page)
 
+        binding_card, binding_layout = build_settings_surface(
+            "变量绑定",
+            "stdio 绑定 env；Streamable HTTP 绑定 Header。字面量与变量不能占用同一目标。",
+            radius=18,
+        )
+        self.binding_list = QListWidget()
+        self.binding_list.setFixedHeight(96)
+        self.binding_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=12, padding=4))
+        binding_layout.addWidget(self.binding_list)
+        binding_actions = QHBoxLayout()
+        add_binding_btn = QPushButton("添加绑定")
+        add_binding_btn.setObjectName("SecondaryBtn")
+        add_binding_btn.clicked.connect(self._add_variable_binding)
+        edit_binding_btn = QPushButton("编辑")
+        edit_binding_btn.setObjectName("SecondaryBtn")
+        edit_binding_btn.clicked.connect(self._edit_variable_binding)
+        remove_binding_btn = QPushButton("删除")
+        remove_binding_btn.setObjectName("SecondaryBtn")
+        remove_binding_btn.clicked.connect(self._remove_variable_binding)
+        binding_actions.addWidget(add_binding_btn)
+        binding_actions.addWidget(edit_binding_btn)
+        binding_actions.addWidget(remove_binding_btn)
+        binding_actions.addStretch()
+        binding_layout.addLayout(binding_actions)
+        layout.addWidget(binding_card)
+
         buttons = QHBoxLayout()
         buttons.addStretch()
         cancel_btn = QPushButton("取消")
@@ -9485,6 +9614,7 @@ class McpServerEditDialog(QDialog):
         buttons.addWidget(cancel_btn)
         buttons.addWidget(ok_btn)
         layout.addLayout(buttons)
+        self._refresh_binding_list()
         self._refresh_transport_stack()
 
     def _mapping_to_text(self, value, separator="="):
@@ -9526,6 +9656,70 @@ class McpServerEditDialog(QDialog):
     def _refresh_transport_stack(self):
         transport = self.transport_combo.currentData()
         self.transport_stack.setCurrentIndex(1 if transport == TRANSPORT_STREAMABLE_HTTP else 0)
+        self._refresh_binding_list()
+
+    def _active_binding_target(self):
+        return "env" if self.transport_combo.currentData() == TRANSPORT_STDIO else "headers"
+
+    def _refresh_binding_list(self):
+        if not hasattr(self, "binding_list"):
+            return
+        self.binding_list.clear()
+        for target in ("env", "headers"):
+            for target_key, binding in self.variable_bindings.get(target, {}).items():
+                variable_id = str((binding or {}).get("variable_id") or "")
+                variable_name = variable_id
+                if self.config_manager:
+                    try:
+                        variable = self.config_manager.get_variable_store().get_public_by_id(variable_id)
+                        variable_name = str((variable or {}).get("name") or variable_id)
+                    except Exception:
+                        variable_name = f"{variable_id}（不可用）"
+                scheme = str((binding or {}).get("scheme") or "raw")
+                item = QListWidgetItem(f"{target}.{target_key}  ←  {variable_name} · {scheme}")
+                item.setData(Qt.UserRole, {"target": target, "target_key": target_key})
+                self.binding_list.addItem(item)
+
+    def _open_binding_dialog(self, target_key="", target_override=""):
+        if not self.config_manager:
+            QMessageBox.warning(self, "绑定变量", "当前无法访问变量中心。")
+            return
+        target = target_override or self._active_binding_target()
+        current = dict(self.variable_bindings.get(target, {}).get(target_key) or {})
+        if target_key:
+            current["target_key"] = target_key
+        dialog = McpVariableBindingDialog(
+            self.config_manager,
+            TRANSPORT_STDIO if target == "env" else TRANSPORT_STREAMABLE_HTTP,
+            binding=current,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        binding = dialog.get_binding()
+        new_key = binding.pop("target_key")
+        binding.pop("target", None)
+        if target_key and target_key != new_key:
+            self.variable_bindings[target].pop(target_key, None)
+        self.variable_bindings[target][new_key] = binding
+        self._refresh_binding_list()
+
+    def _add_variable_binding(self):
+        self._open_binding_dialog()
+
+    def _edit_variable_binding(self):
+        item = self.binding_list.currentItem()
+        if item:
+            data = item.data(Qt.UserRole) or {}
+            self._open_binding_dialog(str(data.get("target_key") or ""), str(data.get("target") or ""))
+
+    def _remove_variable_binding(self):
+        item = self.binding_list.currentItem()
+        if not item:
+            return
+        data = item.data(Qt.UserRole) or {}
+        self.variable_bindings.get(str(data.get("target") or ""), {}).pop(str(data.get("target_key") or ""), None)
+        self._refresh_binding_list()
 
     def get_server_config(self):
         timeout_seconds = int(self.timeout_spin.value())
@@ -9544,6 +9738,7 @@ class McpServerEditDialog(QDialog):
             "env": self._parse_mapping(self.env_edit.toPlainText()),
             "url": self.url_input.text().strip(),
             "headers": self._parse_mapping(self.headers_edit.toPlainText()),
+            "variable_bindings": json.loads(json.dumps(self.variable_bindings, ensure_ascii=False)),
             "auth": dict(self.server.get("auth") or {}),
             "runtime_skill": str(self.server.get("runtime_skill") or "").strip(),
             "source_skill": str(self.server.get("source_skill") or "").strip(),
@@ -9561,6 +9756,11 @@ class McpServerEditDialog(QDialog):
                 return
         elif not server.get("url"):
             QMessageBox.warning(self, "MCP 服务器", "Streamable HTTP 模式下请填写 URL。")
+            return
+        try:
+            normalize_mcp_servers([server])
+        except ValueError as exc:
+            QMessageBox.warning(self, "MCP 服务器", str(exc))
             return
         self.server = server
         super().accept()
@@ -9673,7 +9873,7 @@ class McpServerManager(QWidget):
         )
 
     def add_server(self):
-        dialog = McpServerEditDialog(parent=self)
+        dialog = McpServerEditDialog(parent=self, config_manager=self.config_manager)
         if dialog.exec() != QDialog.Accepted:
             return
         self.servers.append(dialog.get_server_config())
@@ -9780,7 +9980,7 @@ class McpServerManager(QWidget):
         if self.servers[index].get("managed_by_skill"):
             QMessageBox.information(self, "MCP 服务器", "该 MCP 由对应 Skill 管理，请到 Skill 配置页修改。")
             return
-        dialog = McpServerEditDialog(self.servers[index], self)
+        dialog = McpServerEditDialog(self.servers[index], self, config_manager=self.config_manager)
         if dialog.exec() != QDialog.Accepted:
             return
         self.servers[index] = dialog.get_server_config()
@@ -11164,6 +11364,263 @@ class FeishuQrDialog(ChannelQrDialog):
         )
 
 
+class AppVariableEditDialog(QDialog):
+    def __init__(self, config_manager, variable=None, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.variable = dict(variable or {})
+        self.setWindowTitle("编辑变量" if variable else "添加变量")
+        self.setMinimumWidth(460)
+        apply_product_dialog(self, "AppVariableEditDialog")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        title = QLabel("编辑变量" if variable else "添加变量")
+        title.setProperty("roleTitle", True)
+        layout.addWidget(title)
+        form = QFormLayout()
+        form.setSpacing(12)
+        configure_responsive_form_layout(form)
+        self.name_input = QLineEdit(str(self.variable.get("name") or ""))
+        self.name_input.setPlaceholderText("准确名称，例如：project_root")
+        form.addRow(build_form_row_label("名称"), self.name_input)
+        self.kind_combo = QComboBox()
+        apply_settings_combo_style(self.kind_combo)
+        self.kind_combo.addItem("普通变量", VARIABLE_KIND_TEXT)
+        self.kind_combo.addItem("敏感凭据", VARIABLE_KIND_SECRET)
+        current_kind = str(self.variable.get("kind") or VARIABLE_KIND_TEXT)
+        self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(current_kind)))
+        self.kind_combo.setEnabled(not bool(variable))
+        self.kind_combo.currentIndexChanged.connect(self._refresh_value_mode)
+        form.addRow(build_form_row_label("类型"), self.kind_combo)
+        self.value_input = QLineEdit()
+        self.value_input.setPlaceholderText("留空则保留原凭据" if current_kind == VARIABLE_KIND_SECRET and variable else "输入值")
+        if variable and current_kind == VARIABLE_KIND_TEXT:
+            try:
+                self.value_input.setText(
+                    self.config_manager.get_variable_store().get_text_by_id(self.variable.get("id"))
+                )
+            except Exception as exc:
+                self.value_input.setEnabled(False)
+                self.notice_error = str(exc)
+        form.addRow(build_form_row_label("值"), self.value_input)
+        self.description_input = QLineEdit(str(self.variable.get("description") or ""))
+        self.description_input.setPlaceholderText("可选，帮助辨认用途")
+        form.addRow(build_form_row_label("说明"), self.description_input)
+        layout.addLayout(form)
+        self.notice = ProductInlineNotice("敏感凭据不会回填，也不会提供给模型。", "neutral")
+        if getattr(self, "notice_error", ""):
+            self.notice.set_text(f"读取普通变量失败：{self.notice_error}", "error")
+        layout.addWidget(self.notice)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("保存")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        layout.addLayout(buttons)
+        self._refresh_value_mode()
+
+    def _refresh_value_mode(self):
+        is_secret = self.kind_combo.currentData() == VARIABLE_KIND_SECRET
+        self.value_input.setEchoMode(QLineEdit.Password if is_secret else QLineEdit.Normal)
+        if is_secret and self.variable:
+            self.value_input.setPlaceholderText("留空则保留原凭据")
+        else:
+            self.value_input.setPlaceholderText("输入值")
+
+    def accept(self):
+        name = self.name_input.text().strip()
+        value = self.value_input.text()
+        kind = str(self.kind_combo.currentData() or VARIABLE_KIND_TEXT)
+        if not name:
+            QMessageBox.warning(self, "变量与凭据", "请填写变量名称。")
+            return
+        if not self.variable and not value:
+            QMessageBox.warning(self, "变量与凭据", "新变量的值不能为空。")
+            return
+        if kind == VARIABLE_KIND_TEXT and not value:
+            QMessageBox.warning(self, "变量与凭据", "普通变量的值不能为空。")
+            return
+        try:
+            saved = self.config_manager.upsert_app_variable(
+                name=name,
+                kind=kind,
+                value=value if value else None,
+                description=self.description_input.text().strip(),
+                variable_id=str(self.variable.get("id") or ""),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "变量与凭据", f"保存失败：{exc}")
+            return
+        self.variable = saved
+        super().accept()
+
+
+class AppVariableManager(QWidget):
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+        toolbar = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索名称或说明")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self.reload)
+        toolbar.addWidget(self.search_input, 1)
+        self.action_buttons = {}
+        for label, handler, icon_name in (
+            ("添加", self.add_variable, "fa5s.plus"),
+            ("编辑", self.edit_variable, "fa5s.pen"),
+            ("删除", self.delete_variable, "fa5s.trash-alt"),
+            ("恢复上一版", self.restore_previous, "fa5s.undo"),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("SecondaryBtn")
+            button.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+            button.clicked.connect(handler)
+            toolbar.addWidget(button)
+            self.action_buttons[label] = button
+        layout.addLayout(toolbar)
+        self.variable_list = QListWidget()
+        self.variable_list.setMinimumHeight(260)
+        self.variable_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.variable_list.itemDoubleClicked.connect(lambda _item: self.edit_variable())
+        self.variable_list.currentItemChanged.connect(lambda _current, _previous: self._handle_selection_changed())
+        layout.addWidget(self.variable_list, 1)
+        self.reference_label = QLabel("选择变量后可查看 MCP 引用位置。")
+        self.reference_label.setWordWrap(True)
+        self.reference_label.setStyleSheet(apple_settings_inline_note_style())
+        layout.addWidget(self.reference_label)
+        self.status_notice = ProductInlineNotice("普通变量可插入输入框；敏感凭据仅能绑定给 MCP。", "neutral")
+        layout.addWidget(self.status_notice)
+        self.reload()
+
+    def _current_variable(self):
+        item = self.variable_list.currentItem()
+        return dict(item.data(Qt.UserRole) or {}) if item else None
+
+    def reload(self):
+        selected_id = str((self._current_variable() or {}).get("id") or "")
+        self.variable_list.clear()
+        try:
+            variables = self.config_manager.list_app_variables(query=self.search_input.text())
+        except Exception as exc:
+            self.status_notice.set_text(f"读取失败：{exc}", "error")
+            self.variable_list.setEnabled(False)
+            for label in ("添加", "编辑", "删除"):
+                self.action_buttons[label].setEnabled(False)
+            return
+        self.variable_list.setEnabled(True)
+        self.action_buttons["添加"].setEnabled(True)
+        for variable in variables:
+            kind_label = "凭据" if variable.get("kind") == VARIABLE_KIND_SECRET else "普通变量"
+            description = str(variable.get("description") or "").strip()
+            label = f"{variable.get('name')}  ·  {kind_label}"
+            if description:
+                label += f"  ·  {description}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, variable)
+            self.variable_list.addItem(item)
+            if variable.get("id") == selected_id:
+                self.variable_list.setCurrentItem(item)
+        if not variables:
+            self.reference_label.setText("暂无匹配变量。")
+        self._refresh_action_state()
+
+    def _handle_selection_changed(self):
+        self._refresh_reference_text()
+        self._refresh_action_state()
+
+    def _refresh_action_state(self):
+        has_selection = self._current_variable() is not None
+        self.action_buttons["编辑"].setEnabled(has_selection)
+        self.action_buttons["删除"].setEnabled(has_selection)
+
+    def _refresh_reference_text(self):
+        variable = self._current_variable()
+        if not variable:
+            self.reference_label.setText("选择变量后可查看 MCP 引用位置。")
+            return
+        refs = self._usage_refs(variable.get("id"))
+        self.reference_label.setText("引用位置：" + "、".join(refs) if refs else "当前没有 MCP 引用。")
+
+    def _usage_refs(self, variable_id):
+        refs = list(self.config_manager.get_variable_usage_refs(variable_id))
+        settings = self.window()
+        manager = getattr(settings, "mcp_server_manager", None)
+        for server in manager.get_servers() if manager else []:
+            for location, mappings in (server.get("variable_bindings") or {}).items():
+                for key, binding in (mappings or {}).items():
+                    if str((binding or {}).get("variable_id") or "") == str(variable_id or ""):
+                        refs.append(f"MCP {server.get('name') or server.get('id')} · {location}.{key}")
+        return list(dict.fromkeys(refs))
+
+    def add_variable(self):
+        dialog = AppVariableEditDialog(self.config_manager, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.status_notice.set_text("变量已创建。", "success")
+            self.reload()
+
+    def edit_variable(self):
+        variable = self._current_variable()
+        if not variable:
+            return
+        dialog = AppVariableEditDialog(self.config_manager, variable=variable, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.status_notice.set_text("变量已更新。", "success")
+            self.reload()
+
+    def delete_variable(self):
+        variable = self._current_variable()
+        if not variable:
+            return
+        refs = self._usage_refs(variable.get("id"))
+        if refs:
+            QMessageBox.warning(self, "删除变量", "变量仍被使用，不能删除：" + "、".join(refs))
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除变量",
+            f"确定删除“{variable.get('name')}”吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self.config_manager.delete_app_variable(variable.get("id"))
+        except Exception as exc:
+            self.status_notice.set_text(f"删除失败：{exc}", "error")
+            return
+        self.status_notice.set_text("变量已删除。", "success")
+        self.reload()
+
+    def restore_previous(self):
+        reply = QMessageBox.question(
+            self,
+            "恢复上一版",
+            "确定用上一版变量存储替换当前版本吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            count = self.config_manager.restore_previous_app_variables()
+        except Exception as exc:
+            self.status_notice.set_text(f"恢复失败：{exc}", "error")
+            return
+        self.status_notice.set_text(f"已恢复上一版，共 {count} 个变量。", "success")
+        self.reload()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
@@ -11502,6 +11959,13 @@ class SettingsDialog(QDialog):
             "MCP",
             "stdio / Streamable HTTP",
         )
+        variable_page, variable_layout = make_scroll_page(
+            "变量与凭据",
+            "集中管理可复用文本与本机凭据；敏感值只在 MCP 运行前解析。",
+        )
+        self.app_variable_manager = AppVariableManager(self.config_manager, parent=self)
+        variable_layout.addWidget(self.app_variable_manager)
+        variable_layout.addStretch()
         self.mcp_server_manager = McpServerManager(
             self.config_manager.get_mcp_servers(),
             config_manager=self.config_manager,
@@ -11859,6 +12323,7 @@ class SettingsDialog(QDialog):
         add_settings_page("个性与记忆", "fa5s.brain", memory_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
+        add_settings_page("变量与凭据", "fa5s.key", variable_page)
         add_settings_page("MCP", "fa5s.plug", mcp_page)
         add_settings_page("企业消息", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
@@ -15455,6 +15920,21 @@ class ComposerActionPopover(ProductPopover):
             layout.addWidget(self._divider())
         self._add_row(layout, "添加文件", "图片、文档或其他工作资料",
                       qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary), window.select_files_for_prompt)
+        try:
+            text_variable_count = len(window.config_manager.list_app_variables(kind=VARIABLE_KIND_TEXT))
+            variable_error = ""
+        except Exception as exc:
+            text_variable_count = 0
+            variable_error = str(exc)
+        self._add_row(
+            layout,
+            "插入变量",
+            f"{text_variable_count} 个普通变量" if text_variable_count else "暂无可插入的普通变量",
+            qta.icon("fa5s.code", color=DesignTokens.text_secondary),
+            window.show_app_variable_insert_menu,
+            enabled=bool(text_variable_count),
+            tooltip=f"变量读取失败：{variable_error}" if variable_error else "请先在设置中添加普通变量",
+        )
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []) if state else [])
         ready = bool(getattr(window, "skill_manager_ready", False))
         busy = bool(state and window._session_is_busy(state))
@@ -32248,6 +32728,45 @@ class MainWindow(QMainWindow):
         )
         popover.show_for(self.tool_menu_btn, prefer_above=True)
 
+    def show_app_variable_insert_menu(self):
+        state = self.get_current_session()
+        if not state or not self.input_field.isEnabled():
+            return
+        try:
+            variables = self.config_manager.list_app_variables(kind=VARIABLE_KIND_TEXT)
+        except Exception as exc:
+            self.add_system_toast(f"变量读取失败：{exc}", "error", session_id=state.session_id)
+            return
+        if not variables:
+            self.add_system_toast("暂无可插入的普通变量", "info", session_id=state.session_id)
+            return
+        menu = QMenu(self)
+        for variable in variables:
+            action = menu.addAction(str(variable.get("name") or "变量"))
+            description = str(variable.get("description") or "").strip()
+            if description:
+                action.setToolTip(description)
+            action.setData(str(variable.get("id") or ""))
+            action.triggered.connect(
+                lambda _checked=False, variable_id=str(variable.get("id") or ""): self.insert_app_variable(variable_id)
+            )
+        menu.popup(self.tool_menu_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+
+    def insert_app_variable(self, variable_id):
+        state = self.get_current_session()
+        if not state:
+            return False
+        try:
+            value = self.config_manager.get_variable_store().get_text_by_id(variable_id)
+        except Exception as exc:
+            self.add_system_toast(f"插入失败：{exc}", "error", session_id=state.session_id)
+            return False
+        cursor = self.input_field.textCursor()
+        cursor.insertText(value)
+        self.input_field.setTextCursor(cursor)
+        self.input_field.setFocus()
+        return True
+
     def save_composer_as_favorite(self):
         state = self.get_current_session()
         if not state:
@@ -46750,6 +47269,7 @@ a {{ overflow-wrap: anywhere; }}
                 "selected_model_profile": self._model_profile_snapshot_for_state(state, model_id=effective_model_id),
                 "reasoning_effort": self._selected_reasoning_effort(state, model_id=effective_model_id),
                 "workspace_mode": "project" if effective_workspace_dir else "chat_only",
+                "app_variable_access": True,
                 "workflow_mode": normalized_workflow_mode,
                 "office_output_profile": normalize_office_output_profile(
                     office_output_profile if office_output_profile is not None else OFFICE_OUTPUT_PROFILE_FREE

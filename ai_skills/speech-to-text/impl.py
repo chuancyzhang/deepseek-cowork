@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 from datetime import date
@@ -10,10 +11,18 @@ from PySide6.QtCore import QObject, Qt
 from core.audio_attachments import is_audio_attachment
 from core.runtime_components import speech_to_text_component_status
 from core.sandbox_runtime import run_skill_script_in_sandbox
+from core.speech_to_text_config import (
+    ASR_BACKEND_LOCAL,
+    ASR_BACKEND_OPENAI_COMPATIBLE,
+    validate_speech_to_text_config,
+)
 
 
 SKILL_ID = "speech-to-text"
 SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "transcribe.mjs")
+REMOTE_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "scripts", "transcribe_remote.py"
+)
 SUPPORTED_EXTENSIONS = {
     ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".webm"
 }
@@ -21,6 +30,12 @@ SUPPORTED_EXTENSIONS = {
 
 class ComponentNotReadyError(RuntimeError):
     pass
+
+
+class RemoteTranscriptionError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = str(code or "remote_transcription_failed")
 
 
 def _json(payload):
@@ -222,6 +237,7 @@ def _render_markdown(source_path, payload, transcript, polished, privacy):
     metadata = {
         "source": os.path.basename(source_path),
         "date": date.today().isoformat(),
+        "asr_backend": payload.get("backend") or "local",
         "asr_model": payload.get("model") or "",
         "duration_seconds": round(float(payload.get("duration") or 0.0), 3),
         "language": payload.get("lang") or "",
@@ -238,22 +254,73 @@ def _render_markdown(source_path, payload, transcript, polished, privacy):
 def _parse_json_stdout(stdout):
     text = str(stdout or "").strip()
     if not text:
-        raise RuntimeError("本地转录脚本没有返回结果。")
+        raise RuntimeError("转录脚本没有返回结果。")
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"本地转录脚本返回了无效 JSON：{exc}") from exc
+        raise RuntimeError(f"转录脚本返回了无效 JSON：{exc}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("本地转录脚本结果必须是 JSON 对象。")
+        raise RuntimeError("转录脚本结果必须是 JSON 对象。")
     return payload
+
+
+def _configured_backend(context):
+    values = context.get("skill_config") if isinstance(context, dict) else {}
+    return validate_speech_to_text_config(values if isinstance(values, dict) else {})
+
+
+def _run_remote_transcription(
+    source_path,
+    workspace_root,
+    language,
+    timeout_seconds,
+    config,
+    abort_state,
+):
+    result = run_skill_script_in_sandbox(
+        SKILL_ID,
+        REMOTE_SCRIPT_PATH,
+        "python",
+        args=[],
+        cwd=workspace_root,
+        timeout_seconds=timeout_seconds,
+        extra_env={
+            "COWORK_WORKSPACE_DIR": workspace_root,
+            "ASR_API_URL": config["api_url"],
+            "ASR_MODEL_NAME": config["model_name"],
+            "ASR_API_KEY": config["api_key"],
+            "ASR_AUDIO_PATH": source_path,
+            "ASR_LANGUAGE": language,
+            "ASR_TIMEOUT_SECONDS": str(timeout_seconds),
+        },
+        abort_check=lambda: bool(abort_state["aborted"]),
+    )
+    if result.get("aborted"):
+        return None, True
+    try:
+        payload = _parse_json_stdout(result.get("stdout"))
+    except Exception as exc:
+        if result.get("ok"):
+            raise
+        raise RemoteTranscriptionError(
+            "remote_transcription_failed",
+            "远程语音接口执行失败，且没有返回可解析的错误信息。",
+        ) from exc
+    if not result.get("ok") or not payload.get("ok"):
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        raise RemoteTranscriptionError(
+            error.get("code"),
+            str(error.get("message") or "远程语音接口转录失败。"),
+        )
+    return payload, False
 
 
 def transcribe_audio(
     audio_path,
     polish,
-    diarize=True,
+    diarize=None,
     speaker_count=0,
-    model="sensevoice",
+    model=None,
     language="auto",
     output_path="",
     overwrite=False,
@@ -261,15 +328,34 @@ def transcribe_audio(
     workspace_dir=None,
     _context=None,
 ):
-    """Transcribe one user-authorized local audio file and write a Markdown transcript."""
+    """Transcribe one user-authorized audio file and write a Markdown transcript."""
     started_at = time.time()
     context = _context if isinstance(_context, dict) else {}
+    backend = ""
     try:
         if not isinstance(polish, bool):
             raise ValueError("polish 必须是布尔值，并且必须来自用户对是否 AI 润色的明确选择。")
-        model = str(model or "sensevoice").strip().lower()
-        if model != "sensevoice":
-            raise ValueError("model 目前只支持 sensevoice。")
+        config = _configured_backend(context)
+        backend = config["backend"]
+        requested_model = str(model or "").strip().lower()
+        if backend == ASR_BACKEND_LOCAL:
+            effective_model = requested_model or "sensevoice"
+            if effective_model != "sensevoice":
+                raise ValueError("本地 model 目前只支持 sensevoice。")
+            effective_diarize = True if diarize is None else bool(diarize)
+        else:
+            if requested_model:
+                raise RemoteTranscriptionError(
+                    "remote_model_parameter_unsupported",
+                    "远程模式的模型由能力设置管理，请不要传入本地 model 参数。",
+                )
+            if diarize is True or int(speaker_count or 0) > 0:
+                raise RemoteTranscriptionError(
+                    "remote_diarization_unsupported",
+                    "OpenAI 兼容接口模式不执行本地说话人分离；请关闭 diarize 且不要指定 speaker_count。",
+                )
+            effective_model = config["model_name"]
+            effective_diarize = False
         language = str(language or "auto").strip().lower()
         if language not in {"auto", "zh", "en", "ja", "ko", "yue"}:
             raise ValueError("language 只能是 auto、zh、en、ja、ko 或 yue。")
@@ -277,7 +363,6 @@ def transcribe_audio(
         if speaker_count < 0 or speaker_count > 20:
             raise ValueError("speaker_count 必须是 0（自动估算）或 1 到 20。")
         timeout_seconds = max(30, min(int(timeout_seconds or 1800), 3600))
-        model_paths = _require_component()
         workspace_root, source_path, auto_selected = _resolve_audio_path(
             audio_path,
             workspace_dir,
@@ -302,70 +387,101 @@ def transcribe_audio(
             "submit",
             started_at,
             extension=os.path.splitext(source_path)[1].lower(),
-            model=model,
-            diarize=bool(diarize),
+            file_size_bytes=os.path.getsize(source_path),
+            backend=backend,
+            model=effective_model,
+            diarize=effective_diarize,
             polish=polish,
         )
         abort_state = _init_abort_state(context)
         _raise_if_aborted(abort_state)
-        _emit_diagnostic(context, "start", started_at, operation="local_transcription_pipeline")
-        args = [
-            "--input", source_path,
-            "--language", language,
-            "--sensevoice-model", model_paths["sensevoice_model"],
-            "--sensevoice-tokens", model_paths["sensevoice_tokens"],
-            "--diarize", "true" if diarize else "false",
-            "--speaker-count", str(speaker_count),
-        ]
-        if diarize:
-            args.extend([
-                "--segmentation-model", model_paths["segmentation"],
-                "--embedding-model", model_paths["embedding"],
-            ])
-        _emit_step(
-            context,
-            (
-                "正在本地分块识别音频并分离说话人；长录音可能需要数分钟…"
-                if diarize
-                else "正在本地分块识别音频；长录音可能需要数分钟…"
-            ),
-        )
-        _emit_diagnostic(context, "run", started_at, operation="local_asr")
-        result = run_skill_script_in_sandbox(
-            SKILL_ID,
-            SCRIPT_PATH,
-            "node",
-            args=args,
-            cwd=workspace_root,
-            timeout_seconds=timeout_seconds,
-            extra_env={"COWORK_WORKSPACE_DIR": workspace_root},
-            abort_check=lambda: bool(abort_state["aborted"]),
-        )
-        if result.get("aborted"):
+        if backend == ASR_BACKEND_LOCAL:
+            model_paths = _require_component()
+            _emit_diagnostic(context, "start", started_at, operation="local_transcription_pipeline")
+            args = [
+                "--input", source_path,
+                "--language", language,
+                "--sensevoice-model", model_paths["sensevoice_model"],
+                "--sensevoice-tokens", model_paths["sensevoice_tokens"],
+                "--diarize", "true" if effective_diarize else "false",
+                "--speaker-count", str(speaker_count),
+            ]
+            if effective_diarize:
+                args.extend([
+                    "--segmentation-model", model_paths["segmentation"],
+                    "--embedding-model", model_paths["embedding"],
+                ])
+            _emit_step(
+                context,
+                (
+                    "正在本地分块识别音频并分离说话人；长录音可能需要数分钟…"
+                    if effective_diarize
+                    else "正在本地分块识别音频；长录音可能需要数分钟…"
+                ),
+            )
+            _emit_diagnostic(context, "run", started_at, operation="local_asr")
+            result = run_skill_script_in_sandbox(
+                SKILL_ID,
+                SCRIPT_PATH,
+                "node",
+                args=args,
+                cwd=workspace_root,
+                timeout_seconds=timeout_seconds,
+                extra_env={"COWORK_WORKSPACE_DIR": workspace_root},
+                abort_check=lambda: bool(abort_state["aborted"]),
+            )
+            if result.get("aborted"):
+                _emit_diagnostic(context, "finish", started_at, outcome="aborted", backend=backend)
+                return _json(_error("aborted", "用户已停止语音转文字任务。", "可重新发起转录。"))
+            if not result.get("ok"):
+                payload = None
+                try:
+                    payload = _parse_json_stdout(result.get("stdout"))
+                except Exception:
+                    pass
+                error = payload.get("error") if isinstance(payload, dict) and isinstance(payload.get("error"), dict) else {}
+                message = str(error.get("message") or result.get("stderr") or "本地转录脚本执行失败。").strip()
+                raise RuntimeError(message[-2000:])
+            payload = _parse_json_stdout(result.get("stdout"))
+            if not payload.get("ok"):
+                error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+                raise RuntimeError(str(error.get("message") or "本地转录失败。"))
+        else:
+            _emit_diagnostic(context, "start", started_at, operation="remote_transcription_pipeline")
+            _emit_step(context, "正在上传音频并等待已配置的语音接口返回转录结果…")
+            _emit_diagnostic(context, "run", started_at, operation="remote_asr")
+            payload, aborted = _run_remote_transcription(
+                source_path,
+                workspace_root,
+                language,
+                timeout_seconds,
+                config,
+                abort_state,
+            )
+            if aborted:
+                _emit_diagnostic(context, "finish", started_at, outcome="aborted", backend=backend)
+                return _json(_error("aborted", "用户已停止语音转文字任务。", "可重新发起转录。"))
+        if payload is None:
             _emit_diagnostic(context, "finish", started_at, outcome="aborted")
             return _json(_error("aborted", "用户已停止语音转文字任务。", "可重新发起转录。"))
-        if not result.get("ok"):
-            payload = None
-            try:
-                payload = _parse_json_stdout(result.get("stdout"))
-            except Exception:
-                pass
-            error = payload.get("error") if isinstance(payload, dict) and isinstance(payload.get("error"), dict) else {}
-            message = str(error.get("message") or result.get("stderr") or "本地转录脚本执行失败。").strip()
-            raise RuntimeError(message[-2000:])
-        payload = _parse_json_stdout(result.get("stdout"))
-        if not payload.get("ok"):
-            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-            raise RuntimeError(str(error.get("message") or "本地转录失败。"))
+        payload["backend"] = backend
         transcript = str(payload.get("transcript") or "").strip()
         if not transcript:
-            raise RuntimeError("本地模型没有识别出可用文字。")
+            raise RuntimeError(
+                "本地模型没有识别出可用文字。"
+                if backend == ASR_BACKEND_LOCAL
+                else "远程语音接口没有返回可用文字。"
+            )
         raw_markdown = _render_markdown(
             source_path,
             payload,
             transcript,
             polished=False,
-            privacy="local-raw" if polish else "local-only",
+            privacy=(
+                ("local-raw" if polish else "local-only")
+                if backend == ASR_BACKEND_LOCAL
+                else "remote-asr-raw"
+            ),
         )
         _atomic_write_text(raw_path, raw_markdown)
         if polish:
@@ -374,17 +490,22 @@ def transcribe_audio(
                 payload,
                 transcript,
                 polished=False,
-                privacy="local-raw-fallback",
+                privacy=(
+                    "local-raw-fallback"
+                    if backend == ASR_BACKEND_LOCAL
+                    else "remote-asr-raw-fallback"
+                ),
             )
             _atomic_write_text(final_path, fallback_markdown)
 
         response = {
             "ok": True,
             "status": "completed",
+            "backend": backend,
             "output_path": final_path,
             "raw_transcript_path": raw_path,
             "suggested_output_path": final_path if polish else "",
-            "model": payload.get("model") or model,
+            "model": payload.get("model") or effective_model,
             "duration_seconds": round(float(payload.get("duration") or 0.0), 3),
             "speaker_count": int(payload.get("speaker_count") or 0),
             "diarized": bool(payload.get("diarized")),
@@ -399,17 +520,26 @@ def transcribe_audio(
                 "language": payload.get("lang") or "",
                 "emotion": payload.get("emotion") or "",
                 "event": payload.get("event") or "",
-                "privacy_notice": "原始转录已按用户选择提供给当前模型，用于 AI 润色。",
+                "privacy_notice": (
+                    "原始转录已按用户选择提供给当前模型，用于 AI 润色。"
+                    if backend == ASR_BACKEND_LOCAL
+                    else "音频已发送到用户配置的远程语音接口；原始转录已按用户选择"
+                    "提供给当前对话模型，用于 AI 润色。"
+                ),
             })
         else:
             response["privacy_notice"] = (
                 "音频内容和转录正文均由本地模型处理并写入工作区；"
                 "正文未返回给当前大模型。当前模型只收到路径和状态元数据。"
+                if backend == ASR_BACKEND_LOCAL
+                else "音频已发送到用户配置的远程语音接口；转录正文只写入工作区，"
+                "未返回给当前对话模型。当前模型只收到路径和状态元数据。"
             )
         _emit_diagnostic(
             context,
             "finish",
             started_at,
+            backend=backend,
             model=str(response["model"]),
             speaker_count=response["speaker_count"],
             diarized=response["diarized"],
@@ -426,12 +556,30 @@ def transcribe_audio(
     except InterruptedError as exc:
         _emit_diagnostic(context, "finish", started_at, outcome="aborted")
         return _json(_error("aborted", str(exc), "可重新发起转录。"))
+    except RemoteTranscriptionError as exc:
+        _emit_diagnostic(context, "error", started_at, backend=ASR_BACKEND_OPENAI_COMPATIBLE, error_type=type(exc).__name__)
+        return _json(_error(
+            exc.code,
+            str(exc),
+            "检查语音转文字能力中的接口地址、模型名称和 API Key 后重试。",
+        ))
+    except subprocess.TimeoutExpired:
+        _emit_diagnostic(context, "error", started_at, error_type="TimeoutExpired")
+        return _json(_error(
+            "transcription_timeout",
+            "语音转文字任务超时。",
+            "可提高 timeout_seconds 后重试，或检查远程接口与本地组件状态。",
+        ))
     except Exception as exc:
         _emit_diagnostic(context, "error", started_at, error_type=type(exc).__name__)
         return _json(_error(
             "transcription_failed",
             str(exc),
-            "检查音频文件与“设置 → 组件与依赖 → 语音转文字组件”的状态后重试。",
+            (
+                "检查音频文件与“设置 → 组件与依赖 → 语音转文字组件”的状态后重试。"
+                if backend != ASR_BACKEND_OPENAI_COMPATIBLE
+                else "检查音频文件和语音转文字能力中的远程接口配置后重试。"
+            ),
         ))
 
 
@@ -445,6 +593,11 @@ def _read_markdown_parts(path):
 
 
 def _updated_frontmatter(frontmatter, polished):
+    fallback_privacy = (
+        "remote-asr-raw-fallback"
+        if "remote-asr" in frontmatter
+        else "local-raw-fallback"
+    )
     lines = []
     found_polished = False
     found_privacy = False
@@ -453,14 +606,14 @@ def _updated_frontmatter(frontmatter, polished):
             lines.append(f"ai_polished: {'true' if polished else 'false'}")
             found_polished = True
         elif line.startswith("privacy:"):
-            lines.append(f"privacy: {_frontmatter_value('ai-polished' if polished else 'local-raw-fallback')}")
+            lines.append(f"privacy: {_frontmatter_value('ai-polished' if polished else fallback_privacy)}")
             found_privacy = True
         else:
             lines.append(line)
     if not found_polished:
         lines.append(f"ai_polished: {'true' if polished else 'false'}")
     if not found_privacy:
-        lines.append(f"privacy: {_frontmatter_value('ai-polished' if polished else 'local-raw-fallback')}")
+        lines.append(f"privacy: {_frontmatter_value('ai-polished' if polished else fallback_privacy)}")
     return "\n".join(lines)
 
 
@@ -502,7 +655,10 @@ def save_transcript_result(
                 fallback_frontmatter, fallback_body = _read_markdown_parts(final_path)
                 generated_fallback = (
                     fallback_body == raw_body
-                    and 'privacy: "local-raw-fallback"' in fallback_frontmatter
+                    and any(
+                        f'privacy: "{value}"' in fallback_frontmatter
+                        for value in ("local-raw-fallback", "remote-asr-raw-fallback")
+                    )
                     and "ai_polished: false" in fallback_frontmatter
                 )
             except (OSError, ValueError):
@@ -547,7 +703,7 @@ TOOL_EXPORTS = [
         "name": "transcribe_audio",
         "handler": transcribe_audio,
         "description": (
-            "Locally transcribe an authorized audio/video file, optionally separate speakers, and write Markdown. "
+            "Transcribe an authorized audio/video file with the configured local or OpenAI-compatible backend and write Markdown. "
             "The required polish boolean must reflect the user's explicit privacy choice."
         ),
         "parameters": {
@@ -561,9 +717,9 @@ TOOL_EXPORTS = [
                     "type": "boolean",
                     "description": "Required explicit user choice. False keeps transcript text out of model context; true returns it for current-model polishing."
                 },
-                "diarize": {"type": "boolean", "description": "Separate speakers. Defaults to true."},
-                "speaker_count": {"type": "integer", "minimum": 0, "maximum": 20, "description": "Known number of speakers, or 0 for automatic estimation."},
-                "model": {"type": "string", "enum": ["sensevoice"], "description": "Verified local ASR model. Defaults to sensevoice."},
+                "diarize": {"type": "boolean", "description": "Local backend only. Omit for the configured backend default; explicit true is rejected by the remote backend."},
+                "speaker_count": {"type": "integer", "minimum": 0, "maximum": 20, "description": "Local backend only: known number of speakers, or 0 for automatic estimation."},
+                "model": {"type": "string", "enum": ["sensevoice"], "description": "Optional local-backend compatibility parameter. Omit for the remote backend, whose model is configured in Skill settings."},
                 "language": {"type": "string", "enum": ["auto", "zh", "en", "ja", "ko", "yue"], "description": "Language hint for SenseVoice."},
                 "output_path": {"type": "string", "description": "Optional workspace-relative Markdown output path."},
                 "overwrite": {"type": "boolean", "description": "Overwrite existing output only after explicit user approval."},
@@ -573,7 +729,7 @@ TOOL_EXPORTS = [
         },
         "destructive": False,
         "read_only": False,
-        "search_hint": "speech to text ASR transcribe audio meeting speaker diarization 语音转文字 转录 说话人分离",
+        "search_hint": "speech to text ASR OpenAI audio transcriptions local meeting speaker diarization 语音转文字 远程接口 转录 说话人分离",
         "result_format": "json",
         "metadata": {"idempotent": True, "requires_workspace": True}
     },

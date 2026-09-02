@@ -119,6 +119,41 @@ class TestAudioAttachmentPrivacy(unittest.TestCase):
         self.assertTrue(allowed)
         window._show_conversation_notice.assert_not_called()
 
+    def test_remote_speech_backend_skips_component_and_uses_remote_privacy_placeholder(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            audio = os.path.join(workspace, "private.webm")
+            Path(audio).write_bytes(b"audio")
+            window = MainWindow.__new__(MainWindow)
+            window.workspace_dir = workspace
+            window._show_conversation_notice = MagicMock()
+            state = type("_Session", (), {"session_id": "session-remote"})()
+            config = {
+                "backend": "openai_compatible",
+                "api_url": "http://asr.internal/sync/v1/audio/transcriptions",
+                "model_name": "Qwen3-ASR-1.7B",
+                "api_key": "secret",
+            }
+
+            with patch("main.speech_to_text_component_status") as component_status:
+                allowed = window._ensure_speech_component_before_submit(
+                    state,
+                    [audio],
+                    keep_audio_local=True,
+                    transcription_config=config,
+                )
+
+            self.assertTrue(allowed)
+            component_status.assert_not_called()
+            payload = window._build_user_message_payload(
+                "请转录",
+                [audio],
+                keep_audio_local=True,
+                audio_transcription_backend="openai_compatible",
+            )
+            self.assertIn("已配置的语音转文字服务", payload["content"])
+            self.assertNotIn("private.webm", payload["content"])
+            self.assertEqual(payload["meta"]["transcription_only_audio_files"], [audio])
+
 
 if __name__ == "__main__":
     unittest.main()

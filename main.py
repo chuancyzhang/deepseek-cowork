@@ -136,6 +136,14 @@ from core.deliverable_editing import (
 )
 from core.file_capabilities import TEXT_FILE_MAX_BYTES
 from core.audio_attachments import is_audio_attachment, partition_model_visible_attachments
+from core.speech_to_text_config import (
+    ASR_BACKEND_LOCAL,
+    ASR_BACKEND_OPENAI_COMPATIBLE,
+    SPEECH_TO_TEXT_SKILL_ID,
+    speech_to_text_config,
+    speech_to_text_http_warning,
+    validate_speech_to_text_config,
+)
 from core.generated_images import has_visible_assistant_output, output_image_parts
 from core.html_render import extract_renderable_html_response
 from core.inline_visualization import (
@@ -4749,6 +4757,11 @@ class CapabilityWorkbenchDialog(QDialog):
             else:
                 form.addRow(build_form_row_label(label), editor)
             self.config_editors[name] = editor
+            if self.skill_name == SPEECH_TO_TEXT_SKILL_ID:
+                if isinstance(editor, QComboBox):
+                    editor.currentIndexChanged.connect(self._refresh_config_status)
+                else:
+                    editor.textChanged.connect(self._refresh_config_status)
         card_layout.addLayout(form)
         layout.addWidget(card)
 
@@ -4756,6 +4769,10 @@ class CapabilityWorkbenchDialog(QDialog):
         self.config_status.setWordWrap(True)
         self.config_status.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(self.config_status)
+        if self.skill_name == SPEECH_TO_TEXT_SKILL_ID:
+            self.config_security_notice = ProductInlineNotice("", "warning")
+            self.config_security_notice.hide()
+            layout.addWidget(self.config_security_notice)
 
         row = QHBoxLayout()
         row.addStretch()
@@ -4840,7 +4857,14 @@ class CapabilityWorkbenchDialog(QDialog):
         if not hasattr(self.skill_manager, "get_skill_config_status"):
             label.setText("")
             return
-        status = self.skill_manager.get_skill_config_status(self.skill_name)
+        draft_values = self._current_skill_config_values() if self.config_editors else None
+        try:
+            status = self.skill_manager.get_skill_config_status(
+                self.skill_name,
+                values=draft_values,
+            )
+        except TypeError:
+            status = self.skill_manager.get_skill_config_status(self.skill_name)
         missing = status.get("missing_required") or []
         if missing:
             label.setText("还缺少必填配置：" + "、".join(missing))
@@ -4848,6 +4872,11 @@ class CapabilityWorkbenchDialog(QDialog):
             label.setText("配置还不完整：" + "；".join(status.get("config_errors") or []))
         else:
             label.setText("配置完整。")
+        security_notice = getattr(self, "config_security_notice", None)
+        if security_notice is not None:
+            warning = speech_to_text_http_warning(draft_values)
+            security_notice.set_text(warning, "warning")
+            security_notice.setVisible(bool(warning))
 
     def _current_skill_config_values(self):
         values = {}
@@ -4878,6 +4907,30 @@ class CapabilityWorkbenchDialog(QDialog):
                 self.config_status.setText(message)
             QMessageBox.warning(self, "能力设置", message)
             return False
+        if self.skill_name == SPEECH_TO_TEXT_SKILL_ID:
+            try:
+                validate_speech_to_text_config(values)
+            except ValueError as exc:
+                message = str(exc)
+                if getattr(self, "config_status", None) is not None:
+                    self.config_status.setText(message)
+                QMessageBox.warning(self, "能力设置", message)
+                return False
+        if hasattr(self.skill_manager, "get_skill_config_status"):
+            try:
+                draft_status = self.skill_manager.get_skill_config_status(
+                    self.skill_name,
+                    values=values,
+                ) or {}
+            except TypeError:
+                draft_status = {}
+            draft_errors = draft_status.get("config_errors") or []
+            if draft_errors:
+                message = "配置还不完整：" + "；".join(str(item) for item in draft_errors)
+                if getattr(self, "config_status", None) is not None:
+                    self.config_status.setText(message)
+                QMessageBox.warning(self, "能力设置", message)
+                return False
         batch_save = getattr(self.config_manager, "batch_save", None)
         if callable(batch_save):
             with batch_save():
@@ -31940,6 +31993,7 @@ class MainWindow(QMainWindow):
         *,
         resolve_text_references=True,
         keep_audio_local=False,
+        audio_transcription_backend=ASR_BACKEND_LOCAL,
     ):
         display_text = str(user_text or "").strip()
         normalized_files = self._normalize_prompt_file_paths(file_paths)
@@ -31961,11 +32015,18 @@ class MainWindow(QMainWindow):
         if model_visible_files:
             content_blocks.append(self._build_user_added_files_prompt(model_visible_files))
         if local_audio_files:
-            content_blocks.append(
-                "[本地音频附件]\n"
-                "本轮音频附件仅授权给本地语音转文字工具；"
-                "未向当前模型提供文件名、路径、大小或音频内容。"
-            )
+            if audio_transcription_backend == ASR_BACKEND_OPENAI_COMPATIBLE:
+                content_blocks.append(
+                    "[语音转文字专用附件]\n"
+                    "本轮音频附件仅授权给用户已配置的语音转文字服务；"
+                    "未向当前对话模型提供文件名、路径、大小或音频内容。"
+                )
+            else:
+                content_blocks.append(
+                    "[本地音频附件]\n"
+                    "本轮音频附件仅授权给本地语音转文字工具；"
+                    "未向当前模型提供文件名、路径、大小或音频内容。"
+                )
         if display_text:
             content_blocks.append(display_text)
         content = "\n\n".join([block for block in content_blocks if block]).strip()
@@ -31996,8 +32057,13 @@ class MainWindow(QMainWindow):
         if normalized_files:
             meta["user_added_files"] = normalized_files
         if local_audio_files:
-            meta["local_only_audio_files"] = local_audio_files
-            meta["local_only_audio_count"] = len(local_audio_files)
+            if audio_transcription_backend == ASR_BACKEND_OPENAI_COMPATIBLE:
+                meta["transcription_only_audio_files"] = local_audio_files
+                meta["transcription_only_audio_count"] = len(local_audio_files)
+                meta["audio_transcription_backend"] = ASR_BACKEND_OPENAI_COMPATIBLE
+            else:
+                meta["local_only_audio_files"] = local_audio_files
+                meta["local_only_audio_count"] = len(local_audio_files)
         if image_paths:
             meta["user_added_images"] = image_paths
             meta["vision_requested"] = bool(supports_vision)
@@ -32017,8 +32083,61 @@ class MainWindow(QMainWindow):
             "meta": meta or None,
         }
 
-    def _ensure_speech_component_before_submit(self, state, file_paths, *, keep_audio_local):
+    def _speech_to_text_runtime_config(self):
+        values = (
+            self.config_manager.get_skill_config(SPEECH_TO_TEXT_SKILL_ID)
+            if getattr(self, "config_manager", None)
+            and hasattr(self.config_manager, "get_skill_config")
+            else {}
+        )
+        return speech_to_text_config(values)
+
+    def _open_speech_to_text_settings(self):
+        if not self.show_product_page(self.PAGE_CAPABILITIES):
+            return False
+        skill = next(
+            (
+                item
+                for item in self.skill_manager.get_all_skills()
+                if str(item.get("name") or "") == SPEECH_TO_TEXT_SKILL_ID
+            ),
+            None,
+        )
+        return bool(skill and self.show_capability_detail(skill))
+
+    def _ensure_speech_component_before_submit(
+        self,
+        state,
+        file_paths,
+        *,
+        keep_audio_local,
+        transcription_config=None,
+    ):
         if not keep_audio_local or not any(is_audio_attachment(path) for path in file_paths or []):
+            return True
+        config = transcription_config or self._speech_to_text_runtime_config()
+        try:
+            validated_config = validate_speech_to_text_config({
+                "ASR_BACKEND": config.get("backend"),
+                "ASR_API_URL": config.get("api_url"),
+                "ASR_MODEL_NAME": config.get("model_name"),
+                "ASR_API_KEY": config.get("api_key"),
+            })
+        except ValueError as exc:
+            log_chat_runtime_debug(
+                "speech_config_preflight_blocked",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                error=str(exc),
+            )
+            self._show_conversation_notice(
+                state,
+                f"{exc} 本次录音尚未提交给 AI。",
+                "warning",
+                action_text="打开语音转文字设置",
+                action_callback=self._open_speech_to_text_settings,
+            )
+            return False
+        if validated_config.get("backend") == ASR_BACKEND_OPENAI_COMPATIBLE:
             return True
         status = speech_to_text_component_status(include_size=False)
         if status.get("ready"):
@@ -48174,15 +48293,22 @@ a {{ overflow-wrap: anywhere; }}
 
     def _build_edited_guidance_message(self, state, source_message, edited_text):
         prompt_files = self._message_attachment_paths(source_message)
+        keep_audio_local = (
+            SPEECH_TO_TEXT_SKILL_ID
+            in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        )
+        transcription_config = (
+            self._speech_to_text_runtime_config()
+            if keep_audio_local
+            else {"backend": ASR_BACKEND_LOCAL}
+        )
         payload = self._build_user_message_payload(
             edited_text,
             prompt_files,
             supports_vision=self._selected_model_supports_vision(state),
             resolve_text_references=False,
-            keep_audio_local=(
-                "speech-to-text"
-                in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
-            ),
+            keep_audio_local=keep_audio_local,
+            audio_transcription_backend=transcription_config["backend"],
         )
         if not payload.get("content"):
             return None
@@ -48204,6 +48330,9 @@ a {{ overflow-wrap: anywhere; }}
             "workspace_referenced_images",
             "local_only_audio_files",
             "local_only_audio_count",
+            "transcription_only_audio_files",
+            "transcription_only_audio_count",
+            "audio_transcription_backend",
         ):
             meta.pop(key, None)
         meta.update(payload.get("meta") or {})
@@ -48591,13 +48720,19 @@ a {{ overflow-wrap: anywhere; }}
         if not self._ensure_vision_attachment_support(state, prompt_files):
             return False
         keep_audio_local = (
-            "speech-to-text"
+            SPEECH_TO_TEXT_SKILL_ID
             in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        )
+        transcription_config = (
+            self._speech_to_text_runtime_config()
+            if keep_audio_local
+            else {"backend": ASR_BACKEND_LOCAL}
         )
         if not self._ensure_speech_component_before_submit(
             state,
             prompt_files,
             keep_audio_local=keep_audio_local,
+            transcription_config=transcription_config,
         ):
             return False
         payload = self._build_user_message_payload(
@@ -48605,6 +48740,7 @@ a {{ overflow-wrap: anywhere; }}
             prompt_files,
             supports_vision=self._selected_model_supports_vision(state),
             keep_audio_local=keep_audio_local,
+            audio_transcription_backend=transcription_config["backend"],
         )
         if not payload.get("content"):
             return False
@@ -49011,13 +49147,19 @@ a {{ overflow-wrap: anywhere; }}
                 QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
         keep_audio_local = (
-            "speech-to-text"
+            SPEECH_TO_TEXT_SKILL_ID
             in normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        )
+        transcription_config = (
+            self._speech_to_text_runtime_config()
+            if keep_audio_local
+            else {"backend": ASR_BACKEND_LOCAL}
         )
         if not self._ensure_speech_component_before_submit(
             state,
             prompt_files,
             keep_audio_local=keep_audio_local,
+            transcription_config=transcription_config,
         ):
             return False
         payload = self._build_user_message_payload(
@@ -49025,6 +49167,7 @@ a {{ overflow-wrap: anywhere; }}
             prompt_files,
             supports_vision=supports_vision,
             keep_audio_local=keep_audio_local,
+            audio_transcription_backend=transcription_config["backend"],
         )
         if isinstance(user_message_meta, dict) and user_message_meta.get("display_content") is not None:
             payload["display_content"] = str(user_message_meta.get("display_content") or "")
@@ -49068,6 +49211,7 @@ a {{ overflow-wrap: anywhere; }}
             prompt_files,
             supports_vision=supports_vision,
             keep_audio_local=keep_audio_local,
+            audio_transcription_backend=transcription_config["backend"],
         ).get("content") or delegated_text
         if check_duplicates:
             # Compatibility flag retained for existing callers.  Idempotency

@@ -1,9 +1,11 @@
 import importlib.util
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -107,6 +109,11 @@ class TestSpeechToTextSkill(unittest.TestCase):
             [],
         )
         self.assertEqual(manifest["tool_refs"], ["transcribe_audio", "save_transcript_result"])
+        self.assertEqual(manifest["config_fields"][0]["default"], "local")
+        self.assertEqual(
+            {field["name"] for field in manifest["config_fields"]},
+            {"ASR_BACKEND", "ASR_API_URL", "ASR_MODEL_NAME", "ASR_API_KEY"},
+        )
 
         manager = SkillManager(
             workspace_dir=self.workspace_dir,
@@ -120,6 +127,93 @@ class TestSpeechToTextSkill(unittest.TestCase):
         self.assertTrue(validation["ok"], validation["issues"])
         self.assertIn("transcribe_audio", manager.tools)
         self.assertIn("save_transcript_result", manager.tools)
+
+        self.assertTrue(manager.get_skill_config_status("speech-to-text")["complete"])
+        remote_missing = manager.get_skill_config_status(
+            "speech-to-text",
+            values={"ASR_BACKEND": "openai_compatible"},
+        )
+        self.assertFalse(remote_missing["complete"])
+        self.assertIn("接口地址", remote_missing["config_errors"][0])
+
+    def test_remote_backend_posts_openai_multipart_without_local_component(self):
+        requests_seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                requests_seen.append({
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "body": self.rfile.read(length),
+                })
+                response = json.dumps({"text": "远程识别结果。"}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        context = {
+            "skill_config": {
+                "ASR_BACKEND": "openai_compatible",
+                "ASR_API_URL": f"http://127.0.0.1:{server.server_port}/sync/v1/audio/transcriptions",
+                "ASR_MODEL_NAME": "Qwen3-ASR-1.7B",
+                "ASR_API_KEY": "remote-secret-key",
+            }
+        }
+
+        with patch.object(self.module, "_require_component") as require_component:
+            result = json.loads(self.module.transcribe_audio(
+                "meeting.wav",
+                False,
+                language="zh",
+                workspace_dir=self.workspace_dir,
+                _context=context,
+            ))
+
+        require_component.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["backend"], "openai_compatible")
+        self.assertFalse(result["diarized"])
+        self.assertNotIn("transcript", result)
+        self.assertNotIn("remote-secret-key", json.dumps(result, ensure_ascii=False))
+        self.assertIn('privacy: "remote-asr-raw"', Path(result["output_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(requests_seen), 1)
+        request = requests_seen[0]
+        self.assertEqual(request["path"], "/sync/v1/audio/transcriptions")
+        self.assertEqual(request["authorization"], "Bearer remote-secret-key")
+        self.assertIn(b'name="model"', request["body"])
+        self.assertIn(b"Qwen3-ASR-1.7B", request["body"])
+        self.assertIn(b'name="language"', request["body"])
+        self.assertIn(b"test-audio-placeholder", request["body"])
+
+    def test_remote_backend_rejects_local_diarization_parameters(self):
+        result = json.loads(self.module.transcribe_audio(
+            "meeting.wav",
+            False,
+            diarize=True,
+            workspace_dir=self.workspace_dir,
+            _context={
+                "skill_config": {
+                    "ASR_BACKEND": "openai_compatible",
+                    "ASR_API_URL": "http://asr.internal/v1/audio/transcriptions",
+                    "ASR_MODEL_NAME": "Qwen3-ASR-1.7B",
+                    "ASR_API_KEY": "secret",
+                }
+            },
+        ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "remote_diarization_unsupported")
 
     def test_local_only_writes_speaker_transcript_without_returning_body_to_model(self):
         observability = SignalStub()

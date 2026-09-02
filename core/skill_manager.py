@@ -631,11 +631,20 @@ class SkillManager:
                     any_of.append(names)
             all_of = self._coerce_string_list(item.get("all_of"))
             message = str(item.get("message") or "").strip()
+            when_source = item.get("when") if isinstance(item.get("when"), dict) else {}
+            when_field = str(when_source.get("field") or "").strip()
+            when_equals = str(when_source.get("equals") or "").strip()
+            when = (
+                {"field": when_field, "equals": when_equals}
+                if when_field
+                else {}
+            )
             if any_of or all_of:
                 normalized.append({
                     "any_of": any_of,
                     "all_of": all_of,
                     "message": message,
+                    "when": when,
                 })
         return normalized
 
@@ -1567,6 +1576,13 @@ class SkillManager:
 
         errors = []
         for item in requirements:
+            when = item.get("when") if isinstance(item.get("when"), dict) else {}
+            when_field = str(when.get("field") or "").strip()
+            if when_field:
+                actual = str(values.get(when_field, "") or "").strip()
+                expected = str(when.get("equals") or "").strip()
+                if actual != expected:
+                    continue
             all_of = item.get("all_of") or []
             missing_all = [name for name in all_of if not configured(name)]
             if missing_all:
@@ -1581,9 +1597,17 @@ class SkillManager:
                 )
         return errors
 
-    def get_skill_config_status(self, skill_name):
+    def get_skill_config_status(self, skill_name, values=None):
         fields = self.get_skill_config_fields(skill_name)
-        values = self._resolved_skill_config_values(skill_name)
+        if isinstance(values, dict):
+            resolved_values = dict(values)
+            for field in fields:
+                name = str(field.get("name") or "").strip()
+                if name and not str(resolved_values.get(name, "") or "").strip() and str(field.get("default") or ""):
+                    resolved_values[name] = str(field.get("default") or "")
+            values = resolved_values
+        else:
+            values = self._resolved_skill_config_values(skill_name)
         missing = []
         configured = []
         for field in fields:

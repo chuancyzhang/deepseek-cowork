@@ -149,6 +149,7 @@ Skill 的 `allowed-tools`、稳定系统提示与 Tool Registry 必须使用同�
 
 - `text`、`secret`、`select`；
 - `required`、`default`、`options`；
+- `config_requirements[].when` 条件必填规则；
 - 执行时注入的 `env`；
 - `help`、`placeholder`；
 - 不含凭据的 HTTPS `action_url` 与按钮文案。

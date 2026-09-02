@@ -7,18 +7,19 @@
   "source_type": "bundled_plugin",
   "source_format": "cowork",
   "default_enabled": true,
-  "description": "Transcribe local audio and video files into speaker-separated text, with an explicit fully-local or current-model-polished output choice.",
-  "description_cn": "将本地音频或视频转成带说话人标签的文字，并由用户选择完全本地输出或交给当前模型润色。",
+  "description": "Transcribe audio and video with either the bundled local pipeline or a configured OpenAI-compatible transcription endpoint, with optional current-model polishing.",
+  "description_cn": "使用本地语音组件或已配置的 OpenAI 兼容接口转录音视频，并由用户选择是否交给当前模型润色。",
   "presentation": {
     "category": "content_creation",
     "short_name": "语音转文字",
-    "summary": "本地识别音视频，分离说话人，并按选择生成原始稿或 AI 润色稿。",
+    "summary": "使用本地组件或 OpenAI 兼容接口识别音视频，并按选择生成原始稿或 AI 润色稿。",
     "examples": [
       "转录会议录音并区分说话人",
       "把 M4A 语音转成文字",
-      "本地转录，不要把正文交给云端 AI"
+      "使用已配置的远程 ASR 接口转录",
+      "转录后不要把正文交给当前对话模型"
     ],
-    "access_note": "音频始终由本地模型处理；只有选择 AI 润色时，转录文字才会交给当前模型。"
+    "access_note": "本地模式不上传音频；远程模式会把音频发送到配置的接口。只有选择 AI 润色时，转录文字才会交给当前对话模型。"
   },
   "tags": [
     "asr",
@@ -50,11 +51,61 @@
     "transcribe_audio",
     "save_transcript_result"
   ],
+  "config_fields": [
+    {
+      "name": "ASR_BACKEND",
+      "label": "转录方式",
+      "kind": "select",
+      "required": true,
+      "env": "ASR_BACKEND",
+      "default": "local",
+      "help": "本地组件使用 SenseVoice 和说话人分离；OpenAI 兼容接口会上传音频并返回纯文本。",
+      "options": [
+        {"value": "local", "label": "本地语音组件"},
+        {"value": "openai_compatible", "label": "OpenAI 兼容接口"}
+      ]
+    },
+    {
+      "name": "ASR_API_KEY",
+      "label": "API Key（接口模式必填）",
+      "kind": "secret",
+      "required": false,
+      "env": "ASR_API_KEY",
+      "placeholder": "输入远程语音接口的 API Key",
+      "help": "仅在调用远程接口时使用，不会写入对话 prompt 或诊断日志。"
+    },
+    {
+      "name": "ASR_API_URL",
+      "label": "接口地址（接口模式必填）",
+      "kind": "text",
+      "required": false,
+      "env": "ASR_API_URL",
+      "placeholder": "http://host/v1/audio/transcriptions",
+      "help": "填写完整的 HTTP 或 HTTPS audio/transcriptions 地址；不会自动拼接路径。"
+    },
+    {
+      "name": "ASR_MODEL_NAME",
+      "label": "模型名称（接口模式必填）",
+      "kind": "text",
+      "required": false,
+      "env": "ASR_MODEL_NAME",
+      "placeholder": "Qwen3-ASR-1.7B",
+      "help": "调用时作为 multipart 表单的 model 字段发送。"
+    }
+  ],
+  "config_requirements": [
+    {
+      "when": {"field": "ASR_BACKEND", "equals": "openai_compatible"},
+      "all_of": ["ASR_API_URL", "ASR_MODEL_NAME", "ASR_API_KEY"],
+      "message": "OpenAI 兼容接口模式需要填写接口地址、模型名称和 API Key。"
+    }
+  ],
   "python_dependencies": [],
   "node_dependencies": [],
   "references": [],
   "script_refs": [
-    "scripts/transcribe.mjs"
+    "scripts/transcribe.mjs",
+    "scripts/transcribe_remote.py"
   ],
   "script_entries": [],
   "asset_refs": [],
@@ -68,9 +119,9 @@
     "include_experience_entries": false
   },
   "workflow": [
-    "Ask whether the user wants fully local raw output or current-model AI polishing before transcription.",
-    "Require the verified speech-to-text component, then call transcribe_audio with the explicit polish choice and speaker diarization enabled by default.",
-    "For local-only output, report the generated path without reading the transcript back into model context.",
+    "Ask whether the user wants raw output kept out of the current model or current-model AI polishing before transcription.",
+    "Call transcribe_audio with the explicit polish choice; the saved Skill configuration selects the local or OpenAI-compatible backend.",
+    "For non-polished output, report the generated path without reading the transcript back into model context.",
     "For AI polish, preserve speaker labels and timestamps, then call save_transcript_result.",
     "If polishing cannot be completed reliably, show the raw transcript and promote the local raw file as the final result."
   ]

@@ -1343,7 +1343,7 @@ class SkillManager:
         record = self.tool_registry.register(
             "lookup_app_variable",
             self._lookup_app_variable,
-            "Read one global plain-text application variable by its exact name. Secret credentials are never returned.",
+            "Read one application variable by its exact name. A secret is returned only when the user explicitly allowed AI access.",
             lookup_schema,
             skill_name="builtin",
             kind="builtin_app_variable",
@@ -1351,11 +1351,11 @@ class SkillManager:
             read_only=True,
             destructive=False,
             allowed_modes=["execution"],
-            should_defer=True,
-            always_load=False,
+            should_defer=False,
+            always_load=True,
             runtime_binding={"type": "builtin_method"},
             skill_refs=["builtin"],
-            source_kind=TOOL_SOURCE_OPTIONAL,
+            source_kind=TOOL_SOURCE_CORE_BUILTIN,
         )
         if record:
             self.tools["lookup_app_variable"] = self._lookup_app_variable
@@ -1392,24 +1392,31 @@ class SkillManager:
             return {"status": "error", "message": "必须提供准确的变量名称。"}
         store = manager.get_variable_store()
         try:
-            value = store.get_text_exact(exact_name)
-        except KeyError:
+            result = store.resolve_for_ai(exact_name)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "name": exact_name,
+                "message": f"读取全局变量失败：{exc}",
+            }
+        if result.get("status") == "not_found":
             return {
                 "status": "not_found",
                 "name": exact_name,
                 "message": "未找到该名称的全局变量；不会返回其他变量列表。",
             }
-        if value is None:
+        if result.get("status") == "restricted":
             return {
                 "status": "restricted",
                 "name": exact_name,
-                "message": "该名称对应敏感凭据，只能通过已绑定的 MCP 认证位置使用，不能读取明文。",
+                "message": "该凭据未允许 AI 读取；如确需使用，请在“变量与凭据”中显式授权。",
             }
         return {
             "status": "ok",
-            "name": exact_name,
-            "value": value,
-            "message": "该普通变量值已进入当前 Tool 结果和会话历史。",
+            "name": result.get("name") or exact_name,
+            "kind": result.get("kind") or "text",
+            "value": result.get("value"),
+            "message": "该变量值已发送给当前模型，并进入当前 Tool 结果和会话历史。",
         }
 
     def _tool_search(self, query, limit=8, include_loaded=False, _context=None):

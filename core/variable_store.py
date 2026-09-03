@@ -183,11 +183,18 @@ class VariableStore:
             if kind == VARIABLE_KIND_TEXT:
                 if not isinstance(item.get("value"), str):
                     raise VariableStoreError(f"普通变量“{name}”缺少有效值。")
-            elif not str(item.get("protected_value") or "").startswith(DPAPI_PREFIX):
-                raise VariableStoreError(f"敏感凭据“{name}”不是有效的 DPAPI 数据。")
+            else:
+                if not str(item.get("protected_value") or "").startswith(DPAPI_PREFIX):
+                    raise VariableStoreError(f"敏感凭据“{name}”不是有效的 DPAPI 数据。")
+                if "allow_ai_read" in item and not isinstance(item.get("allow_ai_read"), bool):
+                    raise VariableStoreError(f"敏感凭据“{name}”的 AI 读取权限格式无效。")
             ids.add(identifier)
             names.add(name.casefold())
-            normalized.append(copy.deepcopy(item))
+            normalized_item = copy.deepcopy(item)
+            normalized_item["allow_ai_read"] = (
+                True if kind == VARIABLE_KIND_TEXT else bool(item.get("allow_ai_read", False))
+            )
+            normalized.append(normalized_item)
         return {
             "version": VARIABLE_STORE_VERSION,
             "revision": max(0, int(payload.get("revision") or 0)),
@@ -299,6 +306,9 @@ class VariableStore:
             "id": entry["id"],
             "name": entry["name"],
             "kind": entry["kind"],
+            "allow_ai_read": (
+                True if entry["kind"] == VARIABLE_KIND_TEXT else bool(entry.get("allow_ai_read", False))
+            ),
             "description": str(entry.get("description") or ""),
             "created_at": int(entry.get("created_at") or 0),
             "updated_at": int(entry.get("updated_at") or 0),
@@ -348,6 +358,44 @@ class VariableStore:
                 return None
             return str(entry.get("value") or "")
 
+    def resolve_for_ai(self, name):
+        with self._lock:
+            entry = self._find_by_name(name)
+            if entry is None:
+                return {"status": "not_found", "name": str(name or "").strip()}
+            variable_id = entry["id"]
+            kind = entry["kind"]
+            if kind == VARIABLE_KIND_SECRET and not bool(entry.get("allow_ai_read", False)):
+                logger.info(
+                    "variable_store.ai_read.denied variable_id=%s kind=%s reason=restricted",
+                    variable_id,
+                    kind,
+                )
+                return {
+                    "status": "restricted",
+                    "id": variable_id,
+                    "name": entry["name"],
+                    "kind": kind,
+                }
+            logger.info("variable_store.ai_read.start variable_id=%s kind=%s", variable_id, kind)
+            try:
+                value = (
+                    self._unprotect(entry.get("protected_value"))
+                    if kind == VARIABLE_KIND_SECRET
+                    else str(entry.get("value") or "")
+                )
+            except Exception:
+                logger.exception("variable_store.ai_read.error variable_id=%s kind=%s", variable_id, kind)
+                raise
+            logger.info("variable_store.ai_read.finish variable_id=%s kind=%s", variable_id, kind)
+            return {
+                "status": "ok",
+                "id": variable_id,
+                "name": entry["name"],
+                "kind": kind,
+                "value": value,
+            }
+
     def get_text_by_id(self, variable_id):
         with self._lock:
             entry = self._find_by_id(variable_id)
@@ -357,22 +405,11 @@ class VariableStore:
                 raise VariableStoreError("敏感凭据不能插入输入框。")
             return str(entry.get("value") or "")
 
-    def resolve_for_binding(self, variable_id):
-        with self._lock:
-            entry = self._find_by_id(variable_id)
-            if entry is None:
-                raise VariableStoreError("变量引用不存在，请重新绑定。")
-            if entry["kind"] == VARIABLE_KIND_SECRET:
-                try:
-                    return self._unprotect(entry.get("protected_value"))
-                except Exception:
-                    logger.exception("variable_store.resolve.error variable_id=%s", variable_id)
-                    raise
-            return str(entry.get("value") or "")
-
-    def upsert(self, name, kind, value=None, description="", variable_id=""):
+    def upsert(self, name, kind, value=None, description="", variable_id="", allow_ai_read=False):
         name = _normalize_name(name)
         kind = _normalize_kind(kind)
+        if kind == VARIABLE_KIND_SECRET and not isinstance(allow_ai_read, bool):
+            raise ValueError("敏感凭据的 AI 读取权限必须是布尔值。")
         description = str(description or "").strip()
         now = int(time.time())
         with self._lock:
@@ -414,14 +451,17 @@ class VariableStore:
                 if normalized_value is None:
                     raise ValueError("普通变量的新值不能为空。")
                 current["value"] = normalized_value
+                current["allow_ai_read"] = True
                 current.pop("protected_value", None)
-            elif normalized_value is not None:
-                try:
-                    current["protected_value"] = self._protect(normalized_value)
-                    current.pop("value", None)
-                except Exception:
-                    logger.exception("variable_store.save.error variable_id=%s stage=encrypt", current["id"])
-                    raise
+            else:
+                current["allow_ai_read"] = bool(allow_ai_read)
+                if normalized_value is not None:
+                    try:
+                        current["protected_value"] = self._protect(normalized_value)
+                        current.pop("value", None)
+                    except Exception:
+                        logger.exception("variable_store.save.error variable_id=%s stage=encrypt", current["id"])
+                        raise
             snapshot["revision"] = int(snapshot.get("revision") or 0) + 1
             logger.info("variable_store.save.start variable_id=%s operation=%s", current["id"], "update" if variable_id else "create")
             try:
@@ -432,15 +472,7 @@ class VariableStore:
             logger.info("variable_store.save.finish variable_id=%s revision=%s", current["id"], snapshot["revision"])
             return self._public_entry(current)
 
-    def delete(self, variable_id, usage_refs=None):
-        refs = list(usage_refs or [])
-        if refs:
-            logger.warning(
-                "variable_store.delete.error variable_id=%s reason=in_use ref_count=%s",
-                variable_id,
-                len(refs),
-            )
-            raise ValueError("变量仍被引用，不能删除：" + "、".join(str(item) for item in refs[:6]))
+    def delete(self, variable_id):
         with self._lock:
             snapshot = copy.deepcopy(self._load())
             before = len(snapshot["entries"])

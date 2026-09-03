@@ -109,36 +109,6 @@ def normalize_mcp_auth(value):
     }
 
 
-def normalize_mcp_variable_bindings(value):
-    if value in (None, ""):
-        return {"env": {}, "headers": {}}
-    if not isinstance(value, dict):
-        raise ValueError("MCP variable_bindings 必须是对象。")
-    normalized = {"env": {}, "headers": {}}
-    for target in ("env", "headers"):
-        mappings = value.get(target) or {}
-        if not isinstance(mappings, dict):
-            raise ValueError(f"MCP variable_bindings.{target} 必须是对象。")
-        for key, raw_binding in mappings.items():
-            target_key = str(key or "").strip()
-            if not target_key:
-                raise ValueError(f"MCP variable_bindings.{target} 包含空目标名称。")
-            binding = raw_binding if isinstance(raw_binding, dict) else {"variable_id": raw_binding}
-            variable_id = str(binding.get("variable_id") or "").strip()
-            if not variable_id:
-                raise ValueError(f"MCP 变量绑定 {target}.{target_key} 缺少 variable_id。")
-            scheme = str(binding.get("scheme") or "raw").strip().lower()
-            if target == "env" and scheme != "raw":
-                raise ValueError(f"MCP 环境变量绑定 {target_key} 只支持 raw。")
-            if target == "headers" and scheme not in {"raw", "bearer"}:
-                raise ValueError(f"MCP Header 绑定 {target_key} 只支持 raw 或 bearer。")
-            normalized[target][target_key] = {
-                "variable_id": variable_id,
-                "scheme": scheme,
-            }
-    return normalized
-
-
 def normalize_mcp_server(server, index=0, used_ids=None):
     used_ids = used_ids if used_ids is not None else set()
     if not isinstance(server, dict):
@@ -162,16 +132,6 @@ def normalize_mcp_server(server, index=0, used_ids=None):
     args = normalize_mcp_string_list(source.get("args"))
     env = normalize_mcp_env_or_headers(source.get("env"))
     headers = normalize_mcp_env_or_headers(source.get("headers"))
-    variable_bindings = normalize_mcp_variable_bindings(source.get("variable_bindings"))
-    env_conflicts = sorted(set(env) & set(variable_bindings["env"]))
-    header_conflicts = sorted(set(headers) & set(variable_bindings["headers"]))
-    if env_conflicts or header_conflicts:
-        conflicts = [*(f"env.{name}" for name in env_conflicts), *(f"headers.{name}" for name in header_conflicts)]
-        raise ValueError("MCP 字面量配置与变量绑定冲突：" + "、".join(conflicts))
-    if transport == TRANSPORT_STDIO and variable_bindings["headers"]:
-        raise ValueError("stdio MCP 只能绑定环境变量，不能绑定 Header。")
-    if transport == TRANSPORT_STREAMABLE_HTTP and variable_bindings["env"]:
-        raise ValueError("Streamable HTTP MCP 只能绑定 Header，不能绑定环境变量。")
     auth = normalize_mcp_auth(source.get("auth"))
     cwd = str(source.get("cwd") or "").strip()
     if cwd:
@@ -200,8 +160,6 @@ def normalize_mcp_server(server, index=0, used_ids=None):
         "source_skill": source_skill,
         "managed_by_skill": bool(source.get("managed_by_skill") or source_skill),
     }
-    if variable_bindings["env"] or variable_bindings["headers"]:
-        normalized["variable_bindings"] = variable_bindings
     return normalized
 
 
@@ -235,7 +193,6 @@ def _looks_like_single_mcp_server(value):
         "env",
         "url",
         "headers",
-        "variable_bindings",
         "auth",
         "runtime_skill",
         "source_skill",
@@ -372,27 +329,11 @@ class ConfigManager:
     def list_app_variables(self, kind=None, query=""):
         return self.variable_store.list_public(kind=kind, query=query)
 
-    def get_variable_usage_refs(self, variable_id):
-        target = str(variable_id or "").strip()
-        refs = []
-        if not target:
-            return refs
-        for server in self.get_mcp_servers():
-            bindings = server.get("variable_bindings") or {}
-            for location in ("env", "headers"):
-                for key, binding in (bindings.get(location) or {}).items():
-                    if str((binding or {}).get("variable_id") or "").strip() == target:
-                        refs.append(f"MCP {server.get('name') or server.get('id')} · {location}.{key}")
-        return refs
-
     def upsert_app_variable(self, **values):
         return self.variable_store.upsert(**values)
 
     def delete_app_variable(self, variable_id):
-        return self.variable_store.delete(
-            variable_id,
-            usage_refs=self.get_variable_usage_refs(variable_id),
-        )
+        return self.variable_store.delete(variable_id)
 
     def restore_previous_app_variables(self):
         return self.variable_store.restore_previous()

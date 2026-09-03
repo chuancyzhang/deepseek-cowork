@@ -185,12 +185,6 @@ Skill 可以在 `mcp_server_presets` 中声明 `stdio` 或 Streamable HTTP Serve
 配置只保存引用，短期 access/refresh token 留在内存。远端工具最终仍映射成本地
 Tool，经统一权限、观测和结果协议执行。
 
-### 全局变量绑定
-
-用户配置的 MCP 可以通过 `variable_bindings.env` 或 `variable_bindings.headers` 引用全局变量 ID。stdio 仅接受 env，Streamable HTTP 仅接受 Header；Header 的 `scheme` 仅支持 `raw`、`bearer`。配置导入导出不携带变量值，目标设备缺少引用时必须重新绑定，运行时不得回退为字面量或空值。
-
-敏感凭据只在 MCP 连接前解密到内存副本，并对本次 MCP 的输出与异常执行精确脱敏。Skill 自有 secret、模型 API Key 和企业消息凭据仍使用各自现有存储，不迁移到全局变量中心。
-
 ## 8. 能力商城与安装
 
 AI 能力商城负责普通用户的发现和最小状态操作：

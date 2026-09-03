@@ -824,6 +824,8 @@ class LLMWorker(QThread):
         self.agent_id = agent_id or parent_agent_id or ""
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
+        if self.is_subagent:
+            self.run_context["app_variable_access"] = False
         self.started_in_grill_mode = (
             str(self.run_context.get("mode") or "") == RUN_MODE_GRILLING
         )
@@ -971,7 +973,7 @@ class LLMWorker(QThread):
         for item in tools:
             func = item.get("function") if isinstance(item, dict) else None
             name = func.get("name") if isinstance(func, dict) else ""
-            if self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
+            if self.is_subagent and (name in AGENT_MANAGEMENT_TOOLS or name == "lookup_app_variable"):
                 continue
             if name and hasattr(self.skill_manager, "is_tool_allowed"):
                 try:

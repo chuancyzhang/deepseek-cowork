@@ -331,42 +331,6 @@ def _superset_access_token(server_config, config_manager, force_login=False):
 
 def prepare_mcp_server_config(server_config, config_manager=None, force_login=False):
     prepared = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
-    resolved_secrets = []
-    bindings = prepared.get("variable_bindings") if isinstance(prepared.get("variable_bindings"), dict) else {}
-    if any((bindings.get(target) or {}) for target in ("env", "headers")):
-        if not config_manager or not hasattr(config_manager, "get_variable_store"):
-            raise ValueError("MCP 变量绑定需要可用的全局变量存储。")
-        store = config_manager.get_variable_store()
-        for target in ("env", "headers"):
-            mapping = _stringify_mapping(prepared.get(target))
-            for key, binding in (bindings.get(target) or {}).items():
-                if key in mapping:
-                    raise ValueError(f"MCP 字面量配置与变量绑定冲突：{target}.{key}")
-                variable_id = str((binding or {}).get("variable_id") or "").strip()
-                public = store.get_public_by_id(variable_id)
-                if public is None:
-                    raise ValueError(f"MCP 变量引用不存在：{target}.{key}")
-                logger.info(
-                    "mcp_variable.resolve.start variable_id=%s target=%s",
-                    variable_id,
-                    target,
-                )
-                value = store.resolve_for_binding(variable_id)
-                scheme = str((binding or {}).get("scheme") or "raw").strip().lower()
-                if target == "env" and scheme != "raw":
-                    raise ValueError(f"MCP 环境变量绑定 {key} 只支持 raw。")
-                if target == "headers" and scheme not in {"raw", "bearer"}:
-                    raise ValueError(f"MCP Header 绑定 {key} 只支持 raw 或 bearer。")
-                mapping[str(key)] = ("Bearer " + value) if scheme == "bearer" else value
-                if public.get("kind") == "secret":
-                    resolved_secrets.extend([value, mapping[str(key)]])
-                logger.info(
-                    "mcp_variable.resolve.finish variable_id=%s target=%s",
-                    variable_id,
-                    target,
-                )
-            prepared[target] = mapping
-    prepared["_resolved_secrets"] = list(dict.fromkeys(item for item in resolved_secrets if item))
     auth = prepared.get("auth") if isinstance(prepared.get("auth"), dict) else {}
     auth_type = str(auth.get("type") or "").strip().lower()
     if not auth_type:
@@ -378,22 +342,6 @@ def prepare_mcp_server_config(server_config, config_manager=None, force_login=Fa
     headers["Authorization"] = "Bearer " + token
     prepared["headers"] = headers
     return prepared
-
-
-def _redact_exact(value, secrets):
-    cleaned = [str(item) for item in (secrets or []) if str(item)]
-    if not cleaned:
-        return value
-    if isinstance(value, str):
-        result = value
-        for secret in cleaned:
-            result = result.replace(secret, "<redacted-secret>")
-        return result
-    if isinstance(value, list):
-        return [_redact_exact(item, cleaned) for item in value]
-    if isinstance(value, dict):
-        return {key: _redact_exact(item, cleaned) for key, item in value.items()}
-    return value
 
 
 def clear_mcp_auth_cache():
@@ -647,7 +595,6 @@ def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None
         server_name,
         normalize_mcp_transport(server_config.get("transport")),
     )
-    resolved_secrets = []
     try:
         dependency_status = _ensure_runtime_skill_dependencies(server_config, skill_manager=skill_manager)
         if dependency_status is not None and not dependency_status.get("ok"):
@@ -658,15 +605,13 @@ def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None
             return {"ok": False, "error": error, "tools": [], "dependency_status": dependency_status}
         try:
             prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
-            resolved_secrets = list(prepared.pop("_resolved_secrets", None) or [])
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
         tools = _run_async(_list_mcp_server_tools_async(prepared))
-        tools = _redact_exact(tools, resolved_secrets)
         logger.info("mcp_tools.list.finish server=%s tool_count=%s", server_name, len(tools))
         return {"ok": True, "error": "", "tools": tools}
     except Exception as exc:
-        error = _redact_exact(_managed_auth_error(server_config, exc), resolved_secrets)
+        error = _managed_auth_error(server_config, exc)
         logger.error("mcp_tools.list.error server=%s error=%s", server_name, error)
         return {"ok": False, "error": error, "tools": []}
 
@@ -694,7 +639,6 @@ def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None,
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}
     logger.info("mcp_tool.call.start server=%s tool=%s", server_name, str(tool_name or "").strip())
-    resolved_secrets = []
     try:
         dependency_status = _ensure_runtime_skill_dependencies(server_config, skill_manager=skill_manager)
         if dependency_status is not None and not dependency_status.get("ok"):
@@ -716,13 +660,11 @@ def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None,
             }
         try:
             prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
-            resolved_secrets = list(prepared.pop("_resolved_secrets", None) or [])
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
         payload = _run_async(_call_mcp_tool_async(prepared, tool_name, arguments or {}))
-        payload = _redact_exact(payload, resolved_secrets)
     except Exception as exc:
-        error = _redact_exact(_managed_auth_error(server_config, exc), resolved_secrets)
+        error = _managed_auth_error(server_config, exc)
         logger.error("mcp_tool.call.error server=%s tool=%s error=%s", server_name, str(tool_name or "").strip(), error)
         return {
             "status": "error",

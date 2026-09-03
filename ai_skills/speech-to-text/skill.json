@@ -100,7 +100,9 @@
       "message": "OpenAI 兼容接口模式需要填写接口地址、模型名称和 API Key。"
     }
   ],
-  "python_dependencies": [],
+  "python_dependencies": [
+    "requests"
+  ],
   "node_dependencies": [],
   "references": [],
   "script_refs": [

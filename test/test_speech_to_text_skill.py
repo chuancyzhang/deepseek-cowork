@@ -47,6 +47,15 @@ class SignalStub:
         self.values.append(value)
 
 
+class DependencyCoordinatorStub:
+    def __init__(self):
+        self.calls = []
+
+    def ensure_ready(self, skill_name, **kwargs):
+        self.calls.append((skill_name, kwargs))
+        return {"ok": True, "message": "ready", "installed": True}
+
+
 class TestSpeechToTextSkill(unittest.TestCase):
     def setUp(self):
         self.workspace_dir = tempfile.mkdtemp()
@@ -108,6 +117,7 @@ class TestSpeechToTextSkill(unittest.TestCase):
             manifest["node_dependencies"],
             [],
         )
+        self.assertEqual(manifest["python_dependencies"], ["requests"])
         self.assertEqual(manifest["tool_refs"], ["transcribe_audio", "save_transcript_result"])
         self.assertEqual(manifest["config_fields"][0]["default"], "local")
         self.assertEqual(
@@ -135,6 +145,32 @@ class TestSpeechToTextSkill(unittest.TestCase):
         )
         self.assertFalse(remote_missing["complete"])
         self.assertIn("接口地址", remote_missing["config_errors"][0])
+
+    def test_first_tool_call_prepares_declared_requests_dependency(self):
+        coordinator = DependencyCoordinatorStub()
+        manager = SkillManager(
+            workspace_dir=self.workspace_dir,
+            config_manager=ConfigStub(),
+            auto_load=False,
+            load_mcp_tools=False,
+            dependency_coordinator=coordinator,
+        )
+        manager.skills_dirs = [str(REPO_ROOT / "ai_skills")]
+        manager.load_skills(load_mcp_tools=False)
+        manager.skill_records["speech-to-text"]["dependency_status"] = {
+            "ok": False,
+            "pending": True,
+        }
+        manager.tools["transcribe_audio"] = lambda _context=None: "prepared"
+
+        result = manager.call_tool("transcribe_audio", {})
+
+        self.assertEqual(result, "prepared")
+        self.assertEqual(len(coordinator.calls), 1)
+        skill_name, kwargs = coordinator.calls[0]
+        self.assertEqual(skill_name, "speech-to-text")
+        self.assertEqual(kwargs["python_dependencies"], ["requests"])
+        self.assertEqual(kwargs["node_dependencies"], [])
 
     def test_remote_backend_posts_openai_multipart_without_local_component(self):
         requests_seen = []
@@ -168,13 +204,15 @@ class TestSpeechToTextSkill(unittest.TestCase):
                 "ASR_API_URL": f"http://127.0.0.1:{server.server_port}/sync/v1/audio/transcriptions",
                 "ASR_MODEL_NAME": "Qwen3-ASR-1.7B",
                 "ASR_API_KEY": "remote-secret-key",
-            }
+            },
+            "observability_signal": SignalStub(),
         }
 
         with patch.object(self.module, "_require_component") as require_component:
             result = json.loads(self.module.transcribe_audio(
                 "meeting.wav",
                 False,
+                model="sensevoice",
                 language="zh",
                 workspace_dir=self.workspace_dir,
                 _context=context,
@@ -183,9 +221,13 @@ class TestSpeechToTextSkill(unittest.TestCase):
         require_component.assert_not_called()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["backend"], "openai_compatible")
+        self.assertEqual(result["model"], "Qwen3-ASR-1.7B")
         self.assertFalse(result["diarized"])
+        self.assertIn("已忽略仅适用于本地后端的 model 参数", result["warnings"][-1])
         self.assertNotIn("transcript", result)
         self.assertNotIn("remote-secret-key", json.dumps(result, ensure_ascii=False))
+        self.assertTrue(context["observability_signal"].values[0]["ignored_local_model_parameter"])
+        self.assertTrue(context["observability_signal"].values[-1]["ignored_local_model_parameter"])
         self.assertIn('privacy: "remote-asr-raw"', Path(result["output_path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(requests_seen), 1)
         request = requests_seen[0]

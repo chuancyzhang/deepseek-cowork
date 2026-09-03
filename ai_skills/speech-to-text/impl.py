@@ -338,17 +338,14 @@ def transcribe_audio(
         config = _configured_backend(context)
         backend = config["backend"]
         requested_model = str(model or "").strip().lower()
+        ignored_local_model_parameter = False
         if backend == ASR_BACKEND_LOCAL:
             effective_model = requested_model or "sensevoice"
             if effective_model != "sensevoice":
                 raise ValueError("本地 model 目前只支持 sensevoice。")
             effective_diarize = True if diarize is None else bool(diarize)
         else:
-            if requested_model:
-                raise RemoteTranscriptionError(
-                    "remote_model_parameter_unsupported",
-                    "远程模式的模型由能力设置管理，请不要传入本地 model 参数。",
-                )
+            ignored_local_model_parameter = bool(requested_model)
             if diarize is True or int(speaker_count or 0) > 0:
                 raise RemoteTranscriptionError(
                     "remote_diarization_unsupported",
@@ -392,6 +389,7 @@ def transcribe_audio(
             model=effective_model,
             diarize=effective_diarize,
             polish=polish,
+            ignored_local_model_parameter=ignored_local_model_parameter,
         )
         abort_state = _init_abort_state(context)
         _raise_if_aborted(abort_state)
@@ -498,6 +496,10 @@ def transcribe_audio(
             )
             _atomic_write_text(final_path, fallback_markdown)
 
+        warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+        if ignored_local_model_parameter:
+            warnings = list(warnings)
+            warnings.append("已忽略仅适用于本地后端的 model 参数；远程请求使用能力设置中的模型名称。")
         response = {
             "ok": True,
             "status": "completed",
@@ -510,7 +512,7 @@ def transcribe_audio(
             "speaker_count": int(payload.get("speaker_count") or 0),
             "diarized": bool(payload.get("diarized")),
             "ai_polish_requested": polish,
-            "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
+            "warnings": warnings,
             "asr_chunk_count": int(payload.get("asr_chunk_count") or 0),
             "decoded_chunk_count": int(payload.get("decoded_chunk_count") or 0),
         }
@@ -544,6 +546,7 @@ def transcribe_audio(
             speaker_count=response["speaker_count"],
             diarized=response["diarized"],
             polish=polish,
+            ignored_local_model_parameter=ignored_local_model_parameter,
         )
         return _json(response)
     except ComponentNotReadyError as exc:

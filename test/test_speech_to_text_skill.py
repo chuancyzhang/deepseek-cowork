@@ -235,8 +235,80 @@ class TestSpeechToTextSkill(unittest.TestCase):
         self.assertEqual(request["authorization"], "Bearer remote-secret-key")
         self.assertIn(b'name="model"', request["body"])
         self.assertIn(b"Qwen3-ASR-1.7B", request["body"])
+        self.assertIn(b'name="stream"', request["body"])
+        self.assertIn(b"false", request["body"])
         self.assertIn(b'name="language"', request["body"])
         self.assertIn(b"test-audio-placeholder", request["body"])
+
+    def test_known_remote_provider_rejects_unsupported_large_input_before_upload(self):
+        oversized_audio = os.path.join(self.workspace_dir, "long-recording.m4a")
+        with open(oversized_audio, "wb") as handle:
+            handle.truncate(26_000_000)
+        observability = SignalStub()
+        context = {
+            "skill_config": {
+                "ASR_BACKEND": "openai_compatible",
+                "ASR_API_URL": "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions",
+                "ASR_MODEL_NAME": "glm-asr-2512",
+                "ASR_API_KEY": "secret",
+            },
+            "observability_signal": observability,
+        }
+
+        with patch.object(self.module, "run_skill_script_in_sandbox") as runner:
+            result = json.loads(self.module.transcribe_audio(
+                "long-recording.m4a",
+                False,
+                workspace_dir=self.workspace_dir,
+                _context=context,
+            ))
+
+        runner.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "remote_input_unsupported")
+        self.assertFalse(result["retryable"])
+        self.assertIn("仅接受 MP3/WAV", result["error"]["message"])
+        self.assertIn("26.0 MB", result["error"]["message"])
+        self.assertEqual(observability.values[-1]["error_code"], "remote_input_unsupported")
+
+    def test_remote_error_preserves_recovery_and_retryability(self):
+        context = {
+            "skill_config": {
+                "ASR_BACKEND": "openai_compatible",
+                "ASR_API_URL": "https://asr.example.com/v1/audio/transcriptions",
+                "ASR_MODEL_NAME": "remote-asr",
+                "ASR_API_KEY": "secret",
+            }
+        }
+        error_payload = {
+            "ok": False,
+            "error": {
+                "code": "remote_tls_failed",
+                "message": "远程语音接口 TLS 校验失败。",
+                "recovery": "检查接口证书链。",
+                "retryable": False,
+            },
+        }
+        with patch.object(
+            self.module,
+            "run_skill_script_in_sandbox",
+            return_value={
+                "ok": False,
+                "exit_code": 1,
+                "stdout": json.dumps(error_payload, ensure_ascii=False),
+                "stderr": "",
+            },
+        ):
+            result = json.loads(self.module.transcribe_audio(
+                "meeting.wav",
+                False,
+                workspace_dir=self.workspace_dir,
+                _context=context,
+            ))
+
+        self.assertEqual(result["error"]["code"], "remote_tls_failed")
+        self.assertEqual(result["error"]["recovery"], "检查接口证书链。")
+        self.assertFalse(result["retryable"])
 
     def test_remote_backend_rejects_local_diarization_parameters(self):
         result = json.loads(self.module.transcribe_audio(

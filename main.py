@@ -139,9 +139,11 @@ from core.audio_attachments import is_audio_attachment, partition_model_visible_
 from core.speech_to_text_config import (
     ASR_BACKEND_LOCAL,
     ASR_BACKEND_OPENAI_COMPATIBLE,
+    RemoteTranscriptionInputError,
     SPEECH_TO_TEXT_SKILL_ID,
     speech_to_text_config,
     speech_to_text_http_warning,
+    validate_remote_transcription_input,
     validate_speech_to_text_config,
 )
 from core.generated_images import has_visible_assistant_output, output_image_parts
@@ -32014,6 +32016,25 @@ class MainWindow(QMainWindow):
             )
             return False
         if validated_config.get("backend") == ASR_BACKEND_OPENAI_COMPATIBLE:
+            try:
+                for path in file_paths or []:
+                    if is_audio_attachment(path):
+                        validate_remote_transcription_input(validated_config, path)
+            except RemoteTranscriptionInputError as exc:
+                log_chat_runtime_debug(
+                    "speech_remote_input_preflight_blocked",
+                    session_id=str(getattr(state, "session_id", "") or ""),
+                    error_code=exc.code,
+                    **exc.details,
+                )
+                self._show_conversation_notice(
+                    state,
+                    f"{exc} {exc.recovery} 本次录音尚未提交给 AI。",
+                    "warning",
+                    action_text="打开语音转文字设置",
+                    action_callback=self._open_speech_to_text_settings,
+                )
+                return False
             return True
         status = speech_to_text_component_status(include_size=False)
         if status.get("ready"):

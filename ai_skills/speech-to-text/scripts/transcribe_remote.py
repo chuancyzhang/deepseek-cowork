@@ -43,6 +43,14 @@ def _server_error(response, secret):
     return f"{base} {message}".strip() if message else base
 
 
+def _request_error_message(prefix, error, secret, source_path):
+    detail = _redact(error, secret)
+    if source_path:
+        detail = detail.replace(str(source_path), "<audio>")
+    detail = detail[:1000]
+    return f"{prefix}：{detail}" if detail else prefix
+
+
 def main():
     api_url = str(os.environ.get("ASR_API_URL") or "").strip()
     model_name = str(os.environ.get("ASR_MODEL_NAME") or "").strip()
@@ -67,7 +75,7 @@ def main():
             },
         }, failed=True)
 
-    data = {"model": model_name}
+    data = {"model": model_name, "stream": "false"}
     if language and language != "auto":
         data["language"] = language
     content_type = mimetypes.guess_type(source_path)[0] or "application/octet-stream"
@@ -82,20 +90,54 @@ def main():
                 timeout=(min(30, timeout_seconds), timeout_seconds),
                 allow_redirects=False,
             )
-    except requests.Timeout:
+    except requests.exceptions.InvalidURL as exc:
+        _emit({
+            "ok": False,
+            "error": {
+                "code": "remote_invalid_url",
+                "message": _request_error_message("远程语音接口地址无效", exc, api_key, source_path),
+                "recovery": "检查语音转文字能力中的接口地址。",
+                "retryable": False,
+            },
+        }, failed=True)
+    except requests.exceptions.SSLError as exc:
+        _emit({
+            "ok": False,
+            "error": {
+                "code": "remote_tls_failed",
+                "message": _request_error_message("远程语音接口 TLS 校验失败", exc, api_key, source_path),
+                "recovery": "检查接口证书链或系统代理证书配置后重试。",
+                "retryable": False,
+            },
+        }, failed=True)
+    except requests.Timeout as exc:
         _emit({
             "ok": False,
             "error": {
                 "code": "remote_timeout",
-                "message": "远程语音接口请求超时。",
+                "message": _request_error_message("远程语音接口请求超时", exc, api_key, source_path),
+                "recovery": "检查接口状态或提高超时时间后重试。",
+                "retryable": True,
             },
         }, failed=True)
-    except requests.RequestException:
+    except requests.ConnectionError as exc:
+        _emit({
+            "ok": False,
+            "error": {
+                "code": "remote_connection_failed",
+                "message": _request_error_message("远程连接在建立或上传过程中中断", exc, api_key, source_path),
+                "recovery": "检查网络与服务端上传限制后重试；若同一文件重复失败，请不要继续重试。",
+                "retryable": True,
+            },
+        }, failed=True)
+    except requests.RequestException as exc:
         _emit({
             "ok": False,
             "error": {
                 "code": "remote_request_failed",
-                "message": "无法连接远程语音接口。",
+                "message": _request_error_message("远程语音请求失败", exc, api_key, source_path),
+                "recovery": "根据错误详情修正请求后重试。",
+                "retryable": False,
             },
         }, failed=True)
 
@@ -106,6 +148,8 @@ def main():
                 "code": "remote_http_error",
                 "message": _server_error(response, api_key),
                 "http_status": response.status_code,
+                "recovery": "根据服务端错误检查鉴权、模型和上传文件限制。",
+                "retryable": response.status_code in {408, 429} or response.status_code >= 500,
             },
         }, failed=True)
     if len(response.content) > MAX_RESPONSE_BYTES:

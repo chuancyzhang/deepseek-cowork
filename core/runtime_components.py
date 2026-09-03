@@ -329,8 +329,6 @@ def _speech_component_file_records(paths):
 
 
 def speech_to_text_component_status(include_size=False):
-    from core.sandbox_runtime import read_skill_dependency_status, skill_dependency_hash
-
     paths = speech_to_text_component_paths()
     root_exists = os.path.isdir(paths["root"])
     marker = _read_speech_to_text_marker()
@@ -359,14 +357,6 @@ def speech_to_text_component_status(include_size=False):
             if include_size and _sha256_file(path) != str(expected.get("sha256") or "").lower():
                 errors.append(f"模型文件 SHA-256 异常：{key}")
 
-    dependency_status = read_skill_dependency_status(SPEECH_TO_TEXT_SKILL_ID)
-    dependency_hash = skill_dependency_hash([], SPEECH_TO_TEXT_NODE_DEPENDENCIES)
-    dependencies_ready = bool(
-        dependency_status.get("ok")
-        and dependency_status.get("hash") == dependency_hash
-    )
-    if installed and not dependencies_ready:
-        errors.append("语音转文字 Node 依赖未就绪。")
     node_status = node_runtime_status()
     node_ready = bool(
         node_status.get("installed")
@@ -387,7 +377,7 @@ def speech_to_text_component_status(include_size=False):
         if installed and not os.path.isfile(package_manifest):
             errors.append(f"语音组件缺少离线 Node 依赖：{package_name}。")
 
-    healthy = bool(installed and not needs_update and dependencies_ready and node_ready and not errors)
+    healthy = bool(installed and not needs_update and node_ready and not errors)
     return {
         "id": SPEECH_TO_TEXT_COMPONENT_ID,
         "name": "语音转文字组件",
@@ -412,6 +402,7 @@ def speech_to_text_component_status(include_size=False):
                     "v1",
                     "skills",
                     SPEECH_TO_TEXT_SKILL_ID,
+                    "node",
                 )
             )
             if include_size
@@ -598,7 +589,7 @@ def _replace_speech_roots_transactionally(pairs, health_check):
 
 def install_speech_to_text_component(source=None, progress_callback=None, force=False):
     del force
-    from core.sandbox_runtime import reset_native_library_dir_caches, reset_runtime_cache, skill_dependency_hash
+    from core.sandbox_runtime import reset_native_library_dir_caches, reset_runtime_cache
 
     package_path = (
         str(source.get("package_path") or "")
@@ -640,14 +631,7 @@ def install_speech_to_text_component(source=None, progress_callback=None, force=
             "sha256": str(segmentation_spec["sha256"]).lower(),
         }
         shutil.copytree(os.path.join(unpacked, "skill-runtime"), staged_skill)
-        dependency_status = {
-            "ok": True,
-            "hash": skill_dependency_hash([], SPEECH_TO_TEXT_NODE_DEPENDENCIES),
-            "message": "Installed from verified local release package.",
-            "installed": True,
-        }
-        with open(os.path.join(staged_skill, "dependency_status.json"), "w", encoding="utf-8") as handle:
-            json.dump(dependency_status, handle, ensure_ascii=False, indent=2)
+        staged_skill_node = os.path.join(staged_skill, "node")
         node_extract = os.path.join(transaction_root, "node-extract")
         os.makedirs(node_extract)
         with zipfile.ZipFile(os.path.join(unpacked, "node-runtime", NODE_ARCHIVE), "r") as archive:
@@ -678,7 +662,8 @@ def install_speech_to_text_component(source=None, progress_callback=None, force=
         runtime_node_target = os.path.join(sandbox_root, "runtimes", "node")
         component_target = speech_to_text_component_root()
         skill_target = speech_to_text_skill_runtime_root()
-        for target in (runtime_node_target, component_target, skill_target):
+        skill_node_target = os.path.join(skill_target, "node")
+        for target in (runtime_node_target, component_target, skill_node_target):
             os.makedirs(os.path.dirname(target), exist_ok=True)
 
         def health_check():
@@ -715,7 +700,7 @@ def install_speech_to_text_component(source=None, progress_callback=None, force=
                 [
                     (staged_node, runtime_node_target),
                     (staged_component, component_target),
-                    (staged_skill, skill_target),
+                    (staged_skill_node, skill_node_target),
                 ],
                 health_check,
             )
@@ -734,8 +719,8 @@ def uninstall_speech_to_text_component():
     from core.sandbox_runtime import reset_native_library_dir_caches
 
     component_root = speech_to_text_component_root()
-    skill_root = speech_to_text_skill_runtime_root()
-    for target in (component_root, skill_root):
+    skill_node_root = os.path.join(speech_to_text_skill_runtime_root(), "node")
+    for target in (component_root, skill_node_root):
         if os.path.isdir(target):
             shutil.rmtree(target)
     reset_native_library_dir_caches(SPEECH_TO_TEXT_SKILL_ID)

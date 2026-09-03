@@ -360,6 +360,79 @@ class TestRuntimeComponents(unittest.TestCase):
         self.assertTrue(status["needs_repair"])
         self.assertIn("健康标记", status["health_error"])
 
+    def test_speech_component_health_does_not_share_skill_dependency_hash(self):
+        with tempfile.TemporaryDirectory() as data_dir, patch.object(
+            runtime_components,
+            "get_app_data_dir",
+            return_value=data_dir,
+        ), patch.object(
+            runtime_components,
+            "node_runtime_status",
+            return_value={"installed": True, "version": runtime_components.NODE_VERSION},
+        ):
+            paths = runtime_components.speech_to_text_component_paths()
+            file_records = {}
+            for key in ("sensevoice_model", "sensevoice_tokens", "segmentation", "embedding"):
+                path = paths[key]
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                payload = key.encode("utf-8")
+                with open(path, "wb") as handle:
+                    handle.write(payload)
+                file_records[key] = {
+                    "path": os.path.relpath(path, paths["root"]).replace("\\", "/"),
+                    "size": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            marker = {
+                "schema": runtime_components.SPEECH_TO_TEXT_COMPONENT_SCHEMA,
+                "definition_hash": runtime_components._speech_to_text_definition_hash(),
+                "files": file_records,
+            }
+            with open(paths["marker"], "w", encoding="utf-8") as handle:
+                json.dump(marker, handle)
+            skill_root = runtime_components.speech_to_text_skill_runtime_root()
+            for package_name in ("ffmpeg-static", "sherpa-onnx-node"):
+                manifest = os.path.join(skill_root, "node", "node_modules", package_name, "package.json")
+                os.makedirs(os.path.dirname(manifest), exist_ok=True)
+                with open(manifest, "w", encoding="utf-8") as handle:
+                    handle.write("{}")
+            with open(os.path.join(skill_root, "dependency_status.json"), "w", encoding="utf-8") as handle:
+                json.dump({"ok": True, "hash": "python-dependency-hash"}, handle)
+
+            status = runtime_components.speech_to_text_component_status()
+
+        self.assertTrue(status["ready"], status)
+        self.assertEqual(status["health_error"], "")
+
+    def test_uninstalling_speech_component_preserves_python_skill_dependencies(self):
+        with tempfile.TemporaryDirectory() as data_dir, patch.object(
+            runtime_components,
+            "get_app_data_dir",
+            return_value=data_dir,
+        ), patch.object(
+            runtime_components,
+            "speech_to_text_component_status",
+            return_value={"ready": False},
+        ):
+            component_root = runtime_components.speech_to_text_component_root()
+            skill_root = runtime_components.speech_to_text_skill_runtime_root()
+            node_file = os.path.join(skill_root, "node", "node_modules", "module.js")
+            python_file = os.path.join(skill_root, "python", "site-packages", "requests", "__init__.py")
+            dependency_status = os.path.join(skill_root, "dependency_status.json")
+            for path in (os.path.join(component_root, "component.json"), node_file, python_file):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("test")
+            with open(dependency_status, "w", encoding="utf-8") as handle:
+                json.dump({"ok": True, "hash": "python-dependency-hash"}, handle)
+
+            runtime_components.uninstall_speech_to_text_component()
+
+            self.assertFalse(os.path.exists(component_root))
+            self.assertFalse(os.path.exists(os.path.join(skill_root, "node")))
+            self.assertTrue(os.path.isfile(python_file))
+            self.assertTrue(os.path.isfile(dependency_status))
+
 
 if __name__ == "__main__":
     unittest.main()

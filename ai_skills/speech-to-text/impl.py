@@ -14,6 +14,8 @@ from core.sandbox_runtime import run_skill_script_in_sandbox
 from core.speech_to_text_config import (
     ASR_BACKEND_LOCAL,
     ASR_BACKEND_OPENAI_COMPATIBLE,
+    RemoteTranscriptionInputError,
+    validate_remote_transcription_input,
     validate_speech_to_text_config,
 )
 
@@ -33,9 +35,11 @@ class ComponentNotReadyError(RuntimeError):
 
 
 class RemoteTranscriptionError(RuntimeError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, recovery="", retryable=False):
         super().__init__(message)
         self.code = str(code or "remote_transcription_failed")
+        self.recovery = str(recovery or "")
+        self.retryable = bool(retryable)
 
 
 def _json(payload):
@@ -311,6 +315,8 @@ def _run_remote_transcription(
         raise RemoteTranscriptionError(
             error.get("code"),
             str(error.get("message") or "远程语音接口转录失败。"),
+            recovery=str(error.get("recovery") or ""),
+            retryable=bool(error.get("retryable")),
         )
     return payload, False
 
@@ -365,6 +371,8 @@ def transcribe_audio(
             workspace_dir,
             context,
         )
+        if backend == ASR_BACKEND_OPENAI_COMPATIBLE:
+            validate_remote_transcription_input(config, source_path)
         final_path = _resolve_workspace_markdown(
             output_path,
             workspace_root,
@@ -559,12 +567,37 @@ def transcribe_audio(
     except InterruptedError as exc:
         _emit_diagnostic(context, "finish", started_at, outcome="aborted")
         return _json(_error("aborted", str(exc), "可重新发起转录。"))
-    except RemoteTranscriptionError as exc:
-        _emit_diagnostic(context, "error", started_at, backend=ASR_BACKEND_OPENAI_COMPATIBLE, error_type=type(exc).__name__)
+    except RemoteTranscriptionInputError as exc:
+        _emit_diagnostic(
+            context,
+            "error",
+            started_at,
+            backend=ASR_BACKEND_OPENAI_COMPATIBLE,
+            error_type=type(exc).__name__,
+            error_code=exc.code,
+            **exc.details,
+        )
         return _json(_error(
             exc.code,
             str(exc),
-            "检查语音转文字能力中的接口地址、模型名称和 API Key 后重试。",
+            exc.recovery,
+            retryable=exc.retryable,
+        ))
+    except RemoteTranscriptionError as exc:
+        _emit_diagnostic(
+            context,
+            "error",
+            started_at,
+            backend=ASR_BACKEND_OPENAI_COMPATIBLE,
+            error_type=type(exc).__name__,
+            error_code=exc.code,
+            retryable=exc.retryable,
+        )
+        return _json(_error(
+            exc.code,
+            str(exc),
+            exc.recovery or "检查语音转文字能力中的接口地址、模型名称和 API Key 后重试。",
+            retryable=exc.retryable,
         ))
     except subprocess.TimeoutExpired:
         _emit_diagnostic(context, "error", started_at, error_type="TimeoutExpired")

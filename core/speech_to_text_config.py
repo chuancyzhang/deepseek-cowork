@@ -12,6 +12,23 @@ SUPPORTED_ASR_BACKENDS = {
     ASR_BACKEND_LOCAL,
     ASR_BACKEND_OPENAI_COMPATIBLE,
 }
+_KNOWN_REMOTE_LIMITS = {
+    ("open.bigmodel.cn", "glm-asr-2512"): {
+        "label": "GLM-ASR-2512",
+        "extensions": {".wav", ".mp3"},
+        "max_file_bytes": 25_000_000,
+        "max_duration_seconds": 30,
+    },
+}
+
+
+class RemoteTranscriptionInputError(ValueError):
+    def __init__(self, message, *, code="remote_input_unsupported", recovery="", details=None):
+        super().__init__(message)
+        self.code = str(code or "remote_input_unsupported")
+        self.recovery = str(recovery or "")
+        self.retryable = False
+        self.details = dict(details or {})
 
 
 def speech_to_text_config(values):
@@ -80,3 +97,51 @@ def speech_to_text_http_warning(values):
     if parsed.scheme.lower() == "http":
         return "当前接口使用 HTTP，音频与 API Key 将通过未加密连接传输。"
     return ""
+
+
+def validate_remote_transcription_input(config, audio_path):
+    """Fail before AI/tool execution when a known remote provider rejects the input contract."""
+    source = config if isinstance(config, dict) else {}
+    if str(source.get("backend") or "").strip().lower() != ASR_BACKEND_OPENAI_COMPATIBLE:
+        return None
+    try:
+        hostname = str(urlsplit(str(source.get("api_url") or "")).hostname or "").lower()
+    except ValueError:
+        return None
+    model_name = str(source.get("model_name") or "").strip().lower()
+    limits = _KNOWN_REMOTE_LIMITS.get((hostname, model_name))
+    if not limits:
+        return None
+
+    import os
+
+    path = os.path.abspath(str(audio_path or ""))
+    extension = os.path.splitext(path)[1].lower()
+    try:
+        file_size_bytes = os.path.getsize(path)
+    except OSError:
+        return None
+    issues = []
+    if extension not in limits["extensions"]:
+        issues.append(f"当前格式为 {extension.lstrip('.').upper() or '未知'}")
+    if file_size_bytes > limits["max_file_bytes"]:
+        issues.append(f"当前大小为 {file_size_bytes / 1_000_000:.1f} MB")
+    if not issues:
+        return None
+
+    accepted = "/".join(item.lstrip(".").upper() for item in sorted(limits["extensions"]))
+    message = (
+        f"{limits['label']} 仅接受 {accepted}，文件不超过 25 MB、音频不超过 "
+        f"{limits['max_duration_seconds']} 秒；" + "，".join(issues) + "。"
+    )
+    raise RemoteTranscriptionInputError(
+        message,
+        recovery="请切换到本地语音组件，或先将音频转换并切分为符合接口限制的小文件。",
+        details={
+            "provider": hostname,
+            "model": model_name,
+            "extension": extension,
+            "file_size_bytes": file_size_bytes,
+            "max_file_bytes": limits["max_file_bytes"],
+        },
+    )

@@ -154,6 +154,36 @@ class TestAudioAttachmentPrivacy(unittest.TestCase):
             self.assertNotIn("private.webm", payload["content"])
             self.assertEqual(payload["meta"]["transcription_only_audio_files"], [audio])
 
+    def test_known_remote_input_limit_blocks_before_ai_submission(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            audio = os.path.join(workspace, "long-recording.m4a")
+            Path(audio).write_bytes(b"audio")
+            window = MainWindow.__new__(MainWindow)
+            window._show_conversation_notice = MagicMock()
+            window._open_speech_to_text_settings = MagicMock()
+            state = type("_Session", (), {"session_id": "session-remote-limit"})()
+            config = {
+                "backend": "openai_compatible",
+                "api_url": "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions",
+                "model_name": "glm-asr-2512",
+                "api_key": "secret",
+            }
+
+            with patch("main.speech_to_text_component_status") as component_status:
+                allowed = window._ensure_speech_component_before_submit(
+                    state,
+                    [audio],
+                    keep_audio_local=True,
+                    transcription_config=config,
+                )
+
+            self.assertFalse(allowed)
+            component_status.assert_not_called()
+            notice_args = window._show_conversation_notice.call_args
+            self.assertIn("仅接受 MP3/WAV", notice_args.args[1])
+            self.assertIn("切换到本地语音组件", notice_args.args[1])
+            self.assertIn("尚未提交给 AI", notice_args.args[1])
+
 
 if __name__ == "__main__":
     unittest.main()

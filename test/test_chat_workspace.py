@@ -244,14 +244,27 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             self.assertEqual(ctx["grill_cycle_count"], 3)
             self.assertFalse(ctx["grill_execution_confirmed"])
 
-    def test_new_session_defaults_to_current_conversation_model(self):
+    def test_new_session_uses_saved_default_without_changing_current_model(self):
         window = self._window(tempfile.gettempdir())
         state = _State("current")
         state.selected_model_id = "model-b"
         window.sessions = {state.session_id: state}
         window.current_session_id = state.session_id
 
-        self.assertEqual(window._default_model_id_for_new_session(), "model-b")
+        self.assertEqual(window._default_model_id_for_new_session(), "model-a")
+        self.assertEqual(state.selected_model_id, "model-b")
+        self.assertEqual(window._model_id_for_state(state), "model-b")
+
+    def test_new_session_without_models_has_no_default(self):
+        window = self._window(tempfile.gettempdir())
+        window.config_manager.get_selected_model_id.return_value = ""
+        self.assertEqual(window._default_model_id_for_new_session(), "")
+
+    def test_new_session_default_read_failure_is_not_hidden(self):
+        window = self._window(tempfile.gettempdir())
+        window.config_manager.get_selected_model_id.side_effect = RuntimeError("config failed")
+        with self.assertRaisesRegex(RuntimeError, "config failed"):
+            window._default_model_id_for_new_session()
 
     def test_chat_workspace_is_not_grouped_as_project_history(self):
         with tempfile.TemporaryDirectory() as base_dir, patch("main.get_base_dir", return_value=base_dir):

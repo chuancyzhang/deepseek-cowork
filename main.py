@@ -7175,9 +7175,10 @@ class ModelChannelEditor(QFrame):
 class ModelChannelManager(QWidget):
     changed = Signal()
 
-    def __init__(self, channels, parent=None):
+    def __init__(self, channels, parent=None, selected_model_id=""):
         super().__init__(parent)
         self.editors = []
+        self._default_model_id = str(selected_model_id or "")
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(14)
@@ -7205,6 +7206,18 @@ class ModelChannelManager(QWidget):
         toolbar.addWidget(self.delete_selected_channel_btn)
         self.layout.addLayout(toolbar)
 
+        self.layout.addWidget(QLabel("默认模型"))
+        self.default_model_combo = QComboBox()
+        self.default_model_combo.setObjectName("DefaultModelCombo")
+        self.default_model_combo.setMinimumWidth(0)
+        self.default_model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.default_model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        apply_settings_combo_style(self.default_model_combo)
+        self.layout.addWidget(self.default_model_combo)
+        self.default_model_hint = QLabel("仅用于新建对话；已有对话保留自己的模型。")
+        self.default_model_hint.setWordWrap(True)
+        self.layout.addWidget(self.default_model_hint)
+
         self.channel_splitter = QSplitter(Qt.Horizontal)
         self.channel_splitter.setChildrenCollapsible(False)
         self.channel_splitter.setHandleWidth(1)
@@ -7224,6 +7237,46 @@ class ModelChannelManager(QWidget):
 
         for index, channel in enumerate(channels or []):
             self._add_editor(channel, expanded=index == 0)
+        self._refresh_default_models()
+        self.default_model_combo.currentIndexChanged.connect(self._on_default_model_changed)
+        self.changed.connect(self._refresh_default_models)
+        bind_theme(self, self._refresh_default_model_theme, surface="dialogs")
+
+    def _refresh_default_model_theme(self, _resolved=None):
+        apply_settings_combo_style(self.default_model_combo)
+
+    def _refresh_default_models(self):
+        combo = self.default_model_combo
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for channel in self.get_channels():
+                for model in channel.get("models") or []:
+                    combo.addItem(
+                        f"{channel.get('display_name') or '未命名服务'} / "
+                        f"{model.get('display_name') or model.get('model_name') or model['id']}",
+                        model["id"],
+                    )
+            has_models = combo.count() > 0
+            index = combo.findData(self._default_model_id)
+            combo.setPlaceholderText("请选择默认模型" if has_models else "尚未配置模型")
+            combo.setCurrentIndex(index)
+            combo.setEnabled(has_models)
+            self.default_model_hint.setText(
+                "默认模型未选择或已删除，请重新选择后保存。仅用于新建对话。"
+                if has_models and index < 0
+                else "仅用于新建对话；已有对话保留自己的模型。"
+            )
+            combo.setToolTip(combo.currentText())
+        finally:
+            combo.blockSignals(blocked)
+
+    def _on_default_model_changed(self, _index):
+        self._default_model_id = str(self.default_model_combo.currentData() or "")
+        self.changed.emit()
+
+    def get_default_model_id(self):
+        return str(self.default_model_combo.currentData() or "")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -11633,7 +11686,8 @@ class SettingsDialog(QDialog):
         )
 
         self.model_channel_manager = ModelChannelManager(
-            self.config_manager.get_model_channels()
+            self.config_manager.get_model_channels(),
+            selected_model_id=self.config_manager.get_selected_model_id(),
         )
 
         appearance_page, appearance_layout = make_scroll_page(
@@ -12374,6 +12428,7 @@ class SettingsDialog(QDialog):
         state = {
             "config": {
                 "model_channels": self.model_channel_manager.get_channels(),
+                "selected_model_id": self.model_channel_manager.get_default_model_id(),
                 "agent_profiles": self.agent_profile_manager.get_profiles(),
                 "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
                 "default_workspace": self.default_ws_input.text().strip(),
@@ -13800,7 +13855,7 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         self.requires_skill_reload = False
-        selected_model_id = self.config_manager.get_selected_model_id()
+        selected_model_id = self.model_channel_manager.get_default_model_id()
         model_channels = self.model_channel_manager.get_channels()
         mcp_servers = normalize_mcp_servers(self.mcp_server_manager.get_servers())
         current_mcp_servers = self.config_manager.get_mcp_servers()
@@ -13810,8 +13865,10 @@ class SettingsDialog(QDialog):
             for model in (channel.get("models") or [])
             if model.get("id")
         ]
-        if selected_model_id not in all_model_ids:
-            selected_model_id = all_model_ids[0] if all_model_ids else ""
+        if all_model_ids and selected_model_id not in all_model_ids:
+            log_model_service_event("default_model_save_rejected", reason="selection_required")
+            QMessageBox.warning(self, "请选择默认模型", "默认模型未选择或已删除，请在“模型与服务”重新选择后保存。")
+            return
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
             reply = QMessageBox.question(
                 self,
@@ -13879,6 +13936,8 @@ class SettingsDialog(QDialog):
                 "god_mode": self.config_manager.get_god_mode(),
                 "download_sources": self.config_manager.get("download_sources", {}),
             }
+        if config_changed:
+            log_model_service_event("default_model_save_started", model_id=selected_model_id)
         try:
             if "soul" in memory_write_scopes:
                 target_memory_store.save_soul(current_memory_state["soul"])
@@ -13909,6 +13968,8 @@ class SettingsDialog(QDialog):
             if appearance_changed:
                 self.theme_settings_panel.commit()
         except Exception as exc:
+            if config_changed:
+                log_model_service_event("default_model_save_failed", error_type=type(exc).__name__)
             try:
                 if appearance_changed:
                     self.theme_settings_panel.restore_saved_theme()
@@ -13952,6 +14013,8 @@ class SettingsDialog(QDialog):
                 return
             QMessageBox.critical(self, "保存设置失败", f"所有修改已回滚：{exc}")
             return
+        if config_changed:
+            log_model_service_event("default_model_save_completed", model_id=selected_model_id)
         if memory_write_scopes:
             self.memory_store = target_memory_store
         self.requires_skill_reload = mcp_servers != current_mcp_servers
@@ -32869,14 +32932,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _default_model_id_for_new_session(self):
-        current = self.get_current_session()
-        model_id = self._model_id_for_state(current) if current else ""
-        if model_id:
-            return model_id
-        try:
-            return self.config_manager.get_selected_model_id()
-        except Exception:
-            return ""
+        return self.config_manager.get_selected_model_id()
 
     def refresh_model_selector(self):
         if not hasattr(self, "model_select_btn"):
@@ -36413,6 +36469,10 @@ class MainWindow(QMainWindow):
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
         state.selected_model_id = self._default_model_id_for_new_session()
+        log_model_service_event(
+            "session_model_initialized", session_id=session_id,
+            model_id=state.selected_model_id, fresh_session=is_fresh_session,
+        )
         self.sessions[session_id] = state
         requested_workspace = workspace_dir if workspace_dir is not None else ""
         if self._normalize_project_path(requested_workspace):

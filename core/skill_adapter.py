@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+import stat
 
 
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}
@@ -207,6 +208,8 @@ def discover_skill_artifacts(source_path, declared_script_entries=None, declared
         dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
         rel_root = os.path.relpath(root, source_path)
         for filename in filenames:
+            if filename == ".skillhub.json":
+                continue
             rel_path = os.path.normpath(os.path.join(rel_root, filename)) if rel_root != "." else filename
             lower_rel = rel_path.lower()
             ext = os.path.splitext(filename.lower())[1]
@@ -468,7 +471,22 @@ def _extract_zip_to_tempdir(source_path):
     temp_dir = tempfile.mkdtemp(prefix="cowork-agent-skill-")
     try:
         with zipfile.ZipFile(source_path, "r") as archive:
+            seen = set()
+            total = 0
             for member in archive.infolist():
+                parts = member.filename.replace("\\", "/").rstrip("/").split("/")
+                if any(not p or p in {".", ".."} or p.endswith((".", " "))
+                       or re.search(r'[<>:"|?*\x00-\x1f]', p)
+                       or re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", p)
+                       for p in parts):
+                    raise ValueError("ZIP contains unsafe paths")
+                key = "/".join(parts).casefold()
+                if key in seen or stat.S_ISLNK(member.external_attr >> 16):
+                    raise ValueError("ZIP contains duplicate paths or links")
+                seen.add(key)
+                total += member.file_size
+                if len(seen) > 2000 or total > 50 * 1024 * 1024:
+                    raise ValueError("ZIP exceeds 2000 files or 50 MB expanded size")
                 target_path = os.path.abspath(os.path.join(temp_dir, member.filename))
                 if os.path.commonpath([temp_dir, target_path]) != temp_dir:
                     raise ValueError("ZIP contains unsafe paths")

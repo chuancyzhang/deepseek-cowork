@@ -53,6 +53,9 @@ from .clarify_mode import normalize_selected_skill_names
 from .im_gateway_registry import ARTIFACT_DELIVERY_NONE, provider_artifact_delivery_mode
 
 
+SKILL_MUTATION_LOCK = threading.RLock()
+
+
 def _tokenize(text):
     return set(re.findall(r"[a-z0-9][a-z0-9_\-]+|[\u4e00-\u9fff]{2,}", str(text or "").casefold()))
 
@@ -2494,18 +2497,8 @@ class SkillManager:
         return os.path.basename(os.path.normpath(source_path))
 
     def _extract_zip_to_tempdir(self, source_path):
-        temp_dir = tempfile.mkdtemp(prefix="cowork-skill-import-")
-        try:
-            with zipfile.ZipFile(source_path, "r") as archive:
-                for member in archive.infolist():
-                    target_path = os.path.abspath(os.path.join(temp_dir, member.filename))
-                    if os.path.commonpath([temp_dir, target_path]) != temp_dir:
-                        raise ValueError("ZIP contains unsafe paths")
-                archive.extractall(temp_dir)
-            return temp_dir
-        except Exception:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
+        from .skill_adapter import _extract_zip_to_tempdir
+        return _extract_zip_to_tempdir(source_path)
 
     def _resolve_import_source_dir(self, extracted_root):
         if not os.path.isdir(extracted_root):
@@ -2539,16 +2532,51 @@ class SkillManager:
             lines.append("失败：" + "、".join(item.get("skill_name") or "" for item in failed[:8] if item.get("skill_name")))
         return "\n".join(lines)
 
-    def _import_single_skill_dir(self, source_path, source_format="auto"):
+    def _import_single_skill_dir(self, source_path, source_format="auto", *, enabled=None,
+                                 prepare_dependencies=True, update_skill=None, origin=None,
+                                 expected_files=None, on_commit=None):
+        from .skillhub import ORIGIN_FILE, file_hashes, read_origin
         skill_name = self._read_skill_name_from_path(source_path)
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", skill_name):
+            raise ValueError("Invalid skill name")
         target_dir = self._default_writable_skill_root()
+        os.makedirs(target_dir, exist_ok=True)
         target_path = os.path.join(target_dir, skill_name)
-        if os.path.exists(target_path):
-            return {
-                "status": "skipped_existing",
-                "skill_name": skill_name,
-                "message": f"Skill '{skill_name}' already exists",
-            }
+        if origin:
+            if os.path.exists(os.path.join(source_path, ORIGIN_FILE)):
+                raise ValueError("远程包不得包含本地来源记录")
+            expected = {item["path"]: item["sha256"] for item in expected_files or []}
+            # SkillHub adds transport metadata to ZIPs outside the version file manifest.
+            transport_meta = os.path.join(source_path, "_meta.json")
+            if "_meta.json" not in expected and os.path.isfile(transport_meta):
+                with open(transport_meta, encoding="utf-8") as handle:
+                    transport = json.load(handle)
+                if not isinstance(transport, dict) or transport.get("slug") != origin["slug"] or transport.get("version") != origin["version"]:
+                    raise ValueError("下载包元数据与请求的技能版本不匹配")
+                os.remove(transport_meta)
+            if not expected or len(expected) != len(expected_files) or file_hashes(source_path, ignore_runtime=False) != expected:
+                raise ValueError("技能包文件清单或 SHA256 校验失败")
+            existing = self._find_skill_path(skill_name)
+            if existing and os.path.abspath(existing) != os.path.abspath(target_path):
+                raise ValueError("同名其他来源技能已存在，不能覆盖")
+        if update_skill:
+            if skill_name != update_skill or not os.path.isdir(target_path):
+                raise ValueError("更新目标与安装包不匹配")
+            previous = read_origin(target_path)
+            if not origin or not previous or previous.get("slug") != origin.get("slug"):
+                raise ValueError("技能来源不匹配，不能更新")
+            if file_hashes(target_path) != previous.get("files"):
+                raise ValueError("技能存在本地修改，请先导出并处理后再更新")
+        elif os.path.exists(target_path):
+            if origin:
+                raise ValueError("同名技能已安装，请使用更新操作")
+            return {"status": "skipped_existing", "skill_name": skill_name,
+                    "message": f"Skill '{skill_name}' already exists"}
+        backup_path = ""
+        installed = False
+        prior_enabled = self.config_manager.is_skill_enabled(skill_name, True) if self.config_manager else True
+        prior_config = {key: copy.deepcopy(self.config_manager.config.get(key, []))
+                        for key in ("disabled_skills", "enabled_skills", "mcp_servers")} if enabled is not None and hasattr(self.config_manager, "config") else None
         staging_path = tempfile.mkdtemp(prefix=f".{skill_name}-staging-", dir=target_dir)
         os.rmdir(staging_path)
         try:
@@ -2564,10 +2592,30 @@ class SkillManager:
                     ast.parse(handle.read(), filename=impl_path)
             if validation_issues:
                 raise ValueError("; ".join(validation_issues))
+            if origin:
+                metadata = dict(origin, files=file_hashes(staging_path))
+                with open(os.path.join(staging_path, ORIGIN_FILE), "w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, ensure_ascii=False, indent=2)
+            if update_skill:
+                backup_path = target_path + ".backup-" + uuid.uuid4().hex
+                # Hidden sibling directories are ignored by the catalogue watcher.
+                backup_path = os.path.join(target_dir, "." + os.path.basename(backup_path))
+                os.replace(target_path, backup_path)
+            if enabled is not None and self.config_manager:
+                self.config_manager.set_skill_enabled(skill_name, enabled, persist_strict=True)
             os.replace(staging_path, target_path)
+            installed = True
             staging_path = ""
-            dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
+            dependency_status = self._prepare_skill_dependencies(skill_name, target_path) if prepare_dependencies else {"ok": True}
+            if on_commit:
+                on_commit(skill_name)
             message = result.get("message") or f"Skill '{skill_name}' imported successfully"
+            if backup_path:
+                try:
+                    shutil.rmtree(backup_path)
+                except OSError as exc:
+                    message += f"\n更新已提交，但旧版本备份清理失败：{exc}"
+                backup_path = ""
             if not dependency_status.get("ok"):
                 message = f"{message}\nDependency setup deferred: {dependency_status.get('message')}"
             return {
@@ -2575,6 +2623,20 @@ class SkillManager:
                 "skill_name": skill_name,
                 "message": message,
             }
+        except Exception:
+            if installed:
+                shutil.rmtree(target_path)
+            if backup_path:
+                os.replace(backup_path, target_path)
+            if enabled is not None and self.config_manager:
+                if prior_config is not None:
+                    self.config_manager.config.update(prior_config)
+                    self.config_manager._write_config_or_raise()
+                else:
+                    self.config_manager.set_skill_enabled(skill_name, prior_enabled, persist_strict=True)
+            if on_commit and installed:
+                on_commit(skill_name)
+            raise
         finally:
             if staging_path:
                 shutil.rmtree(staging_path, ignore_errors=True)
@@ -2601,7 +2663,7 @@ class SkillManager:
             dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS]
             rel_root = os.path.relpath(root, skill_path)
             for filename in filenames:
-                if filename == ".DS_Store":
+                if filename in {".DS_Store", ".skillhub.json"}:
                     continue
                 source_file = os.path.join(root, filename)
                 if rel_root == ".":
@@ -2650,6 +2712,10 @@ class SkillManager:
             return False, f"Export failed: {e}"
 
     def delete_skill(self, skill_name):
+        with SKILL_MUTATION_LOCK:
+            return self._delete_skill(skill_name)
+
+    def _delete_skill(self, skill_name):
         normalized = str(skill_name or "").strip()
         if not normalized:
             return {"status": "skipped", "skill_name": normalized, "message": "Skill name is required."}
@@ -2880,7 +2946,19 @@ class SkillManager:
             seen.add(skill_name)
         return all_skills
 
-    def import_skill(self, source_path, source_format="auto"):
+    def import_skill(self, source_path, source_format="auto", *, enabled=None,
+                     prepare_dependencies=True, update_skill=None, origin=None,
+                     expected_files=None, on_commit=None):
+        with SKILL_MUTATION_LOCK:
+            return self._import_skill_package(
+                source_path, source_format, enabled=enabled,
+                prepare_dependencies=prepare_dependencies, update_skill=update_skill,
+                origin=origin, expected_files=expected_files, on_commit=on_commit)
+
+    def _import_skill_package(self, source_path, source_format="auto", *, enabled=None,
+                              prepare_dependencies=True, update_skill=None, origin=None,
+                              expected_files=None, on_commit=None):
+        self.last_imported_skill_names = []
         temp_dir = None
         resolved_source_path = source_path
         if os.path.isfile(source_path):
@@ -2899,17 +2977,22 @@ class SkillManager:
             candidate_dirs = discover_importable_skill_dirs(resolved_source_path)
             if not candidate_dirs:
                 return False, "Import failed: no importable skill directories were found."
+            if (origin or update_skill) and len(candidate_dirs) != 1:
+                raise ValueError("SkillHub 安装包必须且只能包含一个 Skill")
             if len(candidate_dirs) == 1:
-                result = self._import_single_skill_dir(candidate_dirs[0], source_format=source_format)
-                if result.get("status") == "skipped_existing":
-                    return False, result.get("message") or "Skill already exists"
+                result = self._import_single_skill_dir(
+                    candidate_dirs[0], source_format=source_format, enabled=enabled,
+                    prepare_dependencies=prepare_dependencies, update_skill=update_skill,
+                    origin=origin, expected_files=expected_files, on_commit=on_commit)
                 self.last_imported_skill_names = [result.get("skill_name")] if result.get("status") == "imported" else []
-                return True, result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
+                return result.get("status") == "imported", result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
 
             summary = {"imported": [], "skipped_existing": [], "failed": []}
             for candidate_dir in candidate_dirs:
                 try:
-                    result = self._import_single_skill_dir(candidate_dir, source_format=source_format)
+                    result = self._import_single_skill_dir(
+                        candidate_dir, source_format=source_format, enabled=enabled,
+                        prepare_dependencies=prepare_dependencies, on_commit=on_commit)
                 except Exception as e:
                     result = {
                         "status": "failed",

@@ -61,6 +61,7 @@ from core.favorite_delivery import (
     collect_feishu_artifacts,
 )
 from core.skill_manager import SkillManager
+from core.skillhub import SkillHubClient, read_origin, identifier
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
 from core.skill_generator import SkillGenerator
@@ -14919,6 +14920,21 @@ class AdvancedSkillsCenterDialog(QDialog):
             QTimer.singleShot(1200, lambda: button.setToolTip("复制技能名"))
 
 
+class SkillHubWorker(QThread):
+    completed = Signal(object)
+
+    def __init__(self, operation, parent=None):
+        super().__init__(parent)
+        self.operation = operation
+
+    def run(self):
+        try:
+            self.completed.emit({"ok": True, "data": self.operation()})
+        except Exception as exc:
+            log_ui_navigation("skillhub_task_error", error=type(exc).__name__)
+            self.completed.emit({"ok": False, "error": str(exc)})
+
+
 class SkillsCenterDialog(QDialog):
     """User-facing capability library; technical controls stay in advanced management."""
 
@@ -14929,6 +14945,22 @@ class SkillsCenterDialog(QDialog):
         self._main = parent
         self.skill_manager = skill_manager
         self.config_manager = config_manager
+        self.hub_client = SkillHubClient()
+        self.hub_data = None
+        self.hub_detail = None
+        self.hub_slug = ""
+        self.hub_version = ""
+        self.hub_error = ""
+        self.hub_loading = False
+        self.hub_generation = 0
+        self.hub_page = 1
+        self.hub_task_message = ""
+        self.hub_installing = False
+        self._mode_state = {}
+        self.hub_timer = QTimer(self)
+        self.hub_timer.setSingleShot(True)
+        self.hub_timer.setInterval(300)
+        self.hub_timer.timeout.connect(self._load_hub)
         self._all_skills = []
         self._user_owned_names = set()
         self.current_mode = "library"
@@ -14993,7 +15025,7 @@ class SkillsCenterDialog(QDialog):
         browse_bar.setContentsMargins(0, 0, 0, 0)
         browse_bar.setSpacing(8)
         self.mode_control = ProductSegmentedControl(
-            [("library", "发现能力"), ("mine", "我的能力")],
+            [("library", "发现能力"), ("hub", "SkillHub"), ("mine", "我的能力")],
             current="library",
         )
         self.mode_control.currentChanged.connect(self._set_mode)
@@ -15006,6 +15038,22 @@ class SkillsCenterDialog(QDialog):
         )
         self.scene_control.currentChanged.connect(self._set_scene)
         layout.addWidget(self.scene_control, 0, Qt.AlignLeft)
+
+        self.hub_filters = QWidget()
+        hub_bar = QHBoxLayout(self.hub_filters)
+        hub_bar.setContentsMargins(0, 0, 0, 0)
+        self.hub_sort = QComboBox()
+        for title, value in [("推荐", "score"), ("下载热门", "downloads"), ("最近更新", "updated_at")]:
+            self.hub_sort.addItem(title, value)
+        self.hub_category = QComboBox()
+        self.hub_category.addItem("全部分类", "")
+        self.hub_sort.currentIndexChanged.connect(self._hub_filter_changed)
+        self.hub_category.currentIndexChanged.connect(self._hub_filter_changed)
+        hub_bar.addWidget(self.hub_sort)
+        hub_bar.addWidget(self.hub_category, 1)
+        hub_bar.addStretch()
+        self.hub_filters.hide()
+        layout.addWidget(self.hub_filters)
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("CapabilityLibraryScroll")
@@ -15044,6 +15092,8 @@ class SkillsCenterDialog(QDialog):
 
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "SkillsCenterDialog")
+        self.hub_sort.setStyleSheet(product_field_style())
+        self.hub_category.setStyleSheet(product_field_style())
         self.search_input.setStyleSheet(product_field_style())
         self.import_skill_btn.setStyleSheet(product_button_style("primary"))
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
@@ -15096,6 +15146,7 @@ class SkillsCenterDialog(QDialog):
             widget = item.widget()
             child_layout = item.layout()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
             elif child_layout is not None:
                 self._clear_layout(child_layout)
@@ -15119,10 +15170,21 @@ class SkillsCenterDialog(QDialog):
         mode = str(mode or "library")
         if mode == self.current_mode:
             return
+        self._mode_state[self.current_mode] = (self.search_text, self.scroll.verticalScrollBar().value())
         self.current_mode = mode
+        self.import_skill_btn.setStyleSheet(product_button_style("secondary" if mode == "hub" else "primary"))
+        self.search_text, position = self._mode_state.get(mode, ("", 0))
+        self.search_input.blockSignals(True)
+        self.search_input.setText(self.search_text)
+        self.search_input.blockSignals(False)
         self.scene_control.setVisible(mode == "library")
+        self.hub_filters.setVisible(mode == "hub" and not self.hub_slug)
+        self.hub_timer.stop()
         log_ui_navigation("capability_library_mode_change", mode=mode)
         self._render_content()
+        self.scroll.verticalScrollBar().setValue(position)
+        if mode == "hub" and self.hub_data is None and not self.hub_loading:
+            self._load_hub()
 
     def _set_scene(self, scene):
         scene = str(scene or "all")
@@ -15135,6 +15197,14 @@ class SkillsCenterDialog(QDialog):
 
     def _on_search_changed(self, text):
         self.search_text = str(text or "")
+        if self.current_mode == "hub":
+            self.hub_page = 1
+            self.hub_slug = ""
+            self.hub_detail = None
+            self.hub_generation += 1
+            self.hub_filters.show()
+            self.hub_timer.start()
+            return
         self._render_content()
 
     def _handle_component_status_changed(self, component_id, status):
@@ -15152,6 +15222,226 @@ class SkillsCenterDialog(QDialog):
             return
         self.browser_component_task = task
         self._render_content()
+
+    def _hub_worker(self, operation, callback):
+        owner = self._main or self
+        if not hasattr(owner, "skillhub_workers"):
+            owner.skillhub_workers = []
+        worker = SkillHubWorker(operation, owner)
+        owner.skillhub_workers.append(worker)
+        worker.completed.connect(callback, Qt.QueuedConnection)
+        worker.finished.connect(lambda: owner.skillhub_workers.remove(worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _hub_filter_changed(self, _index=0):
+        self.hub_page = 1
+        self._load_hub()
+
+    def _load_hub(self):
+        self.hub_generation += 1
+        generation = self.hub_generation
+        self.hub_loading, self.hub_error = True, ""
+        keyword, category, sort, page = self.search_text, self.hub_category.currentData(), self.hub_sort.currentData(), self.hub_page
+        needs_categories = self.hub_category.count() == 1
+        slug = self.hub_slug
+        self._render_content()
+
+        def operation():
+            if slug:
+                data = self.hub_client.detail(slug)
+                data["versions"] = self.hub_client.versions(slug)["versions"]
+                try:
+                    data["evaluation"] = self.hub_client.evaluation(slug)
+                except Exception as exc:
+                    data["evaluation_error"] = str(exc)
+                return data
+            return {"list": self.hub_client.search(keyword, category, sort, page),
+                    "categories": self.hub_client.categories() if needs_categories else None}
+
+        def finished(result):
+            if generation != self.hub_generation:
+                return
+            self.hub_loading = False
+            if not result["ok"]:
+                self.hub_error = result["error"]
+            elif slug:
+                self.hub_detail = result["data"]
+            else:
+                self.hub_data = result["data"]["list"]
+                if result["data"]["categories"] is not None:
+                    self.hub_category.blockSignals(True)
+                    for item in result["data"]["categories"]:
+                        self.hub_category.addItem(item["name"], item["key"])
+                    self.hub_category.blockSignals(False)
+            self._render_content()
+        self._hub_worker(operation, finished)
+
+    def _hub_open(self, slug):
+        self._hub_list_scroll = self.scroll.verticalScrollBar().value()
+        self.hub_slug, self.hub_detail, self.hub_version = slug, None, ""
+        self.hub_filters.hide()
+        self._load_hub()
+
+    def _hub_back(self):
+        self.hub_generation += 1
+        self.hub_slug, self.hub_detail, self.hub_error = "", None, ""
+        self.hub_loading = False
+        self.hub_filters.show()
+        self._render_content()
+        self.scroll.verticalScrollBar().setValue(getattr(self, "_hub_list_scroll", 0))
+
+    def _hub_button(self, text, callback, layout=None, primary=False):
+        button = QPushButton(text)
+        button.setStyleSheet(product_button_style("primary" if primary else "secondary"))
+        button.clicked.connect(callback)
+        (layout or self.content_layout).addWidget(button)
+        return button
+
+    def _hub_label(self, text, layout=None):
+        label = QLabel(str(text))
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px;")
+        (layout or self.content_layout).addWidget(label)
+        return label
+
+    def _hub_installed(self):
+        installed = {}
+        for skill in self._all_skills:
+            origin = read_origin(skill["path"]) if skill.get("path") else None
+            if origin:
+                installed[origin["slug"]] = dict(origin, name=skill["name"])
+        return installed
+
+    def _render_hub(self):
+        self.import_skill_btn.setStyleSheet(product_button_style("secondary"))
+        if self.hub_task_message:
+            self._hub_label(self.hub_task_message)
+        if self.hub_slug:
+            self._hub_button("返回 SkillHub 列表", self._hub_back)
+        if self.hub_loading:
+            self.content_layout.addWidget(ProductEmptyState("正在加载 SkillHub", "请稍候…"))
+        elif self.hub_error:
+            self.content_layout.addWidget(ProductEmptyState("SkillHub 加载失败", self.hub_error))
+            self._hub_button("重试", self._load_hub)
+        else:
+            try:
+                installed = self._hub_installed()
+            except Exception as exc:
+                self._hub_label(f"本地来源记录读取失败：{exc}")
+                return
+            if self.hub_slug and self.hub_detail:
+                data, slug = self.hub_detail, self.hub_slug
+                skill = data["skill"]
+                self._hub_label(skill["displayName"])
+                self._hub_label(skill.get("summary_zh") or skill.get("summary") or "暂无简介")
+                self._hub_label("作者：" + str((data.get("owner") or {}).get("handle") or "未提供"))
+                self._hub_label("质量参考：" + str(data.get("evaluation_error") or (data.get("evaluation") or {}).get("userSummary") or "暂无公开评测"))
+                self._hub_button("官网详情与文件", lambda: QDesktopServices.openUrl(QUrl("https://skillhub.cn/skills/" + identifier(slug))))
+                versions = data["versions"]
+                version_box = QComboBox()
+                version_box.setObjectName("SkillHubVersion")
+                version_box.setStyleSheet(product_field_style())
+                for entry in versions:
+                    version_box.addItem(entry["version"], entry)
+                index = version_box.findText(self.hub_version)
+                if index >= 0:
+                    version_box.setCurrentIndex(index)
+                self.content_layout.addWidget(version_box)
+                notes = self._hub_label("")
+                current = installed.get(slug)
+                if current:
+                    self._hub_label("已安装版本：" + current["version"])
+                action = self._hub_button("更新" if current else "安装到我的能力", lambda: self._hub_install(slug, version_box.currentData(), current), primary=True)
+                def selected():
+                    entry = version_box.currentData() or {}
+                    self.hub_version = entry.get("version", "")
+                    notes.setText(entry.get("changelog") or "此版本暂无更新说明")
+                    action.setEnabled(bool(entry) and not self.hub_installing and (not current or entry["version"] != current["version"]))
+                version_box.currentIndexChanged.connect(selected)
+                selected()
+                self._hub_button("检查更新", self._load_hub)
+            else:
+                data = self.hub_data or {"skills": [], "total": 0}
+                if not data["skills"]:
+                    self.content_layout.addWidget(ProductEmptyState("没有匹配的技能", "调整关键词或分类后重试。"))
+                for skill in data["skills"]:
+                    row = QFrame()
+                    row.setObjectName("CapabilityStoreCard")
+                    row.setStyleSheet(f"QFrame#CapabilityStoreCard {{background: {DesignTokens.bg_main}; border-radius: {DesignTokens.radius_md}px;}}")
+                    layout = QVBoxLayout(row)
+                    layout.setContentsMargins(14, 12, 14, 12)
+                    self._hub_label(skill["name"], layout)
+                    self._hub_label(skill.get("description_zh") or skill.get("description") or "暂无简介", layout)
+                    local = installed.get(skill["slug"])
+                    self._hub_label(f"{skill.get('ownerName') or '未提供作者'} · 下载 {skill.get('downloads', 0)}" + (f" · 已安装 {local['version']}" if local else ""), layout)
+                    self._hub_button("详情与更新" if local else "查看详情", lambda checked=False, slug=skill["slug"]: self._hub_open(slug), layout)
+                    self.content_layout.addWidget(row)
+                nav = QHBoxLayout()
+                self._hub_button("上一页", lambda: self._hub_turn_page(-1), nav).setEnabled(self.hub_page > 1)
+                self._hub_label(f"第 {self.hub_page} 页 · 共 {data['total']} 个", nav)
+                self._hub_button("下一页", lambda: self._hub_turn_page(1), nav).setEnabled(self.hub_page * 20 < data["total"])
+                self.content_layout.addLayout(nav)
+                self._hub_button("刷新", self._load_hub)
+        self.content_layout.addStretch()
+
+    def _hub_turn_page(self, delta):
+        self.hub_page += delta
+        self._load_hub()
+
+    def _hub_install(self, slug, entry, current):
+        if self.hub_installing or not entry:
+            return
+        window = self._main
+        def ensure_idle():
+            if current and window and any(window._session_is_busy(state) for state in window.sessions.values()):
+                raise ValueError("有任务正在运行，请结束后再更新技能")
+        try:
+            ensure_idle()
+        except ValueError as exc:
+            self.hub_task_message = str(exc)
+            self._render_content()
+            return
+        if current and QMessageBox.question(self, "更新技能", f"将 {slug} 从 {current['version']} 更新为 {entry['version']}？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.hub_installing = True
+        if window and current:
+            window.skillhub_update_in_progress = True
+        self.hub_task_message = f"正在下载并校验 {slug} {entry['version']}…"
+        self._render_content()
+        manager = self.skill_manager
+        def commit(name):
+            if window:
+                window.skill_catalog_service.reload(reason="skillhub_install")
+        def operation():
+            ensure_idle()
+            log_ui_navigation("skillhub_install_start", slug=slug, version=entry["version"])
+            return self.hub_client.install(manager, slug, entry["version"], update_skill=current["name"] if current else None, on_commit=commit)
+        def finished(result):
+            self.hub_installing = False
+            if window:
+                window.skillhub_update_in_progress = False
+            if result["ok"]:
+                self.hub_task_message = "更新完成" if current else "安装完成，请在“我的能力”中手动开启"
+                if window:
+                    published = window.publish_ui_skill_changes(result["data"]["names"], "updated" if current else "created")
+                    self.skill_manager = window.skill_manager
+                    if not published:
+                        self.hub_task_message = "文件已安装，但能力目录刷新失败，请重试刷新"
+                details = result["data"].get("message", "").partition("\n")[2]
+                if details:
+                    self.hub_task_message += "\n" + details
+                log_ui_navigation("skillhub_install_done", slug=slug)
+                self.refresh_list()
+            else:
+                self.hub_task_message = "安装失败：" + result["error"]
+                log_ui_navigation("skillhub_install_error", slug=slug)
+            if window:
+                window.add_system_toast(self.hub_task_message, "success" if result["ok"] else "error", auto_close_ms=6000)
+            self._render_content()
+        self._hub_worker(operation, finished)
 
     def _section(self, title, skills, *, user_owned=False):
         section = QWidget()
@@ -15480,7 +15770,8 @@ class SkillsCenterDialog(QDialog):
             self._main.publish_ui_skill_changes(names, "created")
             self.skill_manager = self._main.skill_manager
         self.search_input.clear()
-        self.current_mode = "mine"
+        self._mode_state["mine"] = ("", 0)
+        self._set_mode("mine")
         self.mode_control.set_current("mine")
         self.scene_control.setVisible(False)
         self.refresh_list()
@@ -15554,6 +15845,10 @@ class SkillsCenterDialog(QDialog):
 
     def _render_content(self):
         self._clear_layout(self.content_layout)
+        if self.current_mode == "hub":
+            self._render_hub()
+            return
+
         if self.current_mode == "mine":
             skills = sorted(self._user_skills(), key=lambda item: readable_skill_name(item).casefold())
             if skills:
@@ -35925,6 +36220,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        if any(worker.isRunning() for worker in getattr(self, "skillhub_workers", [])):
+            self.add_system_toast("SkillHub 操作仍在进行，请完成后再退出。", "info")
+            return
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
         self._dispose_application_event_filters()
@@ -35955,6 +36253,8 @@ class MainWindow(QMainWindow):
         self.daemon_process = None
 
     def shutdown_workers(self, preserve_daemon_runs=False):
+        for worker in list(getattr(self, "skillhub_workers", [])):
+            worker.wait()
         preserved_daemon_runs = False
         if not self.flush_pending_chat_saves(timeout_ms=3000):
             self.append_log("会话保存队列在关闭前未能完全 flush，应用将继续退出。")
@@ -36041,6 +36341,10 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if any(worker.isRunning() for worker in getattr(self, "skillhub_workers", [])):
+            self.add_system_toast("SkillHub 操作仍在进行，请完成后再退出。", "info")
+            event.ignore()
+            return
         if self.tray_icon:
             event.ignore()
             self.hide()
@@ -48965,6 +49269,9 @@ a {{ overflow-wrap: anywhere; }}
         history_rewrite_guard=None,
         existing_message_payload=None,
     ):
+        if getattr(self, "skillhub_update_in_progress", False):
+            self.add_system_toast("技能正在更新，请完成后再发送；输入内容已保留。", "info")
+            return False
         log_chat_runtime_debug(
             "submit_session_request_begin",
             session_id=getattr(state, "session_id", "") if state else "",

@@ -1609,7 +1609,7 @@ class ConfigManager:
             return True
         return bool(default_enabled)
 
-    def set_skill_enabled(self, skill_name, enabled):
+    def set_skill_enabled(self, skill_name, enabled, *, persist_strict=False):
         disabled = set(self.config.get("disabled_skills", []))
         enabled_skills = set(self.config.get("enabled_skills", []))
         if enabled:
@@ -1631,4 +1631,7 @@ class ConfigManager:
             managed_updated = True
         if managed_updated:
             self.config["mcp_servers"] = managed_servers
-        self.save_config()
+        if persist_strict:
+            self._write_config_or_raise()
+        else:
+            self.save_config()

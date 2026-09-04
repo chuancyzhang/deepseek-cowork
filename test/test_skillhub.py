@@ -41,8 +41,7 @@ class SkillHubTests(unittest.TestCase):
 
     def install(self, version='1.0.0', **kwargs):
         return self.manager.import_skill(str(self.source), prepare_dependencies=False,
-            origin={'source': 'skillhub', 'slug': 'sample', 'version': version},
-            expected_files=[{'path': p, 'sha256': h} for p, h in file_hashes(self.source).items()], **kwargs)
+            origin={'source': 'skillhub', 'slug': 'sample', 'version': version}, **kwargs)
 
     def test_install_disabled_and_no_dependency_execution(self):
         ok, message = self.install(enabled=False)
@@ -116,26 +115,42 @@ class SkillHubTests(unittest.TestCase):
         self.assertTrue(ok, message)
         self.assertIn('sample', json.loads(Path(config.config_path).read_text())['disabled_skills'])
 
-    def test_manifest_mismatch_rejected_before_install(self):
-        ok, message = self.manager.import_skill(str(self.source), origin={'source':'skillhub','slug':'sample'}, expected_files=[])
-        self.assertFalse(ok)
-        self.assertIn('SHA256', message)
+    def test_zip_is_authoritative_and_slug_can_differ_from_name(self):
+        client = SkillHubClient()
+        client.files = Mock(side_effect=AssertionError('must not request a second source'))
+        def download(slug, version, destination):
+            with zipfile.ZipFile(destination, 'w') as archive:
+                archive.writestr('package/SKILL.md', (self.source/'SKILL.md').read_bytes())
+                archive.writestr('package/_meta.json', json.dumps({'slug':slug,'version':version}))
+        client.download = download
+        result = client.install(self.manager, 'remote-slug', '1.0.0')
+        self.assertEqual(result['names'], ['sample'])
+        self.assertEqual(read_origin(self.target/'sample')['slug'], 'remote-slug')
+        self.write_source('new ZIP content')
+        client.install(self.manager, 'remote-slug', '2.0.0', update_skill='sample')
+        self.assertEqual(read_origin(self.target/'sample')['version'], '2.0.0')
+        client.files.assert_not_called()
+
+    def test_corrupt_download_is_actionable(self):
+        from core.skillhub import SkillHubInstallError
+        client = SkillHubClient()
+        client.download = lambda slug, version, destination: Path(destination).write_bytes(b'not a ZIP')
+        with self.assertRaisesRegex(SkillHubInstallError, '压缩包损坏'):
+            client.install(self.manager, 'sample', '1.0.0')
         self.assertFalse((self.target/'sample').exists())
 
     def test_transport_metadata_checked_and_excluded(self):
-        manifest = [{'path': p, 'sha256': h} for p,h in file_hashes(self.source).items()]
         (self.source/'_meta.json').write_text(json.dumps({'slug':'sample','version':'1.0.0'}))
         ok, message = self.manager.import_skill(str(self.source), enabled=False, prepare_dependencies=False,
-            origin={'source':'skillhub','slug':'sample','version':'1.0.0'}, expected_files=manifest)
+            origin={'source':'skillhub','slug':'sample','version':'1.0.0'})
         self.assertTrue(ok, message)
         self.assertFalse((self.target/'sample'/'_meta.json').exists())
         from core.skill_adapter import discover_skill_artifacts
         self.assertNotIn('.skillhub.json', discover_skill_artifacts(str(self.target/'sample'))['references'])
 
     def test_transport_metadata_wrong_version_rejected(self):
-        manifest = [{'path': p, 'sha256': h} for p,h in file_hashes(self.source).items()]
         (self.source/'_meta.json').write_text(json.dumps({'slug':'sample','version':'9.0.0'}))
-        ok, _ = self.manager.import_skill(str(self.source), origin={'source':'skillhub','slug':'sample','version':'1.0.0'}, expected_files=manifest)
+        ok, _ = self.manager.import_skill(str(self.source), origin={'source':'skillhub','slug':'sample','version':'1.0.0'})
         self.assertFalse(ok)
 
     def test_zip_rejects_traversal_links_and_windows_collisions(self):

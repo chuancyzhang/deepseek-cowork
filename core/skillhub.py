@@ -56,7 +56,44 @@ def read_origin(root):
     return value
 
 
+class SkillHubInstallError(ValueError):
+    def __init__(self, diagnostic):
+        self.diagnostic = str(diagnostic)
+        detail = self.diagnostic.removeprefix("Import failed: ")
+        summary = detail
+        for terms, label in [
+            (("ZIP file is invalid", "Bad CRC", "BadZipFile", "Bad magic", "Truncated"), "压缩包损坏，请重新下载"),
+            (("unsafe paths", "duplicate paths or links"), "压缩包包含不安全路径、重名文件或链接"),
+            (("exceeds 2000",), "压缩包超过文件数或解压大小限制"),
+            (("SKILL.md", "frontmatter", "Invalid skill name", "no importable"), "技能格式不支持，请查看诊断信息"),
+            (("Permission denied", "Access is denied"), "无法写入能力目录，请检查目录权限"),
+            (("No space left", "disk full"), "磁盘空间不足，请清理后重试"),
+        ]:
+            if any(term in detail for term in terms):
+                summary = label
+                break
+        super().__init__(summary)
+
+
 class SkillHubClient:
+    def icon(self, url):
+        from core.remote_skill_installer import validate_public_https_url
+        for _ in range(4):
+            validate_public_https_url(url)
+            with requests.get(url, stream=True, allow_redirects=False, timeout=(5, 10)) as response:
+                if response.is_redirect:
+                    url = urljoin(url, response.headers["Location"])
+                    continue
+                if response.status_code != 200:
+                    raise ValueError("图标下载失败")
+                content = bytearray()
+                for chunk in response.iter_content(16384):
+                    content.extend(chunk)
+                    if len(content) > 512 * 1024:
+                        raise ValueError("图标超过 512 KB")
+                return bytes(content)
+        raise ValueError("图标重定向过多")
+
     def _get(self, path, params=None):
         log.info("skillhub request_start path=%s", path)
         for attempt in range(3):
@@ -149,9 +186,6 @@ class SkillHubClient:
 
     def install(self, manager, slug, version, *, update_skill=None, on_commit=None):
         import tempfile
-        manifest = self.files(slug, version)
-        if manifest.get("version") != version:
-            raise ValueError("SkillHub 文件清单版本不匹配")
         with tempfile.TemporaryDirectory(prefix="cowork-skillhub-") as tmp:
             archive = os.path.join(tmp, "skill.zip")
             try:
@@ -163,8 +197,8 @@ class SkillHubClient:
                 archive, enabled=False if not update_skill else None,
                 prepare_dependencies=False, update_skill=update_skill,
                 origin={"source": "skillhub", "slug": slug, "version": version},
-                expected_files=manifest["files"], on_commit=on_commit,
+                on_commit=on_commit,
             )
             if not ok:
-                raise ValueError(message)
+                raise SkillHubInstallError(message)
             return {"names": manager.last_imported_skill_names, "message": message}

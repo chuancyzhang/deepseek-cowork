@@ -4,21 +4,23 @@
 
 ## SkillHub 专区
 
-在「AI 能力商城 → SkillHub」中按推荐、下载热门或最近更新浏览，也可以输入关键词、按分类筛选和翻页。专区直接使用公开 API，无需团队 Key 或登录。
+在「AI 能力商城 → SkillHub」中按推荐、下载热门或最近更新浏览。分类在横向选项栏中，窄窗口可水平滚动；关键词搜索和分页保持独立状态。
 
-点击「查看详情」可查看版本说明和公开质量参考；「官网详情与文件」打开对应技能网页。选择版本后安装到「我的能力」，默认关闭，不执行包内代码或安装依赖。后续在「我的能力」中手动开启、配置和删除。
+卡片根据可用宽度排列为 1–4 列。点击卡片查看完整介绍，点击右上角「＋」直接安装卡片标明的版本。图标异步加载，无法加载时显示提示，不影响查看和安装。简介最多显示两行，详情提供完整内容、版本说明和可展开的质量参考。
 
-已安装技能可在专区详情中「检查更新」，选择版本并确认。更新保留配置和启用状态；有任务运行时需等任务结束后再更新，本地文件被修改时会阻止覆盖。更新期间发送操作会提示稍后重试，保留输入内容。网络或校验失败会明确显示错误，不替换为其他来源或热门结果。
+专区直接使用公开 API，无需团队 Key 或登录。以官方 ZIP 为唯一安装内容来源，不再跨接口比较文件 SHA256：上游同一版本的 ZIP 和单文件接口可能返回不同的内容。仍检查 ZIP 完整性、路径安全、解压规模、Skill 格式及下载元数据中声明的 slug/version。
 
-安装进度在切页后继续保留，完成或失败会通知。SkillHub 操作期间退出应用会提示等待完成。此版本不提供技能发布功能。
+安装默认关闭，不执行包内代码或准备依赖；成功后可点击「查看我的能力」手动开启、配置和删除。失败提示只出现在对应技能，详情可展开并复制诊断信息后重试。切页不终止安装。
 
-来源和安装基线保存在技能目录的 `.skillhub.json`，不会作为参考资料进入模型上下文，也不会随普通 Skill 导出。下载包附带的 `_meta.json` 若不在上游文件清单中，会先核对 slug 与版本再移除；所有技能文件仍需与上游 SHA256 清单一致。
+已安装技能可在详情中检查更新、选择版本并确认。更新保留配置和启用状态；本地文件哈希仅用于保护用户修改，不再与远程文件清单比对。有任务运行时需结束后再更新，更新期间发送操作保留输入并提示稍后重试。此版本不提供技能发布。
 
-以下是使用示例数据的布局截图（名称、下载量不代表实时榜单）：
+来源与本地安装基线保存在 `.skillhub.json`，不会作为参考资料进入模型上下文，也不会随普通 Skill 导出。
 
-![SkillHub 专区](../images/user-guide/skillhub-store.png)
+以下截图使用真实公开目录数据；榜单和下载量会随时间变化，错误／完成通知为界面状态演示：
 
-[小窗口列表](../images/user-guide/skillhub-store-small.png) · [小窗口详情](../images/user-guide/skillhub-detail-small.png) · [125% 缩放](../images/user-guide/skillhub-store-1.25.png) · [150% 缩放](../images/user-guide/skillhub-store-1.5.png)
+![SkillHub 卡片网格](../images/user-guide/skillhub-store.png)
+
+[单列](../images/user-guide/skillhub-store-one.png) · [双列](../images/user-guide/skillhub-store-small.png) · [三列](../images/user-guide/skillhub-store-three.png) · [详情](../images/user-guide/skillhub-detail.png) · [小窗口错误状态](../images/user-guide/skillhub-detail-small.png) · [125%](../images/user-guide/skillhub-store-1.25.png) · [150%](../images/user-guide/skillhub-store-1.5.png)
 
 Skill 系统解决一个明确问题：怎样在不扩大核心执行协议的前提下，让 Agent 获得
 可发现、可配置、可组合、可积累的专业能力。

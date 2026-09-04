@@ -2534,7 +2534,7 @@ class SkillManager:
 
     def _import_single_skill_dir(self, source_path, source_format="auto", *, enabled=None,
                                  prepare_dependencies=True, update_skill=None, origin=None,
-                                 expected_files=None, on_commit=None):
+                                 on_commit=None):
         from .skillhub import ORIGIN_FILE, file_hashes, read_origin
         skill_name = self._read_skill_name_from_path(source_path)
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", skill_name):
@@ -2545,17 +2545,14 @@ class SkillManager:
         if origin:
             if os.path.exists(os.path.join(source_path, ORIGIN_FILE)):
                 raise ValueError("远程包不得包含本地来源记录")
-            expected = {item["path"]: item["sha256"] for item in expected_files or []}
-            # SkillHub adds transport metadata to ZIPs outside the version file manifest.
+            # ZIP transport metadata is not skill guidance.
             transport_meta = os.path.join(source_path, "_meta.json")
-            if "_meta.json" not in expected and os.path.isfile(transport_meta):
+            if os.path.isfile(transport_meta):
                 with open(transport_meta, encoding="utf-8") as handle:
                     transport = json.load(handle)
-                if not isinstance(transport, dict) or transport.get("slug") != origin["slug"] or transport.get("version") != origin["version"]:
+                if not isinstance(transport, dict) or any(key in transport and transport[key] != origin[key] for key in ("slug", "version")):
                     raise ValueError("下载包元数据与请求的技能版本不匹配")
                 os.remove(transport_meta)
-            if not expected or len(expected) != len(expected_files) or file_hashes(source_path, ignore_runtime=False) != expected:
-                raise ValueError("技能包文件清单或 SHA256 校验失败")
             existing = self._find_skill_path(skill_name)
             if existing and os.path.abspath(existing) != os.path.abspath(target_path):
                 raise ValueError("同名其他来源技能已存在，不能覆盖")
@@ -2948,16 +2945,16 @@ class SkillManager:
 
     def import_skill(self, source_path, source_format="auto", *, enabled=None,
                      prepare_dependencies=True, update_skill=None, origin=None,
-                     expected_files=None, on_commit=None):
+                     on_commit=None):
         with SKILL_MUTATION_LOCK:
             return self._import_skill_package(
                 source_path, source_format, enabled=enabled,
                 prepare_dependencies=prepare_dependencies, update_skill=update_skill,
-                origin=origin, expected_files=expected_files, on_commit=on_commit)
+                origin=origin, on_commit=on_commit)
 
     def _import_skill_package(self, source_path, source_format="auto", *, enabled=None,
                               prepare_dependencies=True, update_skill=None, origin=None,
-                              expected_files=None, on_commit=None):
+                              on_commit=None):
         self.last_imported_skill_names = []
         temp_dir = None
         resolved_source_path = source_path
@@ -2983,7 +2980,7 @@ class SkillManager:
                 result = self._import_single_skill_dir(
                     candidate_dirs[0], source_format=source_format, enabled=enabled,
                     prepare_dependencies=prepare_dependencies, update_skill=update_skill,
-                    origin=origin, expected_files=expected_files, on_commit=on_commit)
+                    origin=origin, on_commit=on_commit)
                 self.last_imported_skill_names = [result.get("skill_name")] if result.get("status") == "imported" else []
                 return result.get("status") == "imported", result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
 

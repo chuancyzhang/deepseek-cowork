@@ -6,21 +6,25 @@
 
 在「AI 能力商城 → SkillHub」中按推荐、下载热门或最近更新浏览。分类在横向选项栏中，窄窗口可水平滚动；关键词搜索和分页保持独立状态。
 
+列表和详情按查询条件保存在应用数据目录的 `cache/skillhub` 中，缓存有效期 60 天，最多保存 32 份结果，重启后继续复用。点击列表「刷新」或详情「检查更新」直接获取最新数据；请求失败不会缓存为成功结果。缓存读取异常会明确提示，点击「重试」重新下载并替换对应缓存。
+
 卡片根据可用宽度排列为 1–4 列。点击卡片查看完整介绍，点击右上角「＋」直接安装卡片标明的版本。图标异步加载，无法加载时显示提示，不影响查看和安装。简介最多显示两行，详情提供完整内容、版本说明和可展开的质量参考。
 
 专区直接使用公开 API，无需团队 Key 或登录。以官方 ZIP 为唯一安装内容来源，不再跨接口比较文件 SHA256：上游同一版本的 ZIP 和单文件接口可能返回不同的内容。仍检查 ZIP 完整性、路径安全、解压规模、Skill 格式及下载元数据中声明的 slug/version。
 
 安装默认关闭，不执行包内代码或准备依赖；成功后可点击「查看我的能力」手动开启、配置和删除。失败提示只出现在对应技能，详情可展开并复制诊断信息后重试。切页不终止安装。
 
+未启用的技能保留在已安装目录中，不进入运行时能力目录。管理页的「返回」回到进入前的商城、能力详情或开发与诊断页面，并保留商城筛选状态。
+
 已安装技能可在详情中检查更新、选择版本并确认。更新保留配置和启用状态；本地文件哈希仅用于保护用户修改，不再与远程文件清单比对。有任务运行时需结束后再更新，更新期间发送操作保留输入并提示稍后重试。此版本不提供技能发布。
 
 来源与本地安装基线保存在 `.skillhub.json`，不会作为参考资料进入模型上下文，也不会随普通 Skill 导出。
 
-以下截图使用真实公开目录数据；榜单和下载量会随时间变化，错误／完成通知为界面状态演示：
+以下截图使用真实公开目录数据；榜单和下载量会随时间变化：
 
 ![SkillHub 卡片网格](../images/user-guide/skillhub-store.png)
 
-[单列](../images/user-guide/skillhub-store-one.png) · [双列](../images/user-guide/skillhub-store-small.png) · [三列](../images/user-guide/skillhub-store-three.png) · [详情](../images/user-guide/skillhub-detail.png) · [小窗口错误状态](../images/user-guide/skillhub-detail-small.png) · [125%](../images/user-guide/skillhub-store-1.25.png) · [150%](../images/user-guide/skillhub-store-1.5.png)
+[单列](../images/user-guide/skillhub-store-one.png) · [双列](../images/user-guide/skillhub-store-small.png) · [三列](../images/user-guide/skillhub-store-three.png) · [详情](../images/user-guide/skillhub-detail.png) · [小窗口详情](../images/user-guide/skillhub-detail-small.png) · [125%](../images/user-guide/skillhub-store-1.25.png) · [150% 详情](../images/user-guide/skillhub-detail-1.5.png)
 
 Skill 系统解决一个明确问题：怎样在不扩大核心执行协议的前提下，让 Agent 获得
 可发现、可配置、可组合、可积累的专业能力。

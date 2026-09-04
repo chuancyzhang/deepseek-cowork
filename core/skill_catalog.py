@@ -106,6 +106,12 @@ class SkillCatalogService:
             }:
                 for skill_name in required_event.skill_names:
                     record = manager.skill_records.get(skill_name)
+                    if record is None and required_event.action in {"created", "updated"}:
+                        # Disabled skills belong to the installed catalog, not the runtime catalog.
+                        path = manager._find_skill_path(skill_name)
+                        if (path and manager._is_skill_directory(path)
+                                and not manager._is_skill_enabled_for_path(skill_name, path)):
+                            record = manager._load_skill_record(skill_name, path)
                     if record is None:
                         raise RuntimeError(f"Skill '{skill_name}' was not present in the rebuilt catalog.")
                     if record.get("available") is False:

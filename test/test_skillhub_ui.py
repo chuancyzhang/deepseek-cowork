@@ -1,6 +1,7 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import unittest
+import tempfile
 from unittest.mock import Mock, patch
 from PySide6.QtWidgets import QApplication, QPushButton
 from main import SkillsCenterDialog
@@ -15,6 +16,10 @@ class SkillHubUiTests(unittest.TestCase):
         self.manager = Mock()
         self.manager.get_all_skills.return_value = []
         self.page = SkillsCenterDialog(self.manager, Mock())
+        from core.skillhub import SkillHubCache
+        cache_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(cache_dir.cleanup)
+        self.page._hub_cache = SkillHubCache(cache_dir.name)
         self.callbacks = []
         self.page._hub_worker = lambda operation, callback: self.callbacks.append(callback)
         self.addCleanup(self.page.deleteLater)
@@ -40,6 +45,17 @@ class SkillHubUiTests(unittest.TestCase):
         self.callbacks[-1]({'ok': False, 'error': 'HTTP 429'})
         self.assertEqual(self.page.hub_error, 'HTTP 429')
         self.assertTrue(any(b.text() == '重试' for b in self.page.findChildren(QPushButton)))
+
+    def test_disk_cache_hit_and_manual_refresh(self):
+        data = {'list': {'skills': [], 'total': 12}, 'categories': []}
+        self.page._hub_cache.put(('list', '', '', self.page.hub_sort.currentData(), 1), data)
+        self.page._set_mode('hub')
+        self.assertEqual(self.callbacks, [])
+        self.assertEqual(self.page.hub_data['total'], 12)
+        self.page._load_hub(force=True)
+        self.assertEqual(len(self.callbacks), 1)
+        self.callbacks[-1]({'ok': False, 'error': 'HTTP 429'})
+        self.assertEqual(self.page.hub_error, 'HTTP 429')
 
     def test_detail_version_and_theme_refresh(self):
         self.page._set_mode('hub')

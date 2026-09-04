@@ -21,6 +21,22 @@ class Config:
 
 
 class SkillHubTests(unittest.TestCase):
+    def test_disk_cache_survives_recreation_expires_and_rejects_corruption(self):
+        from core.skillhub import SkillHubCache
+        cache = SkillHubCache(str(self.root / 'cache'))
+        key = ('list', 'pdf', '', 'downloads', 1)
+        with patch('core.skillhub.time.time', return_value=1000):
+            cache.put(key, {'skills': [], 'total': 7})
+        reopened = SkillHubCache(cache.directory)
+        with patch('core.skillhub.time.time', return_value=1000 + 59 * 86400):
+            self.assertEqual(reopened.get(key)['total'], 7)
+            self.assertIsNone(reopened.get(('list', 'pdf', '', 'downloads', 2)))
+        with patch('core.skillhub.time.time', return_value=1000 + 60 * 86400):
+            self.assertIsNone(reopened.get(key))
+        Path(cache._path(key)).write_text('{broken', encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, '缓存读取失败'):
+            reopened.get(key)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

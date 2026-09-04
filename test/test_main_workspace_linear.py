@@ -433,6 +433,24 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertTrue(detail.simple_mode)
         self.assertEqual(self.window.current_product_subroute, "detail")
 
+        self.assertTrue(self.window.show_capability_workbench(skill))
+        self.assertTrue(self.window.handle_product_back())
+        self.assertIs(self.window.main_page_stack.currentWidget(), detail)
+        self.assertEqual(self.window.current_product_subroute, "detail")
+        self.assertTrue(self.window.handle_product_back())
+        page._set_mode("mine")
+        page.search_input.setText("文档")
+        self.assertTrue(self.window.show_capability_workbench(skill))
+        self.assertTrue(self.window.handle_product_back())
+        self.assertIs(self.window.main_page_stack.currentWidget(), page)
+        self.assertEqual(page.current_mode, "mine")
+        self.assertEqual(page.search_input.text(), "文档")
+        self.assertTrue(self.window.show_advanced_capabilities())
+        advanced = self.window.product_pages["capability_advanced"]
+        self.assertTrue(self.window.show_capability_workbench(skill))
+        self.assertTrue(self.window.handle_product_back())
+        self.assertIs(self.window.main_page_stack.currentWidget(), advanced)
+
     def test_capability_exports_use_skill_name_for_single_and_collection_name_for_multiple(self):
         from main import AdvancedSkillsCenterDialog, SkillsCenterDialog
 

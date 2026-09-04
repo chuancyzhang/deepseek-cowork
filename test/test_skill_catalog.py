@@ -24,6 +24,43 @@ class _Config:
 
 
 class TestSkillCatalogService(unittest.TestCase):
+    def test_disabled_install_refresh_stays_out_of_runtime(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = _Config()
+            config.is_skill_enabled = lambda name, default_enabled=True: False
+            config.set_skill_enabled = lambda *args, **kwargs: None
+            source = os.path.join(root, 'source')
+            os.mkdir(source)
+            with open(os.path.join(source, 'SKILL.md'), 'w', encoding='utf-8') as handle:
+                handle.write('---\nname: internal-name\ndescription: Test\n---\nTest body')
+            target = os.path.join(root, 'installed')
+            os.mkdir(target)
+            def build(*args, **kwargs):
+                manager = SkillManager(config_manager=config, auto_load=False, prepare_dependencies=False)
+                manager.skills_dirs = [target]
+                with patch.object(manager, '_register_builtin_tools'), patch.object(manager, '_load_mcp_servers'):
+                    manager.load_skills(load_mcp_tools=False)
+                return manager
+            manager = build()
+            with patch.object(manager, '_default_writable_skill_root', return_value=target):
+                ok, message = manager.import_skill(source, enabled=False, prepare_dependencies=False,
+                    origin={'source': 'skillhub', 'slug': 'remote-name', 'version': '1.0'})
+            self.assertTrue(ok, message)
+            with patch('core.skill_catalog.SkillManager', side_effect=build):
+                service = SkillCatalogService(config)
+                service.preload()
+                for action in ('created', 'updated'):
+                    service.publish_change(SkillChangeEvent.create(action, ['internal-name'], source='ui'))
+                    snapshot = service.snapshot()
+                    self.assertNotIn('internal-name', snapshot.manager.skill_records)
+                    self.assertNotIn('internal-name', snapshot.manager.skill_prompts_full)
+                    self.assertEqual(snapshot.manager.get_all_skills()[0]['name'], 'internal-name')
+                revision = service.snapshot().revision
+                for action, name in [('created', 'missing'), ('enabled', 'internal-name')]:
+                    with self.assertRaises(RuntimeError):
+                        service.publish_change(SkillChangeEvent.create(action, [name], source='ui'))
+                    self.assertEqual(service.snapshot().revision, revision)
+
     def test_snapshot_is_reused_until_explicit_change(self):
         config = _Config()
         first = MagicMock(skill_records={"alpha": {}})

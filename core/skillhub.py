@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import tempfile
 from urllib.parse import quote, urljoin
 
 import requests
@@ -15,6 +16,49 @@ BASE_URL = "https://api.skillhub.cn"
 ORIGIN_FILE = ".skillhub.json"
 MAX_BYTES = 50 * 1024 * 1024
 log = logging.getLogger(__name__)
+
+
+class SkillHubCache:
+    """Bounded on-disk cache for public browsing data only."""
+
+    def __init__(self, directory):
+        self.directory = directory
+
+    def _path(self, key):
+        digest = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode("utf-8")).hexdigest()
+        return os.path.join(self.directory, digest + ".json")
+
+    def get(self, key):
+        path = self._path(key)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                entry = json.load(handle)
+            if time.time() - float(entry["saved_at"]) < 60 * 86400:
+                return entry["data"]
+            return None
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(f"SkillHub 缓存读取失败，请点击重试重新获取：{exc}") from exc
+
+    def put(self, key, data):
+        temporary = None
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.directory,
+                                             suffix=".tmp", delete=False) as handle:
+                temporary = handle.name
+                json.dump({"saved_at": time.time(), "data": data}, handle, ensure_ascii=False)
+            os.replace(temporary, self._path(key))
+            files = sorted((os.path.join(self.directory, name) for name in os.listdir(self.directory)
+                            if name.endswith(".json")), key=os.path.getmtime, reverse=True)
+            for path in files[32:]:
+                os.remove(path)
+        except OSError as exc:
+            raise RuntimeError(f"SkillHub 缓存保存失败：{exc}") from exc
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)
 
 
 def identifier(value):

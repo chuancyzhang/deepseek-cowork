@@ -61,7 +61,7 @@ from core.favorite_delivery import (
     collect_feishu_artifacts,
 )
 from core.skill_manager import SkillManager
-from core.skillhub import SkillHubClient, read_origin, identifier
+from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier
 from ui.skillhub_widgets import SkillHubCard, decode_icon, compact_count
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
@@ -14948,6 +14948,7 @@ class SkillsCenterDialog(QDialog):
         self.skill_manager = skill_manager
         self.config_manager = config_manager
         self.hub_client = SkillHubClient()
+        self._hub_cache = SkillHubCache(os.path.join(get_app_data_dir(), "cache", "skillhub"))
         self.hub_data = None
         self.hub_detail = None
         self.hub_slug = ""
@@ -15287,14 +15288,25 @@ class SkillsCenterDialog(QDialog):
         self.hub_page = 1
         self._load_hub()
 
-    def _load_hub(self):
+    def _load_hub(self, *, force=False):
         self.hub_generation += 1
         generation = self.hub_generation
         self.hub_loading, self.hub_error = True, ""
         keyword, category, sort, page = self.search_text, self.hub_category_key, self.hub_sort.currentData(), self.hub_page
         needs_categories = not self.hub_categories
+        categories = list(self.hub_categories)
         slug = self.hub_slug
-        self._render_content()
+        key = ("detail", slug) if slug else ("list", keyword, category, sort, page)
+        try:
+            cached = None if force else self._hub_cache.get(key)
+        except RuntimeError as exc:
+            self.hub_loading, self.hub_error = False, str(exc)
+            log_ui_navigation("skillhub_cache_error", error=str(exc))
+            self._render_content()
+            return
+        cache_hit = cached is not None
+        if not cache_hit:
+            self._render_content()
 
         def operation():
             if slug:
@@ -15304,9 +15316,13 @@ class SkillsCenterDialog(QDialog):
                     data["evaluation"] = self.hub_client.evaluation(slug)
                 except Exception as exc:
                     data["evaluation_error"] = str(exc)
+                if not data.get("evaluation_error"):
+                    self._hub_cache.put(key, data)
                 return data
-            return {"list": self.hub_client.search(keyword, category, sort, page),
-                    "categories": self.hub_client.categories() if needs_categories else None}
+            data = {"list": self.hub_client.search(keyword, category, sort, page),
+                    "categories": self.hub_client.categories() if needs_categories else categories}
+            self._hub_cache.put(key, data)
+            return data
 
         def finished(result):
             if generation != self.hub_generation:
@@ -15314,6 +15330,7 @@ class SkillsCenterDialog(QDialog):
             self.hub_loading = False
             if not result["ok"]:
                 self.hub_error = result["error"]
+                log_ui_navigation("skillhub_load_error", slug=slug, error=self.hub_error)
             elif slug:
                 self.hub_detail = result["data"]
             else:
@@ -15326,7 +15343,11 @@ class SkillsCenterDialog(QDialog):
                     self.hub_category.currentChanged.connect(self._hub_category_changed)
                     self.hub_category_scroll.setWidget(self.hub_category)
             self._render_content()
-        self._hub_worker(operation, finished)
+        if cache_hit:
+            log_ui_navigation("skillhub_cache_hit", slug=slug, page=page)
+            finished({"ok": True, "data": cached})
+        else:
+            self._hub_worker(operation, finished)
 
     def _hub_open(self, slug):
         self._hub_list_scroll = self.scroll.verticalScrollBar().value()
@@ -15368,16 +15389,17 @@ class SkillsCenterDialog(QDialog):
                 installed[origin["slug"]] = dict(origin, name=skill["name"])
         return installed
 
-    def _hub_more(self, title, text, key):
-        button = self._hub_button(("收起" if key in self._hub_expanded else "展开") + title, lambda: None)
+    def _hub_more(self, title, text, key, layout=None):
+        button = self._hub_button(("收起" if key in self._hub_expanded else "展开") + title, lambda: None, layout)
+        button.setStyleSheet(product_button_style("ghost"))
         button.setCheckable(True)
         button.setChecked(key in self._hub_expanded)
         button.setMaximumWidth(180)
-        body = self._hub_label(text)
+        body = self._hub_label(text, layout)
         body.setVisible(button.isChecked())
         copy_button = None
         if key.startswith("error:"):
-            copy_button = self._hub_button("复制诊断信息", lambda: QApplication.clipboard().setText(str(text)))
+            copy_button = self._hub_button("复制诊断信息", lambda: QApplication.clipboard().setText(str(text)), layout)
             copy_button.setMaximumWidth(160)
             copy_button.setVisible(button.isChecked())
         def toggle(checked):
@@ -15391,15 +15413,15 @@ class SkillsCenterDialog(QDialog):
                 self._hub_expanded.discard(key)
         button.toggled.connect(toggle)
 
-    def _hub_task_feedback(self, slug):
+    def _hub_task_feedback(self, slug, layout=None):
         task = self.hub_tasks.get(slug)
         if not task:
             return
-        self._hub_label(f"{task.get('version', '')} · {task['message']}")
+        self._hub_label(f"{task.get('version', '')} · {task['message']}", layout)
         if task.get("stage") == "error":
-            self._hub_more("诊断信息", task.get("diagnostic") or task["message"], "error:" + slug)
+            self._hub_more("诊断信息", task.get("diagnostic") or task["message"], "error:" + slug, layout)
         elif task.get("stage") == "done":
-            self._hub_button("查看我的能力", self._hub_show_mine).setMaximumWidth(160)
+            self._hub_button("查看我的能力", self._hub_show_mine, layout).setMaximumWidth(160)
 
     def _hub_show_mine(self):
         self.mode_control.set_current("mine")
@@ -15408,9 +15430,15 @@ class SkillsCenterDialog(QDialog):
     def _hub_render_detail(self, installed):
         data, slug = self.hub_detail, self.hub_slug
         skill = data["skill"]
+        content = QWidget()
+        content.setMaximumWidth(1040)
+        detail_layout = QVBoxLayout(content)
+        detail_layout.setContentsMargins(0, DesignTokens.spacing_sm, 0, 0)
+        detail_layout.setSpacing(DesignTokens.spacing_md)
+        self.content_layout.addWidget(content)
         narrow = self.scroll.viewport().width() < 720
         heading = QBoxLayout(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
-        self.content_layout.addLayout(heading)
+        detail_layout.addLayout(heading)
         title = self._hub_label(skill["displayName"], heading)
         title.setStyleSheet(f"font-size: {DesignTokens.font_size_page}px; font-weight: 600; color: {DesignTokens.text_primary};")
         heading.addStretch()
@@ -15430,18 +15458,27 @@ class SkillsCenterDialog(QDialog):
         if narrow:
             heading.setAlignment(action, Qt.AlignLeft)
         stats = skill.get("stats") or {}
-        self._hub_label(f"{(data.get('owner') or {}).get('handle') or '未提供作者'}   ·   ↓ {compact_count(stats.get('downloads'))}   ☆ {compact_count(stats.get('stars'))}")
+        metadata = self._hub_label(f"{(data.get('owner') or {}).get('handle') or '未提供作者'}   ·   下载 {compact_count(stats.get('downloads'))}   ·   收藏 {compact_count(stats.get('stars'))}", detail_layout)
+        metadata.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
         if current:
-            self._hub_label(f"已安装 {current['version']} · 开启和配置请前往我的能力")
-        self._hub_task_feedback(slug)
-        self._hub_label(skill.get("summary_zh") or skill.get("summary") or "暂无简介")
+            self._hub_label(f"已安装 {current['version']} · 开启和配置请前往我的能力", detail_layout)
+        self._hub_task_feedback(slug, detail_layout)
+        detail_layout.addSpacing(DesignTokens.spacing_sm)
+        self._hub_label(skill.get("summary_zh") or skill.get("summary") or "暂无简介", detail_layout)
+        separator = QFrame()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"QFrame {{ background: {DesignTokens.border}; border: none; }}")
+        detail_layout.addWidget(separator)
         row = QHBoxLayout()
-        self.content_layout.addLayout(row)
-        row.addWidget(QLabel("版本"))
+        detail_layout.addLayout(row)
+        self._hub_label("版本", row)
         row.addWidget(version_box)
+        check = self._hub_button("检查更新", lambda: self._load_hub(force=True), row)
+        check.setStyleSheet(product_button_style("ghost"))
+        check.setMaximumWidth(110)
         row.addStretch()
-        self._hub_button("检查更新", self._load_hub, row).setMaximumWidth(110)
-        notes = self._hub_label("")
+        notes = self._hub_label("", detail_layout)
+        notes.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
         def selected():
             entry = version_box.currentData() or {}
             self.hub_version = entry.get("version", "")
@@ -15453,8 +15490,10 @@ class SkillsCenterDialog(QDialog):
             action.setEnabled(bool(entry) and not self.hub_installing and (not current or entry["version"] != current["version"]))
         version_box.currentIndexChanged.connect(selected)
         selected()
-        self._hub_more("质量参考", str(data.get("evaluation_error") or (data.get("evaluation") or {}).get("userSummary") or "暂无公开评测"), "quality:" + slug)
-        self._hub_button("官网详情与文件 ↗", lambda: QDesktopServices.openUrl(QUrl("https://skillhub.cn/skills/" + identifier(slug)))).setMaximumWidth(180)
+        self._hub_more("质量参考", str(data.get("evaluation_error") or (data.get("evaluation") or {}).get("userSummary") or "暂无公开评测"), "quality:" + slug, detail_layout)
+        official = self._hub_button("官网详情与文件 ↗", lambda: QDesktopServices.openUrl(QUrl("https://skillhub.cn/skills/" + identifier(slug))), detail_layout)
+        official.setMaximumWidth(180)
+        official.setStyleSheet(product_button_style("ghost"))
 
     def _render_hub(self):
         self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_app};}}")
@@ -15462,12 +15501,14 @@ class SkillsCenterDialog(QDialog):
         columns = max(1, min(4, (self.scroll.viewport().width() + DesignTokens.spacing_md) // (280 + DesignTokens.spacing_md)))
         self._hub_layout_key = (columns, self.scroll.viewport().width() < 720)
         if self.hub_slug:
-            self._hub_button("‹ 返回技能列表", self._hub_back).setMaximumWidth(160)
+            back = self._hub_button("‹ 返回技能列表", self._hub_back)
+            back.setMaximumWidth(160)
+            back.setStyleSheet(product_button_style("ghost"))
         if self.hub_loading:
             self.content_layout.addWidget(ProductEmptyState("正在加载 SkillHub", "请稍候…"))
         elif self.hub_error:
             self.content_layout.addWidget(ProductEmptyState("SkillHub 加载失败", self.hub_error))
-            self._hub_button("重试", self._load_hub).setMaximumWidth(100)
+            self._hub_button("重试", lambda: self._load_hub(force=True)).setMaximumWidth(100)
         else:
             try:
                 installed = self._hub_installed()
@@ -15502,7 +15543,7 @@ class SkillsCenterDialog(QDialog):
                 self._hub_button("上一页", lambda: self._hub_turn_page(-1), nav).setEnabled(self.hub_page > 1)
                 self._hub_label(f"第 {self.hub_page} 页 · 共 {data['total']:,} 个", nav).setWordWrap(False)
                 self._hub_button("下一页", lambda: self._hub_turn_page(1), nav).setEnabled(self.hub_page * 20 < data["total"])
-                self._hub_button("刷新", self._load_hub, nav)
+                self._hub_button("刷新", lambda: self._load_hub(force=True), nav)
         self.content_layout.addStretch()
 
     def _hub_turn_page(self, delta):
@@ -44939,16 +44980,18 @@ a {{ overflow-wrap: anywhere; }}
                 if workbench is not None:
                     self.main_page_stack.removeWidget(workbench)
                     workbench.deleteLater()
-                advanced = self.product_pages.get("capability_advanced")
-                if advanced is not None:
-                    advanced.refresh_list()
-                    self.current_product_subroute = "advanced"
-                    self.workspace_title_label.setText("开发与诊断")
-                    self.workspace_subtitle_label.setText("管理来源、文件、依赖和调试工具。")
-                    self.main_page_stack.setCurrentWidget(advanced)
+                subroute, title, subtitle = workbench.return_location
+                parent_page = self.product_pages.get("capability_" + subroute) if subroute else None
+                if parent_page is not None:
+                    if subroute == "advanced":
+                        parent_page.refresh_list()
+                    self.current_product_subroute = subroute
+                    self.workspace_title_label.setText(title)
+                    self.workspace_subtitle_label.setText(subtitle)
+                    self.main_page_stack.setCurrentWidget(parent_page)
                     return True
-            if self.current_product_subroute in {"detail", "advanced"}:
-                key = "capability_detail" if self.current_product_subroute == "detail" else "capability_advanced"
+            if self.current_product_subroute in {"detail", "advanced", "workbench"}:
+                key = "capability_" + self.current_product_subroute
                 page_to_close = self.product_pages.pop(key, None)
                 if page_to_close is not None:
                     self.main_page_stack.removeWidget(page_to_close)
@@ -45211,6 +45254,11 @@ a {{ overflow-wrap: anywhere; }}
             self.main_page_stack.removeWidget(previous)
             previous.deleteLater()
         workbench = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
+        workbench.return_location = (
+            self.current_product_subroute,
+            self.workspace_title_label.text(),
+            self.workspace_subtitle_label.text(),
+        )
         workbench.setParent(self.main_page_stack)
         workbench.setWindowFlags(Qt.Widget)
         workbench.setModal(False)

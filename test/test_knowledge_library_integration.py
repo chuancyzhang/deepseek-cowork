@@ -89,6 +89,43 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertIsNone(knowledge_context_message(None, "request-b"))
         self.assertNotIn(self.scope["generation"], context["content"])
 
+    def test_context_uses_ledger_identity_and_can_merge_on_success_or_error(self):
+        from core.conversation_integrity import merge_messages_by_id
+        worker = LLMWorker.__new__(LLMWorker)
+        worker.turn_id, worker.request_id = "turn-a", "request-a"
+        original = [{"id": "user-a", "role": "user", "content": "看看这篇资料"}]
+        current, generated = copy.deepcopy(original), []
+        worker._append_ledger_message(current, generated, knowledge_context_message(self.scope, "request-a"))
+        self.assertTrue(generated[0]["id"])
+        self.assertEqual(generated[0]["meta"]["turn_id"], "turn-a")
+        merged = merge_messages_by_id(original, generated)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merge_messages_by_id(merged, generated), merged)
+        self.assertEqual(original[0]["content"], "看看这篇资料")
+
+    def test_worker_result_merges_with_knowledge_context(self):
+        from core.conversation_integrity import merge_messages_by_id
+        from test_plan_mode import _ConfigStub
+        class Provider:
+            provider_name, model_name, base_url, thinking_enabled = "stub", "stub", "", False
+            def chat_stream(self, messages, tools=None):
+                yield {"type": "content", "content": "已阅读"}
+        manager = self.manager()
+        original = [{"id": "user-a", "role": "user", "content": "看看资料"}]
+        results = []
+        with patch("core.agent.SkillManager", return_value=manager), patch("core.agent.LLMFactory.create_provider", return_value=Provider()):
+            worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
+                               run_context={"knowledge_context": self.scope})
+            worker.finished_signal.connect(results.append)
+            worker.run()
+        self.assertTrue(results)
+        self.assertNotIn("error", results[-1])
+        generated = results[-1]["generated_messages"]
+        self.assertTrue(any(m.get("meta", {}).get("source") == "knowledge_submission" for m in generated))
+        self.assertTrue(all(m.get("id") for m in generated))
+        merged = merge_messages_by_id(original, generated)
+        self.assertEqual(merged[0], original[0])
+
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
     def test_real_windows_dpapi_roundtrip(self):
         protector = WindowsDpapiProtector()

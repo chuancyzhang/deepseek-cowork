@@ -29239,7 +29239,7 @@ class MainWindow(QMainWindow):
         prompt_context_layout.addWidget(self.agent_picker_btn)
         prompt_context_layout.addWidget(self.selected_skills_badge)
         self.knowledge_refs_button = QPushButton("资料引用")
-        self.knowledge_refs_button.setStyleSheet(product_button_style("secondary"))
+        self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
         self.knowledge_refs_button.clicked.connect(self.edit_knowledge_references)
         self.knowledge_refs_button.hide()
         prompt_context_layout.addWidget(self.knowledge_refs_button)
@@ -29614,6 +29614,8 @@ class MainWindow(QMainWindow):
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
         self.model_select_btn.setStyleSheet(model_style)
+        self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
+        self.knowledge_refs_button.setIcon(qta.icon("fa5s.book-open", color=DesignTokens.icon_secondary))
         self.action_btn.setIcon(
             qta.icon("fa5s.paper-plane", color=DesignTokens.text_inverse)
         )
@@ -33601,9 +33603,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "knowledge_refs_button"):
             references = getattr(state, "knowledge_refs", []) if state else []
             self.knowledge_refs_button.setVisible(bool(references))
-            self.knowledge_refs_button.setText(f"资料引用 · {len(references)}")
+            self.knowledge_refs_button.setText(f"资料 · {len(references)}")
+            self.knowledge_refs_button.setIcon(qta.icon("fa5s.book-open", color=DesignTokens.icon_secondary))
             self.knowledge_refs_button.setToolTip("\n".join(ref.get("title", "") for ref in references))
-            self.knowledge_refs_button.setStyleSheet(product_button_style("secondary"))
+            self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
         profile = self._model_profile_for_state(state)
         provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
         model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
@@ -44948,14 +44951,8 @@ a {{ overflow-wrap: anywhere; }}
 
     def use_knowledge_reference(self, reference, mode):
         if mode == "project":
-            projects = self.config_manager.get_projects()
-            if not projects:
-                self.add_system_toast("请先创建或打开一个项目。", "info")
-                return
-            menu = QMenu(self)
-            for project in projects:
-                menu.addAction(project["name"], lambda project=project: self._save_project_knowledge(project, reference))
-            menu.exec(QCursor.pos())
+            # Close the action menu before opening its project selection step.
+            QTimer.singleShot(0, lambda ref=copy.deepcopy(reference): self._choose_knowledge_project(ref))
             return
         if mode == "new":
             self.new_conversation()
@@ -44972,6 +44969,16 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_context_badges(state.session_id)
         self.add_system_toast("已添加资料，下次提交时使用。", "success")
 
+    def _choose_knowledge_project(self, reference):
+        from ui.knowledge_library import KnowledgeProjectPicker
+        projects = self.config_manager.get_projects(include_hidden=False)
+        if not projects:
+            self.add_system_toast("请先创建或打开一个未归档项目。", "info")
+            return
+        picker = KnowledgeProjectPicker(projects, self)
+        if picker.exec() == QDialog.Accepted:
+            self._save_project_knowledge(picker.selected_project, reference)
+
     def _save_project_knowledge(self, project, reference):
         owner = "project:" + self._project_key(project["path"])
         store = self._knowledge_service().store
@@ -44982,24 +44989,51 @@ a {{ overflow-wrap: anywhere; }}
         self.add_system_toast("已设为项目新对话的默认资料。", "success")
 
     def edit_knowledge_references(self):
+        from ui.knowledge_library import KnowledgeReferencePopover
         state = self.get_session()
         if not state:
             return
-        menu = QMenu(self)
-        for index, reference in enumerate(getattr(state, "knowledge_refs", [])):
-            title = str(reference.get("title") or "资料")
-            menu.addAction("移除 · " + title, lambda index=index, sid=state.session_id: self._remove_knowledge_reference(sid, index))
-        menu.addAction("清空本对话资料引用", lambda sid=state.session_id: self._remove_knowledge_reference(sid, None))
+        initial = copy.deepcopy(getattr(state, "knowledge_refs", []))
+        popover = KnowledgeReferencePopover(initial, self)
+        self.knowledge_reference_popover = popover
+        def apply(references, sid=state.session_id):
+            target = self.get_session(sid)
+            if not target:
+                return
+            if target.knowledge_refs != initial:
+                self.add_system_toast("资料选择已变化，请重新打开后调整。", "info", session_id=sid)
+                return
+            target.knowledge_refs = copy.deepcopy(references)
+            self.save_chat_history(session_id=sid)
+            self.refresh_context_badges(sid)
+            self.add_system_toast("资料选择已更新，下次提交时生效。", "success", session_id=sid)
+        popover.applied.connect(apply)
         workspace = self._workspace_dir_for_state(state)
         if workspace:
             owner = "project:" + self._project_key(workspace)
-            defaults = self._knowledge_service().store.references(owner)
-            if defaults:
-                submenu = menu.addMenu("项目新对话默认资料")
-                for index, reference in enumerate(defaults):
-                    submenu.addAction("移除 · " + str(reference.get("title") or "资料"),
-                                      lambda index=index, owner=owner: self._remove_project_knowledge(owner, index))
-        menu.exec(self.knowledge_refs_button.mapToGlobal(self.knowledge_refs_button.rect().bottomLeft()))
+            if self._knowledge_service().store.references(owner):
+                defaults = QPushButton("管理项目新对话默认资料")
+                defaults.setStyleSheet(product_button_style("ghost"))
+                defaults.clicked.connect(lambda checked=False, owner=owner: (
+                    popover.close(), QTimer.singleShot(0, lambda: self._edit_project_knowledge(owner))))
+                popover.layout().insertWidget(popover.layout().count() - 1, defaults)
+        popover.show_for(self.knowledge_refs_button, prefer_above=True)
+        QTimer.singleShot(0, popover.search.setFocus)
+
+    def _edit_project_knowledge(self, owner):
+        from ui.knowledge_library import KnowledgeReferencePopover
+        store = self._knowledge_service().store
+        initial = store.references(owner)
+        popover = KnowledgeReferencePopover(initial, self)
+        self.knowledge_reference_popover = popover
+        def apply(references):
+            if store.references(owner) != initial:
+                self.add_system_toast("项目资料已变化，请重新打开后调整。", "info")
+                return
+            store.references(owner, references)
+            self.add_system_toast("项目默认资料已更新，已有对话保持原选择。", "success")
+        popover.applied.connect(apply)
+        popover.show_for(self.knowledge_refs_button, prefer_above=True)
 
     def _remove_project_knowledge(self, owner, index):
         store = self._knowledge_service().store

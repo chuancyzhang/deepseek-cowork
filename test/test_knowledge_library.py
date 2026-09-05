@@ -70,6 +70,10 @@ class WeKnoraFixture:
             return Response({"success": True, "data": [{"knowledge_base": {"id": "kb-b", "name": "共享研究资料"}, "permission": "viewer"}]})
         if path in ("knowledge-bases/kb-a", "knowledge-bases/kb-b"):
             return Response({"success": True, "data": {"id": path.split("/")[-1]}})
+        if path.endswith("/preview"):
+            response = Response({})
+            response.content = b"<!doctype html><h1>Preview while indexing</h1>"
+            return response
         if path.startswith("knowledge/"):
             item = self.documents.get(path.split("/")[-1])
             return Response({"success": True, "data": item}, 200 if item else 404)
@@ -116,6 +120,12 @@ class KnowledgeLibraryTests(unittest.TestCase):
         for bad in ( "https://user:password@team.example", "https://team.example/a", "file:///a"):
             with self.assertRaises(KnowledgeError):
                 service_url(bad)
+
+    def test_html_preview_does_not_require_completed_index(self):
+        self.transport.documents["doc-a"]["parse_status"] = "finalizing"
+        self.assertIn(b"Preview while indexing", self.service.preview_html(self.scope, "doc-a"))
+        self.transport.fail_status = 403
+        self.assertCode("forbidden", lambda: self.service.preview_html(self.scope, "doc-a"))
 
     def test_password_not_saved_and_tokens_encrypted(self):
         with open(self.store.path, "rb") as stream:

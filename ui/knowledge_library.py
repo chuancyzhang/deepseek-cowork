@@ -6,17 +6,17 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, QSize
-from PySide6.QtGui import QDesktopServices, QFont, QTextDocument
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, QSize, QBuffer, QByteArray, QIODevice
+from PySide6.QtGui import QDesktopServices, QFont, QTextDocument, QPixmap
 import qtawesome as qta
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel,
-                              QLineEdit, QMenu,
+                              QLineEdit, QListWidget, QListWidgetItem, QMenu,
                               QPushButton, QSplitter, QStackedWidget, QTextBrowser, QTreeWidget,
                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from core.knowledge_library import KnowledgeService, KnowledgeError, response_data, rows, same_identity, segment
 from core.theme import DesignTokens, bind_theme
-from ui.primitives import ProductToolbar, product_button_style, product_field_style, apply_product_dialog
+from ui.primitives import ProductPopover, ProductToolbar, product_button_style, product_field_style, apply_product_dialog
 
 
 WIKI_TYPES = {"index": "概览与导航", "concept": "概念", "entity": "人物与事物", "synthesis": "专题综述", "comparison": "对比分析", "summary": "文档摘要"}
@@ -126,6 +126,134 @@ class LibraryJobs(QObject):
             (callbacks[1] if error else callbacks[0])(error if error else result)
         except Exception as exc:
             callbacks[1](exc)
+
+
+class KnowledgeReferencePopover(ProductPopover):
+    applied = Signal(object)
+
+    def __init__(self, references, parent=None):
+        super().__init__(parent, width=500)
+        self.references = copy.deepcopy(references)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("本对话使用的资料"))
+        subtitle = QLabel("取消勾选可移除资料；应用后从下一次提交生效。")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索已选资料")
+        self.search.setStyleSheet(product_field_style())
+        layout.addWidget(self.search)
+        self.items = QListWidget()
+        self.items.setMinimumHeight(160)
+        self.items.setMaximumHeight(280)
+        self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.items.setWordWrap(True)
+        self.items.setStyleSheet(f"QListWidget {{background:{DesignTokens.bg_main};color:{DesignTokens.text_primary};border:1px solid {DesignTokens.separator};border-radius:7px;padding:4px;}} QListWidget::item {{padding:8px;}}")
+        for ref in self.references:
+            item = QListWidgetItem(ref.get("title") or "资料")
+            item.setToolTip(item.text())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.items.addItem(item)
+        self.search.textChanged.connect(self.filter_items)
+        layout.addWidget(self.items)
+        actions = QHBoxLayout()
+        clear = QPushButton("清除")
+        clear.clicked.connect(self.clear_selection)
+        clear.setStyleSheet(product_button_style("ghost"))
+        actions.addWidget(clear)
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.close)
+        cancel.setStyleSheet(product_button_style("secondary"))
+        actions.addWidget(cancel)
+        self.apply_button = QPushButton("应用")
+        self.apply_button.setStyleSheet(product_button_style("primary"))
+        self.apply_button.clicked.connect(self.apply_selection)
+        actions.addWidget(self.apply_button)
+        layout.addLayout(actions)
+
+    def filter_items(self, text):
+        for index in range(self.items.count()):
+            item = self.items.item(index)
+            item.setHidden(text.casefold() not in item.text().casefold())
+
+    def clear_selection(self):
+        for index in range(self.items.count()):
+            self.items.item(index).setCheckState(Qt.Unchecked)
+
+    def apply_selection(self):
+        self.applied.emit([ref for index, ref in enumerate(self.references)
+                           if self.items.item(index).checkState() == Qt.Checked])
+        self.close()
+
+
+class KnowledgeProjectPicker(QDialog):
+    """Short, searchable project selection using the product dialog theme."""
+    def __init__(self, projects, parent=None):
+        super().__init__(parent)
+        apply_product_dialog(self, "KnowledgeProjectPicker")
+        self.setWindowTitle("添加资料到项目")
+        self.resize(420, 400)
+        self.selected_project = None
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("选择项目，供之后的新对话使用这份资料。"))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索项目")
+        self.search.setClearButtonEnabled(True)
+        self.search.setStyleSheet(product_field_style())
+        layout.addWidget(self.search)
+        self.projects = QListWidget()
+        self.projects.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for project in projects:
+            if project.get("archived") or project.get("hidden"):
+                continue
+            item = QListWidgetItem(str(project["name"]))
+            item.setData(Qt.UserRole, copy.deepcopy(project))
+            item.setToolTip(project["path"])
+            item.setSizeHint(QSize(0, 38))
+            self.projects.addItem(item)
+        layout.addWidget(self.projects, 1)
+        self.empty = QLabel("没有匹配的项目")
+        layout.addWidget(self.empty)
+        self.search.textChanged.connect(self.filter_projects)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setStyleSheet(product_button_style("secondary"))
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        self.submit = QPushButton("添加到项目")
+        self.submit.setStyleSheet(product_button_style("primary"))
+        self.submit.clicked.connect(self.choose)
+        actions.addWidget(self.submit)
+        layout.addLayout(actions)
+        self.projects.itemSelectionChanged.connect(self.update_selection)
+        self.projects.itemDoubleClicked.connect(lambda _item: self.choose())
+        self.filter_projects("")
+        self.search.setFocus()
+
+    def filter_projects(self, query):
+        visible = 0
+        for index in range(self.projects.count()):
+            item = self.projects.item(index)
+            hidden = query.casefold() not in item.text().casefold()
+            item.setHidden(hidden)
+            visible += not hidden
+        self.empty.setVisible(not visible)
+        self.update_selection()
+
+    def update_selection(self):
+        item = self.projects.currentItem()
+        self.submit.setEnabled(bool(item and not item.isHidden()))
+
+    def choose(self):
+        item = self.projects.currentItem()
+        if item and not item.isHidden():
+            self.selected_project = copy.deepcopy(item.data(Qt.UserRole))
+            self.accept()
 
 
 class KnowledgePage(QDialog):
@@ -327,6 +455,7 @@ class KnowledgePage(QDialog):
         reader_menu = QMenu(reader_manage)
         reader_menu.addAction("在 WeKnora 中打开", lambda: self.open_management(
             "/platform/knowledge-bases/" + segment(self.current_ref["kb_id"]) if self.current_ref else "/platform/knowledge-bases"))
+        reader_menu.addAction("用本机应用打开", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.current_file)) if self.current_file else None)
         reader_manage.setMenu(reader_menu)
         reading_actions.addWidget(reader_manage)
         reading_layout.addLayout(reading_actions)
@@ -335,7 +464,9 @@ class KnowledgePage(QDialog):
         self.reader_title.setTextFormat(Qt.PlainText)
         self.reader_title.setObjectName("LibraryDocumentTitle")
         reading_layout.addWidget(self.reader_title)
-        reading_layout.addWidget(self.reader, 1)
+        self.reader_stack = QStackedWidget()
+        self.reader_stack.addWidget(self.reader)
+        reading_layout.addWidget(self.reader_stack, 1)
         self.content_stack.addWidget(reading)
         self.splitter.addWidget(self.content_stack)
         self.splitter.setSizes([200, 800])
@@ -346,6 +477,11 @@ class KnowledgePage(QDialog):
         reading_layout.addWidget(self.read_more)
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="management")
+        self.upload_poll_busy = False
+        self.upload_timer = QTimer(self)
+        self.upload_timer.setInterval(5000)
+        self.upload_timer.timeout.connect(self.poll_uploads)
+        self.upload_timer.start()
         QTimer.singleShot(0, self.refresh)
 
     def refresh_theme(self, _resolved=None):
@@ -398,10 +534,12 @@ class KnowledgePage(QDialog):
                          lambda error: self.error(error) if epoch == self.epoch else None)
 
     def clear_view(self):
+        self.release_preview()
         self.epoch += 1
         self.read_serial += 1
         self.content_stack.setCurrentIndex(0)
         self.items.clear()
+        self.reader_stack.setCurrentIndex(0)
         self.reader.clear()
         self.read_more.hide()
         self.current_ref = None
@@ -664,6 +802,7 @@ class KnowledgePage(QDialog):
         self.run(lambda: self.service.request(scope, "GET", f"/api/v1/knowledgebase/{segment(kb)}/wiki/pages", params={"page": page, "page_size": 30, "page_type": page_type_filter, "sort_by": "title", "sort_order": "asc"}), done)
 
     def select_item(self, item, _column=0):
+        self.release_preview()
         self.read_serial += 1
         data = item.data(Qt.UserRole) or {}
         if data.get("group"):
@@ -673,21 +812,26 @@ class KnowledgePage(QDialog):
         self.reader_use.setVisible("path" not in data and "task" not in data)
         self.reader_save.setVisible("path" in data)
         self.reader_save.setEnabled(bool(self.scope))
+        self.reader_stack.setCurrentIndex(0)
         self.reader.clear()
         self.read_more.hide()
         self.current_ref, self.current_file = None, ""
         self.use_button.setEnabled(False)
         if "path" in data:
             self.current_file = data["path"]
-            self.reader.setPlainText("这份产物保存在本机。保存到资料库后，可以在后续工作中继续使用。\n\n文件位置\n" + self.current_file)
+            self.preview_local_file(self.current_file)
             self.upload_button.setText("保存到资料库")
             self.upload_button.setEnabled(bool(self.scope))
             return
         if "task" in data:
             task = data["task"]
-            self.reader.setPlainText(STATUS.get(task["status"], task["status"]) + "\n\n" + task.get("error", ""))
-            self.run(lambda: self.service.check_upload(task), lambda result: self.reader.setPlainText(
-                STATUS.get(result["status"], result["status"]) + "\n" + result.get("error", "")), "正在核对上传状态…")
+            self.current_file = task["path"]
+            if os.path.isfile(self.current_file):
+                self.preview_local_file(self.current_file)
+            else:
+                self.reader.setPlainText("本机源文件已移动或删除。上传记录仍可核对。")
+            self.run(lambda: self.service.check_upload(task), lambda result: self.notice.setText(
+                STATUS.get(result["status"], result["status"]) + " " + result.get("error", "")), "正在核对上传状态…")
             return
         ref = data.get("ref")
         if not ref:
@@ -698,8 +842,135 @@ class KnowledgePage(QDialog):
         if not ref.get("knowledge_id") and not ref.get("wiki_slug"):
             self.open_kb({"id": ref["kb_id"], "name": ref["title"]})
             return
+        if ref["title"].lower().endswith((".html", ".htm")) and ref.get("knowledge_id"):
+            scope = copy.deepcopy(self.scope)
+            self.run(lambda: self.service.preview_html(scope, ref["knowledge_id"]),
+                     lambda content: self.show_html(content) if self.current_ref == ref else None, "正在读取原文件预览…")
+            return
         self.read_page = 1
         self.read_ref(ref)
+
+    def release_preview(self):
+        if hasattr(self, "pdf_document"):
+            self.pdf_document.close()
+            self.pdf_buffer.close()
+
+    def closeEvent(self, event):
+        self.release_preview()
+        super().closeEvent(event)
+
+    def preview_local_file(self, path):
+        self.release_preview()
+        extension = os.path.splitext(path)[1].lower()
+        self.notice.setText("正在预览本机文件…")
+        if extension in (".html", ".htm"):
+            self.preview_local_html(path)
+            return
+        if extension == ".pdf":
+            try:
+                from PySide6.QtPdf import QPdfDocument
+                from PySide6.QtPdfWidgets import QPdfView
+                if not hasattr(self, "pdf_view"):
+                    self.pdf_document = QPdfDocument(self)
+                    self.pdf_buffer = QBuffer(self)
+                    self.pdf_view = QPdfView(self)
+                    self.pdf_view.setDocument(self.pdf_document)
+                    self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
+                    self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+                    self.reader_stack.addWidget(self.pdf_view)
+                with open(path, "rb") as source:
+                    content = source.read(50 * 1024 * 1024 + 1)
+                if len(content) > 50 * 1024 * 1024:
+                    raise ValueError("PDF 超过 50 MB，请使用本机应用打开。")
+                self.pdf_buffer.setData(QByteArray(content))
+                self.pdf_buffer.open(QIODevice.ReadOnly)
+                self.pdf_document.load(self.pdf_buffer)
+                if self.pdf_document.error() != QPdfDocument.Error.None_:
+                    raise RuntimeError(f"PDF 预览失败：{self.pdf_document.error()}")
+                self.reader_stack.setCurrentWidget(self.pdf_view)
+                self.notice.setText("本机 PDF 预览")
+            except Exception as error:
+                self.error(error)
+            return
+        if extension in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"):
+            try:
+                if os.path.getsize(path) > 25 * 1024 * 1024:
+                    raise ValueError("图片超过 25 MB，请使用本机应用打开。")
+                pixmap = QPixmap(path)
+                if pixmap.isNull():
+                    raise ValueError("无法解码图片。")
+                if not hasattr(self, "image_preview"):
+                    self.image_preview = QLabel()
+                    self.image_preview.setAlignment(Qt.AlignCenter)
+                    self.reader_stack.addWidget(self.image_preview)
+                self.image_preview.setPixmap(pixmap.scaled(self.reader_stack.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.reader_stack.setCurrentWidget(self.image_preview)
+                self.notice.setText("本机图片预览")
+            except Exception as error:
+                self.error(error)
+            return
+        def load():
+            if extension in (".docx", ".pptx", ".xlsx", ".doc", ".ppt", ".xls"):
+                from core.deliverable_preview import render_structured_document_preview
+                return "html", render_structured_document_preview(path)["html"]
+            with open(path, "rb") as source:
+                data = source.read(2 * 1024 * 1024 + 1)
+            if len(data) > 2 * 1024 * 1024:
+                raise ValueError("文件超过 2 MB 文本预览限制，请使用本机应用打开。")
+            if b"\x00" in data:
+                raise ValueError("此文件不是可预览文本，请使用本机应用打开。")
+            return "markdown" if extension in (".md", ".markdown") else "text", data.decode("utf-8-sig")
+        def done(result):
+            if self.current_file != path:
+                return
+            kind, content = result
+            if kind == "html":
+                self.show_html(content.encode("utf-8"))
+                self.notice.setText("本机 Office 内容预览")
+            elif kind == "markdown":
+                self.reader.document().setMarkdown(content, QTextDocument.MarkdownNoHTML)
+                self.notice.setText("本机 Markdown 预览")
+            else:
+                self.reader.setPlainText(content)
+                self.notice.setText("本机文本预览")
+        self.run(load, done, "正在读取本机文件…")
+
+    def preview_local_html(self, path):
+        def load():
+            with open(path, "rb") as source:
+                content = source.read(1500001)
+            if len(content) > 1500000:
+                raise KnowledgeError("preview_too_large", "HTML 文件超过内置预览大小限制（1.5 MB）。")
+            return content
+        self.run(load, lambda content: self.show_html(content) if self.current_file == path else None,
+                 "正在预览本机文件…")
+
+    def show_html(self, content):
+        from bs4 import UnicodeDammit
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings, QWebEngineUrlRequestInterceptor
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        decoded = UnicodeDammit(content, is_html=True).unicode_markup
+        if decoded is None:
+            raise KnowledgeError("preview_encoding", "无法识别 HTML 文件编码。")
+        if not hasattr(self, "html_view"):
+            class PreviewResources(QWebEngineUrlRequestInterceptor):
+                def interceptRequest(self, info):
+                    if info.requestUrl().scheme() not in ("data", "about"):
+                        info.block(True)
+            self.html_profile = QWebEngineProfile(self)
+            self.html_interceptor = PreviewResources(self.html_profile)
+            self.html_profile.setUrlRequestInterceptor(self.html_interceptor)
+            self.html_view = QWebEngineView(self)
+            page = QWebEnginePage(self.html_profile, self.html_view)
+            self.html_view.setPage(page)
+            settings = page.settings()
+            settings.setAttribute(QWebEngineSettings.JavascriptEnabled, False)
+            settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, False)
+            settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
+            self.reader_stack.addWidget(self.html_view)
+        self.html_view.setHtml(decoded, QUrl("about:blank"))
+        self.reader_stack.setCurrentWidget(self.html_view)
+        self.notice.setText("HTML 原文件预览 · 脚本和外部资源不在预览中执行。")
 
     def read_ref(self, ref):
         self.read_serial += 1
@@ -869,8 +1140,42 @@ class KnowledgePage(QDialog):
         self.title.setText("上传记录")
         for task in self.service.store.uploads():
             if same_identity(task["scope"], self.scope):
-                self.add_item(os.path.basename(task["path"]) + " · " + STATUS.get(task["status"], task["status"]), {"task": task})
-        self.notice.setText("选择记录核对远端状态；未确认的上传不会自动重传。")
+                self.add_item(os.path.basename(task["path"]), {"task": task})
+        self.notice.setText("正在核对上传记录…")
+        self.poll_uploads(initial=True)
+
+    def poll_uploads(self, initial=False):
+        if self.upload_poll_busy or self.view != "uploads" or not self.scope or not self.isVisible():
+            return
+        tasks = [task for task in self.service.store.uploads()
+                 if same_identity(task["scope"], self.scope) and ((initial and (task.get("knowledge_id") or task["status"] == "unknown")) or task["status"] in ("pending", "processing", "finalizing"))]
+        if not tasks:
+            if initial:
+                self.notice.setText("暂无需要核对的上传；上传中的任务完成后会留下回执。" if self.items.count() else "还没有上传记录。")
+            return
+        self.upload_poll_busy = True
+        scope = copy.deepcopy(self.scope)
+        def work():
+            errors = []
+            for task in tasks:
+                try:
+                    self.service.check_upload(task)
+                except Exception as error:
+                    errors.append(str(error))
+            return errors
+        def done(errors):
+            self.upload_poll_busy = False
+            if self.view != "uploads" or not self.scope or not same_identity(scope, self.scope):
+                return
+            self.items.clear()
+            for task in self.service.store.uploads():
+                if same_identity(task["scope"], self.scope):
+                    self.add_item(os.path.basename(task["path"]), {"task": task})
+            self.notice.setText("状态核对失败：" + "；".join(dict.fromkeys(errors)) if errors else "已同步远端状态；解析中的记录会自动更新。")
+        def failed(error):
+            self.upload_poll_busy = False
+            self.error(error)
+        self.jobs.submit(work, done, failed)
 
     def manage_current(self):
         path = "/platform/knowledge-bases"

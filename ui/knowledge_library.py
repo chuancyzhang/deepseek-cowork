@@ -19,6 +19,9 @@ from core.theme import DesignTokens, bind_theme
 from ui.primitives import ProductToolbar, product_button_style, product_field_style, apply_product_dialog
 
 
+WIKI_TYPES = {"index": "概览与导航", "concept": "概念", "entity": "人物与事物", "synthesis": "专题综述", "comparison": "对比分析", "summary": "文档摘要"}
+
+
 STATUS = {"uploading": "正在上传", "pending": "已上传 · 等待解析", "processing": "解析中",
           "finalizing": "正在建立索引", "completed": "可检索", "failed": "解析失败",
           "cancelled": "解析已取消", "unknown": "结果待核对", "rejected": "上传失败"}
@@ -270,6 +273,16 @@ class KnowledgePage(QDialog):
         self.wiki_button = QPushButton("Wiki")
         self.wiki_button.clicked.connect(self.show_wiki)
         folder_row.addWidget(self.wiki_button)
+        self.wiki_filter = QComboBox()
+        self.wiki_filter.addItem("全部分类", "")
+        for key, label in WIKI_TYPES.items():
+            self.wiki_filter.addItem(label, key)
+        self.wiki_filter.activated.connect(lambda _index: self.show_wiki())
+        folder_row.addWidget(self.wiki_filter, 1)
+        self.files_button = QPushButton("返回资料")
+        self.files_button.setMaximumWidth(120)
+        self.files_button.clicked.connect(lambda: self.open_kb(self.current_kb))
+        folder_row.addWidget(self.files_button)
         center_layout.addLayout(folder_row)
         self.items = LibraryTable()
         self.items.itemClicked.connect(self.select_item)
@@ -398,6 +411,10 @@ class KnowledgePage(QDialog):
         self.project_filter.hide()
         self.folders.hide()
         self.wiki_button.hide()
+        self.wiki_filter.hide()
+        self.files_button.hide()
+        self.items.setHeaderLabels(["名称", "类型", "更新时间", "状态"])
+        self.items.setColumnHidden(3, False)
         self.use_button.hide()
         self.upload_button.hide()
         self.management_button.hide()
@@ -513,7 +530,7 @@ class KnowledgePage(QDialog):
             self.view = "recent"
             self.title.setText("最近访问")
             for ref in self.service.store.recent(self.scope):
-                self.add_item(ref["title"], {"ref": ref})
+                self.add_item(ref["title"], {"ref": ref, "group_name": "Wiki 阅读" if ref.get("wiki_slug") else "资料阅读"})
             self.notice.setText("" if self.items.count() else "还没有最近访问的资料。从左侧打开一个资料库，或搜索你想了解的内容。")
         elif kind == "artifacts":
             self.clear_view()
@@ -529,18 +546,18 @@ class KnowledgePage(QDialog):
             self.open_management("/platform/organizations/" + segment(data["id"]))
 
     def add_item(self, title, payload):
-        document = payload.get("document", {})
+        document = payload.get("document", payload.get("wiki", {}))
         task = payload.get("task", {})
         path = payload.get("path", task.get("path", ""))
         extension = (document.get("file_type") or os.path.splitext(path or str(title))[1].lstrip(".")).lower()
         kind = {"md": "文档", "pdf": "PDF", "docx": "文档", "xlsx": "表格", "csv": "表格",
                 "html": "网页", "pptx": "演示文稿"}.get(extension, "资料")
         if payload.get("ref", {}).get("wiki_slug"):
-            kind = "Wiki"
+            kind = WIKI_TYPES.get(document.get("page_type"), "Wiki")
         state = task.get("status") or document.get("parse_status", "")
         icon = qta.icon("fa5s.file-alt", color=DesignTokens.primary)
         return self.items.append([str(title), kind, friendly_date(document.get("updated_at") or task.get("updated_at")),
-                                  STATUS.get(state, state)], payload, icon, payload.get("project", ""))
+                                  STATUS.get(state, state)], payload, icon, payload.get("group_name", payload.get("project", "")))
 
     def show_artifacts(self):
         self.project_filter.show()
@@ -618,18 +635,33 @@ class KnowledgePage(QDialog):
         if reset:
             self.page = 1
         self.view = "wiki"
+        self.title.setText(self.current_kb["name"] + " · Wiki")
+        self.wiki_filter.show()
+        self.files_button.show()
+        self.management_button.show()
+        self.items.setHeaderLabels(["标题", "分类", "更新时间", ""])
+        self.items.setColumnHidden(3, True)
         self.previous.show()
         self.next.show()
         scope, kb, page = copy.deepcopy(self.scope), self.current_kb["id"], self.page
+        page_type_filter = self.wiki_filter.currentData()
         def done(payload):
             data = response_data(payload)
-            for item in data.get("pages") or []:
-                self.add_item(item["title"], {"ref": self.service.reference(scope, kb, item["title"], wiki_slug=item["slug"])})
+            pages = data.get("pages") or []
+            order = {key: index for index, key in enumerate(WIKI_TYPES)}
+            for item in sorted(pages, key=lambda item: (order.get(item.get("page_type"), 99), item["title"].casefold())):
+                page_type = item.get("page_type")
+                category = " / ".join(item.get("category_path") or [])
+                group = WIKI_TYPES.get(page_type, "其他页面")
+                if category:
+                    group += " · " + category
+                self.add_item(item["title"], {"wiki": item, "group_name": group,
+                    "ref": self.service.reference(scope, kb, item["title"], wiki_slug=item["slug"])})
             self.previous.setEnabled(page > 1)
             self.next.setEnabled(page < data.get("total_pages", 1))
             self.page_label.setText(f"Wiki · 第 {page} 页")
-            self.notice.setText("Wiki 编辑和管理在 WeKnora 中完成。")
-        self.run(lambda: self.service.request(scope, "GET", f"/api/v1/knowledgebase/{segment(kb)}/wiki/pages", params={"page": page, "page_size": 30}), done)
+            self.notice.setText("按分类浏览 Wiki。Wiki 编辑和目录管理在 WeKnora 中完成。" if pages else "此分类暂无 Wiki 页面。Wiki 编辑和管理在 WeKnora 中完成。")
+        self.run(lambda: self.service.request(scope, "GET", f"/api/v1/knowledgebase/{segment(kb)}/wiki/pages", params={"page": page, "page_size": 30, "page_type": page_type_filter, "sort_by": "title", "sort_order": "asc"}), done)
 
     def select_item(self, item, _column=0):
         self.read_serial += 1

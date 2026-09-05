@@ -68,6 +68,16 @@ def main():
     wait_for(lambda: page.items.count() == 1)
     app.processEvents()
     page.grab().save(os.path.join(destination, "browse.png"))
+    service.transport.wiki_pages = [
+        {"slug": "index", "title": "资料概览", "page_type": "index"},
+        {"slug": "concept", "title": "认知力", "page_type": "concept", "category_path": ["投资基础"]},
+        {"slug": "summary", "title": "投资观 · 文档摘要", "page_type": "summary"}]
+    page.show_wiki()
+    wait_for(lambda: page.items.count() == 3)
+    app.processEvents()
+    page.grab().save(os.path.join(destination, "wiki.png"))
+    page.open_kb({"id": "kb-a", "name": "产品资料"})
+    wait_for(lambda: page.items.count() == 1)
     page.select_item(page.items.item(0))
     wait_for(lambda: "只读用户可以阅读" in page.reader.toPlainText())
     app.processEvents()

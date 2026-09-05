@@ -34,8 +34,6 @@ def service_url(value):
         raise KnowledgeError("invalid_url", "请输入 WeKnora 服务根地址。")
     if not parts.hostname or parts.scheme not in ("http", "https"):
         raise KnowledgeError("invalid_url", "请输入有效的 HTTP 或 HTTPS 服务地址。")
-    if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
-        raise KnowledgeError("insecure_url", "远程 WeKnora 连接必须使用 HTTPS。")
     return f"{parts.scheme}://{parts.netloc}"
 
 

@@ -84,7 +84,7 @@ class WeKnoraFixture:
         if path.endswith("/knowledge"):
             return Response({"success": True, "data": [self.documents["doc-a"]], "total": 1})
         if path.endswith("/wiki/pages"):
-            return Response({"success": True, "data": {"pages": [{"slug": "intro", "title": "产品概览"}], "total_pages": 1}})
+            return Response({"success": True, "data": {"pages": getattr(self, "wiki_pages", [{"slug": "intro", "title": "产品概览", "page_type": "index"}]), "total_pages": 1}})
         if "/wiki/pages/" in path:
             return Response({"success": True, "data": {"title": "产品概览", "content": "产品概览正文"}})
         raise AssertionError(f"Unexpected wire request: {method} {path}")
@@ -109,9 +109,11 @@ class KnowledgeLibraryTests(unittest.TestCase):
             call()
         self.assertEqual(caught.exception.code, code)
 
-    def test_transport_requires_https_except_loopback(self):
+    def test_transport_accepts_remote_http_and_https(self):
         self.assertEqual(service_url("http://localhost/api/v1"), "http://localhost")
-        for bad in ("http://team.example", "https://user:password@team.example", "https://team.example/a", "file:///a"):
+        self.assertEqual(service_url("http://192.168.1.20:8080"), "http://192.168.1.20:8080")
+        self.assertEqual(service_url("http://team.example"), "http://team.example")
+        for bad in ( "https://user:password@team.example", "https://team.example/a", "file:///a"):
             with self.assertRaises(KnowledgeError):
                 service_url(bad)
 

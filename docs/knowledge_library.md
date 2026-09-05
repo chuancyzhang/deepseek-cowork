@@ -1,6 +1,6 @@
 # 在 Cowork 中使用资料库
 
-资料库把已有知识带入工作，也让本次产物成为下次工作的资料。打开左侧“资料库”，使用 WeKnora 邮箱与密码登录。默认连接本机 `http://localhost`；远程地址须使用 HTTPS。密码不会保存，登录令牌使用 Windows DPAPI 加密保存。
+资料库把已有知识带入工作，也让本次产物成为下次工作的资料。打开左侧“资料库”，使用 WeKnora 邮箱与密码登录。默认连接本机 `http://localhost`；远程地址支持 HTTP 和 HTTPS。密码不会保存，登录令牌使用 Windows DPAPI 加密保存。
 
 ## 找到并阅读资料
 
@@ -45,3 +45,8 @@ Agent 通过 Knowledge Skill 的 `list/search/read` 读取资料并综合回答�
 ![资料列表](images/knowledge-library/browse.png)
 
 ![阅读页](images/knowledge-library/desktop.png)
+
+
+2026-09-05 交互更新：远程连接支持 HTTP 与 HTTPS。Wiki 按服务端页面类型与分类路径分组，可按分类筛选；保留分页与返回资料入口。最近访问区分资料阅读和 Wiki 阅读，不修改远端标题或内容。
+
+![Wiki 分类浏览](images/knowledge-library/wiki.png)

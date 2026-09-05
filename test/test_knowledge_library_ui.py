@@ -87,6 +87,25 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.page.select_item(self.page.items.item(0))
         self.wait_for(lambda: "产品概览正文" in self.page.reader.toPlainText())
 
+    def test_wiki_groups_use_server_types_and_category_paths(self):
+        self.transport.wiki_pages = [
+            {"slug": "summary", "title": "原始文档摘要", "page_type": "summary"},
+            {"slug": "concept", "title": "认知力", "page_type": "concept", "category_path": ["投资基础"]},
+            {"slug": "index", "title": "Index", "page_type": "index"},
+        ]
+        self.page.open_kb({"id": "kb-a", "name": "产品资料"})
+        self.wait_for(lambda: self.page.items.count() == 1)
+        self.page.show_wiki()
+        self.wait_for(lambda: self.page.items.count() == 3)
+        self.assertEqual(self.page.items.topLevelItem(0).text(), "概览与导航")
+        self.assertEqual(self.page.items.topLevelItem(1).text(), "概念 · 投资基础")
+        self.assertEqual(self.page.items.topLevelItem(2).text(), "文档摘要")
+        self.assertTrue(self.page.items.isColumnHidden(3))
+        self.assertTrue(self.page.files_button.isVisible())
+        self.page.files_button.click()
+        self.wait_for(lambda: self.page.view == "files" and self.page.items.count() == 1)
+        self.assertFalse(self.page.items.isColumnHidden(3))
+
     def test_small_window_reflows_and_theme_can_be_reverted(self):
         self.page.resize(650, 760)
         self.app.processEvents()

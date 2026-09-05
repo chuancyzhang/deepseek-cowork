@@ -87,3 +87,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ## 许可证
 
 MIT License
+
+
+### 资料库
+
+连接本机 WeKnora，在 Cowork 中浏览、搜索和阅读资料，将资料带入 Agent 对话，并把本地产物保存回资料库。详见 [资料库使用说明](docs/knowledge_library.md)。

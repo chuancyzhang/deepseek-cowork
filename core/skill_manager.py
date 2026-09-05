@@ -3345,6 +3345,12 @@ class SkillManager:
         return str(spec.get("source_skill") or (record.get("mcp_server") or {}).get("source_skill") or "").strip()
 
     def _is_skill_allowed_by_scope(self, skill_name, run_context):
+        if (run_context or {}).get("knowledge_context"):
+            normalized_name = str(skill_name or "").strip()
+            record = self.skill_records.get(normalized_name) or {}
+            server = record.get("mcp_server") or {}
+            if normalized_name == "weknora" or self._source_skill_for_record(normalized_name) == "weknora" or server.get("runtime_skill") == "weknora":
+                return False
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:
             return True
@@ -3356,6 +3362,10 @@ class SkillManager:
 
     def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
         resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
+        if (run_context or {}).get("knowledge_context"):
+            owner = self.tool_to_skill_map.get(resolved_name)
+            if owner and not self._is_skill_allowed_by_scope(owner, run_context):
+                return False
         if resolved_name == "lookup_app_variable":
             return bool((run_context or {}).get("app_variable_access"))
         allowed_skill_names = self._allowed_skill_names(run_context)

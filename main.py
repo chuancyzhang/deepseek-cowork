@@ -26,6 +26,7 @@ from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
+from core.knowledge_library import KnowledgeService, KnowledgeStore, KnowledgeError
 from core.variable_store import (
     VARIABLE_KIND_SECRET,
     VARIABLE_KIND_TEXT,
@@ -25393,6 +25394,7 @@ class SessionState:
         self.grill_cycle_count = 0
         self.grill_execution_confirmed = False
         self.selected_skill_names = []
+        self.knowledge_refs = []
         self.selected_model_id = ""
         self.workflow_mode = ""
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
@@ -27647,6 +27649,7 @@ class MainWindow(QMainWindow):
     PAGE_CONVERSATION = "conversation"
     PAGE_CAPABILITIES = "capabilities"
     PAGE_FAVORITES = "favorites"
+    PAGE_KNOWLEDGE = "knowledge"
     PAGE_SETTINGS = "settings"
 
     def __init__(self, config_manager=None, theme_manager=None):
@@ -28084,6 +28087,15 @@ class MainWindow(QMainWindow):
         sidebar_favorites_btn.clicked.connect(lambda checked=False: self.open_favorites())
         self.product_nav_buttons[self.PAGE_FAVORITES] = sidebar_favorites_btn
         sidebar_layout.addWidget(sidebar_favorites_btn)
+
+        sidebar_knowledge_btn = QPushButton(" 资料库")
+        sidebar_knowledge_btn.setIcon(qta.icon('fa5s.book', color=DesignTokens.text_secondary))
+        sidebar_knowledge_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_knowledge_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_knowledge_btn.setCheckable(True)
+        sidebar_knowledge_btn.clicked.connect(lambda checked=False: self.show_product_page(self.PAGE_KNOWLEDGE))
+        self.product_nav_buttons[self.PAGE_KNOWLEDGE] = sidebar_knowledge_btn
+        sidebar_layout.addWidget(sidebar_knowledge_btn)
 
         sidebar_settings_btn = QPushButton(" 系统设置")
         sidebar_settings_btn.setText(" 设置")
@@ -29226,6 +29238,11 @@ class MainWindow(QMainWindow):
         prompt_context_layout.addWidget(self.tool_menu_btn)
         prompt_context_layout.addWidget(self.agent_picker_btn)
         prompt_context_layout.addWidget(self.selected_skills_badge)
+        self.knowledge_refs_button = QPushButton("资料引用")
+        self.knowledge_refs_button.setStyleSheet(product_button_style("secondary"))
+        self.knowledge_refs_button.clicked.connect(self.edit_knowledge_references)
+        self.knowledge_refs_button.hide()
+        prompt_context_layout.addWidget(self.knowledge_refs_button)
         prompt_context_layout.addWidget(self.grill_mode_badge)
         prompt_context_layout.addWidget(self.project_selector_btn)
         prompt_context_layout.addWidget(self.loop_hint)
@@ -29370,6 +29387,7 @@ class MainWindow(QMainWindow):
         controller.register_component("left.history", self.history_scroll, self.sidebar_layout)
         controller.register_component("left.capabilities", self.product_nav_buttons[self.PAGE_CAPABILITIES], self.sidebar_layout)
         controller.register_component("left.favorites", self.product_nav_buttons[self.PAGE_FAVORITES], self.sidebar_layout)
+        controller.register_component("left.knowledge", self.product_nav_buttons[self.PAGE_KNOWLEDGE], self.sidebar_layout)
         controller.register_component("left.settings", self.product_nav_buttons[self.PAGE_SETTINGS], self.sidebar_layout)
 
         controller.register_component("header.back", self.product_back_btn, self.top_bar_layout)
@@ -29381,6 +29399,7 @@ class MainWindow(QMainWindow):
         controller.register_component("composer.input", self.input_field)
         controller.register_component("composer.add_context", self.tool_menu_btn)
         controller.register_component("composer.skills", self.selected_skills_badge)
+        controller.register_component("composer.knowledge", self.knowledge_refs_button)
         controller.register_component("composer.grill_mode", self.grill_mode_badge)
         controller.register_component("composer.agent", self.agent_picker_btn)
         controller.register_component("composer.model", self.model_select_btn)
@@ -29512,6 +29531,7 @@ class MainWindow(QMainWindow):
         nav_icons = {
             self.PAGE_CAPABILITIES: "fa5s.puzzle-piece",
             self.PAGE_FAVORITES: "fa5s.star",
+            self.PAGE_KNOWLEDGE: "fa5s.book",
             self.PAGE_SETTINGS: "fa5s.cog",
         }
         for route, icon_name in nav_icons.items():
@@ -33578,6 +33598,12 @@ class MainWindow(QMainWindow):
 
     def refresh_context_badges(self, session_id=None):
         state = self.get_session(session_id)
+        if hasattr(self, "knowledge_refs_button"):
+            references = getattr(state, "knowledge_refs", []) if state else []
+            self.knowledge_refs_button.setVisible(bool(references))
+            self.knowledge_refs_button.setText(f"资料引用 · {len(references)}")
+            self.knowledge_refs_button.setToolTip("\n".join(ref.get("title", "") for ref in references))
+            self.knowledge_refs_button.setStyleSheet(product_button_style("secondary"))
         profile = self._model_profile_for_state(state)
         provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
         model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
@@ -36955,6 +36981,9 @@ class MainWindow(QMainWindow):
         )
         self.sessions[session_id] = state
         requested_workspace = workspace_dir if workspace_dir is not None else ""
+        state.knowledge_refs = []
+        if is_fresh_session and requested_workspace:
+            state.knowledge_refs = self._knowledge_service().store.references("project:" + self._project_key(requested_workspace))
         if self._normalize_project_path(requested_workspace):
             self._set_session_workspace(state, requested_workspace, source="project")
         elif is_fresh_session or workspace_dir is not None:
@@ -37027,6 +37056,7 @@ class MainWindow(QMainWindow):
         state.grill_execution_confirmed = False
         state.selected_skill_names = []
         state.selected_model_id = ""
+        state.knowledge_refs = []
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
@@ -37863,6 +37893,7 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = normalize_selected_skill_names(
             conversation_meta.get("selected_skill_names")
         )
+        state.knowledge_refs = copy.deepcopy(conversation_meta.get("knowledge_refs") or [])
         state.selected_model_id = str(
             conversation_meta.get("selected_model_id") or self.config_manager.get_selected_model_id() or ""
         ).strip()
@@ -41782,6 +41813,7 @@ class MainWindow(QMainWindow):
             meta.pop("last_deepseek_billing", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
+        meta["knowledge_refs"] = copy.deepcopy(getattr(state, "knowledge_refs", []))
         timeline_events = copy.deepcopy(getattr(state, "ui_timeline_events", []) or [])
         if timeline_events:
             meta["ui_timeline_v1"] = timeline_events
@@ -41829,7 +41861,7 @@ class MainWindow(QMainWindow):
             getattr(state, "persisted_conversation_meta", {}) or {}
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills:
+        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and not getattr(state, "knowledge_refs", []):
             return None
         title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
@@ -44890,6 +44922,105 @@ a {{ overflow-wrap: anywhere; }}
         self.product_pages[route] = page
         return page
 
+    def _knowledge_service(self):
+        service = getattr(self, "knowledge_service", None)
+        if service is None:
+            service = KnowledgeService()
+            self.knowledge_service = service
+        return service
+
+    def _knowledge_artifacts(self):
+        paths = {}
+        for project in self.config_manager.get_projects():
+            paths[project["path"]] = project["name"]
+        for state in self.sessions.values():
+            path = self._workspace_dir_for_state(state)
+            if path:
+                paths.setdefault(path, os.path.basename(path))
+        entries = []
+        seen = set()
+        for path, name in paths.items():
+            for item in self.chat_storage.list_deliverables(path, prune_missing=False):
+                if item["path"] not in seen:
+                    seen.add(item["path"])
+                    entries.append({**item, "project": name})
+        return entries
+
+    def use_knowledge_reference(self, reference, mode):
+        if mode == "project":
+            projects = self.config_manager.get_projects()
+            if not projects:
+                self.add_system_toast("请先创建或打开一个项目。", "info")
+                return
+            menu = QMenu(self)
+            for project in projects:
+                menu.addAction(project["name"], lambda project=project: self._save_project_knowledge(project, reference))
+            menu.exec(QCursor.pos())
+            return
+        if mode == "new":
+            self.new_conversation()
+        state = self.get_session()
+        if not state:
+            self.new_conversation()
+            state = self.get_session()
+        refs = copy.deepcopy(getattr(state, "knowledge_refs", []))
+        if reference not in refs:
+            refs.append(copy.deepcopy(reference))
+        state.knowledge_refs = refs
+        self.save_chat_history(session_id=state.session_id)
+        self.show_conversation_page()
+        self.refresh_context_badges(state.session_id)
+        self.add_system_toast("已添加资料，下次提交时使用。", "success")
+
+    def _save_project_knowledge(self, project, reference):
+        owner = "project:" + self._project_key(project["path"])
+        store = self._knowledge_service().store
+        refs = store.references(owner)
+        if reference not in refs:
+            refs.append(copy.deepcopy(reference))
+        store.references(owner, refs)
+        self.add_system_toast("已设为项目新对话的默认资料。", "success")
+
+    def edit_knowledge_references(self):
+        state = self.get_session()
+        if not state:
+            return
+        menu = QMenu(self)
+        for index, reference in enumerate(getattr(state, "knowledge_refs", [])):
+            title = str(reference.get("title") or "资料")
+            menu.addAction("移除 · " + title, lambda index=index, sid=state.session_id: self._remove_knowledge_reference(sid, index))
+        menu.addAction("清空本对话资料引用", lambda sid=state.session_id: self._remove_knowledge_reference(sid, None))
+        workspace = self._workspace_dir_for_state(state)
+        if workspace:
+            owner = "project:" + self._project_key(workspace)
+            defaults = self._knowledge_service().store.references(owner)
+            if defaults:
+                submenu = menu.addMenu("项目新对话默认资料")
+                for index, reference in enumerate(defaults):
+                    submenu.addAction("移除 · " + str(reference.get("title") or "资料"),
+                                      lambda index=index, owner=owner: self._remove_project_knowledge(owner, index))
+        menu.exec(self.knowledge_refs_button.mapToGlobal(self.knowledge_refs_button.rect().bottomLeft()))
+
+    def _remove_project_knowledge(self, owner, index):
+        store = self._knowledge_service().store
+        refs = store.references(owner)
+        if 0 <= index < len(refs):
+            refs.pop(index)
+            store.references(owner, refs)
+        self.add_system_toast("项目默认资料已更新，已有对话保持原选择。", "success")
+
+    def _remove_knowledge_reference(self, session_id, index):
+        state = self.get_session(session_id)
+        refs = list(getattr(state, "knowledge_refs", []))
+        if index is None:
+            refs = []
+        elif 0 <= index < len(refs):
+            refs.pop(index)
+        state.knowledge_refs = refs
+        self.save_chat_history(session_id=session_id)
+        self.refresh_context_badges(session_id)
+        self.add_system_toast("资料引用已更新，下次提交时生效。", "success")
+
     def _ensure_product_page(self, route, section=None):
         page = self.product_pages.get(route)
         if page is not None and _qt_object_alive(page):
@@ -44902,6 +45033,10 @@ a {{ overflow-wrap: anywhere; }}
             page = SkillsCenterDialog(self.skill_manager, self.config_manager, self)
         elif route == self.PAGE_FAVORITES:
             page = FavoritesPage(self.config_manager, self)
+        elif route == self.PAGE_KNOWLEDGE:
+            from ui.knowledge_library import KnowledgePage
+            page = KnowledgePage(self, service=self._knowledge_service(), artifacts=self._knowledge_artifacts)
+            page.referenceRequested.connect(self.use_knowledge_reference)
         elif route == self.PAGE_SETTINGS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section)
         else:
@@ -45290,7 +45425,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         if route == self.PAGE_CONVERSATION:
             return self.show_conversation_page()
-        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS}:
+        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS, self.PAGE_KNOWLEDGE}:
             raise ValueError(f"未知产品页面：{route}")
         if self.current_product_route != route and not self._confirm_leave_product_page():
             return False
@@ -45324,6 +45459,7 @@ a {{ overflow-wrap: anywhere; }}
         titles = {
             self.PAGE_CAPABILITIES: ("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力。"),
             self.PAGE_FAVORITES: ("常用", "保存经常重复的任务，下次直接开始或按时自动运行。"),
+            self.PAGE_KNOWLEDGE: ("资料库", "使用已有知识完成工作，再将有价值的产物保存回来。"),
             self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
         }
         title, subtitle = titles[route]
@@ -47828,6 +47964,7 @@ a {{ overflow-wrap: anywhere; }}
                     getattr(state, "grill_execution_confirmed", False)
                 ),
                 "selected_skill_names": effective_skill_names,
+                "knowledge_context": self._knowledge_service().snapshot(getattr(state, "knowledge_refs", []), state.session_id),
                 "selected_model_id": effective_model_id,
                 "selected_model_profile": self._model_profile_snapshot_for_state(state, model_id=effective_model_id),
                 "reasoning_effort": self._selected_reasoning_effort(state, model_id=effective_model_id),
@@ -47906,6 +48043,7 @@ a {{ overflow-wrap: anywhere; }}
                 "agent_description": profile.get("description"),
                 "agent_system_prompt": profile.get("system_prompt"),
                 "agent_summon_source": summon_source,
+                "knowledge_context": self._knowledge_service().snapshot(getattr(state, "knowledge_refs", []), state.session_id) if state else None,
                 "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": "",
                 "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,

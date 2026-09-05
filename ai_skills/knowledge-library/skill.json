@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "name": "knowledge-library",
+  "display_name": "Cowork 资料库",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": true,
+  "description": "List, search and read knowledge using the current Cowork user's WeKnora identity and task scope.",
+  "description_cn": "按当前用户身份及本次任务范围，搜索和阅读 Cowork 资料库。",
+  "presentation": {"category": "docs_knowledge", "short_name": "资料库", "summary": "使用已连接的 WeKnora 知识完成工作。", "examples": ["搜索资料库", "阅读团队文档"], "access_note": "在资料库页面登录；Agent 仅可读取当前任务范围内的资料。"},
+  "tags": ["knowledge", "WeKnora", "资料库", "团队知识"],
+  "triggers": ["资料库", "知识库", "团队资料", "WeKnora"],
+  "tool_refs": ["run_skill_script"],
+  "script_refs": ["scripts/list.py", "scripts/search.py", "scripts/read.py"],
+  "script_entries": [
+    {"name": "list", "path": "scripts/list.py", "runtime": "python", "description": "列出本次任务可使用的资料库与资料。"},
+    {"name": "search", "path": "scripts/search.py", "runtime": "python", "description": "在本次任务范围内搜索知识，input_text 为 query 及可选 kb_ids、knowledge_ids。"},
+    {"name": "read", "path": "scripts/read.py", "runtime": "python", "description": "分页阅读文档或 Wiki，input_text 为 knowledge_id 或 kb_id 与 wiki_slug。"}
+  ],
+  "config_fields": [],
+  "python_dependencies": [],
+  "node_dependencies": []
+}

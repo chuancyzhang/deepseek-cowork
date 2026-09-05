@@ -256,6 +256,9 @@ def run_skill_script(
     if not record:
         return f"Error: Skill '{skill_name}' not found."
 
+    if not skill_manager._is_skill_allowed_by_scope(skill_name, (_context or {}).get("run_context")):
+        return "Error: 当前任务不允许使用此 Skill。"
+
     abort_state = _init_abort_state(_context)
     if abort_state["aborted"]:
         return "Error: Script execution aborted by user."
@@ -288,6 +291,12 @@ def run_skill_script(
     script_abs_path = os.path.abspath(os.path.join(record["path"], script_rel_path))
     if not os.path.isfile(script_abs_path):
         return f"Error: Script path '{script_rel_path}' not found for skill '{skill_name}'."
+
+    if skill_name == "knowledge-library":
+        from core.knowledge_library import knowledge_script_call
+        host_context = dict(_context or {})
+        host_context["knowledge_cancelled"] = lambda: bool(abort_state["aborted"])
+        return knowledge_script_call(host_context, target["name"], input_text, args)
 
     dependency_status = record.get("dependency_status") or {"ok": True}
     if not dependency_status.get("ok"):

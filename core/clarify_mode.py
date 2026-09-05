@@ -226,6 +226,8 @@ def normalize_run_context(run_context):
                 ],
             }
         )
+    if isinstance(ctx.get("knowledge_context"), dict):
+        normalized["knowledge_context"] = json.loads(json.dumps(ctx["knowledge_context"]))
     return normalized
 
 

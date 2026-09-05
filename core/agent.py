@@ -2807,7 +2807,15 @@ class LLMWorker(QThread):
         turn_count = 0
         total_duration = 0
         generated_messages = []
-        
+
+        knowledge_context = self.run_context.get("knowledge_context")
+        if knowledge_context:
+            # Append a new fact for this submission. Never rewrite old references or the system prefix.
+            from .knowledge_library import knowledge_context_message
+            context_message = knowledge_context_message(knowledge_context, self.request_id)
+            current_messages.append(context_message)
+            generated_messages.append(context_message)
+
         last_tool_signature = None
         repetition_count = 0
         

@@ -1,6 +1,6 @@
 # DeepSeek Cowork 文档中心
 
-当前应用版本：**5.1.0**
+当前应用版本：**5.2.0**
 
 这里集中维护 DeepSeek Cowork 的当前态文档。第一次使用先读用户指南；准备升级
 先读发布说明；理解实现或扩展能力时再进入技术文档。
@@ -9,7 +9,7 @@
 
 | 你的目标 | 从这里开始 | 继续阅读 |
 | --- | --- | --- |
-| 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.1.0 发布说明](releases/5.1.0.md) |
+| 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.2.0 发布说明](releases/5.2.0.md) |
 | 判断产品适合什么工作 | [产品文档](product.md) | [路线图](roadmap.md) |
 | 理解 Agent 如何执行与恢复 | [技术设计](technical-design.md) | [Skill 系统](skill-system.md) |
 | 创建、安装或调试能力 | [Skill 系统](skill-system.md) | [技术设计](technical-design.md) |
@@ -39,7 +39,7 @@
 ## 内容基线
 
 - 当前行为以 `core/`、`main.py`、`ui/`、内置能力清单和测试为准。
-- 当前态文档只描述 5.1.0；历史版本号只保留在 `docs/releases/`。
+- 当前态文档只描述 5.2.0；历史版本号只保留在 `docs/releases/`。
 - Markdown 是权威内容源；已删除的派生 Word 文档不属于当前文档基线。
 - `skills/**/SKILL.md` 与 `ai_skills/**` 是运行时或上游能力内容，不与产品文档混写。
 - 发布变化先进入对应版本的发布说明；只有仍然成立的行为才进入当前态文档。

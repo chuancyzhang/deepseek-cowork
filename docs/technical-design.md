@@ -1,9 +1,9 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**5.1.0**
+当前应用版本：**5.2.0**
 
 本文描述当前源码中长期成立的运行模型。发布流水账放在
-[5.1.0 发布说明](releases/5.1.0.md)，Skill 包格式和安装流程放在
+[5.2.0 发布说明](releases/5.2.0.md)，Skill 包格式和安装流程放在
 [Skill 系统](skill-system.md)。
 
 ## 1. 架构目标与不变量
@@ -114,7 +114,7 @@ assistant 消息的协议元数据；下一次请求优先原样回放这些 Ite
 
 ### 3.3 后训练调用偏好与 Responses 协议兼容准备
 
-5.1.0 将“核心 Tool 首轮直出、可选 Tool 按需发现、稳定函数 Schema、完整文本
+当前实现将“核心 Tool 首轮直出、可选 Tool 按需发现、稳定函数 Schema、完整文本
 读取凭据、标准 `apply_patch`”收敛为一个确定动作空间，并补齐 DeepSeek Responses
 的 reasoning、函数调用和服务端搜索回放。这是为 DeepSeek V4 Flash 正式版及
 后续 V4 Pro 正式版的**后训练调用偏好和 Responses 协议兼容**做准备；具体模型

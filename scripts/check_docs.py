@@ -11,7 +11,7 @@ from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "5.1.9"
+APP_VERSION = "5.2.0"
 
 CURRENT_DOCS = (
     ROOT / "README.md",
@@ -157,7 +157,7 @@ def validate_product_concepts() -> list[str]:
 def validate_screenshot_contract() -> list[str]:
     errors: list[str] = []
     expected = {
-        ROOT / "docs" / "user-guide.md": 64,
+        ROOT / "docs" / "user-guide.md": 65,
         ROOT / "docs" / "guides" / "ai-theme-and-visualize.md": 11,
     }
     for path, expected_count in expected.items():

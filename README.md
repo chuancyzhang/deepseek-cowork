@@ -8,14 +8,13 @@ deliverables into one observable, steerable, and recoverable workflow.
 
 This is a personal exploration project and is not affiliated with DeepSeek.
 
-Current app version: **5.1.0** · [Read the release notes](docs/releases/5.1.0.md)
+Current app version: **5.2.0** · [Read the release notes](docs/releases/5.2.0.md)
 
-## What matters in 5.1.0
+## What matters in 5.2.0
 
-- **Revise results in place:** preview common formats and safely edit DOCX, HTML, XLSX, CSV/TSV, Markdown, JSON, XML, YAML, and plain text in Files & Deliverables.
-- **Find capabilities by task:** the capability marketplace groups tools into research, documents, data, content, and finance; the new-chat home opens PPT, finance, data, and browser workflows directly.
-- **Connect with less setup:** browser automation has one guided preparation and connection flow; enterprise messaging supports Feishu, DingTalk, WeCom, QQ, and WeChat with one active channel at a time.
-- **Use a stable Agent tool contract:** core Tools are visible on the first model turn, text work converges on full-file reads plus audited patches, and DeepSeek Responses preserves reasoning, function calls, and server-side search order. This prepares for the post-training calling preferences and Responses protocol compatibility of the DeepSeek V4 Flash release and the later V4 Pro release.
+- **Bring knowledge into Agent work:** the new WeKnora-backed knowledge library lets you browse, search, and read documents and Wiki pages, then add selected references to conversations or projects.
+- **Save results for future work:** save local artifacts, conversation files, and project deliverables to a chosen knowledge base and folder, with multi-file uploads, file previews, and processing status.
+- **Discover skills through SkillHub:** browse, search, install, and update skills in the capability marketplace, then configure and enable them when ready.
 
 ## Core workflow
 

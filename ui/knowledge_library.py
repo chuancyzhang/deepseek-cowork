@@ -1249,6 +1249,8 @@ class KnowledgePage(QDialog):
         buttons.addWidget(submit)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
+        available_width = dialog.screen().availableGeometry().width()
+        dialog.resize(min(640, max(320, available_width - 48)), dialog.sizeHint().height())
         if dialog.exec() != QDialog.Accepted:
             folder_generation[0] += 1
             return

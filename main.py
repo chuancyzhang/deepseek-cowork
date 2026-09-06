@@ -14959,6 +14959,7 @@ class SkillsCenterDialog(QDialog):
         self.hub_page = 1
         self.hub_tasks = {}
         self.hub_icons = {}
+        self._hub_icon_refresh_urls = set()
         self._hub_icon_queue = []
         self._hub_icon_active = set()
         self.hub_categories = []
@@ -15274,20 +15275,36 @@ class SkillsCenterDialog(QDialog):
         while self._hub_icon_queue and len(self._hub_icon_active) < 4:
             url = self._hub_icon_queue.pop(0)
             self._hub_icon_active.add(url)
+            force = url in self._hub_icon_refresh_urls
+            self._hub_icon_refresh_urls.discard(url)
+            def operation(url=url, force=force):
+                data = None if force else self._hub_cache.get_icon(url)
+                return {"bytes": data if data is not None else self.hub_client.icon(url),
+                        "cached": data is not None}
             def done(result, url=url):
+                if url in self._hub_icon_refresh_urls:
+                    self._hub_icon_active.discard(url)
+                    self._hub_load_icon(url)
+                    return
                 pixmap = None
                 if result["ok"]:
                     try:
-                        pixmap = decode_icon(result["data"])
-                    except ValueError:
-                        log_ui_navigation("skillhub_icon_decode_error")
+                        payload = result["data"]
+                        pixmap = decode_icon(payload["bytes"])
+                        if not payload["cached"]:
+                            self._hub_cache.put_icon(url, payload["bytes"])
+                    except (ValueError, RuntimeError) as exc:
+                        pixmap = None
+                        log_ui_navigation("skillhub_icon_error", error=str(exc))
+                else:
+                    log_ui_navigation("skillhub_icon_error", error=result.get("error", "图标加载失败"))
                 self.hub_icons[url] = pixmap
                 if len(self.hub_icons) > 128:
                     self.hub_icons.pop(next(iter(self.hub_icons)))
                 self._hub_icon_active.discard(url)
                 self.hub_icon_ready.emit(url, pixmap)
                 self._hub_pump_icons()
-            self._hub_worker(lambda url=url: self.hub_client.icon(url), done)
+            self._hub_worker(operation, done)
 
     def _hub_filter_changed(self, _index=0):
         self._hub_restore_scroll = 0
@@ -15295,6 +15312,11 @@ class SkillsCenterDialog(QDialog):
         self._load_hub()
 
     def _load_hub(self, *, force=False):
+        if force:
+            urls = {str(skill.get("iconUrl") or "") for skill in (self.hub_data or {}).get("skills", [])}
+            self._hub_icon_refresh_urls.update(urls - {""})
+            for url in urls:
+                self.hub_icons.pop(url, None)
         self.hub_generation += 1
         generation = self.hub_generation
         self.hub_loading, self.hub_error = True, ""

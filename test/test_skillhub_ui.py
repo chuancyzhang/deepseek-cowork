@@ -191,6 +191,43 @@ class SkillHubUiTests(unittest.TestCase):
         self.page._render_content()
         self.assertFalse(any(w.text() == '重试安装' and not w.isHidden() for w in self.page.findChildren(QPushButton)))
 
+    def test_icon_disk_hit_refresh_and_invalid_image_not_saved(self):
+        from PySide6.QtCore import QBuffer, QIODevice
+        from PySide6.QtGui import QImage
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        icon = QImage(8, 8, QImage.Format_RGB32)
+        icon.fill(0xff112233)
+        icon.save(buffer, 'PNG')
+        data = bytes(buffer.data())
+        url = 'https://example.com/icon.png'
+        operations = []
+        self.page._hub_worker = lambda operation, callback: operations.append((operation, callback))
+        self.page.hub_client.icon = Mock(return_value=data)
+        def finish():
+            operation, callback = operations.pop(0)
+            callback({'ok': True, 'data': operation()})
+        self.page._hub_load_icon(url)
+        finish()
+        self.assertEqual(self.page._hub_cache.get_icon(url), data)
+        self.page.hub_icons.clear()
+        self.page.hub_client.icon.reset_mock()
+        self.page._hub_load_icon(url)
+        finish()
+        self.page.hub_client.icon.assert_not_called()
+        self.page.hub_data = {'skills': [{'iconUrl': url}], 'total': 1}
+        self.page._load_hub(force=True)
+        operations.clear()  # List refresh is independent of the icon worker.
+        self.page._hub_load_icon(url)
+        finish()
+        self.page.hub_client.icon.assert_called_once_with(url)
+        self.page.hub_client.icon.return_value = b'not an image'
+        broken = url + '?broken'
+        self.page._hub_load_icon(broken)
+        finish()
+        self.assertIsNone(self.page._hub_cache.get_icon(broken))
+        self.assertIsNone(self.page.hub_icons[broken])
+
     def test_icons_are_bounded_and_invalid_images_rejected(self):
         from ui.skillhub_widgets import decode_icon
         with self.assertRaises(ValueError):

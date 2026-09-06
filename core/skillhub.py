@@ -1,4 +1,6 @@
 """Public SkillHub catalogue. Installed skills remain owned by SkillManager."""
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -21,8 +23,9 @@ log = logging.getLogger(__name__)
 class SkillHubCache:
     """Bounded on-disk cache for public browsing data only."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, *, max_entries=32):
         self.directory = directory
+        self.max_entries = max_entries
 
     def _path(self, key):
         digest = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -52,13 +55,36 @@ class SkillHubCache:
             os.replace(temporary, self._path(key))
             files = sorted((os.path.join(self.directory, name) for name in os.listdir(self.directory)
                             if name.endswith(".json")), key=os.path.getmtime, reverse=True)
-            for path in files[32:]:
+            for path in files[self.max_entries:]:
                 os.remove(path)
         except OSError as exc:
             raise RuntimeError(f"SkillHub 缓存保存失败：{exc}") from exc
         finally:
             if temporary and os.path.exists(temporary):
                 os.remove(temporary)
+
+    def _icon_cache(self):
+        return SkillHubCache(os.path.join(self.directory, "icons"), max_entries=128)
+
+    def get_icon(self, url):
+        encoded = self._icon_cache().get(url)
+        if encoded is None:
+            return None
+        try:
+            if not isinstance(encoded, str) or len(encoded) > 700000:
+                raise ValueError("图标缓存格式或大小无效")
+            data = base64.b64decode(encoded, validate=True)
+            if not data or len(data) > 512 * 1024:
+                raise ValueError("图标缓存大小无效")
+            return data
+        except (ValueError, binascii.Error) as exc:
+            raise RuntimeError(f"SkillHub 图标缓存读取失败，请刷新后重试：{exc}") from exc
+
+    def put_icon(self, url, data):
+        if not isinstance(data, bytes) or not data or len(data) > 512 * 1024:
+            raise ValueError("图标必须为不超过 512 KB 的有效数据")
+        self._icon_cache().put(url, base64.b64encode(data).decode("ascii"))
+
 
 
 def identifier(value):

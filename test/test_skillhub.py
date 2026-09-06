@@ -37,6 +37,29 @@ class SkillHubTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '缓存读取失败'):
             reopened.get(key)
 
+    def test_icon_cache_survives_restart_expires_and_is_separate(self):
+        from core.skillhub import SkillHubCache
+        cache = SkillHubCache(str(self.root / 'cache'))
+        url = 'https://example.com/icon.png'
+        with patch('core.skillhub.time.time', return_value=1000):
+            cache.put(('list',), {'total': 1})
+            cache.put_icon(url, b'image bytes')
+        reopened = SkillHubCache(cache.directory)
+        with patch('core.skillhub.time.time', return_value=1000 + 59 * 86400):
+            self.assertEqual(reopened.get_icon(url), b'image bytes')
+            self.assertIsNone(reopened.get_icon(url + '?v=2'))
+        with patch('core.skillhub.time.time', return_value=1000 + 60 * 86400):
+            self.assertIsNone(reopened.get_icon(url))
+        for index in range(130):
+            cache.put_icon(f'https://example.com/{index}.png', b'data')
+        self.assertEqual(len(list((Path(cache.directory) / 'icons').glob('*.json'))), 128)
+        self.assertTrue(Path(cache._path(('list',))).exists())
+        with self.assertRaises(ValueError):
+            cache.put_icon(url, b'x' * (512 * 1024 + 1))
+        cache._icon_cache().put(url, 'invalid base64!')
+        with self.assertRaisesRegex(RuntimeError, '图标缓存读取失败'):
+            cache.get_icon(url)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

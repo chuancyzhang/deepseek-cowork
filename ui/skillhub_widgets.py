@@ -141,7 +141,7 @@ class SkillHubCard(QFrame):
             self.icon.setPixmap(pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.icon.setText("!")
-            self.icon.setToolTip("图标加载失败；技能仍可查看和安装")
+            self.icon.setToolTip("图标加载失败；点击列表“刷新”重试，技能仍可查看和安装")
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):

@@ -45,7 +45,7 @@ def main():
     page = KnowledgePage(service=service)
     page.setWindowTitle("Cowork 资料库 · 接入验证")
     page.referenceRequested.connect(lambda ref, mode: page.notice.setText(
-        f"引用已验证：{ref['title']}。新建对话、当前对话和项目集成请在 Cowork 主窗口使用。"))
+        f"引用已验证：{len(ref) if isinstance(ref, list) else 1} 份资料。新建对话、当前对话和项目集成请在 Cowork 主窗口使用。"))
     page.resize(1180, 800)
     page.show()
     if not options.screenshots:
@@ -68,6 +68,11 @@ def main():
     wait_for(lambda: page.items.count() == 1)
     app.processEvents()
     page.grab().save(os.path.join(destination, "browse.png"))
+    page.add_item("用户研究", {"document": {"id": "doc-b", "knowledge_base_id": "kb-a", "title": "用户研究"}})
+    page.check_page(True)
+    app.processEvents()
+    page.grab().save(os.path.join(destination, "batch.png"))
+    page.check_page(False)
     service.transport.wiki_pages = [
         {"slug": "index", "title": "资料概览", "page_type": "index"},
         {"slug": "concept", "title": "认知力", "page_type": "concept", "category_path": ["投资基础"]},

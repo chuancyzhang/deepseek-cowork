@@ -126,6 +126,21 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         merged = merge_messages_by_id(original, generated)
         self.assertEqual(merged[0], original[0])
 
+    def test_batch_reference_creates_one_conversation_and_saves_once(self):
+        from main import MainWindow
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        state = SimpleNamespace(session_id="batch-session", knowledge_refs=[])
+        host = SimpleNamespace(new_conversation=Mock(), get_session=lambda: state,
+                               save_chat_history=Mock(), show_conversation_page=Mock(),
+                               refresh_context_badges=Mock(), add_system_toast=Mock())
+        refs = [self.service.reference(self.scope, "kb-a", "甲", "doc-a"),
+                self.service.reference(self.scope, "kb-a", "乙", "doc-b")]
+        MainWindow.use_knowledge_reference(host, refs, "new")
+        host.new_conversation.assert_called_once()
+        host.save_chat_history.assert_called_once_with(session_id="batch-session")
+        self.assertEqual(state.knowledge_refs, refs)
+
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
     def test_real_windows_dpapi_roundtrip(self):
         protector = WindowsDpapiProtector()

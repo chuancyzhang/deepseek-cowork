@@ -49,6 +49,33 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
             QTest.qWait(10)
         self.assertTrue(predicate(), self.page.notice.text())
 
+    def test_hover_checkbox_selects_without_opening_and_title_opens(self):
+        from PySide6.QtWidgets import QStyleOptionViewItem, QStyle
+        self.page.open_kb({"id": "kb-a", "name": "产品资料"})
+        self.wait_for(lambda: self.page.items.count() > 0)
+        table = self.page.items
+        item = table.item(0)
+        index = table.indexFromItem(item)
+        option = QStyleOptionViewItem()
+        table.itemDelegate().initStyleOption(option, index)
+        self.assertFalse(option.features & QStyleOptionViewItem.HasCheckIndicator)
+        option.state |= QStyle.State_MouseOver
+        table.itemDelegate().initStyleOption(option, index)
+        self.assertTrue(option.features & QStyleOptionViewItem.HasCheckIndicator)
+        activated = []
+        table.fileActivated.connect(activated.append)
+        point = table.checkbox_rect(item).center()
+        QTest.mouseMove(table.viewport(), point)
+        QTest.mouseClick(table.viewport(), Qt.LeftButton, pos=point)
+        self.assertEqual(item.checkState(0), Qt.Checked)
+        self.assertFalse(activated)
+        self.assertTrue(self.page.batch_bar.isVisible())
+        self.page.check_page(False)
+        self.assertFalse(self.page.batch_bar.isVisible())
+        point.setX(table.visualRect(index).left() + 100)
+        QTest.mouseClick(table.viewport(), Qt.LeftButton, pos=point)
+        self.assertEqual(activated, [item])
+
     def test_project_picker_filters_archived_and_searches(self):
         from ui.knowledge_library import KnowledgeProjectPicker
         picker = KnowledgeProjectPicker([
@@ -148,6 +175,39 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
             self.page.preview_local_file(path)
             self.wait_for(lambda: render.called)
             self.assertIn("本地产物正文", render.call_args.args[0].decode("utf-8"))
+
+    def test_checked_documents_emit_one_batch_without_parent_library(self):
+        self.page.open_kb({"id": "kb-a", "name": "产品资料"})
+        self.wait_for(lambda: self.page.items.count() == 1)
+        self.page.add_item("第二份资料", {"document": {"id": "doc-b", "knowledge_base_id": "kb-a", "title": "第二份资料"}})
+        self.page.check_page(True)
+        captured = []
+        self.page.referenceRequested.connect(lambda refs, mode: captured.append((refs, mode)))
+        self.page.use_reference("new")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual({r["knowledge_id"] for r in captured[0][0]}, {"doc-a", "doc-b"})
+        self.assertEqual(self.page.content_stack.currentIndex(), 0)
+
+    def test_batch_upload_retains_partial_failure_without_replay(self):
+        from core.knowledge_library import KnowledgeError
+        calls = []
+        def upload(scope, path, kb, folder):
+            calls.append(path)
+            if path == "bad.md":
+                raise KnowledgeError("outcome_unknown", "结果待核对")
+            return {"status": "pending"}
+        with patch.object(self.service, "upload", side_effect=upload):
+            self.page.submit_upload_batch(self.service.snapshot(), ["one.md", "bad.md", "two.md"], "kb-a", "")
+            self.wait_for(lambda: "2 / 3" in self.page.notice.text())
+        self.assertEqual(calls, ["one.md", "bad.md", "two.md"])
+        self.assertIn("bad.md", self.page.notice.text())
+
+    def test_explicit_upload_survives_catalog_navigation(self):
+        with patch.object(self.page, "choose_upload") as choose:
+            self.page.upload_paths(["one.md", "two.md"])
+            self.page.clear_view()
+            self.wait_for(lambda: choose.called)
+            self.assertEqual(len(choose.call_args.args[0]), 2)
 
     def test_catalog_browse_read_and_reference_signal(self):
         self.page.open_kb({"id": "kb-a", "name": "产品资料"})

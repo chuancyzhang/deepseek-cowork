@@ -7,9 +7,9 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, QSize, QBuffer, QByteArray, QIODevice
-from PySide6.QtGui import QDesktopServices, QFont, QTextDocument, QPixmap
+from PySide6.QtGui import QDesktopServices, QFont, QTextDocument, QPixmap, QIcon
 import qtawesome as qta
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QStyledItemDelegate, QStyleOptionViewItem, QStyle, QAbstractItemView, QComboBox, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel,
                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
                               QPushButton, QSplitter, QStackedWidget, QTextBrowser, QTreeWidget,
                               QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -35,10 +35,25 @@ class LibraryRow(QTreeWidgetItem):
         return super().data(0, column) if role is None else super().data(column, role)
 
 
+class LibrarySelectionDelegate(QStyledItemDelegate):
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if index.column() == 0 and index.data(Qt.CheckStateRole) is not None:
+            visible = bool(option.state & QStyle.State_MouseOver) or index.data(Qt.CheckStateRole) == Qt.Checked.value
+            if visible:
+                option.icon = QIcon()
+            else:
+                option.features &= ~QStyleOptionViewItem.HasCheckIndicator
+
+
 class LibraryTable(QTreeWidget):
     """A document table with optional project groups and a shared row API."""
+    fileActivated = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setItemDelegate(LibrarySelectionDelegate(self))
         self.setObjectName("LibraryTable")
         self.setColumnCount(4)
         self.setHeaderLabels(["名称", "类型", "更新时间", "状态"])
@@ -53,6 +68,45 @@ class LibraryTable(QTreeWidget):
             self.header().resizeSection(index, width)
         self._rows, self._groups = [], {}
 
+    def checkbox_rect(self, item):
+        index = self.indexFromItem(item, 0)
+        option = QStyleOptionViewItem()
+        option.initFrom(self)
+        option.rect = self.visualRect(index)
+        option.state |= QStyle.State_MouseOver
+        self.itemDelegate().initStyleOption(option, index)
+        return self.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, option, self)
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        self._checkbox_pressed = None
+        if event.button() == Qt.LeftButton and item and item.data(0, Qt.CheckStateRole) is not None and self.checkbox_rect(item).contains(event.position().toPoint()):
+            self._checkbox_pressed = item
+            self.setCurrentItem(item)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        checkbox = bool(item and item.flags() & Qt.ItemIsUserCheckable and self.checkbox_rect(item).contains(event.position().toPoint()))
+        pressed = getattr(self, "_checkbox_pressed", None)
+        self._checkbox_pressed = None
+        if pressed is not None:
+            if item is pressed and checkbox and event.button() == Qt.LeftButton:
+                item.setCheckState(0, Qt.Unchecked if item.checkState(0) == Qt.Checked else Qt.Checked)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+        if item and event.button() == Qt.LeftButton and not checkbox:
+            self.fileActivated.emit(item)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.currentItem():
+            self.fileActivated.emit(self.currentItem())
+            return
+        super().keyPressEvent(event)
+
     def clear(self):
         super().clear()
         self._rows, self._groups = [], {}
@@ -66,6 +120,9 @@ class LibraryTable(QTreeWidget):
     def append(self, columns, payload, icon, group=""):
         row = LibraryRow(columns)
         row.setData(0, Qt.UserRole, payload)
+        if any(key in payload for key in ("ref", "document")):
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.Unchecked)
         row.setIcon(0, icon)
         row.setSizeHint(0, QSize(0, 60 if "\n" in columns[0] else 48))
         row.setToolTip(0, columns[0])
@@ -413,8 +470,28 @@ class KnowledgePage(QDialog):
         folder_row.addWidget(self.files_button)
         center_layout.addLayout(folder_row)
         self.items = LibraryTable()
-        self.items.itemClicked.connect(self.select_item)
+        self.items.fileActivated.connect(self.select_item)
+        self.items.itemChanged.connect(lambda *_args: self.update_batch_selection())
         center_layout.addWidget(self.items, 1)
+        self.batch_bar = QWidget()
+        self.batch_bar.setObjectName("KnowledgeBatchBar")
+        selection_actions = QHBoxLayout(self.batch_bar)
+        selection_actions.setContentsMargins(8, 6, 8, 6)
+        self.batch_count = QLabel()
+        selection_actions.addWidget(self.batch_count)
+        clear_selection = QPushButton("取消选择")
+        clear_selection.clicked.connect(lambda: self.check_page(False))
+        selection_actions.addWidget(clear_selection)
+        selection_actions.addStretch()
+        batch_add = QPushButton("添加到…")
+        batch_add.setProperty("libraryPrimary", True)
+        batch_menu = QMenu(batch_add)
+        for label, mode in (("新建对话", "new"), ("当前对话", "current"), ("项目", "project")):
+            batch_menu.addAction(label, lambda checked=False, mode=mode: self.use_reference(mode))
+        batch_add.setMenu(batch_menu)
+        selection_actions.addWidget(batch_add)
+        center_layout.addWidget(self.batch_bar)
+        self.batch_bar.hide()
         pager = QHBoxLayout()
         self.previous = QPushButton("上一页")
         self.previous.clicked.connect(lambda: self.turn_page(-1))
@@ -539,6 +616,7 @@ class KnowledgePage(QDialog):
         self.read_serial += 1
         self.content_stack.setCurrentIndex(0)
         self.items.clear()
+        self.batch_bar.hide()
         self.reader_stack.setCurrentIndex(0)
         self.reader.clear()
         self.read_more.hide()
@@ -705,7 +783,8 @@ class KnowledgePage(QDialog):
         for entry in self.artifacts():
             if not selected or entry.get("project") == selected:
                 self.add_item(os.path.basename(entry["path"]), {"path": entry["path"], "project": entry.get("project") or "未分组"})
-        self.notice.setText("选择产物后保存到资料库。" if self.items.count() else "还没有本地产物。")
+        self.update_batch_selection()
+        self.notice.setText("点击产物打开预览。" if self.items.count() else "还没有本地产物。")
 
     def open_kb(self, kb):
         self.clear_view()
@@ -750,7 +829,7 @@ class KnowledgePage(QDialog):
         self.page_label.setText(f"第 {self.page} 页 · {total} 份资料")
         self.previous.setEnabled(self.page > 1)
         self.next.setEnabled(self.page * 30 < total)
-        self.notice.setText("选择资料阅读，或直接使用整个资料库。" if total else "这里还没有资料。")
+        self.notice.setText("点击资料打开阅读，悬停勾选可批量加入对话或项目。" if total else "这里还没有资料。")
 
     def change_folder(self, index):
         if self.current_kb:
@@ -970,7 +1049,7 @@ class KnowledgePage(QDialog):
             self.reader_stack.addWidget(self.html_view)
         self.html_view.setHtml(decoded, QUrl("about:blank"))
         self.reader_stack.setCurrentWidget(self.html_view)
-        self.notice.setText("HTML 原文件预览 · 脚本和外部资源不在预览中执行。")
+        self.notice.clear()
 
     def read_ref(self, ref):
         self.read_serial += 1
@@ -1036,27 +1115,79 @@ class KnowledgePage(QDialog):
             self.notice.setText(f"找到 {len(results)} 条相关片段。" if results else "没有匹配资料，可以调整关键词。")
         self.run(work, done, "正在搜索知识…")
 
+    def checked_payloads(self):
+        return [item.data(Qt.UserRole) for item in self.items._rows if item.checkState(0) == Qt.Checked]
+
+    def check_page(self, checked):
+        for item in self.items._rows:
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+
+    def update_batch_selection(self):
+        payloads = self.checked_payloads()
+        refs = [p for p in payloads if "ref" in p or "document" in p]
+        if hasattr(self, "batch_bar"):
+            self.batch_bar.setVisible(bool(refs))
+            self.batch_count.setText(f"已选择 {len(refs)} 份资料")
+        self.use_button.setEnabled(bool(self.current_ref))
+        self.use_button.setVisible(not refs and self.view == "files" and bool(self.current_ref))
+        self.use_button.setText("和 Agent 一起用")
+        if self.view == "artifacts":
+            self.upload_button.hide()
+
     def use_reference(self, mode):
-        if self.current_ref:
-            self.referenceRequested.emit(copy.deepcopy(self.current_ref), mode)
+        refs = []
+        if self.content_stack.currentIndex() == 0:
+            for data in self.checked_payloads():
+                ref = data.get("ref")
+                if "document" in data:
+                    doc = data["document"]
+                    ref = self.service.reference(self.scope, doc["knowledge_base_id"], doc.get("title", doc["id"]), doc["id"])
+                if ref and ref not in refs:
+                    refs.append(ref)
+        if not refs and self.current_ref:
+            refs = [self.current_ref]
+        if refs:
+            self.referenceRequested.emit(copy.deepcopy(refs[0] if len(refs) == 1 else refs), mode)
 
     def upload_file(self):
-        path = self.current_file
-        if not path:
-            path, _ = QFileDialog.getOpenFileName(self, "添加资料")
-        if not path:
-            return
-        scope = copy.deepcopy(self.scope)
-        self.run(lambda: self.service.catalog(scope), lambda catalog: self.choose_upload(path, scope, catalog), "正在读取目标资料库…")
+        paths = [self.current_file] if self.current_file else [p["path"] for p in self.checked_payloads() if "path" in p]
+        if not paths:
+            paths, _ = QFileDialog.getOpenFileNames(self, "添加资料（可多选）")
+        self.upload_paths(paths)
 
-    def choose_upload(self, path, scope, catalog):
+    def upload_paths(self, paths):
+        paths = list(dict.fromkeys(os.path.abspath(path) for path in paths if path))
+        if not paths:
+            return
+        scope = self.service.snapshot()
+        if not scope:
+            self.error(KnowledgeError("not_connected", "请先登录资料库。"))
+            return
+        self.scope = scope
+        self.notice.setText("正在读取目标资料库…")
+        def done(catalog):
+            current = self.service.snapshot()
+            if not current or not same_identity(scope, current) or scope.get("generation") != current.get("generation"):
+                self.error(KnowledgeError("identity_changed", "账号或工作空间已变化，请重新选择上传目标。"))
+                return
+            self.choose_upload(paths, scope, catalog)
+        # An explicit file submission must survive the page's initial catalog navigation.
+        self.jobs.submit(lambda: self.service.catalog(scope), done, self.error)
+
+    def choose_upload(self, paths, scope, catalog):
+        paths = [paths] if isinstance(paths, str) else list(paths)
         dialog = QDialog(self)
         apply_product_dialog(dialog, "KnowledgeUploadDialog")
         dialog.setWindowTitle("保存到资料库")
         layout = QVBoxLayout(dialog)
-        filename = QLabel(os.path.basename(path))
+        filename = QLabel(f"已选择 {len(paths)} 个文件")
         filename.setWordWrap(True)
         layout.addWidget(filename)
+        files = QListWidget()
+        files.setMaximumHeight(160)
+        files.addItems(paths)
+        layout.addWidget(files)
         targets = QComboBox()
         seen = set()
         for group in ("mine", "others", "shared"):
@@ -1065,6 +1196,7 @@ class KnowledgePage(QDialog):
                     continue
                 seen.add(kb["id"])
                 targets.addItem(kb["name"], kb["id"])
+        layout.addWidget(QLabel("目标资料库"))
         layout.addWidget(targets)
         if self.current_kb:
             index = targets.findData(self.current_kb["id"])
@@ -1072,6 +1204,7 @@ class KnowledgePage(QDialog):
                 targets.setCurrentIndex(index)
         folder = QComboBox()
         folder.addItem("根目录", "")
+        layout.addWidget(QLabel("文件夹"))
         layout.addWidget(folder)
         note = QLabel("权限由 WeKnora 在提交时验证；文件不会自动覆盖已有资料。")
         note.setWordWrap(True)
@@ -1122,10 +1255,24 @@ class KnowledgePage(QDialog):
         folder_generation[0] += 1
         kb_id, folder_path = targets.currentData(), folder.currentData()
         self.notice.setText("上传已提交，可在上传记录中查看状态。")
-        # Upload callbacks are not discarded on navigation: the receipt belongs to the original identity.
-        self.jobs.submit(lambda: self.service.upload(scope, path, kb_id, folder_path),
-                         lambda task: self.notice.setText("上传完成：" + STATUS.get(task["status"], task["status"])) if self.scope and same_identity(scope, self.scope) else None,
-                         lambda error: self.error(error) if self.scope and same_identity(scope, self.scope) else None)
+        self.submit_upload_batch(scope, paths, kb_id, folder_path)
+
+    def submit_upload_batch(self, scope, paths, kb_id, folder_path):
+        # Every file retains an independent durable receipt; never replay the whole batch.
+        def work():
+            results, errors = [], []
+            for path in paths:
+                try:
+                    results.append(self.service.upload(scope, path, kb_id, folder_path))
+                except Exception as error:
+                    errors.append(os.path.basename(path) + "：" + str(error))
+            return results, errors
+        def done(result):
+            if not self.scope or not same_identity(scope, self.scope):
+                return
+            results, errors = result
+            self.notice.setText(f"已上传 {len(results)} / {len(paths)} 个文件。" + ("；".join(errors) if errors else "可在上传记录查看解析进度。"))
+        self.jobs.submit(work, done, self.error)
 
     def can_offer_upload(self, kb):
         if getattr(self, "tenant_role", None) == "viewer" or kb.get("permission") == "viewer" or kb.get("source_from_agent"):

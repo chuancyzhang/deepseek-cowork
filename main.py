@@ -28397,6 +28397,8 @@ class MainWindow(QMainWindow):
         self.deliverables_list = QListWidget()
         self.deliverables_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_main, radius=14, padding=4))
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
+        self.deliverables_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.deliverables_list.customContextMenuRequested.connect(self.show_deliverable_knowledge_menu)
         self.file_source_stack.addWidget(self.deliverables_list)
 
         self.file_browser_empty_state = ProductEmptyState(
@@ -28521,6 +28523,13 @@ class MainWindow(QMainWindow):
         self.deliverable_more_menu.addAction(self.deliverable_more_refresh_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_save_copy_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_restore_action)
+        self.deliverable_more_knowledge_action = QAction("保存到资料库…", self.deliverable_more_menu)
+        self.deliverable_more_knowledge_action.triggered.connect(
+            lambda: self.upload_workspace_knowledge([self.current_deliverable_path]))
+        self.deliverable_more_menu.addSeparator()
+        self.deliverable_more_menu.addAction(self.deliverable_more_knowledge_action)
+        self.deliverable_more_menu.aboutToShow.connect(lambda: self.deliverable_more_knowledge_action.setVisible(
+            bool(self._knowledge_service().snapshot() and os.path.isfile(getattr(self, "current_deliverable_path", "") or ""))))
         self.deliverable_more_btn.setMenu(self.deliverable_more_menu)
         self.deliverables_refresh_btn = QToolButton()
         self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.file-code", color=DesignTokens.text_secondary))
@@ -44770,6 +44779,8 @@ a {{ overflow-wrap: anywhere; }}
         menu.addAction(reveal_action)
         menu.addSeparator()
         menu.addAction(copy_path_action)
+        if os.path.isfile(path) and self._knowledge_service().snapshot():
+            menu.addAction("保存到资料库…", lambda: self.upload_workspace_knowledge([path]))
         if deliverable_action is not None:
             menu.addAction(deliverable_action)
         menu.addSeparator()
@@ -44925,6 +44936,25 @@ a {{ overflow-wrap: anywhere; }}
         self.product_pages[route] = page
         return page
 
+    def show_deliverable_knowledge_menu(self, position):
+        item = self.deliverables_list.itemAt(position)
+        if not item or not self._knowledge_service().snapshot():
+            return
+        path = item.data(Qt.UserRole)
+        if not path or not os.path.isfile(path):
+            return
+        menu = create_styled_menu(self)
+        menu.addAction("保存到资料库…", lambda: self.upload_workspace_knowledge([path]))
+        menu.exec(self.deliverables_list.viewport().mapToGlobal(position))
+
+    def upload_workspace_knowledge(self, paths):
+        if not self._knowledge_service().snapshot():
+            self.add_system_toast("请先登录资料库。", "info")
+            return
+        page = self._ensure_product_page(self.PAGE_KNOWLEDGE)
+        self.show_product_page(self.PAGE_KNOWLEDGE)
+        QTimer.singleShot(0, lambda: page.upload_paths(paths))
+
     def _knowledge_service(self):
         service = getattr(self, "knowledge_service", None)
         if service is None:
@@ -44961,8 +44991,9 @@ a {{ overflow-wrap: anywhere; }}
             self.new_conversation()
             state = self.get_session()
         refs = copy.deepcopy(getattr(state, "knowledge_refs", []))
-        if reference not in refs:
-            refs.append(copy.deepcopy(reference))
+        for item in (reference if isinstance(reference, list) else [reference]):
+            if item not in refs:
+                refs.append(copy.deepcopy(item))
         state.knowledge_refs = refs
         self.save_chat_history(session_id=state.session_id)
         self.show_conversation_page()
@@ -44983,8 +45014,9 @@ a {{ overflow-wrap: anywhere; }}
         owner = "project:" + self._project_key(project["path"])
         store = self._knowledge_service().store
         refs = store.references(owner)
-        if reference not in refs:
-            refs.append(copy.deepcopy(reference))
+        for item in (reference if isinstance(reference, list) else [reference]):
+            if item not in refs:
+                refs.append(copy.deepcopy(item))
         store.references(owner, refs)
         self.add_system_toast("已设为项目新对话的默认资料。", "success")
 

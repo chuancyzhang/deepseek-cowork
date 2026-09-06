@@ -109,6 +109,76 @@ class SkillHubUiTests(unittest.TestCase):
         self.page._hub_install.assert_called_once_with('skill-0', {'version':'1.0.0'}, None)
         self.page.close()
 
+    def test_local_cards_reflow_and_keep_management_actions(self):
+        from PySide6.QtWidgets import QFrame, QLabel
+        from PySide6.QtGui import QFont, QFontDatabase
+        from pathlib import Path
+        from ui.skillhub_widgets import ClampedText
+        original_font = self.app.font()
+        self.addCleanup(lambda: self.app.setFont(original_font))
+        QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
+        QFontDatabase.addApplicationFont('C:/Windows/Fonts/seguisym.ttf')
+        self.app.setFont(QFont('Microsoft YaHei', 10))
+        self.manager.get_all_skills.return_value = [dict(
+            name=f'local-{i}', display_name='资料整理助手' + str(i),
+            description_cn='读取项目资料，整理会议记录与文档，提取需要跟进的事项。' * 10,
+            enabled=i % 2 == 0,
+            source_type='bundled_plugin',
+            presentation=dict(category='search_browse', short_name='资料整理助手' + str(i),
+                              summary='读取项目资料，整理会议记录与文档，提取需要跟进的事项。' * 10,
+                              examples=['搜索项目资料', '整理会议记录'], access_note='读取用户选择的资料。')) for i in range(8)]
+        self.manager.is_skill_editable.return_value = False
+        self.page.refresh_list()
+        self.page.show()
+        for mode in ('library', 'mine'):
+            if mode == 'mine':
+                for skill in self.manager.get_all_skills.return_value:
+                    skill.pop('source_type')
+                self.manager.is_skill_editable.return_value = True
+                self.page.refresh_list()
+                self.page._set_mode(mode)
+                self.page.mode_control.set_current(mode)
+            for width, columns in [(560, 1), (760, 2), (1060, 3), (1600, 4)]:
+                self.page.resize(width, 760)
+                for _ in range(6):
+                    self.app.processEvents()
+                cards = [c for c in self.page.findChildren(QFrame, 'CapabilityStoreCard') if c.isVisible()]
+                self.assertEqual(len(cards), 8)
+                self.assertEqual(len({c.x() for c in cards}), columns)
+                self.assertEqual(len({c.height() for c in cards}), 1)
+                self.assertLessEqual(self.page.content.width(), self.page.scroll.viewport().width())
+                for card in cards:
+                    for child in card.findChildren(QPushButton) + card.findChildren(ClampedText):
+                        if child.isVisible():
+                            self.assertTrue(card.rect().contains(child.geometry()), (width, child.objectName()))
+                folder = os.environ.get('COWORK_CAPABILITY_SCREENSHOTS')
+                if folder and width in (560, 1600):
+                    Path(folder).mkdir(parents=True, exist_ok=True)
+                    self.page.grab().save(str(Path(folder) / f'{mode}-{width}.png'))
+            if mode == 'mine':
+                self.page._export_skill = Mock()
+                self.page._delete_skill = Mock()
+                menu = cards[0].findChild(QPushButton, 'CapabilityMoreActions').menu()
+                self.assertEqual([a.text() for a in menu.actions()], ['导出', '删除'])
+                menu.actions()[0].trigger()
+                menu.actions()[1].trigger()
+                self.page._export_skill.assert_called_once()
+                self.page._delete_skill.assert_called_once()
+        from core.theme import DesignTokens
+        original_background = DesignTokens.bg_main
+        with patch.object(DesignTokens, 'bg_main', '#202124'):
+            self.page.refresh_theme()
+            for _ in range(4):
+                self.app.processEvents()
+            cards = [c for c in self.page.findChildren(QFrame, 'CapabilityStoreCard') if c.isVisible()]
+            self.assertTrue(all('#202124' in c.styleSheet() for c in cards))
+        self.page.refresh_theme()
+        for _ in range(4):
+            self.app.processEvents()
+        cards = [c for c in self.page.findChildren(QFrame, 'CapabilityStoreCard') if c.isVisible()]
+        self.assertTrue(all(original_background in c.styleSheet() for c in cards))
+        self.page.close()
+
     def test_failure_stays_with_its_skill_and_version(self):
         from PySide6.QtWidgets import QLabel
         self.page.current_mode = 'hub'

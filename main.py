@@ -63,7 +63,7 @@ from core.favorite_delivery import (
 )
 from core.skill_manager import SkillManager
 from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier
-from ui.skillhub_widgets import SkillHubCard, decode_icon, compact_count
+from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns, style_store_card
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
 from core.skill_generator import SkillGenerator
@@ -14940,7 +14940,6 @@ class SkillHubWorker(QThread):
 class SkillsCenterDialog(QDialog):
     """User-facing capability library; technical controls stay in advanced management."""
 
-    RESPONSIVE_COLUMN_THRESHOLD = 880
     hub_icon_ready = Signal(str, object)
 
     def __init__(self, skill_manager, config_manager, parent=None):
@@ -15048,7 +15047,14 @@ class SkillsCenterDialog(QDialog):
             current="all",
         )
         self.scene_control.currentChanged.connect(self._set_scene)
-        layout.addWidget(self.scene_control, 0, Qt.AlignLeft)
+        self.scene_scroll = QScrollArea()
+        self.scene_scroll.setFrameShape(QFrame.NoFrame)
+        self.scene_scroll.setWidgetResizable(True)
+        self.scene_scroll.setMinimumWidth(0)
+        self.scene_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scene_scroll.setFixedHeight(52)
+        self.scene_scroll.setWidget(self.scene_control)
+        layout.addWidget(self.scene_scroll)
 
         self.hub_filters = QWidget()
         hub_bar = QHBoxLayout(self.hub_filters)
@@ -15194,12 +15200,11 @@ class SkillsCenterDialog(QDialog):
         self.search_input.blockSignals(True)
         self.search_input.setText(self.search_text)
         self.search_input.blockSignals(False)
-        self.scene_control.setVisible(mode == "library")
+        self.scene_scroll.setVisible(mode == "library")
         self.hub_filters.setVisible(mode == "hub" and not self.hub_slug)
         self.hub_timer.stop()
         log_ui_navigation("capability_library_mode_change", mode=mode)
-        if mode == "hub":
-            self._hub_restore_scroll = position
+        self._hub_restore_scroll = position
         self._render_content()
         self.scroll.verticalScrollBar().setValue(position)
         if mode == "hub" and self.hub_data is None and not self.hub_loading:
@@ -15499,7 +15504,7 @@ class SkillsCenterDialog(QDialog):
     def _render_hub(self):
         self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_app};}}")
         self.import_skill_btn.setStyleSheet(product_button_style("secondary"))
-        columns = max(1, min(4, (self.scroll.viewport().width() + DesignTokens.spacing_md) // (280 + DesignTokens.spacing_md)))
+        columns = store_columns(self.scroll.viewport().width())
         self._hub_layout_key = (columns, self.scroll.viewport().width() < 720)
         if self.hub_slug:
             back = self._hub_button("‹ 返回技能列表", self._hub_back)
@@ -15621,9 +15626,8 @@ class SkillsCenterDialog(QDialog):
         grid_host = QWidget()
         grid = QGridLayout(grid_host)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-        columns = 1 if user_owned else self._column_count
+        grid.setSpacing(DesignTokens.spacing_md)
+        columns = store_columns(self.scroll.viewport().width())
         for index, skill in enumerate(skills):
             grid.addWidget(
                 self._capability_row(skill, user_owned=user_owned),
@@ -15638,40 +15642,25 @@ class SkillsCenterDialog(QDialog):
     def _capability_row(self, skill, *, user_owned=False):
         row = QFrame()
         row.setObjectName("CapabilityStoreCard")
-        row.setMinimumHeight(146)
-        row.setStyleSheet(
-            f"QFrame#CapabilityStoreCard {{ background: {DesignTokens.bg_main}; border: none; "
-            f"border-radius: {DesignTokens.radius_md}px; }}"
-        )
+        style_store_card(row)
         layout = QVBoxLayout(row)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(7)
-        title = QLabel(readable_skill_name(skill) or str(skill.get("name") or "未命名能力"))
-        title.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; color: {DesignTokens.text_primary};"
-        )
-        full_description = capability_summary(skill, user_owned=user_owned)
-        description = QLabel(full_description)
-        description.setWordWrap(True)
-        description.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
-        )
-        description.setToolTip(full_description)
-        layout.addWidget(title)
-        layout.addWidget(description)
-        examples = [
-            str(item).strip()
-            for item in (capability_presentation(skill).get("examples") or [])
-            if str(item).strip()
-        ][:2]
+        layout.setContentsMargins(DesignTokens.spacing_md, DesignTokens.spacing_md,
+                                  DesignTokens.spacing_md, DesignTokens.spacing_md)
+        layout.setSpacing(DesignTokens.spacing_sm)
+        header = QHBoxLayout()
+        display_name = readable_skill_name(skill) or str(skill.get("name") or "未命名能力")
+        icon = QLabel(display_name[:1])
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(32, 32)
+        icon.setStyleSheet(f"background: {DesignTokens.bg_app}; color: {DesignTokens.accent_ai}; border-radius: {DesignTokens.radius_md}px; font-weight: 600;")
+        header.addWidget(icon)
+        header.addWidget(ClampedText(display_name, strong=True), 1)
+        layout.addLayout(header)
+        layout.addWidget(ClampedText(capability_summary(skill, user_owned=user_owned) or "暂无简介", lines=2))
+        examples = [str(item).strip() for item in
+                    (capability_presentation(skill).get("examples") or []) if str(item).strip()][:2]
         if examples:
-            example_label = QLabel("可以帮你：" + " · ".join(examples))
-            example_label.setWordWrap(False)
-            example_label.setStyleSheet(
-                f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_tertiary};"
-            )
-            example_label.setToolTip("、".join(examples))
-            layout.addWidget(example_label)
+            layout.addWidget(ClampedText("可以帮你：" + " · ".join(examples)))
         layout.addStretch()
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
@@ -15739,7 +15728,7 @@ class SkillsCenterDialog(QDialog):
                         lambda checked=False, value=dict(skill): self._open_detail(value)
                     )
                 actions.addWidget(action)
-            layout.addLayout(actions)
+            self._finish_capability_card(row, header, actions, skill, user_owned)
             return row
         is_browser_automation = name == "browser-automation"
         browser_ready = bool(self.browser_component_status.get("ready"))
@@ -15789,22 +15778,6 @@ class SkillsCenterDialog(QDialog):
             )
             actions.addWidget(status)
             actions.addStretch()
-            if user_owned:
-                manage_btn = QPushButton("管理")
-                manage_btn.setObjectName("CapabilityManageSkill")
-                manage_btn.setStyleSheet(product_button_style("ghost"))
-                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
-                actions.addWidget(manage_btn)
-                export_btn = QPushButton("导出")
-                export_btn.setObjectName("CapabilityExportSkill")
-                export_btn.setStyleSheet(product_button_style("ghost"))
-                export_btn.clicked.connect(lambda checked=False, value=dict(skill): self._export_skill(value))
-                actions.addWidget(export_btn)
-                delete_btn = QPushButton("删除")
-                delete_btn.setObjectName("CapabilityDeleteSkill")
-                delete_btn.setStyleSheet(product_button_style("danger"))
-                delete_btn.clicked.connect(lambda checked=False, value=dict(skill): self._delete_skill(value))
-                actions.addWidget(delete_btn)
             if is_browser_automation or skill.get("config_fields"):
                 settings_btn = QPushButton("设置")
                 if is_browser_automation:
@@ -15828,22 +15801,6 @@ class SkillsCenterDialog(QDialog):
                 )
                 actions.addWidget(hint)
             actions.addStretch()
-            if user_owned:
-                manage_btn = QPushButton("管理")
-                manage_btn.setObjectName("CapabilityManageSkill")
-                manage_btn.setStyleSheet(product_button_style("ghost"))
-                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
-                actions.addWidget(manage_btn)
-                export_btn = QPushButton("导出")
-                export_btn.setObjectName("CapabilityExportSkill")
-                export_btn.setStyleSheet(product_button_style("ghost"))
-                export_btn.clicked.connect(lambda checked=False, value=dict(skill): self._export_skill(value))
-                actions.addWidget(export_btn)
-                delete_btn = QPushButton("删除")
-                delete_btn.setObjectName("CapabilityDeleteSkill")
-                delete_btn.setStyleSheet(product_button_style("danger"))
-                delete_btn.clicked.connect(lambda checked=False, value=dict(skill): self._delete_skill(value))
-                actions.addWidget(delete_btn)
             action = QPushButton("设置后开启" if needs_config else "开启")
             action.setObjectName("CapabilityEnableAction")
             action.setStyleSheet(product_button_style("primary"))
@@ -15854,8 +15811,52 @@ class SkillsCenterDialog(QDialog):
                     lambda checked=False, value=dict(skill): self._toggle_skill(value, True)
                 )
             actions.addWidget(action)
-        layout.addLayout(actions)
+        self._finish_capability_card(row, header, actions, skill, user_owned)
         return row
+
+    def _finish_capability_card(self, row, header, actions, skill, user_owned):
+        # Keep existing state decisions and callbacks; arrange their controls consistently.
+        for index in range(actions.count() - 1, -1, -1):
+            widget = actions.itemAt(index).widget()
+            if isinstance(widget, QPushButton) and widget.objectName() in {
+                "CapabilityEnableAction", "CapabilityDisableAction", "BrowserAutomationSetupAction"
+            }:
+                # Browser setup can coexist with close; keep close in the footer.
+                if widget.objectName() == "CapabilityDisableAction" and row.findChild(QPushButton, "BrowserAutomationSetupAction"):
+                    continue
+                actions.takeAt(index)
+                widget.setStyleSheet(product_button_style("secondary"))
+                widget.setAccessibleName(f"{widget.text()} {readable_skill_name(skill)}")
+                header.addWidget(widget)
+        if not any(isinstance(actions.itemAt(i).widget(), QLabel) for i in range(actions.count())):
+            status = QLabel("未开启")
+            status.setObjectName("CapabilityStateLabel")
+            status.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
+            actions.insertWidget(0, status)
+        if user_owned:
+            manage = QPushButton("管理")
+            manage.setObjectName("CapabilityManageSkill")
+            manage.setStyleSheet(product_button_style("ghost"))
+            manage.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
+            actions.addWidget(manage)
+            more = QPushButton("···")
+            more.setObjectName("CapabilityMoreActions")
+            more.setAccessibleName(f"{readable_skill_name(skill)}的更多操作")
+            more.setToolTip("更多操作：导出、删除")
+            more.setStyleSheet(product_button_style("ghost") + "QPushButton#CapabilityMoreActions::menu-indicator {image: none; width: 0px;}")
+            menu = create_styled_menu(more)
+            menu.addAction("导出", lambda value=dict(skill): self._export_skill(value))
+            menu.addAction("删除", lambda value=dict(skill): self._delete_skill(value))
+            more.setMenu(menu)
+            actions.addWidget(more)
+        # Long connection messages wrap without widening the grid.
+        for index in range(actions.count()):
+            widget = actions.itemAt(index).widget()
+            if isinstance(widget, QLabel):
+                widget.setWordWrap(True)
+                widget.setMinimumWidth(0)
+                actions.setStretch(index, 1)
+        row.layout().addLayout(actions)
 
     def _toggle_skill(self, skill, enabled):
         name = str(skill.get("name") or "").strip()
@@ -15936,7 +15937,7 @@ class SkillsCenterDialog(QDialog):
         self._mode_state["mine"] = ("", 0)
         self._set_mode("mine")
         self.mode_control.set_current("mine")
-        self.scene_control.setVisible(False)
+        self.scene_scroll.setVisible(False)
         self.refresh_list()
         log_ui_navigation("capability_import_done", source="store", skill_count=len(names))
         QMessageBox.information(self, "导入 Skill", message or "Skill 已导入。")
@@ -16011,7 +16012,15 @@ class SkillsCenterDialog(QDialog):
         self._hub_restore_scroll = None
         if scroll_position is None:
             scroll_position = self.scroll.verticalScrollBar().value()
+        if self.current_mode != "hub":
+            token = object()
+            self._local_scroll_token = token
+            QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(scroll_position)
+                              if self.current_mode != "hub" and self._local_scroll_token is token else None)
         self._clear_layout(self.content_layout)
+        self._column_count = store_columns(self.scroll.viewport().width())
+        self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_app};}}")
+        self.import_skill_btn.setStyleSheet(product_button_style("secondary"))
         if self.current_mode == "hub":
             self._render_hub()
             token = object()
@@ -16061,20 +16070,15 @@ class SkillsCenterDialog(QDialog):
         self.content_layout.addStretch()
 
     def _hub_reflow(self):
-        if self.current_mode != "hub":
-            return
         width = self.scroll.viewport().width()
-        key = (max(1, min(4, (width + DesignTokens.spacing_md) // (280 + DesignTokens.spacing_md))), width < 720)
-        if key != self._hub_layout_key:
+        columns = store_columns(width)
+        changed = ((columns, width < 720) != self._hub_layout_key
+                   if self.current_mode == "hub" else columns != self._column_count)
+        if changed:
             self._render_content()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        columns = 2 if self.width() >= self.RESPONSIVE_COLUMN_THRESHOLD else 1
-        if columns != self._column_count:
-            self._column_count = columns
-            if self.current_mode != "hub":
-                QTimer.singleShot(0, self._render_content)
         QTimer.singleShot(0, self._hub_reflow)
 
     def showEvent(self, event):

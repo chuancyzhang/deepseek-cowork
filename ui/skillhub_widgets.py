@@ -66,6 +66,22 @@ class ClampedText(QWidget):
         layout.endLayout()
 
 
+def store_columns(width):
+    return max(1, min(4, (width + T.spacing_md) // (280 + T.spacing_md)))
+
+
+def style_store_card(card):
+    card.setMinimumWidth(0)
+    card.setFixedHeight(max(174, int(2 * T.spacing_md + 3 * T.spacing_sm
+                                    + max(32, T.font_size_body * 1.5)
+                                    + T.font_size_meta * 4.5 + 24)))
+    name = card.objectName()
+    card.setStyleSheet(
+        f"QFrame#{name} {{background: {T.bg_main}; border: 1px solid {T.border_subtle}; border-radius: {T.radius_lg}px;}}"
+        f"QFrame#{name}:hover, QFrame#{name}:focus {{border-color: {T.accent_ai};}}"
+    )
+
+
 class SkillHubCard(QFrame):
     opened = Signal()
     installRequested = Signal()
@@ -79,14 +95,7 @@ class SkillHubCard(QFrame):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName(f"查看 {skill['name']} 详情")
-        self.setFixedHeight(max(174, int(2 * T.spacing_md + 3 * T.spacing_sm
-                                        + max(32, T.font_size_body * 1.5)
-                                        + T.font_size_meta * 4.5 + 24)))
-        self.setMinimumWidth(0)
-        self.setStyleSheet(
-            f"QFrame#SkillHubCard {{background: {T.bg_main}; border: 1px solid {T.border_subtle}; border-radius: {T.radius_lg}px;}}"
-            f"QFrame#SkillHubCard:hover, QFrame#SkillHubCard:focus {{border-color: {T.accent_ai};}}"
-        )
+        style_store_card(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(T.spacing_md, T.spacing_md, T.spacing_md, T.spacing_md)
         layout.setSpacing(T.spacing_sm)

@@ -208,16 +208,17 @@ class UiDesignSystemTests(unittest.TestCase):
             self.assertIn("my-skill", page._user_owned_names)
             self.assertEqual([item["name"] for item in page._official_skills()], ["web-search"])
             page.show()
-            page.resize(879, 680)
+            page.resize(560, 680)
             self.app.processEvents()
             self.assertEqual(page._column_count, 1)
-            page.resize(900, 680)
+            page.resize(760, 680)
             self.app.processEvents()
             self.assertEqual(page._column_count, 2)
             page._set_mode("mine")
             labels = {label.text() for label in page.findChildren(QLabel)}
             self.assertIn("我的能力", labels)
-            self.assertIn("整理我的项目资料。", labels)
+            from ui.skillhub_widgets import ClampedText
+            self.assertIn("整理我的项目资料。", [w.text for w in page.findChildren(ClampedText)])
             visible_copy = " ".join(
                 [label.text() for label in page.findChildren(QLabel)]
                 + [button.text() for button in page.findChildren(QPushButton)]

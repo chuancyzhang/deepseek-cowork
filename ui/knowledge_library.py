@@ -398,6 +398,7 @@ class KnowledgePage(QDialog):
         logout.setMenu(account_menu)
         account_layout.addWidget(logout)
         header.addWidget(self.account_bar)
+        self.account_bar.hide()
 
         toolbar = ProductToolbar(self)
         self.query = QLineEdit()
@@ -557,6 +558,9 @@ class KnowledgePage(QDialog):
         self.splitter.addWidget(self.content_stack)
         self.splitter.setSizes([200, 800])
         layout.addWidget(self.splitter, 1)
+        self.splitter.hide()
+        self.login_spacer = QWidget()
+        layout.addWidget(self.login_spacer, 1)
         self.read_more = QPushButton("继续阅读下一页")
         self.read_more.clicked.connect(self.read_next)
         self.read_more.hide()
@@ -657,11 +661,11 @@ class KnowledgePage(QDialog):
         connected = bool(self.scope)
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
+        self.splitter.setVisible(connected)
+        self.login_spacer.setVisible(not connected)
         self.upload_button.setEnabled(False)
         if not connected:
-            self.notice.setText("连接 WeKnora 后，可以使用自己的资料和共享知识。本地产物仍保存在本机。")
-            self.tree.addTopLevelItem(self.node("本地产物", {"kind": "artifacts"}))
-            self.navigate(self.tree.topLevelItem(0))
+            self.notice.clear()
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])

@@ -269,6 +269,8 @@ class KnowledgeService:
         for key in ("connection_id", "user_id", "generation"):
             if scope.get(key) != connection.get(key):
                 raise KnowledgeError("identity_changed", "资料库账号已改变，请重新选择资料后提交。")
+        if str(scope.get("tenant_id", "")) != str(connection.get("tenant_id", "")):
+            raise KnowledgeError("workspace_changed", "资料库已切换工作空间。此任务仍引用原工作空间，请切回后重试；不会使用其他空间的资料。")
         for ref in scope.get("refs", []):
             if not same_identity(ref, scope):
                 raise KnowledgeError("stale_reference", "所选资料来自其他账号或工作空间，请重新选择。")
@@ -318,9 +320,21 @@ class KnowledgeService:
         with self.store.connect(write=True) as db:
             connection = self.store.connection(db, secret=True)
             self._identity(scope, connection)
-            credentials = connection.pop("credentials")
+            # WeKnora 0.6.3–0.8.0 scopes JWTs to the active workspace.
+            # Changing only X-Tenant-ID cannot switch an authenticated workspace.
+            result = self._http(connection["base_url"], "POST", "/api/v1/auth/switch-tenant",
+                                token=connection["credentials"]["token"], tenant=scope["tenant_id"],
+                                json={"tenant_id": int(tenant_id), "refresh_token": connection["credentials"]["refresh_token"]})
+            active = result.get("active_tenant") or {}
+            user = result.get("user") or {}
+            if (str(active.get("id")) != str(tenant_id) or str(user.get("id")) != connection["user_id"]
+                    or not result.get("token") or not result.get("refresh_token")):
+                raise KnowledgeError("invalid_switch", "服务未确认工作空间切换，原连接已保留。请重新登录后选择。")
+            credentials = {"token": result["token"], "refresh_token": result["refresh_token"]}
+            connection.pop("credentials")
             connection["tenant_id"] = str(tenant_id)
             self.store.save_connection(connection, credentials, db)
+            log.info("knowledge_workspace_switched tenant=%s", tenant_id)
 
     def reference(self, scope, kb_id, title, knowledge_id="", wiki_slug=""):
         return {**{k: scope[k] for k in ("connection_id", "user_id", "tenant_id")},
@@ -340,6 +354,18 @@ class KnowledgeService:
                 shared.append({**kb, "organization_id": org["id"], "organization_name": org["name"],
                                "permission": entry.get("permission"), "source_from_agent": entry.get("source_from_agent")})
         return {"mine": own, "others": other, "shared": shared, "organizations": organizations}
+
+    def folders(self, scope, kb_id):
+        try:
+            return response_data(self.request(scope, "GET", f"/api/v1/knowledge-bases/{segment(kb_id)}/knowledge/folders"))
+        except KnowledgeError as exc:
+            if exc.status != 404:
+                raise
+            # 0.6.3 has no document-folder route. Verify the KB is accessible
+            # before identifying this as an unavailable optional feature.
+            self.request(scope, "GET", f"/api/v1/knowledge-bases/{segment(kb_id)}")
+            log.info("knowledge_folders_unsupported kb=%s", kb_id)
+            return {"folders": [], "unsupported": True}
 
     def files(self, scope, kb_id, page=1, folder=None):
         params = {"page": max(1, int(page)), "page_size": 30}

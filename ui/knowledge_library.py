@@ -342,31 +342,40 @@ class KnowledgePage(QDialog):
         layout.addLayout(header)
 
         self.login_box = QWidget()
+        self.login_box.setMaximumWidth(680)
         login_layout = QVBoxLayout(self.login_box)
         login_layout.setContentsMargins(0, 0, 0, 0)
-        self.base = QLineEdit("http://localhost")
-        self.base.setPlaceholderText("WeKnora 服务地址")
+        login_title = QLabel("连接你的资料库")
+        login_title.setObjectName("LibraryHeading")
+        login_layout.addWidget(login_title)
+        login_help = QLabel("登录后，可查找和阅读你的资料，在对话中引用，并保存工作成果。请输入你平时打开 WeKnora 的服务地址和账号。")
+        login_help.setWordWrap(True)
+        login_layout.addWidget(login_help)
+        self.base = QLineEdit()
+        self.base.setPlaceholderText("例如：http://localhost:8080 或团队提供的服务地址")
         self.email = QLineEdit()
-        self.email.setPlaceholderText("WeKnora 邮箱")
+        self.email.setPlaceholderText("注册 WeKnora 时使用的邮箱")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         self.password.setPlaceholderText("密码（不会保存）")
         for title, field in (("服务地址", self.base), ("邮箱", self.email), ("密码", self.password)):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(title))
-            row.addWidget(field, 1)
-            login_layout.addLayout(row)
+            login_layout.addWidget(QLabel(title))
+            field.setMinimumHeight(36)
+            login_layout.addWidget(field)
         login_actions = QHBoxLayout()
         self.login_button = QPushButton("连接并登录")
         self.login_button.setProperty("libraryPrimary", True)
         self.login_button.clicked.connect(self.login)
         self.password.returnPressed.connect(self.login)
         login_actions.addWidget(self.login_button)
-        register = QPushButton("注册 / 账号管理")
+        register = QPushButton("打开网页版 / 注册账号")
         register.clicked.connect(lambda: self.open_management("/login", connected=False))
         login_actions.addWidget(register)
         login_actions.addStretch()
         login_layout.addLayout(login_actions)
+        login_note = QLabel("密码不会保存。若团队使用单点登录，请在网页版管理账号；此处使用邮箱和密码登录。")
+        login_note.setWordWrap(True)
+        login_layout.addWidget(login_note)
         layout.addWidget(self.login_box)
 
         self.account_bar = QWidget()
@@ -652,6 +661,7 @@ class KnowledgePage(QDialog):
         if not connected:
             self.notice.setText("连接 WeKnora 后，可以使用自己的资料和共享知识。本地产物仍保存在本机。")
             self.tree.addTopLevelItem(self.node("本地产物", {"kind": "artifacts"}))
+            self.navigate(self.tree.topLevelItem(0))
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])
@@ -709,8 +719,8 @@ class KnowledgePage(QDialog):
         self.navigate(self.tree.topLevelItem(0))
 
     def login(self):
-        if not self.email.text().strip() or not self.password.text():
-            self.notice.setText("请输入邮箱和密码。")
+        if not self.base.text().strip() or not self.email.text().strip() or not self.password.text():
+            self.notice.setText("请填写服务地址、邮箱和密码。")
             return
         base, email, password = self.base.text(), self.email.text().strip(), self.password.text()
         self.login_button.setEnabled(False)
@@ -801,9 +811,12 @@ class KnowledgePage(QDialog):
         self.folders.clear()
         self.folders.addItem("全部文件夹", None)
         scope = copy.deepcopy(self.scope)
-        self.run(lambda: response_data(self.service.request(scope, "GET", f"/api/v1/knowledge-bases/{segment(kb['id'])}/knowledge/folders")), self.loaded_folders)
+        self.run(lambda: self.service.folders(scope, kb["id"]), self.loaded_folders)
 
     def loaded_folders(self, data):
+        self._folders_supported = not data.get("unsupported", False)
+        self.folders.setEnabled(self._folders_supported)
+        self.folders.setToolTip("" if self._folders_supported else "当前服务不支持文件夹，仍可浏览全部资料。")
         self.folders.addItem("根目录", "")
         def visit(nodes, depth=0):
             for node in nodes:
@@ -829,7 +842,10 @@ class KnowledgePage(QDialog):
         self.page_label.setText(f"第 {self.page} 页 · {total} 份资料")
         self.previous.setEnabled(self.page > 1)
         self.next.setEnabled(self.page * 30 < total)
-        self.notice.setText("点击资料打开阅读，悬停勾选可批量加入对话或项目。" if total else "这里还没有资料。")
+        message = "点击资料打开阅读，悬停勾选可批量加入对话或项目。" if total else "这里还没有资料。"
+        if not getattr(self, "_folders_supported", True):
+            message += " 当前服务不支持文件夹，已显示全部资料。"
+        self.notice.setText(message)
 
     def change_folder(self, index):
         if self.current_kb:
@@ -1234,11 +1250,16 @@ class KnowledgePage(QDialog):
                         folder.addItem("  " * depth + node["name"], node["path"])
                         visit(node.get("children") or [], depth + 1)
                 visit(response_data(payload).get("folders") or [])
+                if response_data(payload).get("unsupported"):
+                    note.setText("当前服务不支持文件夹，资料将保存到此资料库。")
+                    folder.setEnabled(False)
+                else:
+                    folder.setEnabled(True)
                 index = folder.findData(self.folder or "")
                 if index >= 0:
                     folder.setCurrentIndex(index)
                 submit.setEnabled(True)
-            self.jobs.submit(lambda: self.service.request(scope, "GET", f"/api/v1/knowledge-bases/{segment(kb_id)}/knowledge/folders"),
+            self.jobs.submit(lambda: self.service.folders(scope, kb_id),
                              done, lambda error: note.setText(str(error)) if generation == folder_generation[0] else None)
         targets.currentIndexChanged.connect(load_target_folders)
         load_target_folders()

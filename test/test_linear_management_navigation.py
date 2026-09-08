@@ -21,6 +21,10 @@ class LinearManagementNavigationTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Navigation tests must not start a live GitHub request merely by showing a page.
+        update_check = patch("main.SettingsDialog.start_app_update")
+        update_check.start()
+        self.addCleanup(update_check.stop)
         self.window = MainWindow()
 
     def tearDown(self):
@@ -40,7 +44,7 @@ class LinearManagementNavigationTests(unittest.TestCase):
 
     def test_settings_and_favorites_use_main_page_stack_without_exec(self):
         with patch.object(QDialog, "exec", side_effect=AssertionError("large modal opened")):
-            self.assertTrue(self.window.open_settings("个性与记忆"))
+            self.assertTrue(self.window.open_settings("回答偏好"))
             self.assertEqual(self.window.current_product_route, "settings")
             self.assertIs(
                 self.window.main_page_stack.currentWidget(),
@@ -101,10 +105,10 @@ class LinearManagementNavigationTests(unittest.TestCase):
         self.assertTrue(editor.is_dirty())
         self.assertTrue(editor.save_btn.isEnabled())
 
-    def test_memory_is_a_settings_section_and_part_of_dirty_state(self):
-        self.window.open_settings("个性与记忆")
+    def test_preferences_are_a_settings_section_and_part_of_dirty_state(self):
+        self.window.open_settings("回答偏好")
         page = self.window.product_pages["settings"]
-        self.assertEqual(page.nav_list.currentItem().text(), "个性与记忆")
+        self.assertEqual(page.nav_list.currentItem().text(), "回答偏好")
         original = page.memory_soul_edit.toPlainText()
         page.memory_soul_edit.setPlainText(original + "\n保持直接。")
         self.app.processEvents()

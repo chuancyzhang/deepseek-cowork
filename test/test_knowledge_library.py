@@ -47,6 +47,9 @@ class WeKnoraFixture:
         if path == "auth/login":
             return Response({"success": True, "token": "secret-token", "refresh_token": "secret-refresh",
                              "user": {"id": "user-a", "email": "reader@example.test"}, "tenant": {"id": 1}})
+        if path == "auth/switch-tenant":
+            return Response({"success": True, "token": "workspace-token", "refresh_token": "workspace-refresh",
+                             "user": {"id": "user-a"}, "active_tenant": {"id": kwargs["json"]["tenant_id"]}})
         if path == "auth/refresh":
             self.expired = False
             return Response({"success": True, "access_token": "new-token", "refresh_token": "new-refresh"})
@@ -183,8 +186,11 @@ class KnowledgeLibraryTests(unittest.TestCase):
     def test_space_switch_does_not_mutate_background_snapshot(self):
         self.service.switch_tenant("2")
         self.assertEqual(self.service.snapshot()["tenant_id"], "2")
-        self.service.request(self.scope, "GET", "/api/v1/auth/me")
-        self.assertEqual(self.transport.calls[-1][2]["headers"]["X-Tenant-ID"], "1")
+        self.assertEqual(self.scope["tenant_id"], "1")
+        self.assertCode("workspace_changed", lambda: self.service.request(self.scope, "GET", "/api/v1/auth/me"))
+        switch = next(c for c in self.transport.calls if c[1] == "auth/switch-tenant")
+        self.assertEqual(switch[2]["json"]["tenant_id"], 2)
+        self.assertEqual(self.store.connection(secret=True)["credentials"]["token"], "workspace-token")
 
     def test_account_relogin_revokes_old_run_even_for_same_user(self):
         self.service.login("http://localhost", "reader@example.test", "password")

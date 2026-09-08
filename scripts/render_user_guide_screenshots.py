@@ -631,6 +631,44 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "unified-management":
+            window.config_manager.upsert_project(str(workspace), name="产品周报")
+            window.config_manager.set_agent_profiles([{"id": "guide-agent", "name": "周报助手", "description": "整理本周进展、风险与下周计划", "enabled": False, "skill_names": []}])
+            window.config_manager.set_mcp_servers([{"id": "guide-service", "name": "团队资料", "transport": "streamable-http", "url": "https://example.com/mcp", "enabled": False}])
+            window.chat_storage.save_conversation("guide-pinned", [{"id": "guide-message", "role": "user", "content": "整理本周进展"}], title="整理本周进展", status="completed", meta={"pinned": True, "workspace_dir": str(workspace), "workspace_source": "project"})
+            window.skill_manager.load_skills()
+            window.skill_manager_ready = True
+            window.refresh_history_list()
+            window.show()
+            for width, height, suffix in ((1440, 900, "wide"), (1000, 720, "small")):
+                window.resize(width, height)
+                assert window.open_settings("回答偏好"), f"settings navigation failed: {suffix}, {window.current_product_route}"
+                save_widget(window, f"management-settings-{suffix}.png")
+                assert window.open_project_management("记忆", workspace_dir=str(workspace))
+                save_widget(window, f"management-memory-{suffix}.png")
+                assert window.open_skills_center()
+                skills = window.product_pages[window.PAGE_CAPABILITIES]
+                skills.select_section("skills")
+                save_widget(window, f"management-skills-{suffix}.png")
+                assert skills.select_section("mcp")
+                save_widget(window, f"management-mcp-{suffix}.png")
+                manager = skills.management_page.mcp_server_manager
+                manager._open_editor(0)
+                save_widget(window, f"management-mcp-edit-{suffix}.png")
+                manager._close_editor(discard=True)
+                assert skills.select_section("agents")
+                save_widget(window, f"management-agents-{suffix}.png")
+                agents = skills.management_page.agent_profile_manager
+                agents.open_profile_editor()
+                save_widget(window, f"management-agent-edit-{suffix}.png")
+                assert agents.leave_profile_editor()
+                assert skills.select_section("skills")
+                skills._set_mode("builtin")
+                save_widget(window, f"management-builtin-{suffix}.png")
+                skills._set_mode("library")
+            assert window.show_conversation_page()
+            save_widget(window, "management-sidebar.png")
+            return
         if SCREENSHOT_SCOPE == "favorites":
             project_dir = TEMP_ROOT / "weekly-report-project"
             project_dir.mkdir(parents=True, exist_ok=True)
@@ -1923,4 +1961,20 @@ def main_run():
 
 
 if __name__ == "__main__":
-    main_run()
+    if SCREENSHOT_SCOPE == "unified-management":
+        from PySide6.QtCore import qInstallMessageHandler
+        def record_qt_message(kind, context, message):
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            with (OUTPUT_DIR / "render-diagnostics.txt").open("a", encoding="utf-8") as stream:
+                stream.write(str(message) + "\n")
+        qInstallMessageHandler(record_qt_message)
+        def record_exception(kind, value, tb):
+            import traceback
+            (OUTPUT_DIR / "render-error.txt").write_text("".join(traceback.format_exception(kind, value, tb)), encoding="utf-8")
+        sys.excepthook = record_exception
+    try:
+        main_run()
+    except Exception:
+        import traceback
+        (OUTPUT_DIR / "render-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        raise

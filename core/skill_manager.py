@@ -2330,6 +2330,8 @@ class SkillManager:
         skill_path = self._find_skill_path(skill_name)
         if not skill_path:
             return False
+        if self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_CORE_BUILTIN:
+            return False
         identity = self._skill_identity(skill_path)
         if identity.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
             return False
@@ -2426,7 +2428,7 @@ class SkillManager:
                     os.remove(path)
                 return {
                     "ok": False,
-                    "error": "Skill validation failed; the original file was restored: "
+                    "error": "保存未完成，原文件已保留："
                     + "; ".join(validation.get("issues") or []),
                     "validation": validation,
                 }
@@ -2436,6 +2438,22 @@ class SkillManager:
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def rename_skill_display_name(self, skill_name, display_name):
+        display_name = str(display_name or "").strip()
+        if not display_name or len(display_name) > 128 or any(ord(c) < 32 for c in display_name):
+            return {"ok": False, "error": "请输入 1–128 字的名称，支持中文，不能含换行或控制字符。"}
+        payload = self.read_skill_file(skill_name, "SKILL.md")
+        if not payload.get("ok"):
+            return payload
+        content = payload.get("content", "")
+        match = re.match(r"\A---\s*\n(.*?)\n---(?:\n|$)", content, re.S)
+        if not match:
+            return {"ok": False, "error": "SKILL.md 缺少有效的文件头，请先在文件编辑中修复。"}
+        header = match.group(1)
+        field = "display_name: " + json.dumps(display_name, ensure_ascii=False)
+        header = re.sub(r"^display_name:[^\n]*$", lambda _: field, header, flags=re.M) if re.search(r"^display_name:", header, re.M) else header + "\n" + field
+        return self.write_skill_file(skill_name, "SKILL.md", "---\n" + header + "\n---\n" + content[match.end():])
 
     def validate_skill(self, skill_name):
         skill_path = self._find_skill_path(skill_name)
@@ -2465,9 +2483,17 @@ class SkillManager:
             except Exception as e:
                 issues.append(f"impl.py syntax check failed: {e}")
         for ref_key in ("references", "script_refs", "asset_refs"):
-            for ref in spec.get(ref_key) or []:
-                if isinstance(ref, str) and ref.strip() and not os.path.exists(os.path.join(skill_path, ref)):
-                    issues.append(f"{ref_key} entry not found: {ref}")
+            refs = spec.get(ref_key) or []
+            if isinstance(refs, str):
+                refs = [refs]
+            if not isinstance(refs, list):
+                issues.append(f"skill.json 的 {ref_key} 应填写相对路径列表，例如 [\"references/说明.md\"]。")
+                continue
+            for ref in refs:
+                if not isinstance(ref, str):
+                    issues.append(f"skill.json 的 {ref_key} 每项应为文件相对路径。")
+                elif ref.strip() and not os.path.exists(os.path.join(skill_path, ref)):
+                    issues.append(f"{ref_key} 引用的文件不存在：{ref}。请在 skill.json 中填写实际路径，说明文字应放入 SKILL.md。")
         for entry in spec.get("script_entries") or []:
             if not isinstance(entry, dict):
                 issues.append("script_entries entries must be objects.")
@@ -2537,7 +2563,8 @@ class SkillManager:
                                  on_commit=None):
         from .skillhub import ORIGIN_FILE, file_hashes, read_origin
         skill_name = self._read_skill_name_from_path(source_path)
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", skill_name):
+        from core.skill_from_conversation import is_valid_skill_name
+        if not is_valid_skill_name(skill_name):
             raise ValueError("Invalid skill name")
         target_dir = self._default_writable_skill_root()
         os.makedirs(target_dir, exist_ok=True)

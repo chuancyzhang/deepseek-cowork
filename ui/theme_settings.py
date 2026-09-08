@@ -138,10 +138,19 @@ class ThemeSettingsPanel(QWidget):
         root.setSpacing(14)
         root.addWidget(self._build_manager_section())
         root.addWidget(self._build_basic_section())
-        root.addWidget(self._build_advanced_section())
-        root.addWidget(self._build_scene_section())
-        root.addWidget(self._build_asset_section())
-        root.addWidget(self._build_structure_section())
+        more_toggle = QPushButton("更多主题配置")
+        more_toggle.setCheckable(True)
+        root.addWidget(more_toggle, 0, Qt.AlignLeft)
+        more = QWidget()
+        more_layout = QVBoxLayout(more)
+        more_layout.setContentsMargins(0, 0, 0, 0)
+        more_layout.addWidget(self._build_advanced_section())
+        more_layout.addWidget(self._build_scene_section())
+        more_layout.addWidget(self._build_asset_section())
+        more_layout.addWidget(self._build_structure_section())
+        more.hide()
+        more_toggle.toggled.connect(more.setVisible)
+        root.addWidget(more)
         root.addWidget(
             ProductInlineNotice(
                 "也可以在对话中描述背景、图标、布局、字体和配色。AI 只能修改受验证的呈现层，预览确认后才会保存。",
@@ -273,6 +282,15 @@ class ThemeSettingsPanel(QWidget):
         self.density_combo.addItem("标准", "standard")
         self.density_combo.addItem("舒适", "comfortable")
         form.addRow("界面密度", self.density_combo)
+        layout.addLayout(form)
+        toggle = QPushButton("颜色、圆角与栏宽")
+        toggle.setCheckable(True)
+        layout.addWidget(toggle, 0, Qt.AlignLeft)
+        advanced = QWidget()
+        form = QFormLayout(advanced)
+        form.setSpacing(10)
+        advanced.hide()
+        toggle.toggled.connect(advanced.setVisible)
         self.radius_scale_spin = _ClickActivatedDoubleSpinBox()
         self.radius_scale_spin.setRange(0.50, 1.50)
         self.radius_scale_spin.setSingleStep(0.05)
@@ -309,7 +327,7 @@ class ThemeSettingsPanel(QWidget):
             editor.setValue(int(defaults[token_name]))
             self.geometry_spins[token_name] = editor
             form.addRow(label, editor)
-        layout.addLayout(form)
+        layout.addWidget(advanced)
         return frame
 
     def _build_advanced_section(self):

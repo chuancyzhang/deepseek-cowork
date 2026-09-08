@@ -62,7 +62,7 @@ from core.favorite_delivery import (
     collect_feishu_artifacts,
 )
 from core.skill_manager import SkillManager
-from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier
+from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier, preferred_version
 from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns, style_store_card
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
@@ -306,6 +306,7 @@ from core.mcp_client import (
     test_mcp_server_connection,
 )
 from core.skill_from_conversation import (
+    is_valid_skill_name,
     ConversationSkillCaptureRepository,
     build_evidence_source,
     build_target_skill_snapshot,
@@ -1993,8 +1994,8 @@ def apple_settings_nav_style():
             font-weight: 600;
             border: none;
         }}
-        QListWidget::item:hover {{
-            background: {DesignTokens.bg_settings_nav_selected};
+        QListWidget::item:hover:!selected {{
+            background: {DesignTokens.bg_sidebar_hover};
             color: {DesignTokens.text_primary};
         }}
     """
@@ -2757,6 +2758,12 @@ def skill_center_tab_key(skill):
 
 def skill_center_is_builtin(skill):
     return skill_center_tab_key(skill) == "builtin"
+
+
+def capability_is_readonly_builtin(skill):
+    """UI ownership uses the runtime's source identity, never a display name."""
+    source = str((skill or {}).get("source_kind") or "")
+    return source == "core_builtin" if source else skill_center_is_builtin(skill)
 
 
 def session_skill_is_selectable(skill):
@@ -3636,6 +3643,7 @@ class CapabilityWorkbenchDialog(QDialog):
         title_box = QVBoxLayout()
         title_box.setSpacing(4)
         title = QLabel(self.skill.get("display_name") or self.skill_name or "能力工作台")
+        self.capability_title = title
         title.setProperty("roleTitle", True)
         subtitle = QLabel(
             "查看用途、配置并管理这项能力。"
@@ -3647,6 +3655,11 @@ class CapabilityWorkbenchDialog(QDialog):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
+        if self.skill_manager.is_skill_editable(self.skill_name):
+            rename_btn = QPushButton("修改名称")
+            rename_btn.setStyleSheet(product_button_style("secondary"))
+            rename_btn.clicked.connect(self.rename_skill)
+            header.addWidget(rename_btn)
         close_btn = QPushButton("关闭")
         close_btn.setStyleSheet(apple_button_style("secondary", radius=14))
         close_btn.clicked.connect(self.accept)
@@ -5155,6 +5168,23 @@ class CapabilityWorkbenchDialog(QDialog):
             self.file_editor.setPlainText("")
             self.file_status.setText(payload.get("error") or "读取失败。")
 
+    def rename_skill(self):
+        name, accepted = QInputDialog.getText(self, "修改技能名称", "名称（支持中文）", text=self.capability_title.text())
+        if not accepted or name.strip() == self.capability_title.text():
+            return
+        result = self.skill_manager.rename_skill_display_name(self.skill_name, name)
+        if not result.get("ok"):
+            QMessageBox.warning(self, "修改名称", result.get("error") or "保存失败，原名称已保留。")
+            return
+        self.skill["display_name"] = name.strip()
+        self.capability_title.setText(name.strip())
+        owner = self.parent()
+        while owner is not None and not hasattr(owner, "publish_ui_skill_change"):
+            owner = owner.parent()
+        if owner is not None:
+            owner.publish_ui_skill_change(self.skill_name, "updated")
+        log_ui_navigation("skill_display_name_saved", skill_name=self.skill_name)
+
     def save_current_skill_file(self):
         if not self.current_file_path:
             return
@@ -6568,7 +6598,7 @@ class ModelChannelEditor(QFrame):
         self.delete_channel_btn = QToolButton()
         self.delete_channel_btn.setFixedSize(30, 30)
         self.delete_channel_btn.setStyleSheet(apple_icon_action_button_style("danger"))
-        self.delete_channel_btn.setToolTip("删除渠道")
+        self.delete_channel_btn.setToolTip("删除服务")
         self.delete_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
         self.delete_channel_btn.clicked.connect(self.delete_channel)
         header_layout.addWidget(self.delete_channel_btn)
@@ -7196,12 +7226,12 @@ class ModelChannelManager(QWidget):
         title_box.addWidget(title)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
-        add_channel_btn = QPushButton("添加渠道")
+        add_channel_btn = QPushButton("添加服务")
         add_channel_btn.setObjectName("SecondaryBtn")
         add_channel_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         add_channel_btn.clicked.connect(self.add_channel)
         toolbar.addWidget(add_channel_btn)
-        self.delete_selected_channel_btn = QPushButton("删除渠道")
+        self.delete_selected_channel_btn = QPushButton("删除服务")
         self.delete_selected_channel_btn.setObjectName("SecondaryBtn")
         self.delete_selected_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
         self.delete_selected_channel_btn.setEnabled(False)
@@ -7331,7 +7361,7 @@ class ModelChannelManager(QWidget):
     def add_channel(self):
         channel = {
             "channel_id": f"openai-custom-{uuid.uuid4().hex[:8]}",
-            "display_name": "新渠道",
+            "display_name": "新服务",
             "provider_type": "openai",
             "api_key": "",
             "base_url": DEFAULT_DEEPSEEK_BASE_URL,
@@ -7344,8 +7374,8 @@ class ModelChannelManager(QWidget):
     def delete_channel(self, editor):
         reply = QMessageBox.question(
             self,
-            "删除模型渠道",
-            "确定删除这个渠道及其下的模型吗？",
+            "删除模型服务",
+            "确定删除这个服务及其下的模型吗？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -7378,6 +7408,8 @@ class AgentProfileManager(QWidget):
         self.profiles = json.loads(json.dumps(profiles or [], ensure_ascii=False))
         self._current_index = -1
         self._loading_profile = False
+        self.editing_profile = False
+        self._untouched_drafts = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7388,14 +7420,14 @@ class AgentProfileManager(QWidget):
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(4)
-        title = QLabel("智能体模板")
+        title = QLabel("我的智能体")
         title.setStyleSheet(apple_settings_section_title_style())
         title_box.addWidget(title)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
 
         add_btn = QPushButton("新增智能体")
-        add_btn.setObjectName("SecondaryBtn")
+        add_btn.setObjectName("PrimaryBtn")
         add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         add_btn.clicked.connect(self.add_profile)
         toolbar.addWidget(add_btn)
@@ -7414,22 +7446,39 @@ class AgentProfileManager(QWidget):
         layout.addLayout(toolbar)
 
         body = QHBoxLayout()
+        self.profile_body_layout = body
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(14)
+        self.profile_search = QLineEdit()
+        self.profile_search.setPlaceholderText("搜索智能体名称或用途")
+        self.profile_search.textChanged.connect(self._filter_profiles)
+        layout.addWidget(self.profile_search)
+        self.profile_back = QPushButton("← 返回智能体列表")
+        self.profile_back.setStyleSheet(product_button_style("secondary"))
+        self.profile_back.setMinimumHeight(36)
+        self.profile_back.clicked.connect(self.leave_profile_editor)
+        self.profile_back.hide()
+        layout.addWidget(self.profile_back, 0, Qt.AlignLeft)
         layout.addLayout(body, 1)
 
         self.profile_list = QListWidget()
-        self.profile_list.setFixedWidth(236)
+        self.profile_list.setMinimumWidth(0)
+        self.profile_list.itemActivated.connect(lambda *_: self.open_profile_editor())
+        self.profile_list.setToolTip("双击或按 Enter 编辑智能体；在对话中选择智能体即可使用")
         self.profile_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.profile_list.currentRowChanged.connect(self._on_profile_changed)
         body.addWidget(self.profile_list)
 
         editor_card = QFrame()
+        self.profile_editor = editor_card
         editor_card.setStyleSheet(apple_settings_surface_style(radius=18))
         editor_layout = QVBoxLayout(editor_card)
         editor_layout.setContentsMargins(18, 18, 18, 18)
         editor_layout.setSpacing(14)
         body.addWidget(editor_card, 1)
+        self.profile_empty = QLabel("还没有智能体。点击“新增智能体”，保存可重复使用的工作角色。")
+        self.profile_empty.setWordWrap(True)
+        body.addWidget(self.profile_empty, 1)
 
         form = QFormLayout()
         form.setSpacing(12)
@@ -7471,13 +7520,66 @@ class AgentProfileManager(QWidget):
         helper.setWordWrap(True)
         helper.setStyleSheet(apple_settings_inline_note_style())
         editor_layout.addWidget(helper)
+        filters = QHBoxLayout()
+        self.skill_search = QLineEdit()
+        self.skill_search.setPlaceholderText("搜索能力名称或用途")
+        self.selected_only = QCheckBox("只看已选")
+        self.skill_search.textChanged.connect(self._filter_skill_options)
+        self.selected_only.toggled.connect(self._filter_skill_options)
+        filters.addWidget(self.skill_search, 1)
+        filters.addWidget(self.selected_only)
+        editor_layout.insertLayout(editor_layout.indexOf(self.skill_list), filters)
 
         self._reload_skill_options()
         self._refresh_profile_list()
         if self.profile_list.count():
             self.profile_list.setCurrentRow(0)
         else:
-            self.add_profile()
+            self._load_profile_into_fields(-1)
+
+    def _filter_profiles(self, text):
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            item.setHidden(text.strip().casefold() not in item.text().casefold())
+
+    def open_profile_editor(self):
+        if self._current_index < 0:
+            return
+        self.editing_profile = True
+        self.profile_list.hide()
+        self.profile_search.hide()
+        self.profile_back.show()
+        self._load_profile_into_fields(self._current_index)
+
+    def leave_profile_editor(self):
+        host = self.parentWidget()
+        while host is not None and not hasattr(host, "_confirm_discard_settings"):
+            host = host.parentWidget()
+        if host is not None and not host._confirm_discard_settings():
+            return False
+        self.profiles = [p for p in self.profiles if not self._is_untouched_draft(p)]
+        self._untouched_drafts.clear()
+        self._current_index = -1
+        self._refresh_profile_list()
+        self.profile_list.setCurrentRow(0)
+        self.editing_profile = False
+        self.profile_editor.hide()
+        self.profile_back.hide()
+        self.profile_list.show()
+        self.profile_search.show()
+        self.profile_empty.setVisible(not self.profiles)
+        return True
+
+    def _filter_skill_options(self, *_):
+        query = self.skill_search.text().strip().casefold()
+        for row in range(self.skill_list.count()):
+            item = self.skill_list.item(row)
+            item.setHidden((bool(query) and query not in (item.text() + item.toolTip()).casefold()) or
+                           (self.selected_only.isChecked() and item.checkState() != Qt.Checked))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.profile_list.setMaximumWidth(16777215)
 
     def _available_skills(self):
         skills = []
@@ -7518,7 +7620,8 @@ class AgentProfileManager(QWidget):
             name = str(profile.get("name") or "未命名智能体").strip()
             enabled = bool(profile.get("enabled", True))
             label = name if enabled else f"{name} (已停用)"
-            item = QListWidgetItem(label)
+            item = QListWidgetItem(f"{label}\n{profile.get('description') or '尚未填写用途'} · 已选 {len(profile.get('skill_names') or [])} 项能力")
+            item.setSizeHint(QSize(0, 70))
             item.setData(Qt.UserRole, profile.get("id"))
             item.setToolTip(profile.get("description") or "")
             self.profile_list.addItem(item)
@@ -7527,6 +7630,8 @@ class AgentProfileManager(QWidget):
     def _load_profile_into_fields(self, index):
         self._loading_profile = True
         try:
+            self.profile_editor.setVisible(index >= 0 and self.editing_profile)
+            self.profile_empty.setVisible(index < 0)
             profile = self.profiles[index] if 0 <= index < len(self.profiles) else {}
             self.enabled_check.setChecked(bool(profile.get("enabled", True)))
             self.name_input.setText(str(profile.get("name") or ""))
@@ -7534,11 +7639,19 @@ class AgentProfileManager(QWidget):
             self.system_prompt_edit.setPlainText(str(profile.get("system_prompt") or ""))
             selected = set(normalize_selected_skill_names(profile.get("skill_names")))
             self.skill_list.blockSignals(True)
+            available = {self.skill_list.item(row).data(Qt.UserRole) for row in range(self.skill_list.count())}
+            for missing in sorted(selected - available):
+                item = QListWidgetItem(f"{missing} · 当前不可用")
+                item.setData(Qt.UserRole, missing)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setToolTip("能力尚未加载或已停用；保留原选择，可到技能或 MCP 服务中处理。")
+                self.skill_list.addItem(item)
             for row in range(self.skill_list.count()):
                 item = self.skill_list.item(row)
                 skill_name = str(item.data(Qt.UserRole) or "").strip()
                 item.setCheckState(Qt.Checked if skill_name in selected else Qt.Unchecked)
             self.skill_list.blockSignals(False)
+            self._filter_skill_options()
         finally:
             self._loading_profile = False
 
@@ -7560,10 +7673,10 @@ class AgentProfileManager(QWidget):
             return
         profile.update(updated)
         profile["updated_at"] = int(time.time())
-        self._refresh_profile_list()
-        self.profile_list.blockSignals(True)
-        self.profile_list.setCurrentRow(index)
-        self.profile_list.blockSignals(False)
+        item = self.profile_list.item(index)
+        if item is not None:
+            label = profile["name"] + ("" if profile["enabled"] else " (已停用)")
+            item.setText(f"{label}\n{profile['description'] or '尚未填写用途'} · 已选 {len(profile['skill_names'])} 项能力")
         self.changed.emit()
 
     def _on_profile_changed(self, index):
@@ -7587,10 +7700,12 @@ class AgentProfileManager(QWidget):
             "created_at": now,
             "updated_at": now,
         }
+        self._untouched_drafts[profile["id"]] = dict(profile)
         self.profiles.append(profile)
         self._refresh_profile_list()
         self.profile_list.setCurrentRow(len(self.profiles) - 1)
         self.changed.emit()
+        self.open_profile_editor()
 
     def copy_profile(self):
         index = self.profile_list.currentRow()
@@ -7606,6 +7721,7 @@ class AgentProfileManager(QWidget):
         self._refresh_profile_list()
         self.profile_list.setCurrentRow(index + 1)
         self.changed.emit()
+        self.open_profile_editor()
 
     def delete_profile(self):
         index = self.profile_list.currentRow()
@@ -7621,22 +7737,26 @@ class AgentProfileManager(QWidget):
         if reply != QMessageBox.Yes:
             return
         del self.profiles[index]
+        self._current_index = -1
         self._refresh_profile_list()
         if self.profiles:
             self.profile_list.setCurrentRow(min(index, len(self.profiles) - 1))
         else:
-            self.add_profile()
+            self._load_profile_into_fields(-1)
         self.changed.emit()
 
+    def _is_untouched_draft(self, profile):
+        baseline = self._untouched_drafts.get(profile.get("id"))
+        return baseline is not None and all(
+            profile.get(key) == value for key, value in baseline.items()
+            if key not in {"created_at", "updated_at"}
+        )
+
     def get_profiles(self):
-        self._sync_current_profile_from_fields()
-        valid_skill_names = {
-            str(skill.get("name") or "").strip()
-            for skill in self._available_skills()
-            if str(skill.get("name") or "").strip()
-        }
         profiles = []
         for profile in self.profiles:
+            if self._is_untouched_draft(profile):
+                continue
             name = str(profile.get("name") or "").strip()
             if not name:
                 continue
@@ -7648,7 +7768,6 @@ class AgentProfileManager(QWidget):
                 "skill_names": [
                     skill_name
                     for skill_name in normalize_selected_skill_names(profile.get("skill_names"))
-                    if skill_name in valid_skill_names
                 ],
                 "enabled": bool(profile.get("enabled", True)),
                 "created_at": int(profile.get("created_at") or int(time.time())),
@@ -9461,21 +9580,21 @@ class McpServerEditDialog(QDialog):
 
         header = QVBoxLayout()
         header.setSpacing(4)
-        title = QLabel("编辑 MCP Server" if self._editing_existing else "添加 MCP Server")
+        title = QLabel("编辑服务" if self._editing_existing else "添加服务")
         title.setProperty("roleTitle", True)
-        hint = QLabel("MCP terms stay in English. Current scope: tools.")
+        hint = QLabel("填写服务提供的连接信息，保存后即可测试连接。")
         hint.setWordWrap(True)
         hint.setProperty("roleSubtitle", True)
         header.addWidget(title)
         header.addWidget(hint)
         layout.addLayout(header)
 
-        basics_card, basics_layout = build_settings_surface("基础信息", "先定义 server 名称、transport 和连接超时。", radius=18)
+        basics_card, basics_layout = build_settings_surface("基础信息", "为服务起一个容易识别的名称。", radius=18)
         form = QFormLayout()
         form.setSpacing(12)
         configure_responsive_form_layout(form)
 
-        self.enabled_check = QCheckBox("启用这个 MCP 服务器")
+        self.enabled_check = QCheckBox("启用此服务")
         self.enabled_check.setChecked(bool(self.server.get("enabled", True)))
         form.addRow(build_form_row_label("状态"), self.enabled_check)
 
@@ -9486,15 +9605,15 @@ class McpServerEditDialog(QDialog):
 
         self.transport_combo = QComboBox()
         apply_settings_combo_style(self.transport_combo)
-        self.transport_combo.addItem("stdio", TRANSPORT_STDIO)
-        self.transport_combo.addItem("Streamable HTTP", TRANSPORT_STREAMABLE_HTTP)
+        self.transport_combo.addItem("本地工具（stdio）", TRANSPORT_STDIO)
+        self.transport_combo.addItem("远程服务（Streamable HTTP）", TRANSPORT_STREAMABLE_HTTP)
         transport = str(self.server.get("transport") or self.server.get("type") or TRANSPORT_STDIO)
         transport_index = self.transport_combo.findData(
             TRANSPORT_STREAMABLE_HTTP if transport == TRANSPORT_STREAMABLE_HTTP else TRANSPORT_STDIO
         )
         self.transport_combo.setCurrentIndex(transport_index if transport_index >= 0 else 0)
         self.transport_combo.currentIndexChanged.connect(self._refresh_transport_stack)
-        form.addRow(build_form_row_label("Transport"), self.transport_combo)
+        form.addRow(build_form_row_label("连接方式"), self.transport_combo)
 
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(5, 300)
@@ -9506,7 +9625,7 @@ class McpServerEditDialog(QDialog):
             )
         )
         self.timeout_spin.setSuffix(" 秒")
-        form.addRow(build_form_row_label("Timeout"), self.timeout_spin)
+        form.addRow(build_form_row_label("等待时间"), self.timeout_spin)
         basics_layout.addLayout(form)
         layout.addWidget(basics_card)
 
@@ -9517,7 +9636,7 @@ class McpServerEditDialog(QDialog):
         stdio_page_layout = QVBoxLayout(stdio_page)
         stdio_page_layout.setContentsMargins(0, 0, 0, 0)
         stdio_page_layout.setSpacing(0)
-        stdio_card, stdio_card_layout = build_settings_surface("stdio", "用于本地命令启动型 MCP server。", radius=18)
+        stdio_card, stdio_card_layout = build_settings_surface("stdio", "连接在本机运行的工具。", radius=18)
         stdio_layout = QFormLayout()
         stdio_layout.setContentsMargins(0, 0, 0, 0)
         stdio_layout.setSpacing(12)
@@ -9526,14 +9645,14 @@ class McpServerEditDialog(QDialog):
         self.command_input = QLineEdit()
         self.command_input.setPlaceholderText("例如：npx")
         self.command_input.setText(str(self.server.get("command") or ""))
-        stdio_layout.addRow(build_form_row_label("Command"), self.command_input)
+        stdio_layout.addRow(build_form_row_label("启动命令"), self.command_input)
 
         self.args_edit = QTextEdit()
         self.args_edit.setFixedHeight(76)
         self.args_edit.setPlaceholderText("每行一个参数，例如：\n-y\n@modelcontextprotocol/server-filesystem\nD:\\\\workspace")
         self.args_edit.setPlainText("\n".join(self.server.get("args") or []))
         self.args_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
-        stdio_layout.addRow(build_form_row_label("Args"), self.args_edit)
+        stdio_layout.addRow(build_form_row_label("启动参数"), self.args_edit)
 
         self.cwd_input = QLineEdit()
         self.cwd_input.setPlaceholderText("可选：启动目录")
@@ -9547,14 +9666,14 @@ class McpServerEditDialog(QDialog):
         cwd_btn.setObjectName("SecondaryBtn")
         cwd_btn.clicked.connect(self._choose_cwd)
         cwd_layout.addWidget(cwd_btn)
-        stdio_layout.addRow(build_form_row_label("cwd"), cwd_container)
+        stdio_layout.addRow(build_form_row_label("工作目录"), cwd_container)
 
         self.env_edit = QTextEdit()
         self.env_edit.setFixedHeight(90)
         self.env_edit.setPlaceholderText("每行一个环境变量：KEY=VALUE")
         self.env_edit.setPlainText(self._mapping_to_text(self.server.get("env"), separator="="))
         self.env_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
-        stdio_layout.addRow(build_form_row_label("env"), self.env_edit)
+        stdio_layout.addRow(build_form_row_label("环境变量"), self.env_edit)
         stdio_card_layout.addLayout(stdio_layout)
         stdio_page_layout.addWidget(stdio_card)
         self.transport_stack.addWidget(stdio_page)
@@ -9563,7 +9682,7 @@ class McpServerEditDialog(QDialog):
         http_page_layout = QVBoxLayout(http_page)
         http_page_layout.setContentsMargins(0, 0, 0, 0)
         http_page_layout.setSpacing(0)
-        http_card, http_card_layout = build_settings_surface("Streamable HTTP", "用于远程服务型 MCP server。", radius=18)
+        http_card, http_card_layout = build_settings_surface("Streamable HTTP", "连接服务提供方给出的远程地址。", radius=18)
         http_layout = QFormLayout()
         http_layout.setContentsMargins(0, 0, 0, 0)
         http_layout.setSpacing(12)
@@ -9572,14 +9691,14 @@ class McpServerEditDialog(QDialog):
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://example.com/mcp")
         self.url_input.setText(str(self.server.get("url") or ""))
-        http_layout.addRow(build_form_row_label("URL"), self.url_input)
+        http_layout.addRow(build_form_row_label("服务地址"), self.url_input)
 
         self.headers_edit = QTextEdit()
         self.headers_edit.setFixedHeight(120)
         self.headers_edit.setPlaceholderText("每行一个 Header：Authorization: Bearer ...")
         self.headers_edit.setPlainText(self._mapping_to_text(self.server.get("headers"), separator=": "))
         self.headers_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
-        http_layout.addRow(build_form_row_label("Headers"), self.headers_edit)
+        http_layout.addRow(build_form_row_label("认证与请求头"), self.headers_edit)
         if self.server.get("auth"):
             managed_auth_note = QLabel("认证由对应的 AI Skill 管理，access token 不会写入 Headers。")
             managed_auth_note.setWordWrap(True)
@@ -9591,7 +9710,8 @@ class McpServerEditDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel_btn = QPushButton("取消")
+        cancel_btn = QPushButton("返回服务列表")
+        self.back_button = cancel_btn
         cancel_btn.setObjectName("SecondaryBtn")
         cancel_btn.clicked.connect(self.reject)
         ok_btn = QPushButton("保存")
@@ -9599,7 +9719,27 @@ class McpServerEditDialog(QDialog):
         ok_btn.clicked.connect(self.accept)
         buttons.addWidget(cancel_btn)
         buttons.addWidget(ok_btn)
+        body = QWidget()
+        body.setObjectName("McpConnectionForm")
+        body.setStyleSheet(f"QWidget#McpConnectionForm {{background: {DesignTokens.bg_app};}}")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                body_layout.addWidget(item.widget())
+            elif item.layout() is not None:
+                body_layout.addLayout(item.layout())
+            else:
+                body_layout.addItem(item)
+        body_layout.addStretch()
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setFrameShape(QFrame.NoFrame)
+        form_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        form_scroll.setWidget(body)
         layout.addLayout(buttons)
+        layout.addWidget(form_scroll, 1)
         self._refresh_transport_stack()
 
     def _mapping_to_text(self, value, separator="="):
@@ -9695,39 +9835,62 @@ class McpServerManager(QWidget):
         self.config_manager = config_manager
         self.skill_manager = skill_manager
         self.test_worker = None
+        self.test_results = {}
+        self.editor_dialog = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
-        toolbar = QHBoxLayout()
+        toolbar_host = QWidget()
+        toolbar = QHBoxLayout(toolbar_host)
         toolbar.setContentsMargins(0, 0, 0, 0)
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(4)
-        title = QLabel("MCP")
+        title = QLabel("我的服务")
         title.setStyleSheet(apple_settings_section_title_style())
-        title_box.addWidget(title)
-        toolbar.addLayout(title_box, 1)
-        toolbar.addStretch()
-        for label, handler, icon_name in (
-            ("添加服务器", self.add_server, "fa5s.plus"),
-            ("导入 JSON", self.import_servers_from_json, "fa5s.file-import"),
-            ("编辑", self.edit_server, "fa5s.pen"),
-            ("删除", self.delete_server, "fa5s.trash-alt"),
-            ("测试连接", self.test_server, "fa5s.plug"),
-        ):
-            btn = QPushButton(label)
-            btn.setObjectName("SecondaryBtn")
-            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
-            btn.clicked.connect(handler)
-            toolbar.addWidget(btn)
-        layout.addLayout(toolbar)
+        toolbar.addWidget(title, 1)
+        add = QPushButton("添加服务")
+        add.setStyleSheet(product_button_style("primary"))
+        add.clicked.connect(self.add_server)
+        toolbar.addWidget(add)
+        more = QPushButton("更多")
+        more.setStyleSheet(product_button_style("secondary"))
+        menu = create_styled_menu(more)
+        menu.addAction("导入配置（JSON）", self.import_servers_from_json)
+        menu.addAction("编辑所选服务", self.edit_server)
+        menu.addAction("测试所选服务", self.test_server)
+        menu.addSeparator()
+        menu.addAction("删除所选服务", self.delete_server)
+        more.setMenu(menu)
+        toolbar.addWidget(more)
+        layout.addWidget(toolbar_host)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索 MCP 服务")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._filter_servers)
+        layout.addWidget(self.search_input)
 
         self.server_list = QListWidget()
         self.server_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.server_list.itemDoubleClicked.connect(lambda *_: self.edit_server())
+        self.server_list.setToolTip("双击服务编辑连接信息；更多菜单可测试或删除服务")
         self.server_list.currentRowChanged.connect(self._refresh_detail)
-        layout.addWidget(self.server_list, 1)
+        layout.addWidget(self.server_list)
+        selected_actions = QWidget()
+        selected_layout = QHBoxLayout(selected_actions)
+        selected_layout.setContentsMargins(0, 0, 0, 0)
+        self.edit_selected_btn = QPushButton("编辑连接")
+        self.edit_selected_btn.setStyleSheet(product_button_style("secondary"))
+        self.edit_selected_btn.clicked.connect(self.edit_server)
+        self.test_selected_btn = QPushButton("测试连接")
+        self.test_selected_btn.setStyleSheet(product_button_style("secondary"))
+        self.test_selected_btn.clicked.connect(self.test_server)
+        selected_layout.addWidget(self.edit_selected_btn)
+        selected_layout.addWidget(self.test_selected_btn)
+        selected_layout.addStretch()
+        layout.addWidget(selected_actions)
 
         self.detail_label = QLabel()
         self.detail_label.setWordWrap(True)
@@ -9742,7 +9905,95 @@ class McpServerManager(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(self.status_label)
+        layout.addStretch()
         self._refresh_list()
+
+    def _filter_servers(self, *_):
+        query = self.search_input.text().casefold().strip()
+        for row in range(self.server_list.count()):
+            self.server_list.item(row).setHidden(query not in self.server_list.item(row).text().casefold())
+
+    def _open_editor(self, index=None):
+        if self.editor_dialog is not None:
+            return
+        dialog = McpServerEditDialog(self.servers[index] if index is not None else None, self)
+        dialog.setWindowFlags(Qt.Widget)
+        dialog.setMinimumSize(0, 0)
+        dialog.back_button.clicked.disconnect()
+        dialog.back_button.clicked.connect(self.confirm_editor)
+        self.editor_dialog = dialog
+        self._editor_previous_servers = json.loads(json.dumps(self.servers))
+        self._editor_baseline = dialog.get_server_config()
+        self._editor_widgets = [self.layout().itemAt(i).widget() for i in range(self.layout().count())]
+        for widget in self._editor_widgets:
+            if widget:
+                widget.hide()
+        self._editor_spacer = self.layout().takeAt(self.layout().count() - 1)
+        self.layout().insertWidget(0, dialog, 1)
+        def finish():
+            nonlocal index
+            value = dialog.get_server_config()
+            if index is None:
+                self.servers.append(value)
+                index = len(self.servers) - 1
+            else:
+                self.servers[index] = value
+            self.changed.emit()
+            callback = getattr(self, "commit_callback", None)
+            if callback:
+                callback()
+                owner = getattr(callback, "__self__", None)
+                if owner and owner._settings_dirty:
+                    QTimer.singleShot(0, dialog.show)
+                    return
+            self._close_editor()
+            self._refresh_list()
+        dialog.accepted.connect(finish)
+        dialog.rejected.connect(lambda: self._close_editor(discard=True))
+        dialog.show()
+        self._set_outer_actions_visible(False)
+
+    def _set_outer_actions_visible(self, visible):
+        host = self.parentWidget()
+        while host is not None and not hasattr(host, "settings_action_bar"):
+            host = host.parentWidget()
+        if host is not None:
+            host.settings_action_bar.setVisible(visible and bool(host._settings_dirty))
+
+    def _close_editor(self, discard=False):
+        if discard:
+            self.servers = self._editor_previous_servers
+            self.changed.emit()
+            self._refresh_list()
+        dialog = self.editor_dialog
+        self.editor_dialog = None
+        if dialog:
+            self.layout().removeWidget(dialog)
+            dialog.deleteLater()
+        for widget in getattr(self, "_editor_widgets", []):
+            if widget:
+                widget.show()
+        if getattr(self, "_editor_spacer", None) is not None:
+            self.layout().addItem(self._editor_spacer)
+            self._editor_spacer = None
+        self._set_outer_actions_visible(True)
+
+    def confirm_editor(self):
+        if self.editor_dialog is None:
+            return True
+        if self.editor_dialog.get_server_config() == self._editor_baseline:
+            self._close_editor()
+            return True
+        choice = ProductMessageDialog("MCP 配置尚未保存", "保留输入并继续编辑，或保存后离开。", "confirm", [
+            ("保存并离开", "save", "primary", False), ("放弃更改", "discard", "secondary", False),
+            ("继续编辑", "stay", "secondary", True)], parent=self).exec_result("stay")
+        if choice == "discard":
+            self._close_editor(discard=True)
+            return True
+        if choice == "save":
+            self.editor_dialog.accept()
+            return self.editor_dialog is None
+        return False
 
     def _current_index(self):
         row = self.server_list.currentRow()
@@ -9759,13 +10010,18 @@ class McpServerManager(QWidget):
             if server.get("managed_by_skill"):
                 state += " · Skill 托管"
             summary = summarize_mcp_server(server)
-            item = QListWidgetItem(f"{title}  ·  {mcp_transport_label(server.get('transport'))}  ·  {state}")
+            item = QListWidgetItem(f"{title}  ·  {state}")
+            item.setSizeHint(QSize(0, 54))
             item.setToolTip(summary)
             self.server_list.addItem(item)
         self.server_list.blockSignals(False)
+        self.server_list.setFixedHeight(min(330, max(72, self.server_list.count() * 54 + 16)))
+        self.edit_selected_btn.setEnabled(bool(self.servers))
+        self.test_selected_btn.setEnabled(bool(self.servers))
         if self.server_list.count():
             self.server_list.setCurrentRow(max(0, min(self.server_list.currentRow(), self.server_list.count() - 1)))
         self._refresh_detail()
+        self._filter_servers()
 
     def _refresh_detail(self):
         index = self._current_index()
@@ -9773,33 +10029,12 @@ class McpServerManager(QWidget):
             self.detail_label.setText("尚未配置 MCP 服务器。")
             return
         server = self.servers[index]
-        state_text = "已启用" if server.get("enabled", True) else "已停用"
-        summary = summarize_mcp_server(server)
-        summary_html = html.escape(summary)
-        managed_note = ""
-        if server.get("managed_by_skill"):
-            source_skill = str(server.get("source_skill") or "对应").strip()
-            managed_note = (
-                f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>"
-                f"由 {html.escape(source_skill)} Skill 管理；请在 Skill 配置页修改或启停。</div>"
-            )
-        self.detail_label.setText(
-            "<div>"
-            f"<span style='font-weight:700;color:{DesignTokens.text_primary};'>{html.escape(str(server.get('name') or 'MCP Server'))}</span>"
-            f"<span style='color:{DesignTokens.text_tertiary};'> · {html.escape(mcp_transport_label(server.get('transport')))} · {state_text} · 超时 {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS}s</span>"
-            f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>{summary_html}</div>"
-            f"{managed_note}"
-            "</div>"
-        )
+        result = self.test_results.get(server.get("id"))
+        self.status_label.setText(result[1] if result and result[0] == server else "尚未测试当前配置。")
+        self.detail_label.setText("双击服务可编辑连接信息。测试结果仅代表最近一次检查。")
 
     def add_server(self):
-        dialog = McpServerEditDialog(parent=self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        self.servers.append(dialog.get_server_config())
-        self._refresh_list()
-        self.server_list.setCurrentRow(self.server_list.count() - 1)
-        self.changed.emit()
+        self._open_editor()
 
     def _find_duplicate_server_index(self, server):
         target_id = str(server.get("id") or "").strip().lower()
@@ -9900,13 +10135,7 @@ class McpServerManager(QWidget):
         if self.servers[index].get("managed_by_skill"):
             QMessageBox.information(self, "MCP 服务器", "该 MCP 由对应 Skill 管理，请到 Skill 配置页修改。")
             return
-        dialog = McpServerEditDialog(self.servers[index], self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        self.servers[index] = dialog.get_server_config()
-        self._refresh_list()
-        self.server_list.setCurrentRow(index)
-        self.changed.emit()
+        self._open_editor(index)
 
     def delete_server(self):
         index = self._current_index()
@@ -9935,6 +10164,7 @@ class McpServerManager(QWidget):
         if self.test_worker and self.test_worker.isRunning():
             return
         server = self.servers[index]
+        self._testing_server = json.loads(json.dumps(server))
         self.status_label.setText(f"正在测试 {server.get('name') or 'MCP Server'} ...")
         owner = getattr(self.window(), "_main", None)
         skill_manager = getattr(owner, "skill_manager", None) or self.skill_manager
@@ -9950,16 +10180,12 @@ class McpServerManager(QWidget):
 
     def _handle_test_result(self, result):
         self.test_worker = None
-        if result.get("ok"):
-            tools = result.get("tools") or []
-            preview = "，".join(tools[:6]) if tools else "无 tools"
-            self.status_label.setText(f"连接成功，发现 {result.get('tool_count', 0)} 个工具：{preview}")
-            QMessageBox.information(self, "MCP 连接测试", self.status_label.text())
-            return
-        message = result.get("error") or "未知错误"
-        self.status_label.setText(f"连接失败：{message}")
-        QMessageBox.warning(self, "MCP 连接测试", message)
-
+        server = getattr(self, "_testing_server", {})
+        stamp = datetime.now().strftime("%m-%d %H:%M")
+        message = f"{stamp} · 测试成功 · {result.get('tool_count', 0)} 个工具" if result.get("ok") else f"{stamp} · 测试失败：{result.get('error') or '未知错误'}"
+        self.test_results[server.get("id")] = (server, message)
+        self._refresh_detail()
+        log_ui_navigation("mcp_test_done", server_id=server.get("id"), ok=bool(result.get("ok")))
     def get_servers(self):
         return json.loads(json.dumps(self.servers, ensure_ascii=False))
 
@@ -11441,6 +11667,11 @@ class AppVariableManager(QWidget):
         create_actions.addWidget(self.create_btn)
         create_layout.addLayout(create_actions)
         layout.addWidget(create_card)
+        create_card.hide()
+        add_button = QPushButton("添加变量或凭据")
+        add_button.setObjectName("PrimaryBtn")
+        add_button.clicked.connect(self.create_variable)
+        layout.addWidget(add_button, 0, Qt.AlignRight)
 
         list_title = QLabel("已保存变量")
         list_title.setStyleSheet(apple_settings_section_title_style())
@@ -11559,6 +11790,12 @@ class AppVariableManager(QWidget):
         self.status_notice.set_text("变量已创建。", "success")
         self.reload()
 
+    def create_variable(self):
+        dialog = AppVariableEditDialog(self.config_manager, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            self.status_notice.set_text("变量已创建。", "success")
+            self.reload()
+
     def edit_variable(self):
         variable = self._current_variable()
         if not variable:
@@ -11609,8 +11846,10 @@ class AppVariableManager(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config_manager, parent=None, initial_page_label=None):
+    def __init__(self, config_manager, parent=None, initial_page_label=None, domain="settings"):
         super().__init__(parent)
+        self.domain = domain
+        self._active_settings_row = -1
         self._layout_sync_timer = QTimer(self)
         self._layout_sync_timer.setSingleShot(True)
         self._layout_sync_timer.timeout.connect(self._sync_deferred_layout)
@@ -11636,6 +11875,7 @@ class SettingsDialog(QDialog):
         title_box = QVBoxLayout()
         title_box.setSpacing(6)
         title = QLabel("设置")
+        self.settings_title = title
         title.setProperty("roleTitle", True)
         title_box.addWidget(title)
         layout.addLayout(title_box)
@@ -11660,6 +11900,7 @@ class SettingsDialog(QDialog):
         self.content_stack = QStackedWidget()
         body_layout.addWidget(self.content_stack, 1)
         self._settings_pages = []
+        self._page_labels = []
 
         def make_scroll_page(title, intro=None):
             scroll_area = QScrollArea()
@@ -11667,6 +11908,11 @@ class SettingsDialog(QDialog):
             scroll_area.setFrameShape(QFrame.NoFrame)
             scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             content = QWidget()
+            content.setObjectName("SettingsPageContent")
+            content.setStyleSheet(f"QWidget#SettingsPageContent {{ background: {DesignTokens.bg_app}; }}")
+            if title in {"外观", "回答偏好", "记忆", "工作区与存储", "权限", "应用更新"}:
+                content.setMaximumWidth(960)
+                scroll_area.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             page_layout = QVBoxLayout(content)
             page_layout.setContentsMargins(6, 4, 6, 18)
             page_layout.setSpacing(16)
@@ -11677,10 +11923,20 @@ class SettingsDialog(QDialog):
             return scroll_area, page_layout
 
         def add_settings_page(label, icon_name, page):
+            allowed = {
+                "settings": {"外观", "回答偏好", "模型与服务", "工作区与存储", "变量与凭据", "消息连接", "组件与依赖", "更新与关于"},
+                "capabilities": {"MCP 服务", "智能体"},
+                "projects": {"项目", "对话", "记忆", "归档"},
+            }
+            page.setParent(self.content_stack)
+            page.hide()
+            if label not in allowed[self.domain]:
+                return None
             item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
             self.nav_list.addItem(item)
             self.nav_combo.addItem(label)
             self._settings_pages.append(page)
+            self._page_labels.append(label)
             return item
 
         model_page, model_layout = make_scroll_page(
@@ -11726,7 +11982,7 @@ class SettingsDialog(QDialog):
             skill_provider=skill_provider,
         )
         workspace_page, workspace_layout = make_scroll_page(
-            "工作区",
+            "工作区与存储",
             "把默认落点和聊天存储位置整理好，减少每次启动后的重复调整。",
         )
         archive_page, archive_layout = make_scroll_page(
@@ -11734,8 +11990,8 @@ class SettingsDialog(QDialog):
             "从侧边栏收起不常用的项目与对话，需要时可以随时恢复。",
         )
         memory_page, memory_layout = make_scroll_page(
-            "个性与记忆",
-            "管理回答个性、全局长期摘要与当前工作区摘要；修改从下一轮对话开始生效。",
+            "记忆",
+            "管理全局与项目记忆；修改从下一轮对话开始生效，不改写历史。",
         )
         self.memory_store = MemoryStore(self.config_manager.get_chat_history_dir())
         self.memory_workspace_dir = (
@@ -11756,7 +12012,9 @@ class SettingsDialog(QDialog):
         self.memory_soul_edit.setMinimumHeight(120)
         self.memory_soul_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=8, subtle=True, padding=12))
         personality_layout.addWidget(self.memory_soul_edit)
-        memory_layout.addWidget(personality_group)
+        preference_page, preference_layout = make_scroll_page("回答偏好", "设置通用交流偏好，从下一轮对话开始生效。")
+        preference_layout.addWidget(personality_group)
+        preference_layout.addStretch()
 
         global_group, global_layout = build_settings_surface(
             "全局长期摘要",
@@ -11804,6 +12062,20 @@ class SettingsDialog(QDialog):
         workspace_actions.addWidget(self.generate_workspace_memory_btn)
         workspace_memory_layout.addLayout(workspace_actions)
         memory_layout.addWidget(workspace_group)
+        self.memory_scope_control = ProductSegmentedControl([("global", "全局记忆"), ("workspace", "项目记忆")], current="global")
+        self.memory_scope_control.currentChanged.connect(lambda key: (global_group.setVisible(key == "global"), workspace_group.setVisible(key == "workspace")))
+        memory_layout.insertWidget(1, self.memory_scope_control)
+        workspace_group.hide()
+        self.memory_project_label = QLabel(f"当前项目：{self.memory_workspace_dir or '未连接项目'}")
+        self.memory_project_label.setWordWrap(True)
+        workspace_memory_layout.insertWidget(0, self.memory_project_label)
+        self.memory_project_combo = QComboBox()
+        self.memory_project_combo.addItem("选择项目…", "")
+        for project in self.config_manager.get_projects():
+            path = project.get("path", "")
+            self.memory_project_combo.addItem(project.get("name") or os.path.basename(path) or path, path)
+        self.memory_project_combo.setCurrentIndex(max(0, self.memory_project_combo.findData(self.memory_workspace_dir)))
+        workspace_memory_layout.insertWidget(0, self.memory_project_combo)
         memory_layout.addStretch()
         storage_group, storage_group_layout = build_settings_surface(
             "工作区与存储",
@@ -11944,8 +12216,8 @@ class SettingsDialog(QDialog):
             "把更高风险的执行能力收在明确的确认边界内，避免误触。",
         )
         mcp_page, mcp_layout = make_scroll_page(
-            "MCP",
-            "stdio / Streamable HTTP",
+            "MCP 服务",
+            "连接工具与数据，查看配置状态和最近测试结果。",
         )
         variable_page, variable_layout = make_scroll_page(
             "变量与凭据",
@@ -12286,13 +12558,18 @@ class SettingsDialog(QDialog):
         agent_layout.addStretch()
         workspace_layout.addWidget(storage_group)
         workspace_layout.addStretch()
-        mcp_layout.addWidget(self.mcp_server_manager)
-        mcp_layout.addStretch()
+        if domain == "capabilities":
+            old_mcp_page = mcp_page
+            mcp_page = QWidget()
+            mcp_layout = QVBoxLayout(mcp_page)
+            mcp_layout.setContentsMargins(16, 12, 16, 12)
+            old_mcp_page.deleteLater()
+        mcp_layout.addWidget(self.mcp_server_manager, 1)
         permission_page_layout.addWidget(permission_group)
         permission_page_layout.addStretch()
 
         im_page, im_layout = make_scroll_page(
-            "企业消息",
+            "消息连接",
             "把助手连接到常用聊天软件，直接发消息安排任务，并沿用同一套工作区边界。",
         )
 
@@ -12302,59 +12579,224 @@ class SettingsDialog(QDialog):
         self._im_gateway_status_timer = QTimer(self)
         self._im_gateway_status_timer.setInterval(1500)
         self._im_gateway_status_timer.timeout.connect(self._refresh_im_provider_states)
-        self._im_gateway_status_timer.start()
+        if domain == "settings":
+            self._im_gateway_status_timer.start()
         im_layout.addStretch()
 
+        if domain == "projects":
+            from ui.project_management import ProjectBrowser
+            for kind, label in (("projects", "项目"), ("sessions", "对话")):
+                add_settings_page(label, "fa5s.folder-open", ProjectBrowser(self._main, kind))
         add_settings_page("外观", "fa5s.palette", appearance_page)
+        add_settings_page("回答偏好", "fa5s.comment", preference_page)
         add_settings_page("模型与服务", "fa5s.brain", model_page)
+        add_settings_page("MCP 服务", "fa5s.plug", mcp_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
-        add_settings_page("个性与记忆", "fa5s.brain", memory_page)
-        add_settings_page("工作区", "fa5s.folder-open", workspace_page)
+        add_settings_page("记忆", "fa5s.brain", memory_page)
+        add_settings_page("工作区与存储", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("变量与凭据", "fa5s.key", variable_page)
-        add_settings_page("MCP", "fa5s.plug", mcp_page)
-        add_settings_page("企业消息", "fa5s.comments", im_page)
+        add_settings_page("消息连接", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
-        self.update_nav_item = add_settings_page("更新", "fa5s.download", update_page)
+        self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
+        if domain == "settings":
+            from ui.project_management import SettingsNavigationDelegate
+            order = ["外观", "回答偏好", "模型与服务", "消息连接", "变量与凭据", "工作区与存储", "组件与依赖", "更新与关于"]
+            pages = dict(zip(self._page_labels, self._settings_pages))
+            items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
+            self.nav_combo.clear()
+            groups = {"外观": "使用偏好", "模型与服务": "模型与连接", "变量与凭据": "访问与存储", "组件与依赖": "应用维护"}
+            for label in order:
+                item = items[label]
+                item.setData(Qt.UserRole + 1, groups.get(label, ""))
+                self.nav_list.addItem(item)
+                self.nav_combo.addItem(label)
+            self._page_labels = order
+            self._settings_pages = [pages[label] for label in order]
+            self.nav_list.setItemDelegate(SettingsNavigationDelegate(self.nav_list))
         def show_settings_page(row):
             if row < 0 or row >= len(self._settings_pages):
                 return
+            if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None):
+                if not self._confirm_discard_settings():
+                    self.nav_list.blockSignals(True)
+                    self.nav_list.setCurrentRow(self._active_settings_row)
+                    self.nav_list.blockSignals(False)
+                    self.nav_combo.blockSignals(True)
+                    self.nav_combo.setCurrentIndex(self._active_settings_row)
+                    self.nav_combo.blockSignals(False)
+                    return
             page = self._settings_pages[row]
             if self.content_stack.indexOf(page) < 0:
                 self.content_stack.addWidget(page)
             self.content_stack.setCurrentWidget(page)
+            self._active_settings_row = row
+            self.nav_combo.blockSignals(True)
+            self.nav_combo.setCurrentIndex(row)
+            self.nav_combo.blockSignals(False)
+            if hasattr(self, "settings_action_bar"):
+                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "变量与凭据", "消息连接", "更新与关于"})
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
-        self.nav_list.currentRowChanged.connect(self.nav_combo.setCurrentIndex)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
         self.select_initial_page(initial_page_label)
 
         action_bar = ProductActionBar()
+        self.settings_action_bar = action_bar
         self.settings_dirty_label = QLabel("没有未保存的修改")
         self.settings_dirty_label.setStyleSheet(apple_caption_style())
         action_bar.layout.insertWidget(0, self.settings_dirty_label)
-        self.save_settings_btn = QPushButton("保存设置")
+        self.save_settings_btn = QPushButton("保存更改")
         self.save_settings_btn.setObjectName("PrimaryBtn")
         self.save_settings_btn.setEnabled(False)
         self.save_settings_btn.clicked.connect(self.save_settings)
-        cancel_btn = QPushButton("取消")
+        cancel_btn = QPushButton("放弃更改")
         cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.request_reject)
+        self.discard_settings_btn = cancel_btn
+        cancel_btn.hide()
+        cancel_btn.clicked.connect(self.discard_page_changes)
         action_bar.layout.addWidget(cancel_btn)
         action_bar.layout.addWidget(self.save_settings_btn)
         layout.addWidget(action_bar)
         self._settings_baseline_state = self._settings_state()
         self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
         self._connect_settings_dirty_tracking()
+        self.mcp_server_manager.commit_callback = self.save_settings
+        self.memory_project_combo.currentIndexChanged.connect(lambda: self.select_memory_workspace(self.memory_project_combo.currentData() or ""))
+        show_settings_page(self.nav_list.currentRow())
+        self.settings_search = QLineEdit()
+        self.settings_search.setPlaceholderText("搜索设置名称或用途…" if domain == "settings" else "搜索管理页面…")
+        self.settings_search.setClearButtonEnabled(True)
+        self.settings_search.textChanged.connect(self._filter_settings_pages)
+        self.settings_search.returnPressed.connect(self._activate_settings_search)
+        layout.insertWidget(1, self.settings_search)
+
+    def _activate_settings_search(self):
+        for row, page in enumerate(self._settings_pages):
+            if self.nav_list.item(row).isHidden():
+                continue
+            self.nav_list.setCurrentRow(row)
+            if self._active_settings_row != row:
+                return
+            query = self.settings_search.text().strip().casefold()
+            for label in page.findChildren(QLabel):
+                if query in label.text().casefold() and isinstance(page, QScrollArea):
+                    page.ensureWidgetVisible(label)
+                    break
+            return
+
+    def _filter_settings_pages(self, query):
+        query = query.strip().casefold()
+        for row, page in enumerate(self._settings_pages):
+            words = [self._page_labels[row]]
+            words.extend(label.text() for label in page.findChildren(QLabel))
+            self.nav_list.item(row).setHidden(bool(query) and query not in " ".join(words).casefold())
+
+    def select_memory_workspace(self, path):
+        if path == self.memory_workspace_dir:
+            self.memory_scope_control.set_current("workspace")
+            self.memory_scope_control.currentChanged.emit("workspace")
+            return True
+        if not self._confirm_discard_settings():
+            self.memory_project_combo.blockSignals(True)
+            self.memory_project_combo.setCurrentIndex(max(0, self.memory_project_combo.findData(self.memory_workspace_dir)))
+            self.memory_project_combo.blockSignals(False)
+            return False
+        self.memory_workspace_dir = path
+        self.memory_scope_control.set_current("workspace")
+        self.memory_scope_control.currentChanged.emit("workspace")
+        self.memory_project_combo.blockSignals(True)
+        self.memory_project_combo.setCurrentIndex(max(0, self.memory_project_combo.findData(path)))
+        self.memory_project_combo.blockSignals(False)
+        self.memory_project_label.setText(f"当前项目：{path or '未连接项目'}")
+        self.memory_workspace_edit.setPlainText(self.memory_store.read_summary("workspace", path) if path else "")
+        self.memory_workspace_edit.setEnabled(bool(path))
+        self.generate_workspace_memory_btn.setEnabled(bool(path))
+        self._clear_settings_dirty()
+        return True
+
+    def discard_page_changes(self):
+        if not self._settings_dirty:
+            return
+        if self.domain == "capabilities":
+            self._restoring_settings = True
+            try:
+                manager = self.agent_profile_manager
+                manager.profiles = json.loads(json.dumps(self.config_manager.get_agent_profiles()))
+                manager._untouched_drafts.clear()
+                manager._current_index = -1
+                manager._refresh_profile_list()
+                if manager.profiles:
+                    manager.profile_list.setCurrentRow(0)
+                else:
+                    manager._load_profile_into_fields(-1)
+                self.mcp_server_manager.servers = json.loads(json.dumps(self.config_manager.get_mcp_servers()))
+                self.mcp_server_manager._refresh_list()
+            finally:
+                self._restoring_settings = False
+            self._clear_settings_dirty()
+            return
+        self._restoring_settings = True
+        try:
+            state = json.loads(json.dumps(self._settings_baseline_state))
+            config = state["config"]
+            config.update(model_channels=self.config_manager.get_model_channels(),
+                          selected_model_id=self.config_manager.get_selected_model_id(),
+                          agent_profiles=self.config_manager.get_agent_profiles(),
+                          mcp_servers=self.config_manager.get_mcp_servers(),
+                          default_workspace=self.config_manager.get("default_workspace", ""),
+                          history_dir=self.config_manager.get_chat_history_dir(),
+                          chat_workspace_root=self.config_manager.get_chat_workspace_root(),
+                          god_mode=self.config_manager.get_god_mode())
+            self.memory_store = MemoryStore(config["history_dir"])
+            state["memory"]["soul"] = self.memory_store.read_soul()
+            state["memory"]["global"] = self.memory_store.read_summary("global", "")
+            state["memory"]["workspace"] = self.memory_store.read_summary("workspace", self.memory_workspace_dir) if self.memory_workspace_dir else ""
+            self.memory_soul_edit.setPlainText(state["memory"]["soul"])
+            self.memory_global_edit.setPlainText(state["memory"]["global"])
+            self.memory_workspace_edit.setPlainText(state["memory"]["workspace"])
+            self.default_ws_input.setText(config["default_workspace"])
+            self.history_dir_input.setText(config["history_dir"])
+            self.chat_workspace_root_input.setText(config["chat_workspace_root"])
+            self.god_mode_check.setChecked(config["god_mode"])
+            self.agent_profile_manager.profiles = json.loads(json.dumps(config["agent_profiles"]))
+            self.agent_profile_manager._current_index = -1
+            self.agent_profile_manager._refresh_profile_list()
+            self.agent_profile_manager.profile_list.setCurrentRow(0)
+            self.mcp_server_manager.servers = json.loads(json.dumps(config["mcp_servers"]))
+            self.mcp_server_manager._refresh_list()
+            self.theme_settings_panel.restore_saved_theme()
+            # Complex editors are restored using their existing load APIs below.
+            self._restore_configuration_editors(config)
+        finally:
+            self._restoring_settings = False
+        self._clear_settings_dirty()
+
+    def _restore_configuration_editors(self, config):
+        manager = self.model_channel_manager
+        if manager.get_channels() != config["model_channels"]:
+            for editor in manager.editors:
+                manager.channel_detail_stack.removeWidget(editor)
+                editor.deleteLater()
+            manager.editors = []
+            manager.channel_list.clear()
+            for channel in config["model_channels"]:
+                manager._add_editor(channel)
+        manager._default_model_id = config["selected_model_id"]
+        manager._refresh_default_models()
+        for kind, value in config["download_sources"].items():
+            combo = getattr(self, f"{kind}_source_combo")
+            combo.setCurrentIndex(max(0, combo.findData(value["selected"])))
+            getattr(self, f"{kind}_source_url").setText(value["url"])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         compact = self.width() < DesignTokens.settings_compact_threshold
         if hasattr(self, "nav_combo"):
-            self.nav_combo.setVisible(compact)
+            self.nav_combo.setVisible(compact and not self.property("sectionHosted"))
         if hasattr(self, "nav_list"):
-            self.nav_list.setVisible(not compact)
+            self.nav_list.setVisible(not compact and not self.property("sectionHosted"))
         self._layout_sync_timer.start(0)
 
     def _sync_deferred_layout(self):
@@ -12364,6 +12806,8 @@ class SettingsDialog(QDialog):
             self._ensure_im_master_detail_layout()
 
     def _start_memory_generation(self, scope):
+        if not self._confirm_discard_settings():
+            return
         if not self._main or not hasattr(self._main, "start_memory_update"):
             QMessageBox.warning(self, "无法更新记忆", "当前窗口没有可用的记忆更新服务。")
             return
@@ -12458,8 +12902,14 @@ class SettingsDialog(QDialog):
         return self._serialize_settings_state(self._settings_state())
 
     def _refresh_settings_dirty_state(self):
+        if getattr(self, "_restoring_settings", False):
+            return
         dirty = self._settings_state_signature() != self._settings_baseline
         self._settings_dirty = dirty
+        if getattr(self, "domain", "") == "capabilities" and hasattr(self, "settings_action_bar"):
+            self.settings_action_bar.setVisible(dirty and self.mcp_server_manager.editor_dialog is None)
+        if hasattr(self, "discard_settings_btn"):
+            self.discard_settings_btn.setVisible(dirty)
         if hasattr(self, "save_settings_btn"):
             self.save_settings_btn.setEnabled(dirty)
         if hasattr(self, "settings_dirty_label"):
@@ -12470,6 +12920,10 @@ class SettingsDialog(QDialog):
 
     def _clear_settings_dirty(self):
         self._settings_dirty = False
+        if self.domain == "capabilities" and hasattr(self, "settings_action_bar"):
+            self.settings_action_bar.hide()
+        if hasattr(self, "discard_settings_btn"):
+            self.discard_settings_btn.hide()
         self._settings_baseline_state = self._settings_state()
         self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
         if hasattr(self, "save_settings_btn"):
@@ -12478,17 +12932,21 @@ class SettingsDialog(QDialog):
             self.settings_dirty_label.setText("没有未保存的修改")
 
     def _confirm_discard_settings(self):
+        if not self.mcp_server_manager.confirm_editor():
+            return False
         if self._settings_dirty:
-            reply = QMessageBox.question(
-                self,
-                "还有未保存的设置",
-                "关闭后将丢弃尚未保存的修改，确定继续吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
+            choice = ProductMessageDialog(
+                "还有未保存的更改", "保存当前更改后离开，或放弃更改。", "confirm",
+                [("保存并离开", "save", "primary", False),
+                 ("放弃更改", "discard", "secondary", False),
+                 ("继续编辑", "stay", "secondary", True)], parent=self,
+            ).exec_result("stay")
+            if choice == "save":
+                self.save_settings()
+                return not self._settings_dirty
+            if choice != "discard":
                 return False
-            self.theme_settings_panel.restore_saved_theme()
+            self.discard_page_changes()
         return True
 
     def request_reject(self):
@@ -12513,6 +12971,7 @@ class SettingsDialog(QDialog):
         event.accept()
 
     def select_initial_page(self, initial_page_label):
+        initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于"}.get(initial_page_label, initial_page_label)
         if not initial_page_label:
             self.nav_list.setCurrentRow(0)
             return
@@ -12838,7 +13297,7 @@ class SettingsDialog(QDialog):
     def showEvent(self, event):
         self.refresh_current_version_label()
         super().showEvent(event)
-        if not self._automatic_update_check_started:
+        if self.domain == "settings" and not self._automatic_update_check_started:
             self._automatic_update_check_started = True
             self.start_app_update(check_only=True)
 
@@ -13036,10 +13495,8 @@ class SettingsDialog(QDialog):
         )
         notes = (release.get("body") or "").strip()
         if notes:
-            notes = re.sub(r"\s+", " ", notes)
-            if len(notes) > 240:
-                notes = notes[:240].rstrip() + "..."
-            self.update_notes_label.setText(f"更新日志：{notes}")
+            self.update_notes_label.setTextFormat(Qt.MarkdownText)
+            self.update_notes_label.setText(notes)
         elif is_local_update:
             self.update_notes_label.setText("更新日志：本地安装包未携带更新日志。")
         else:
@@ -13047,7 +13504,7 @@ class SettingsDialog(QDialog):
 
         if not result.get("update_available"):
             self.update_available_banner.setVisible(False)
-            self.update_nav_item.setText("更新")
+            self.update_nav_item.setText("更新与关于") if self.update_nav_item else None
             self.update_progress.setVisible(False)
             self.update_status_label.setText("当前已是最新版本。")
             if not check_only:
@@ -13063,7 +13520,7 @@ class SettingsDialog(QDialog):
                 f"发现新版本 {latest_version}，可以更新。点击下方“立即更新”开始下载。"
             )
         self.update_available_banner.setVisible(True)
-        self.update_nav_item.setText("更新  •")
+        self.update_nav_item.setText("更新与关于  •") if self.update_nav_item else None
         self.update_btn.setText("检查并更新" if is_local_update else "立即更新")
         if check_only:
             self.update_progress.setVisible(False)
@@ -13868,11 +14325,12 @@ class SettingsDialog(QDialog):
             for model in (channel.get("models") or [])
             if model.get("id")
         ]
-        if all_model_ids and selected_model_id not in all_model_ids:
+        page_label = self._page_labels[self._active_settings_row]
+        if page_label == "模型与服务" and all_model_ids and selected_model_id not in all_model_ids:
             log_model_service_event("default_model_save_rejected", reason="selection_required")
             QMessageBox.warning(self, "请选择默认模型", "默认模型未选择或已删除，请在“模型与服务”重新选择后保存。")
             return
-        if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
+        if page_label == "权限" and self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
             reply = QMessageBox.question(
                 self,
                 "确认开启扩展权限",
@@ -13891,7 +14349,21 @@ class SettingsDialog(QDialog):
         baseline_state = self._settings_baseline_state
         current_config_state = current_state["config"]
         baseline_config_state = baseline_state["config"]
-        config_changed = current_config_state != baseline_config_state
+        changed_keys = {key for key in current_config_state if current_config_state[key] != baseline_config_state[key]}
+        config_changed = bool(changed_keys)
+        from core.settings_changes import merge_settings_objects
+        try:
+            if changed_keys & {"model_channels", "selected_model_id"}:
+                model_channels = merge_settings_objects(baseline_config_state["model_channels"], model_channels, self.config_manager.get_model_channels(), "channel_id")
+                if "selected_model_id" not in changed_keys:
+                    selected_model_id = self.config_manager.get_selected_model_id()
+            if "mcp_servers" in changed_keys:
+                mcp_servers = merge_settings_objects(baseline_config_state["mcp_servers"], mcp_servers, current_mcp_servers)
+            agent_profiles = merge_settings_objects(baseline_config_state["agent_profiles"], self.agent_profile_manager.get_profiles(), self.config_manager.get_agent_profiles()) if "agent_profiles" in changed_keys else []
+        except ValueError as exc:
+            log_ui_navigation("settings_save_conflict", page=page_label, error=str(exc))
+            QMessageBox.warning(self, "配置已更新", str(exc))
+            return
         appearance_changed = (
             current_state["appearance"] != baseline_state["appearance"]
             or self.theme_settings_panel.has_active_preview()
@@ -13926,6 +14398,12 @@ class SettingsDialog(QDialog):
                     "workspace",
                     self.memory_workspace_dir,
                 )
+            if not history_dir_changed:
+                for scope, saved in previous_memory.items():
+                    if saved.strip() not in {baseline_memory_state[scope].strip(), current_memory_state[scope].strip()}:
+                        log_ui_navigation("memory_save_conflict", scope=scope)
+                        QMessageBox.warning(self, "记忆已更新", "记忆已在其他位置更新，当前输入已保留。请核对内容；放弃更改可重新载入已保存版本。")
+                        return
         previous_config = {}
         if config_changed:
             previous_config = {
@@ -13954,20 +14432,28 @@ class SettingsDialog(QDialog):
                 )
             if config_changed:
                 with self.config_manager.batch_save():
-                    self.config_manager.set_model_channels(model_channels, selected_model_id)
-                    self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
-                    self.config_manager.set_mcp_servers(mcp_servers)
-                    self.config_manager.set(
-                        "default_workspace",
-                        current_config_state["default_workspace"],
-                    )
-                    self.config_manager.set_chat_history_dir(target_history_dir)
-                    self.config_manager.set_chat_workspace_root(
-                        current_config_state["chat_workspace_root"]
-                    )
-                    self.config_manager.set_god_mode(current_config_state["god_mode"])
+                    if bool(changed_keys & {"model_channels", "selected_model_id"}):
+                        self.config_manager.set_model_channels(model_channels, selected_model_id)
+                    if "agent_profiles" in changed_keys:
+                        self.config_manager.set_agent_profiles(agent_profiles)
+                    if "mcp_servers" in changed_keys:
+                        self.config_manager.set_mcp_servers(mcp_servers)
+                    if "default_workspace" in changed_keys:
+                        self.config_manager.set(
+                            "default_workspace",
+                            current_config_state["default_workspace"],
+                        )
+                    if "history_dir" in changed_keys:
+                        self.config_manager.set_chat_history_dir(target_history_dir)
+                    if "chat_workspace_root" in changed_keys:
+                        self.config_manager.set_chat_workspace_root(
+                            current_config_state["chat_workspace_root"]
+                        )
+                    if "god_mode" in changed_keys:
+                        self.config_manager.set_god_mode(current_config_state["god_mode"])
                     self.download_sources = pending_download_sources
-                    self.config_manager.set("download_sources", self.download_sources)
+                    if "download_sources" in changed_keys:
+                        self.config_manager.set("download_sources", self.download_sources)
             if appearance_changed:
                 self.theme_settings_panel.commit()
         except Exception as exc:
@@ -13988,25 +14474,33 @@ class SettingsDialog(QDialog):
                     )
                 if config_changed:
                     with self.config_manager.batch_save():
-                        self.config_manager.set_model_channels(
-                            previous_config["model_channels"],
-                            previous_config["selected_model_id"],
-                        )
-                        self.config_manager.set_agent_profiles(previous_config["agent_profiles"])
-                        self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
-                        self.config_manager.set(
-                            "default_workspace",
-                            previous_config["default_workspace"],
-                        )
-                        self.config_manager.set_chat_history_dir(previous_config["history_dir"])
-                        self.config_manager.set_chat_workspace_root(
-                            previous_config["chat_workspace_root"]
-                        )
-                        self.config_manager.set_god_mode(previous_config["god_mode"])
-                        self.config_manager.set(
-                            "download_sources",
-                            previous_config["download_sources"],
-                        )
+                        if bool(changed_keys & {"model_channels", "selected_model_id"}):
+                            self.config_manager.set_model_channels(
+                                previous_config["model_channels"],
+                                previous_config["selected_model_id"],
+                            )
+                        if "agent_profiles" in changed_keys:
+                            self.config_manager.set_agent_profiles(previous_config["agent_profiles"])
+                        if "mcp_servers" in changed_keys:
+                            self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
+                        if "default_workspace" in changed_keys:
+                            self.config_manager.set(
+                                "default_workspace",
+                                previous_config["default_workspace"],
+                            )
+                        if "history_dir" in changed_keys:
+                            self.config_manager.set_chat_history_dir(previous_config["history_dir"])
+                        if "chat_workspace_root" in changed_keys:
+                            self.config_manager.set_chat_workspace_root(
+                                previous_config["chat_workspace_root"]
+                            )
+                        if "god_mode" in changed_keys:
+                            self.config_manager.set_god_mode(previous_config["god_mode"])
+                        if "download_sources" in changed_keys:
+                            self.config_manager.set(
+                                "download_sources",
+                                previous_config["download_sources"],
+                            )
             except Exception as rollback_exc:
                 QMessageBox.critical(
                     self,
@@ -14018,6 +14512,8 @@ class SettingsDialog(QDialog):
             return
         if config_changed:
             log_model_service_event("default_model_save_completed", model_id=selected_model_id)
+        if "agent_profiles" in changed_keys:
+            self.agent_profile_manager._untouched_drafts.clear()
         if memory_write_scopes:
             self.memory_store = target_memory_store
         self.requires_skill_reload = mcp_servers != current_mcp_servers
@@ -14027,7 +14523,7 @@ class SettingsDialog(QDialog):
             else ""
         )
         self._clear_settings_dirty()
-        self._allow_close_without_prompt = True
+        self._allow_close_without_prompt = False
         if self.property("embeddedProductPage"):
             if self._main and hasattr(self._main, "add_system_toast"):
                 if theme_commit_warning:
@@ -14999,29 +15495,43 @@ class SkillsCenterDialog(QDialog):
             self.component_task_manager.state_changed.connect(
                 self._handle_component_task_state
             )
-        self.setWindowTitle("AI 能力商城")
+        self.setWindowTitle("能力")
         self.resize(960, 680)
         apply_product_dialog(self, "SkillsCenterDialog")
 
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        self.section_control = ProductSegmentedControl([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "智能体")], current="skills")
+        self.section_control.currentChanged.connect(self.select_section)
+        root.addWidget(self.section_control, 0, Qt.AlignLeft)
+        self.section_stack = QStackedWidget()
+        root.addWidget(self.section_stack, 1)
+        self.skill_page = QWidget()
+        self.section_stack.addWidget(self.skill_page)
+        self.management_page = None
+        self.current_section = "skills"
+        layout = QVBoxLayout(self.skill_page)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(12)
-        header = ProductPageHeader("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力")
+        header = ProductPageHeader("技能", "找到适合任务的技能，或管理自己的能力")
         header_row.addWidget(header, 1, Qt.AlignTop)
-        self.import_skill_btn = QPushButton("导入 Skill")
+        self.import_skill_btn = QPushButton("添加技能")
         self.import_skill_btn.setObjectName("CapabilityImportSkill")
         self.import_skill_btn.setStyleSheet(product_button_style("primary"))
         self.import_skill_btn.clicked.connect(self._import_skill_zip)
         header_row.addWidget(self.import_skill_btn, 0, Qt.AlignTop)
+        self.builtin_btn = QPushButton("内置技能")
+        self.builtin_btn.setStyleSheet(product_button_style("secondary"))
+        self.builtin_btn.clicked.connect(lambda: self._set_mode("builtin"))
+        header_row.addWidget(self.builtin_btn, 0, Qt.AlignTop)
         self.advanced_btn = QPushButton("开发与诊断")
         self.advanced_btn.setObjectName("CapabilityAdvancedManagement")
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self.advanced_btn.clicked.connect(self._open_advanced_management)
-        header_row.addWidget(self.advanced_btn, 0, Qt.AlignTop)
+        self.advanced_btn.hide()
         layout.addLayout(header_row)
 
         self.search_input = QLineEdit()
@@ -15036,13 +15546,24 @@ class SkillsCenterDialog(QDialog):
         browse_bar.setContentsMargins(0, 0, 0, 0)
         browse_bar.setSpacing(8)
         self.mode_control = ProductSegmentedControl(
-            [("library", "发现能力"), ("hub", "SkillHub"), ("mine", "我的能力")],
+            [("library", "精选技能"), ("hub", "SkillHub"), ("mine", "我的能力")],
             current="library",
         )
         self.mode_control.currentChanged.connect(self._set_mode)
         browse_bar.addWidget(self.mode_control, 0)
         browse_bar.addStretch()
+        self.hub_refresh_btn = QPushButton("刷新 SkillHub")
+        self.hub_refresh_btn.setStyleSheet(product_button_style("secondary"))
+        self.hub_refresh_btn.setToolTip("清除浏览缓存并重新获取技能和版本，不影响已安装技能")
+        self.hub_refresh_btn.clicked.connect(self._refresh_hub_catalog)
+        self.hub_refresh_btn.hide()
+        browse_bar.addWidget(self.hub_refresh_btn)
         layout.addLayout(browse_bar)
+        self.builtin_back = QPushButton("返回技能")
+        self.builtin_back.clicked.connect(lambda: self._set_mode(getattr(self, "_before_builtin", "library")))
+        self.builtin_back.hide()
+        self.builtin_back.setStyleSheet(product_button_style("ghost"))
+        layout.addWidget(self.builtin_back, 0, Qt.AlignLeft)
         self.scene_control = ProductSegmentedControl(
             [("all", "全部"), *CAPABILITY_SCENES.items()],
             current="all",
@@ -15104,6 +15625,34 @@ class SkillsCenterDialog(QDialog):
         ):
             QTimer.singleShot(0, self._probe_browser_component_status)
 
+    def select_section(self, section):
+        section = {"MCP": "mcp", "MCP 服务": "mcp", "智能体": "agents"}.get(section, section)
+        if self.management_page and not self.management_page._confirm_discard_settings():
+            self.section_control.set_current(self.current_section)
+            return False
+        if section == "skills":
+            self.section_stack.setCurrentWidget(self.skill_page)
+        else:
+            if self.management_page is None:
+                self.management_page = SettingsDialog(self.config_manager, self._main, domain="capabilities")
+                self.management_page.setWindowFlags(Qt.Widget)
+                self.management_page.setProperty("embeddedProductPage", True)
+                self.management_page.setProperty("sectionHosted", True)
+                self.management_page.setMinimumSize(0, 0)
+                self.management_page.nav_list.hide()
+                self.management_page.nav_combo.hide()
+                self.management_page.settings_search.hide()
+                self.management_page.settings_title.hide()
+                self.section_stack.addWidget(self.management_page)
+            self.management_page.select_initial_page("MCP 服务" if section == "mcp" else "智能体")
+            self.section_stack.setCurrentWidget(self.management_page)
+        self.current_section = section
+        self.section_control.set_current(section)
+        return True
+
+    def confirm_leave(self):
+        return self.management_page is None or self.management_page._confirm_discard_settings()
+
     def _probe_browser_component_status(self):
         manager = self.component_task_manager
         if manager is None or manager.has_task(BROWSER_SKILL_COMPONENT_ID):
@@ -15125,7 +15674,7 @@ class SkillsCenterDialog(QDialog):
 
     def _is_user_owned(self, skill):
         name = str(skill.get("name") or "").strip()
-        if not name or capability_is_official(skill):
+        if not name or capability_is_readonly_builtin(skill) or capability_is_official(skill):
             return False
         if str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
             return False
@@ -15187,13 +15736,21 @@ class SkillsCenterDialog(QDialog):
     def _user_skills(self):
         return [
             skill for skill in self._all_skills
-            if str(skill.get("name") or "").strip() in self._user_owned_names and self._matches_search(skill)
+            if str(skill.get("name") or "").strip() in self._user_owned_names and not capability_is_readonly_builtin(skill) and self._matches_search(skill)
         ]
 
     def _set_mode(self, mode):
         mode = str(mode or "library")
         if mode == self.current_mode:
             return
+        if mode == "builtin":
+            self._before_builtin = self.current_mode
+        self.hub_refresh_btn.setVisible(mode == "hub")
+        self.builtin_back.setVisible(mode == "builtin")
+        self.mode_control.setVisible(mode != "builtin")
+        self.import_skill_btn.setVisible(mode != "builtin")
+        self.advanced_btn.hide()
+        self.builtin_btn.setVisible(mode != "builtin")
         self._mode_state[self.current_mode] = (self.search_text, self.scroll.verticalScrollBar().value())
         self.current_mode = mode
         self.import_skill_btn.setStyleSheet(product_button_style("secondary" if mode == "hub" else "primary"))
@@ -15311,8 +15868,21 @@ class SkillsCenterDialog(QDialog):
         self.hub_page = 1
         self._load_hub()
 
+    def _refresh_hub_catalog(self):
+        self.hub_generation += 1
+        try:
+            self._hub_cache.clear()
+        except OSError as exc:
+            self.hub_error = f"缓存刷新失败：{exc}；可重试刷新。"
+            self._render_content()
+            return
+        self.hub_categories = []
+        self._load_hub(force=True)
+
     def _load_hub(self, *, force=False):
         if force:
+            if not getattr(self, "_hub_explicit_version", False):
+                self.hub_version = ""
             urls = {str(skill.get("iconUrl") or "") for skill in (self.hub_data or {}).get("skills", [])}
             self._hub_icon_refresh_urls.update(urls - {""})
             for url in urls:
@@ -15344,12 +15914,13 @@ class SkillsCenterDialog(QDialog):
                     data["evaluation"] = self.hub_client.evaluation(slug)
                 except Exception as exc:
                     data["evaluation_error"] = str(exc)
-                if not data.get("evaluation_error"):
+                if generation == self.hub_generation and not data.get("evaluation_error"):
                     self._hub_cache.put(key, data)
                 return data
             data = {"list": self.hub_client.search(keyword, category, sort, page),
                     "categories": self.hub_client.categories() if needs_categories else categories}
-            self._hub_cache.put(key, data)
+            if generation == self.hub_generation:
+                self._hub_cache.put(key, data)
             return data
 
         def finished(result):
@@ -15381,8 +15952,9 @@ class SkillsCenterDialog(QDialog):
         self._hub_list_scroll = self.scroll.verticalScrollBar().value()
         self._hub_restore_scroll = 0
         self.hub_slug, self.hub_detail, self.hub_version = slug, None, ""
+        self._hub_explicit_version = False
         self.hub_filters.hide()
-        self._load_hub()
+        self._load_hub(force=True)
 
     def _hub_back(self):
         self.hub_generation += 1
@@ -15476,11 +16048,15 @@ class SkillsCenterDialog(QDialog):
         version_box.setStyleSheet(product_field_style())
         version_box.setMinimumWidth(110)
         version_box.setMaximumWidth(180)
-        for entry in data["versions"]:
+        entries = list(data["versions"])
+        latest = data.get("latestVersion") or {}
+        if latest.get("version") and not any(e["version"] == latest["version"] for e in entries):
+            entries.insert(0, latest)
+        for entry in entries:
             version_box.addItem(entry["version"], entry)
-        index = version_box.findText(self.hub_version)
-        if index >= 0:
-            version_box.setCurrentIndex(index)
+        selected_version = preferred_version(data, self.hub_version if getattr(self, "_hub_explicit_version", False) else "")
+        version_box.setCurrentIndex(version_box.findText(selected_version))
+        version_box.activated.connect(lambda _: setattr(self, "_hub_explicit_version", True))
         action = self._hub_button("更新" if current else "安装到我的能力", lambda: self._hub_install(slug, version_box.currentData(), current), heading, primary=True)
         action.setMaximumWidth(180)
         if narrow:
@@ -15603,8 +16179,13 @@ class SkillsCenterDialog(QDialog):
         def commit(name):
             if window:
                 window.skill_catalog_service.reload(reason="skillhub_install")
+        explicit_version = self.hub_slug == slug and getattr(self, "_hub_explicit_version", False)
         def operation():
             ensure_idle()
+            if not explicit_version:
+                latest = preferred_version(self.hub_client.detail(slug))
+                if not latest or latest != entry["version"]:
+                    raise ValueError(f"发布版本已变化（当前为 {latest or '未提供'}）。请刷新 SkillHub 并查看版本后安装；尚未下载或修改技能。")
             log_ui_navigation("skillhub_install_start", slug=slug, version=entry["version"])
             return self.hub_client.install(manager, slug, entry["version"], update_skill=current["name"] if current else None, on_commit=commit)
         def finished(result):
@@ -15678,7 +16259,7 @@ class SkillsCenterDialog(QDialog):
         header.addWidget(icon)
         header.addWidget(ClampedText(display_name, strong=True), 1)
         layout.addLayout(header)
-        layout.addWidget(ClampedText(capability_summary(skill, user_owned=user_owned) or "暂无简介", lines=2))
+        layout.addWidget(ClampedText((skill.get("user_description") or skill.get("description") or "暂无简介") if capability_is_readonly_builtin(skill) else (capability_summary(skill, user_owned=user_owned) or "暂无简介"), lines=2))
         examples = [str(item).strip() for item in
                     (capability_presentation(skill).get("examples") or []) if str(item).strip()][:2]
         if examples:
@@ -15687,6 +16268,17 @@ class SkillsCenterDialog(QDialog):
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
+        if capability_is_readonly_builtin(skill):
+            status = QLabel("随应用提供 · 只读")
+            status.setStyleSheet(apple_caption_style())
+            actions.addWidget(status)
+            actions.addStretch()
+            view = QPushButton("查看详情")
+            view.setStyleSheet(product_button_style("ghost"))
+            view.clicked.connect(lambda checked=False, value=dict(skill): self._show_builtin_detail(value))
+            actions.addWidget(view)
+            layout.addLayout(actions)
+            return row
         name = str(skill.get("name") or "").strip()
         enabled = bool(skill.get("enabled"))
         needs_config = not enabled and skill_center_config_state(skill) == "needs_config"
@@ -15881,6 +16473,8 @@ class SkillsCenterDialog(QDialog):
         row.layout().addLayout(actions)
 
     def _toggle_skill(self, skill, enabled):
+        if capability_is_readonly_builtin(skill):
+            return False
         name = str(skill.get("name") or "").strip()
         if not name:
             return False
@@ -16066,6 +16660,14 @@ class SkillsCenterDialog(QDialog):
             self.content_layout.addStretch()
             return
 
+        if self.current_mode == "builtin":
+            self._builtin_detail_open = False
+            skills = [skill for skill in self._all_skills
+                      if capability_is_readonly_builtin(skill) and self._matches_search(skill)]
+            self.content_layout.addWidget(self._section("内置技能 · 随应用提供，只读", skills))
+            self.content_layout.addStretch()
+            return
+
         official = self._official_skills()
         rendered = False
         scene_keys = [self.current_scene] if self.current_scene != "all" else list(CAPABILITY_SCENES)
@@ -16098,6 +16700,20 @@ class SkillsCenterDialog(QDialog):
                    if self.current_mode == "hub" else columns != self._column_count)
         if changed:
             self._render_content()
+
+    def _show_builtin_detail(self, skill):
+        self._builtin_detail_open = True
+        self._clear_layout(self.content_layout)
+        title = QLabel(readable_skill_name(skill) or skill.get("name", ""))
+        title.setStyleSheet(apple_settings_section_title_style())
+        self.content_layout.addWidget(title)
+        detail = QTextBrowser()
+        detail.setPlainText(str(skill.get("content") or skill.get("description") or "暂无详情"))
+        self.content_layout.addWidget(detail)
+        back = QPushButton("返回内置技能")
+        back.clicked.connect(self._render_content)
+        back.setStyleSheet(product_button_style("ghost"))
+        self.content_layout.insertWidget(0, back, 0, Qt.AlignLeft)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -17765,6 +18381,7 @@ class ConversationSkillPreviewDialog(QDialog):
         layout.setSpacing(12)
         self.name_input = QLineEdit(str(self._draft.get("skill_name") or ""))
         self.name_input.setStyleSheet(apple_input_style())
+        self.name_input.setPlaceholderText("例如：客户资料整理助手（支持中文）")
         self.name_input.setEnabled(self.mode == "create")
         self.description_input = QLineEdit(str(self._draft.get("description") or ""))
         self.description_input.setStyleSheet(apple_input_style())
@@ -17892,8 +18509,8 @@ class ConversationSkillPreviewDialog(QDialog):
         if self.mode == "create" and not draft.get("skill_name"):
             QMessageBox.warning(self, "无法保存", "Skill 名称不能为空。")
             return
-        if self.mode == "create" and not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]*$", draft.get("skill_name") or ""):
-            QMessageBox.warning(self, "无法保存", "Skill 名称只能包含英文字母、数字和连字符。")
+        if self.mode == "create" and not is_valid_skill_name(draft.get("skill_name")):
+            QMessageBox.warning(self, "无法保存", "技能名称支持中文、字母、数字、下划线和连字符，最长 128 字，不能使用系统保留名称。")
             return
         ok, error = validate_impl_py(draft.get("impl_py") or "")
         if not ok:
@@ -27677,6 +28294,7 @@ class MainWindow(QMainWindow):
     PAGE_FAVORITES = "favorites"
     PAGE_KNOWLEDGE = "knowledge"
     PAGE_SETTINGS = "settings"
+    PAGE_PROJECTS = "projects"
 
     def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
@@ -28001,14 +28619,14 @@ class MainWindow(QMainWindow):
 
         sidebar_layout = QVBoxLayout(sidebar)
         self.sidebar_layout = sidebar_layout
-        sidebar_layout.setContentsMargins(10, 14, 10, 12)
+        sidebar_layout.setContentsMargins(10, 28, 10, 12)
         sidebar_layout.setSpacing(8)
 
         new_chat_btn = QPushButton(" 新建聊天")
         self.new_chat_btn = new_chat_btn
         new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
-        new_chat_btn.setFixedHeight(32)
+        new_chat_btn.setFixedHeight(42)
         new_chat_btn.setStyleSheet(apple_button_style("ghost", radius=7, align="left"))
         new_chat_btn.clicked.connect(lambda checked=False: self.new_conversation())
         sidebar_layout.addWidget(new_chat_btn)
@@ -28035,11 +28653,18 @@ class MainWindow(QMainWindow):
         project_header_layout = QHBoxLayout(project_header)
         project_header_layout.setContentsMargins(0, 8, 0, 0)
         project_header_layout.setSpacing(6)
-        project_label = QLabel("项目")
+        project_label = QLabel("项目与对话")
         self.project_label = project_label
         project_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px; font-weight: 600;")
         project_header_layout.addWidget(project_label)
         project_header_layout.addStretch()
+        self.manage_projects_btn = QPushButton("管理")
+        self.manage_projects_btn.setStyleSheet(product_button_style("ghost"))
+        self.manage_projects_btn.setFixedHeight(28)
+        self.manage_projects_btn.setToolTip("管理项目与对话")
+        self.manage_projects_btn.setAccessibleName("管理项目与对话")
+        self.manage_projects_btn.clicked.connect(lambda: self.show_sidebar_projects_menu(self.manage_projects_btn))
+        project_header_layout.addWidget(self.manage_projects_btn)
         self.sidebar_projects_menu_btn = QToolButton()
         self.sidebar_projects_menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
         self.sidebar_hover_tips.register(self.sidebar_projects_menu_btn, "项目与侧边栏选项")
@@ -28060,8 +28685,8 @@ class MainWindow(QMainWindow):
         project_header_actions_layout.setSpacing(2)
         project_header_actions_layout.addWidget(self.sidebar_projects_menu_btn)
         project_header_actions_layout.addWidget(self.sidebar_add_project_btn)
-        project_header_layout.addWidget(project_header_actions)
-        project_header.set_hover_actions([project_header_actions])
+        project_header_actions.hide()
+        project_header.set_hover_actions([])
         project_header.setContextMenuPolicy(Qt.CustomContextMenu)
         project_header.customContextMenuRequested.connect(
             lambda _pos, host=project_header: self.show_sidebar_projects_menu(host)
@@ -28095,7 +28720,7 @@ class MainWindow(QMainWindow):
         self.product_nav_buttons = {}
 
         sidebar_skills_btn = QPushButton(" 功能中心")
-        sidebar_skills_btn.setText(" 能力商城")
+        sidebar_skills_btn.setText(" 能力")
         sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.text_secondary))
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
@@ -29298,6 +29923,11 @@ class MainWindow(QMainWindow):
         self.prompt_toolbar.addWidget(self.prompt_action_group)
         self._composer_toolbar_mode = ""
         input_card_layout.addWidget(self.prompt_toolbar_container)
+        self.composer_permission = QCheckBox("允许高风险操作 · 所有对话复用")
+        self.composer_permission.setChecked(self.config_manager.get_god_mode())
+        self.composer_permission.setToolTip("开启后可突破工作区限制并执行高风险代码操作。此设置保存后供后续执行使用，不改变已经启动的任务。")
+        self.composer_permission.toggled.connect(self._save_composer_permission)
+        input_card_layout.addWidget(self.composer_permission)
         self._apply_composer_toolbar_layout(compact=False)
 
         self.input_row = QWidget()
@@ -29537,7 +30167,7 @@ class MainWindow(QMainWindow):
         )
         self.sidebar_layout.setContentsMargins(
             DesignTokens.spacing_sm + 2,
-            DesignTokens.spacing_md - 2,
+            DesignTokens.spacing_md + 12,
             DesignTokens.spacing_sm + 2,
             DesignTokens.spacing_sm + 4,
         )
@@ -38756,11 +39386,10 @@ class MainWindow(QMainWindow):
         )
         if ordered == original:
             return False
-        insert_at = indexed[0][0]
         for widget in original:
             layout.removeWidget(widget)
-        for offset, widget in enumerate(ordered):
-            layout.insertWidget(insert_at + offset, widget)
+        for (position, _previous), widget in zip(indexed, ordered):
+            layout.insertWidget(position, widget)
         layout.invalidate()
         layout.activate()
         return True
@@ -39516,7 +40145,7 @@ class MainWindow(QMainWindow):
         menu.aboutToShow.connect(search.setFocus)
         menu.exec(self.project_selector_btn.mapToGlobal(self.project_selector_btn.rect().bottomLeft()))
 
-    def show_project_menu(self, path, anchor):
+    def show_project_menu(self, path, anchor, position=None):
         normalized = self._normalize_project_path(path)
         if not normalized:
             return
@@ -39540,6 +40169,7 @@ class MainWindow(QMainWindow):
         rename_action = QAction("重命名项目", self)
         rename_action.triggered.connect(lambda checked=False, p=normalized: self.rename_project(p))
         menu.addAction(rename_action)
+        menu.addAction("管理记忆", lambda p=normalized: self.open_project_management("记忆", workspace_dir=p))
 
         archive_action = QAction("归档对话", self)
         archive_action.triggered.connect(lambda checked=False, p=normalized: self.archive_project_conversations(p))
@@ -39549,7 +40179,7 @@ class MainWindow(QMainWindow):
         remove_action = QAction("归档项目", self)
         remove_action.triggered.connect(lambda checked=False, p=normalized: self.archive_project(p))
         menu.addAction(remove_action)
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        menu.exec(position if position is not None else anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def set_project_pinned(self, path, pinned):
         self.config_manager.upsert_project(path, pinned=bool(pinned))
@@ -39597,7 +40227,7 @@ class MainWindow(QMainWindow):
         return True
 
     def archive_project(self, path):
-        confirm = QMessageBox.question(self, "归档项目", "归档后该项目会从左侧栏和项目选择器中隐藏，可在设置的归档页恢复。")
+        confirm = QMessageBox.question(self, "归档项目", "归档后该项目会从左侧栏和项目选择器中隐藏，可在项目与对话的归档页恢复。")
         if confirm != QMessageBox.Yes:
             return
         self.config_manager.archive_project(path)
@@ -39615,7 +40245,7 @@ class MainWindow(QMainWindow):
             self.refresh_deliverables()
             self.update_ui_state_for_workspace()
         self.refresh_history_list()
-        self.add_system_toast("项目已归档，可在设置中恢复", "success", auto_close_ms=3200)
+        self.add_system_toast("项目已归档，可在项目与对话中恢复", "success", auto_close_ms=3200)
 
     def remove_project(self, path):
         self.archive_project(path)
@@ -39658,6 +40288,9 @@ class MainWindow(QMainWindow):
 
     def show_sidebar_projects_menu(self, anchor=None):
         menu = create_styled_menu(self)
+        menu.addAction("管理项目与对话", lambda: self.open_project_management())
+        menu.addAction("添加项目", self.add_project_from_dialog)
+        menu.addSeparator()
         archive_action = QAction("归档所有聊天", self)
         archive_action.triggered.connect(self.archive_visible_project_conversations)
         menu.addAction(archive_action)
@@ -39895,6 +40528,23 @@ class MainWindow(QMainWindow):
                 )
 
         rendered_any = False
+        pinned_sessions = [entry for project in project_entries for entry in project["sessions"] if entry.get("pinned")]
+        pinned_sessions.extend(entry for entry in unassigned_entries if entry.get("pinned"))
+        pinned_projects = [project for project in project_entries if project.get("pinned")]
+        if pinned_projects or pinned_sessions:
+            self._add_history_group_label("置顶")
+            for project in pinned_projects:
+                sessions = [entry for entry in project["sessions"] if not entry.get("pinned")]
+                self.history_layout.addWidget(self._make_project_row(project, sessions, query=query))
+            for entry in sorted(pinned_sessions, key=lambda item: -int(item.get("updated_at") or 0)):
+                self.history_layout.addWidget(self._make_project_session_row(entry))
+            rendered_any = True
+        project_entries = [project for project in project_entries if not project.get("pinned")]
+        for project in project_entries:
+            project["sessions"] = [entry for entry in project["sessions"] if not entry.get("pinned")]
+        unassigned_entries = [entry for entry in unassigned_entries if not entry.get("pinned")]
+        if project_entries:
+            self._add_history_group_label("项目")
         for project in project_entries:
             row = self._make_project_row(project, project.get("sessions") or [], query=query)
             self.history_layout.addWidget(row)
@@ -39904,7 +40554,7 @@ class MainWindow(QMainWindow):
             key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0))
         )
         if unassigned_entries:
-            self._add_history_group_label("聊天")
+            self._add_history_group_label("独立对话")
             visible_limit = max(
                 CHAT_HISTORY_INITIAL_LIMIT,
                 int(self.unassigned_history_visible_limit or 0),
@@ -39981,7 +40631,7 @@ class MainWindow(QMainWindow):
         for path, button in self.project_buttons.items():
             button.setIcon(sidebar_symbol_icon("folder-open" if self._project_key(path) == current_key else "folder", DesignTokens.text_secondary, 16))
 
-    def show_session_menu(self, session_id, anchor):
+    def show_session_menu(self, session_id, anchor, position=None):
         menu = create_styled_menu(self)
         record = self.chat_storage.get_conversation_record(session_id) or {}
         pinned = bool((record.get("meta") or {}).get("pinned") or record.get("pinned"))
@@ -40001,7 +40651,7 @@ class MainWindow(QMainWindow):
         menu.addAction(archive_action)
         menu.addSeparator()
         menu.addAction(delete_action)
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        menu.exec(position if position is not None else anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def rename_session(self, session_id):
         return self.begin_session_inline_rename(session_id)
@@ -42368,7 +43018,7 @@ class MainWindow(QMainWindow):
         self.memory_update_dialog.background_requested.connect(self.handle_memory_update_backgrounded)
         self.memory_update_dialog.finished.connect(self.handle_memory_update_dialog_finished)
         self.memory_update_dialog.append_progress(f"开始扫描{scope_label}并生成长期摘要预览")
-        if self.current_product_route == self.PAGE_SETTINGS:
+        if self.current_product_route == self.PAGE_PROJECTS:
             self.memory_update_dialog.setParent(self.main_page_stack)
             self.memory_update_dialog.setWindowFlags(Qt.Widget)
             self.memory_update_dialog.setModal(False)
@@ -44950,6 +45600,8 @@ a {{ overflow-wrap: anywhere; }}
         page.setMinimumSize(0, 0)
         for label in page.findChildren(QLabel):
             if label.property("roleTitle") or label.property("roleSubtitle"):
+                if isinstance(page, SettingsDialog) and label is not page.settings_title:
+                    continue
                 label.hide()
         hidden_texts = {"关闭", "完成"}
         if route == self.PAGE_FAVORITES:
@@ -45129,6 +45781,8 @@ a {{ overflow-wrap: anywhere; }}
             from ui.knowledge_library import KnowledgePage
             page = KnowledgePage(self, service=self._knowledge_service(), artifacts=self._knowledge_artifacts)
             page.referenceRequested.connect(self.use_knowledge_reference)
+        elif route == self.PAGE_PROJECTS:
+            page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain="projects")
         elif route == self.PAGE_SETTINGS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section)
         else:
@@ -45150,9 +45804,12 @@ a {{ overflow-wrap: anywhere; }}
                     return False
             self._close_favorite_editor()
             return True
-        if self.current_product_route != self.PAGE_SETTINGS:
+        if self.current_product_route == self.PAGE_CAPABILITIES:
+            page = self.product_pages.get(self.PAGE_CAPABILITIES)
+            return page is None or page.confirm_leave()
+        if self.current_product_route not in {self.PAGE_SETTINGS, self.PAGE_PROJECTS}:
             return True
-        page = self.product_pages.get(self.PAGE_SETTINGS)
+        page = self.product_pages.get(self.current_product_route)
         if page is not None and getattr(page, "_settings_dirty", False):
             if not page._confirm_discard_settings():
                 return False
@@ -45180,9 +45837,39 @@ a {{ overflow-wrap: anywhere; }}
         if page is None or page is self.conversation_page:
             return
         self.main_page_stack.removeWidget(page)
-        page.deleteLater()
+        page.hide()
+        # Network tests/update workers may still publish their result after navigation.
+        # Retain their owner until QThread has really finished; never terminate a task.
+        if not hasattr(self, "_retiring_product_pages"):
+            self._retiring_product_pages = []
+        self._retiring_product_pages.append(page)
+        def release_when_finished():
+            if not _qt_object_alive(page):
+                return
+            if any(worker.isRunning() for worker in page.findChildren(QThread) if _qt_object_alive(worker)):
+                QTimer.singleShot(250, release_when_finished)
+                return
+            if page in self._retiring_product_pages:
+                self._retiring_product_pages.remove(page)
+            page.deleteLater()
+        release_when_finished()
 
     def handle_product_back(self):
+        if self.current_product_route == self.PAGE_CAPABILITIES and not self.current_product_subroute:
+            capabilities = self.product_pages.get(self.PAGE_CAPABILITIES)
+            management = getattr(capabilities, "management_page", None)
+            manager = getattr(management, "mcp_server_manager", None)
+            if manager is not None and manager.editor_dialog is not None:
+                return manager.confirm_editor()
+            agents = getattr(management, "agent_profile_manager", None)
+            if agents is not None and agents.editing_profile:
+                return agents.leave_profile_editor()
+            if capabilities is not None and capabilities.current_mode == "builtin":
+                if getattr(capabilities, "_builtin_detail_open", False):
+                    capabilities._render_content()
+                    return True
+                capabilities._set_mode(getattr(capabilities, "_before_builtin", "library"))
+                return True
         if self.current_product_route == self.PAGE_SETTINGS and self.current_product_subroute == "favorite_delivery_setup":
             settings_page = self.product_pages.get(self.PAGE_SETTINGS)
             if settings_page is not None and getattr(settings_page, "_settings_dirty", False):
@@ -45228,7 +45915,7 @@ a {{ overflow-wrap: anywhere; }}
                 if page is not None:
                     page.refresh_list()
                     self.main_page_stack.setCurrentWidget(page)
-                self.workspace_title_label.setText("AI 能力商城")
+                self.workspace_title_label.setText("能力")
                 self.workspace_subtitle_label.setText("按想完成的任务，为 Cowork 开启新能力。")
                 return True
         if self.current_product_route == self.PAGE_FAVORITES and self.current_product_subroute == "favorite_editor":
@@ -45245,18 +45932,18 @@ a {{ overflow-wrap: anywhere; }}
                     return False
             self._close_favorite_editor()
             return True
-        if self.current_product_route == self.PAGE_SETTINGS and self.current_product_subroute == "memory_update":
+        if self.current_product_route == self.PAGE_PROJECTS and self.current_product_subroute == "memory_update":
             self._show_settings_from_memory_update()
             return True
         return self.show_conversation_page()
 
     def _show_settings_from_memory_update(self):
         self.current_product_subroute = ""
-        settings_page = self.product_pages.get(self.PAGE_SETTINGS)
+        settings_page = self.product_pages.get(self.PAGE_PROJECTS)
         if settings_page is not None:
-            settings_page.select_initial_page("个性与记忆")
+            settings_page.select_initial_page("记忆")
             self.main_page_stack.setCurrentWidget(settings_page)
-        self.workspace_title_label.setText("设置")
+        self.workspace_title_label.setText("项目与对话")
         self.workspace_subtitle_label.setText("管理模型、工作区、智能体、记忆与系统偏好。")
 
     def _show_memory_update_surface(self):
@@ -45265,7 +45952,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         if dialog.property("embeddedProductPage"):
             dialog.show()
-            self.current_product_route = self.PAGE_SETTINGS
+            self.current_product_route = self.PAGE_PROJECTS
             self.current_product_subroute = "memory_update"
             self.workspace_title_label.setText("更新长期记忆")
             self.workspace_subtitle_label.setText("扫描历史、检查生成过程，并确认是否应用草稿。")
@@ -45517,7 +46204,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         if route == self.PAGE_CONVERSATION:
             return self.show_conversation_page()
-        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS, self.PAGE_KNOWLEDGE}:
+        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS, self.PAGE_KNOWLEDGE, self.PAGE_PROJECTS}:
             raise ValueError(f"未知产品页面：{route}")
         if self.current_product_route != route and not self._confirm_leave_product_page():
             return False
@@ -45549,10 +46236,11 @@ a {{ overflow-wrap: anywhere; }}
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
-            self.PAGE_CAPABILITIES: ("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力。"),
+            self.PAGE_CAPABILITIES: ("能力", "技能、MCP 服务与智能体。"),
+            self.PAGE_PROJECTS: ("项目与对话", "管理项目、历史、记忆和归档。"),
             self.PAGE_FAVORITES: ("常用", "保存经常重复的任务，下次直接开始或按时自动运行。"),
             self.PAGE_KNOWLEDGE: ("资料库", "使用已有知识完成工作，再将有价值的产物保存回来。"),
-            self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
+            self.PAGE_SETTINGS: ("设置", "配置应用偏好、模型连接与运行环境。"),
         }
         title, subtitle = titles[route]
         self.workspace_title_label.setText(title)
@@ -45566,7 +46254,7 @@ a {{ overflow-wrap: anywhere; }}
         self.current_product_subroute = ""
         for key, button in self.product_nav_buttons.items():
             button.setChecked(key == route)
-        if route == self.PAGE_SETTINGS and section:
+        if route in {self.PAGE_SETTINGS, self.PAGE_PROJECTS} and section:
             page.select_initial_page(section)
         elif route == self.PAGE_CAPABILITIES:
             page.refresh_list()
@@ -45610,7 +46298,37 @@ a {{ overflow-wrap: anywhere; }}
             QTimer.singleShot(0, self.input_field.setFocus)
         return True
 
+    def open_project_management(self, section="项目", workspace_dir=None):
+        if not self.show_product_page(self.PAGE_PROJECTS, section=section):
+            return False
+        page = self.product_pages[self.PAGE_PROJECTS]
+        if workspace_dir is not None:
+            return page.select_memory_workspace(workspace_dir)
+        return True
+
+    def _save_composer_permission(self, enabled):
+        previous = self.config_manager.get_god_mode()
+        if previous == enabled:
+            return
+        try:
+            self.config_manager.set_god_mode(enabled)
+            log_ui_navigation("composer_permission_saved", enabled=enabled)
+        except Exception:
+            self.config_manager.config["god_mode"] = previous
+            self.composer_permission.blockSignals(True)
+            self.composer_permission.setChecked(previous)
+            self.composer_permission.blockSignals(False)
+            self.add_system_toast("权限保存失败，已保留原设置。请重试。", "error")
+
     def open_settings(self, initial_page_label=None, target_component=None):
+        if initial_page_label == "权限":
+            if self.show_product_page(self.PAGE_CONVERSATION):
+                self.composer_permission.setFocus()
+            return True
+        if initial_page_label in {"个性与记忆", "记忆", "归档"}:
+            return self.open_project_management("归档" if initial_page_label == "归档" else "记忆")
+        if initial_page_label in {"MCP", "MCP 服务", "智能体"}:
+            return self.open_skills_center() and self.product_pages[self.PAGE_CAPABILITIES].select_section(initial_page_label)
         opened = self.show_product_page(self.PAGE_SETTINGS, section=initial_page_label)
         if not opened or not target_component:
             return opened
@@ -46489,7 +47207,7 @@ a {{ overflow-wrap: anywhere; }}
         skills_status = self.skill_load_error or ("能力加载完成" if skills_available else "能力加载中")
         if hasattr(self, "sidebar_skills_btn"):
             self.sidebar_skills_btn.setEnabled(skills_available)
-            self.sidebar_skills_btn.setToolTip("打开能力商城" if skills_available else skills_status)
+            self.sidebar_skills_btn.setToolTip("打开能力" if skills_available else skills_status)
         if hasattr(self, "sidebar_skill_capture_btn"):
             self.sidebar_skill_capture_btn.setToolTip("沉淀当前会话为 Skill" if skills_available else skills_status)
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
@@ -49806,7 +50524,7 @@ a {{ overflow-wrap: anywhere; }}
                 else:
                     self._show_conversation_notice(
                         state,
-                        "尚未配置模型，请先在“设置 → 模型与服务”添加渠道和模型。",
+                        "尚未配置模型，请先在“设置 → 模型与服务”添加服务和模型。",
                         "warning",
                     )
                     QTimer.singleShot(0, lambda: self.open_settings("模型与服务"))

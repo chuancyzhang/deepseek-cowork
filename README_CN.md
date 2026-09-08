@@ -1,6 +1,6 @@
 # DeepSeek Cowork
 
-[中文](README_CN.md) | [English](README.md) | [文档中心](docs/index.md)
+[中文](README_CN.md) | [English](README.md) | [文档中心](docs/index.md) | [设置与能力管理](docs/unified-management.md)
 
 DeepSeek Cowork 是一个面向 Windows 的本地桌面 Agent 工作台。它把对话、项目文件、
 Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观察、可干预、可恢复的工作流。

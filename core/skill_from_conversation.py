@@ -17,7 +17,7 @@ from core.memory_update import collect_llm_content, estimate_tokens
 
 DEFAULT_TRANSCRIPT_CHAR_LIMIT = 120_000
 DEFAULT_EVIDENCE_CHAR_LIMIT = 120_000
-SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+SKILL_NAME_RE = re.compile(r"[^\W_][\w-]{0,127}")
 WINDOWS_USER_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s\"']+")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\(?:[^\\\r\n\"']+\\)*[^\\\r\n\"']*")
 WINDOWS_FORWARD_PATH_RE = re.compile(r"(?i)\b[A-Z]:/(?:[^/\s\"']+/)*[^/\s\"']*")
@@ -121,7 +121,10 @@ class DraftValidationResult:
 
 
 def is_valid_skill_name(skill_name):
-    return bool(SKILL_NAME_RE.match(str(skill_name or "").strip()))
+    name = str(skill_name or "").strip()
+    return bool(SKILL_NAME_RE.fullmatch(name)) and name.upper() not in {
+        "CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(1, 10)], *[f"LPT{i}" for i in range(1, 10)]
+    }
 
 
 def _string(value, default=""):
@@ -802,7 +805,7 @@ def normalize_skill_draft(payload, fallback_title="", mode="create"):
         tool_refs = extract_impl_tool_refs(impl_py)
     draft = {
         "mode": mode,
-        "skill_name": _slugify(skill_name),
+        "skill_name": skill_name if is_valid_skill_name(skill_name) else _slugify(skill_name),
         "description": description,
         "description_cn": _string(payload.get("description_cn")),
         "usage_guidelines": _string(payload.get("usage_guidelines")),
@@ -1343,7 +1346,7 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
         issues.append(DraftValidationIssue(severity, code, message, resource_path))
 
     if normalized.get("mode") == "create" and not is_valid_skill_name(normalized.get("skill_name")):
-        add("error", "invalid_skill_name", "Skill 名称只能包含英文字母、数字和连字符。")
+        add("error", "invalid_skill_name", "技能名称支持中文、字母、数字、下划线和连字符，最长 128 字。")
     if normalized.get("mode") == "create" and not normalized.get("description"):
         add("error", "missing_description", "Skill 说明不能为空。")
     if not normalized.get("instructions_md") and not normalized.get("usage_guidelines") and not normalized.get("experience_items"):
@@ -1600,7 +1603,7 @@ def save_new_skill(draft, target_root=None):
     draft = normalize_skill_draft(draft)
     skill_name = draft["skill_name"]
     if not is_valid_skill_name(skill_name):
-        return SaveResult(False, "Skill name must contain only letters, numbers, and hyphens.")
+        return SaveResult(False, "技能名称支持中文、字母、数字、下划线和连字符，最长 128 字，不能使用系统保留名称。")
 
     validation = validate_conversation_skill_draft(
         draft,

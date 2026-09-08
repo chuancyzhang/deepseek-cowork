@@ -44,6 +44,13 @@ class SkillHubCache:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise RuntimeError(f"SkillHub 缓存读取失败，请点击重试重新获取：{exc}") from exc
 
+    def clear(self):
+        # Only catalogue cache entries; installed skills and credentials are elsewhere.
+        if os.path.isdir(self.directory):
+            for name in os.listdir(self.directory):
+                if re.fullmatch(r"[a-f0-9]{64}\.json", name):
+                    os.remove(os.path.join(self.directory, name))
+
     def put(self, key, data):
         temporary = None
         try:
@@ -85,6 +92,14 @@ class SkillHubCache:
             raise ValueError("图标必须为不超过 512 KB 的有效数据")
         self._icon_cache().put(url, base64.b64encode(data).decode("ascii"))
 
+
+
+def preferred_version(detail, selected=""):
+    """The published latest version is authoritative, not history-list order."""
+    versions = {entry.get("version") for entry in detail.get("versions", [])}
+    if selected and selected in versions:
+        return selected
+    return str((detail.get("latestVersion") or {}).get("version") or "")
 
 
 def identifier(value):
@@ -154,6 +169,8 @@ class SkillHubClient:
                 if response.is_redirect:
                     url = urljoin(url, response.headers["Location"])
                     continue
+                if response.status_code == 404:
+                    raise RuntimeError(f"SkillHub 未提供此版本的下载包（{version}，HTTP 404）。请刷新 SkillHub 后查看可用版本；若仍失败，可到官网查看发布状态。已安装技能未改变。")
                 if response.status_code != 200:
                     raise ValueError("图标下载失败")
                 content = bytearray()

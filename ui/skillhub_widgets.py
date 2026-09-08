@@ -109,10 +109,10 @@ class SkillHubCard(QFrame):
         header.addWidget(self.icon)
         header.addWidget(ClampedText(skill['name'], strong=True), 1)
         stage = state.get("stage")
-        label = "…" if stage == "running" else "重试" if stage == "error" else "✓" if installed else "+"
+        label = "安装中" if stage == "running" else "重试" if stage == "error" else "查看" if installed else "安装"
         self.action = QPushButton(label)
         self.action.setObjectName("SkillHubInstallAction")
-        self.action.setFixedSize(40, 32)
+        self.action.setFixedSize(68, 34)
         self.action.setStyleSheet(
             f"QPushButton#SkillHubInstallAction {{background: {T.bg_app}; color: {T.text_primary}; border: none; border-radius: {T.radius_sm}px; padding: 0; font-size: {T.font_size_section}px;}}"
             f"QPushButton#SkillHubInstallAction:hover {{color: {T.accent_ai};}}"

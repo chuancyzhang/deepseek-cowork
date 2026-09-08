@@ -81,7 +81,7 @@ class DefaultModelSettingsTests(unittest.TestCase):
 
     def test_cancel_does_not_change_saved_default(self):
         self.select_b()
-        with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
+        with patch("main.ProductMessageDialog.exec_result", return_value="discard"):
             self.dialog.request_reject()
         self.assertEqual(ConfigManager().get_selected_model_id(), "model-a")
 

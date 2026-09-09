@@ -22798,7 +22798,6 @@ class AssistantTurnGroup(QFrame):
             for bubble in self.stage_bubbles:
                 if bubble._has_thinking_details():
                     bubble.thinking_widget.setVisible(True)
-                    bubble.think_toggle_btn.setChecked(True)
         self._refresh_process_disclosure_text(*self._process_counts(self.process_result_bubble))
         self.sync_stage_visibility()
         log_sub_agent_runtime(

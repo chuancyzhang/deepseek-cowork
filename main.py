@@ -22530,6 +22530,7 @@ class AssistantTurnGroup(QFrame):
         self.process_expanded = True
         self.process_finalization_pending = False
         self.process_result_bubble = None
+        self.process_elapsed_seconds = None
         self.setObjectName("AssistantTurnGroup")
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -22645,6 +22646,17 @@ class AssistantTurnGroup(QFrame):
             parts.append(f"{stage_count} 个阶段")
         if tool_count:
             parts.append(f"{tool_count} 次 Tool 调用")
+        if self.process_elapsed_seconds is not None:
+            total_seconds = max(0, int(self.process_elapsed_seconds + 0.5))
+            minutes, seconds = divmod(total_seconds, 60)
+            hours, minutes = divmod(minutes, 60)
+            if hours:
+                duration = f"{hours} 小时 {minutes} 分 {seconds} 秒"
+            elif minutes:
+                duration = f"{minutes} 分 {seconds} 秒"
+            else:
+                duration = f"{seconds} 秒"
+            parts.append(f"耗时 {duration}")
         summary = " · ".join(parts) or "执行详情"
         arrow = "▴" if self.process_disclosure.isChecked() else "▾"
         self.process_disclosure.setText(f" 执行过程 · {summary}  {arrow}")
@@ -25954,6 +25966,7 @@ class SessionState:
         self.last_agent_bubble = None
         self.active_agent_turn_group = None
         self.live_agent_turn_groups = []
+        self.live_run_started_at = None
         self.agent_turn_group_sequence = 0
         self.agent_stage_closed = False
         self.llm_worker = None
@@ -35548,6 +35561,10 @@ class MainWindow(QMainWindow):
 
     def _finalize_live_turn_process_groups(self, state):
         groups = list(getattr(state, "live_agent_turn_groups", []) or [])
+        started_at = getattr(state, "live_run_started_at", None)
+        elapsed_seconds = (
+            max(0.0, time.monotonic() - started_at) if started_at is not None else None
+        )
         result_group = getattr(state, "active_agent_turn_group", None)
         result_bubble = (
             result_group.active_stage()
@@ -35563,9 +35580,11 @@ class MainWindow(QMainWindow):
             )
             raise RuntimeError("实时执行过程终态缺少当前结果组，无法安全折叠。")
         state.live_agent_turn_groups = []
+        state.live_run_started_at = None
         for group in groups:
             if group is None or not _qt_object_alive(group):
                 continue
+            group.process_elapsed_seconds = elapsed_seconds
             if group is result_group:
                 group.finalize_non_result_stages(result_bubble)
                 group.request_process_finalization(result_bubble)
@@ -35585,6 +35604,7 @@ class MainWindow(QMainWindow):
         log_sub_agent_runtime(
             "ui_assistant_terminal_groups_finalized",
             session_id=state.session_id,
+            elapsed_seconds=elapsed_seconds,
             terminal_status=str(getattr(state, "session_status", "") or ""),
             group_count=len(groups),
             result_group_id=str(getattr(result_group, "group_id", "") or ""),
@@ -51046,6 +51066,7 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_observability_view(state.session_id)
         self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         self.set_session_phase("Preparing", state.session_id)
+        state.live_run_started_at = time.monotonic()
         self.set_session_status("running", state.session_id)
         state.active_run_retry_context = copy.deepcopy(run_retry_context)
         state.failed_run_retry_context = {}

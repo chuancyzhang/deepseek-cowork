@@ -58,6 +58,8 @@ TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "connection closed",
     "connection error",
     "remote protocol error",
+    "incomplete chunked read",
+    "peer closed connection without sending complete message body",
     "server disconnected",
     "ssl error",
     "bad gateway",
@@ -117,7 +119,8 @@ def is_transient_model_api_error(error):
         return True
     if isinstance(
         error,
-        (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError),
+        (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError,
+         httpx.RemoteProtocolError),
     ):
         return True
     text = str(error or "").strip().lower()
@@ -235,6 +238,7 @@ def retry_model_api_stream(stream_factory, request_context=None):
                     reported_error = ProviderStreamError(
                         str(chunk.get("content") or "Unknown provider stream error")
                     )
+                    reported_error.error_type = str(chunk.get("error_type") or "ProviderStreamError")
                     break
                 if chunk_type in SEMANTIC_PROVIDER_CHUNK_TYPES:
                     emitted_semantic_output = True
@@ -269,7 +273,8 @@ def retry_model_api_stream(stream_factory, request_context=None):
             if not can_retry:
                 for chunk in failed_terminal_chunks:
                     yield chunk
-                yield {"type": "error", "content": str(exc)}
+                yield {"type": "error", "content": str(exc),
+                       "error_type": getattr(exc, "error_type", type(exc).__name__)}
                 return
             retry_number = attempt_index + 1
             retry_after = _retry_after_seconds(exc)

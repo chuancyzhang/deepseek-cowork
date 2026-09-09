@@ -1545,7 +1545,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 if stream_closed.is_set():
                     return
                 stream_closed.set()
-                _log_daemon(f"send_message_stream client disconnected session_id={session_id} reason={reason}")
+                _log_daemon(
+                    f"send_message_stream client disconnected session_id={session_id} "
+                    f"run_id={request_id} last_sequence={last_stream_sequence['value']} reason={reason}"
+                )
                 try:
                     state.runtime_journal.append_event(
                         session_id,
@@ -1585,6 +1588,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     return False
 
             def send_stream(payload):
+                payload = dict(payload)
+                payload["session_id"] = session_id
+                payload["run_id"] = request_id
+                payload["source_message_id"] = str(
+                    getattr(worker_holder.get("worker"), "current_assistant_message_id", "") or ""
+                )
                 try:
                     event = state.runtime_journal.append_event(
                         session_id,

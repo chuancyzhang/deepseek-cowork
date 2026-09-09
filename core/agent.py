@@ -2877,6 +2877,18 @@ class LLMWorker(QThread):
                     )
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     attempt_id = f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}"
+                    assistant_message_id = uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"cowork-assistant:{self.session_id}:{self.request_id}:{self.turn_id}:{turn_count}",
+                    ).hex
+                    self.current_assistant_message_id = assistant_message_id
+                    self.observability_signal.emit({
+                        "type": "assistant_message_started",
+                        "message_id": assistant_message_id,
+                        "turn_id": self.turn_id,
+                        "run_id": self.request_id,
+                        "timestamp": time.time(),
+                    })
                     attempt_record = self._record_provider_attempt(attempt_id, {
                         "run_id": self.request_id or self.turn_id or self.session_id,
                         "turn_id": self.turn_id,
@@ -2979,6 +2991,7 @@ class LLMWorker(QThread):
                     response_items_buffer = []
                     output_image_parts_buffer = []
                     provider_error_message = None
+                    provider_error_type = "ProviderStreamError"
                     provider_terminal_status = ""
                     tool_round_context = None
                     stream = None
@@ -3151,6 +3164,7 @@ class LLMWorker(QThread):
                             # 4. Handle Error
                             elif type_ == "error":
                                 provider_error_message = chunk.get("content") or "Unknown error"
+                                provider_error_type = str(chunk.get("error_type") or "ProviderStreamError")
                                 self.step_signal.emit(f"Provider Error: {provider_error_message}")
                                 self.output_signal.emit(f"Provider Error: {provider_error_message}")
                             elif type_ == "provider_request":
@@ -3377,6 +3391,7 @@ class LLMWorker(QThread):
                             self._append_pending_guidance(current_messages, generated_messages, close=True)
                             self.finished_signal.emit({
                                 "error": str(provider_error_message),
+                                "error_type": provider_error_type,
                                 "generated_messages": generated_messages,
                                 "turn_id": self.turn_id,
                                 "request_id": self.request_id,
@@ -3411,6 +3426,7 @@ class LLMWorker(QThread):
                         self._append_pending_guidance(current_messages, generated_messages, close=True)
                         self.finished_signal.emit({
                             "error": str(provider_error_message),
+                            "error_type": provider_error_type,
                             "generated_messages": generated_messages,
                             "turn_id": self.turn_id,
                             "request_id": self.request_id,
@@ -3522,7 +3538,7 @@ class LLMWorker(QThread):
 
                     # Append Assistant Message to History (Manual reconstruction)
                     assistant_msg = {
-                        "id": uuid.uuid4().hex,
+                        "id": assistant_message_id,
                         "role": "assistant",
                         "content": content,
                         "meta": {

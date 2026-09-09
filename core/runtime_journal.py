@@ -1,4 +1,5 @@
 import hashlib
+import errno
 import json
 import os
 import sys
@@ -32,6 +33,7 @@ class RuntimeJournal:
     _thread_locks = {}
 
     def __init__(self, history_dir):
+        self._diagnostic_context = threading.local()
         self.root = os.path.join(os.path.abspath(history_dir), "runtime_journal_v2")
         os.makedirs(self.root, exist_ok=True)
 
@@ -174,8 +176,11 @@ class RuntimeJournal:
     def _read(self, path, default=None):
         if not os.path.isfile(path):
             return default
-        with open(path, "r", encoding="utf-8") as handle:
-            envelope = json.load(handle)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                envelope = json.load(handle)
+        except OSError as exc:
+            raise self._write_error(operation="read_record", path=path, exc=exc) from exc
         if int(envelope.get("journal_version") or 0) != RUNTIME_JOURNAL_VERSION:
             raise RuntimeJournalError(f"unsupported runtime journal version: {path}")
         payload = envelope.get("payload")
@@ -210,8 +215,14 @@ class RuntimeJournal:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _last_nonempty_line(self, path):
+        try:
+            return self._read_last_nonempty_line(path)
+        except OSError as exc:
+            raise self._write_error(operation="read_event_tail", path=path, exc=exc) from exc
+
     @staticmethod
-    def _last_nonempty_line(path):
+    def _read_last_nonempty_line(path):
         if not os.path.isfile(path) or os.path.getsize(path) == 0:
             return ""
         with open(path, "rb") as handle:
@@ -242,10 +253,13 @@ class RuntimeJournal:
         run_id="",
         writer_owner="",
     ):
+        context = getattr(self._diagnostic_context, "value", {})
         return RuntimeJournalError(
             f"runtime journal write failed: operation={operation} path={path} "
             f"pid={os.getpid()} process_role={self._process_role()} "
-            f"run_id={str(run_id or '')} writer_owner={str(writer_owner or '')} "
+            f"session_id={context.get('session_id', '')} "
+            f"run_id={str(run_id or context.get('run_id', ''))} writer_owner={str(writer_owner or '')} "
+            f"wait_ms={context.get('wait_ms', 0):.1f} "
             f"errno={getattr(exc, 'errno', None)} "
             f"winerror={getattr(exc, 'winerror', None)} error={exc}"
         )
@@ -264,13 +278,20 @@ class RuntimeJournal:
         if os.name == "nt":
             import msvcrt
 
-            handle.seek(0)
-            if not handle.read(1):
+            deadline = time.monotonic() + 10.0
+            while True:
                 handle.seek(0)
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    # CRT locking reports byte-range contention as EACCES.
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(0.05, remaining))
             return
         import fcntl
 
@@ -289,16 +310,43 @@ class RuntimeJournal:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
-    def session_lock(self, session_id):
+    def session_lock(self, session_id, run_id=""):
         lock_path = os.path.join(self._session_dir(session_id), "session.lock")
         thread_lock = self._thread_lock(lock_path)
         with thread_lock:
-            with open(lock_path, "a+b") as handle:
-                self._lock_file(handle)
+            started = time.monotonic()
+            def failure(operation, exc):
+                return RuntimeJournalError(
+                    f"runtime journal lock failed: operation={operation} path={lock_path} "
+                    f"session_id={session_id} run_id={run_id} pid={os.getpid()} "
+                    f"process_role={self._process_role()} "
+                    f"wait_ms={(time.monotonic() - started) * 1000:.1f} "
+                    f"errno={getattr(exc, 'errno', None)} "
+                    f"winerror={getattr(exc, 'winerror', None)} error={exc}"
+                )
+            try:
+                handle = open(lock_path, "a+b")
+            except OSError as exc:
+                raise failure("open_lock", exc) from exc
+            with handle:
+                try:
+                    self._lock_file(handle)
+                except OSError as exc:
+                    raise failure("acquire_lock", exc) from exc
+                previous_context = getattr(self._diagnostic_context, "value", {})
+                self._diagnostic_context.value = {
+                    "session_id": str(session_id), "run_id": str(run_id),
+                    "wait_ms": (time.monotonic() - started) * 1000,
+                }
                 try:
                     yield
                 finally:
-                    self._unlock_file(handle)
+                    try:
+                        self._unlock_file(handle)
+                    except OSError as exc:
+                        raise failure("release_lock", exc) from exc
+                    finally:
+                        self._diagnostic_context.value = previous_context
 
     def load_manifest(self, session_id):
         payload = self._read(self._manifest_path(session_id), default=None)
@@ -484,7 +532,7 @@ class RuntimeJournal:
         return record
 
     def get_run(self, session_id, run_id):
-        with self.session_lock(session_id):
+        with self.session_lock(session_id, run_id):
             record = self._read(
                 self._record_path(session_id, "runs", run_id),
                 default=None,
@@ -514,7 +562,7 @@ class RuntimeJournal:
         )
 
     def update_run(self, session_id, run_id, patch):
-        with self.session_lock(session_id):
+        with self.session_lock(session_id, run_id):
             path = self._record_path(session_id, "runs", run_id)
             record = self._read(path, default=None)
             if record is None:
@@ -593,7 +641,7 @@ class RuntimeJournal:
             return record
 
     def append_event(self, session_id, run_id, event_type, payload=None, provider_sequence=None):
-        with self.session_lock(session_id):
+        with self.session_lock(session_id, run_id):
             run_path = self._record_path(session_id, "runs", run_id)
             record = self._read(run_path, default=None)
             if record is None:
@@ -620,7 +668,7 @@ class RuntimeJournal:
             return event
 
     def read_events(self, session_id, run_id, starting_after=0):
-        with self.session_lock(session_id):
+        with self.session_lock(session_id, run_id):
             return self._read_events_unlocked(session_id, run_id, starting_after)
 
     def _read_events_unlocked(self, session_id, run_id, starting_after=0):
@@ -656,7 +704,7 @@ class RuntimeJournal:
             "updated_at": time.time(),
         })
         path = self._attempt_path(session_id, attempt_id)
-        with self.session_lock(session_id):
+        with self.session_lock(session_id, patch.get("run_id", "")):
             existing = self._read_attempt_unlocked(session_id, attempt_id) or {}
             patch.setdefault("created_at", existing.get("created_at") or time.time())
             try:

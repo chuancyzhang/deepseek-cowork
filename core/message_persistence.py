@@ -71,6 +71,19 @@ def project_provider_messages(messages, *, include_runtime_repairs=False):
         messages,
         include_runtime_repairs=include_runtime_repairs,
     )
+    canonical_ids = {
+        str(message.get("id") or "") for message in candidates
+        if not (message.get("meta") or {}).get("ui_visible_fragment")
+    }
+    # A displayed fragment is context only until its complete provider message
+    # exists. Keep the stored fragment at its original conversational position.
+    candidates = [
+        message for message in candidates
+        if not (
+            (message.get("meta") or {}).get("ui_visible_fragment")
+            and str((message.get("meta") or {}).get("ui_source_message_id") or "") in canonical_ids
+        )
+    ]
     projected, excluded_ids = project_canonical_messages(candidates)
     candidate_ids = {
         str(message.get("id") or "")

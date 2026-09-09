@@ -96,6 +96,7 @@ from core.chat_save_queue import (
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.runtime_journal import RuntimeJournal
 from core.conversation_render import (
+    project_visible_messages,
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
     is_ppt_agent_internal_stage_message,
@@ -18998,6 +18999,7 @@ class DaemonRequestWorker(QThread):
 
 
 class DaemonStreamWorker(QThread):
+    stream_state_signal = Signal(dict)
     finished_signal = Signal(object, str)
     thinking_signal = Signal(str)
     content_signal = Signal(str)
@@ -19082,8 +19084,15 @@ class DaemonStreamWorker(QThread):
             except Exception:
                 pass
     def _dispatch_stream_message(self, msg):
+        if (msg.get("session_id") and str(msg["session_id"]) != self.session_id) or (
+            msg.get("run_id") and str(msg["run_id"]) != self.request_id
+        ):
+            raise RuntimeError("Daemon stream identity mismatch")
         try:
-            self._last_sequence = max(self._last_sequence, int(msg.get("sequence") or 0))
+            sequence = int(msg.get("sequence") or 0)
+            if sequence > 0 and sequence <= self._last_sequence:
+                return False
+            self._last_sequence = max(self._last_sequence, sequence)
         except (TypeError, ValueError):
             pass
         message_type = msg.get("type")
@@ -19139,10 +19148,12 @@ class DaemonStreamWorker(QThread):
                 result["_streamed"] = True
             self.finished_signal.emit(result, self.session_id)
             return True
+        self.stream_state_signal.emit({"status": "connected", "sequence": self._last_sequence})
         return False
 
     def _reattach_until_terminal(self):
         consecutive_failures = 0
+        self.stream_state_signal.emit({"status": "reconnecting", "sequence": self._last_sequence})
         while not self._aborted:
             try:
                 response = self.client.attach_run(
@@ -19169,6 +19180,8 @@ class DaemonStreamWorker(QThread):
                 if status in {"completed", "failed", "interrupted", "cancelled"}:
                     final_result = run.get("final_result")
                     if isinstance(final_result, dict):
+                        final_result = dict(final_result)
+                        final_result["_runtime_terminal"] = status
                         return self._dispatch_stream_message(
                             {"type": "final", "result": final_result}
                         )
@@ -19184,7 +19197,17 @@ class DaemonStreamWorker(QThread):
                     return True
             else:
                 consecutive_failures += 1
-                if consecutive_failures >= 20:
+                log_sub_agent_runtime(
+                    "daemon_stream_reattach_failed", session_id=self.session_id,
+                    run_id=self.request_id, attempt=consecutive_failures,
+                    last_sequence=self._last_sequence,
+                    error=str((response or {}).get("error") or "invalid response"),
+                )
+                self.stream_state_signal.emit({
+                    "status": "reconnecting", "attempt": consecutive_failures,
+                    "sequence": self._last_sequence,
+                })
+                if consecutive_failures >= 6:
                     return False
             self.msleep(250)
         return True
@@ -19247,6 +19270,10 @@ class DaemonStreamWorker(QThread):
                 log_sub_agent_runtime(
                     "daemon_stream_worker_exception",
                     session_id=self.session_id,
+                    run_id=self.request_id,
+                    last_sequence=self._last_sequence,
+                    error_type=type(e).__name__,
+                    close_reason="read_timeout" if isinstance(e, TimeoutError) else "socket_error",
                     error=text,
                 )
                 if self._reattach_until_terminal():
@@ -19295,7 +19322,7 @@ class DaemonStopWorker(QThread):
 
 
 class DaemonAttachWorker(DaemonStreamWorker):
-    def __init__(self, client, session_id, run_id, turn_id="", parent=None):
+    def __init__(self, client, session_id, run_id, turn_id="", parent=None, starting_after=0):
         super().__init__(
             client,
             session_id,
@@ -19304,6 +19331,7 @@ class DaemonAttachWorker(DaemonStreamWorker):
             request_id=run_id,
             parent=parent,
         )
+        self._last_sequence = int(starting_after or 0)
 
     def run(self):
         log_sub_agent_runtime(
@@ -35978,6 +36006,27 @@ class MainWindow(QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
+            if event_type == "assistant_message_started":
+                source_id = str(event.get("message_id") or "")
+                state.active_source_message_id = source_id
+                state.replay_content_skip = (
+                    sum(len(str(message.get("content") or "")) for message in state.messages
+                        if (message.get("meta") or {}).get("ui_visible_fragment")
+                        and (message.get("meta") or {}).get("ui_source_message_id") == source_id)
+                    if getattr(state, "replaying_daemon_history", False) else 0
+                )
+                bubble = self._ensure_live_agent_stage(state)
+                if bubble is not None:
+                    previous_source = str(getattr(bubble, "ui_source_message_id", ""))
+                    if previous_source and previous_source != source_id:
+                        self.flush_session_content(state.session_id, final=True)
+                        self._close_live_agent_stage(state)
+                        state.current_content_buffer = ""
+                        state.current_thinking_buffer = ""
+                        state.last_flushed_content_buffer = ""
+                        bubble = self._append_live_thinking_segment(state)
+                    bubble.ui_source_message_id = source_id
+                return
             if event_type == "provider_request_start":
                 self._start_token_speed_monitor(state, event)
             elif event_type == "provider_request_finish":
@@ -38236,9 +38285,11 @@ class MainWindow(QMainWindow):
     def _render_history_span(self, state, span, insert_index=None):
         start = int(span.get("start") or 0)
         end = int(span.get("end") or start)
-        messages = state.messages[start:end]
+        messages = project_visible_messages(state.messages)[start:end]
         if not messages:
             return 0
+        if any((message.get("meta") or {}).get("ui_visible_fragment") for message in messages):
+            return self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)
         if messages[0].get("role") == "user" and not self._message_is_office_draft_request(messages[0]):
             before = state.chat_layout.count()
             inserted = self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)
@@ -48385,8 +48436,8 @@ a {{ overflow-wrap: anywhere; }}
             for stage_index, stage in enumerate(list(getattr(group, "stage_bubbles", []) or []), start=1):
                 if stage is None or not _qt_object_alive(stage):
                     continue
-                content = str(getattr(stage, "main_content_text", "") or "").strip()
-                if not content:
+                content = str(getattr(stage, "main_content_text", "") or "")
+                if not content.strip():
                     continue
                 stage_id = str(getattr(stage, "ui_stage_id", "") or f"{group_id}:stage-{stage_index}")
                 stage_key = (group_id, stage_id)
@@ -48407,6 +48458,8 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_turn_group_id": group_id,
                     "ui_stage_id": stage_id,
                     "ui_reply_kind": reply_kind,
+                    "ui_source_message_id": str(getattr(stage, "ui_source_message_id", "") or ""),
+                    "ui_visible_fragment": True,
                 }
                 if terminal:
                     meta.update({
@@ -48442,6 +48495,8 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_turn_group_id": group_id,
                     "ui_stage_id": stage_id,
                     "ui_reply_kind": reply_kind,
+                    "ui_source_message_id": str(getattr(fallback_bubble, "ui_source_message_id", "") or ""),
+                    "ui_visible_fragment": True,
                 }
                 if terminal:
                     meta.update({
@@ -48460,6 +48515,8 @@ a {{ overflow-wrap: anywhere; }}
         visible_messages = [message for group_messages in stage_groups for message in group_messages]
         if not visible_messages:
             return []
+        if outcome == "completed":
+            visible_messages[-1]["meta"]["ui_reply_kind"] = "final"
 
         existing_ids = {
             str(message.get("id") or "")
@@ -49495,6 +49552,7 @@ a {{ overflow-wrap: anywhere; }}
                 group_id=group.group_id,
             )
         group.add_stage(bubble)
+        bubble.ui_source_message_id = str(getattr(state, "active_source_message_id", "") or "")
         state.temp_thinking_bubble = bubble
         state.last_agent_bubble = bubble
         state.agent_stage_closed = False
@@ -51072,6 +51130,11 @@ a {{ overflow-wrap: anywhere; }}
         state.failed_run_retry_context = {}
         state.active_turn_id = next_turn_id
         state.active_turn_request_id = submit_request_id
+        state.active_source_message_id = ""
+        state.replaying_daemon_history = False
+        state.replay_content_skip = 0
+        state.daemon_cursor_run_id = submit_request_id
+        state.daemon_applied_sequence = 0
         state.active_turn_user_message_id = user_message_id
         state.active_history_writer_owner = history_writer_owner
         if is_first_submit:
@@ -52246,6 +52309,11 @@ a {{ overflow-wrap: anywhere; }}
 
     def _connect_daemon_worker_signals(self, state, worker, turn_id):
         request_id = str(getattr(worker, "request_id", "") or "")
+        worker.stream_state_signal.connect(
+            lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
+                self._handle_daemon_stream_state(data, sid, tid, rid),
+            Qt.QueuedConnection,
+        )
         self._bind_run_worker_finished(
             state,
             worker,
@@ -52304,6 +52372,43 @@ a {{ overflow-wrap: anywhere; }}
             Qt.QueuedConnection,
         )
 
+    def _handle_daemon_stream_state(self, data, session_id, turn_id, run_id):
+        state = self.get_session(session_id)
+        if not self._event_matches_active_run(state, turn_id, run_id):
+            return
+        if getattr(state, "daemon_cursor_run_id", "") != run_id:
+            state.daemon_cursor_run_id = run_id
+            state.daemon_applied_sequence = 0
+        if data.get("status") == "connected":
+            state.daemon_applied_sequence = max(
+                int(getattr(state, "daemon_applied_sequence", 0)),
+                int(data.get("sequence") or 0),
+            )
+            if getattr(state, "daemon_transport_state", "") != "connected":
+                self.set_session_phase("Analyzing", session_id)
+        else:
+            state.turn_steerable = False
+            self.set_session_phase("正在重新连接", session_id)
+        state.daemon_transport_state = str(data.get("status") or "")
+
+    def _reconnect_daemon_stream(self, session_id, run_id):
+        state = self.get_session(session_id)
+        if not state or str(state.active_turn_request_id or "") != str(run_id):
+            return
+        worker = getattr(state, "daemon_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        if getattr(state, "stop_pending", False) or not state.daemon_running:
+            return
+        self.set_session_phase("正在重新连接", session_id)
+        state.daemon_worker = DaemonAttachWorker(
+            self.daemon_client, session_id, run_id, turn_id=state.active_turn_id,
+            starting_after=(getattr(state, "daemon_applied_sequence", 0)
+                            if getattr(state, "daemon_cursor_run_id", "") == run_id else 0),
+        )
+        self._connect_daemon_worker_signals(state, state.daemon_worker, state.active_turn_id)
+        state.daemon_worker.start()
+
     def attach_active_daemon_run_if_needed(self, state):
         if not state or self._session_has_current_execution(state):
             return False
@@ -52348,6 +52453,7 @@ a {{ overflow-wrap: anywhere; }}
             turn_id = raw_turn_id
         state.active_turn_id = turn_id
         state.active_turn_request_id = run_id
+        state.replaying_daemon_history = True
         state.active_turn_user_message_id = str(run.get("user_message_id") or "")
         state.daemon_running = True
         state.turn_steerable = False
@@ -52511,6 +52617,27 @@ a {{ overflow-wrap: anywhere; }}
             has_error=isinstance(result, dict) and "error" in result,
             streamed=isinstance(result, dict) and bool(result.get("_streamed")),
         )
+        if not self._event_matches_active_run(state, turn_id, request_id):
+            return
+        if isinstance(result, dict) and result.get("_transport_disconnected"):
+            state.daemon_worker = None
+            state.daemon_running = True
+            state.turn_steerable = False
+            state.daemon_transport_state = "disconnected"
+            self.set_session_phase("连接中断，后台状态待确认", state.session_id)
+            notice = self._show_conversation_notice(
+                state, "连接中断，后台状态待确认。已显示内容保留，可重新连接或停止。", "warning",
+            )
+            reconnect = QPushButton("重新连接")
+            reconnect.setStyleSheet(product_button_style("secondary"))
+            reconnect.clicked.connect(
+                lambda checked=False, sid=state.session_id, rid=request_id:
+                    self._reconnect_daemon_stream(sid, rid)
+            )
+            notice.layout().addWidget(reconnect)
+            if state.session_id == self.current_session_id:
+                self.normalize_session_ui(state)
+            return
         state.daemon_running = False
         state.turn_steerable = False
         state.daemon_worker = None
@@ -53107,6 +53234,12 @@ a {{ overflow-wrap: anywhere; }}
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        skip = min(len(text or ""), int(getattr(state, "replay_content_skip", 0) or 0))
+        if skip:
+            state.replay_content_skip -= skip
+            text = text[skip:]
+            if not text:
+                return
         if getattr(state, "provider_retry_attempt", 0):
             log_sub_agent_runtime(
                 "ui_provider_retry_resumed",
@@ -53128,6 +53261,20 @@ a {{ overflow-wrap: anywhere; }}
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
 
+    def _visible_source_tail(self, state, text, bubble):
+        source = str(getattr(bubble, "ui_source_message_id", "") or "")
+        if not source:
+            return str(text or "")
+        stage_id = str(getattr(bubble, "ui_stage_id", "") or "")
+        prefix = "".join(
+            str(message.get("content") or "") for message in state.messages
+            if (message.get("meta") or {}).get("ui_visible_fragment")
+            and (message.get("meta") or {}).get("ui_source_message_id") == source
+            and (message.get("meta") or {}).get("ui_stage_id") != stage_id
+        )
+        text = str(text or "")
+        return text[len(prefix):] if prefix and text.startswith(prefix) else text
+
     def handle_content_snapshot(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
         if not state or not self._event_matches_active_run(state, turn_id, request_id):
@@ -53137,7 +53284,9 @@ a {{ overflow-wrap: anywhere; }}
         ):
             return
         canonical_content = str(text or "")
-        self._ensure_live_agent_stage(state)
+        bubble = self._ensure_live_agent_stage(state)
+        canonical_content = self._visible_source_tail(state, canonical_content, bubble)
+        state.replay_content_skip = 0
         state.current_content_buffer = canonical_content
         state.last_flushed_content_buffer = ""
         if str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():
@@ -53245,10 +53394,7 @@ a {{ overflow-wrap: anywhere; }}
         raw_messages = generated_messages_raw if isinstance(generated_messages_raw, list) else []
         persistable_messages = filter_persistable_messages(raw_messages)
         self._annotate_generated_messages_for_unified_turn(state, persistable_messages)
-        persistable_messages = self._exclude_generated_rounds_committed_at_guidance(
-            state.messages,
-            persistable_messages,
-        )
+        # Keep complete provider rounds; visible fragments use source identities.
         return persistable_messages, len(raw_messages) - len(persistable_messages)
 
     def _annotate_generated_messages_for_unified_turn(self, state, generated_messages):
@@ -53277,7 +53423,15 @@ a {{ overflow-wrap: anywhere; }}
             if all(key):
                 ordered_stages.append(key)
 
-        assistant_index = 0
+        stage_by_source = {}
+        for group in getattr(state, "live_agent_turn_groups", []) or []:
+            for bubble in getattr(group, "stage_bubbles", []) or []:
+                source = str(getattr(bubble, "ui_source_message_id", "") or "")
+                if source:
+                    stage_by_source[source] = (
+                        str(getattr(bubble, "ui_turn_group_id", "")),
+                        str(getattr(bubble, "ui_stage_id", "")),
+                    )
         tool_stage_by_id = {
             str(event.get("tool_call_id")): (
                 str(event.get("group_id") or ""),
@@ -53295,9 +53449,7 @@ a {{ overflow-wrap: anywhere; }}
             role = str(message.get("role") or "")
             key = last_key
             if role == "assistant":
-                if assistant_index < len(ordered_stages):
-                    key = ordered_stages[assistant_index]
-                assistant_index += 1
+                key = stage_by_source.get(str(message.get("id") or ""), ("", ""))
                 meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
                 meta.update({
                     "ui_turn_id": str(getattr(state, "active_turn_id", "")),
@@ -53815,6 +53967,10 @@ a {{ overflow-wrap: anywhere; }}
                     **checkpoint_patch,
                 )
             generated_messages_raw = result.get("generated_messages", [])
+            self._append_visible_assistant_stages(
+                state, turn_id=turn_id or state.active_turn_id, run_id=run_id,
+                outcome=failure_status, fallback_bubble=bubble,
+            )
             persistable_generated_messages, persistence_filtered_count = (
                 self._prepare_generated_messages_for_turn(
                     state,
@@ -53991,6 +54147,19 @@ a {{ overflow-wrap: anywhere; }}
                 finished_at=time.time(),
             )
         generated_messages_raw = result.get("generated_messages", [])
+        if not content:
+            content = next((str(message.get("content") or "")
+                            for message in reversed(generated_messages_raw or [])
+                            if isinstance(message, dict) and message.get("role") == "assistant"
+                            and not message.get("tool_calls")), "")
+        display_content = self._visible_source_tail(state, content, bubble)
+        if content:
+            state.current_content_buffer = display_content
+            bubble.set_main_content(display_content, content_parts=content_parts, final=False)
+        self._append_visible_assistant_stages(
+            state, turn_id=turn_id or state.active_turn_id, run_id=run_id,
+            outcome="completed", fallback_bubble=bubble,
+        )
         persistable_generated_messages, persistence_filtered_count = (
             self._prepare_generated_messages_for_turn(
                 state,
@@ -54074,7 +54243,7 @@ a {{ overflow-wrap: anywhere; }}
             interval_ms = 30
             total_ms = int(max((duration or 0) * 1000, interval_ms))
             chunk_size = max(1, int(len(reasoning) * interval_ms / total_ms))
-            bubble.set_main_content(content, content_parts=content_parts, final=False)
+            bubble.set_main_content(display_content, content_parts=content_parts, final=False)
 
             timer = QTimer(bubble)
             bubble._thinking_replay_timer = timer
@@ -54093,10 +54262,10 @@ a {{ overflow-wrap: anywhere; }}
             timer.start(interval_ms)
         elif should_replay_thinking:
             bubble.update_thinking(reasoning, duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts, final=False)
+            bubble.set_main_content(display_content, content_parts=content_parts, final=False)
         else:
             bubble.update_thinking(duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts, final=False)
+            bubble.set_main_content(display_content, content_parts=content_parts, final=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:
@@ -54178,7 +54347,7 @@ a {{ overflow-wrap: anywhere; }}
         history_commit_error = str(result.get("_history_commit_error") or "").strip()
         if history_commit_error:
             bubble.set_source_message_id(assistant_source_message_id)
-            bubble.set_main_content(content, content_parts=content_parts, final=True)
+            bubble.set_main_content(display_content, content_parts=content_parts, final=True)
             self._fail_terminal_persistence(
                 state,
                 bubble,
@@ -54310,7 +54479,7 @@ a {{ overflow-wrap: anywhere; }}
         bubble.set_source_message_id(assistant_source_message_id)
         internal_ppt_stage = str(getattr(state, "ppt_agent_internal_stage", "") or "").strip()
         bubble.set_main_content(
-            "" if internal_ppt_stage else content,
+            "" if internal_ppt_stage else display_content,
             content_parts=[] if internal_ppt_stage else content_parts,
             final=True,
         )

@@ -1,4 +1,44 @@
 import json
+import copy
+
+
+def project_visible_messages(messages):
+    """Hide only text represented by explicitly linked, persisted fragments.
+
+    Canonical messages and tool rounds stay in the ledger. This is a read-only
+    display projection; legacy messages without source identities are untouched.
+    """
+    represented = {}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        meta = message.get("meta") or {}
+        source = str(meta.get("ui_source_message_id") or "")
+        if source and meta.get("ui_visible_fragment"):
+            represented[source] = represented.get(source, "") + str(message.get("content") or "")
+    projected = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            projected.append(message)
+            continue
+        if str(message.get("id") or "") in represented:
+            message = copy.deepcopy(message)
+            visible = represented[str(message["id"])]
+            content = str(message.get("content") or "")
+            if not content.startswith(visible):
+                # Never hide unrepresented provider output on a mapping conflict.
+                projected.append(message)
+                continue
+            message["content"] = content[len(visible):]
+            if isinstance(message.get("content_parts"), list):
+                message["content_parts"] = [
+                    part for part in message["content_parts"]
+                    if isinstance(part, dict) and part.get("type") != "text"
+                ]
+            message.setdefault("meta", {})["ui_reply_kind"] = "stage"
+            message["meta"]["ui_stage_id"] = f"provider:{message['id']}"
+        projected.append(message)
+    return projected
 
 
 def _safe_jsonable(value):
@@ -130,6 +170,7 @@ def _finalize_assistant_group(group):
 
 
 def build_conversation_render_items(messages):
+    messages = project_visible_messages(messages)
     items = []
     assistant_group = None
 

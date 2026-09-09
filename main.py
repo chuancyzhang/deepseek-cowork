@@ -38283,7 +38283,7 @@ class MainWindow(QMainWindow):
     def _render_history_span(self, state, span, insert_index=None):
         start = int(span.get("start") or 0)
         end = int(span.get("end") or start)
-        messages = project_visible_messages(state.messages)[start:end]
+        messages = project_visible_messages(state.messages, start=start, end=end)
         if not messages:
             return 0
         if any((message.get("meta") or {}).get("ui_visible_fragment") for message in messages):
@@ -48435,7 +48435,7 @@ a {{ overflow-wrap: anywhere; }}
                 if stage is None or not _qt_object_alive(stage):
                     continue
                 content = str(getattr(stage, "main_content_text", "") or "")
-                if not content.strip():
+                if not content.strip() and not str(getattr(stage, "ui_source_message_id", "") or ""):
                     continue
                 stage_id = str(getattr(stage, "ui_stage_id", "") or f"{group_id}:stage-{stage_index}")
                 stage_key = (group_id, stage_id)
@@ -48458,6 +48458,7 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_reply_kind": reply_kind,
                     "ui_source_message_id": str(getattr(stage, "ui_source_message_id", "") or ""),
                     "ui_visible_fragment": True,
+                    "ui_display_anchor_only": not bool(content.strip()),
                 }
                 if terminal:
                     meta.update({
@@ -48513,7 +48514,7 @@ a {{ overflow-wrap: anywhere; }}
         visible_messages = [message for group_messages in stage_groups for message in group_messages]
         if not visible_messages:
             return []
-        if outcome == "completed":
+        if outcome == "completed" and str(visible_messages[-1].get("content") or "").strip():
             visible_messages[-1]["meta"]["ui_reply_kind"] = "final"
 
         existing_ids = {

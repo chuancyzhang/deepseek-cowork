@@ -80,8 +80,11 @@ def project_provider_messages(messages, *, include_runtime_repairs=False):
     candidates = [
         message for message in candidates
         if not (
-            (message.get("meta") or {}).get("ui_visible_fragment")
-            and str((message.get("meta") or {}).get("ui_source_message_id") or "") in canonical_ids
+            (message.get("meta") or {}).get("ui_display_anchor_only")
+            or (
+                (message.get("meta") or {}).get("ui_visible_fragment")
+                and str((message.get("meta") or {}).get("ui_source_message_id") or "") in canonical_ids
+            )
         )
     ]
     projected, excluded_ids = project_canonical_messages(candidates)

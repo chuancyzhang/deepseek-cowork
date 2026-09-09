@@ -1,44 +1,137 @@
 import json
 import copy
+import logging
 
 
-def project_visible_messages(messages):
-    """Hide only text represented by explicitly linked, persisted fragments.
+def project_visible_messages(messages, *, start=0, end=None):
+    """Join provider rounds onto display anchors, without changing the ledger.
 
-    Canonical messages and tool rounds stay in the ledger. This is a read-only
-    display projection; legacy messages without source identities are untouched.
+    Range arguments address ORIGINAL ledger rows, not the shorter projection.
+    This keeps lazy history paging stable when late tool results move to anchors.
+    Identity lookup is bounded by ordinary user messages; guidance is a display
+    boundary inside that turn, not a new provider conversation.
     """
-    represented = {}
-    for message in messages or []:
-        if not isinstance(message, dict):
+    messages = list(messages or [])
+    slots = [[message] for message in messages]
+    fragments = {}
+    scopes = []
+    scope = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, dict):
+            if message.get("role") == "user" and not is_same_turn_guidance_message(message):
+                scope = index
+            meta = message.get("meta") or {}
+            source = str(meta.get("ui_source_message_id") or "")
+            if source and meta.get("ui_visible_fragment"):
+                fragments.setdefault((scope, source), []).append(index)
+        scopes.append(scope)
+
+    tool_anchors = {}
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if (message.get("meta") or {}).get("ui_visible_fragment"):
+            continue
+        source = str(message.get("id") or "")
+        anchors = fragments.get((scopes[index], source), [])
+        if not anchors:
+            continue
+        visible = "".join(str(messages[i].get("content") or "") for i in anchors)
+        content = str(message.get("content") or "")
+        if not content.startswith(visible):
+            logging.getLogger(__name__).warning(
+                "history_projection_source_conflict source_id=%s ledger_index=%s anchors=%s",
+                source, index, anchors,
+            )
+            continue  # Preserve both records when the identity/content contract fails.
+        for anchor in anchors:
+            slots[anchor][0] = copy.deepcopy(slots[anchor][0])
+        first = slots[anchors[0]][0]
+        last = slots[anchors[-1]][0]
+        last["content"] = str(last.get("content") or "") + content[len(visible):]
+        # Each fragment retains its own text and original stage/group identity.
+        for anchor in anchors:
+            fragment = slots[anchor][0]
+            fragment["content_parts"] = [
+                {"type": "text", "text": str(fragment.get("content") or "")}
+            ] + [part for part in fragment.get("content_parts") or []
+                 if isinstance(part, dict) and part.get("type") != "text"]
+        for part in message.get("content_parts") or []:
+            if isinstance(part, dict) and part.get("type") != "text" and part not in last["content_parts"]:
+                last["content_parts"].append(copy.deepcopy(part))
+        if message.get("reasoning_content") or message.get("reasoning"):
+            first["reasoning_content"] = message.get("reasoning_content") or message.get("reasoning")
+        calls = message.get("tool_calls") or []
+        if calls:
+            last["tool_calls"] = copy.deepcopy(calls)
+            last.setdefault("meta", {})["ui_reply_kind"] = "stage"
+        for call in calls:
+            if isinstance(call, dict) and call.get("id"):
+                tool_anchors[(scopes[index], str(call["id"]))] = anchors[-1]
+        slots[index] = []
+
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        anchor = tool_anchors.get((scopes[index], str(message.get("tool_call_id") or "")))
+        if anchor is not None:
+            slots[anchor].append(message)
+            slots[index] = []
+
+    # Records written before empty stages became anchors may contain tool-only
+    # rounds. Place those by their explicit group and canonical round order,
+    # never by text equality or by counting UI stages.
+    group_anchors = {}
+    for anchors in fragments.values():
+        for anchor in anchors:
+            meta = messages[anchor].get("meta") or {}
+            group = str(meta.get("ui_turn_group_id") or "")
+            if group:
+                group_anchors.setdefault((scopes[anchor], group), []).append(anchor)
+    results = {}
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "tool":
+            results.setdefault((scopes[index], str(message.get("tool_call_id") or "")), []).append(index)
+    before = {}
+    after = {}
+    next_linked = {}
+    following_anchors = {}
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         meta = message.get("meta") or {}
-        source = str(meta.get("ui_source_message_id") or "")
-        if source and meta.get("ui_visible_fragment"):
-            represented[source] = represented.get(source, "") + str(message.get("content") or "")
-    projected = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            projected.append(message)
+        group_key = (scopes[index], str(meta.get("ui_turn_group_id") or ""))
+        next_linked[index] = following_anchors.get(group_key)
+        linked = fragments.get((scopes[index], str(message.get("id") or "")), [])
+        for anchor in reversed(linked):
+            group = str((messages[anchor].get("meta") or {}).get("ui_turn_group_id") or "")
+            if group:
+                following_anchors[(scopes[index], group)] = anchor
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant" or not slots[index]:
             continue
-        if str(message.get("id") or "") in represented:
-            message = copy.deepcopy(message)
-            visible = represented[str(message["id"])]
-            content = str(message.get("content") or "")
-            if not content.startswith(visible):
-                # Never hide unrepresented provider output on a mapping conflict.
-                projected.append(message)
+        meta = message.get("meta") or {}
+        if meta.get("ui_visible_fragment") or (scopes[index], str(message.get("id") or "")) in fragments:
+            continue
+        group = str(meta.get("ui_turn_group_id") or "")
+        anchors = group_anchors.get((scopes[index], group), [])
+        if not anchors:
+            continue
+        next_anchor = next_linked.get(index)
+        target = next_anchor if next_anchor is not None else max(anchors)
+        bundle = [message]
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
                 continue
-            message["content"] = content[len(visible):]
-            if isinstance(message.get("content_parts"), list):
-                message["content_parts"] = [
-                    part for part in message["content_parts"]
-                    if isinstance(part, dict) and part.get("type") != "text"
-                ]
-            message.setdefault("meta", {})["ui_reply_kind"] = "stage"
-            message["meta"]["ui_stage_id"] = f"provider:{message['id']}"
-        projected.append(message)
-    return projected
+            for result_index in results.get((scopes[index], str(call.get("id") or "")), []):
+                bundle.extend(slots[result_index])
+                slots[result_index] = []
+        (before if next_anchor is not None else after).setdefault(target, []).extend(bundle)
+        slots[index] = []
+    for anchor in set(before) | set(after):
+        slots[anchor] = before.get(anchor, []) + slots[anchor] + after.get(anchor, [])
+    return [message for slot in slots[start:end] for message in slot]
 
 
 def _safe_jsonable(value):

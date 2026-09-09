@@ -20136,9 +20136,7 @@ class EmptyStateWidget(QWidget):
 
     def activate_theme_customizer(self):
         self.main_window.input_field.setText(
-            "请使用 Theme Customizer 帮我设计一套 Cowork 界面主题。"
-            "先询问我的配色、字体、密度、布局和背景偏好；"
-            "生成后只创建预览，不要直接保存或启用。"
+            "请帮助我设计一套中国风得主题。"
         )
         self.main_window.prepare_home_action("theme")
 

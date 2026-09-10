@@ -22948,6 +22948,11 @@ class HistoricalAssistantSummary(QFrame):
         self.retry_button.clicked.connect(self._retry_details)
         self.retry_button.hide()
         layout.addWidget(self.retry_button, 0, Qt.AlignLeft)
+        self.details = QWidget(self)
+        self.details_layout = QVBoxLayout(self.details)
+        self.details_layout.setContentsMargins(0, 0, 0, 0)
+        self.details_layout.setSpacing(0)
+        layout.addWidget(self.details)
         self.body = QWidget(self)
         self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.body_layout = QVBoxLayout(self.body)
@@ -37929,6 +37934,7 @@ class MainWindow(QMainWindow):
                 if reasoning or tool_calls:
                     clone = copy.deepcopy(message)
                     clone["content"] = ""
+                    clone["content_parts"] = []
                     clone.setdefault("meta", {})["ui_reply_kind"] = "stage"
                     process_messages.append(clone)
                 continue
@@ -37949,7 +37955,7 @@ class MainWindow(QMainWindow):
             batches.append(current)
         return batches
 
-    def _render_history_assistant_summary(self, state, messages, start, end, insert_index=None):
+    def _render_history_assistant_summary(self, state, messages, start, end, insert_index=None, *, process_only=False, visible_message=None):
         assistant_messages = [
             message for message in messages
             if isinstance(message, dict) and message.get("role") == "assistant"
@@ -37970,6 +37976,10 @@ class MainWindow(QMainWindow):
                 ),
                 None,
             )
+        if process_only:
+            final_message = None
+        elif visible_message is not None:
+            final_message = visible_message
         tool_count = sum(len(message.get("tool_calls") or []) for message in assistant_messages)
         process_stage_count = sum(
             1 for message in assistant_messages
@@ -38007,9 +38017,9 @@ class MainWindow(QMainWindow):
             if isinstance((final_message or {}).get("content_parts"), list)
             else None
         )
-        if not has_visible_assistant_output(final_content, final_content_parts):
+        if not process_only and not has_visible_assistant_output(final_content, final_content_parts):
             final_content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
-        final_bubble = self.add_chat_bubble(
+        final_bubble = None if process_only else self.add_chat_bubble(
             "Agent",
             "",
             animate=False,
@@ -38039,7 +38049,7 @@ class MainWindow(QMainWindow):
             if message.get("id")
         ]
         node_key = (
-            f"assistant:{group_id}"
+            f"assistant:{group_id}:{span_ids[0] if span_ids else start}:{span_ids[-1] if span_ids else end}"
             if group_id
             else f"assistant:{span_ids[0] if span_ids else start}:{span_ids[-1] if span_ids else end}"
         )
@@ -38242,9 +38252,11 @@ class MainWindow(QMainWindow):
             finally:
                 self._history_process_events_suppressed = previous_suppression
             added = state.chat_layout.count() - before_count
-            for index in range(max(0, insert_index), max(0, insert_index + added)):
-                widget = state.chat_layout.itemAt(index).widget()
+            for _ in range(added):
+                item = state.chat_layout.takeAt(insert_index)
+                widget = item.widget() if item is not None else None
                 if widget is not None:
+                    summary.details_layout.addWidget(widget)
                     summary.detail_groups.append(widget)
             summary.detail_batch_index += 1
             summary.set_progress(summary.detail_batch_index, total)
@@ -38280,6 +38292,77 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
 
+    def _render_projected_history_summary(self, state, messages, start, end, insert_index=None):
+        """Collapse process segments without moving guidance across a segment."""
+        inserted = 0
+        segment = []
+
+        def is_final_body(message):
+            return (
+                message.get("role") == "assistant"
+                and (message.get("meta") or {}).get("ui_reply_kind") == "final"
+                and not message.get("tool_calls")
+                and has_visible_assistant_output(message.get("content"), message.get("content_parts"))
+            )
+
+        # An interrupted run has no final answer. Keep its last visible partial
+        # response accessible without promoting every intermediate stage.
+        partial_body = None
+        if not any(is_final_body(message) for message in messages):
+            partial_body = next((message for message in reversed(messages)
+                if message.get("role") == "assistant"
+                and (message.get("meta") or {}).get("context_visible_interruption")
+                and has_visible_assistant_output(message.get("content"), message.get("content_parts"))), None)
+
+        def is_summary_body(message):
+            return is_final_body(message) or message is partial_body
+
+        def next_index():
+            return None if insert_index is None else insert_index + inserted
+
+        def flush(*, process_only):
+            nonlocal inserted, segment
+            if not segment:
+                return
+            inserted += self._render_history_assistant_summary(
+                state, segment, start, end, next_index(), process_only=process_only,
+                visible_message=next((m for m in reversed(segment)
+                    if is_summary_body(m)), None),
+            )
+            segment = []
+
+        for message in messages:
+            if message.get("role") in {"assistant", "tool"}:
+                if message.get("role") == "assistant" and any(
+                    is_summary_body(m) for m in segment
+                ):
+                    # Split only after a terminal body, not after commentary.
+                    flush(process_only=False)
+                # Empty source anchors carry position, not a visible thinking stage.
+                if (
+                    message.get("role") == "assistant"
+                    and (message.get("meta") or {}).get("ui_display_anchor_only")
+                    and not has_visible_assistant_output(message.get("content"), message.get("content_parts"))
+                    and not (message.get("reasoning_content") or message.get("reasoning") or message.get("tool_calls"))
+                ):
+                    continue
+                segment.append(message)
+                continue
+            flush(process_only=not any(
+                is_summary_body(m) for m in segment
+            ))
+            inserted += self.render_message_batch(
+                [message], state.session_id, insert_index=next_index(), animate=False,
+            )
+        flush(process_only=not any(
+            is_summary_body(m) for m in segment
+        ))
+        log_ui_navigation(
+            "history_projected_summary_restored", session_id=state.session_id,
+            span_start=start, span_end=end, widget_count=inserted,
+        )
+        return inserted
+
     def _render_history_span(self, state, span, insert_index=None):
         start = int(span.get("start") or 0)
         end = int(span.get("end") or start)
@@ -38287,7 +38370,7 @@ class MainWindow(QMainWindow):
         if not messages:
             return 0
         if any((message.get("meta") or {}).get("ui_visible_fragment") for message in messages):
-            return self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)
+            return self._render_projected_history_summary(state, messages, start, end, insert_index)
         if messages[0].get("role") == "user" and not self._message_is_office_draft_request(messages[0]):
             before = state.chat_layout.count()
             inserted = self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)

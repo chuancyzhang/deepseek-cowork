@@ -25,6 +25,7 @@ from core.im_gateway_registry import (
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
+from core.tool_images import tool_image_content_parts
 from core.message_persistence import filter_persistable_messages, project_provider_messages
 from core.runtime_journal import RuntimeJournal
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
@@ -3798,6 +3799,8 @@ class LLMWorker(QThread):
                                 "is_subagent": self.is_subagent,
                                 "current_messages_snapshot": current_snapshot,
                                 "run_context": json_copy(self.run_context, {}),
+                                "model_api_protocol": getattr(provider, "api_protocol", ""),
+                                "model_supports_vision": bool(getattr(provider, "supports_vision", False)),
                                 "discovered_tool_names": self.discovered_tool_names,
                             }
                             if missing_tool_name:
@@ -4096,6 +4099,9 @@ class LLMWorker(QThread):
                                     "duration": duration_tool
                                 }
                             }
+                            image_parts = tool_image_content_parts(result_obj)
+                            if image_parts:
+                                tool_msg["content_parts"] = json_copy(image_parts, [])
                             self._append_ledger_message(
                                 current_messages,
                                 generated_messages,

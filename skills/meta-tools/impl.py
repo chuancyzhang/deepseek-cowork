@@ -2,6 +2,8 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from core.tool_images import tool_image_content_parts
+
 
 PARALLEL_TOOL_BLOCKLIST = {
     "parallel_tools",
@@ -79,6 +81,7 @@ def _execute_parallel_subcall(index, call_id, name, args, context):
     child_context = dict(context or {})
     if "run_context" in child_context:
         child_context["run_context"] = _json_copy(child_context.get("run_context"), {})
+    child_context["tool_call_id"] = str(call_id or f"{context.get('tool_call_id') or 'parallel'}:{index}")
     result = skill_manager.call_tool(resolved_name, safe_args, context=child_context)
     duration = round(max(time.time() - start_time, 0.0), 6)
     if isinstance(result, str) and result.startswith("Error"):
@@ -89,6 +92,19 @@ def _execute_parallel_subcall(index, call_id, name, args, context):
             "status": "error",
             "duration": duration,
             "error": result,
+        }
+    if isinstance(result, dict) and (
+        result.get("ok") is False
+        or str(result.get("status") or "").lower() in {"error", "failed", "denied"}
+    ):
+        return {
+            "index": index,
+            "id": str(call_id or ""),
+            "name": resolved_name,
+            "status": "error",
+            "duration": duration,
+            "error": _json_safe(result.get("error") or result.get("content") or "Tool failed."),
+            "result": _json_safe(result),
         }
     return {
         "index": index,
@@ -184,12 +200,25 @@ def parallel_tools(calls, max_concurrency=4, _context=None):
         overall_status = "error"
     elif ok_count < total_count:
         overall_status = "partial_error"
-    return {
+    payload = {
         "status": overall_status,
         "count": total_count,
         "duration": round(max(time.time() - started_at, 0.0), 6),
         "results": ordered_results,
     }
+    content_parts = []
+    for item in ordered_results:
+        parts = tool_image_content_parts(item.get("result"))
+        if not parts:
+            continue
+        content_parts.append({
+            "type": "text",
+            "text": f"Tool result {item['index'] + 1}: {item['name']} (id={item['id']})",
+        })
+        content_parts.extend(_json_copy(parts, []))
+    if content_parts:
+        payload["content_parts"] = content_parts
+    return payload
 
 
 def update_experience(skill_name=None, experience=None, description=None, instructions=None, tool_name=None, task_type=None, error_pattern=None, tags=None, _context=None):

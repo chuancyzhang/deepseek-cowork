@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "view-image",
+  "display_name": "图片查看",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": true,
+  "description": "View workspace images and current conversation image attachments through multimodal Responses tool results.",
+  "description_cn": "读取工作区或当前会话附件中的图片，并通过 Responses 协议将图片传给模型。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "图片查看",
+    "summary": "让支持图片输入的 Responses 模型查看本地图片和会话附件。",
+    "examples": ["查看工作区截图", "分析附件中的图片", "检查图表内容"],
+    "access_note": "读取指定图片并保存会话快照，将图片发送给当前配置的模型服务。"
+  },
+  "tags": ["image", "vision", "screenshot", "attachment", "图片", "截图"],
+  "triggers": ["view_image", "view image", "inspect screenshot", "查看图片", "读取图片", "看图", "图片附件"],
+  "tool_refs": ["view_image"],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use view_image to inspect workspace images or image attachments already present in the current conversation.",
+    "Pass a workspace-relative image path or the full attachment path. The tool returns actual image content, not only a path or text description.",
+    "The current model must support image input and use the Responses protocol. Report tool errors instead of claiming to have seen an unavailable image."
+  ]
+}

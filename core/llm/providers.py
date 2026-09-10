@@ -18,6 +18,7 @@ from .deepseek import (
 )
 from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
 from core.conversation_integrity import ensure_tool_call_sequence
+from core.tool_images import build_responses_tool_output
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -1217,7 +1218,22 @@ class OpenAIProvider(LLMProvider):
 
     def _prepare_responses_input(self, messages):
         items = []
-        for message in self._prepare_messages(messages):
+        for source_message in messages:
+            # Tool parts belong inside their function result. Preserve them
+            # before ordinary message preparation removes local content_parts.
+            if str(source_message.get("role") or "").strip().lower() == "tool":
+                call_id = str(source_message.get("tool_call_id") or "").strip()
+                if not call_id:
+                    raise ValueError("Responses API tool result is missing tool_call_id.")
+                output = build_responses_tool_output(
+                    source_message.get("content"),
+                    source_message.get("content_parts"),
+                    supports_vision=self.supports_vision,
+                    tool_call_id=call_id,
+                )
+                items.append({"type": "function_call_output", "call_id": call_id, "output": output})
+                continue
+            message = self._prepare_messages([source_message])[0]
             role = str(message.get("role") or "").strip().lower()
             content = message.get("content")
             if role in {"system", "developer"}:
@@ -1274,13 +1290,6 @@ class OpenAIProvider(LLMProvider):
                         "name": name,
                         "arguments": arguments,
                     })
-                continue
-            if role == "tool":
-                call_id = str(message.get("tool_call_id") or "").strip()
-                if not call_id:
-                    raise ValueError("Responses API tool result is missing tool_call_id.")
-                output = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-                items.append({"type": "function_call_output", "call_id": call_id, "output": output or ""})
                 continue
             raise ValueError(f"Responses API does not support message role: {role or 'empty'}")
         return items

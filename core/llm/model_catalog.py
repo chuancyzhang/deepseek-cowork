@@ -23,7 +23,7 @@ DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT = "max"
 # this registry instead of hard-coding a model name.
 MODEL_RECOMMENDATIONS = {
     DEEPSEEK_RECOMMENDATION_KEY: {
-        "model_name": "deepseek-v4-flash",
+        "model_name": "deepseek-flash",
         "label": "推荐",
     },
 }
@@ -106,9 +106,8 @@ def build_new_model_defaults(provider_type, base_url, model_name):
             "reasoning_efforts": [],
             "reasoning_effort": "",
         }
-    normalized_name = str(model_name or "").strip().lower()
     return {
-        "supports_vision": normalized_name == DEEPSEEK_VISION_MODEL,
+        "supports_vision": True,
         "supports_image_generation": False,
         "api_protocol": API_PROTOCOL_RESPONSES,
         "deepseek_thinking_enabled": True,

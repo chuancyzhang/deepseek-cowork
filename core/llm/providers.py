@@ -78,6 +78,9 @@ MODEL_API_RETRY_BASE_DELAY_SECONDS = 0.5
 MODEL_API_RETRY_MAX_DELAY_SECONDS = 8.0
 MODEL_API_RETRY_AFTER_MAX_SECONDS = 30.0
 MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS = 60.0
+# DeepSeek may queue inference for 10 minutes. Leave a transport margin;
+# this is a read-idle timeout, not a deadline for the whole generation.
+DEEPSEEK_API_READ_TIMEOUT_SECONDS = 660.0
 SEMANTIC_PROVIDER_CHUNK_TYPES = {
     "reasoning",
     "content",
@@ -95,6 +98,17 @@ RESPONSES_WEB_SEARCH_TOOL_TYPES = {
 
 class ProviderStreamError(RuntimeError):
     """Error reported as a provider stream chunk before a valid terminal."""
+
+
+def _deepseek_keep_alive_timeout(base_url, timeout):
+    if not is_official_deepseek_api(base_url):
+        return timeout
+    adjusted = httpx.Timeout(timeout)
+    if adjusted.read is not None:
+        adjusted.read = max(adjusted.read, DEEPSEEK_API_READ_TIMEOUT_SECONDS)
+    # SDKs already ignore SSE comments and accept leading JSON whitespace.
+    # Each received network chunk resets the read wait, including keep-alives.
+    return adjusted
 
 
 def _exception_status_code(error):
@@ -513,16 +527,24 @@ class OpenAIProvider(LLMProvider):
         api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
     ):
         from openai import OpenAI
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=httpx.Timeout(
+        self.request_timeout = _deepseek_keep_alive_timeout(
+            base_url,
+            httpx.Timeout(
                 connect=20.0,
                 read=MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
                 write=60.0,
                 pool=60.0,
             ),
         )
+        client_kwargs = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "timeout": self.request_timeout,
+        }
+        if is_official_deepseek_api(base_url):
+            # The application owns visible, cancellable, bounded retries.
+            client_kwargs["max_retries"] = 0
+        self.client = OpenAI(**client_kwargs)
         self.base_url = base_url
         self.model_name = model_name
         self.thinking_enabled = bool(thinking_enabled)
@@ -702,6 +724,7 @@ class OpenAIProvider(LLMProvider):
                 _release_provider_stream(request_context, stream)
 
     def test_connection(self, timeout=20):
+        timeout = _deepseek_keep_alive_timeout(self.base_url, timeout)
         if self.api_protocol == API_PROTOCOL_RESPONSES:
             params = {
                 "model": self.model_name,
@@ -1573,12 +1596,18 @@ class AnthropicProvider(LLMProvider):
                 client_kwargs["default_headers"] = {"X-Api-Key": omit_header}
         else:
             client_kwargs["api_key"] = cleaned_key
-        client_kwargs["timeout"] = httpx.Timeout(
-            connect=20.0,
-            read=MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
-            write=60.0,
-            pool=60.0,
+        self.request_timeout = _deepseek_keep_alive_timeout(
+            base_url,
+            httpx.Timeout(
+                connect=20.0,
+                read=MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS,
+                write=60.0,
+                pool=60.0,
+            ),
         )
+        client_kwargs["timeout"] = self.request_timeout
+        if is_official_deepseek_api(base_url):
+            client_kwargs["max_retries"] = 0
         self.client = Anthropic(**client_kwargs)
         self.base_url = base_url
         self.model_name = model_name
@@ -1620,8 +1649,11 @@ class AnthropicProvider(LLMProvider):
                     (request_context or {}).get("client_request_id") or ""
                 ),
             }
+            terminal_seen = False
             for event in _iter_registered_provider_stream(request_context, stream):
-                if event.type == "content_block_delta":
+                if event.type == "message_stop":
+                    terminal_seen = True
+                elif event.type == "content_block_delta":
                     delta_type = getattr(event.delta, "type", "")
                     if delta_type == "text_delta":
                         yield {"type": "content", "content": event.delta.text}
@@ -1644,6 +1676,10 @@ class AnthropicProvider(LLMProvider):
                                 "arguments": "",
                             },
                         }
+            if is_official_deepseek_api(self.base_url) and not terminal_seen:
+                raise ProviderStreamError(
+                    "DeepSeek Anthropic stream ended without a message_stop."
+                )
             yield {
                 "type": "provider_terminal",
                 "status": "completed",
@@ -1655,7 +1691,7 @@ class AnthropicProvider(LLMProvider):
             model=self.model_name,
             messages=[{"role": "user", "content": "Reply with OK."}],
             max_tokens=8,
-            timeout=timeout,
+            timeout=_deepseek_keep_alive_timeout(self.base_url, timeout),
         )
         blocks = getattr(response, "content", None) or []
         text = "".join(str(getattr(block, "text", "") or "") for block in blocks).strip()

@@ -2992,6 +2992,9 @@ class LLMWorker(QThread):
                         "model": getattr(provider, "model_name", ""),
                         "base_url": getattr(provider, "base_url", ""),
                         "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                        "read_timeout_seconds": getattr(
+                            getattr(provider, "request_timeout", None), "read", None
+                        ),
                         "started_at": start_time,
                     })
                     if self.session_id and attempt_record is None:
@@ -3008,6 +3011,9 @@ class LLMWorker(QThread):
                         "model": getattr(provider, "model_name", ""),
                         "base_url": getattr(provider, "base_url", ""),
                         "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                        "read_timeout_seconds": getattr(
+                            getattr(provider, "request_timeout", None), "read", None
+                        ),
                         "message_count": len(request_messages),
                         "tool_count": len(self._tools_for_messages(request_messages)),
                         "timestamp": time.time(),

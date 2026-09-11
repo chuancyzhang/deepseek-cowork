@@ -707,6 +707,7 @@ class ConfigManager:
             "id": model_id,
             "display_name": display_name or model_name,
             "model_name": model_name,
+            "bootstrap_plugin": str(source.get("bootstrap_plugin") or "").strip(),
             "supports_vision": bool(source.get("supports_vision", False)),
             "supports_image_generation": bool(
                 source.get("supports_image_generation", False)

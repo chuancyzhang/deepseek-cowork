@@ -6288,8 +6288,10 @@ class ModelEditDialog(QDialog):
         self._editing_existing = bool(source_model)
         model = source_model or build_new_model_defaults(provider_id, self.base_url, "")
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
-        self.resize(560, 560)
-        self.setMinimumSize(520, 520)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available_height = screen.availableGeometry().height() if screen else 760
+        self.resize(560, min(680, max(440, available_height - 80)))
+        self.setMinimumSize(520, 440)
         self.setStyleSheet(linear_dialog_stylesheet("ModelEditDialog"))
 
         layout = QVBoxLayout(self)
@@ -6356,6 +6358,35 @@ class ModelEditDialog(QDialog):
             self.api_protocol_combo.currentIndexChanged.connect(mark_protocol_selected)
             self.model_name_input.textChanged.connect(sync_new_model_protocol)
             sync_new_model_protocol(self.model_name_input.text())
+
+        from bootstrap_plugins.deepseek_flash_minimal import DeepSeekFlashMinimalBootstrap
+        self._bootstrap_plugin = DeepSeekFlashMinimalBootstrap()
+        self.bootstrap_check = QCheckBox("启用极简启动")
+        self.bootstrap_check.setObjectName("ModelBootstrapCheck")
+        self.bootstrap_check.setChecked(model.get("bootstrap_plugin") == self._bootstrap_plugin.plugin_id)
+        bootstrap_field = QWidget()
+        bootstrap_layout = QVBoxLayout(bootstrap_field)
+        bootstrap_layout.setContentsMargins(0, 0, 0, 0)
+        bootstrap_layout.setSpacing(4)
+        bootstrap_layout.addWidget(self.bootstrap_check)
+        self.bootstrap_hint = QLabel("新对话首轮使用极简上下文，随后恢复完整能力。关闭时使用默认流程。")
+        self.bootstrap_hint.setWordWrap(True)
+        self.bootstrap_hint.setStyleSheet(apple_settings_inline_note_style())
+        bootstrap_layout.addWidget(self.bootstrap_hint)
+        form.addRow(build_form_row_label("启动方式"), bootstrap_field)
+
+        def sync_bootstrap_control():
+            supported = self._bootstrap_plugin.supports(
+                {"provider_type": self.provider_id, "base_url": self.base_url},
+                self.model_name_input.text().strip(),
+            )
+            form.setRowVisible(bootstrap_field, supported)
+            self.bootstrap_check.setEnabled(supported)
+            if not supported:
+                self.bootstrap_check.setChecked(False)
+
+        self.model_name_input.textChanged.connect(sync_bootstrap_control)
+        sync_bootstrap_control()
 
         self.vision_check = QCheckBox("支持图片理解")
         self.vision_check.setChecked(bool(model.get("supports_vision", False)))
@@ -6443,7 +6474,17 @@ class ModelEditDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet(apple_settings_inline_note_style())
         card_layout.addWidget(hint)
-        layout.addWidget(card)
+        self.model_form_scroll = QScrollArea()
+        self.model_form_scroll.setObjectName("ModelFormScroll")
+        self.model_form_scroll.setWidgetResizable(True)
+        self.model_form_scroll.setFrameShape(QFrame.NoFrame)
+        self.model_form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.model_form_scroll.viewport().setObjectName("ModelFormViewport")
+        self.model_form_scroll.setStyleSheet(
+            "QScrollArea#ModelFormScroll, QWidget#ModelFormViewport { background: transparent; }"
+        )
+        self.model_form_scroll.setWidget(card)
+        layout.addWidget(self.model_form_scroll, 1)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -6464,6 +6505,13 @@ class ModelEditDialog(QDialog):
             "id": existing_id or "",
             "display_name": display_name,
             "model_name": model_name,
+            "bootstrap_plugin": (
+                self._bootstrap_plugin.plugin_id
+                if self.bootstrap_check.isChecked()
+                and self._bootstrap_plugin.supports(
+                    {"provider_type": self.provider_id, "base_url": self.base_url}, model_name,
+                ) else ""
+            ),
             "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
             "supports_image_generation": bool(
                 self.image_generation_check
@@ -35799,6 +35847,24 @@ class MainWindow(QMainWindow):
         if event_type == "system_prompt":
             cache_key = event.get("prompt_cache_key") or ""
             return f"[{stamp}] SYSTEM PROMPT loaded\nprompt_cache_key={cache_key}"
+        if event_type == "bootstrap_phase_changed":
+            phase = event.get("phase") or "NORMAL"
+            reason = event.get("reason") or ""
+            descriptions = {
+                "started": "极简启动中，首轮仅使用启动工具。",
+                "completed": "极简启动完成，已进入 Cowork 完整能力。",
+                "advanced_capability": "任务需要更多能力，已进入 Cowork 完整能力。",
+                "provider_error": "启动请求失败，已保留输出并切换到完整能力。",
+                "tool_error": "启动工具失败，已保留结果并切换到完整能力。",
+                "initialization_failed": "极简启动不可用，使用 Cowork 默认流程。",
+                "existing_conversation": "已有对话上下文，沿用默认流程；极简启动仅用于新对话。",
+                "attachments": "任务包含附件，直接使用完整能力。",
+                "dedicated_workflow": "任务已有专用工作流程，直接使用完整能力。",
+                "workspace_unavailable": "没有任务工作区，使用默认流程。",
+            }
+            detail = descriptions.get(reason, reason)
+            error = str(event.get("error") or "")
+            return f"[{stamp}] 极简启动 · {phase}\n{detail}" + (f"\n{error}" if error else "")
         if event_type == "run_error":
             return (
                 f"[{stamp}] RUN ERROR {event.get('summary') or ''}\n"

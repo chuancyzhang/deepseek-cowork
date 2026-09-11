@@ -24,6 +24,7 @@ from core.im_gateway_registry import (
 )
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
+from bootstrap_plugins.session import BootstrapSession
 from core.chat_storage import ChatStorage
 from core.tool_images import tool_image_content_parts
 from core.message_persistence import filter_persistable_messages, project_provider_messages
@@ -832,6 +833,7 @@ class LLMWorker(QThread):
         )
         self.turn_id = str(turn_id or "")
         self.request_id = str(request_id or "")
+        self.bootstrap = BootstrapSession()
         
         # Flags for control
         self.is_paused = False
@@ -954,6 +956,9 @@ class LLMWorker(QThread):
         return tool_names
 
     def _refresh_tool_definitions(self):
+        if self.bootstrap.active:
+            self.tools = json_copy(self.bootstrap.definitions, [])
+            return
         for tool_name in self._selected_skill_tool_names():
             self.discovered_tool_names.add(tool_name)
         try:
@@ -1013,6 +1018,8 @@ class LLMWorker(QThread):
         return self._current_run_mode() == RUN_MODE_GRILLING
 
     def _is_tool_allowed_for_mode(self, name):
+        if self.bootstrap.active:
+            return name in self.bootstrap.tool_names
         if hasattr(self.skill_manager, "is_tool_allowed"):
             try:
                 return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
@@ -1021,6 +1028,8 @@ class LLMWorker(QThread):
         return True
 
     def _is_tool_visible_for_run(self, name):
+        if self.bootstrap.active:
+            return name in self.bootstrap.tool_names
         if hasattr(self.skill_manager, "is_tool_visible"):
             try:
                 return self.skill_manager.is_tool_visible(
@@ -2492,6 +2501,8 @@ class LLMWorker(QThread):
             raise RuntimeError(f"provider attempt journal write failed: {exc}") from exc
 
     def _tool_execution_policy(self, name):
+        if self.bootstrap.active:
+            return {"read_only": False, "destructive": True, "idempotent": False, "safe_retry": False}
         getter = getattr(self.skill_manager, "get_tool_record", None)
         record = getter(name) if callable(getter) else None
         record = record if isinstance(record, dict) else {}
@@ -2778,6 +2789,59 @@ class LLMWorker(QThread):
             projected.append(plain_message)
         return projected
 
+    def _call_run_tool(self, name, args, context):
+        if self.bootstrap.active:
+            return self.bootstrap.call_tool(
+                name, args, {**context, "abort_check": lambda: self.is_stopped},
+            )
+        return self.skill_manager.call_tool(name, args, context=context)
+
+    def _emit_bootstrap_state(self, reason, *, error_type=""):
+        self.observability_signal.emit({
+            "type": "bootstrap_phase_changed",
+            "plugin": self.bootstrap.plugin_id,
+            "phase": "BOOTSTRAP" if self.bootstrap.active else "NORMAL",
+            "reason": reason,
+            "error_type": error_type,
+            "error": self.bootstrap.error_message,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "request_id": self.request_id,
+            "timestamp": time.time(),
+        })
+
+    def _finish_bootstrap(self, current_messages, generated_messages, reason, *, error_type=""):
+        if not self.bootstrap.finish(reason):
+            return False
+        self._emit_bootstrap_state(reason, error_type=error_type)
+        failed = reason in {"provider_error", "tool_error", "initialization_failed"}
+        self.step_signal.emit(
+            "极简启动遇到问题，已保留现有内容，正在切换到 Cowork 完整能力。"
+            if failed else "极简启动完成，正在使用 Cowork 完整能力继续处理。"
+        )
+        self._append_ledger_message(current_messages, generated_messages, {
+            "role": "system",
+            "content": (
+                "极简启动阶段已结束。现在使用 Cowork 的完整能力继续完成用户原任务。"
+                "保留并利用上文已完成的工作，不要重复回答或重复执行已完成的命令。"
+                "若命令结果未知，先只读核实其效果，不要直接重跑。"
+                "启动工具已退出，请使用当前提供的工具。"
+            ),
+            "meta": {
+                "kind": "bootstrap_transition", "hidden": True,
+                "plugin": self.bootstrap.plugin_id, "phase": "NORMAL", "reason": reason,
+                "ledger_revision": APPEND_ONLY_LEDGER_REVISION,
+            },
+        })
+        knowledge_context = self.run_context.get("knowledge_context")
+        if knowledge_context:
+            from .knowledge_library import knowledge_context_message
+            self._append_ledger_message(
+                current_messages, generated_messages,
+                knowledge_context_message(knowledge_context, self.request_id),
+            )
+        return True
+
     def run(self):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is
         # sanitized after the concrete provider/protocol is known so Responses
@@ -2787,9 +2851,18 @@ class LLMWorker(QThread):
             for message in (self.messages or [])
             if isinstance(message, dict)
         ]
-        runtime_snapshot = get_runtime_snapshot()
+        self.bootstrap = BootstrapSession.create(
+            self.config_manager, self.run_context, current_messages,
+            self.workspace_dir, self.is_subagent,
+        )
+        if self.bootstrap.plugin is not None or self.bootstrap.error_type:
+            self._emit_bootstrap_state(self.bootstrap.reason, error_type=self.bootstrap.error_type)
+            self.step_signal.emit(self.bootstrap.status_text)
+        runtime_snapshot = None if self.bootstrap.active else get_runtime_snapshot()
         try:
-            stable_system_prompt = self._get_stable_system_prompt()
+            stable_system_prompt = (
+                self.bootstrap.prompt if self.bootstrap.active else self._get_stable_system_prompt()
+            )
         except Exception as exc:
             error_message = f"系统提示词加载失败：{exc}"
             self.output_signal.emit(error_message)
@@ -2810,7 +2883,7 @@ class LLMWorker(QThread):
         generated_messages = []
 
         knowledge_context = self.run_context.get("knowledge_context")
-        if knowledge_context:
+        if knowledge_context and not self.bootstrap.active:
             # Append a new fact for this submission. Never rewrite old references or the system prefix.
             from .knowledge_library import knowledge_context_message
             context_message = knowledge_context_message(knowledge_context, self.request_id)
@@ -2839,31 +2912,50 @@ class LLMWorker(QThread):
             self._append_pending_guidance(current_messages, generated_messages)
 
             # Catalog changes are applied only between model requests.
-            self._apply_pending_skill_snapshot(current_messages, generated_messages)
+            if not self.bootstrap.active:
+                self._apply_pending_skill_snapshot(current_messages, generated_messages)
 
             turn_count += 1
             self._refresh_tool_definitions()
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
-            self._reconcile_selected_skill_states(
-                current_messages,
-                generated_messages,
-                disclosed_skills,
-            )
-
-            stable_system_prompt = self._get_stable_system_prompt()
+            if self.bootstrap.active:
+                stable_system_prompt = self.bootstrap.prompt
+                runtime_context_prompt = ""
+            else:
+                try:
+                    self._reconcile_selected_skill_states(
+                        current_messages, generated_messages, disclosed_skills,
+                    )
+                    stable_system_prompt = self._get_stable_system_prompt()
+                    if runtime_snapshot is None:
+                        runtime_snapshot = get_runtime_snapshot()
+                    runtime_context_prompt = self._build_runtime_context_prompt(runtime_snapshot)
+                    self._append_runtime_context(
+                        runtime_context_prompt, current_messages, generated_messages,
+                    )
+                except Exception as exc:
+                    # NORMAL preparation can first occur after bootstrap has produced work.
+                    error_message = f"运行上下文加载失败：{exc}"
+                    self.output_signal.emit(error_message)
+                    self._append_pending_guidance(current_messages, generated_messages, close=True)
+                    self.finished_signal.emit({
+                        "error": error_message,
+                        "error_type": type(exc).__name__,
+                        "generated_messages": generated_messages,
+                        "turn_id": self.turn_id,
+                        "request_id": self.request_id,
+                    })
+                    return
             current_messages[0]["content"] = stable_system_prompt
-            runtime_context_prompt = self._build_runtime_context_prompt(runtime_snapshot)
-            self._append_runtime_context(
-                runtime_context_prompt,
-                current_messages,
-                generated_messages,
-            )
             request_messages = self._build_request_messages(current_messages)
             self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
+            chunk_content = ""
+            assistant_message_id = ""
+            tool_round_context = None
 
             if self.api_key:
                 try:
@@ -3192,6 +3284,8 @@ class LLMWorker(QThread):
                                 if attempt_patch:
                                     self._record_provider_attempt(attempt_id, attempt_patch)
                             elif type_ == "provider_retry":
+                                if self.bootstrap.active:
+                                    raise RuntimeError(str(chunk.get("reason") or "Bootstrap provider request failed."))
                                 retry_number = max(1, int(chunk.get("attempt") or 1))
                                 max_retries = max(
                                     retry_number,
@@ -3389,6 +3483,8 @@ class LLMWorker(QThread):
                             final_content = chunk_content or "⚠️ Operation stopped by user."
                             break
                         if provider_error_message:
+                            if self.bootstrap.active:
+                                raise RuntimeError(str(provider_error_message))
                             self._append_pending_guidance(current_messages, generated_messages, close=True)
                             self.finished_signal.emit({
                                 "error": str(provider_error_message),
@@ -3424,6 +3520,8 @@ class LLMWorker(QThread):
                         # failed before delivering the replay state required for
                         # the next request.
                         tool_calls_buffer.clear()
+                        if self.bootstrap.active:
+                            raise RuntimeError(str(provider_error_message))
                         self._append_pending_guidance(current_messages, generated_messages, close=True)
                         self.finished_signal.emit({
                             "error": str(provider_error_message),
@@ -3478,6 +3576,8 @@ class LLMWorker(QThread):
                             + "；".join(invalid_tool_calls)
                             + "。未提交不完整 assistant tool-call 消息，原历史不会被静默裁剪。"
                         )
+                        if self.bootstrap.active:
+                            raise ValueError(malformed_error)
                         self.step_signal.emit(f"Tool Call Error: {malformed_error}")
                         self.output_signal.emit(f"Tool Call Error: {malformed_error}")
                         self.observability_signal.emit({
@@ -3494,8 +3594,12 @@ class LLMWorker(QThread):
                         })
                         return
 
-                    if tool_calls:
+                    if tool_calls and not self.bootstrap.active:
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills, generated_messages)
+                    if self.bootstrap.active:
+                        self.bootstrap.handoff_requested = any(
+                            tool.function.name not in self.bootstrap.tool_names for tool in tool_calls
+                        )
 
                     if (
                         (not tool_calls)
@@ -3503,6 +3607,8 @@ class LLMWorker(QThread):
                         and (not output_image_parts_buffer)
                         and (not provider_error_message)
                     ):
+                        if self.bootstrap.active:
+                            raise RuntimeError("Bootstrap returned no actionable content or tool call.")
                         if preserve_responses and response_items_buffer:
                             self.finished_signal.emit({
                                 "error": (
@@ -3961,7 +4067,7 @@ class LLMWorker(QThread):
                                     max_tool_attempts = 3 if execution_policy.get("safe_retry") else 1
                                     for tool_attempt in range(1, max_tool_attempts + 1):
                                         try:
-                                            result = self.skill_manager.call_tool(
+                                            result = self._call_run_tool(
                                                 name,
                                                 args,
                                                 context=tool_context,
@@ -4247,6 +4353,17 @@ class LLMWorker(QThread):
                                 "request_id": self.request_id,
                             })
                             return
+                        if self.bootstrap.active and not self.is_stopped:
+                            self._finish_bootstrap(
+                                current_messages, generated_messages,
+                                "advanced_capability" if self.bootstrap.handoff_requested
+                                else "tool_error" if failed_tool_results else "completed",
+                            )
+                            # The one authorized phase boundary starts a new prompt prefix.
+                            # All subsequent NORMAL requests retain the usual strict check.
+                            previous_provider_messages = None
+                            self._checkpoint_generated_ledger(generated_messages, boundary="bootstrap_completed")
+                            continue
                         if failed_tool_results:
                             marked_count = self._mark_tool_round_runtime_only(
                                 current_messages,
@@ -4324,6 +4441,11 @@ class LLMWorker(QThread):
                         continue
                     else:
                         # Final Answer
+                        if self.bootstrap.active and not self.is_stopped:
+                            self._finish_bootstrap(current_messages, generated_messages, "completed")
+                            previous_provider_messages = None
+                            self._checkpoint_generated_ledger(generated_messages, boundary="bootstrap_completed")
+                            continue
                         if (
                             self._is_grilling_mode()
                             and not self.run_context.get("grill_checkpoint_cancelled")
@@ -4378,6 +4500,40 @@ class LLMWorker(QThread):
                         break
                         
                 except Exception as e:
+                    if self.bootstrap.active and not self.is_stopped and tool_round_context is None:
+                        # A failed stream may have already displayed text. Retain it exactly
+                        # once, without executing partial tool calls or inventing replay data.
+                        if (chunk_content or current_turn_reasoning) and not any(
+                            message.get("id") == assistant_message_id for message in generated_messages
+                        ):
+                            self._append_ledger_message(current_messages, generated_messages, {
+                                "id": assistant_message_id or uuid.uuid4().hex,
+                                "role": "assistant",
+                                "content": chunk_content,
+                                "reasoning_content": current_turn_reasoning,
+                                "reasoning": current_turn_reasoning,
+                                "meta": {"bootstrap_partial": True},
+                            })
+                        try:
+                            self._record_provider_attempt(
+                                f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                                {"status": "failed", "error": str(e), "error_type": type(e).__name__, "finished_at": time.time()},
+                            )
+                        except Exception as journal_error:
+                            # Losing durable execution tracking is not a recoverable plugin error.
+                            self._append_pending_guidance(current_messages, generated_messages, close=True)
+                            self.finished_signal.emit({
+                                "error": str(journal_error), "error_type": "RuntimeJournalWriteError",
+                                "generated_messages": generated_messages,
+                                "turn_id": self.turn_id, "request_id": self.request_id,
+                            })
+                            return
+                        self.bootstrap.error_message = str(e)
+                        self._finish_bootstrap(
+                            current_messages, generated_messages, "provider_error", error_type=type(e).__name__,
+                        )
+                        previous_provider_messages = None
+                        continue
                     self._discard_incomplete_tool_round(
                         current_messages,
                         generated_messages,

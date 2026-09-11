@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QDialog
 
 from core.config_manager import ConfigManager
@@ -272,6 +273,72 @@ class ModelConfigurationUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        if os.environ.get("COWORK_BOOTSTRAP_SCREENSHOT_DIR"):
+            for filename in ("msyh.ttc", "segoeui.ttf"):
+                QFontDatabase.addApplicationFont(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename))
+            cls.app.setFont(QFont("Microsoft YaHei", 9))
+
+    def test_flash_bootstrap_switch_defaults_off_and_persists_per_model(self):
+        from bootstrap_plugins import resolve
+
+        dialog = ModelEditDialog("openai", {"model_name": "deepseek-flash"}, base_url="https://api.deepseek.com")
+        try:
+            self.assertTrue(dialog.bootstrap_check.isEnabled())
+            self.assertFalse(dialog.bootstrap_check.isChecked())
+            self.assertEqual(dialog.get_model()["bootstrap_plugin"], "")
+            dialog.bootstrap_check.setChecked(True)
+            model = dialog.get_model(existing_id="flash-test")
+            with tempfile.TemporaryDirectory() as directory, patch(
+                "core.config_manager.get_app_data_dir", return_value=directory,
+            ), patch("core.config_manager.get_base_dir", return_value=directory):
+                config = ConfigManager()
+                config.set_model_channels([{
+                    "channel_id": "official", "provider_type": "openai",
+                    "base_url": "https://api.deepseek.com", "api_key": "test-key", "models": [model],
+                }], "flash-test")
+                restored = ConfigManager().get_model_profile("flash-test")
+                self.assertEqual(restored["bootstrap_plugin"], "deepseek_flash_minimal")
+                self.assertIsNotNone(resolve(restored, restored["model_name"]))
+            reopened = ModelEditDialog("openai", restored, base_url=restored["base_url"])
+            self.assertTrue(reopened.bootstrap_check.isChecked())
+            reopened.bootstrap_check.setChecked(False)
+            self.assertEqual(reopened.get_model()["bootstrap_plugin"], "")
+            reopened.deleteLater()
+            # Small-window layout keeps the save/cancel footer outside the scroll area.
+            dialog.resize(520, 440)
+            dialog.show()
+            self.app.processEvents()
+            self.assertGreater(dialog.model_form_scroll.verticalScrollBar().maximum(), 0)
+            self.assertLess(dialog.model_form_scroll.geometry().bottom(), dialog.height() - 30)
+            capture_dir = os.environ.get("COWORK_BOOTSTRAP_SCREENSHOT_DIR")
+            if capture_dir:
+                os.makedirs(capture_dir, exist_ok=True)
+                dialog.grab().save(os.path.join(capture_dir, "model-bootstrap-small.png"))
+                dialog.resize(560, 680)
+                self.app.processEvents()
+                dialog.grab().save(os.path.join(capture_dir, "model-bootstrap.png"))
+        finally:
+            dialog.close()
+
+    def test_flash_bootstrap_switch_excludes_other_models_and_services(self):
+        for provider, base_url, model_name in (
+            ("openai", "https://api.deepseek.com", "deepseek-v4-flash"),
+            ("openai", "https://api.deepseek.com", "deepseek-pro"),
+            ("openai", "https://proxy.example.com", "deepseek-flash"),
+            ("openai", "https://api.deepseek.com.example.com", "deepseek-flash"),
+            ("anthropic", "https://api.deepseek.com", "deepseek-flash"),
+        ):
+            with self.subTest(provider=provider, base_url=base_url, model_name=model_name):
+                dialog = ModelEditDialog(provider, {"model_name": model_name}, base_url=base_url)
+                self.assertFalse(dialog.bootstrap_check.isEnabled())
+                dialog.bootstrap_check.setChecked(True)
+                self.assertEqual(dialog.get_model()["bootstrap_plugin"], "")
+                dialog.deleteLater()
+        dialog = ModelEditDialog("openai", {"model_name": "deepseek-flash"}, base_url="https://api.deepseek.com")
+        dialog.bootstrap_check.setChecked(True)
+        dialog.model_name_input.setText("deepseek-pro")
+        self.assertFalse(dialog.bootstrap_check.isChecked())
+        dialog.deleteLater()
 
     def test_import_dialog_prioritizes_recommendation_and_excludes_existing(self):
         dialog = ModelImportDialog(

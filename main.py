@@ -66,6 +66,7 @@ from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier
 from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns, style_store_card
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
+from ui.stream_event_buffer import StreamEventBuffer
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
 from core.env_utils import (
@@ -18731,6 +18732,7 @@ def _forward_wheel_to_chat_scroll(widget, event):
 
 class AutoResizingTextEdit(ReadOnlyTextEdit):
     linkActivated = Signal(str)
+    heightChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -18741,7 +18743,9 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         self.setLineWrapMode(QTextEdit.WidgetWidth)
         self.setFixedHeight(24)
         self._height_adjust_pending = False
+        self._adjusting_height = False
         self.textChanged.connect(self.scheduleAdjustHeight)
+        self.document().documentLayout().documentSizeChanged.connect(self.scheduleAdjustHeight)
         self.setStyleSheet("background: transparent;")
         
         # Set word wrap mode to break anywhere if needed (for long strings)
@@ -18772,25 +18776,31 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         根据文档内容调整文本框高度
         添加最大高度限制防止初始渲染时高度异常
         """
-        if not _qt_object_alive(self):
+        if not _qt_object_alive(self) or self._adjusting_height:
             return
         self._height_adjust_pending = False
-        viewport_width = self.viewport().width()
-        if viewport_width <= 0:
-            viewport_width = self.width() - (self.frameWidth() * 2)
-        self.document().setTextWidth(max(0.0, float(viewport_width)))
-        doc_height = self.document().size().height()
-        margins = self.contentsMargins()
-        frame = self.frameWidth() * 2
-        height = int(doc_height + margins.top() + margins.bottom() + frame + 4)
-        # 确保最小高度避免不可见，同时限制最大高度防止初始异常
-        height = max(height, 24)
-        if self.height() != height:
-            self.setFixedHeight(height)
+        self._adjusting_height = True
+        try:
+            viewport_width = self.viewport().width()
+            if viewport_width <= 0:
+                viewport_width = self.width() - (self.frameWidth() * 2)
+            width = max(0.0, float(viewport_width))
+            if self.document().textWidth() != width:
+                self.document().setTextWidth(width)
+            doc_height = self.document().size().height()
+            margins = self.contentsMargins()
+            frame = self.frameWidth() * 2
+            height = max(24, int(doc_height + margins.top() + margins.bottom() + frame + 4))
+            if self.height() != height:
+                self.setFixedHeight(height)
+                self.heightChanged.emit()
+        finally:
+            self._adjusting_height = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.adjustHeight()
+        if event.size().width() != event.oldSize().width():
+            self.scheduleAdjustHeight()
 
 
 class ReadOnlyPlainTextEdit(QPlainTextEdit):
@@ -18806,6 +18816,8 @@ class ReadOnlyPlainTextEdit(QPlainTextEdit):
 
 
 class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
+    heightChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -18818,11 +18830,48 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         self.document().setDefaultTextOption(text_option)
         self.setFixedHeight(24)
         self._height_adjust_pending = False
+        self._adjusting_height = False
+        self._height_line_prefix = [0]
+        self._height_dirty_block = 0
+        self._height_last_changed_block = 0
+        self._height_layout_key = None
+        self.document().contentsChange.connect(self._mark_height_contents_changed)
+        self.document().documentLayout().documentSizeChanged.connect(self._mark_height_layout_changed)
         self.textChanged.connect(self.scheduleAdjustHeight)
         self.setStyleSheet("background: transparent;")
 
     def wheelEvent(self, event):
         _forward_wheel_to_chat_scroll(self, event)
+
+    def _mark_height_contents_changed(self, position, removed, added):
+        if removed:
+            start = 0
+        else:
+            # Including the preceding character also covers a newline inserted
+            # at the beginning of a new block. Qt positions are UTF-16 offsets.
+            block = self.document().findBlock(max(0, position - 1))
+            start = max(0, block.blockNumber())
+        self._height_last_changed_block = start
+        dirty = self._height_dirty_block
+        self._height_dirty_block = start if dirty is None else min(dirty, start)
+        self.scheduleAdjustHeight()
+
+    def _mark_height_layout_changed(self, _size):
+        # A text block can finish laying out after contentsChange. Revisit the
+        # last changed suffix rather than treating every layout signal as a
+        # reason to scan the whole document.
+        start = self._height_last_changed_block
+        dirty = self._height_dirty_block
+        self._height_dirty_block = start if dirty is None else min(dirty, start)
+        self.scheduleAdjustHeight()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, "_height_line_prefix"):
+            self._height_layout_key = None
+            self._height_dirty_block = 0
+            self._height_last_changed_block = 0
+            self.scheduleAdjustHeight()
 
     def scheduleAdjustHeight(self):
         if not _qt_object_alive(self):
@@ -18833,35 +18882,59 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         QTimer.singleShot(0, self.adjustHeight)
 
     def adjustHeight(self):
-        if not _qt_object_alive(self):
+        if not _qt_object_alive(self) or self._adjusting_height:
             return
         self._height_adjust_pending = False
-        text_option = self.document().defaultTextOption()
-        if text_option.wrapMode() != QTextOption.WrapAtWordBoundaryOrAnywhere:
-            text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-            self.document().setDefaultTextOption(text_option)
-        viewport_width = self.viewport().width()
-        if viewport_width <= 0:
-            viewport_width = self.width() - (self.frameWidth() * 2)
-        self.document().setTextWidth(max(0.0, float(viewport_width)))
-        line_count = 0
-        block = self.document().begin()
-        while block.isValid():
-            layout = block.layout()
-            line_count += max(1, layout.lineCount() if layout is not None else 1)
-            block = block.next()
-        doc_height = line_count * self.fontMetrics().lineSpacing()
-        margins = self.contentsMargins()
-        doc_margin = int(self.document().documentMargin() * 2)
-        frame = self.frameWidth() * 2
-        height = int(doc_height + doc_margin + margins.top() + margins.bottom() + frame + 4)
-        height = max(height, 24)
-        if self.height() != height:
-            self.setFixedHeight(height)
+        self._adjusting_height = True
+        try:
+            document = self.document()
+            text_option = document.defaultTextOption()
+            if text_option.wrapMode() != QTextOption.WrapAtWordBoundaryOrAnywhere:
+                text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+                document.setDefaultTextOption(text_option)
+            viewport_width = self.viewport().width()
+            if viewport_width <= 0:
+                viewport_width = self.width() - (self.frameWidth() * 2)
+            width = max(0.0, float(viewport_width))
+            key = (
+                width, self.font().key(), document.defaultFont().key(),
+                self.logicalDpiX(), self.logicalDpiY(), self.devicePixelRatioF(),
+                text_option.wrapMode(), self.tabStopDistance(),
+            )
+            if key != self._height_layout_key:
+                self._height_line_prefix = [0]
+                self._height_dirty_block = 0
+                self._height_last_changed_block = 0
+                self._height_layout_key = key
+            if document.textWidth() != width:
+                document.setTextWidth(width)
+            prefix = self._height_line_prefix
+            dirty = self._height_dirty_block
+            if dirty is not None:
+                start = min(dirty, len(prefix) - 1, max(0, document.blockCount() - 1))
+                del prefix[start + 1:]
+                block = document.findBlockByNumber(start)
+                while block.isValid():
+                    layout = block.layout()
+                    lines = max(1, layout.lineCount() if layout is not None else 1)
+                    prefix.append(prefix[-1] + lines)
+                    block = block.next()
+                self._height_dirty_block = None
+            doc_height = prefix[-1] * self.fontMetrics().lineSpacing()
+            margins = self.contentsMargins()
+            doc_margin = int(document.documentMargin() * 2)
+            frame = self.frameWidth() * 2
+            height = max(24, int(doc_height + doc_margin + margins.top() + margins.bottom() + frame + 4))
+            if self.height() != height:
+                self.setFixedHeight(height)
+                self.heightChanged.emit()
+        finally:
+            self._adjusting_height = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.adjustHeight()
+        if event.size().width() != event.oldSize().width():
+            self.scheduleAdjustHeight()
 
 class AutoResizingInputEdit(QTextEdit):
     returnPressed = Signal()
@@ -22675,31 +22748,41 @@ class AssistantTurnGroup(QFrame):
 
     def sync_stage_visibility(self):
         """Hide semantically empty stages and separators without changing stage order."""
+        changed = False
+
+        def set_visible(widget, visible):
+            nonlocal changed
+            if widget.isHidden() == bool(visible):
+                widget.setVisible(bool(visible))
+                changed = True
+
         if self.process_finalized and not self.process_expanded:
             for bubble in self.stage_bubbles:
-                bubble.setVisible(
+                set_visible(bubble,
                     self.process_result_bubble is not None
                     and bubble is self.process_result_bubble
                 )
                 if bubble.thinking_widget is not None:
-                    bubble.thinking_widget.setVisible(False)
+                    set_visible(bubble.thinking_widget, False)
             for separator in self.stage_separators:
-                separator.setVisible(False)
-            self.setVisible(bool(self.process_disclosure.isVisible() or self.process_result_bubble is not None))
-            self.group_layout.invalidate()
-            self.updateGeometry()
+                set_visible(separator, False)
+            set_visible(self, bool(self.process_disclosure.isVisible() or self.process_result_bubble is not None))
+            if changed:
+                self.group_layout.invalidate()
+                self.updateGeometry()
             return
         visible_before = False
         for index, bubble in enumerate(self.stage_bubbles):
             visible = bubble.has_visible_stage_content()
-            bubble.setVisible(visible)
+            set_visible(bubble, visible)
             if index > 0:
-                self.stage_separators[index - 1].setVisible(bool(visible_before and visible))
+                set_visible(self.stage_separators[index - 1], bool(visible_before and visible))
             if visible:
                 visible_before = True
-        self.setVisible(visible_before)
-        self.group_layout.invalidate()
-        self.updateGeometry()
+        set_visible(self, visible_before)
+        if changed:
+            self.group_layout.invalidate()
+            self.updateGeometry()
 
     def _process_counts(self, result_bubble):
         process_stage_count = 0
@@ -23098,6 +23181,13 @@ class ChatBubble(QFrame):
     ):
         super().__init__(parent)
         self.role = role
+        self._stage_visibility_signature = None
+        self._geometry_refreshing = False
+        self._geometry_refresh_timer = QTimer(self)
+        self._geometry_refresh_timer.setSingleShot(True)
+        self._geometry_refresh_timer.timeout.connect(self._flush_conversation_geometry)
+        self._ui_cost_totals = {}
+        self._ui_cost_reported_at = time.monotonic()
         self.content_wrapper = None
         self.user_bubble_frame = None
         self.user_content_edit = None
@@ -23372,6 +23462,8 @@ class ChatBubble(QFrame):
             self.content_rich_edit = AutoResizingTextEdit()
             self.content_rich_edit.linkActivated.connect(self._handle_content_link)
             self.content_plain_edit = AutoResizingPlainTextEdit()
+            self.content_rich_edit.heightChanged.connect(self._refresh_conversation_geometry)
+            self.content_plain_edit.heightChanged.connect(self._refresh_conversation_geometry)
             self.content_rich_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             self.content_plain_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             self.content_rich_edit.setVisible(False)
@@ -23926,22 +24018,55 @@ class ChatBubble(QFrame):
     def _notify_stage_visibility_changed(self):
         parent = self.parentWidget()
         if isinstance(parent, AssistantTurnGroup):
-            parent.sync_stage_visibility()
+            signature = (id(parent), self.has_visible_stage_content())
+            if signature != self._stage_visibility_signature:
+                self._stage_visibility_signature = signature
+                parent.sync_stage_visibility()
 
     def _refresh_conversation_geometry(self):
         if not _qt_object_alive(self):
             return
+        if not self._geometry_refresh_timer.isActive():
+            self._geometry_refresh_timer.start(0)
+
+    def _record_ui_cost(self, kind, started, *, force=False):
+        totals = self._ui_cost_totals
+        totals[f"{kind}_count"] = totals.get(f"{kind}_count", 0) + 1
+        totals[f"{kind}_ms"] = totals.get(f"{kind}_ms", 0.0) + (time.monotonic() - started) * 1000
+        now = time.monotonic()
+        if not force and now - self._ui_cost_reported_at < 1.0:
+            return
+        self._ui_cost_reported_at = now
+        log_chat_runtime_debug(
+            "ui_bubble_projection_cost", session_id=self.session_id,
+            group_id=str(getattr(self, "ui_turn_group_id", "")),
+            stage_id=str(getattr(self, "ui_stage_id", "")),
+            content_length=len(getattr(self, "main_content_text", "") or ""),
+            **{key: round(value, 3) for key, value in totals.items()},
+        )
+        totals.clear()
+
+    def _flush_conversation_geometry(self):
+        if not _qt_object_alive(self) or self._geometry_refreshing:
+            return
+        self._geometry_refreshing = True
+        started = time.monotonic()
+        try:
+            self._apply_conversation_geometry()
+        finally:
+            self._geometry_refreshing = False
+            self._record_ui_cost("geometry", started)
+
+    def _apply_conversation_geometry(self):
         for widget in (self.think_container, self.thinking_widget, self.content_col, self):
-            if widget is None:
+            if widget is None or widget.isHidden():
                 continue
             layout = widget.layout()
             if layout is not None:
                 layout.invalidate()
                 layout.activate()
             widget.updateGeometry()
-        parent = self.parentWidget()
-        if isinstance(parent, AssistantTurnGroup):
-            parent.sync_stage_visibility()
+        self._notify_stage_visibility_changed()
         self.geometryChanged.emit()
 
     def _has_thinking_details(self):
@@ -23957,8 +24082,12 @@ class ChatBubble(QFrame):
         return False
 
     def _sync_thinking_container_visibility(self):
-        self.think_container.setVisible(bool(self.think_toggle_btn.isChecked() and self._has_thinking_details()))
-        self._refresh_conversation_geometry()
+        visible = bool(self.think_toggle_btn.isChecked() and self._has_thinking_details())
+        changed = self.think_container.isHidden() == visible
+        if changed:
+            self.think_container.setVisible(visible)
+        if changed or visible:
+            self._refresh_conversation_geometry()
 
     def _on_think_tick(self):
         if self.think_start_time is None: return
@@ -23981,7 +24110,6 @@ class ChatBubble(QFrame):
             expanded=bool(checked),
             has_details=self._has_thinking_details(),
         )
-        QTimer.singleShot(0, self._refresh_conversation_geometry)
 
     def set_thinking_state(self, is_thinking):
         if is_thinking:
@@ -24040,7 +24168,9 @@ class ChatBubble(QFrame):
 
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None or duration is not None:
-            self.thinking_widget.setVisible(True)
+            if self.thinking_widget.isHidden():
+                self.thinking_widget.setVisible(True)
+                self._refresh_conversation_geometry()
         if text is not None:
             widget = self.get_active_think_widget()
             widget.setText(widget.text() + str(text or ""))
@@ -24168,6 +24298,8 @@ class ChatBubble(QFrame):
         if already_rendered:
             return
 
+        started = time.monotonic()
+        previous_view_mode = self._main_content_view_mode
         render_text = text
         if final:
             render_text = self._sync_inline_visualizations(text)
@@ -24208,10 +24340,9 @@ class ChatBubble(QFrame):
         self._last_main_content_render_ts = time.time()
         self._sync_deliverable_cards(text)
         self.content_edit.scheduleAdjustHeight()
-        QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
-        QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
-        QTimer.singleShot(0, self._refresh_conversation_geometry)
-        QTimer.singleShot(60, self._refresh_conversation_geometry)
+        if final or previous_view_mode != self._main_content_view_mode:
+            self._refresh_conversation_geometry()
+        self._record_ui_cost("render", started, force=final)
         if final:
             parent = self.parentWidget()
             if isinstance(parent, AssistantTurnGroup):
@@ -33022,6 +33153,17 @@ class MainWindow(QMainWindow):
             )
             self.refresh_token_usage_label(state.session_id)
 
+    def _record_token_speed_chunks(self, state, chunks, kind, *, skip=0):
+        # Keep the original sample accounting, including replay-prefix removal.
+        # Only the expensive session/timeline projection uses joined text.
+        for chunk in chunks:
+            if skip:
+                consumed = min(skip, len(chunk))
+                skip -= consumed
+                chunk = chunk[consumed:]
+            if chunk:
+                self._record_token_speed_delta(state, chunk, kind)
+
     def refresh_token_usage_label(self, session_id=None):
         state = self.get_session(session_id)
         if not state:
@@ -33422,6 +33564,7 @@ class MainWindow(QMainWindow):
     def _can_rewrite_session_from_message(self, state):
         if not state:
             return (False, "找不到当前会话。")
+        self._flush_ui_stream_buffers(state)
         if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
             return (False, "历史消息仍在加载，请稍后再试。")
         if self._session_is_busy(state):
@@ -35971,6 +36114,66 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _create_ui_stream_buffer(self, state, worker, kind, turn_id, request_id):
+        def report(event, **metrics):
+            log_chat_runtime_debug(
+                f"ui_stream_buffer_{event}", session_id=state.session_id,
+                turn_id=turn_id, request_id=request_id, worker_kind=kind, **metrics,
+            )
+            if event == "error":
+                log_ui_exception(self, None, metrics.get("traceback", "Stream event delivery failed"))
+                app = QApplication.instance()
+                if app is not None:
+                    app._queue_ui_error_toast()
+
+        buffer = StreamEventBuffer(self, report=report)
+        worker._ui_stream_buffer = buffer
+        buffers = getattr(state, "ui_stream_buffers", None)
+        if buffers is None:
+            state.ui_stream_buffers = buffers = []
+        buffers.append(buffer)
+        report("created")
+        return buffer
+
+    def _connect_ui_stream_signal(self, state, worker, signal_name, callback, *, text=False):
+        buffer = worker._ui_stream_buffer
+        worker_field = "daemon_worker" if isinstance(worker, DaemonStreamWorker) else "llm_worker"
+        turn_id = state.active_turn_id
+        request_id = str(getattr(state, "active_turn_request_id", "") or "")
+
+        def deliver(*args):
+            current = self.get_session(state.session_id)
+            if (
+                current is not state
+                or getattr(state, worker_field, None) is not worker
+                or not self._event_matches_active_run(state, turn_id, request_id)
+            ):
+                return False
+            callback(*args)
+            return True
+
+        kind = "stream_state" if signal_name == "stream_state_signal" else signal_name
+        buffer.connect_signal(getattr(worker, signal_name), kind, deliver, text=text)
+
+    def _flush_ui_stream_buffers(self, state):
+        if state is None:
+            return
+        for buffer in list(getattr(state, "ui_stream_buffers", []) or []):
+            buffer.flush()
+
+    def _retire_ui_stream_buffer(self, state, worker, *, discard_terminal=False):
+        buffer = getattr(worker, "_ui_stream_buffer", None)
+        if buffer is None:
+            return
+        buffers = getattr(state, "ui_stream_buffers", []) if state else []
+        if buffer in buffers:
+            buffers.remove(buffer)
+        worker._ui_stream_buffer = None
+        try:
+            buffer.close(discard_terminal=discard_terminal)
+        finally:
+            buffer.deleteLater()
+
     def _bind_run_worker_finished(self, state, worker, kind, turn_id, request_id, result_handler):
         if not state or worker is None:
             raise ValueError("运行 worker 收尾缺少会话或 worker。")
@@ -35988,12 +36191,21 @@ class MainWindow(QMainWindow):
             result_handler(result)
 
         worker.finished_signal.connect(mark_result_received, Qt.DirectConnection)
-        worker.finished_signal.connect(on_result, Qt.QueuedConnection)
-        worker.finished.connect(
-            lambda sid=state.session_id, tid=turn_id, rid=request_id, current=worker, worker_kind=kind:
-            self._handle_native_run_worker_finished(sid, tid, rid, worker_kind, current),
-            Qt.QueuedConnection,
-        )
+        def on_native_finished():
+            try:
+                self._handle_native_run_worker_finished(
+                    state.session_id, turn_id, request_id, kind, worker,
+                )
+            finally:
+                self._retire_ui_stream_buffer(state, worker)
+
+        buffer = getattr(worker, "_ui_stream_buffer", None)
+        if buffer is not None:
+            buffer.connect_signal(worker.finished_signal, "result", on_result)
+            buffer.connect_signal(worker.finished, "native_finished", on_native_finished)
+        else:
+            worker.finished_signal.connect(on_result, Qt.QueuedConnection)
+            worker.finished.connect(on_native_finished, Qt.QueuedConnection)
 
     def _handle_native_run_worker_finished(self, session_id, turn_id, request_id, kind, worker):
         state = self.get_session(session_id)
@@ -37311,6 +37523,13 @@ class MainWindow(QMainWindow):
                 self._disconnect_worker_signals(state.code_worker)
                 state.code_worker.stop()
                 state.code_worker.wait(1000)
+            # Finished threads can still have undelivered GUI data. Seal those
+            # buffers too, before dropping the session's worker identities.
+            for worker in (state.daemon_worker, state.llm_worker):
+                if worker is not None:
+                    self._retire_ui_stream_buffer(state, worker, discard_terminal=True)
+            self.flush_session_content(state.session_id, final=False)
+            self.flush_session_thinking(state.session_id)
             state.daemon_running = False
             state.daemon_worker = None
             state.llm_worker = None
@@ -37592,7 +37811,6 @@ class MainWindow(QMainWindow):
         state = self.sessions.get(session_id)
         if state:
             self._stop_live_subagents(state, force=True)
-            self._cancel_token_speed_monitor(state, "session_closed")
             if state.daemon_worker:
                 self._disconnect_worker_signals(state.daemon_worker)
                 try:
@@ -37611,6 +37829,9 @@ class MainWindow(QMainWindow):
                     state.code_worker.stop()
                 except Exception:
                     pass
+            self.flush_session_content(state.session_id, final=False)
+            self.flush_session_thinking(state.session_id)
+            self._cancel_token_speed_monitor(state, "session_closed")
             del self.sessions[session_id]
         self.session_tabs.removeTab(index)
         if self.session_tabs.count() == 0: self.create_new_session()
@@ -37658,6 +37879,9 @@ class MainWindow(QMainWindow):
             render_timer = getattr(bubble, "_main_content_render_timer", None)
             if render_timer is not None:
                 render_timer.stop()
+            geometry_timer = getattr(bubble, "_geometry_refresh_timer", None)
+            if geometry_timer is not None:
+                geometry_timer.stop()
         widget.hide()
         widget.deleteLater()
 
@@ -42585,13 +42809,15 @@ class MainWindow(QMainWindow):
         delta = str(delta or "")
         if not delta:
             return None
-        event = self._timeline_find_event(state, kind=kind, open_only=True)
-        last = (getattr(state, "ui_timeline_events", []) or [None])[-1]
+        # Only the last open event can be extended. Searching/copying the full
+        # timeline cannot find any other event eligible for this append.
+        event = (getattr(state, "ui_timeline_events", []) or [None])[-1]
         active_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
         active_stage_id = str(getattr(active_bubble, "ui_stage_id", ""))
         if (
-            event is None
-            or event is not last
+            not isinstance(event, dict)
+            or event.get("kind") != kind
+            or event.get("finished_at") is not None
             or str(event.get("stage_id") or "") != active_stage_id
         ):
             event = self._timeline_append_event(state, kind, status="running")
@@ -48390,13 +48616,17 @@ a {{ overflow-wrap: anywhere; }}
             state.active_skills_label.setText(current_text + f" [{skill_name}]")
             state.active_skills_label.setVisible(True)
 
-    def _disconnect_worker_signals(self, worker):
+    def _disconnect_worker_signals(self, worker, *, discard_terminal=True):
         if not worker:
             return
+        state = self.get_session(getattr(worker, "session_id", None))
+        self._retire_ui_stream_buffer(state, worker, discard_terminal=discard_terminal)
         for signal_name in (
             "finished_signal",
             "thinking_signal",
             "content_signal",
+            "content_snapshot_signal",
+            "stream_state_signal",
             "tool_call_signal",
             "tool_result_signal",
             "observability_signal",
@@ -48799,7 +49029,6 @@ a {{ overflow-wrap: anywhere; }}
         state = self.get_current_session()
         if not state:
             return
-        self._cancel_token_speed_monitor(state, "user_stop")
         stopped_turn_id = state.active_turn_id
         stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
         daemon_worker = state.daemon_worker
@@ -48829,13 +49058,13 @@ a {{ overflow-wrap: anywhere; }}
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
             state.last_agent_bubble.stop_thinking_timers()
         if daemon_worker:
-            self._disconnect_worker_signals(daemon_worker)
             daemon_worker.detach()
+            self._disconnect_worker_signals(daemon_worker)
             if daemon_worker.isRunning():
                 self._keep_detached_worker(daemon_worker)
         if llm_worker:
-            self._disconnect_worker_signals(llm_worker)
             llm_worker.stop()
+            self._disconnect_worker_signals(llm_worker)
             if llm_worker.isRunning():
                 self._keep_detached_worker(llm_worker)
         if code_worker:
@@ -48843,6 +49072,10 @@ a {{ overflow-wrap: anywhere; }}
             code_worker.stop()
             if code_worker.isRunning():
                 self._keep_detached_worker(code_worker)
+
+        self.flush_session_content(state.session_id, final=False)
+        self.flush_session_thinking(state.session_id)
+        self._cancel_token_speed_monitor(state, "user_stop")
 
         # Terminalize the local run before any remote cancellation wait. This
         # prevents a stopped turn from remaining steerable/"thinking" in the UI.
@@ -49766,6 +49999,7 @@ a {{ overflow-wrap: anywhere; }}
     ):
         if not state or not isinstance(message, dict):
             return None
+        self._flush_ui_stream_buffers(state)
         message_id = str(message.get("id") or "")
         existing = self._timeline_find_event(state, kind="guidance", message_id=message_id)
         if existing is not None:
@@ -50362,6 +50596,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         if not payload.get("content"):
             return False
+        self._flush_ui_stream_buffers(state)
         expected_turn_id = state.active_turn_id
         expected_request_id = str(getattr(state, "active_turn_request_id", "") or "")
         message = {
@@ -52392,6 +52627,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
         session_id = state.session_id
+        self._create_ui_stream_buffer(state, state.llm_worker, "llm", turn_id, request_id)
         self._bind_run_worker_finished(
             state,
             state.llm_worker,
@@ -52401,47 +52637,52 @@ a {{ overflow-wrap: anywhere; }}
             lambda result, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_llm_response(result, sid, tid, rid),
         )
-        state.llm_worker.content_signal.connect(
-            lambda text, sid=session_id, tid=turn_id, rid=request_id:
-                self.handle_content_signal(text, sid, tid, rid),
-            Qt.QueuedConnection,
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "content_signal",
+            lambda text, chunks, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_content_signal(text, sid, tid, rid, speed_chunks=chunks),
+            text=True,
         )
-        state.llm_worker.content_snapshot_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "content_snapshot_signal",
             lambda text, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_content_snapshot(text, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        state.llm_worker.step_signal.connect(self.append_log, Qt.QueuedConnection)
-        state.llm_worker.thinking_signal.connect(
-            lambda text, sid=session_id, tid=turn_id, rid=request_id:
-                self.handle_thinking_signal(text, sid, tid, rid),
-            Qt.QueuedConnection,
+        self._connect_ui_stream_signal(state, state.llm_worker, "step_signal", self.append_log)
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "thinking_signal",
+            lambda text, chunks, sid=session_id, tid=turn_id, rid=request_id:
+                self.handle_thinking_signal(text, sid, tid, rid, speed_chunks=chunks),
+            text=True,
         )
-        state.llm_worker.skill_used_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "skill_used_signal",
             lambda name, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_skill_used(name, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        state.llm_worker.tool_call_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "tool_call_signal",
             lambda data, sid=session_id, tid=turn_id, rid=request_id:
                 self.add_tool_card(data, sid, turn_id=tid, request_id=rid),
-            Qt.QueuedConnection,
         )
-        state.llm_worker.tool_result_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "tool_result_signal",
             lambda data, sid=session_id, tid=turn_id, rid=request_id:
                 self.update_tool_card(data, sid, turn_id=tid, request_id=rid),
-            Qt.QueuedConnection,
         )
-        state.llm_worker.observability_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "observability_signal",
             lambda data, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_observability_event(data, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid), Qt.QueuedConnection)
-        state.llm_worker.agent_state_signal.connect(
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "output_signal",
+            lambda text, sid=session_id: self.handle_worker_output(text, sid),
+        )
+        self._connect_ui_stream_signal(
+            state, state.llm_worker, "agent_state_signal",
             lambda data, sid=session_id, tid=turn_id, rid=request_id:
                 self.handle_agent_state(data, sid, tid, rid),
-            Qt.QueuedConnection,
         )
         state.llm_worker.start()
         log_chat_runtime_debug(
@@ -52457,10 +52698,11 @@ a {{ overflow-wrap: anywhere; }}
 
     def _connect_daemon_worker_signals(self, state, worker, turn_id):
         request_id = str(getattr(worker, "request_id", "") or "")
-        worker.stream_state_signal.connect(
+        self._create_ui_stream_buffer(state, worker, "daemon", turn_id, request_id)
+        self._connect_ui_stream_signal(
+            state, worker, "stream_state_signal",
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self._handle_daemon_stream_state(data, sid, tid, rid),
-            Qt.QueuedConnection,
         )
         self._bind_run_worker_finished(
             state,
@@ -52471,53 +52713,55 @@ a {{ overflow-wrap: anywhere; }}
             lambda result, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_daemon_response(result, sid, tid, rid),
         )
-        worker.thinking_signal.connect(
-            lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
-                self.handle_thinking_signal(text, sid, tid, rid),
-            Qt.QueuedConnection,
+        self._connect_ui_stream_signal(
+            state, worker, "thinking_signal",
+            lambda text, chunks, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_thinking_signal(text, sid, tid, rid, speed_chunks=chunks),
+            text=True,
         )
-        worker.content_signal.connect(
-            lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
-                self.handle_content_signal(text, sid, tid, rid),
-            Qt.QueuedConnection,
+        self._connect_ui_stream_signal(
+            state, worker, "content_signal",
+            lambda text, chunks, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_content_signal(text, sid, tid, rid, speed_chunks=chunks),
+            text=True,
         )
-        worker.content_snapshot_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "content_snapshot_signal",
             lambda text, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_content_snapshot(text, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        worker.tool_call_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "tool_call_signal",
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.add_tool_card(data, sid, turn_id=tid, request_id=rid),
-            Qt.QueuedConnection,
         )
-        worker.tool_result_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "tool_result_signal",
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.update_tool_card(data, sid, turn_id=tid, request_id=rid),
-            Qt.QueuedConnection,
         )
-        worker.observability_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "observability_signal",
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_observability_event(data, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        worker.agent_state_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "agent_state_signal",
             lambda data, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_agent_state(data, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        worker.interaction_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "interaction_signal",
             lambda req, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_daemon_interaction_request(req, sid, tid, rid),
-            Qt.QueuedConnection,
         )
-        worker.turn_started_signal.connect(
+        self._connect_ui_stream_signal(
+            state, worker, "turn_started_signal",
             lambda daemon_turn_id, sid=state.session_id, tid=turn_id: self.handle_daemon_turn_started(
                 daemon_turn_id,
                 sid,
                 tid,
             ),
-            Qt.QueuedConnection,
         )
 
     def _handle_daemon_stream_state(self, data, session_id, turn_id, run_id):
@@ -52545,6 +52789,10 @@ a {{ overflow-wrap: anywhere; }}
             return
         worker = getattr(state, "daemon_worker", None)
         if worker is not None and worker.isRunning():
+            return
+        if worker is not None:
+            self._disconnect_worker_signals(worker, discard_terminal=False)
+        if str(state.active_turn_request_id or "") != str(run_id):
             return
         if getattr(state, "stop_pending", False) or not state.daemon_running:
             return
@@ -53373,7 +53621,7 @@ a {{ overflow-wrap: anywhere; }}
             event_count=len(getattr(state, "sub_agent_events", []) or []),
         )
 
-    def handle_content_signal(self, text, session_id=None, turn_id=None, request_id=None):
+    def handle_content_signal(self, text, session_id=None, turn_id=None, request_id=None, *, speed_chunks=None):
         state = self.get_session(session_id)
         if not state: return
         if not self._event_matches_active_run(state, turn_id, request_id):
@@ -53401,7 +53649,10 @@ a {{ overflow-wrap: anywhere; }}
             state.provider_retry_max = 0
             self.set_session_phase("Analyzing", state.session_id)
         self._ensure_live_agent_stage(state)
-        self._record_token_speed_delta(state, text, "content")
+        if speed_chunks is None:
+            self._record_token_speed_delta(state, text, "content")
+        else:
+            self._record_token_speed_chunks(state, speed_chunks, "content", skip=skip)
         state.current_content_buffer += text
         if str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():
             return
@@ -53445,7 +53696,7 @@ a {{ overflow-wrap: anywhere; }}
         event["text"] = canonical_content
         self.flush_session_content(state.session_id, final=False)
 
-    def handle_thinking_signal(self, text, session_id=None, turn_id=None, request_id=None):
+    def handle_thinking_signal(self, text, session_id=None, turn_id=None, request_id=None, *, speed_chunks=None):
         state = self.get_session(session_id)
         if not state: return
         if not self._event_matches_active_run(state, turn_id, request_id):
@@ -53454,7 +53705,8 @@ a {{ overflow-wrap: anywhere; }}
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
-        if getattr(state, "provider_retry_attempt", 0):
+        resumed_retry = bool(getattr(state, "provider_retry_attempt", 0))
+        if resumed_retry:
             log_sub_agent_runtime(
                 "ui_provider_retry_resumed",
                 session_id=state.session_id,
@@ -53467,12 +53719,14 @@ a {{ overflow-wrap: anywhere; }}
             state.provider_retry_max = 0
         self._ensure_live_agent_stage(state)
         delta = text or ""
-        self._record_token_speed_delta(state, delta, "thinking")
+        if speed_chunks is None:
+            self._record_token_speed_delta(state, delta, "thinking")
+        else:
+            self._record_token_speed_chunks(state, speed_chunks, "thinking")
         if delta.strip():
-            if state.pending_clarify_questions:
-                self.set_session_phase("Clarifying", state.session_id)
-            else:
-                self.set_session_phase("Analyzing", state.session_id)
+            phase = "Clarifying" if state.pending_clarify_questions else "Analyzing"
+            if resumed_retry or state.run_phase != phase:
+                self.set_session_phase(phase, state.session_id)
         state.current_thinking_buffer += delta
         self._timeline_append_text_delta(state, "thinking", delta)
         state.pending_thinking_delta += delta

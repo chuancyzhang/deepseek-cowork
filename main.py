@@ -67,6 +67,14 @@ from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker
 from ui.stream_event_buffer import StreamEventBuffer
+from ui.thinking_text import (
+    ThinkingAutoTextProbe,
+    ThinkingTextBuffer,
+    append_thinking_event_text,
+    finish_thinking_event_text,
+    snapshot_thinking_timeline,
+    thinking_event_text,
+)
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
 from core.env_utils import (
@@ -18936,6 +18944,149 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         if event.size().width() != event.oldSize().width():
             self.scheduleAdjustHeight()
 
+class ThinkingPlainTextEdit(AutoResizingPlainTextEdit):
+    """Use the existing height cache only while this thought is visible."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("ThinkingPlainText")
+        self.setUndoRedoEnabled(False)
+        self.document().setDocumentMargin(0)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def scheduleAdjustHeight(self):
+        if _qt_object_alive(self) and self.isVisible():
+            super().scheduleAdjustHeight()
+
+    def adjustHeight(self):
+        if not _qt_object_alive(self):
+            return
+        if not self.isVisible():
+            self._height_adjust_pending = False
+            return
+        super().adjustHeight()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.scheduleAdjustHeight()
+
+    def contextMenuEvent(self, event):
+        menu = create_styled_menu(self)
+        populate_text_context_menu(menu, self, plain_text=self.parentWidget().text)
+        menu.exec(event.globalPos())
+
+
+class ThinkingTextView(QWidget):
+    """Keep complete source text even when the display is folded or offscreen."""
+
+    heightChanged = Signal()
+    renderMeasured = Signal(float)
+    renderFailed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ThinkingTextView")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self._source = ThinkingTextBuffer()
+        self._format_probe = ThinkingAutoTextProbe()
+        self._rendered_version = 0
+        self._rendering = False
+        self._plain_edit = None
+        self._rich_label = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_pending_text)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def text(self):
+        return self._source.text()
+
+    def has_text(self):
+        return self._source.has_text
+
+    def append_text(self, text):
+        text = str(text or "")
+        self._source.append(text)
+        self._format_probe.append(text)
+        self._schedule_render()
+
+    def _schedule_render(self):
+        if self.isVisible() and self._rendered_version != self._source.version:
+            if not self._render_timer.isActive():
+                self._render_timer.start(0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_render()
+
+    def hideEvent(self, event):
+        self._render_timer.stop()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().height() != event.oldSize().height():
+            self.heightChanged.emit()
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet("QWidget#ThinkingTextView { background: transparent; border: none; }")
+        for widget, selector in (
+            (self._plain_edit, "QPlainTextEdit#ThinkingPlainText"),
+            (self._rich_label, "QLabel#ThinkingRichText"),
+        ):
+            if widget is None:
+                continue
+            widget.setStyleSheet(
+                f"{selector} {{ color: {DesignTokens.text_secondary}; font-size: 12px; "
+                "line-height: 1.5; background: transparent; border: none; padding: 0; "
+                f"selection-background-color: {DesignTokens.selection_bg}; "
+                f"selection-color: {DesignTokens.selection_text}; }}"
+            )
+            apply_selection_palette(widget)
+
+    def _flush_pending_text(self):
+        if not _qt_object_alive(self) or not self.isVisible() or self._rendering:
+            return
+        if self._rendered_version == self._source.version:
+            return
+        self._rendering = True
+        started = time.monotonic()
+        try:
+            if self._format_probe.is_rich_text():
+                # Preserve QLabel's AutoText/HTML behavior for rich thoughts.
+                if self._rich_label is None:
+                    self._rich_label = AutoResizingLabel(self)
+                    self._rich_label.setObjectName("ThinkingRichText")
+                    self.layout().addWidget(self._rich_label)
+                    self.refresh_theme()
+                if self._plain_edit is not None:
+                    self._plain_edit.hide()
+                self._rich_label.setText(self._source.text())
+                self._rich_label.show()
+            else:
+                if self._plain_edit is None:
+                    self._plain_edit = ThinkingPlainTextEdit(self)
+                    self._plain_edit.heightChanged.connect(self.heightChanged.emit)
+                    self.layout().addWidget(self._plain_edit)
+                    self.refresh_theme()
+                self._plain_edit.show()
+                # An independent cursor preserves the user's active selection.
+                # insertText also preserves delta boundaries without new lines.
+                cursor = QTextCursor(self._plain_edit.document())
+                cursor.movePosition(QTextCursor.End)
+                cursor.insertText(self._source.text_since(self._rendered_version))
+            self._rendered_version = self._source.version
+        except Exception as exc:
+            self.renderFailed.emit(str(exc))
+            raise
+        finally:
+            self._rendering = False
+            self.renderMeasured.emit(started)
+
+
 class AutoResizingInputEdit(QTextEdit):
     returnPressed = Signal()
     mentionRequested = Signal()
@@ -24042,6 +24193,8 @@ class ChatBubble(QFrame):
             group_id=str(getattr(self, "ui_turn_group_id", "")),
             stage_id=str(getattr(self, "ui_stage_id", "")),
             content_length=len(getattr(self, "main_content_text", "") or ""),
+            thinking_length=getattr(self, "_thinking_text_length", 0),
+            thinking_expanded=bool(self.think_toggle_btn.isChecked()) if self.role != "User" else False,
             **{key: round(value, 3) for key, value in totals.items()},
         )
         totals.clear()
@@ -24074,8 +24227,8 @@ class ChatBubble(QFrame):
             widget = self.think_container_layout.itemAt(index).widget()
             if widget is None:
                 continue
-            if isinstance(widget, AutoResizingLabel):
-                if widget.text().strip():
+            if isinstance(widget, ThinkingTextView):
+                if widget.has_text():
                     return True
                 continue
             return True
@@ -24086,8 +24239,21 @@ class ChatBubble(QFrame):
         changed = self.think_container.isHidden() == visible
         if changed:
             self.think_container.setVisible(visible)
-        if changed or visible:
+        if changed and self.isVisible():
             self._refresh_conversation_geometry()
+
+    def _on_thinking_height_changed(self):
+        if self.think_container.isVisible():
+            self._refresh_conversation_geometry()
+
+    def _on_thinking_render_failed(self, error):
+        log_chat_runtime_debug(
+            "ui_thinking_render_error", session_id=self.session_id,
+            group_id=str(getattr(self, "ui_turn_group_id", "")),
+            stage_id=str(getattr(self, "ui_stage_id", "")),
+            thinking_length=getattr(self, "_thinking_text_length", 0),
+            error=error,
+        )
 
     def _on_think_tick(self):
         if self.think_start_time is None: return
@@ -24133,13 +24299,12 @@ class ChatBubble(QFrame):
             count = self.think_container_layout.count()
             if count > 0:
                 widget = self.think_container_layout.itemAt(count - 1).widget()
-                if isinstance(widget, AutoResizingLabel):
+                if isinstance(widget, ThinkingTextView):
                     return widget
-        widget = AutoResizingLabel()
-        widget.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; font-size: 12px; line-height: 1.5; "
-            "background: transparent; border: none;"
-        )
+        widget = ThinkingTextView()
+        widget.heightChanged.connect(self._on_thinking_height_changed)
+        widget.renderMeasured.connect(lambda started: self._record_ui_cost("thinking_render", started))
+        widget.renderFailed.connect(self._on_thinking_render_failed)
         self.think_container_layout.addWidget(widget)
         self.timeline_events.append(widget)
         widget.show()
@@ -24173,7 +24338,9 @@ class ChatBubble(QFrame):
                 self._refresh_conversation_geometry()
         if text is not None:
             widget = self.get_active_think_widget()
-            widget.setText(widget.text() + str(text or ""))
+            delta = str(text or "")
+            widget.append_text(delta)
+            self._thinking_text_length = getattr(self, "_thinking_text_length", 0) + len(delta)
             self._sync_thinking_container_visibility()
         
         if duration:
@@ -24578,6 +24745,7 @@ class ChatBubble(QFrame):
         self._start_new_think_segment = True
         self.thinking_widget.setVisible(True)
         self._sync_thinking_container_visibility()
+        self._on_thinking_height_changed()
         self._notify_stage_visibility_changed()
 
 
@@ -26154,6 +26322,26 @@ def schedule_main_window_startup(
 
 
 class SessionState:
+    @property
+    def current_thinking_buffer(self):
+        return self._thinking_text.text()
+
+    @current_thinking_buffer.setter
+    def current_thinking_buffer(self, text):
+        self._thinking_text = ThinkingTextBuffer(text)
+
+    @property
+    def pending_thinking_delta(self):
+        return self._pending_thinking_text.text()
+
+    @pending_thinking_delta.setter
+    def pending_thinking_delta(self, text):
+        self._pending_thinking_text = ThinkingTextBuffer(text)
+
+    def append_thinking_delta(self, delta):
+        self._thinking_text.append(delta)
+        self._pending_thinking_text.append(delta)
+
     def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll, token_usage_label=None):
         self.session_id = session_id
         self.workspace_dir = ""
@@ -33623,7 +33811,7 @@ class MainWindow(QMainWindow):
             "render_node_by_message_id": dict(state.render_node_by_message_id),
             "tool_cards": dict(state.tool_cards),
             "pending_tool_results": copy.deepcopy(state.pending_tool_results),
-            "ui_timeline_events": copy.deepcopy(state.ui_timeline_events),
+            "ui_timeline_events": snapshot_thinking_timeline(state.ui_timeline_events),
             "pending_guidance_messages": copy.deepcopy(state.pending_guidance_messages),
             "persisted_agents": copy.deepcopy(state.persisted_agents),
             "history_detail_summaries": list(state.history_detail_summaries),
@@ -41528,7 +41716,7 @@ class MainWindow(QMainWindow):
                 target = ensure_bubble()
                 if target is None:
                     return False
-                target.update_thinking(event.get("text") or "")
+                target.update_thinking(thinking_event_text(event))
                 started_at = float(event.get("started_at") or 0)
                 finished_at = float(event.get("finished_at") or started_at)
                 target.think_duration += max(0.0, finished_at - started_at)
@@ -42805,7 +42993,7 @@ class MainWindow(QMainWindow):
             return event
         return None
 
-    def _timeline_append_text_delta(self, state, kind, delta):
+    def _timeline_append_text_delta(self, state, kind, delta, *, defer_thinking_text=False):
         delta = str(delta or "")
         if not delta:
             return None
@@ -42821,7 +43009,12 @@ class MainWindow(QMainWindow):
             or str(event.get("stage_id") or "") != active_stage_id
         ):
             event = self._timeline_append_event(state, kind, status="running")
-        event["text"] = str(event.get("text") or "") + delta
+        if kind == "thinking":
+            append_thinking_event_text(event, delta)
+            if not defer_thinking_text:
+                event["text"] = thinking_event_text(event)
+        else:
+            event["text"] = str(event.get("text") or "") + delta
         return event
 
     def _timeline_close_open_events(self, state, kinds=None, status="completed"):
@@ -42831,6 +43024,7 @@ class MainWindow(QMainWindow):
             if not isinstance(event, dict) or event.get("kind") not in allowed:
                 continue
             if event.get("finished_at") is None:
+                finish_thinking_event_text(event)
                 event["finished_at"] = now
                 event["status"] = status
 
@@ -42946,7 +43140,7 @@ class MainWindow(QMainWindow):
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta["knowledge_refs"] = copy.deepcopy(getattr(state, "knowledge_refs", []))
-        timeline_events = copy.deepcopy(getattr(state, "ui_timeline_events", []) or [])
+        timeline_events = snapshot_thinking_timeline(getattr(state, "ui_timeline_events", []) or [])
         if timeline_events:
             meta["ui_timeline_v1"] = timeline_events
         else:
@@ -43137,13 +43331,13 @@ class MainWindow(QMainWindow):
     def _checkpoint_live_chat(self, state):
         if not state or not getattr(state, "live_activity", False):
             return False
-        content = str(getattr(state, "current_content_buffer", "") or "")
-        reasoning = str(getattr(state, "current_thinking_buffer", "") or "")
-        if not content.strip() and not reasoning.strip():
-            return False
         now = time.monotonic()
         last = float(getattr(state, "last_chat_recovery_checkpoint_at", 0.0) or 0.0)
         if now - last < 1.0:
+            return False
+        content = str(getattr(state, "current_content_buffer", "") or "")
+        reasoning = str(getattr(state, "current_thinking_buffer", "") or "")
+        if not content.strip() and not reasoning.strip():
             return False
         state.last_chat_recovery_checkpoint_at = now
         run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
@@ -53727,9 +53921,10 @@ a {{ overflow-wrap: anywhere; }}
             phase = "Clarifying" if state.pending_clarify_questions else "Analyzing"
             if resumed_retry or state.run_phase != phase:
                 self.set_session_phase(phase, state.session_id)
-        state.current_thinking_buffer += delta
-        self._timeline_append_text_delta(state, "thinking", delta)
-        state.pending_thinking_delta += delta
+        state.append_thinking_delta(delta)
+        # The streaming path retains parts; snapshot/read boundaries obtain
+        # complete strings through thinking_event_text/snapshot_thinking_timeline.
+        self._timeline_append_text_delta(state, "thinking", delta, defer_thinking_text=True)
         if state.thinking_flush_timer and not state.thinking_flush_timer.isActive():
             state.thinking_flush_timer.start()
 
@@ -53774,7 +53969,6 @@ a {{ overflow-wrap: anywhere; }}
                 bubble = None
         if bubble is not None:
             bubble.update_thinking(delta)
-        self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def _merge_generated_messages(self, existing_messages, generated_messages):
         if not isinstance(generated_messages, list):
@@ -54634,8 +54828,8 @@ a {{ overflow-wrap: anywhere; }}
         has_thinking_text = False
         for timeline_index in range(bubble.think_container_layout.count() - 1, -1, -1):
             widget = bubble.think_container_layout.itemAt(timeline_index).widget()
-            if isinstance(widget, AutoResizingLabel):
-                has_thinking_text = bool(widget.text().strip())
+            if isinstance(widget, ThinkingTextView):
+                has_thinking_text = widget.has_text()
                 if has_thinking_text:
                     break
 

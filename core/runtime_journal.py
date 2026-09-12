@@ -641,31 +641,87 @@ class RuntimeJournal:
             return record
 
     def append_event(self, session_id, run_id, event_type, payload=None, provider_sequence=None):
+        return self.append_events(session_id, run_id, [{
+            "type": event_type, "payload": payload, "provider_sequence": provider_sequence,
+        }])[0]
+
+    def append_events(self, session_id, run_id, entries):
+        """Durably append an ordered batch using the existing per-event format.
+
+        This is not an atomic transaction: failed writes must not be retried
+        blindly, and a damaged tail remains an explicit journal error.
+        """
+        entries = list(entries)
+        if not entries:
+            return []
+        started = time.monotonic()
         with self.session_lock(session_id, run_id):
+            lock_ms = (time.monotonic() - started) * 1000
             run_path = self._record_path(session_id, "runs", run_id)
             record = self._read(run_path, default=None)
             if record is None:
                 raise RuntimeJournalError(f"runtime run not found: {run_id}")
             sequence = self._last_event_sequence_unlocked(session_id, run_id) + 1
-            event = {
-                "sequence": sequence,
-                "type": str(event_type or "event"),
-                "payload": payload if isinstance(payload, dict) else {"value": payload},
-                "provider_sequence": provider_sequence,
-                "created_at": time.time(),
-            }
+            events = []
+            for offset, entry in enumerate(entries):
+                payload = entry.get("payload")
+                events.append({
+                    "sequence": sequence + offset,
+                    "type": str(entry.get("type") or "event"),
+                    "payload": payload if isinstance(payload, dict) else {"value": payload},
+                    "provider_sequence": entry.get("provider_sequence"),
+                    "created_at": entry.get("created_at", time.time()),
+                })
             event_path = self._event_path(session_id, run_id)
             try:
-                self._append_jsonl(event_path, event)
+                if len(events) == 1:
+                    self._append_jsonl(event_path, events[0])
+                else:
+                    raw = "".join(self._canonical_json(self._envelope(event)) + "\n" for event in events)
+                    with open(event_path, "a", encoding="utf-8") as handle:
+                        handle.write(raw)
+                        handle.flush()
+                        os.fsync(handle.fileno())
             except Exception as exc:
                 raise self._write_error(
-                    operation=f"append_{event['type']}",
+                    operation=f"append_{events[0]['type']}" if len(events) == 1 else "append_events",
                     path=event_path,
                     exc=exc,
                     run_id=run_id,
                     writer_owner=record.get("writer_owner"),
                 ) from exc
-            return event
+            self._diagnostic_context.append_metrics = {
+                "lock_ms": lock_ms, "persist_ms": (time.monotonic() - started) * 1000,
+                "batch_events": len(events),
+            }
+            return events
+
+    def append_metrics(self):
+        return dict(getattr(self._diagnostic_context, "append_metrics", {}))
+
+    def write_checkpoint(self, session_id, run_id, *, content, reasoning, instance_id, revision):
+        """Update only a live run, without recreating it or changing its status."""
+        with self.session_lock(session_id, run_id):
+            path = self._record_path(session_id, "runs", run_id)
+            record = self._read(path, default=None)
+            if record is None or record.get("status") != "running" or record.get("stop_requested"):
+                return "expired"
+            if record.get("checkpoint_instance_id") == instance_id and int(
+                record.get("checkpoint_revision") or 0
+            ) >= revision:
+                return "expired"
+            record.update({
+                "draft_content": content, "draft_reasoning": reasoning,
+                "checkpoint_instance_id": instance_id, "checkpoint_revision": revision,
+                "updated_at": time.time(),
+            })
+            self._atomic_write(path, record)
+            self._append_jsonl(self._event_path(session_id, run_id), {
+                "sequence": self._last_event_sequence_unlocked(session_id, run_id) + 1,
+                "type": "checkpoint", "provider_sequence": None, "created_at": time.time(),
+                "payload": {"content_length": len(content), "reasoning_length": len(reasoning)},
+            })
+            return "saved"
 
     def read_events(self, session_id, run_id, starting_after=0):
         with self.session_lock(session_id, run_id):

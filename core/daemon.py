@@ -22,6 +22,7 @@ from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
 from core.runtime_journal import RUN_TERMINAL_STATUSES, RuntimeJournal, RuntimeJournalError
+from core.runtime_stream import RuntimeStream
 from core.conversation_integrity import merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
@@ -576,6 +577,18 @@ class DaemonState:
             }
             if expected_run_id:
                 run_ids.add(expected_run_id)
+            # Release stream backpressure and stop execution before waiting on
+            # disk. The journal transition below still fences registration.
+            for target_worker in [worker, *detached]:
+                if target_worker is None:
+                    continue
+                pipeline = getattr(target_worker, "_runtime_stream_pipeline", None)
+                if pipeline is not None:
+                    pipeline.stop_accepting()
+                try:
+                    target_worker.stop()
+                except Exception as exc:
+                    _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={exc}")
             # Keep the journal transition and worker registration mutually exclusive.
             # Otherwise a stop can observe no worker, then a worker can register and
             # start after the journal has already been marked interrupted.
@@ -597,16 +610,6 @@ class DaemonState:
             if matched_execution or not expected_run_id:
                 interaction_service.cancel_session_requests(session_id, reason="cancelled")
                 self._close_live_subagents(session_id, force=True)
-            if worker:
-                try:
-                    worker.stop()
-                except Exception as e:
-                    _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
-            for detached_worker in detached:
-                try:
-                    detached_worker.stop()
-                except Exception as e:
-                    _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
             stopped = bool(matched_execution or interrupted_run_ids)
         release_targets = []
         seen_worker_ids = set()
@@ -1324,6 +1327,40 @@ class DaemonState:
 
 
 class DaemonRequestHandler(socketserver.StreamRequestHandler):
+    def finish(self):
+        pipeline = getattr(self, "_stream_pipeline", None)
+        try:
+            if pipeline is not None:
+                pipeline.stop_accepting()
+                if not getattr(self, "_stream_finalized", False):
+                    worker = getattr(self, "_stream_worker", None)
+                    if worker is not None:
+                        try:
+                            worker.stop()
+                        except Exception as exc:
+                            _log_daemon(f"runtime_stream abort stop failed run_id={pipeline.run_id} error={exc}")
+                        self.server.state.detach_worker_until_finished(
+                            pipeline.session_id, worker, reason="stream_handler_failed",
+                        )
+                pipeline.close()
+                if not getattr(self, "_stream_finalized", False):
+                    _log_daemon(
+                        f"runtime_stream handler_aborted session_id={pipeline.session_id} "
+                        f"run_id={pipeline.run_id} last_sequence={pipeline.last_sequence}"
+                    )
+                    try:
+                        self.server.state.runtime_journal.interrupt_run(
+                            pipeline.session_id, pipeline.run_id, reason="stream_handler_failed",
+                        )
+                    except Exception as exc:
+                        _log_daemon(f"runtime_stream abort journal failed run_id={pipeline.run_id} error={exc}")
+                    finally:
+                        self.server.state.clear_active_worker(
+                            pipeline.session_id, expected_worker=worker, expected_run_id=pipeline.run_id,
+                        )
+        finally:
+            super().finish()
+
     def handle(self):
         line = self.rfile.readline()
         if not line:
@@ -1379,6 +1416,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 )
             except Exception:
                 active_worker_running = False
+            active_pipeline = getattr(active_worker, "_runtime_stream_pipeline", None)
+            if active_pipeline is not None and active_pipeline.active:
+                active_worker_running = True
             if active_worker and active_run_id == run_id and not active_worker_running:
                 self.server.state.clear_active_worker(
                     session_id,
@@ -1449,11 +1489,17 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         "terminal_error": "The worker that owned this run is no longer alive.",
                     },
                 )
+            replay_pending = bool(
+                active_run_id == run_id and active_pipeline is not None and not active_pipeline.drained
+            )
             events = self.server.state.runtime_journal.read_events(
                 session_id,
                 run_id,
                 starting_after=data.get("starting_after") or 0,
             )
+            if replay_pending and run.get("status") in RUN_TERMINAL_STATUSES:
+                # Replay must drain accepted events before reporting terminal.
+                run = {**run, "status": "finalizing"}
             self._send(
                 {
                     "status": "ok",
@@ -1540,15 +1586,23 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             stream_lock = threading.Lock()
             stream_closed = threading.Event()
             worker_holder = {}
+            self.connection.settimeout(5.0)
 
             def detach_stream_due_to_disconnect(reason):
                 if stream_closed.is_set():
                     return
                 stream_closed.set()
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 _log_daemon(
                     f"send_message_stream client disconnected session_id={session_id} "
                     f"run_id={request_id} last_sequence={last_stream_sequence['value']} reason={reason}"
                 )
+                threading.Thread(target=record_subscriber_detached, args=(reason,), daemon=True).start()
+
+            def record_subscriber_detached(reason):
                 try:
                     state.runtime_journal.append_event(
                         session_id,
@@ -1595,12 +1649,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     getattr(worker_holder.get("worker"), "current_assistant_message_id", "") or ""
                 )
                 try:
-                    event = state.runtime_journal.append_event(
-                        session_id,
-                        request_id,
-                        str(payload.get("type") or "stream_event"),
-                        payload,
-                    )
+                    return pipeline.enqueue(payload, terminal=payload.get("type") == "final")
                 except Exception as exc:
                     _log_daemon(
                         "runtime stream event write failed "
@@ -1611,20 +1660,26 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                             exc,
                         )
                     )
-                    raise
-                sequence = int(event.get("sequence") or 0)
-                last_stream_sequence["value"] = max(
-                    int(last_stream_sequence.get("value") or 0),
-                    sequence,
-                )
-                return write_stream(payload, sequence)
+                    on_stream_failure(exc)
+                    if payload.get("type") in {"turn_started", "final"}:
+                        raise
+                    return False
 
             def send_terminal_stream(payload):
                 try:
-                    return send_stream(payload)
+                    delivered = send_stream(payload)
+                    pipeline.close()
+                    return delivered
                 except Exception as exc:
-                    sequence = int(last_stream_sequence.get("value") or 0) + 1
-                    last_stream_sequence["value"] = sequence
+                    pipeline.close()
+                    # A transport-only terminal must not advance the replay cursor.
+                    sequence = 0
+                    payload = copy.deepcopy(payload)
+                    terminal_result = payload.setdefault("result", {})
+                    terminal_result["_runtime_journal_warning"] = str(exc)
+                    terminal_result.setdefault("error", "运行记录保存失败，已保存内容仍可恢复。")
+                    payload["session_id"] = session_id
+                    payload["run_id"] = request_id
                     _log_daemon(
                         "terminal journal append failed; sending terminal directly "
                         f"session_id={session_id} run_id={request_id} "
@@ -1638,6 +1693,32 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
 
             result_holder = {}
             done = threading.Event()
+
+            def on_stream_failure(exc):
+                if worker_holder.get("stream_failed"):
+                    return
+                worker_holder["stream_failed"] = str(exc)
+                current_pipeline = getattr(self, "_stream_pipeline", None)
+                if current_pipeline is not None:
+                    current_pipeline.stop_accepting()
+                _log_daemon(
+                    f"runtime_stream failed session_id={session_id} run_id={request_id} "
+                    f"error={exc}"
+                )
+                active_worker = worker_holder.get("worker")
+                try:
+                    if active_worker is not None:
+                        active_worker.stop()
+                finally:
+                    done.set()
+
+            def report_stream(**metrics):
+                last_stream_sequence["value"] = int(metrics.get("last_sequence") or 0)
+                _log_daemon(
+                    f"runtime_stream summary session_id={session_id} run_id={request_id} "
+                    + json.dumps(metrics, separators=(",", ":"))
+                )
+
             def on_finished(result):
                 try:
                     result_holder["result"] = result
@@ -1661,6 +1742,14 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 dependency_coordinator=state.dependency_coordinator,
             )
             worker_holder["worker"] = worker
+            pipeline = RuntimeStream(
+                state.runtime_journal, session_id, request_id,
+                write=write_stream, detach=detach_stream_due_to_disconnect,
+                failed=on_stream_failure, report=report_stream,
+            )
+            self._stream_pipeline = pipeline
+            self._stream_worker = worker
+            worker._runtime_stream_pipeline = pipeline
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
             content_snapshot_signal = getattr(worker, "content_snapshot_signal", None)
@@ -1742,10 +1831,21 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "request_id": request_id,
                 }
             result = result_holder.get("result") or {"error": "No response"}
+            try:
+                pipeline.flush()
+            except Exception as exc:
+                worker_holder["stream_failed"] = str(exc)
+            if worker_holder.get("stream_failed"):
+                result = dict(result)
+                result["error"] = "运行记录保存失败：" + worker_holder["stream_failed"]
+                result["_runtime_journal_warning"] = worker_holder["stream_failed"]
             result = _normalize_worker_error(result)
             runtime_finalize_error = ""
             try:
-                latest_run = state.runtime_journal.get_run(session_id, request_id) or {}
+                # stop_session holds this lock from cancellation through its
+                # durable interruption. Do not overtake an in-progress stop.
+                with state.lock:
+                    latest_run = state.runtime_journal.get_run(session_id, request_id) or {}
             except Exception as exc:
                 latest_run = {}
                 runtime_finalize_error = str(exc)
@@ -1963,6 +2063,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         f"operation=update_commit error={exc}"
                     )
             send_terminal_stream({"type": "final", "result": result})
+            self._stream_finalized = True
             if daemon_commit_succeeded:
                 try:
                     state.runtime_journal.acknowledge_commit(

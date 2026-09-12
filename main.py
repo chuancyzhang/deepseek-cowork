@@ -104,6 +104,7 @@ from core.chat_save_queue import (
 )
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.runtime_journal import RuntimeJournal
+from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
 from core.conversation_render import (
     project_visible_messages,
     build_conversation_render_spans,
@@ -23044,7 +23045,7 @@ class AssistantTurnGroup(QFrame):
         result_bubble = result_bubble or self.active_stage()
         if result_bubble is None:
             return False
-        if not bool(getattr(result_bubble, "_rendered_main_content_final", False)):
+        if not bool(getattr(result_bubble, "_pending_main_content_final", False)):
             self.process_finalization_pending = True
             self.process_result_bubble = result_bubble
             return False
@@ -23715,6 +23716,8 @@ class ChatBubble(QFrame):
             self._rendered_main_content_parts_signature = None
             self._rendered_main_content_final = False
             self._rendered_main_content_mode = None
+            self._main_content_version = 0
+            self._rendered_main_content_version = -1
             self._last_main_content_render_ts = 0.0
             self._main_content_render_interval = STREAM_RENDER_INTERVAL_SEC
             self._main_content_render_timer = QTimer(self)
@@ -23908,7 +23911,7 @@ class ChatBubble(QFrame):
                 "padding-right: 2px; border: none; background: transparent;"
             )
         if self.content_edit is not None and self.main_content_text:
-            was_final = bool(getattr(self, "_rendered_main_content_final", False))
+            was_final = bool(getattr(self, "_pending_main_content_final", False))
             self._rendered_main_content_text = None
             self._render_main_content(
                 self.main_content_text,
@@ -24222,6 +24225,8 @@ class ChatBubble(QFrame):
             return True
         if bool((getattr(self, "main_content_text", "") or "").strip()):
             return True
+        if getattr(self, "_pending_generated_images", None) or getattr(self, "_deliverable_paths", None):
+            return True
         generated_images = getattr(self, "generated_images_container", None)
         if generated_images is not None and not generated_images.isHidden():
             return True
@@ -24478,10 +24483,25 @@ class ChatBubble(QFrame):
     def set_main_content(self, text, content_parts=None, final=False):
         """设置对话气泡的主要内容，并合并高频流式渲染。"""
         text = text or ""
+        changed = (
+            self._pending_main_content_text != text
+            or self._pending_main_content_parts != content_parts
+            or self._pending_main_content_final != bool(final)
+        )
+        if changed:
+            self._main_content_version += 1
         self.main_content_text = text
         self._pending_main_content_text = text
-        self._pending_main_content_parts = content_parts
+        self._pending_main_content_parts = copy.deepcopy(content_parts)
         self._pending_main_content_final = bool(final)
+        # Apply metadata and lifecycle even when the result stage is hidden.
+        if changed:
+            self._sync_deliverable_cards(text, render=False)
+            self._sync_generated_image_cards(text, content_parts, final=final, render=False)
+        if final:
+            parent = self.parentWidget()
+            if isinstance(parent, AssistantTurnGroup):
+                parent.complete_pending_process_finalization(self)
         self._notify_stage_visibility_changed()
         actions_visible = bool(self.message_actions_enabled and final and text.strip())
         self.copy_result_btn.setVisible(actions_visible)
@@ -24493,10 +24513,16 @@ class ChatBubble(QFrame):
         parts_signature = self._output_image_parts_signature(content_parts)
         already_rendered = (
             self._rendered_main_content_text == text
+            and self._rendered_main_content_version == self._main_content_version
             and self._rendered_main_content_parts_signature == parts_signature
             and (self._rendered_main_content_final or not final)
         )
         if already_rendered:
+            return
+
+        if not self.isVisible():
+            self._main_content_render_timer.stop()
+            self._record_ui_cost("deferred", time.monotonic(), force=final)
             return
 
         if final:
@@ -24505,7 +24531,7 @@ class ChatBubble(QFrame):
             self._flush_pending_main_content_render()
             return
 
-        now = time.time()
+        now = time.monotonic()
         elapsed = now - self._last_main_content_render_ts
         if elapsed >= self._main_content_render_interval:
             self._flush_pending_main_content_render()
@@ -24516,17 +24542,35 @@ class ChatBubble(QFrame):
             self._main_content_render_timer.start(delay_ms)
 
     def _flush_pending_main_content_render(self):
+        if not self.isVisible():
+            return
+        self._main_content_render_timer.stop()
         self._render_main_content(
             self._pending_main_content_text,
             content_parts=self._pending_main_content_parts,
             final=self._pending_main_content_final,
         )
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        timer = getattr(self, "_main_content_render_timer", None)
+        if timer is not None:
+            timer.start(0)
+
+    def hideEvent(self, event):
+        timer = getattr(self, "_main_content_render_timer", None)
+        if timer is not None:
+            timer.stop()
+        super().hideEvent(event)
+
     def _render_main_content(self, text, content_parts=None, final=False):
+        if not self.isVisible():
+            return
         text = text or ""
         parts_signature = self._output_image_parts_signature(content_parts)
         already_rendered = (
             self._rendered_main_content_text == text
+            and self._rendered_main_content_version == self._main_content_version
             and self._rendered_main_content_parts_signature == parts_signature
             and (self._rendered_main_content_final or not final)
         )
@@ -24572,16 +24616,13 @@ class ChatBubble(QFrame):
         self._rendered_main_content_parts_signature = parts_signature
         self._rendered_main_content_final = bool(final)
         self._rendered_main_content_mode = render_mode
-        self._last_main_content_render_ts = time.time()
+        self._rendered_main_content_version = self._main_content_version
+        self._last_main_content_render_ts = time.monotonic()
         self._sync_deliverable_cards(text)
         self.content_edit.scheduleAdjustHeight()
         if final or previous_view_mode != self._main_content_view_mode:
             self._refresh_conversation_geometry()
         self._record_ui_cost("render", started, force=final)
-        if final:
-            parent = self.parentWidget()
-            if isinstance(parent, AssistantTurnGroup):
-                parent.complete_pending_process_finalization(self)
 
     @staticmethod
     def _output_image_parts_signature(content_parts):
@@ -24594,16 +24635,14 @@ class ChatBubble(QFrame):
             for part in output_image_parts(content_parts)
         )
 
-    def _sync_generated_image_cards(self, text, content_parts, *, final=False):
+    def _sync_generated_image_cards(self, text, content_parts, *, final=False, render=True):
         container = getattr(self, "generated_images_container", None)
         layout = getattr(self, "generated_images_layout", None)
         if container is None or layout is None:
             return
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        if render and hasattr(self, "_pending_generated_images"):
+            self._render_generated_image_cards(self._pending_generated_images)
+            return
         images = [(image_part, False) for image_part in output_image_parts(content_parts)]
         seen_paths = {
             os.path.normcase(os.path.abspath(str(image_part.get("path") or "")))
@@ -24619,6 +24658,20 @@ class ChatBubble(QFrame):
                     continue
                 images.append(({"type": "workspace_image", "path": path}, True))
                 seen_paths.add(path_key)
+        self._pending_generated_images = copy.deepcopy(images)
+        if render:
+            self._render_generated_image_cards(images)
+
+    def _render_generated_image_cards(self, images):
+        if getattr(self, "_rendered_generated_images", None) == images:
+            return
+        container = self.generated_images_container
+        layout = self.generated_images_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         for image_part, open_in_deliverables in images:
             card = GeneratedImageCard(
                 image_part,
@@ -24629,6 +24682,7 @@ class ChatBubble(QFrame):
                 card.pathActivated.connect(self._activate_workspace_image)
             layout.addWidget(card, 0, Qt.AlignLeft)
         container.setVisible(bool(images))
+        self._rendered_generated_images = copy.deepcopy(images)
         self._notify_stage_visibility_changed()
 
     def _activate_workspace_image(self, path):
@@ -24724,11 +24778,16 @@ class ChatBubble(QFrame):
                 "系统默认浏览器未能打开该网页，请检查默认浏览器设置后重试。",
             )
 
-    def _sync_deliverable_cards(self, text):
+    def _sync_deliverable_cards(self, text, *, render=True):
         if not hasattr(self, "deliverable_cards_layout"):
             return
-        paths = [path for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir)]
-        if paths == self._deliverable_paths:
+        paths = self._deliverable_paths if render else [
+            path for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir)
+        ]
+        if paths != self._deliverable_paths:
+            self._deliverable_paths = paths
+            self.deliverablePathsChanged.emit(list(paths))
+        if not render or paths == getattr(self, "_rendered_deliverable_paths", None):
             return
         while self.deliverable_cards_layout.count():
             item = self.deliverable_cards_layout.takeAt(0)
@@ -24775,9 +24834,8 @@ class ChatBubble(QFrame):
             button.clicked.connect(lambda checked=False, value=path: self.deliverablePathActivated.emit(value))
             self.deliverable_cards_layout.addWidget(button)
             visible_card_count += 1
-        self._deliverable_paths = paths
+        self._rendered_deliverable_paths = paths
         self.deliverable_cards.setVisible(bool(visible_card_count))
-        self.deliverablePathsChanged.emit(list(paths))
 
     def _render_plain_stream_content(self, text):
         """Avoid full Markdown conversion while a long response is still streaming."""
@@ -24785,10 +24843,9 @@ class ChatBubble(QFrame):
         if self._rendered_main_content_mode == "plain" and text.startswith(previous):
             delta = text[len(previous):]
             if delta:
-                cursor = self.content_edit.textCursor()
+                cursor = QTextCursor(self.content_edit.document())
                 cursor.movePosition(QTextCursor.End)
                 cursor.insertText(delta)
-                self.content_edit.setTextCursor(cursor)
             return
         self.content_edit.setPlainText(text)
 
@@ -30448,6 +30505,11 @@ class MainWindow(QMainWindow):
         self.chat_save_worker.save_blocked.connect(self.handle_chat_save_blocked)
         self.chat_save_worker.save_completed.connect(self.handle_chat_save_completed)
         self.chat_save_worker.start()
+        self.runtime_checkpoint_worker = RuntimeCheckpointWorker(self.runtime_journal, parent=self)
+        self.runtime_checkpoint_worker.completed.connect(self._handle_runtime_checkpoint_completed)
+        self.runtime_checkpoint_worker.measured.connect(self._handle_runtime_checkpoint_measured)
+        self._checkpoint_continuations = {}
+        self.runtime_checkpoint_worker.start()
         self.refresh_model_selector()
         self.create_new_session()
         self.update_skill_capture_button_state()
@@ -36074,7 +36136,7 @@ class MainWindow(QMainWindow):
                     pending=bool(group.process_finalization_pending),
                     result_ready=bool(
                         result_bubble is not None
-                        and getattr(result_bubble, "_rendered_main_content_final", False)
+                        and getattr(result_bubble, "_pending_main_content_final", False)
                     ),
                 )
                 continue
@@ -37702,7 +37764,9 @@ class MainWindow(QMainWindow):
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
         self._dispose_application_event_filters()
-        preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
+        self._shutdown_workers_async(self._finish_quit_app)
+
+    def _finish_quit_app(self, preserved_daemon_runs):
         if not preserved_daemon_runs:
             if self.daemon_client and self.daemon_available:
                 self.daemon_client.shutdown()
@@ -37711,6 +37775,26 @@ class MainWindow(QMainWindow):
         if self.tray_icon:
             self.tray_icon.hide()
         QApplication.quit()
+
+    def _shutdown_workers_async(self, continuation):
+        if getattr(self, "_checkpoint_shutdown_pending", False):
+            return
+        self._checkpoint_shutdown_pending = True
+        # A delivered final may still be waiting for its checkpoint callback.
+        # Materialize it before shutting down the canonical history save worker.
+        for state in list(self.sessions.values()):
+            self._flush_ui_stream_buffers(state)
+        callbacks = list(self._checkpoint_continuations.values())
+        self._checkpoint_continuations.clear()
+        for callback in callbacks:
+            callback()
+        preserved = self.shutdown_workers(preserve_daemon_runs=True)
+        worker = getattr(self, "runtime_checkpoint_worker", None)
+        if worker is None or not worker.isRunning():
+            continuation(preserved)
+            return
+        worker.finished.connect(lambda: continuation(preserved))
+        worker.request_stop()
 
     def _dispose_application_event_filters(self):
         for attribute in ("deliverable_web_preview", "file_workbench"):
@@ -37786,6 +37870,7 @@ class MainWindow(QMainWindow):
                     self._retire_ui_stream_buffer(state, worker, discard_terminal=True)
             self.flush_session_content(state.session_id, final=False)
             self.flush_session_thinking(state.session_id)
+            self._queue_runtime_checkpoint(state, boundary="exit" if preserve_session_run else "exit_local")
             state.daemon_running = False
             state.daemon_worker = None
             state.llm_worker = None
@@ -37824,6 +37909,9 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if getattr(self, "_checkpoint_close_ready", False):
+            event.accept()
+            return
         if any(worker.isRunning() for worker in getattr(self, "skillhub_workers", [])):
             self.add_system_toast("SkillHub 操作仍在进行，请完成后再退出。", "info")
             event.ignore()
@@ -37838,11 +37926,15 @@ class MainWindow(QMainWindow):
                 return
             self._dispose_application_event_filters()
             self.skill_catalog_service.stop_watching()
-            preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
-            if not preserved_daemon_runs:
-                self.stop_daemon_process()
-            self.stop_gateway_process()
-            event.accept()
+            event.ignore()
+            self._shutdown_workers_async(self._finish_window_close)
+
+    def _finish_window_close(self, preserved_daemon_runs):
+        if not preserved_daemon_runs:
+            self.stop_daemon_process()
+        self.stop_gateway_process()
+        self._checkpoint_close_ready = True
+        self.close()
 
     def attach_single_instance_server(self, server):
         self.single_instance_server = server
@@ -37926,11 +38018,8 @@ class MainWindow(QMainWindow):
         self.refresh_token_usage_label(session_id)
         if hasattr(self, "input_field") and self.input_field.toPlainText() != state.composer_draft:
             self.input_field.setPlainText(state.composer_draft or "")
-        if getattr(state, "chat_scroll", None) and state.saved_scroll_position is not None:
-            QTimer.singleShot(
-                0,
-                lambda bar=state.chat_scroll.verticalScrollBar(), value=state.saved_scroll_position: bar.setValue(int(value)),
-            )
+        if getattr(state, "chat_scroll", None):
+            QTimer.singleShot(0, lambda current=state: self._restore_session_projection(current))
         if (
             getattr(state, "history_loaded", True)
             and getattr(self, "right_drawer_open", False)
@@ -41552,9 +41641,36 @@ class MainWindow(QMainWindow):
         else:
             self.flush_session_scroll(state.session_id)
 
+    def _restore_session_projection(self, state):
+        if self.get_session(state.session_id) is not state or state.session_id != self.current_session_id:
+            return
+        for bubble in state.session_widget.findChildren(ChatBubble):
+            if bubble.role == "User" or not bubble.isVisible():
+                continue
+            bubble._flush_pending_main_content_render()
+            bubble.content_edit.adjustHeight()
+            if bubble._geometry_refresh_timer.isActive():
+                bubble._geometry_refresh_timer.stop()
+                bubble._flush_conversation_geometry()
+        # Parent layouts settle after the text heights, before restoring scroll.
+        QTimer.singleShot(0, lambda current=state: self._restore_session_scroll_position(current))
+
+    def _restore_session_scroll_position(self, state):
+        if self.get_session(state.session_id) is not state or state.session_id != self.current_session_id:
+            return
+        if state.scroll_dragging:
+            return
+        bar = state.chat_scroll.verticalScrollBar()
+        if state.auto_scroll_enabled:
+            self.request_session_scroll_to_bottom(state.session_id)
+        elif state.saved_scroll_position is not None:
+            bar.setValue(int(state.saved_scroll_position))
+
     def _finalize_session_scroll(self, session_id, force=False):
         state = self.get_session(session_id)
         if not state or not getattr(state, "chat_scroll", None):
+            return
+        if state.session_id != self.current_session_id or not state.chat_scroll.isVisible():
             return
         if getattr(state, "scroll_dragging", False):
             return
@@ -43403,51 +43519,49 @@ class MainWindow(QMainWindow):
         last = float(getattr(state, "last_chat_recovery_checkpoint_at", 0.0) or 0.0)
         if now - last < 1.0:
             return False
-        content = str(getattr(state, "current_content_buffer", "") or "")
-        reasoning = str(getattr(state, "current_thinking_buffer", "") or "")
-        if not content.strip() and not reasoning.strip():
-            return False
         state.last_chat_recovery_checkpoint_at = now
+        return self._queue_runtime_checkpoint(state)
+
+    def _queue_runtime_checkpoint(self, state, *, boundary="", continuation=None):
+        worker = getattr(self, "runtime_checkpoint_worker", None)
         run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
-        if not run_id:
+        if worker is None or not worker.isRunning() or not run_id:
+            if continuation is not None:
+                continuation()
             return False
-        try:
-            if self.runtime_journal.get_run(state.session_id, run_id) is None:
-                self.runtime_journal.begin_run(
-                    state.session_id,
-                    run_id,
-                    turn_id=getattr(state, "active_turn_id", ""),
-                    writer_owner=f"ui:{os.getpid()}",
-                    base_messages=(
-                        self.chat_storage.get_messages(state.session_id)
-                        if self.chat_storage.has_conversation(state.session_id)
-                        else []
-                    ),
-                )
-            self.runtime_journal.update_run(
-                state.session_id,
-                run_id,
-                {
-                    "status": "running",
-                    "draft_content": content,
-                    "draft_reasoning": reasoning,
-                },
-            )
-            self.runtime_journal.append_event(
-                state.session_id,
-                run_id,
-                "checkpoint",
-                {
-                    "content_length": len(content),
-                    "reasoning_length": len(reasoning),
-                },
-            )
-            return True
-        except Exception as exc:
-            self.append_log(
-                f"运行恢复记录写入失败({state.session_id}, run={run_id}): {exc}"
-            )
+        if not getattr(state, "checkpoint_instance_id", ""):
+            state.checkpoint_instance_id = uuid.uuid4().hex
+        state.checkpoint_revision = int(getattr(state, "checkpoint_revision", 0)) + 1
+        request = CheckpointRequest(
+            state.session_id, run_id, state.checkpoint_instance_id, state.checkpoint_revision,
+            str(state.current_content_buffer or ""), str(state.current_thinking_buffer or ""), boundary,
+        )
+        key = (*request.key, request.revision)
+        if continuation is not None:
+            self._checkpoint_continuations[key] = continuation
+        if not worker.enqueue(request):
+            self._checkpoint_continuations.pop(key, None)
+            if continuation is not None:
+                QTimer.singleShot(0, continuation)
             return False
+        return True
+
+    def _handle_runtime_checkpoint_measured(self, metrics):
+        log_chat_runtime_debug("runtime_checkpoint", **metrics)
+
+    def _handle_runtime_checkpoint_completed(self, request, outcome, error):
+        state = self.get_session(request.session_id)
+        same_instance = state is not None and getattr(state, "checkpoint_instance_id", "") == request.instance_id
+        if outcome == "failed":
+            if same_instance:
+                state.checkpoint_failure = (request, error)
+            self.append_log(f"运行恢复记录写入失败({request.session_id}, run={request.run_id}): {error}")
+            self.add_system_toast("回答内容已保留，但运行恢复记录保存失败，请查看运行日志。", "warning")
+        elif same_instance and outcome == "saved":
+            state.checkpoint_failure = None
+        callback = self._checkpoint_continuations.pop((*request.key, request.revision), None)
+        if callback is not None:
+            callback()
 
     def flush_pending_chat_saves(self, session_id=None, timeout_ms=3000):
         worker = getattr(self, "chat_save_worker", None)
@@ -49338,6 +49452,7 @@ a {{ overflow-wrap: anywhere; }}
         self.flush_session_content(state.session_id, final=False)
         self.flush_session_thinking(state.session_id)
         self._cancel_token_speed_monitor(state, "user_stop")
+        self._queue_runtime_checkpoint(state, boundary="stop")
 
         # Terminalize the local run before any remote cancellation wait. This
         # prevents a stopped turn from remaining steerable/"thinking" in the UI.
@@ -49348,27 +49463,6 @@ a {{ overflow-wrap: anywhere; }}
         state.turn_steerable = False
         state.llm_worker = None
         state.code_worker = None
-        if stopped_run_id:
-            try:
-                self.runtime_journal.interrupt_run(
-                    state.session_id,
-                    stopped_run_id,
-                    reason="interrupted by user",
-                    patch={
-                        "draft_content": str(state.current_content_buffer or ""),
-                        "draft_reasoning": str(state.current_thinking_buffer or ""),
-                    },
-                )
-                self.runtime_journal.append_event(
-                    state.session_id,
-                    stopped_run_id,
-                    "interrupted",
-                    {"reason": "user_stop"},
-                )
-            except Exception as exc:
-                self.append_log(
-                    f"运行停止状态写入恢复日志失败({state.session_id}, run={stopped_run_id}): {exc}"
-                )
         self._finish_grill_mode(state, "stopped")
         self._reject_unapplied_guidance(state, restore_input=False)
         self._persist_pending_guidance(state)
@@ -54352,7 +54446,7 @@ a {{ overflow-wrap: anywhere; }}
             filtered.append(message)
         return filtered
 
-    def handle_llm_response(self, result, session_id=None, turn_id=None, request_id=None):
+    def handle_llm_response(self, result, session_id=None, turn_id=None, request_id=None, *, _checkpoint_ready=False):
         state = self.get_session(session_id)
         if not state:
             log_chat_runtime_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
@@ -54382,6 +54476,17 @@ a {{ overflow-wrap: anywhere; }}
                 turn_id=turn_id,
                 active_turn_id=state.active_turn_id,
                 completed_turn_id=state.completed_turn_id,
+            )
+            return
+        if not _checkpoint_ready:
+            self._queue_runtime_checkpoint(
+                state, boundary="complete",
+                continuation=lambda current=state, payload=copy.deepcopy(result),
+                    turn=turn_id if turn_id is not None else state.active_turn_id,
+                    run=request_id or state.active_turn_request_id: (
+                    self.handle_llm_response(payload, current.session_id, turn, run, _checkpoint_ready=True)
+                    if self.get_session(current.session_id) is current else None
+                ),
             )
             return
         provider_succeeded = "error" not in result

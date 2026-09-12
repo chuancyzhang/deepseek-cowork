@@ -15532,6 +15532,10 @@ class SkillsCenterDialog(QDialog):
         self.current_scene = "all"
         self.search_text = ""
         self._column_count = 2
+        self._builtin_detail_open = False
+        self._builtin_detail_skill = None
+        self._builtin_detail_editor = None
+        self._builtin_list_scroll = 0
         self.component_task_manager = getattr(parent, "component_task_manager", None)
         self.browser_component_status = {}
         self.browser_component_task = {}
@@ -15810,6 +15814,10 @@ class SkillsCenterDialog(QDialog):
         self.advanced_btn.hide()
         self.builtin_btn.setVisible(mode != "builtin")
         self._mode_state[self.current_mode] = (self.search_text, self.scroll.verticalScrollBar().value())
+        if self.current_mode == "builtin" and self._builtin_detail_open:
+            self._mode_state["builtin"] = (self.search_text, self._builtin_list_scroll)
+        self._builtin_detail_open = False
+        self._builtin_detail_skill = None
         self.current_mode = mode
         self.import_skill_btn.setStyleSheet(product_button_style("secondary" if mode == "hub" else "primary"))
         self.search_text, position = self._mode_state.get(mode, ("", 0))
@@ -15845,6 +15853,9 @@ class SkillsCenterDialog(QDialog):
             self.hub_generation += 1
             self.hub_filters.show()
             self.hub_timer.start()
+            return
+        if self._builtin_detail_open:
+            self._close_builtin_detail()
             return
         self._render_content()
 
@@ -16682,6 +16693,11 @@ class SkillsCenterDialog(QDialog):
             self._main.show_advanced_capabilities()
 
     def _render_content(self):
+        detail_position = (
+            self._builtin_detail_editor.verticalScrollBar().value()
+            if self._builtin_detail_editor is not None else 0
+        )
+        self._builtin_detail_editor = None
         scroll_position = getattr(self, "_hub_restore_scroll", self.scroll.verticalScrollBar().value())
         self._hub_restore_scroll = None
         if scroll_position is None:
@@ -16719,7 +16735,9 @@ class SkillsCenterDialog(QDialog):
             return
 
         if self.current_mode == "builtin":
-            self._builtin_detail_open = False
+            if self._builtin_detail_open:
+                self._render_builtin_detail(detail_position)
+                return
             skills = [skill for skill in self._all_skills
                       if capability_is_readonly_builtin(skill) and self._matches_search(skill)]
             self.content_layout.addWidget(self._section("内置技能 · 随应用提供，只读", skills))
@@ -16760,18 +16778,68 @@ class SkillsCenterDialog(QDialog):
             self._render_content()
 
     def _show_builtin_detail(self, skill):
+        if not self._builtin_detail_open:
+            self._builtin_list_scroll = self.scroll.verticalScrollBar().value()
         self._builtin_detail_open = True
-        self._clear_layout(self.content_layout)
+        self._builtin_detail_skill = dict(skill)
+        self._builtin_detail_editor = None
+        self._hub_restore_scroll = 0
+        log_ui_navigation("builtin_skill_detail_open", skill_name=skill.get("name"))
+        self._render_content()
+
+    def _close_builtin_detail(self):
+        self._builtin_detail_open = False
+        self._builtin_detail_skill = None
+        self._hub_restore_scroll = self._builtin_list_scroll
+        self._render_content()
+
+    def _render_builtin_detail(self, scroll_position=0):
+        skill = self._builtin_detail_skill
+        name = str(skill.get("name") or "")
+        back = QPushButton("返回内置技能")
+        back.clicked.connect(self._close_builtin_detail)
+        back.setStyleSheet(product_button_style("ghost"))
+        self.content_layout.addWidget(back, 0, Qt.AlignLeft)
         title = QLabel(readable_skill_name(skill) or skill.get("name", ""))
+        title.setTextFormat(Qt.PlainText)
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         title.setStyleSheet(apple_settings_section_title_style())
         self.content_layout.addWidget(title)
-        detail = QTextBrowser()
-        detail.setPlainText(str(skill.get("content") or skill.get("description") or "暂无详情"))
-        self.content_layout.addWidget(detail)
-        back = QPushButton("返回内置技能")
-        back.clicked.connect(self._render_content)
-        back.setStyleSheet(product_button_style("ghost"))
-        self.content_layout.insertWidget(0, back, 0, Qt.AlignLeft)
+        source = QLabel("SKILL.md · 随应用提供，只读")
+        source.setStyleSheet(apple_caption_style())
+        self.content_layout.addWidget(source, 0, Qt.AlignTop)
+        try:
+            payload = self.skill_manager.read_skill_file(name, "SKILL.md")
+        except Exception as exc:
+            payload = {"ok": False, "error": str(exc)}
+        if not payload.get("ok"):
+            error = str(payload.get("error") or "未知读取错误")
+            log_ui_navigation("builtin_skill_detail_error", skill_name=name, error=error)
+            self.content_layout.addWidget(ProductInlineNotice(
+                "技能内容读取失败，请重试。\n" + error, "error"
+            ))
+            retry = QPushButton("重试读取")
+            retry.setStyleSheet(product_button_style("secondary"))
+            retry.clicked.connect(lambda checked=False: self._show_builtin_detail(skill))
+            self.content_layout.addWidget(retry, 0, Qt.AlignLeft)
+            self.content_layout.addStretch()
+            return
+        content = str(payload.get("content") or "")
+        detail = QPlainTextEdit()
+        detail.setObjectName("BuiltinSkillContent")
+        detail.setAccessibleName("内置技能完整内容（只读）")
+        detail.setReadOnly(True)
+        detail.setStyleSheet(product_code_style("QPlainTextEdit#BuiltinSkillContent"))
+        detail.setMinimumHeight(240)
+        detail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        detail.setPlainText(content)
+        detail.setPlaceholderText("SKILL.md 为空。")
+        self.content_layout.addWidget(detail, 1)
+        self._builtin_detail_editor = detail
+        QTimer.singleShot(0, lambda: detail.verticalScrollBar().setValue(scroll_position)
+                          if _qt_object_alive(detail) and self._builtin_detail_editor is detail else None)
+        log_ui_navigation("builtin_skill_detail_loaded", skill_name=name, content_length=len(content))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -46504,7 +46572,7 @@ a {{ overflow-wrap: anywhere; }}
                 return agents.leave_profile_editor()
             if capabilities is not None and capabilities.current_mode == "builtin":
                 if getattr(capabilities, "_builtin_detail_open", False):
-                    capabilities._render_content()
+                    capabilities._close_builtin_detail()
                     return True
                 capabilities._set_mode(getattr(capabilities, "_before_builtin", "library"))
                 return True

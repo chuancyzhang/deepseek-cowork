@@ -38904,7 +38904,14 @@ class MainWindow(QMainWindow):
     def _render_history_span(self, state, span, insert_index=None):
         start = int(span.get("start") or 0)
         end = int(span.get("end") or start)
-        messages = project_visible_messages(state.messages, start=start, end=end)
+        messages = project_visible_messages(
+            state.messages, start=start, end=end,
+            timeline_events=(
+                {**event, "text": thinking_event_text(event)}
+                for event in getattr(state, "ui_timeline_events", []) or []
+                if isinstance(event, dict) and event.get("kind") == "thinking"
+            ),
+        )
         if not messages:
             return 0
         if any((message.get("meta") or {}).get("ui_visible_fragment") for message in messages):
@@ -48988,6 +48995,15 @@ a {{ overflow-wrap: anywhere; }}
             "interrupted", "failed", "error",
         }
         reply_kind = "interrupted" if terminal else "stage"
+        thinking_stages = {
+            (str(event.get("group_id") or ""), str(event.get("stage_id") or ""))
+            for event in getattr(state, "ui_timeline_events", []) or []
+            if isinstance(event, dict)
+            and event.get("kind") == "thinking"
+            and str(event.get("turn_id") or "") == turn_key
+            and event.get("group_id") and event.get("stage_id")
+            and thinking_event_text(event).strip()
+        }
         stage_groups = []
         seen_stage_keys = set()
         for group in groups:
@@ -48997,10 +49013,14 @@ a {{ overflow-wrap: anywhere; }}
                 if stage is None or not _qt_object_alive(stage):
                     continue
                 content = str(getattr(stage, "main_content_text", "") or "")
-                if not content.strip() and not str(getattr(stage, "ui_source_message_id", "") or ""):
-                    continue
                 stage_id = str(getattr(stage, "ui_stage_id", "") or f"{group_id}:stage-{stage_index}")
                 stage_key = (group_id, stage_id)
+                if (
+                    not content.strip()
+                    and not str(getattr(stage, "ui_source_message_id", "") or "")
+                    and stage_key not in thinking_stages
+                ):
+                    continue
                 if stage_key in seen_stage_keys:
                     continue
                 seen_stage_keys.add(stage_key)
@@ -49039,9 +49059,9 @@ a {{ overflow-wrap: anywhere; }}
 
         if not stage_groups and fallback_bubble is not None:
             content = str(getattr(fallback_bubble, "main_content_text", "") or "").strip()
-            if content:
-                group_id = str(getattr(fallback_bubble, "ui_turn_group_id", "") or "")
-                stage_id = str(getattr(fallback_bubble, "ui_stage_id", "") or "fallback-stage")
+            group_id = str(getattr(fallback_bubble, "ui_turn_group_id", "") or "")
+            stage_id = str(getattr(fallback_bubble, "ui_stage_id", "") or "fallback-stage")
+            if content or (group_id, stage_id) in thinking_stages:
                 message_id = self._visible_assistant_message_id(
                     state.session_id,
                     run_key,
@@ -49058,6 +49078,7 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_reply_kind": reply_kind,
                     "ui_source_message_id": str(getattr(fallback_bubble, "ui_source_message_id", "") or ""),
                     "ui_visible_fragment": True,
+                    "ui_display_anchor_only": not bool(content),
                 }
                 if terminal:
                     meta.update({
@@ -49125,6 +49146,8 @@ a {{ overflow-wrap: anywhere; }}
         reason_text,
         outcome,
     ):
+        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
+        previous_render_total = len(getattr(state, "render_items", []) or [])
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
         self._timeline_close_open_events(state, status=timeline_status)
         self._timeline_append_event(
@@ -49174,6 +49197,16 @@ a {{ overflow-wrap: anywhere; }}
             conversation_id=state.session_id,
         )
         self._rebuild_session_render_spans(state)
+        self._sync_displayed_render_count_after_live_append(
+            state, previous_render_count, previous_render_total,
+        )
+        log_ui_navigation(
+            "interrupted_history_spans_synced",
+            session_id=state.session_id, turn_id=turn_id, run_id=run_id,
+            outcome=outcome, previous_total=previous_render_total,
+            previous_displayed=previous_render_count,
+            total=len(state.render_items), displayed=state.displayed_render_count,
+        )
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""

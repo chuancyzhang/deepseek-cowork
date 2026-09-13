@@ -3,7 +3,7 @@ import copy
 import logging
 
 
-def project_visible_messages(messages, *, start=0, end=None):
+def project_visible_messages(messages, *, start=0, end=None, timeline_events=()):
     """Join provider rounds onto display anchors, without changing the ledger.
 
     Range arguments address ORIGINAL ledger rows, not the shorter projection.
@@ -154,7 +154,65 @@ def project_visible_messages(messages, *, start=0, end=None):
         slots[index] = []
     for anchor in set(before) | set(after):
         slots[anchor] = before.get(anchor, []) + slots[anchor] + after.get(anchor, [])
+    _restore_projected_thinking(slots, timeline_events)
     return [message for slot in slots[start:end] for message in slot]
+
+
+def _restore_projected_thinking(slots, timeline_events):
+    """Fill UI-only copies before paging, so each stage gets reasoning once."""
+    if not timeline_events:
+        return
+    targets = {}
+    existing = set()
+    existing_sources = set()
+    for slot in slots:
+        for index, message in enumerate(slot):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            meta = message.get("meta") or {}
+            key = (
+                str(meta.get("ui_turn_id") or meta.get("turn_id") or ""),
+                str(meta.get("ui_turn_group_id") or ""),
+                str(meta.get("ui_stage_id") or ""),
+            )
+            if not all(key):
+                continue
+            source = str((
+                meta.get("ui_source_message_id")
+                if meta.get("ui_visible_fragment") else message.get("id")
+            ) or "")
+            source_key = (key[0], source)
+            targets.setdefault(key, (slot, index, source_key))
+            if message.get("reasoning_content") or message.get("reasoning"):
+                existing.add(key)
+                if source:
+                    existing_sources.add(source_key)
+    targets = {
+        key: target for key, target in targets.items()
+        if key not in existing and target[2] not in existing_sources
+    }
+    if not targets:
+        return
+    thinking = {}
+    for event in timeline_events:
+        if not isinstance(event, dict) or event.get("kind") != "thinking":
+            continue
+        key = tuple(str(event.get(field) or "") for field in ("turn_id", "group_id", "stage_id"))
+        if key in targets and str(event.get("text") or "").strip():
+            thinking.setdefault(key, []).append(event)
+    for key, events in thinking.items():
+        reasoning = "".join(
+            str(event.get("text") or "")
+            for event in sorted(events, key=lambda item: int(item.get("sequence") or 0))
+        )
+        slot, index, _ = targets[key]
+        message = dict(slot[index])
+        message["reasoning_content"] = reasoning
+        slot[index] = message
+        logging.getLogger(__name__).debug(
+            "history_projection_thinking_restored message_id=%s turn_id=%s group_id=%s stage_id=%s reasoning_len=%s",
+            message.get("id"), *key, len(reasoning),
+        )
 
 
 def _safe_jsonable(value):

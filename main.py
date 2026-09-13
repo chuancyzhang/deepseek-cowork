@@ -26328,13 +26328,10 @@ class SessionSkillCaptureIndicator(QToolButton):
 
 
 class StartupLoadingWindow(QWidget):
-    """Small first-paint window shown while the full main window is built."""
-
-    first_painted = Signal()
+    """Loading window displayed during main-window startup."""
 
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
-        self._first_paint_done = False
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle("DeepSeek Cowork")
         icon_path = resolve_app_icon_path()
@@ -26391,13 +26388,6 @@ class StartupLoadingWindow(QWidget):
 
         self.resize(300, 188)
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._first_paint_done:
-            self._first_paint_done = True
-            log_startup_stage("startup_loading_first_paint")
-            self.first_painted.emit()
-
     def show_centered(self):
         screen = QGuiApplication.primaryScreen()
         if screen:
@@ -26447,13 +26437,7 @@ def schedule_main_window_startup(
         if pending_activation.get("requested"):
             window.activate_existing_window()
 
-    def queue_main_window():
-        QTimer.singleShot(0, build_main_window)
-
-    if startup_window is None or startup_window._first_paint_done:
-        queue_main_window()
-    else:
-        startup_window.first_painted.connect(queue_main_window)
+    QTimer.singleShot(0, build_main_window)
     return holder
 
 

@@ -123,8 +123,10 @@ def run_python_code(workspace_dir, code, _context=None):
     if not workspace_dir:
         return "Error: Workspace not selected."
         
-    god_mode = False
-    if _context and 'config_manager' in _context:
+    from core.execution_authorization import current_authorization, invocation_authorized
+    authorization = current_authorization(_context)
+    god_mode = bool(authorization and (authorization.god_mode or invocation_authorized(_context)))
+    if authorization is None and _context and 'config_manager' in _context:
         god_mode = _context['config_manager'].get_god_mode()
 
     visualization_dir = ""

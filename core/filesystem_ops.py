@@ -22,6 +22,12 @@ class TextFileCodecError(Exception):
 
 
 def _is_god_mode(context):
+    from .execution_authorization import current_authorization, invocation_authorized
+    authorization = current_authorization(context)
+    if authorization is not None:
+        authorization.check()
+        # File scope was checked by the action gate. Keep integrity checks below.
+        return authorization.god_mode or invocation_authorized(context)
     if isinstance(context, dict):
         cfg = context.get("config_manager")
         if cfg:

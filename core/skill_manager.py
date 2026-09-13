@@ -3566,6 +3566,53 @@ class SkillManager:
         return self.materialize_experience_package(skill_name, include_references=include_references, include_entries=include_entries)
 
     def call_tool(self, name, args, context=None):
+        from .execution_authorization import invoke, current_authorization
+        record = self.tool_registry.get(name)
+        resolved_name = record.name if record else str(name or "").strip()
+        if resolved_name not in self.tools:
+            return f"Error: Tool '{name}' not found."
+        effective_context = dict(context or {})
+        effective_context["execution_authorization"] = current_authorization(effective_context)
+        effective_context.setdefault("workspace_dir", self.workspace_dir)
+        # Private host arguments must never come from model JSON (including MCP kwargs).
+        arguments = dict(args or {})
+        if any(key in {"_context", "_server", "_remote_name", "execution_authorization", "authorization_started", "authorization_event"} for key in arguments):
+            return {"ok": False, "status": "denied", "executed": False, "error": "Private execution arguments are not accepted."}
+
+        def preparation():
+            payload = {"script_paths": [], "dependencies": [], "requires_install": False}
+            skill_names = [self.tool_to_skill_map.get(resolved_name)]
+            if resolved_name == "tool_search":
+                matches = self._search_skills(arguments.get("query", ""), limit=arguments.get("limit", 8),
+                                              run_context=effective_context.get("run_context"))
+                for match in matches:
+                    candidate = self.skill_records.get(match.get("name")) or {}
+                    if candidate.get("spec", {}).get("source_format") == self.MCP_SOURCE_FORMAT and not candidate.get("mcp_tools_loaded"):
+                        server = candidate.get("mcp_server") or {}
+                        payload["requires_install"] = True
+                        payload.setdefault("mcp_discovery", []).append({key: server.get(key) for key in ("id", "name", "transport", "command", "args", "url")})
+            if resolved_name == "run_skill_script":
+                skill_names.append(arguments.get("skill_name"))
+            for skill_name in skill_names:
+                skill_record = self.skill_records.get(skill_name) or {}
+                spec = skill_record.get("spec") or {}
+                if not (skill_record.get("dependency_status") or {"ok": True}).get("ok"):
+                    payload["requires_install"] = True
+                    payload["dependencies"].append({"skill": skill_name, "python": spec.get("python_dependencies", []), "node": spec.get("node_dependencies", [])})
+                if resolved_name == "run_skill_script" and skill_name == arguments.get("skill_name"):
+                    requested = str(arguments.get("script_name") or "")
+                    for entry in spec.get("script_entries") or []:
+                        path = str(entry.get("path") or "")
+                        if requested in {entry.get("name"), os.path.normpath(path), os.path.basename(path)}:
+                            payload["script_paths"].append(os.path.abspath(os.path.join(skill_record["path"], path)))
+                            payload["script"] = {"runtime": entry.get("runtime"), "cwd": skill_record["path"], "default_args": entry.get("default_args", [])}
+            return payload
+
+        return invoke(resolved_name, arguments, self.tools[resolved_name], effective_context,
+                      lambda: self._call_tool_authorized(resolved_name, arguments, effective_context),
+                      preparation=preparation)
+
+    def _call_tool_authorized(self, name, args, context=None):
         record = self.tool_registry.get(name)
         resolved_name = record.name if record else str(name or "").strip()
         if resolved_name not in self.tools:

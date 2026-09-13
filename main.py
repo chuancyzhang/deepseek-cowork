@@ -3474,8 +3474,8 @@ class _LegacySettingsDialog(QDialog):
         history_dir_btn.clicked.connect(choose_history_dir)
         
         # God Mode Toggle
-        self.god_mode_check = QCheckBox("启用 God Mode (解除安全限制)")
-        self.god_mode_check.setToolTip("警告：开启后，Agent 将拥有对全盘文件的访问权限，并可执行任意 Python 代码。\n请仅在您完全信任 Agent 操作时开启。")
+        self.god_mode_check = QCheckBox("启用上帝模式（持续授权执行）")
+        self.god_mode_check.setToolTip("开启后，新启动的任务可以按当前系统用户权限执行操作，保留已有业务确认。关闭后，读取和分析不受影响，修改原有资产或运行代码时请求本次许可。")
         self.god_mode_check.setChecked(self.config_manager.get_god_mode())
         self.god_mode_check.setStyleSheet(
             f"QCheckBox {{ color: {DesignTokens.error_text}; font-weight: bold; }}"
@@ -12307,7 +12307,7 @@ class SettingsDialog(QDialog):
         permission_panel_layout.setContentsMargins(14, 14, 14, 14)
         permission_title = QLabel("扩展权限模式")
         permission_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.warning_panel_text};")
-        permission_desc = QLabel("开启后，助手可以突破工作区限制并执行更高风险的代码操作。仅在完全信任任务时使用。")
+        permission_desc = QLabel("上帝模式为新任务提供持续执行授权。关闭后，读取和分析不受影响，修改原有资产或运行代码时请求本次许可。切换不改变正在运行的任务。")
         permission_desc.setWordWrap(True)
         permission_desc.setStyleSheet(f"color: {DesignTokens.warning_panel_text}; font-size: 12px;")
         self.god_mode_check = QCheckBox("允许高风险操作")
@@ -17514,6 +17514,30 @@ class InlineInteractionCard(QFrame):
         layout.addWidget(self.title_label)
         layout.addWidget(self.message_label)
 
+        permission_meta = self.request.get("metadata") or {}
+        self.permission_details = None
+        self.permission_details_button = None
+        if permission_meta.get("execution_permission"):
+            self.message_label.setText("\n".join(filter(None, [self.message_label.text(), permission_meta.get("scope", "") ])))
+            self.permission_details_button = QPushButton("查看执行详情")
+            self.permission_details_button.setCheckable(True)
+            self.permission_details_button.setStyleSheet(product_button_style("secondary"))
+            layout.addWidget(self.permission_details_button)
+
+            def show_permission_details(checked):
+                if self.permission_details is None and checked:
+                    self.permission_details = QPlainTextEdit()
+                    self.permission_details.setReadOnly(True)
+                    self.permission_details.setPlainText(str(permission_meta.get("details") or ""))
+                    self.permission_details.setMinimumHeight(120)
+                    self.permission_details.setMaximumHeight(260)
+                    self.permission_details.setStyleSheet(product_field_style())
+                    layout.insertWidget(layout.indexOf(self.permission_details_button) + 1, self.permission_details)
+                if self.permission_details is not None:
+                    self.permission_details.setVisible(checked)
+
+            self.permission_details_button.toggled.connect(show_permission_details)
+
         self.text_input = QLineEdit()
         self.text_input.setPlaceholderText("补充说明…")
         self.text_input.setStyleSheet(product_field_style())
@@ -17580,6 +17604,9 @@ class InlineInteractionCard(QFrame):
         self.cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
         self.cancel_btn.clicked.connect(lambda: self._finish(False))
         self.submit_btn = QPushButton("继续" if self.kind == "approval" else "提交")
+        if permission_meta.get("execution_permission"):
+            self.cancel_btn.setText("拒绝")
+            self.submit_btn.setText("允许本次执行")
         self.submit_btn.setStyleSheet(product_button_style("primary", radius=7))
         self.submit_btn.clicked.connect(self._submit)
         actions.addWidget(self.cancel_btn)
@@ -17617,6 +17644,10 @@ class InlineInteractionCard(QFrame):
         self.text_input.setStyleSheet(product_field_style())
         for control in self.question_controls:
             control["input"].setStyleSheet(product_field_style())
+        if self.permission_details is not None:
+            self.permission_details.setStyleSheet(product_field_style())
+        if self.permission_details_button is not None:
+            self.permission_details_button.setStyleSheet(product_button_style("secondary"))
         validation_color = (
             DesignTokens.success_text
             if self._validation_tone == "success"
@@ -19377,6 +19408,7 @@ class DaemonStreamWorker(QThread):
         self._aborted = False
         self._sock = None
         self._last_sequence = 0
+        self.execution_authorization = None
 
     def _abort_remote_session(self):
         log_sub_agent_runtime(
@@ -19433,6 +19465,10 @@ class DaemonStreamWorker(QThread):
         except (TypeError, ValueError):
             pass
         message_type = msg.get("type")
+        if message_type in {"turn_started", "final"} and "execution_policy" in msg:
+            from core.execution_authorization import authorization_from_host_snapshot
+            self.execution_authorization = authorization_from_host_snapshot(
+                msg["execution_policy"], session_id=self.session_id, run_id=self.request_id)
         if message_type == "thinking":
             self.thinking_signal.emit(msg.get("delta", ""))
         elif message_type == "turn_started":
@@ -30452,9 +30488,9 @@ class MainWindow(QMainWindow):
         self.prompt_toolbar.addWidget(self.prompt_action_group)
         self._composer_toolbar_mode = ""
         input_card_layout.addWidget(self.prompt_toolbar_container)
-        self.composer_permission = QCheckBox("允许高风险操作 · 所有对话复用")
+        self.composer_permission = QCheckBox("上帝模式 · 所有对话复用")
         self.composer_permission.setChecked(self.config_manager.get_god_mode())
-        self.composer_permission.setToolTip("开启后可突破工作区限制并执行高风险代码操作。此设置保存后供后续执行使用，不改变已经启动的任务。")
+        self.composer_permission.setToolTip("全局默认执行授权，仅影响新启动任务。关闭后仍可读取、分析和制作任务产物；修改原有资产或执行代码时请求本次许可。正在运行的任务保持启动时权限，可停止后重新启动。")
         self.composer_permission.toggled.connect(self._save_composer_permission)
         input_card_layout.addWidget(self.composer_permission)
         self._apply_composer_toolbar_layout(compact=False)
@@ -34805,14 +34841,16 @@ class MainWindow(QMainWindow):
             connection_text = "Local Agent"
         self.model_badge.setText(f"{provider_text} | {model_name} | {connection_text}")
 
-        if self.config_manager.get_god_mode():
-            self.security_badge.setText("Extended Access")
+        run_authorization = getattr(state, "execution_authorization", None) if state else None
+        effective_god_mode = run_authorization.god_mode if run_authorization else self.config_manager.get_god_mode()
+        if effective_god_mode:
+            self.security_badge.setText("本次任务：上帝模式" if run_authorization else "默认：上帝模式")
             self.security_badge.setStyleSheet(
                 f"background: {DesignTokens.warning_bg}; color: {DesignTokens.warning_text}; "
                 f"border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;"
             )
         else:
-            self.security_badge.setText("Workspace Only")
+            self.security_badge.setText("本次任务：按次授权" if run_authorization else "默认：按次授权")
             self.security_badge.setStyleSheet(
                 f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; "
                 f"border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;"
@@ -36402,6 +36440,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _create_ui_stream_buffer(self, state, worker, kind, turn_id, request_id):
+        from core.execution_authorization import ExecutionAuthorization
+        if getattr(state, "authorization_run_id", None) != request_id:
+            state.authorization_run_id = request_id
+            state.execution_authorization = getattr(worker, "execution_authorization", None)
+            if state.execution_authorization is None and not isinstance(worker, DaemonStreamWorker):
+                state.execution_authorization = ExecutionAuthorization.start(
+                    self.config_manager, state.session_id, request_id, self._workspace_dir_for_state(state))
         def report(event, **metrics):
             log_chat_runtime_debug(
                 f"ui_stream_buffer_{event}", session_id=state.session_id,
@@ -36574,6 +36619,17 @@ class MainWindow(QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
+            if event_type == "authorization" and event.get("status") != "awaiting_approval":
+                for interaction_id, card in list(state.pending_interactions.items()):
+                    metadata = (card.request or {}).get("metadata") or {}
+                    if (metadata.get("execution_permission")
+                            and metadata.get("tool_call_id") == event.get("tool_call_id")
+                            and metadata.get("run_id") == event.get("run_id")):
+                        state.pending_interactions.pop(interaction_id, None)
+                        card.timeout_timer.stop()
+                        state.chat_layout.removeWidget(card)
+                        card.hide()
+                        card.deleteLater()
             if event_type == "assistant_message_started":
                 source_id = str(event.get("message_id") or "")
                 state.active_source_message_id = source_id
@@ -53167,6 +53223,7 @@ a {{ overflow-wrap: anywhere; }}
                 expected_turn_id=turn_id,
             )
             return
+        state.execution_authorization = getattr(state.daemon_worker, "execution_authorization", None)
         state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
         log_chat_runtime_debug(
             "daemon_turn_started",
@@ -53221,6 +53278,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         state.daemon_running = False
         state.turn_steerable = False
+        state.execution_authorization = getattr(state.daemon_worker, "execution_authorization", None)
         state.daemon_worker = None
         if "error" in result and str(result.get("error", "")).lower().find("daemon") >= 0:
             self.daemon_available = False
@@ -55138,12 +55196,18 @@ a {{ overflow-wrap: anywhere; }}
             code_block = code_match.group(1).strip()
             self.append_log("System: 检测到代码块，准备执行...")
             self.set_session_phase("Executing", state.session_id)
-            god_mode = self.config_manager.get_god_mode()
+            authorization = getattr(state, "execution_authorization", None)
+            god_mode = bool(authorization and authorization.god_mode)
             
             if god_mode:
                  self._show_conversation_notice(state, "God Mode 已开启，正在执行高权限代码", "warning")
 
-            state.code_worker = CodeWorker(code_block, self._workspace_dir_for_state(state), god_mode=god_mode)
+            state.code_worker = CodeWorker(code_block, self._workspace_dir_for_state(state), god_mode=god_mode,
+                                           execution_authorization=authorization, runtime_journal=self.runtime_journal)
+            if not god_mode:
+                state.code_worker.observability_signal.connect(
+                    lambda event, sid=state.session_id, tid=turn_id, rid=run_id:
+                        self.handle_observability_event(event, sid, tid, rid), Qt.QueuedConnection)
             state.code_worker.output_signal.connect(
                 lambda text, sid=state.session_id, tid=turn_id, rid=run_id:
                     self.handle_code_output(text, sid, tid, rid)

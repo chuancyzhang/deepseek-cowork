@@ -1645,6 +1645,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 payload = dict(payload)
                 payload["session_id"] = session_id
                 payload["run_id"] = request_id
+                if payload.get("type") in {"turn_started", "final"}:
+                    authorization = getattr(worker_holder.get("worker"), "execution_authorization", None)
+                    if authorization is not None:
+                        payload["execution_policy"] = authorization.runtime_snapshot()
                 payload["source_message_id"] = str(
                     getattr(worker_holder.get("worker"), "current_assistant_message_id", "") or ""
                 )
@@ -1766,7 +1770,11 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 
             def handle_interaction_request(payload):
-                if QThread.currentThread() != worker:
+                if (payload or {}).get("metadata", {}).get("execution_permission"):
+                    authorization = worker.execution_authorization
+                    if (payload or {}).get("session_id") != session_id or (payload or {}).get("metadata", {}).get("run_id") != authorization.run_id:
+                        return
+                elif QThread.currentThread() != worker:
                     return
                 request_payload = dict(payload or {})
                 request_payload["session_id"] = session_id

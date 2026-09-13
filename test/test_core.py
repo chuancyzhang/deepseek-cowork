@@ -1301,6 +1301,11 @@ class _DaemonConfigStub:
         return self._values.get(key, default)
     def get_model_profile(self, model_id=None):
         return self._profile
+    def get_god_mode(self):
+        # Existing protocol/recovery fixtures model the previously authorized path.
+        return bool(self._values.get("god_mode", True))
+    def get_chat_workspace_root(self):
+        return os.path.join(self._history_dir, "conversation_workspaces")
 
 
 class _PromptSkillManagerStub:
@@ -1923,6 +1928,22 @@ class TestDaemonState(unittest.TestCase):
 
 
 class TestAgentSystemPrompt(unittest.TestCase):
+    def test_permission_context_does_not_rewrite_stable_prefix_or_tool_definitions(self):
+        from core.execution_authorization import ExecutionAuthorization
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self._build_prompt_worker(directory)
+            stable = worker._build_stable_system_prompt()
+            tools = list(worker.tools)
+            snapshot = {"python": {"available": False}, "node": {"available": False}, "bash": {"available": False}}
+            full_runtime = worker._build_runtime_context_prompt(snapshot)
+            worker.execution_authorization = ExecutionAuthorization("session-1", "run", False, os.path.join(directory, "artifacts", "run"))
+            restricted_runtime = worker._build_runtime_context_prompt(snapshot)
+            self.assertEqual(worker._build_stable_system_prompt(), stable)
+            self.assertEqual(worker.tools, tools)
+            self.assertNotIn("# 当前运行的执行授权", full_runtime)
+            self.assertTrue(restricted_runtime.startswith(full_runtime))
+            self.assertIn(worker.execution_authorization.artifact_root, restricted_runtime)
+
     def _build_prompt_worker(self, temp_dir):
         with patch("core.agent.SkillManager", return_value=_PromptSkillManagerStub()):
             worker = LLMWorker(
@@ -2371,6 +2392,8 @@ class TestAgentSystemPrompt(unittest.TestCase):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = LLMWorker.__new__(LLMWorker)
+            from core.execution_authorization import ExecutionAuthorization
+            worker.execution_authorization = ExecutionAuthorization("prompt", "run", True, "")
             worker.workspace_dir = temp_dir
             worker.run_context = {"mode": RUN_MODE_EXECUTION}
             worker.tools = []
@@ -2394,6 +2417,8 @@ class TestAgentSystemPrompt(unittest.TestCase):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = LLMWorker.__new__(LLMWorker)
+            from core.execution_authorization import ExecutionAuthorization
+            worker.execution_authorization = ExecutionAuthorization("prompt", "run", True, "")
             worker.workspace_dir = temp_dir
             worker.run_context = {"mode": RUN_MODE_EXECUTION}
             worker.tools = [
@@ -4633,6 +4658,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
     def test_ui_owned_daemon_stream_leaves_history_commit_to_ui(self):
         from PySide6.QtCore import QThread, Signal
+        from core.execution_authorization import ExecutionAuthorization
 
         class _UiOwnedWorker(QThread):
             thinking_signal = Signal(str)
@@ -4646,6 +4672,8 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(
+                    args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
             def run(self):
                 self.finished_signal.emit(
@@ -4674,6 +4702,11 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                 chunks.append(chunk)
 
         self.assertTrue(any(chunk.get("type") == "final" for chunk in chunks))
+        policy_events = [chunk for chunk in chunks if chunk.get("type") in {"turn_started", "final"}]
+        self.assertEqual(len(policy_events), 2)
+        self.assertEqual(policy_events[0]["execution_policy"], policy_events[1]["execution_policy"])
+        self.assertEqual(policy_events[0]["execution_policy"]["session_id"], session_id)
+        self.assertIs(policy_events[0]["execution_policy"]["god_mode"], True)
         self.assertFalse(self.state.chat_storage.has_conversation(session_id))
         manifest = self.state.runtime_journal.load_manifest(session_id)
         self.assertFalse(manifest.get("pending_commit_run_id"))

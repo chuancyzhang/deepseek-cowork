@@ -86,6 +86,10 @@ Treat the report from the current build as authoritative for size and contents.
 - [Roadmap](docs/roadmap.md) (Chinese): current phase and candidate directions
 - [Release history](docs/releases/index.md) (Chinese): version changes and acceptance priorities
 
+## Execution permissions
+
+Execution permissions and the manual product acceptance checklist are documented in [God Mode](docs/GOD_MODE.md) (Chinese). Turning God Mode off preserves tool discovery and reasoning, while requiring per-action approval for changes outside the current run's artifact directory and for opaque code execution.
+
 ## License
 
 MIT License

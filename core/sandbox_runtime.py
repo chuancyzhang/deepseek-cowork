@@ -597,6 +597,8 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
 
 
 def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=None, timeout=None, text=False, extra_env=None):
+    from .execution_authorization import require_process_authorization
+    require_process_authorization()
     runtime = ensure_sandbox_runtime()
     cwd = cwd or os.getcwd()
     env = build_sandbox_env(cwd, skill_id=skill_id)

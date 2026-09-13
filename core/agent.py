@@ -131,12 +131,15 @@ class CodeWorker(QThread):
     output_signal = Signal(str)
     finished_signal = Signal()
     input_request_signal = Signal(str)
+    observability_signal = Signal(dict)
 
-    def __init__(self, code, cwd, god_mode=False):
+    def __init__(self, code, cwd, god_mode=False, execution_authorization=None, runtime_journal=None):
         super().__init__()
         self.code = code
         self.cwd = cwd
         self.god_mode = god_mode
+        self.execution_authorization = execution_authorization
+        self.runtime_journal = runtime_journal
         self.process = None
         self.is_stopped = False
 
@@ -151,6 +154,8 @@ class CodeWorker(QThread):
 
     def stop(self):
         self.is_stopped = True
+        if self.execution_authorization is not None:
+            self.execution_authorization.cancel()
         if self.process:
             try:
                 self.process.terminate() # Try graceful termination
@@ -159,11 +164,71 @@ class CodeWorker(QThread):
                 pass
 
     def run(self):
+        from core.execution_authorization import invoke
+        if self.execution_authorization is None:
+            self.output_signal.emit("缺少可信的运行授权，代码未执行。请重新启动任务。")
+            self.finished_signal.emit()
+            return
+        executed = False
+        authorization = self.execution_authorization
+        track_execution = not authorization.god_mode
+        execution_id = ("code-block-" + hashlib.sha256(
+            json.dumps([authorization.run_id, self.code, self.cwd], ensure_ascii=False).encode("utf-8")
+        ).hexdigest()) if track_execution else ""
+
+        def authorization_event(payload):
+            if self.runtime_journal is None:
+                raise RuntimeError("无法保存本次授权记录。")
+            self.runtime_journal.record_authorization(payload["session_id"], payload["run_id"], payload["tool_call_id"], payload)
+            self.observability_signal.emit(payload)
+
+        def execute():
+            nonlocal executed
+            executed = True
+            result = self._run_authorized()
+            if track_execution:
+                self.runtime_journal.record_tool(authorization.session_id, execution_id, {
+                    "status": "completed" if isinstance(result, dict) else "unknown",
+                    "result": result if isinstance(result, dict) else None,
+                })
+
+        def started():
+            self.runtime_journal.record_tool(authorization.session_id, execution_id, {
+                "status": "started", "run_id": authorization.run_id, "name": "code_block",
+            }, only_if_absent=True)
+
+        try:
+            if track_execution:
+                if self.runtime_journal is None:
+                    raise ValueError("无法保存代码执行记录，代码未执行。")
+                existing = self.runtime_journal.get_tool(authorization.session_id, execution_id)
+                if isinstance(existing, dict):
+                    if existing.get("status") == "completed":
+                        self.output_signal.emit("本段代码已有执行结果，已保留原输出和成果，不重复执行。")
+                    else:
+                        self.output_signal.emit("本段代码的执行结果尚未确认，已阻止自动重放。请检查已有成果。")
+                    return
+            result = invoke("code_block", {"code": self.code}, self._run_authorized,
+                            {"execution_authorization": self.execution_authorization,
+                             "authorization_event": authorization_event,
+                             "authorization_started": started if track_execution else None,
+                             "tool_call_id": "code-block:" + self.execution_authorization.run_id,
+                             "workspace_dir": self.cwd, "abort_check": lambda: self.is_stopped}, execute)
+            if not executed:
+                self.output_signal.emit(str(result.get("content") or result))
+        except Exception as exc:
+            self.output_signal.emit(f"代码执行或记录失败：{exc}。已保留已有输出和成果。")
+        finally:
+            if not executed or track_execution:
+                self.finished_signal.emit()
+
+    def _run_authorized(self):
         temp_path = None
         try:
             # 1. Validation
             try:
-                validate_code_safety(self.code, self.cwd, god_mode=self.god_mode)
+                from core.execution_authorization import invocation_authorized
+                validate_code_safety(self.code, self.cwd, god_mode=self.god_mode or invocation_authorized())
             except SecurityError as e:
                 self.output_signal.emit(f"❌ {str(e)}")
                 # We will let the finally block emit finished_signal
@@ -228,6 +293,7 @@ def input(prompt=""):
                 stderr = self.process.stderr.read()
                 if stderr:
                     self.output_signal.emit(f"Error Output:\n{stderr}")
+                return {"returncode": self.process.poll()}
             
         except Exception as e:
             self.output_signal.emit(f"Execution Error: {e}")
@@ -242,7 +308,8 @@ def input(prompt=""):
                     os.remove(temp_path)
                 except:
                     pass
-            self.finished_signal.emit()
+            if self.execution_authorization is None or self.execution_authorization.god_mode:
+                self.finished_signal.emit()
 
 def _reasoning_text_from_message(msg):
     if not isinstance(msg, dict):
@@ -814,6 +881,7 @@ class LLMWorker(QThread):
         skill_catalog_service=None,
         dependency_coordinator=None,
         request_id=None,
+        execution_authorization=None,
     ):
         super().__init__()
         self.messages, self.excluded_provider_message_ids = project_provider_messages(messages)
@@ -833,7 +901,14 @@ class LLMWorker(QThread):
         )
         self.turn_id = str(turn_id or "")
         self.request_id = str(request_id or "")
+        from core.execution_authorization import ExecutionAuthorization, current_authorization
+        inherited_authorization = execution_authorization or current_authorization()
+        self.execution_authorization = (
+            inherited_authorization if type(inherited_authorization) is ExecutionAuthorization
+            else ExecutionAuthorization.start(config_manager, self.session_id, self.request_id or self.turn_id, workspace_dir)
+        )
         self.bootstrap = BootstrapSession()
+        self._authorization_events = {}
         
         # Flags for control
         self.is_paused = False
@@ -1330,6 +1405,8 @@ class LLMWorker(QThread):
     def stop(self):
         self.is_stopped = True
         self.is_paused = False # Ensure loop breaks if paused
+        if not self.is_subagent:
+            self.execution_authorization.cancel()
         self.step_signal.emit("System: Stopping...")
         requested_at = time.time()
         self.observability_signal.emit({
@@ -2256,6 +2333,16 @@ class LLMWorker(QThread):
             )
 
         context_lines = capability_lines + dynamic_state_lines
+        authorization = self.execution_authorization
+        if not authorization.god_mode:
+            context_lines.extend([
+                "# 当前运行的执行授权",
+                "God Mode 关闭，读取和分析能力保持不变。可信工具可以读取工作区外的文件。",
+                f"本次任务产物区：{authorization.artifact_root}。新产物优先写入这里，不覆盖原件或其他运行产物。",
+                "改变原有资产或执行任意代码时，工具执行层会申请本次许可。直接调用所需工具，不用提前请求一个泛化确认。",
+                "拒绝、取消、超时或不可用均表示该动作未执行；不得绕过许可、伪造完成或自动重试该动作。",
+                "本次权限在运行期间固定；任意代码获批后按当前系统用户权限执行，没有系统级隔离。",
+            ])
         return "\n".join(context_lines)
 
     def _build_system_prompt(self, runtime_snapshot):
@@ -2513,6 +2600,11 @@ class LLMWorker(QThread):
             or metadata.get("supports_idempotency_key")
             or record.get("idempotent")
         )
+        if not self.execution_authorization.god_mode:
+            from core.execution_authorization import trusted_kind
+            handler = getattr(self.skill_manager, "tools", {}).get(name)
+            read_only = trusted_kind(name, handler) == "read"
+            idempotent = False
         return {
             "read_only": read_only,
             "destructive": bool(record.get("destructive")),
@@ -2790,11 +2882,21 @@ class LLMWorker(QThread):
         return projected
 
     def _call_run_tool(self, name, args, context):
+        from core.execution_authorization import invoke
         if self.bootstrap.active:
-            return self.bootstrap.call_tool(
-                name, args, {**context, "abort_check": lambda: self.is_stopped},
+            return invoke(
+                name, args, self.bootstrap.call_tool, context,
+                lambda: self.bootstrap.call_tool(name, args, {**context, "abort_check": lambda: self.is_stopped}),
             )
         return self.skill_manager.call_tool(name, args, context=context)
+
+    def _authorization_event(self, payload):
+        if self.runtime_journal is None or not self.session_id:
+            raise RuntimeError("无法保存本次授权记录。")
+        self.runtime_journal.record_authorization(self.session_id, self.execution_authorization.run_id,
+                                                 payload["tool_call_id"], payload)
+        self._authorization_events[str(payload.get("tool_call_id") or "")] = dict(payload)
+        self.observability_signal.emit(payload)
 
     def _emit_bootstrap_state(self, reason, *, error_type=""):
         self.observability_signal.emit({
@@ -3889,6 +3991,9 @@ class LLMWorker(QThread):
                                     continue
                                 current_snapshot.append(msg.copy())
                             tool_context = {
+                                "execution_authorization": self.execution_authorization,
+                                "authorization_event": self._authorization_event,
+                                "abort_check": lambda: self.is_stopped,
                                 "session_id": self.session_id,
                                 "conversation_id": self.conversation_id,
                                 "workspace_dir": self.workspace_dir,
@@ -4065,10 +4170,15 @@ class LLMWorker(QThread):
                                         ),
                                     }
                                 else:
-                                    self._record_tool_execution(execution_id, {
-                                        "status": "started",
-                                        "started_at": start_tool_time,
-                                    })
+                                    if self.execution_authorization.god_mode:
+                                        self._record_tool_execution(execution_id, {
+                                            "status": "started",
+                                            "started_at": start_tool_time,
+                                        })
+                                    else:
+                                        tool_context["authorization_started"] = lambda eid=execution_id: self._record_tool_execution(eid, {
+                                            "status": "started", "started_at": time.time(),
+                                        })
                                     result = None
                                     max_tool_attempts = 3 if execution_policy.get("safe_retry") else 1
                                     for tool_attempt in range(1, max_tool_attempts + 1):
@@ -4107,6 +4217,8 @@ class LLMWorker(QThread):
                                         failure_kind = self._tool_result_failure_kind(result)
                                         if (
                                             failure_kind == "failed"
+                                            and not (isinstance(result, dict) and result.get("authorization_status"))
+                                            and not self._authorization_events.get(str(tool.id))
                                             and execution_policy.get("safe_retry")
                                             and tool_attempt < max_tool_attempts
                                         ):
@@ -4212,6 +4324,9 @@ class LLMWorker(QThread):
                                 }
                             }
                             image_parts = tool_image_content_parts(result_obj)
+                            authorization_summary = self._authorization_events.get(str(tool.id))
+                            if authorization_summary:
+                                tool_msg["meta"]["execution_permission"] = dict(authorization_summary)
                             if image_parts:
                                 tool_msg["content_parts"] = json_copy(image_parts, [])
                             self._append_ledger_message(

@@ -185,6 +185,9 @@ class TestToolRegistry(unittest.TestCase):
 
 class TestSkillManagerToolDiscovery(unittest.TestCase):
     def setUp(self):
+        from core.execution_authorization import ExecutionAuthorization, bind_authorization
+        # Existing discovery tests exercise the unchanged, user-authorized path.
+        self.enterContext(bind_authorization(ExecutionAuthorization("discovery-test", "run", True, "")))
         self.temp_dir = tempfile.mkdtemp()
         self.skills_dir = os.path.join(self.temp_dir, "skills")
         self.ai_skills_dir = os.path.join(self.temp_dir, "ai_skills")

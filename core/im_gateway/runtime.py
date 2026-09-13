@@ -293,6 +293,9 @@ def _build_interaction_hint(request):
     lines = [title]
     if message:
         lines.append(message)
+    permission_meta = request.get("metadata") or {}
+    if permission_meta.get("execution_permission"):
+        lines.extend([str(permission_meta.get("scope") or ""), str(permission_meta.get("details") or "")])
     if kind == "approval":
         lines.append("")
         lines.append("请回复：是 / 否")
@@ -2036,10 +2039,6 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     except Exception as e:
         _log_gateway(f"{provider_name} load_config failed error={e}")
     workspace_dir = config_manager.get("default_workspace", "")
-    if not config_manager.get_god_mode() and not workspace_dir:
-        _log_gateway(f"{provider_name} handle_im_event blocked: workspace not configured")
-        provider.send_card_reply(event, card_content="请先在桌面端选择默认工作区（未开启上帝模式，需在工作区内操作）。", title="🤖 AI 助手")
-        return None
     date_key = resolve_date_key(event.get("create_time"))
     session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
     conversation_id = session_mapper.get_or_create(provider_name, session_key)

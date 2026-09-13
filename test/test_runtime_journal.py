@@ -8,6 +8,24 @@ from core.runtime_journal import RuntimeJournal, RuntimeJournalError
 
 
 class TestRuntimeJournal(unittest.TestCase):
+    def test_tool_start_claim_cannot_overwrite_existing_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.record_tool("s", "code", {"status": "started"}, only_if_absent=True)
+            journal.record_tool("s", "code", {"status": "completed", "result": {"returncode": 0}})
+            with self.assertRaises(RuntimeJournalError):
+                journal.record_tool("s", "code", {"status": "started"}, only_if_absent=True)
+            self.assertEqual(journal.get_tool("s", "code")["status"], "completed")
+
+    def test_authorization_records_standalone_run_without_creating_replay_grants(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            journal = RuntimeJournal(temp_dir)
+            journal.record_authorization("s", "standalone", "call", {"status": "awaiting_approval"})
+            record = journal.record_authorization("s", "standalone", "call", {"status": "denied"})
+            self.assertEqual([event["status"] for event in record["events"]], ["awaiting_approval", "denied"])
+            self.assertIsNone(journal.get_run("s", "standalone"))
+            self.assertIsNone(journal.find_tool_execution("s", name="opaque", args_hash="hash"))
+
     def test_atomic_write_retries_permission_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             journal = RuntimeJournal(temp_dir)

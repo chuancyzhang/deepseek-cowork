@@ -32,11 +32,17 @@ def _structured_document_error(action, path):
 
 
 def _confirm_delete(rel_path, recursive_flag, context):
+    from core.execution_authorization import approved_file_confirmation
+    if approved_file_confirmation(context):
+        return True
     prompt = f"Confirm delete recursively: '{rel_path}'?" if recursive_flag else f"Confirm delete: '{rel_path}'?"
     return bool(ask_user(prompt, _context=context, title="请确认", timeout_seconds=120))
 
 
 def _confirm_patch_deletions(paths, context):
+    from core.execution_authorization import approved_file_confirmation
+    if approved_file_confirmation(context):
+        return True
     normalized = [str(path or "").strip() for path in paths or [] if str(path or "").strip()]
     lines = "\n".join(f"- {path}" for path in normalized)
     prompt = f"补丁将删除以下 {len(normalized)} 个文件：\n{lines}\n\n是否继续应用整个补丁？"

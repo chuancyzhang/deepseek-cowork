@@ -29,7 +29,7 @@ This built-in skill handles workspace path operations and plain text files only.
 - To create or modify Office/PDF documents, use `run_python_code` with the appropriate document library.
 - Path search is owned by `command-tools` through `glob` and `grep`.
 - User confirmation is owned by `interaction`; delete confirmation uses the shared interaction bridge internally.
-- Normal mode rejects paths outside the workspace, UNC paths, resolved path escapes, and write paths that traverse symbolic links or directory junctions. God Mode retains its existing outside-workspace authorization, but write paths still reject reparse-point traversal.
+- With God Mode off, trusted reads can use paths outside the workspace. New files and edits within this run's artifact directory are allowed; changes elsewhere require an execution-layer approval for the exact operation. Use the artifact directory from the runtime context, not another run's directory. God Mode preserves existing access and delete confirmations. Write paths still reject symbolic links and directory junctions, and existing-file integrity checks always apply.
 
 ## Usage Guidelines
 

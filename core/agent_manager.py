@@ -146,6 +146,7 @@ class AgentRuntimeRecord:
     worker_cleanup_pending: bool = False
     closing_requested: bool = False
     force_close: bool = False
+    execution_authorization: object = field(default=None, repr=False)
 
     def is_live(self):
         return self.status in AGENT_LIVE_STATUSES
@@ -581,14 +582,16 @@ class SessionAgentManager:
             run_context_keys=sorted(list(run_context_copy.keys())),
         )
         try:
-            worker = self.worker_factory(
-                messages_copy,
-                self.config_manager,
-                self.workspace_dir,
-                record.agent_id,
-                self.conversation_id,
-                run_context_copy,
-            )
+            from core.execution_authorization import bind_authorization
+            with bind_authorization(record.execution_authorization):
+                worker = self.worker_factory(
+                    messages_copy,
+                    self.config_manager,
+                    self.workspace_dir,
+                    record.agent_id,
+                    self.conversation_id,
+                    run_context_copy,
+                )
         except Exception as exc:
             record.status = "failed"
             record.last_error = str(exc)
@@ -928,6 +931,8 @@ class SessionAgentManager:
                     conversation_id=f"agent:{agent_id}",
                 ),
             )
+            from core.execution_authorization import current_authorization
+            record.execution_authorization = current_authorization()
             self._agents[agent_id] = record
             self._persist_record_unlocked(record)
             self._emit_agent_state(
@@ -995,6 +1000,8 @@ class SessionAgentManager:
 
             record.pending_inputs.append(text)
             if record.worker is None:
+                from core.execution_authorization import current_authorization
+                record.execution_authorization = current_authorization()
                 _log_agent_runtime(
                     "send_input_start_idle_agent",
                     conversation_id=self.conversation_id,

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QCoreApplication, QThread, Signal
 
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, SessionAgentManager
 from core.chat_storage import ChatStorage
+from core.execution_authorization import ExecutionAuthorization, bind_authorization, current_authorization
 
 
 class _Signal:
@@ -279,6 +280,20 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertEqual(messages[0]["role"], "user")
         self.assertEqual(messages[0]["content"], "task A")
 
+    def test_child_authorization_is_inherited_outside_serialized_context(self):
+        auth = ExecutionAuthorization(self.conversation_id, "parent-run", False, os.path.join(self.temp_dir, "artifacts"))
+        observed = []
+        original = self.manager.worker_factory
+        def factory(*args):
+            observed.append(current_authorization())
+            return original(*args)
+        self.manager.worker_factory = factory
+        with bind_authorization(auth):
+            result = self.manager.spawn_agent(message="read", run_context={"god_mode": True})
+        self.assertEqual(observed, [auth])
+        self.assertIs(self.manager._agents[result["agent_id"]].execution_authorization, auth)
+        self.assertNotIn("execution_authorization", self.storage.get_agent(result["agent_id"])["meta"])
+
     def test_spawn_agent_persists_run_context_and_profile_meta(self):
         result = self.manager.spawn_agent(
             message="task A",
@@ -384,6 +399,7 @@ class TestAgentManagerTools(unittest.TestCase):
                 parent_agent_id="sub-1",
                 session_id=self.conversation_id,
                 is_subagent=True,
+                execution_authorization=ExecutionAuthorization(self.conversation_id, "test", True, ""),
             )
         tool_names = {item["function"]["name"] for item in worker.tools}
         self.assertIn("bash", tool_names)

@@ -611,8 +611,11 @@ class TestFileSystemPatch(unittest.TestCase):
             provider.stream_usage_enabled = False
             provider.prompt_cache_key_param = ""
             provider.supports_vision = False
+            provider.supports_image_generation = False
             provider.client = MagicMock()
-            provider.client.chat.completions.create.return_value = []
+            from types import SimpleNamespace
+            provider.client.chat.completions.create.return_value = [SimpleNamespace(
+                usage=None, choices=[SimpleNamespace(finish_reason="stop", delta=SimpleNamespace(content=None, tool_calls=None))])]
 
             list(provider.chat_stream([{"role": "user", "content": "test"}], tools=[definition]))
             sent = provider.client.chat.completions.create.call_args.kwargs["tools"]

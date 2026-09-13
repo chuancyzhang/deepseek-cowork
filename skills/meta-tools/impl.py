@@ -79,6 +79,7 @@ def _execute_parallel_subcall(index, call_id, name, args, context):
 
     safe_args = args if isinstance(args, dict) else {}
     child_context = dict(context or {})
+    child_context.pop("authorization_started", None)
     if "run_context" in child_context:
         child_context["run_context"] = _json_copy(child_context.get("run_context"), {})
     child_context["tool_call_id"] = str(call_id or f"{context.get('tool_call_id') or 'parallel'}:{index}")

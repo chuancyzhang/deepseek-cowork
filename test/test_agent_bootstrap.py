@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bootstrap_plugins import resolve
 from bootstrap_plugins.deepseek_flash_minimal import DeepSeekFlashMinimalBootstrap
 from core.agent import LLMWorker
+from core.execution_authorization import ExecutionAuthorization
 from core.llm.providers import retry_model_api_stream
 
 
@@ -101,7 +102,7 @@ class ProviderStub:
 
 
 class TestAgentBootstrap(unittest.TestCase):
-    def run_worker(self, rounds, *, profile=None, context=None, history=None, shell_result=None, prepare_error=None, prompt_error=None, protocol="chat_completions"):
+    def run_worker(self, rounds, *, profile=None, context=None, history=None, shell_result=None, prepare_error=None, prompt_error=None, protocol="chat_completions", authorization=None):
         provider = ProviderStub(rounds, protocol)
         skills = SkillStub()
         events, finished = [], []
@@ -123,12 +124,27 @@ class TestAgentBootstrap(unittest.TestCase):
                 ConfigStub(temp_dir, profile), workspace_dir=temp_dir,
                 session_id="session-1", turn_id="turn-1", request_id="request-1",
                 run_context=context,
+                execution_authorization=authorization or ExecutionAuthorization(
+                    "bootstrap-test", "run", True, ""),
             )
             worker.observability_signal.connect(events.append)
             worker.finished_signal.connect(finished.append)
             worker.run()
             self.assertEqual(len(finished), 1)
             return provider.requests, finished[0], events, skills.calls, shell.call_count, snapshot.call_count
+
+    def test_closed_bootstrap_denial_does_not_start_shell_or_change_tool_schema(self):
+        rounds = [[tool_call("pwsh", arguments='{"command":"Get-ChildItem"}')],
+                  [{"type": "content", "content": "done"}]]
+        full_requests, _, _, _, full_calls, _ = self.run_worker(rounds)
+        auth = ExecutionAuthorization("session-1", "request-1", False, "artifacts")
+        with patch("core.interaction.interaction_service.create_request", return_value={"status": "completed", "approved": False}):
+            requests, result, events, _, calls, _ = self.run_worker(rounds, authorization=auth)
+        self.assertEqual(full_calls, 1)
+        self.assertEqual(calls, 0)
+        self.assertEqual(requests[0], full_requests[0])
+        self.assertTrue(any(event.get("status") == "denied" for event in events))
+        self.assertFalse(result.get("error"), result)
 
     def test_scope_and_explicit_normal_contexts(self):
         self.assertIsNotNone(resolve(PROFILE, "deepseek-flash"))

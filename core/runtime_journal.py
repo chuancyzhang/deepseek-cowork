@@ -802,7 +802,7 @@ class RuntimeJournal:
                 record.update(patch)
         return record or None
 
-    def record_tool(self, session_id, execution_id, payload):
+    def record_tool(self, session_id, execution_id, payload, *, only_if_absent=False):
         record = dict(payload or {})
         record.update({
             "session_id": str(session_id),
@@ -812,10 +812,30 @@ class RuntimeJournal:
         path = self._record_path(session_id, "tools", execution_id)
         with self.session_lock(session_id):
             existing = self._read(path, default={}) or {}
+            if only_if_absent and existing:
+                raise RuntimeJournalError("工具已有执行记录，不能重复启动。")
             existing.update(record)
             existing.setdefault("created_at", time.time())
             self._atomic_write(path, existing)
         return existing
+
+    def record_authorization(self, session_id, run_id, call_id, payload):
+        """Durable decisions for both chat workers and standalone agent runs.
+
+        These records are evidence only: they are never executable grants and
+        never participate in successful-tool replay or active-run ownership.
+        """
+        identity = self.checksum([str(run_id), str(call_id)])
+        path = self._record_path(session_id, "authorizations", identity)
+        with self.session_lock(session_id):
+            record = self._read(path, default=None) or {
+                "session_id": str(session_id), "run_id": str(run_id),
+                "tool_call_id": str(call_id), "events": [],
+            }
+            record["events"].append({**dict(payload), "timestamp": time.time()})
+            record["status"] = str(payload.get("status") or "")
+            self._atomic_write(path, record)
+        return record
 
     def get_tool(self, session_id, execution_id):
         return self._read(self._record_path(session_id, "tools", execution_id), default=None)

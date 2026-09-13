@@ -144,6 +144,8 @@ def parse_interaction_reply(
     questions = _normalize_questions(req.get("questions"))
 
     if isinstance(raw_value, dict) and raw_value.get("request_id"):
+        if raw_value.get("request_id") != req.get("request_id"):
+            return _build_response_payload(req, status="invalid", approved=False, raw_value=None), False, "request identity mismatch"
         payload = _build_response_payload(
             req,
             status=str(raw_value.get("status") or "completed"),
@@ -381,7 +383,13 @@ class InteractionService(QObject):
         timeout_seconds: float = 120.0,
         source_tool: str = "",
         metadata: dict[str, Any] | None = None,
+        abort_check=None,
+        require_receiver: bool = False,
     ) -> dict[str, Any]:
+        if require_receiver:
+            from PySide6.QtCore import QMetaMethod
+            if not self.isSignalConnected(QMetaMethod.fromSignal(self.interaction_requested)):
+                return InteractionResponse(request_id="", status="unavailable", approved=False).to_dict()
         request = InteractionRequest(
             request_id=uuid.uuid4().hex,
             session_id=(session_id or "").strip(),
@@ -403,9 +411,22 @@ class InteractionService(QObject):
                 "event": event,
                 "response": None,
                 "created_at": time.time(),
+                "deadline": time.monotonic() + request.timeout_seconds,
+                "abort_check": abort_check,
             }
         self.interaction_requested.emit(payload)
-        resolved = event.wait(request.timeout_seconds)
+        if callable(abort_check):
+            deadline = time.monotonic() + request.timeout_seconds
+            while not event.wait(min(0.05, max(0, deadline - time.monotonic()))):
+                if abort_check():
+                    with self._lock:
+                        self._pending.pop(request.request_id, None)
+                    return InteractionResponse(request_id=request.request_id, status="cancelled", approved=False).to_dict()
+                if time.monotonic() >= deadline:
+                    break
+            resolved = event.is_set()
+        else:
+            resolved = event.wait(request.timeout_seconds)
         with self._lock:
             entry = self._pending.pop(request.request_id, None)
         if not resolved or not entry or not isinstance(entry.get("response"), dict):
@@ -433,17 +454,22 @@ class InteractionService(QObject):
     def resolve_request(self, request_id: str, raw_value: Any) -> bool:
         with self._lock:
             entry = self._pending.get(request_id)
-        if not isinstance(entry, dict):
-            return False
-        request = entry.get("request") or {}
-        payload, valid, _ = parse_interaction_reply(request, raw_value)
-        if not valid:
-            return False
-        entry["response"] = payload
-        event = entry.get("event")
-        if isinstance(event, threading.Event):
-            event.set()
-        return True
+            if not isinstance(entry, dict) or entry.get("response") is not None:
+                return False
+            if time.monotonic() >= entry.get("deadline", float("inf")):
+                return False
+            abort_check = entry.get("abort_check")
+            if callable(abort_check) and abort_check():
+                return False
+            request = entry.get("request") or {}
+            payload, valid, _ = parse_interaction_reply(request, raw_value)
+            if not valid:
+                return False
+            entry["response"] = payload
+            event = entry.get("event")
+            if isinstance(event, threading.Event):
+                event.set()
+            return True
 
     def get_pending_request(self, session_id: str) -> dict[str, Any] | None:
         target_session_id = (session_id or "").strip()

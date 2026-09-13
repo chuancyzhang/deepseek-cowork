@@ -11,14 +11,37 @@ def project_visible_messages(messages, *, start=0, end=None):
     Identity lookup is bounded by ordinary user messages; guidance is a display
     boundary inside that turn, not a new provider conversation.
     """
-    messages = list(messages or [])
+    if not isinstance(messages, (list, tuple)):
+        messages = list(messages or [])
+    start, end, _ = slice(start, end).indices(len(messages))
+    if start >= end:
+        return []
+
+    def starts_scope(message):
+        return (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and not is_same_turn_guidance_message(message)
+        )
+
+    # Project complete scopes so sources and late results outside the requested
+    # span can still join its anchors, without traversing unrelated turns.
+    scope_start = start
+    while scope_start > 0 and not starts_scope(messages[scope_start]):
+        scope_start -= 1
+    scope_end = end
+    while scope_end < len(messages) and not starts_scope(messages[scope_end]):
+        scope_end += 1
+    messages = messages[scope_start:scope_end]
+    start -= scope_start
+    end -= scope_start
     slots = [[message] for message in messages]
     fragments = {}
     scopes = []
     scope = -1
     for index, message in enumerate(messages):
         if isinstance(message, dict):
-            if message.get("role") == "user" and not is_same_turn_guidance_message(message):
+            if starts_scope(message):
                 scope = index
             meta = message.get("meta") or {}
             source = str(meta.get("ui_source_message_id") or "")
@@ -41,7 +64,7 @@ def project_visible_messages(messages, *, start=0, end=None):
         if not content.startswith(visible):
             logging.getLogger(__name__).warning(
                 "history_projection_source_conflict source_id=%s ledger_index=%s anchors=%s",
-                source, index, anchors,
+                source, index + scope_start, [anchor + scope_start for anchor in anchors],
             )
             continue  # Preserve both records when the identity/content contract fails.
         for anchor in anchors:

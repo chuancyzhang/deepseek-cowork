@@ -436,7 +436,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIco
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QEventLoop, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -18093,8 +18093,6 @@ class ConversationSkillRangeDialog(QDialog):
         if self._submitting:
             self.submit_error.hide()
         self.next_btn.repaint()
-        if self._submitting:
-            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
 
 class ConversationSkillWizardDialog(QDialog):
@@ -18426,8 +18424,6 @@ class ConversationSkillEvidenceDialog(QDialog):
         if self._submitting:
             self.submit_error.hide()
         self.compile_btn.repaint()
-        if self._submitting:
-            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def selected_destination(self):
         options = self.options.selected_options()
@@ -26334,8 +26330,11 @@ class SessionSkillCaptureIndicator(QToolButton):
 class StartupLoadingWindow(QWidget):
     """Small first-paint window shown while the full main window is built."""
 
+    first_painted = Signal()
+
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
+        self._first_paint_done = False
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle("DeepSeek Cowork")
         icon_path = resolve_app_icon_path()
@@ -26392,6 +26391,13 @@ class StartupLoadingWindow(QWidget):
 
         self.resize(300, 188)
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._first_paint_done:
+            self._first_paint_done = True
+            log_startup_stage("startup_loading_first_paint")
+            self.first_painted.emit()
+
     def show_centered(self):
         screen = QGuiApplication.primaryScreen()
         if screen:
@@ -26405,7 +26411,6 @@ class StartupLoadingWindow(QWidget):
 def show_startup_loading_window(app):
     startup_window = StartupLoadingWindow()
     startup_window.show_centered()
-    app.processEvents()
     log_startup_stage("startup_loading_show_requested")
     return startup_window
 
@@ -26442,7 +26447,13 @@ def schedule_main_window_startup(
         if pending_activation.get("requested"):
             window.activate_existing_window()
 
-    QTimer.singleShot(0, build_main_window)
+    def queue_main_window():
+        QTimer.singleShot(0, build_main_window)
+
+    if startup_window is None or startup_window._first_paint_done:
+        queue_main_window()
+    else:
+        startup_window.first_painted.connect(queue_main_window)
     return holder
 
 
@@ -29041,7 +29052,6 @@ class MainWindow(QMainWindow):
         self.current_project_path = ""
         self._session_load_token_counter = 0
         self._history_load_workers = set()
-        self._history_process_events_suppressed = 0
         self.active_run_session_id = None
         self.active_code_session_id = None
         self.active_skills_label = None
@@ -29110,7 +29120,6 @@ class MainWindow(QMainWindow):
         
         # Animation Throttling
         self.last_message_time = 0
-        self.last_ui_update_time = 0
 
         # Connect to Interaction Bridge
         bridge.interaction_requested.connect(self.handle_interaction_request)
@@ -30904,15 +30913,6 @@ class MainWindow(QMainWindow):
         self.sync_context_drawer_layout()
         self.workspace_theme_controller.apply(_resolved or {})
         self.update()
-
-    def process_ui_events(self, force=False):
-        if int(getattr(self, "_history_process_events_suppressed", 0) or 0) > 0:
-            return
-        import time
-        now = time.time()
-        if force or (now - self.last_ui_update_time > 0.05):
-            QApplication.processEvents()
-            self.last_ui_update_time = now
 
     def _apply_initial_window_size(self):
         screen = QGuiApplication.primaryScreen()
@@ -34789,21 +34789,6 @@ class MainWindow(QMainWindow):
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
-            self.action_btn.setEnabled(True)
-            self.ws_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-weight: 600;")
-        else:
-            # Keep input enabled but change placeholder to guide user
-            self.input_field.setPlaceholderText("📁 先选择或拖拽一个文件夹到这里...")
-            # Disable send button
-            self.action_btn.setEnabled(False)
-            self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
-
-        self.refresh_context_badges()
-
-    def update_ui_state_for_workspace(self):
-        if self.workspace_dir:
-            self.input_field.setEnabled(True)
             self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(True))
@@ -37948,36 +37933,6 @@ class MainWindow(QMainWindow):
         self._sync_deliverable_text_editor_layout()
         self._position_active_system_toast()
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            if hasattr(self, 'drag_overlay'):
-                self.drag_overlay.show()
-                self.drag_overlay.raise_()
-        else:
-            event.ignore()
-
-    def dragLeaveEvent(self, event):
-        if hasattr(self, 'drag_overlay'):
-            self.drag_overlay.hide()
-
-    def dropEvent(self, event):
-        if hasattr(self, 'drag_overlay'):
-            self.drag_overlay.hide()
-            
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if not urls: return
-            
-            path = urls[0].toLocalFile()
-            if os.path.isdir(path):
-                # Switch workspace
-                self.load_workspace(path)
-            else:
-                self._add_prompt_files([path])
-            
-            event.acceptProposedAction()
-
     # --- Session & Logic Methods (No changes to logic, only UI wrappers) ---
     def get_current_session(self):
         if not self.current_session_id: return None
@@ -38034,37 +37989,6 @@ class MainWindow(QMainWindow):
             self.refresh_deliverables(render_current=True)
         self._sync_file_header()
         QTimer.singleShot(0, lambda sid=session_id: self._sync_question_navigator(sid))
-
-    def normalize_session_ui(self, state):
-        if not state: return
-        running = state.llm_worker and state.llm_worker.isRunning()
-        running_code = state.code_worker and state.code_worker.isRunning()
-        running_daemon = getattr(state, "daemon_running", False)
-        
-        if running or running_code or running_daemon:
-            self.action_btn.setText("停止")
-            self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
-            self.action_btn.setStyleSheet(
-                f"background: {DesignTokens.error_text}; color: {DesignTokens.text_inverse}; "
-                f"border-radius: {DesignTokens.radius_xl}px; font-weight: bold; border: none;"
-            )
-            self.action_btn.setEnabled(True)
-            self.input_field.setEnabled(False)
-            
-            # Hide extra buttons/prompts when running
-            self.loop_hint.setVisible(False)
-        else:
-            self.action_btn.setText("发送")
-            self.action_btn.setText("开始")
-            self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(
-                f"background: {DesignTokens.primary}; color: {DesignTokens.text_inverse}; "
-                f"border-radius: {DesignTokens.radius_xl}px; font-weight: bold; border: none;"
-            )
-            self.action_btn.setEnabled(True)
-            self.input_field.setEnabled(True)
-            
-            self.loop_hint.setVisible(False)
 
     def normalize_session_ui(self, state):
         if not state:
@@ -38875,17 +38799,12 @@ class MainWindow(QMainWindow):
         try:
             insert_index = state.chat_layout.indexOf(summary)
             before_count = state.chat_layout.count()
-            previous_suppression = int(getattr(self, "_history_process_events_suppressed", 0) or 0)
-            self._history_process_events_suppressed = previous_suppression + 1
-            try:
-                self._render_unified_assistant_batch(
-                    batch,
-                    state,
-                    insert_index=insert_index,
-                    animate=False,
-                )
-            finally:
-                self._history_process_events_suppressed = previous_suppression
+            self._render_unified_assistant_batch(
+                batch,
+                state,
+                insert_index=insert_index,
+                animate=False,
+            )
             added = state.chat_layout.count() - before_count
             for _ in range(added):
                 item = state.chat_layout.takeAt(insert_index)
@@ -39033,8 +38952,6 @@ class MainWindow(QMainWindow):
         inserted_total = 0
         previous_history_rendering = bool(getattr(state, "rendering_history_bubbles", False))
         state.rendering_history_bubbles = True
-        previous_suppression = int(getattr(self, "_history_process_events_suppressed", 0) or 0)
-        self._history_process_events_suppressed = previous_suppression + 1
         try:
             for span in spans:
                 start = int(span.get("start") or 0)
@@ -39046,7 +38963,6 @@ class MainWindow(QMainWindow):
                 if current_index is not None:
                     current_index += int(inserted or 0)
         finally:
-            self._history_process_events_suppressed = previous_suppression
             state.rendering_history_bubbles = previous_history_rendering
         return inserted_total
 
@@ -39572,104 +39488,6 @@ class MainWindow(QMainWindow):
                 auto_close_ms=0,
             )
         return card
-
-    def refresh_history_list(self):
-        self.history_container.setUpdatesEnabled(False)
-        while self.history_layout.count():
-            item = self.history_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        
-        conversations = self.chat_storage.list_conversations()
-        conversation_ids = {c["id"] for c in conversations}
-
-        for conv in conversations:
-            session_id = conv["id"]
-            title = conv["title"] or "新对话"
-            if conv.get("im_provider") == "feishu":
-                ts = conv.get("updated_at")
-                if ts:
-                    title = f"飞书对话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}"
-                else:
-                    title = "飞书对话"
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
-            btn = HistoryTitleButton(title)
-            btn.setCursor(Qt.PointingHandCursor)
-            if session_id == self.current_session_id:
-                 btn.setStyleSheet(
-                     f"text-align: left; padding: 10px; border: none; "
-                     f"border-radius: {DesignTokens.radius_md}px; "
-                     f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-                     "font-weight: 600;"
-                 )
-            else:
-                 btn.setStyleSheet(
-                     f"text-align: left; padding: 10px; border: none; "
-                     f"border-radius: {DesignTokens.radius_md}px; background: transparent; "
-                     f"color: {DesignTokens.text_secondary};"
-                 )
-            btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
-            del_btn = QPushButton()
-            del_btn.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_icon))
-            del_btn.setCursor(Qt.PointingHandCursor)
-            del_btn.setFixedSize(28, 28)
-            del_btn.setStyleSheet("border: none; background: transparent;")
-            del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
-            row_layout.addWidget(btn, 1)
-            row_layout.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
-            self.history_layout.addWidget(row)
-
-        history_dir = self.chat_history_dir
-        if os.path.exists(history_dir):
-            files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
-            files.sort(key=os.path.getmtime, reverse=True)
-
-            for file_path in files:
-                try:
-                    filename = os.path.basename(file_path)
-                    session_id = filename.replace('chat_history_', '').replace('.json', '')
-                    if session_id in conversation_ids:
-                        continue
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        if not data: continue
-                        title = self._compute_session_title(data)
-                        row = QWidget()
-                        row_layout = QHBoxLayout(row)
-                        row_layout.setContentsMargins(0, 0, 0, 0)
-                        row_layout.setSpacing(8)
-                        btn = HistoryTitleButton(title)
-                        btn.setCursor(Qt.PointingHandCursor)
-                        if session_id == self.current_session_id:
-                             btn.setStyleSheet(
-                                 f"text-align: left; padding: 10px; border: none; "
-                                 f"border-radius: {DesignTokens.radius_md}px; "
-                                 f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-                                 "font-weight: 600;"
-                             )
-                        else:
-                             btn.setStyleSheet(
-                                 f"text-align: left; padding: 10px; border: none; "
-                                 f"border-radius: {DesignTokens.radius_md}px; background: transparent; "
-                                 f"color: {DesignTokens.text_secondary};"
-                             )
-                        btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
-                        del_btn = QPushButton()
-                        del_btn.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_icon))
-                        del_btn.setCursor(Qt.PointingHandCursor)
-                        del_btn.setFixedSize(28, 28)
-                        del_btn.setStyleSheet("border: none; background: transparent;")
-                        del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
-                        row_layout.addWidget(btn, 1)
-                        row_layout.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
-                        self.history_layout.addWidget(row)
-                except Exception as e:
-                    continue
-        self.history_layout.addStretch()
-        self.history_container.setUpdatesEnabled(True)
-        self.history_container.update()
 
     def _history_query_text(self):
         field = getattr(self, "history_search_input", None)
@@ -42739,7 +42557,6 @@ class MainWindow(QMainWindow):
                         },
                         session_id=state.session_id,
                     )
-            self.process_ui_events(force=False)
             return inserted_count
         except Exception as exc:
             state.ui_timeline_warning = f"对话过程恢复失败：{exc}"
@@ -42820,25 +42637,31 @@ class MainWindow(QMainWindow):
         active_agent_bubble = None
         pending_content_parts = []
         pending_struct_parts = []
-        tool_meta_by_id = {}
-        for full_msg in state.messages or []:
-            if full_msg.get("role") != "assistant":
-                continue
-            for tc in full_msg.get("tool_calls") or []:
-                call_id = tc.get("id")
-                func = tc.get("function") or {}
-                if not call_id:
-                    continue
-                args = func.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        pass
-                tool_meta_by_id[call_id] = {
-                    "name": func.get("name") or "unknown_tool",
-                    "args": args if args is not None else {}
-                }
+        tool_meta_by_id = None
+
+        def tool_metadata(tool_id):
+            nonlocal tool_meta_by_id
+            if tool_meta_by_id is None:
+                tool_meta_by_id = {}
+                for full_msg in state.messages or []:
+                    if full_msg.get("role") != "assistant":
+                        continue
+                    for tc in full_msg.get("tool_calls") or []:
+                        call_id = tc.get("id")
+                        func = tc.get("function") or {}
+                        if not call_id:
+                            continue
+                        args = func.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                pass
+                        tool_meta_by_id[call_id] = {
+                            "name": func.get("name") or "unknown_tool",
+                            "args": args if args is not None else {}
+                        }
+            return tool_meta_by_id.get(tool_id)
 
         def finalize_active_bubble():
             nonlocal active_agent_bubble, pending_content_parts, pending_struct_parts
@@ -43024,8 +42847,8 @@ class MainWindow(QMainWindow):
                 t_id = msg.get('tool_call_id')
                 t_result = content
                 if t_id:
-                    if t_id not in state.tool_cards and t_id in tool_meta_by_id:
-                        meta = tool_meta_by_id[t_id]
+                    meta = tool_metadata(t_id) if t_id not in state.tool_cards else None
+                    if meta is not None:
                         self.add_tool_card({
                             'id': t_id,
                             'name': meta.get('name') or 'unknown_tool',
@@ -50436,7 +50259,6 @@ a {{ overflow-wrap: anywhere; }}
             force_scroll=True,
             session_id=state.session_id,
             mutation_ready=mutation_ready,
-            process_events=False,
         )
         if previous_group is not None:
             previous_group.finalize_process_only()
@@ -52366,7 +52188,6 @@ a {{ overflow-wrap: anywhere; }}
                 state.chat_layout.insertWidget(index, wrapper)
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
-            self.process_ui_events(force=False)
             
         if has_pending_result:
             self.update_tool_card({
@@ -52383,7 +52204,6 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_step_list(state.session_id)
         if state.session_id == self.current_session_id:
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
-        self.process_ui_events(force=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def update_tool_card(self, data, session_id=None, turn_id=None, request_id=None):
@@ -52575,7 +52395,6 @@ a {{ overflow-wrap: anywhere; }}
             self.right_drawer_tab == self.RIGHT_TAB_OBSERVABILITY):
             
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
-        self.process_ui_events(force=True)
 
     def _retire_session_empty_state(self, state, reason="message_append"):
         if state is None:
@@ -52609,7 +52428,6 @@ a {{ overflow-wrap: anywhere; }}
         session_id=None,
         target_layout=None,
         edited=False,
-        process_events=True,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
@@ -52684,8 +52502,6 @@ a {{ overflow-wrap: anywhere; }}
                     message_index + 1,
                     key=f"user:{source_message_id}",
                 )
-        if process_events:
-            self.process_ui_events(force=False)
         
         # Keep latest message in view when appending.
         if index is None:
@@ -52705,7 +52521,6 @@ a {{ overflow-wrap: anywhere; }}
         session_id=None,
         target_layout=None,
         mutation_ready=False,
-        process_events=True,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state:
@@ -52732,7 +52547,6 @@ a {{ overflow-wrap: anywhere; }}
             session_id=state.session_id,
             index=index,
             target_layout=target_layout,
-            process_events=process_events,
         )
 
     def _connect_chat_bubble_actions(self, bubble, state):
@@ -52968,7 +52782,6 @@ a {{ overflow-wrap: anywhere; }}
                 process_widget_count=office_card.process_widget_count(),
             )
         self.request_session_scroll_to_bottom(state.session_id, force=True)
-        self.process_ui_events(force=True)
 
         state.llm_worker = LLMWorker(
             self._messages_for_worker(state, run_context),
@@ -53292,7 +53105,6 @@ a {{ overflow-wrap: anywhere; }}
                 process_widget_count=office_card.process_widget_count(),
             )
         self.request_session_scroll_to_bottom(state.session_id, force=True)
-        self.process_ui_events(force=True)
         state.daemon_running = True
         state.turn_steerable = False
         state.daemon_worker = DaemonStreamWorker(
@@ -55399,7 +55211,6 @@ a {{ overflow-wrap: anywhere; }}
             cursor.insertText(text or "")
             state.last_agent_bubble.code_output_edit.setTextCursor(cursor)
             state.last_agent_bubble.code_output_edit.adjustHeight()
-            self.process_ui_events()
             self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def handle_code_finished(self, session_id=None, turn_id=None, request_id=None):

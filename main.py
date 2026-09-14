@@ -297,6 +297,8 @@ from core.memory_update import (
 )
 from core.memory_store import MemoryStore
 from core.token_speed import TokenSpeedTracker
+from core.context_usage import CONTEXT_CATEGORIES, normalize_context_usage
+from ui.token_usage import TokenUsagePopover
 from core.deepseek_billing import (
     DEEPSEEK_PRICING_VERSION,
     DeepSeekBalanceError,
@@ -1631,9 +1633,11 @@ def format_token_usage_chip_text(summary, speed_snapshot=None, billing_snapshot=
     cached_tokens = usage.get("cached_input_tokens", 0)
     if cached_tokens > 0:
         rate = token_usage_cache_rate(usage) * 100
-        text = f"{compact_token_count(total_tokens)} tokens · 缓存 {compact_token_count(cached_tokens)} / {rate:.0f}%"
+        text = f"用量 {compact_token_count(total_tokens)} · 命中 {rate:.0f}%"
     else:
-        text = f"{compact_token_count(total_tokens)} tokens · 缓存 0"
+        text = f"用量 {compact_token_count(total_tokens)}"
+    if usage["cached_input_tokens"] + usage["uncached_input_tokens"] < usage["input_tokens"]:
+        text = f"用量 {compact_token_count(total_tokens)} · 缓存待补全"
     if isinstance(speed_snapshot, dict):
         if str(speed_snapshot.get("unavailable_reason") or "").strip():
             text += " · 速度不可用"
@@ -1641,30 +1645,24 @@ def format_token_usage_chip_text(summary, speed_snapshot=None, billing_snapshot=
             text += " · 速度 " + format_token_speed_rate(speed_snapshot.get("current_rate"))
         elif speed_snapshot.get("last_rate") is not None:
             text += " · 最近 " + format_token_speed_rate(speed_snapshot.get("last_rate"))
-    billing = normalize_deepseek_billing_snapshot(billing_snapshot)
-    currency = _deepseek_billing_currency(billing)
-    costs = billing.get("costs") if isinstance(billing.get("costs"), dict) else {}
-    if billing.get("cost_status") == "available" and currency in costs:
-        cost_text = _format_billing_money(costs.get(currency), currency)
-        if cost_text:
-            text += " · 本轮 " + cost_text
-    if billing.get("balance_status") == "succeeded" and currency:
-        info = _deepseek_balance_info(billing, currency)
-        balance_text = _format_billing_money(info.get("total_balance"), currency, balance=True)
-        if balance_text:
-            text += " · 余 " + balance_text
     return text
 
 
 def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None, billing_snapshot=None):
     usage = normalize_token_usage_summary(summary)
+    known_cache_input = usage["cached_input_tokens"] + usage["uncached_input_tokens"]
+    cache_detail = "尚未返回缓存明细"
+    if known_cache_input:
+        cache_rate = usage["cached_input_tokens"] / known_cache_input
+        cache_scope = "全部输入" if known_cache_input == usage["input_tokens"] else "已知缓存明细的输入"
+        cache_detail = f"{usage['cached_input_tokens']:,}（占{cache_scope} {cache_rate:.1%}）"
     lines = [
-        "当前统计桶累计 token 用量（按 Provider / 模型 / 协议隔离）",
+        "当前会话累计用量（仅当前服务、模型与协议）",
         f"总量：{usage.get('total_tokens', 0):,}",
         f"输入：{usage.get('input_tokens', 0):,}",
         f"输出：{usage.get('output_tokens', 0):,}",
-        f"缓存输入：{usage.get('cached_input_tokens', 0):,} ({token_usage_cache_rate(usage) * 100:.1f}%)",
-        f"未缓存输入：{usage.get('uncached_input_tokens', 0):,}",
+        "缓存输入：" + cache_detail,
+        "未缓存输入：" + (f"{usage['uncached_input_tokens']:,}" if known_cache_input else "尚未返回"),
         f"已统计请求：{usage.get('request_count', 0):,}",
     ]
     if usage.get("missing_usage_count", 0):
@@ -1706,7 +1704,7 @@ def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None, bi
         lines.extend(
             [
                 "",
-                "最近一轮请求（本轮，不是累计）",
+                "最近一次模型请求（一次用户任务可能包含多次请求）",
                 f"总量：{last.get('total_tokens', 0):,}",
                 f"输入：{last.get('input_tokens', 0):,}",
                 f"输出：{last.get('output_tokens', 0):,}",
@@ -1795,6 +1793,104 @@ def format_token_usage_tooltip(summary, last_usage=None, speed_snapshot=None, bi
             lines.append("余额：查询失败（" + error_labels.get(category, "未知错误") + "）")
             lines.append("说明：不影响本轮结果；下次运行结束后会重新查询。")
     return "\n".join(lines)
+
+
+def normalize_usage_rounds(value):
+    value = value if isinstance(value, dict) else {}
+    result = {}
+    for key in ("current", "previous"):
+        item = value.get(key)
+        if isinstance(item, dict) and item.get("run_id"):
+            result[key] = {
+                "run_id": str(item["run_id"]),
+                "usage": normalize_token_usage_summary(item.get("usage")),
+            }
+    return result
+
+
+def format_token_usage_overview(summary, last, speed, billing, context, rounds, running, run_id=""):
+    usage = normalize_token_usage_summary(summary)
+    last = last if isinstance(last, dict) else {}
+    speed = speed if isinstance(speed, dict) else {}
+    billing = normalize_deepseek_billing_snapshot(billing)
+    cached = usage["cached_input_tokens"]
+    uncached = usage["uncached_input_tokens"]
+    known = cached + uncached
+    complete_cache = known == usage["input_tokens"] and known > 0
+    rate = cached / known if known else None
+
+    def metric(title, value, note="", detail=""):
+        return {"title": title, "value": value, "note": note, "detail": detail}
+
+    data = {
+        "scope": "当前会话 · " + str(last.get("model") or "当前模型"),
+        "total": metric("累计用量", compact_token_count(usage["total_tokens"]), "tokens · 输入 + 输出",
+                        f"输入 {usage['input_tokens']:,} · 输出 {usage['output_tokens']:,}\n仅累计当前服务、模型与协议的请求。"),
+        "cached": metric("缓存输入", compact_token_count(cached) if known else "—",
+                         "tokens" if complete_cache else "部分已知" if known else "尚未返回",
+                         f"已报告的缓存输入 {cached:,} tokens；它属于输入用量，不额外累加。"),
+        "hit": metric("缓存命中率", f"{rate * 100:.1f}%" if rate is not None else "—",
+                      "占输入用量" if complete_cache else "仅已知输入" if known else "尚未返回"),
+        "cache_segments": [(cached, "accent_success"), (uncached, "bg_tertiary")] if known else [],
+        "cache_note": f"已统计 {usage['request_count']} 次请求 · 未缓存 {compact_token_count(uncached)} tokens"
+                      if complete_cache else "缓存明细尚不完整，命中率仅基于已返回的缓存明细。" if known else "服务尚未提供缓存明细。",
+    }
+    if usage["missing_usage_count"]:
+        data["cache_note"] += f" · {usage['missing_usage_count']} 次未返回用量"
+    rounds = normalize_usage_rounds(rounds)
+    current_is_running = running and rounds.get("current", {}).get("run_id") == str(run_id)
+    selected_round = rounds.get("previous" if current_is_running else "current", {})
+    round_usage = normalize_token_usage_summary(selected_round.get("usage"))
+    round_count = round_usage["request_count"]
+    data["round"] = metric(
+        "上一轮用量", compact_token_count(round_usage["total_tokens"]) if round_count else "—",
+        f"{round_count} 次请求合计" if round_count else "暂无用量记录",
+        f"一次用户任务中已返回的输入与输出合计 {round_usage['total_tokens']:,} tokens。\n输入 {round_usage['input_tokens']:,} · 输出 {round_usage['output_tokens']:,}\n停止或失败的轮次也保留已报告用量。",
+    )
+    currency = _deepseek_billing_currency(billing)
+    balance_status = billing.get("balance_status")
+    data["balance"] = metric("账户余额", "—", "服务未提供")
+    if balance_status == "succeeded":
+        info = _deepseek_balance_info(billing, currency)
+        value = _format_billing_money(info.get("total_balance"), currency, balance=True)
+        balance = billing.get("balance") or {}
+        fetched = float(balance.get("fetched_at") or 0)
+        note = datetime.fromtimestamp(fetched).strftime("%m-%d %H:%M 更新") if fetched else "最近查询结果"
+        data["balance"] = metric("账户余额", value or "—", note,
+                                 "余额来自最近一次查询，并非实时扣费后余额。")
+    elif balance_status == "querying":
+        data["balance"] = metric("账户余额", "查询中", "正在后台更新")
+    elif balance_status == "failed":
+        data["balance"] = metric("账户余额", "查询失败", "下轮结束后重试", "可在统计详情查看失败原因。")
+    elif billing:
+        data["balance"] = metric("账户余额", "—", "本轮结束后查询")
+    speed_active = bool(speed.get("active"))
+    speed_rate = speed.get("current_rate" if speed_active else "last_rate")
+    speed_note = "实时估算 · tok/s" if speed_active else "最近均速 · tok/s"
+    speed_value = f"{float(speed_rate):.1f}" if speed_rate is not None else "—"
+    if speed.get("unavailable_reason"):
+        speed_value, speed_note = "—", "速度暂不可用"
+    elif speed_active and speed_rate is None:
+        speed_note = "等待开始生成"
+    elif speed_rate is None:
+        speed_note = "生成后显示"
+    data["speed"] = metric("生成速度", speed_value, speed_note,
+                           "按文本估算思考与正文的生成速度；不含工具参数和首字等待。实时值使用近 3 秒窗口。")
+    snapshot = normalize_context_usage(context)
+    if snapshot.get("status") == "available" and snapshot.get("total"):
+        counts = snapshot["counts"]
+        total = snapshot["total"]
+        data["context"] = {
+            "total": f"≈ {compact_token_count(total)} tokens",
+            "segments": [(counts[key], color) for key, _label, color in CONTEXT_CATEGORIES],
+            "values": {key: ("<0.1%" if 0 < count / total < 0.001 else f"{count / total:.1%}") for key, count in counts.items()},
+            "details": {key: f"{label} · 约 {counts[key]:,} tokens" for key, label, _color in CONTEXT_CATEGORIES},
+            "note": "最近请求的发送前文本估算，非账单或上下文容量。注入含运行说明与技能内容。"
+                    + (" 图片等非文本内容未计入。" if snapshot.get("has_media") else ""),
+        }
+    else:
+        data["context"] = {"note": "组成统计暂不可用，下次请求时重新统计。" if snapshot else "下一次模型请求后显示组成，旧记录没有此项统计。"}
+    return data
 
 
 def apple_search_field_style():
@@ -26718,6 +26814,8 @@ class SessionState:
         self.token_usage_buckets = {}
         self.counted_usage_request_ids = set()
         self.last_token_usage = {}
+        self.context_usage_snapshot = {}
+        self.token_usage_rounds = {}
         self.token_speed_tracker = TokenSpeedTracker()
         self.token_speed_timer = None
         self.current_deepseek_billing = {}
@@ -28693,120 +28791,22 @@ class SessionContextChip(QWidget):
         self.main_btn.setEnabled(enabled)
 
 
-class TokenUsagePopover(QFrame):
-    """Light app-owned popover for token details."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
-        self.setObjectName("TokenUsagePopover")
-        self.setFrameShape(QFrame.NoFrame)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(8, 6, 8, 10)
-        outer_layout.setSpacing(0)
-
-        surface = QFrame(self)
-        surface.setObjectName("TokenUsagePopoverSurface")
-        outer_layout.addWidget(surface)
-
-        layout = QVBoxLayout(surface)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(0)
-
-        self.detail_label = QLabel()
-        self.detail_label.setObjectName("TokenUsagePopoverText")
-        self.detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.detail_label.setWordWrap(False)
-        layout.addWidget(self.detail_label)
-
-        self.setStyleSheet(
-            f"""
-            QFrame#TokenUsagePopover {{
-                background: transparent;
-                border: none;
-            }}
-            QFrame#TokenUsagePopoverSurface {{
-                background-color: {DesignTokens.overlay_bg};
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 14px;
-            }}
-            QLabel#TokenUsagePopoverText {{
-                color: {DesignTokens.text_primary};
-                background: transparent;
-                font-size: 12px;
-                font-weight: 500;
-            }}
-            """
-        )
-        add_soft_shadow(surface, blur=18, y_offset=6, alpha=12)
-        bind_theme(self, self.refresh_theme, surface="feedback")
-
-    def refresh_theme(self, _resolved=None):
-        self.setStyleSheet(
-            f"QFrame#TokenUsagePopover {{ background: transparent; border: none; }}"
-            f"QFrame#TokenUsagePopoverSurface {{ background: {DesignTokens.overlay_bg}; "
-            f"border: 1px solid {DesignTokens.overlay_border}; "
-            f"border-radius: {DesignTokens.overlay_radius}px; }}"
-            f"QLabel#TokenUsagePopoverText {{ color: {DesignTokens.overlay_text}; "
-            f"background: transparent; font-size: {DesignTokens.font_size_meta}px; "
-            f"font-weight: {DesignTokens.font_weight_medium}; }}"
-        )
-
-    def set_detail_text(self, text):
-        self.detail_label.setText(str(text or ""))
-        self.adjustSize()
-
-    def show_for(self, anchor):
-        if not anchor or not _qt_object_alive(anchor):
-            return
-        self.adjustSize()
-        anchor_rect = anchor.rect()
-        global_bottom = anchor.mapToGlobal(anchor_rect.bottomLeft())
-        x = global_bottom.x() + (anchor.width() - self.width()) // 2
-        y = global_bottom.y() + 8
-        screen = anchor.screen() or QGuiApplication.primaryScreen()
-        if screen:
-            available = screen.availableGeometry()
-            x = max(available.left() + 8, min(x, available.right() - self.width() - 8))
-            y = max(available.top() + 8, min(y, available.bottom() - self.height() - 8))
-        self.move(x, y)
-        self.show()
-        self.raise_()
-
-
 class TokenUsageChip(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("TokenUsageChip")
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(26)
-        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setMinimumWidth(100)
+        self.setMaximumWidth(330)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setAccessibleName("查看用量、缓存与上下文组成")
+        self.setToolTip("查看用量、缓存与上下文组成")
+        self._full_text = ""
         self._detail_text = ""
         self._popover = TokenUsagePopover(self)
         self.clicked.connect(self.toggle_popover)
-        self.setStyleSheet(
-            f"""
-            QPushButton#TokenUsageChip {{
-                background: {DesignTokens.bg_main};
-                color: {DesignTokens.text_secondary};
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 13px;
-                padding: 3px 10px;
-                font-size: 11px;
-                font-weight: 650;
-                text-align: center;
-            }}
-            QPushButton#TokenUsageChip:hover {{
-                background: {DesignTokens.bg_hover};
-                color: {DesignTokens.text_primary};
-                border-color: {DesignTokens.border};
-            }}
-            QPushButton#TokenUsageChip:pressed {{
-                background: {DesignTokens.bg_secondary};
-            }}
-            """
-        )
+        self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="feedback")
 
     def refresh_theme(self, _resolved=None):
@@ -28820,11 +28820,34 @@ class TokenUsageChip(QPushButton):
             f"QPushButton#TokenUsageChip:hover {{ background: {DesignTokens.bg_hover}; "
             f"color: {DesignTokens.text_primary}; border-color: {DesignTokens.border}; }}"
             f"QPushButton#TokenUsageChip:pressed {{ background: {DesignTokens.bg_pressed}; }}"
+            f"QPushButton#TokenUsageChip:focus {{ border-color: {DesignTokens.primary}; }}"
         )
 
     def setDetailText(self, text):
         self._detail_text = str(text or "")
         self._popover.set_detail_text(self._detail_text)
+
+    def setOverview(self, data):
+        self._popover.set_overview(data)
+
+    def setText(self, text):
+        self._full_text = str(text or "")
+        self.setAccessibleDescription(self._full_text)
+        super().setText(self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(30, self.width() - 24)))
+        self.updateGeometry()
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setWidth(min(330, max(100, self.fontMetrics().horizontalAdvance(getattr(self, "_full_text", "")) + 24)))
+        return hint
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        super().setText(self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(30, self.width() - 24)))
+
+    def hideEvent(self, event):
+        self._popover.hide()
+        super().hideEvent(event)
 
     def toggle_popover(self):
         if self._popover.isVisible():
@@ -33583,8 +33606,15 @@ class MainWindow(QMainWindow):
         summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
         state.token_usage_summary = summary
         speed_snapshot = self._token_speed_snapshot(state)
-        billing_snapshot = getattr(state, "last_deepseek_billing", {})
+        billing_snapshot = getattr(state, "last_deepseek_billing", {}) or getattr(state, "current_deepseek_billing", {})
         label.setText(format_token_usage_chip_text(summary, speed_snapshot, billing_snapshot))
+        label.setOverview(format_token_usage_overview(
+            summary, getattr(state, "last_token_usage", {}), speed_snapshot,
+            billing_snapshot, getattr(state, "context_usage_snapshot", {}),
+            getattr(state, "token_usage_rounds", {}),
+            getattr(state, "session_status", "") in {"running", "finalizing"},
+            getattr(state, "active_turn_request_id", ""),
+        ))
         label.setDetailText(
             format_token_usage_tooltip(
                 summary,
@@ -33593,15 +33623,7 @@ class MainWindow(QMainWindow):
                 billing_snapshot,
             )
         )
-        has_speed = bool(
-            isinstance(speed_snapshot, dict)
-            and (
-                speed_snapshot.get("active")
-                or speed_snapshot.get("last_rate") is not None
-                or str(speed_snapshot.get("unavailable_reason") or "").strip()
-            )
-        )
-        label.setVisible(int(summary.get("total_tokens") or 0) > 0 or has_speed)
+        label.setVisible(True)
 
     def apply_token_usage_event(self, state, usage):
         if not state:
@@ -33633,6 +33655,14 @@ class MainWindow(QMainWindow):
                 counted = True
         if counted:
             current["request_count"] += 1
+            rounds = normalize_usage_rounds(getattr(state, "token_usage_rounds", {}))
+            current_round = rounds.get("current")
+            if current_round:
+                round_usage = current_round["usage"]
+                for key in ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "uncached_input_tokens"):
+                    round_usage[key] += last[key]
+                round_usage["request_count"] += 1
+                state.token_usage_rounds = rounds
             if usage_request_id:
                 counted_request_ids.add(usage_request_id)
                 state.counted_usage_request_ids = counted_request_ids
@@ -36723,12 +36753,30 @@ class MainWindow(QMainWindow):
                     bubble.ui_source_message_id = source_id
                 return
             if event_type == "provider_request_start":
+                rounds = normalize_usage_rounds(getattr(state, "token_usage_rounds", {}))
+                run_key = str(event.get("run_id") or event.get("turn_id") or "")
+                if run_key and rounds.get("current", {}).get("run_id") != run_key:
+                    if rounds.get("current"):
+                        rounds["previous"] = rounds["current"]
+                    rounds["current"] = {"run_id": run_key, "usage": normalize_token_usage_summary({})}
+                    state.token_usage_rounds = rounds
+                    log_chat_runtime_debug(
+                        "token_usage_round_started", session_id=state.session_id,
+                        run_id=run_key,
+                    )
                 self._start_token_speed_monitor(state, event)
             elif event_type == "provider_request_finish":
                 self._finish_token_speed_monitor(state, event)
             elif event_type == "provider_request_error":
                 self._finish_token_speed_monitor(state, event, status="error")
             elif event_type == "system_prompt":
+                state.context_usage_snapshot = normalize_context_usage(event.get("context_usage"))
+                log_chat_runtime_debug(
+                    "context_usage_updated", session_id=state.session_id,
+                    run_id=str(event.get("run_id") or ""),
+                    status=state.context_usage_snapshot.get("status", "unavailable"),
+                    estimated_tokens=state.context_usage_snapshot.get("total", 0),
+                )
                 state.system_prompt_text = event.get("content") or ""
                 state.runtime_context_text = event.get("runtime_context") or ""
                 state.prompt_cache_meta = {
@@ -36738,6 +36786,7 @@ class MainWindow(QMainWindow):
                     item for item in (event.get("skill_contexts") or [])
                     if isinstance(item, dict)
                 ]
+                self.refresh_token_usage_label(state.session_id)
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
             elif event_type == "llm_usage":
@@ -38493,6 +38542,8 @@ class MainWindow(QMainWindow):
         state.token_usage_buckets = {}
         state.counted_usage_request_ids = set()
         state.last_token_usage = {}
+        state.context_usage_snapshot = {}
+        state.token_usage_rounds = {}
         state.current_deepseek_billing = {}
         state.last_deepseek_billing = {}
         if state.token_speed_timer is not None and state.token_speed_timer.isActive():
@@ -39369,6 +39420,8 @@ class MainWindow(QMainWindow):
         state.last_deepseek_billing = normalize_deepseek_billing_snapshot(
             conversation_meta.get("last_deepseek_billing")
         )
+        state.context_usage_snapshot = normalize_context_usage(conversation_meta.get("context_usage_snapshot"))
+        state.token_usage_rounds = normalize_usage_rounds(conversation_meta.get("token_usage_rounds"))
         try:
             state.chat_save_revision = max(
                 0,
@@ -43246,6 +43299,8 @@ class MainWindow(QMainWindow):
         meta["token_usage_buckets"] = normalize_token_usage_buckets(
             getattr(state, "token_usage_buckets", {})
         )
+        meta["context_usage_snapshot"] = normalize_context_usage(getattr(state, "context_usage_snapshot", {}))
+        meta["token_usage_rounds"] = normalize_usage_rounds(getattr(state, "token_usage_rounds", {}))
         meta["history_save_revision"] = max(
             0,
             int(getattr(state, "chat_save_revision", 0) or 0),

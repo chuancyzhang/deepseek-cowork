@@ -29,6 +29,7 @@ from core.chat_storage import ChatStorage
 from core.tool_images import tool_image_content_parts
 from core.message_persistence import filter_persistable_messages, project_provider_messages
 from core.runtime_journal import RuntimeJournal
+from core.context_usage import estimate_context_usage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
     GRILL_CHECKPOINT_PURPOSE,
@@ -2513,6 +2514,18 @@ class LLMWorker(QThread):
         }
 
     def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages):
+        # Observation only: do not add fields to messages or provider parameters.
+        try:
+            context_usage = estimate_context_usage(
+                request_messages, self._tools_for_messages(request_messages),
+            )
+        except Exception as exc:
+            context_usage = {"status": "unavailable"}
+            self.observability_signal.emit({
+                "type": "context_usage_unavailable",
+                "error_type": type(exc).__name__,
+                "timestamp": time.time(),
+            })
         skill_contexts = []
         for msg in request_messages or []:
             if not isinstance(msg, dict):
@@ -2532,6 +2545,7 @@ class LLMWorker(QThread):
             "type": "system_prompt",
             "content": stable_prompt,
             "runtime_context": runtime_prompt,
+            "context_usage": context_usage,
             "skill_contexts": skill_contexts,
             "prompt_cache_key": self.conversation_id or self.session_id,
             "timestamp": time.time(),

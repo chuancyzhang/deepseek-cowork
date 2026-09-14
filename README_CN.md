@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 ## 许可证
 
-MIT License
+Apache-2.0
 
 
 ### 资料库

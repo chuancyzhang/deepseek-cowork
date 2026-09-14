@@ -92,4 +92,4 @@ Execution permissions and the manual product acceptance checklist are documented
 
 ## License
 
-MIT License
+Apache-2.0

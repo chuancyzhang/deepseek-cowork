@@ -2902,7 +2902,7 @@ class LLMWorker(QThread):
         self.observability_signal.emit({
             "type": "bootstrap_phase_changed",
             "plugin": self.bootstrap.plugin_id,
-            "phase": "BOOTSTRAP" if self.bootstrap.active else "NORMAL",
+            "phase": "COMPLETED" if reason == "answered" else "BOOTSTRAP" if self.bootstrap.active else "NORMAL",
             "reason": reason,
             "error_type": error_type,
             "error": self.bootstrap.error_message,
@@ -2917,6 +2917,10 @@ class LLMWorker(QThread):
         if not self.bootstrap.finish(reason):
             return False
         self._emit_bootstrap_state(reason, error_type=error_type)
+        if reason == "answered":
+            # A completed answer needs no capability handoff or continuation prompt.
+            self.step_signal.emit("本次回答已完成。")
+            return True
         failed = reason in {"provider_error", "tool_error", "initialization_failed"}
         self.step_signal.emit(
             "极简启动遇到问题，已保留现有内容，正在切换到 Cowork 完整能力。"
@@ -4563,11 +4567,6 @@ class LLMWorker(QThread):
                         continue
                     else:
                         # Final Answer
-                        if self.bootstrap.active and not self.is_stopped:
-                            self._finish_bootstrap(current_messages, generated_messages, "completed")
-                            previous_provider_messages = None
-                            self._checkpoint_generated_ledger(generated_messages, boundary="bootstrap_completed")
-                            continue
                         if (
                             self._is_grilling_mode()
                             and not self.run_context.get("grill_checkpoint_cancelled")
@@ -4615,8 +4614,14 @@ class LLMWorker(QThread):
                             generated_messages,
                             close_if_empty=True,
                         ):
+                            if self.bootstrap.active and not self.is_stopped:
+                                self._finish_bootstrap(current_messages, generated_messages, "completed")
+                                previous_provider_messages = None
+                                self._checkpoint_generated_ledger(generated_messages, boundary="bootstrap_completed")
                             force_reply_attempted = False
                             continue
+                        if self.bootstrap.active and not self.is_stopped:
+                            self._finish_bootstrap(current_messages, generated_messages, "answered")
                         final_content = content
                         final_content_parts = json_copy(output_image_parts_buffer, [])
                         break

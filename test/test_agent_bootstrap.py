@@ -103,7 +103,7 @@ class ProviderStub:
 
 
 class TestAgentBootstrap(unittest.TestCase):
-    def run_worker(self, rounds, *, profile=None, context=None, history=None, shell_result=None, prepare_error=None, prompt_error=None, protocol="chat_completions", authorization=None):
+    def run_worker(self, rounds, *, profile=None, context=None, history=None, shell_result=None, prepare_error=None, prompt_error=None, protocol="chat_completions", authorization=None, on_worker_ready=None):
         provider = ProviderStub(rounds, protocol)
         skills = SkillStub()
         events, finished = [], []
@@ -130,6 +130,8 @@ class TestAgentBootstrap(unittest.TestCase):
             )
             worker.observability_signal.connect(events.append)
             worker.finished_signal.connect(finished.append)
+            if on_worker_ready is not None:
+                on_worker_ready(worker)
             worker.run()
             self.assertEqual(len(finished), 1)
             return provider.requests, finished[0], events, skills.calls, shell.call_count, snapshot.call_count
@@ -201,9 +203,8 @@ class TestAgentBootstrap(unittest.TestCase):
         self.assertEqual(resumed[0]["messages"][0]["content"], "NORMAL COWORK")
         self.assertEqual(shell_calls, 0)
 
-    def test_text_bootstrap_and_tool_failure_both_continue_normal(self):
+    def test_tool_failure_and_advanced_capability_continue_normal(self):
         for first, shell_result in (
-            ([{"type": "content", "content": "Initial observation"}], None),
             ([tool_call("pwsh", arguments='{"command":"bad-command"}')], {"status": "error", "error": "command failed"}),
             ([tool_call("read_file")], None),
         ):
@@ -217,6 +218,76 @@ class TestAgentBootstrap(unittest.TestCase):
                 self.assertLessEqual(shell_calls, 1)
                 self.assertEqual(calls, [])
                 self.assertFalse(any((m.get("meta") or {}).get("runtime_repair_only") for m in result["generated_messages"]))
+
+    def test_completed_first_answer_finishes_once_with_or_without_attachments(self):
+        answer = "这是截图中的对话内容。"
+        for protocol in ("chat_completions", "responses"):
+            for part in (
+                None,
+                {"type": "input_file", "path": "D:/workspace/report.txt"},
+                {"type": "input_image", "path": "D:/workspace/image.png"},
+            ):
+                with self.subTest(protocol=protocol, part=part):
+                    task = copy.deepcopy(TASK)
+                    if part:
+                        task["content_parts"].append(part)
+                    response = [
+                        {"type": "reasoning", "content": "Read the user's question."},
+                        {"type": "content", "content": answer},
+                        {"type": "provider_terminal", "status": "completed", "finish_reason": "stop"},
+                    ]
+                    replay_items = [{
+                        "id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+                        "content": [{"type": "output_text", "text": answer, "annotations": []}],
+                    }]
+                    if protocol == "responses":
+                        response.append({"type": "response_items", "items": replay_items})
+                    requests, result, events, calls, shell_calls, snapshots = self.run_worker(
+                        [response], history=[task], protocol=protocol,
+                        profile={**PROFILE, "supports_vision": True},
+                        prompt_error=AssertionError("Completed answer must not prepare a normal request"),
+                    )
+                    self.assertNotIn("error", result)
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(result["content"], answer)
+                    self.assertEqual(result["reasoning"], "Read the user's question.")
+                    self.assertEqual((calls, shell_calls, snapshots), ([], 0, 0))
+                    self.assertEqual(len(result["generated_messages"]), 1)
+                    saved = result["generated_messages"][0]
+                    self.assertEqual((saved["role"], saved["content"]), ("assistant", answer))
+                    if protocol == "responses":
+                        self.assertEqual(saved["meta"]["deepseek_responses_replay_items"], replay_items)
+                    phases = [e for e in events if e["type"] == "bootstrap_phase_changed"]
+                    self.assertEqual([e["phase"] for e in phases], ["BOOTSTRAP", "COMPLETED"])
+                    self.assertEqual(phases[-1]["reason"], "answered")
+
+    def test_user_guidance_during_first_answer_still_continues_in_normal_mode(self):
+        workers = []
+        guidance = {"id": "user-2", "role": "user", "content": "再补充解释一下。"}
+
+        def first_response():
+            yield {"type": "content", "content": "首轮回答。"}
+            self.assertTrue(workers[0].steer(guidance, expected_turn_id="turn-1")["accepted"])
+
+        requests, result, events, _, shell_calls, _ = self.run_worker(
+            [first_response, [{"type": "content", "content": "补充回答。"}]],
+            on_worker_ready=workers.append,
+        )
+        self.assertNotIn("error", result)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(result["content"], "补充回答。")
+        self.assertEqual(shell_calls, 0)
+        self.assertEqual(requests[1]["messages"][0]["content"], "NORMAL COWORK")
+        self.assertEqual(len([m for m in requests[1]["messages"] if m.get("id") == "user-2"]), 1)
+        self.assertEqual(
+            [m["content"] for m in result["generated_messages"] if m["role"] == "assistant"],
+            ["首轮回答。", "补充回答。"],
+        )
+        self.assertEqual(
+            [e["phase"] for e in events if e["type"] == "bootstrap_phase_changed"],
+            ["BOOTSTRAP", "NORMAL"],
+        )
+        self.assertEqual(workers[0].steer(guidance)["error"], "turn_not_active")
 
     def test_attachments_survive_bootstrap_and_normal_handoff(self):
         for protocol in ("chat_completions", "responses"):

@@ -36392,6 +36392,7 @@ class MainWindow(QMainWindow):
             descriptions = {
                 "started": "极简启动中，首轮仅使用启动工具。",
                 "completed": "极简启动完成，已进入 Cowork 完整能力。",
+                "answered": "首轮已完成回答，本次任务已结束。",
                 "advanced_capability": "任务需要更多能力，已进入 Cowork 完整能力。",
                 "provider_error": "启动请求失败，已保留输出并切换到完整能力。",
                 "tool_error": "启动工具失败，已保留结果并切换到完整能力。",

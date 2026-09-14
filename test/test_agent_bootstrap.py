@@ -1,4 +1,5 @@
 import copy
+import os
 import subprocess
 import tempfile
 import unittest
@@ -217,6 +218,78 @@ class TestAgentBootstrap(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertFalse(any((m.get("meta") or {}).get("runtime_repair_only") for m in result["generated_messages"]))
 
+    def test_attachments_survive_bootstrap_and_normal_handoff(self):
+        for protocol in ("chat_completions", "responses"):
+            for part in (
+                {"type": "input_file", "path": "D:/workspace/report.txt", "name": "report.txt"},
+                {"type": "input_image", "path": "D:/workspace/image.png"},
+            ):
+                with self.subTest(protocol=protocol, part=part):
+                    task = copy.deepcopy(TASK)
+                    task["content_parts"].append(part)
+                    task["meta"] = {"user_added_files": [part["path"]]}
+                    args = '{"command":"Get-ChildItem"}'
+                    rounds = [
+                        [tool_call("pwsh", arguments=args)],
+                        [{"type": "content", "content": "done"}],
+                    ]
+                    if protocol == "responses":
+                        rounds[0].append({"type": "response_items", "items": [
+                            {"id": "rs_1", "type": "reasoning", "summary": [],
+                             "content": [{"type": "reasoning_text", "text": "Inspect the task with the available tool."}]},
+                            {"id": "fc_1", "type": "function_call", "call_id": "call-1", "name": "pwsh", "arguments": args},
+                        ]})
+                        rounds[1].append({"type": "response_items", "items": [
+                            {"id": "msg_2", "type": "message", "role": "assistant", "status": "completed",
+                             "content": [{"type": "output_text", "text": "done", "annotations": []}]},
+                        ]})
+                    requests, result, events, _, shell_calls, _ = self.run_worker(
+                        rounds, history=[task], protocol=protocol, profile={**PROFILE, "supports_vision": True},
+                    )
+                    self.assertNotIn("error", result)
+                    self.assertEqual(shell_calls, 1)
+                    self.assertEqual(len(requests), 2)
+                    self.assertEqual(requests[0]["messages"][0]["content"], "You are a helpful software engineer assistant.")
+                    self.assertEqual(requests[1]["messages"][0]["content"], "NORMAL COWORK")
+                    # Local display metadata is intentionally omitted from provider requests.
+                    expected_task = {key: value for key, value in task.items() if key != "meta"}
+                    for request in requests:
+                        self.assertEqual(next(m for m in request["messages"] if m.get("id") == task["id"]), expected_task)
+                    self.assertEqual(
+                        [e["phase"] for e in events if e["type"] == "bootstrap_phase_changed"],
+                        ["BOOTSTRAP", "NORMAL"],
+                    )
+
+    def test_shell_selection_preserves_prefix_and_only_fails_when_all_shells_missing(self):
+        plugin = DeepSeekFlashMinimalBootstrap()
+        prefix = (plugin.system_prompt(), plugin.tool_definitions(), plugin.tools())
+        for executables, expected in (
+            ({"pwsh": "pwsh.exe", "powershell": "powershell.exe"}, "pwsh.exe"),
+            ({"powershell": "powershell.exe"}, "powershell.exe"),
+        ):
+            with self.subTest(executables=executables), patch(
+                "bootstrap_plugins.deepseek_flash_minimal.shutil.which", side_effect=executables.get,
+            ):
+                plugin.prepare()
+                self.assertEqual(plugin.executable, expected)
+                self.assertEqual((plugin.system_prompt(), plugin.tool_definitions(), plugin.tools()), prefix)
+        with patch("bootstrap_plugins.deepseek_flash_minimal.shutil.which", return_value=None), patch(
+            "bootstrap_plugins.deepseek_flash_minimal.os.path.isfile", return_value=False,
+        ):
+            with self.assertRaises(FileNotFoundError):
+                plugin.prepare()
+        self.assertEqual(plugin.executable, "")
+
+    @unittest.skipUnless(os.name == "nt", "Windows system PowerShell path")
+    def test_windows_powershell_can_be_found_without_path(self):
+        plugin = DeepSeekFlashMinimalBootstrap()
+        expected = os.path.join("C:/Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        with patch("bootstrap_plugins.deepseek_flash_minimal.shutil.which", return_value=None), patch.dict(
+            os.environ, {"SystemRoot": "C:/Windows"},
+        ), patch("bootstrap_plugins.deepseek_flash_minimal.os.path.isfile", side_effect=lambda path: path == expected):
+            plugin.prepare()
+        self.assertEqual(plugin.executable, expected)
+
     def test_provider_error_keeps_partial_output_and_falls_back_only_once(self):
         for second in (
             [{"type": "content", "content": "recovered"}],
@@ -254,15 +327,18 @@ class TestAgentBootstrap(unittest.TestCase):
             self.assertEqual(attempts, [0])
             wait.assert_not_called()
         requests, result, events, _, _, _ = self.run_worker(
-            [[{"type": "content", "content": "done"}]], prepare_error=FileNotFoundError("pwsh missing"),
+            [[{"type": "content", "content": "done"}]], prepare_error=FileNotFoundError("No PowerShell available"),
         )
         self.assertNotIn("error", result)
         self.assertEqual(requests[0]["messages"][0]["content"], "NORMAL COWORK")
         self.assertEqual(next(e for e in events if e["type"] == "bootstrap_phase_changed")["reason"], "initialization_failed")
 
-    def test_pwsh_unicode_exit_code_and_pre_execution_stop(self):
+    def test_available_powershell_unicode_exit_code_and_pre_execution_stop(self):
         plugin = DeepSeekFlashMinimalBootstrap()
-        plugin.prepare()
+        try:
+            plugin.prepare()
+        except FileNotFoundError:
+            self.skipTest("Neither PowerShell 7 nor Windows PowerShell is available")
         # A real local shell smoke; replace only the environment provisioning layer.
         def launch(args, **kwargs):
             return subprocess.Popen(

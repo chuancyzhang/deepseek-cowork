@@ -32,18 +32,12 @@ class BootstrapSession:
             session.plugin = resolve(profile, profile.get("model_name"))
             if session.plugin is None:
                 return session
-            # Normal desktop text messages also have text content_parts.
+            # Attachments stay in the original user messages through bootstrap and handoff.
             # Selected skills and a connected (unscoped) knowledge library are
             # restored after bootstrap; they are not evidence of a dedicated workflow.
             knowledge = run_context.get("knowledge_context") or {}
             if not messages or any(message.get("role") != "user" for message in messages):
                 session.reason = "existing_conversation"
-            elif any(
-                not isinstance(message.get("content"), str)
-                or any(part.get("type") != "text" for part in message.get("content_parts") or [])
-                for message in messages
-            ):
-                session.reason = "attachments"
             elif (
                 is_subagent
                 or run_context.get("mode") != "execution"
@@ -88,7 +82,6 @@ class BootstrapSession:
         return {
             "started": "正在进行极简启动。",
             "existing_conversation": "当前对话已有上下文，沿用 Cowork 完整能力；极简启动仅用于新对话。",
-            "attachments": "当前任务包含附件，直接使用 Cowork 完整能力。",
             "dedicated_workflow": "当前任务已有专用工作流程，直接使用 Cowork 完整能力。",
             "workspace_unavailable": "当前没有任务工作区，使用 Cowork 默认流程。",
             "initialization_failed": "极简启动不可用，正在使用 Cowork 完整能力。",

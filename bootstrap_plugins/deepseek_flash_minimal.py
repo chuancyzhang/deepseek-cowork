@@ -59,9 +59,15 @@ class DeepSeekFlashMinimalBootstrap:
         }]
 
     def prepare(self):
-        self.executable = shutil.which("pwsh") or ""
+        # Both PowerShell editions accept the same encoded command and tool schema.
+        self.executable = shutil.which("pwsh") or shutil.which("powershell") or ""
+        if not self.executable and os.name == "nt":
+            system_root = os.environ.get("SystemRoot", "")
+            legacy = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+            if system_root and os.path.isfile(legacy):
+                self.executable = legacy
         if not self.executable:
-            raise FileNotFoundError("PowerShell 7 (pwsh) is unavailable.")
+            raise FileNotFoundError("PowerShell is unavailable (checked pwsh and Windows PowerShell).")
 
     def call_tool(self, name, args, context):
         if name != "pwsh":

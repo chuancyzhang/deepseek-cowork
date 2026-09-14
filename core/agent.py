@@ -2906,6 +2906,7 @@ class LLMWorker(QThread):
             "reason": reason,
             "error_type": error_type,
             "error": self.bootstrap.error_message,
+            "shell_executable": getattr(self.bootstrap.plugin, "executable", ""),
             "session_id": self.session_id,
             "turn_id": self.turn_id,
             "request_id": self.request_id,

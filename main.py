@@ -21657,6 +21657,60 @@ class ImagePreviewError(RuntimeError):
     """User-facing image preview validation failure."""
 
 
+class ImageCopyButton(QPushButton):
+    """Copy the original local image, never the displayed thumbnail or file URL."""
+
+    def __init__(self, path, parent=None):
+        super().__init__("复制图片", parent)
+        self.path = path
+        self.setObjectName("ImageCopyButton")
+        self.setAccessibleName("复制图片")
+        self.setToolTip("将原始尺寸的图片复制到剪贴板")
+        self._reset_timer = QTimer(self)
+        self._reset_timer.setSingleShot(True)
+        self._reset_timer.timeout.connect(lambda: self.setText("复制图片"))
+        self.clicked.connect(self.copy_image)
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(apple_button_style("secondary", radius=DesignTokens.radius_sm))
+
+    def copy_image(self):
+        self._reset_timer.stop()
+        self.setText("复制图片")
+        log_attachment_event("image_copy_begin", path=self.path)
+        image = QImage(self.path) if self.path and os.path.isfile(self.path) else QImage()
+        if image.isNull():
+            message = "图片文件不存在、无法读取或已损坏。请确认文件可用后重试。"
+            log_attachment_event("image_copy_failed", path=self.path, error=message)
+            QMessageBox.warning(self.window(), "无法复制图片", message)
+            return False
+        clipboard = QApplication.clipboard()
+        clipboard.setImage(image)
+        if not clipboard.mimeData() or not clipboard.mimeData().hasImage():
+            message = "无法写入剪贴板，请稍后重试。"
+            log_attachment_event("image_copy_failed", path=self.path, error=message)
+            QMessageBox.warning(self.window(), "无法复制图片", message)
+            return False
+        log_attachment_event("image_copy_completed", path=self.path, width=image.width(), height=image.height())
+        self.setText("已复制")
+        self._reset_timer.start(2000)
+        return True
+
+    def add_context_menu(self, widget):
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        def show_menu(position):
+            menu = create_styled_menu(widget)
+            action = menu.addAction("复制图片")
+            action.setEnabled(self.isEnabled())
+            action.triggered.connect(self.click)
+            menu.exec(widget.mapToGlobal(position))
+
+        widget.customContextMenuRequested.connect(show_menu)
+
+
 class ClickableImageLabel(QLabel):
     activated = Signal()
 
@@ -21732,6 +21786,8 @@ class ImagePreviewDialog(QDialog):
         title_column.addWidget(self.title_label)
         title_column.addWidget(self.meta_label)
         header.addLayout(title_column, 1)
+        self.copy_btn = ImageCopyButton(self.path, self)
+        header.addWidget(self.copy_btn, 0, Qt.AlignTop)
         self.close_btn = QPushButton("关闭")
         self.close_btn.setObjectName("PrimaryBtn")
         self.close_btn.setAccessibleName("关闭图片预览")
@@ -21749,6 +21805,7 @@ class ImagePreviewDialog(QDialog):
         self.image_label.setObjectName("ImagePreviewCanvas")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.copy_btn.add_context_menu(self.image_label)
         self.preview_scroll.setWidget(self.image_label)
         self.preview_scroll.viewport().installEventFilter(self)
         layout.addWidget(self.preview_scroll, 1)
@@ -22052,7 +22109,7 @@ class FileChip(QFrame):
         )
 
         layout = QHBoxLayout(self)
-        is_image = self.path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        is_image = DELIVERABLE_TYPES.get(os.path.splitext(self.path)[1].lower(), ("",))[0] == "image"
         self._is_image = is_image
         self._uses_file_icon = not is_image
         layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
@@ -22084,6 +22141,13 @@ class FileChip(QFrame):
         text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
         text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         layout.addWidget(text_label)
+
+        self.copy_btn = None
+        if is_image:
+            self.copy_btn = ImageCopyButton(self.path, self)
+            layout.addWidget(self.copy_btn)
+            for target in (self, icon_label, text_label):
+                self.copy_btn.add_context_menu(target)
 
         self._activation_targets = (icon_label, text_label)
         for target in self._activation_targets:
@@ -22277,7 +22341,14 @@ class GeneratedImageCard(QFrame):
         self.caption_label.setObjectName("GeneratedImageCaption")
         self.caption_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.caption_label.setWordWrap(True)
-        layout.addWidget(self.caption_label)
+        caption_row = QHBoxLayout()
+        caption_row.addWidget(self.caption_label, 1)
+        self.copy_btn = ImageCopyButton(self.path, self)
+        self.copy_btn.setEnabled(not self._pixmap.isNull())
+        caption_row.addWidget(self.copy_btn, 0, Qt.AlignTop)
+        layout.addLayout(caption_row)
+        self.copy_btn.add_context_menu(self)
+        self.copy_btn.add_context_menu(self.image_label)
 
         if self._pixmap.isNull():
             self.image_label.setVisible(False)
@@ -36326,7 +36397,6 @@ class MainWindow(QMainWindow):
                 "tool_error": "启动工具失败，已保留结果并切换到完整能力。",
                 "initialization_failed": "极简启动不可用，使用 Cowork 默认流程。",
                 "existing_conversation": "已有对话上下文，沿用默认流程；极简启动仅用于新对话。",
-                "attachments": "任务包含附件，直接使用完整能力。",
                 "dedicated_workflow": "任务已有专用工作流程，直接使用完整能力。",
                 "workspace_unavailable": "没有任务工作区，使用默认流程。",
             }

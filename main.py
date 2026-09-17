@@ -211,6 +211,7 @@ from ui.primitives import (
     product_surface_style,
 )
 from ui.theme_settings import ThemeSettingsPanel
+from ui.log_export import LogExportPanel
 from ui.theme_workspace import (
     WorkspaceThemeController,
     apply_theme_component_visibility,
@@ -12712,6 +12713,9 @@ class SettingsDialog(QDialog):
         agent_layout.addWidget(self.agent_profile_manager)
         agent_layout.addStretch()
         workspace_layout.addWidget(storage_group)
+        log_group, log_layout = build_settings_surface("日志下载", show_subtitle=False)
+        log_layout.addWidget(LogExportPanel(get_app_data_dir(), append_background_process_log))
+        workspace_layout.addWidget(log_group)
         workspace_layout.addStretch()
         if domain == "capabilities":
             old_mcp_page = mcp_page

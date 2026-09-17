@@ -39657,10 +39657,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, first_input.setFocus)
         else:
             self.add_system_toast(
-                "后台对话正在等待你的输入",
+                "后台对话发来了输入请求",
                 "info",
                 session_id=state.session_id,
-                auto_close_ms=0,
             )
         return card
 

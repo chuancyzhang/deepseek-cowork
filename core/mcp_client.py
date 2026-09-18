@@ -55,6 +55,9 @@ def describe_mcp_operation_error(server_config, exc):
     cause = exc.cause if isinstance(exc, McpOperationError) else exc
     detail = _meaningful_exception_text(cause)
     lowered = detail.lower()
+    if server_config.get("redact_errors"):
+        code = "401" if "401" in detail or "unauthorized" in lowered else "403" if "403" in detail or "forbidden" in lowered else "transport"
+        return f"MCP {stage} 失败（{code}），请检查连接与授权。"
     source_skill = str(server_config.get("source_skill") or "").strip()
     runtime_skill = str(server_config.get("runtime_skill") or "").strip()
     url = str(server_config.get("url") or "").strip()
@@ -515,16 +518,23 @@ async def _open_mcp_session(server_config):
 
 
 async def _list_mcp_server_tools_async(server_config):
+    tools, cursor, seen = [], None, set()
     async with _open_mcp_session(server_config) as (session, timeout_seconds):
-        try:
-            result = await asyncio.wait_for(session.list_tools(), timeout=timeout_seconds)
-        except Exception as exc:
-            raise McpOperationError("tools/list", exc) from exc
-    tools = []
-    for tool in getattr(result, "tools", None) or []:
-        payload = _tool_to_payload(tool)
-        if payload["name"]:
-            tools.append(payload)
+        while True:
+            try:
+                result = await asyncio.wait_for(session.list_tools(cursor=cursor) if cursor else session.list_tools(), timeout=timeout_seconds)
+            except Exception as exc:
+                raise McpOperationError("tools/list", exc) from exc
+            for tool in getattr(result, "tools", None) or []:
+                payload = _tool_to_payload(tool)
+                if payload["name"]:
+                    tools.append(payload)
+            cursor = getattr(result, "nextCursor", None)
+            if not cursor:
+                break
+            if cursor in seen or len(seen) >= 100:
+                raise McpOperationError("tools/list", ValueError("MCP tool pagination did not advance."))
+            seen.add(cursor)
     return tools
 
 

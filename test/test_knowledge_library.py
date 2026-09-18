@@ -260,5 +260,292 @@ class KnowledgeLibraryTests(unittest.TestCase):
         self.assertEqual(result["code"], "invalid_arguments")
 
 
+class CloudMcpFixture:
+    """Recorded contract shapes from bundled Tencent references and Lexiang setup/base.
+
+    This verifies adapter behavior, not availability of a live tenant's MCP schema.
+    """
+    def __init__(self):
+        self.calls, self.fail, self.move_count = [], None, 0
+
+    def discover(self, config):
+        fields = {
+            "manage.folder_list": {"folder_id": "string", "start": "integer"},
+            "query_space_list": {"num": "integer"},
+            "query_space_node": {"space_id": "string", "parent_id": "string", "num": "integer"},
+            "manage.search_file": {"search_key": "string"}, "get_content": {"file_id": "string"},
+            "manage.query_file_info": {"file_id": "string"},
+            "manage.pre_import": {"file_name": "string", "file_size": "integer", "file_md5": "string"},
+            "manage.async_import": {"file_name": "string", "file_size": "integer", "file_md5": "string", "task_id": "string", "file_key": "string"},
+            "manage.import_progress": {"task_id": "string"},
+            "manage.move_file_to_space": {"file_id": "string", "space_id": "string", "target_parent_id": "string"},
+            "manage.move_file": {"file_id": "string", "target_folder_id": "string"},
+            "whoami": {}, "space_list_spaces": {"page": "integer"}, "space_describe_space": {"space_id": "string"},
+            "entry_list_children": {"parent_id": "string", "page": "integer"},
+            "entry_describe_entry": {"entry_id": "string"}, "entry_describe_ai_parse_content": {"entry_id": "string"},
+            "lexiang_search": {"query": "string", "type": "string"},
+            "file_apply_upload": {"parent_entry_id": "string", "name": "string", "mime_type": "string", "size": "integer", "upload_type": "string"},
+            "file_commit_upload": {"session_id": "string"},
+        }
+        return {"ok": True, "tools": [{"name": name, "input_schema": {"type": "object", "properties": {
+            key: {"type": kind} for key, kind in props.items()}}} for name, props in fields.items()]}
+
+    def call(self, config, tool, args):
+        self.calls.append((tool, copy.deepcopy(args)))
+        if self.fail == tool or self.fail == "401":
+            return {"status": "error", "error": "401 secret-token" if self.fail == "401" else "transport failed"}
+        data = {
+            "whoami": {"company": {"code": "acme", "name": "示例企业", "company_domain": "https://lexiangla.com"}, "user": {"id": "reader", "name": "测试用户"}},
+            "query_space_list": {"spaces": [{"space_id": "space", "title": "团队资料"}], "has_next": False},
+            "query_space_node": {"children": [{"node_id": "doc", "title": "文档", "url": "https://docs.qq.com/doc/doc"}], "has_next": False},
+            "manage.folder_list": {"list": [{"id": "doc", "title": "文档", "url": "https://docs.qq.com/doc/doc"}], "finish": True},
+            "manage.search_file": {"list": [{"file_id": "doc", "title": "文档", "url": "https://docs.qq.com/doc/doc"}]},
+            "manage.query_file_info": {"space_id": "space"},
+            "get_content": {"content": "正文" * 8000},
+            "space_list_spaces": {"spaces": [{"id": "space", "name": "团队资料", "team_id": "team", "team_name": "研发"}]},
+            "space_describe_space": {"space": {"root_entry_id": "root"}},
+            "entry_list_children": {"entries": [{"id": "doc", "name": "文档", "type": "page"}]},
+            "entry_describe_entry": {"entry": {"id": args.get("entry_id"), "space_id": "space"}},
+            "entry_describe_ai_parse_content": {"content": "乐享正文"},
+            "lexiang_search": {"items": [{"id": "doc", "name": "文档", "space_id": "space"}]},
+            "manage.pre_import": {"upload_url": "https://files.example.test/upload?secret=signed", "file_key": "key", "task_id": "task"},
+            "manage.async_import": {"task_id": "task"},
+            "manage.import_progress": {"progress": 100, "file_id": "doc", "file_url": "https://docs.qq.com/doc/doc"},
+            "file_apply_upload": {"session_id": "upload-session", "upload_url": "https://files.example.test/upload?secret=signed"},
+            "file_commit_upload": {"entry_id": "doc"},
+        }.get(tool, {})
+        if tool.startswith("manage.move_file"):
+            self.move_count += 1
+        return {"status": "ok", "structured_content": data}
+
+    def get(self, url, **kwargs):
+        return Response({"data": {"token": "secret-token"}})
+
+    def put(self, url, **kwargs):
+        self.calls.append(("put", {"size": len(kwargs["data"].read())}))
+        return Response({}, 200)
+
+
+class MultiSourceKnowledgeTests(unittest.TestCase):
+    def setUp(self):
+        from core.knowledge_sources import TencentDocsProvider, LexiangProvider, MultiSourceKnowledgeService
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = KnowledgeStore(self.temp.name, TestProtector())
+        self.remote = CloudMcpFixture()
+        self.tencent = TencentDocsProvider(self.store, self.remote, self.remote.call, self.remote.discover)
+        self.lexiang = LexiangProvider(self.store, self.remote, self.remote.call, self.remote.discover)
+        self.weknora = KnowledgeService(self.store, WeKnoraFixture())
+        self.facade = MultiSourceKnowledgeService(self.store, {"weknora": self.weknora, "tencent-docs": self.tencent, "lexiang": self.lexiang})
+        self.tencent.start_authorization()
+        self.tencent.finish_authorization(confirmed=True)
+        self.lexiang.connect("acme", "secret-token")
+
+    def assertCode(self, code, action):
+        with self.assertRaises(KnowledgeError) as result:
+            action()
+        self.assertEqual(result.exception.code, code)
+
+    def test_two_stage_auth_never_fetches_before_explicit_confirmation(self):
+        from unittest.mock import Mock
+        self.tencent.transport = Mock()
+        url = self.tencent.start_authorization()
+        self.assertIn("docs.qq.com/scenario/open-claw.html?", url)
+        self.tencent.transport.get.assert_not_called()
+        self.assertCode("confirmation_required", self.tencent.finish_authorization)
+        self.tencent.transport.get.assert_not_called()
+        self.tencent._pending_auth = ("expired", 0)
+        self.assertCode("auth_expired", lambda: self.tencent.finish_authorization(confirmed=True))
+        self.tencent.transport.get.assert_not_called()
+
+    def test_bad_tenant_and_401_do_not_replace_or_disclose_connection(self):
+        before = self.lexiang.snapshot()
+        self.assertCode("tenant_mismatch", lambda: self.lexiang.connect("other", "secret-token"))
+        self.assertEqual(before, self.lexiang.snapshot())
+        self.remote.fail = "401"
+        count = len(self.remote.calls)
+        with self.assertRaises(KnowledgeError) as error:
+            self.lexiang.verify()
+        self.assertEqual(error.exception.status, 401)
+        self.assertNotIn("secret-token", str(error.exception))
+        self.assertEqual(len(self.remote.calls), count + 1)
+
+    def test_credentials_are_encrypted_and_identity_is_not_in_model_context(self):
+        from core.knowledge_sources import context_message
+        self.facade.select_source("lexiang")
+        scope = self.facade.snapshot()
+        message = json.dumps(context_message(scope, "request"))
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn(scope["sources"]["lexiang"]["connection_id"], message)
+        with open(self.store.path, "rb") as stream:
+            self.assertNotIn(b"secret-token", stream.read())
+
+    def test_mixed_same_id_references_require_source_and_cannot_expand(self):
+        refs = [p.reference(p.snapshot(), "space", "同名", "doc") for p in (self.tencent, self.lexiang)]
+        scope = self.facade.snapshot(refs, "conversation")
+        self.assertCode("source_required", lambda: self.facade.tool(scope, "read", {"item_id": "doc"}))
+        self.assertCode("outside_scope", lambda: self.facade.tool(scope, "read", {"source": "weknora", "item_id": "doc"}))
+        result = self.facade.tool(scope, "read", {"source": "lexiang", "item_id": "doc"})
+        self.assertEqual(result["content"], "乐享正文")
+        count = len(self.remote.calls)
+        self.assertCode("scoped_search_unsupported", lambda: self.facade.tool(scope, "search", {"source": "tencent-docs", "query": "x"}))
+        self.assertEqual(count, len(self.remote.calls))
+        self.assertCode("outside_scope", lambda: self.facade.tool(scope, "read", {"source": "tencent-docs", "item_id": "other"}))
+
+    def test_collection_reference_can_browse_but_document_reference_cannot(self):
+        ref = self.tencent.reference(self.tencent.snapshot(), "space", "整个空间")
+        scope = self.facade.snapshot([ref])
+        result = self.facade.tool(scope, "list", {})
+        self.assertEqual(result["directories"][0]["entries"][0]["item_id"], "doc")
+        self.assertCode("outside_scope", lambda: self.facade.tool(scope, "list", {"collection_id": "other"}))
+        ref = self.tencent.reference(self.tencent.snapshot(), "space", "文档", "doc")
+        scope = self.facade.snapshot([ref])
+        self.assertCode("outside_scope", lambda: self.facade.tool(scope, "list", {"collection_id": "space"}))
+
+    def test_lexiang_partial_last_page_does_not_loop(self):
+        original = self.remote.call
+        def paged(config, tool, args):
+            if tool == "space_list_spaces":
+                return {"status": "ok", "structured_content": {"spaces": [
+                    {"id": str(i), "name": "资料库"} for i in (range(3) if args["page"] == 1 else range(3, 4))], "total": 4}}
+            return original(config, tool, args)
+        self.lexiang.caller = paged
+        catalog = self.lexiang.catalog(self.lexiang.snapshot())
+        self.assertEqual(len(catalog["shared"]), 4)
+
+    def test_switching_page_preserves_submitted_scope_and_auth_change_invalidates_only_its_source(self):
+        refs = [p.reference(p.snapshot(), "space", "文档", "doc") for p in (self.tencent, self.lexiang)]
+        scope = self.facade.snapshot(refs)
+        original = copy.deepcopy(scope)
+        self.facade.select_source("weknora")
+        self.assertEqual(scope, original)
+        self.lexiang.connect("acme", "new-token")
+        self.assertCode("identity_changed", lambda: self.facade.tool(scope, "read", {"source": "lexiang", "item_id": "doc"}))
+        self.assertTrue(self.facade.tool(scope, "read", {"source": "tencent-docs", "item_id": "doc"})["has_more"])
+
+    def test_legacy_import_is_idempotent_and_logout_cannot_resurrect(self):
+        self.weknora.login("http://localhost", "user@test", "password")
+        original = self.store.connection()
+        with self.store.connect(write=True) as db:
+            row = db.execute("SELECT public,secret FROM source_connections WHERE source='weknora'").fetchone()
+            db.execute("INSERT INTO connection VALUES(1,?,?)", tuple(row))
+            db.execute("DELETE FROM source_connections WHERE source='weknora'")
+        migrated = KnowledgeStore(self.temp.name, TestProtector())
+        self.assertEqual(migrated.connection(), original)
+        self.weknora.logout()
+        self.assertIsNone(KnowledgeStore(self.temp.name, TestProtector()).connection())
+        self.assertIsNotNone(migrated.connection(source="lexiang"))
+
+    def test_catalog_directory_content_and_legacy_weknora_parameters(self):
+        values, more = self.tencent.children(self.tencent.snapshot(), "space")
+        self.assertEqual(values[0]["id"], "doc")
+        self.assertFalse(more)
+        catalog = self.lexiang.catalog(self.lexiang.snapshot())
+        self.assertEqual(catalog["organizations"][0]["name"], "研发")
+        result = self.lexiang.search(self.lexiang.snapshot(), "内容")
+        self.assertIn("company_from=acme", result[0]["url"])
+        self.weknora.login("http://localhost", "user@test", "password")
+        scope = self.facade.snapshot(requested_source="weknora")
+        self.assertTrue(self.facade.tool(scope, "search", {"query": "权限"})["results"])
+
+    def test_schema_mismatch_never_dispatches_a_guessed_call(self):
+        connection = self.tencent.identity(self.tencent.snapshot())
+        self.tencent.schemas(connection)["manage.search_file"]["properties"] = {"different_parameter": {"type": "string"}}
+        count = len(self.remote.calls)
+        self.assertCode("schema_mismatch", lambda: self.tencent.search(self.tencent.snapshot(), "x"))
+        self.assertEqual(count, len(self.remote.calls))
+
+    def test_tencent_pages_use_server_offsets_and_space_children(self):
+        from core.knowledge_sources import PERSONAL
+        original = self.remote.call
+        def paged(config, tool, args):
+            if tool == "manage.folder_list":
+                self.remote.calls.append((tool, args))
+                return {"status": "ok", "structured_content": {"list": [
+                    {"id": "one", "title": "第一页"}, {"id": "two", "title": "第一页二"}]
+                    if args["start"] == 0 else [{"id": "three", "title": "第二页"}], "finish": args["start"] != 0}}
+            return original(config, tool, args)
+        self.tencent.caller = paged
+        rows, more = self.tencent.children(self.tencent.snapshot(), PERSONAL, page=2)
+        self.assertEqual(rows[0]["id"], "three")
+        self.assertFalse(more)
+        self.assertEqual(self.remote.calls[-1][1]["start"], 2)
+
+    def test_cancelled_cloud_read_never_dispatches_remote_call(self):
+        count = len(self.remote.calls)
+        self.assertCode("cancelled", lambda: self.tencent.tool(self.tencent.snapshot(), "read", {"item_id": "doc"}, lambda: True))
+        self.assertEqual(count, len(self.remote.calls))
+
+    def test_mcp_discovery_reads_all_pages_and_redacts_native_errors(self):
+        import asyncio
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from core.mcp_client import _list_mcp_server_tools_async, describe_mcp_operation_error
+        tool = lambda name: SimpleNamespace(name=name, description="", inputSchema={"type": "object"})
+        session = SimpleNamespace(list_tools=AsyncMock(side_effect=[
+            SimpleNamespace(tools=[tool("first")], nextCursor="next"),
+            SimpleNamespace(tools=[tool("second")], nextCursor=None)]))
+        @asynccontextmanager
+        async def opened(_config):
+            yield session, 5
+        with patch("core.mcp_client._open_mcp_session", opened):
+            result = asyncio.run(_list_mcp_server_tools_async({}))
+        self.assertEqual([t["name"] for t in result], ["first", "second"])
+        session.list_tools.assert_any_await(cursor="next")
+        error = describe_mcp_operation_error({"redact_errors": True}, RuntimeError("401 Authorization=secret-token"))
+        self.assertIn("401", error)
+        self.assertNotIn("secret-token", error)
+
+    def upload(self, provider):
+        path = os.path.join(self.temp.name, "report.md")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("report")
+        return provider.upload(provider.snapshot(), path, "space", "folder")
+
+    def test_tencent_upload_failed_placement_retains_file_and_resumes_without_import(self):
+        task = self.upload(self.tencent)
+        self.assertEqual(task["status"], "processing")
+        self.remote.fail = "manage.move_file_to_space"
+        self.tencent.check_upload(task)
+        self.assertEqual(task["status"], "placement_failed")
+        self.assertEqual(task["knowledge_id"], "doc")
+        count = len(self.remote.calls)
+        self.tencent.check_upload(task)
+        self.assertEqual(count, len(self.remote.calls))
+        self.remote.fail = None
+        self.tencent.check_upload(task, resume=True)
+        self.assertEqual(task["status"], "saved")
+        self.assertEqual(sum(name == "manage.async_import" for name, _ in self.remote.calls), 1)
+        self.assertCode("duplicate_upload", lambda: self.upload(self.tencent))
+
+    def test_lexiang_commit_unknown_never_replayed(self):
+        self.remote.fail = "file_commit_upload"
+        self.assertCode("outcome_unknown", lambda: self.upload(self.lexiang))
+        task = self.store.uploads()[0]
+        self.assertEqual(task["stage"], "commit_upload")
+        count = len(self.remote.calls)
+        self.lexiang.check_upload(task)
+        self.assertEqual(count, len(self.remote.calls))
+        self.assertEqual(task["status"], "unknown")
+        self.assertCode("duplicate_upload", lambda: self.upload(self.lexiang))
+
+    def test_lexiang_upload_success_is_saved_not_falsely_searchable(self):
+        task = self.upload(self.lexiang)
+        self.assertEqual(task["status"], "saved")
+        self.assertEqual(self.store.setting("last_upload_target")["source"], "lexiang")
+        self.assertNotIn("signed", json.dumps(self.store.uploads()))
+
+    def test_concurrent_upload_checks_place_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        task = self.upload(self.tencent)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(self.tencent.check_upload, copy.deepcopy(task)) for _ in range(2)]
+            for job in jobs:
+                job.result()
+        self.assertEqual(self.remote.move_count, 1)
+        self.assertEqual(self.store.uploads()[0]["status"], "saved")
+
+
 if __name__ == "__main__":
     unittest.main()

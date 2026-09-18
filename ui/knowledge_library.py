@@ -209,7 +209,8 @@ class KnowledgeReferencePopover(ProductPopover):
         self.items.setWordWrap(True)
         self.items.setStyleSheet(f"QListWidget {{background:{DesignTokens.bg_main};color:{DesignTokens.text_primary};border:1px solid {DesignTokens.separator};border-radius:7px;padding:4px;}} QListWidget::item {{padding:8px;}}")
         for ref in self.references:
-            item = QListWidgetItem(ref.get("title") or "资料")
+            from core.knowledge_sources import SOURCES
+            item = QListWidgetItem((ref.get("title") or "资料") + " · " + SOURCES.get(ref.get("source", "weknora"), "资料库"))
             item.setToolTip(item.text())
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
@@ -666,6 +667,10 @@ class KnowledgePage(QDialog):
         self.upload_button.setEnabled(False)
         if not connected:
             self.notice.clear()
+            self.tree.addTopLevelItem(self.node("本地产物", {"kind": "artifacts"}))
+            self.splitter.show()
+            self.login_spacer.hide()
+            self.navigate(self.tree.topLevelItem(0))
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])
@@ -751,6 +756,8 @@ class KnowledgePage(QDialog):
         self.run(lambda: self.service.switch_tenant(tenant), lambda _: self.refresh(), "正在切换工作空间…")
 
     def navigate(self, item, _column=0):
+        if item is None:
+            return
         data = item.data(0, Qt.UserRole) or {}
         kind = data.get("kind")
         if kind == "kb":
@@ -1160,7 +1167,7 @@ class KnowledgePage(QDialog):
         if self.content_stack.currentIndex() == 0:
             for data in self.checked_payloads():
                 ref = data.get("ref")
-                if "document" in data:
+                if "document" in data and not ref:
                     doc = data["document"]
                     ref = self.service.reference(self.scope, doc["knowledge_base_id"], doc.get("title", doc["id"]), doc["id"])
                 if ref and ref not in refs:
@@ -1298,7 +1305,9 @@ class KnowledgePage(QDialog):
             if not self.scope or not same_identity(scope, self.scope):
                 return
             results, errors = result
-            self.notice.setText(f"已上传 {len(results)} / {len(paths)} 个文件。" + ("；".join(errors) if errors else "可在上传记录查看解析进度。"))
+            self.notice.setText(f"已提交 {len(results)} / {len(paths)} 个文件。" + ("；".join(errors) if errors else "可在上传记录查看进度。"))
+            if results and getattr(self.service, "source", "weknora") == "weknora":
+                self.service.store.setting("last_upload_target", {"source": "weknora", "collection_id": kb_id, "folder": folder_path or ""})
         self.jobs.submit(work, done, self.error)
 
     def can_offer_upload(self, kb):
@@ -1322,7 +1331,7 @@ class KnowledgePage(QDialog):
         if self.upload_poll_busy or self.view != "uploads" or not self.scope or not self.isVisible():
             return
         tasks = [task for task in self.service.store.uploads()
-                 if same_identity(task["scope"], self.scope) and ((initial and (task.get("knowledge_id") or task["status"] == "unknown")) or task["status"] in ("pending", "processing", "finalizing"))]
+                 if same_identity(task["scope"], self.scope) and ((initial and (task.get("knowledge_id") or task.get("remote_task_id") or task["status"] in ("unknown", "uploading", "placing"))) or task["status"] in ("pending", "processing", "finalizing", "placement_pending"))]
         if not tasks:
             if initial:
                 self.notice.setText("暂无需要核对的上传；上传中的任务完成后会留下回执。" if self.items.count() else "还没有上传记录。")

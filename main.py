@@ -26,7 +26,8 @@ from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
-from core.knowledge_library import KnowledgeService, KnowledgeStore, KnowledgeError
+from core.knowledge_library import KnowledgeStore, KnowledgeError
+from core.knowledge_sources import MultiSourceKnowledgeService as KnowledgeService
 from core.variable_store import (
     VARIABLE_KIND_SECRET,
     VARIABLE_KIND_TEXT,
@@ -29843,7 +29844,7 @@ class MainWindow(QMainWindow):
         self.deliverable_more_menu.addSeparator()
         self.deliverable_more_menu.addAction(self.deliverable_more_knowledge_action)
         self.deliverable_more_menu.aboutToShow.connect(lambda: self.deliverable_more_knowledge_action.setVisible(
-            bool(self._knowledge_service().snapshot() and os.path.isfile(getattr(self, "current_deliverable_path", "") or ""))))
+            bool(self._knowledge_service().connected() and os.path.isfile(getattr(self, "current_deliverable_path", "") or ""))))
         self.deliverable_more_btn.setMenu(self.deliverable_more_menu)
         self.deliverables_refresh_btn = QToolButton()
         self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.file-code", color=DesignTokens.text_secondary))
@@ -46274,7 +46275,7 @@ a {{ overflow-wrap: anywhere; }}
         menu.addAction(reveal_action)
         menu.addSeparator()
         menu.addAction(copy_path_action)
-        if os.path.isfile(path) and self._knowledge_service().snapshot():
+        if os.path.isfile(path) and self._knowledge_service().connected():
             menu.addAction("保存到资料库…", lambda: self.upload_workspace_knowledge([path]))
         if deliverable_action is not None:
             menu.addAction(deliverable_action)
@@ -46435,7 +46436,7 @@ a {{ overflow-wrap: anywhere; }}
 
     def show_deliverable_knowledge_menu(self, position):
         item = self.deliverables_list.itemAt(position)
-        if not item or not self._knowledge_service().snapshot():
+        if not item or not self._knowledge_service().connected():
             return
         path = item.data(Qt.UserRole)
         if not path or not os.path.isfile(path):
@@ -46445,7 +46446,7 @@ a {{ overflow-wrap: anywhere; }}
         menu.exec(self.deliverables_list.viewport().mapToGlobal(position))
 
     def upload_workspace_knowledge(self, paths):
-        if not self._knowledge_service().snapshot():
+        if not self._knowledge_service().connected():
             self.add_system_toast("请先登录资料库。", "info")
             return
         page = self._ensure_product_page(self.PAGE_KNOWLEDGE)
@@ -46458,6 +46459,21 @@ a {{ overflow-wrap: anywhere; }}
             service = KnowledgeService()
             self.knowledge_service = service
         return service
+
+    def _knowledge_snapshot(self, state):
+        from core.knowledge_sources import requested_source
+        text = ""
+        for message in reversed(getattr(state, "messages", [])):
+            if message.get("role") == "user" and not (message.get("meta") or {}).get("hidden"):
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+                break
+        return self._knowledge_service().snapshot(
+            getattr(state, "knowledge_refs", []), state.session_id,
+            requested_source=requested_source(text, getattr(state, "selected_skill_names", [])))
 
     def _knowledge_artifacts(self):
         paths = {}
@@ -46597,7 +46613,7 @@ a {{ overflow-wrap: anywhere; }}
         elif route == self.PAGE_FAVORITES:
             page = FavoritesPage(self.config_manager, self)
         elif route == self.PAGE_KNOWLEDGE:
-            from ui.knowledge_library import KnowledgePage
+            from ui.knowledge_sources import MultiSourceKnowledgePage as KnowledgePage
             page = KnowledgePage(self, service=self._knowledge_service(), artifacts=self._knowledge_artifacts)
             page.referenceRequested.connect(self.use_knowledge_reference)
         elif route == self.PAGE_PROJECTS:
@@ -49613,7 +49629,7 @@ a {{ overflow-wrap: anywhere; }}
                     getattr(state, "grill_execution_confirmed", False)
                 ),
                 "selected_skill_names": effective_skill_names,
-                "knowledge_context": self._knowledge_service().snapshot(getattr(state, "knowledge_refs", []), state.session_id),
+                "knowledge_context": self._knowledge_snapshot(state),
                 "selected_model_id": effective_model_id,
                 "selected_model_profile": self._model_profile_snapshot_for_state(state, model_id=effective_model_id),
                 "reasoning_effort": self._selected_reasoning_effort(state, model_id=effective_model_id),
@@ -49692,7 +49708,7 @@ a {{ overflow-wrap: anywhere; }}
                 "agent_description": profile.get("description"),
                 "agent_system_prompt": profile.get("system_prompt"),
                 "agent_summon_source": summon_source,
-                "knowledge_context": self._knowledge_service().snapshot(getattr(state, "knowledge_refs", []), state.session_id) if state else None,
+                "knowledge_context": self._knowledge_snapshot(state) if state else None,
                 "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": "",
                 "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,

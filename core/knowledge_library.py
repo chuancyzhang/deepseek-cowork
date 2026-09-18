@@ -79,7 +79,13 @@ class KnowledgeStore:
                 CREATE TABLE IF NOT EXISTS uploads (
                     id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
                     updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS source_connections (
+                    source TEXT PRIMARY KEY, public TEXT NOT NULL, secret BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS library_settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            # Copy encrypted bytes without decrypting, including on machines without DPAPI.
+            db.execute("INSERT OR IGNORE INTO source_connections SELECT 'weknora', public, secret FROM connection")
 
     @contextmanager
     def connect(self, write=False):
@@ -101,14 +107,15 @@ class KnowledgeStore:
             self.protector = WindowsDpapiProtector()
         return self.protector
 
-    def connection(self, db=None, secret=False):
+    def connection(self, db=None, secret=False, source="weknora"):
         if db is None:
             with self.connect() as conn:
-                return self.connection(conn, secret)
-        row = db.execute("SELECT * FROM connection WHERE singleton=1").fetchone()
+                return self.connection(conn, secret, source)
+        row = db.execute("SELECT * FROM source_connections WHERE source=?", (source,)).fetchone()
         if not row:
             return None
         public = json.loads(row["public"])
+        public.setdefault("source", source)
         if secret:
             public["credentials"] = json.loads(self.crypt().unprotect(row["secret"]).decode("utf-8"))
         return public
@@ -118,7 +125,24 @@ class KnowledgeStore:
             with self.connect(write=True) as conn:
                 return self.save_connection(public, credentials, conn)
         encrypted = self.crypt().protect(json.dumps(credentials).encode("utf-8"))
-        db.execute("INSERT OR REPLACE INTO connection VALUES(1,?,?)", (json.dumps(public), encrypted))
+        source = public.get("source", "weknora")
+        db.execute("INSERT OR REPLACE INTO source_connections VALUES(?,?,?)", (source, json.dumps(public), encrypted))
+        # The old row is only an import source; retaining it could resurrect a logout.
+        if source == "weknora":
+            db.execute("DELETE FROM connection")
+
+    def remove_connection(self, source):
+        with self.connect(write=True) as db:
+            db.execute("DELETE FROM source_connections WHERE source=?", (source,))
+            if source == "weknora":
+                db.execute("DELETE FROM connection")
+
+    def setting(self, key, value=None):
+        with self.connect(write=value is not None) as db:
+            if value is not None:
+                db.execute("INSERT OR REPLACE INTO library_settings VALUES(?,?)", (key, json.dumps(value)))
+            row = db.execute("SELECT value FROM library_settings WHERE key=?", (key,)).fetchone()
+            return json.loads(row[0]) if row else None
 
     def references(self, owner, refs=None):
         with self.connect(write=refs is not None) as db:
@@ -152,12 +176,16 @@ class KnowledgeStore:
 
 
 def same_identity(a, b):
-    return all(str(a.get(k, "")) == str(b.get(k, "")) for k in ("connection_id", "user_id", "tenant_id"))
+    return (a.get("source", "weknora") == b.get("source", "weknora") and
+            all(str(a.get(k, "")) == str(b.get(k, "")) for k in ("connection_id", "user_id", "tenant_id")))
 
 
 def knowledge_context_message(scope, request_id):
     if not scope:
         return None
+    if "sources" in scope:
+        from .knowledge_sources import context_message
+        return context_message(scope, request_id)
     return {
         "role": "user",
         "content": (
@@ -175,6 +203,8 @@ def knowledge_context_message(scope, request_id):
 
 
 class KnowledgeService:
+    source = "weknora"
+    display_name = "WeKnora"
     def __init__(self, store=None, transport=None):
         self.store = store or KnowledgeStore()
         self.transport = transport or requests
@@ -251,6 +281,7 @@ class KnowledgeService:
         with self.store.connect(write=True) as db:
             connection = self.store.connection(db, secret=True)
             db.execute("DELETE FROM connection")
+            db.execute("DELETE FROM source_connections WHERE source='weknora'")
         if connection:
             self._http(connection["base_url"], "POST", "/api/v1/auth/logout",
                        token=connection["credentials"]["token"], tenant=connection["tenant_id"])
@@ -338,6 +369,8 @@ class KnowledgeService:
 
     def reference(self, scope, kb_id, title, knowledge_id="", wiki_slug=""):
         return {**{k: scope[k] for k in ("connection_id", "user_id", "tenant_id")},
+                "source": "weknora", "collection_id": str(kb_id), "item_id": str(knowledge_id),
+                "url": scope["base_url"] + "/platform/knowledge-bases/" + segment(kb_id),
                 "kb_id": str(kb_id), "knowledge_id": str(knowledge_id), "wiki_slug": str(wiki_slug), "title": title}
 
     def catalog(self, scope):
@@ -544,7 +577,12 @@ def knowledge_script_call(context, operation, input_text, args=None):
         if not scope:
             raise KnowledgeError("not_connected", "本次任务没有资料库身份，请连接后重新提交。")
         arguments = json.loads(input_text or "{}")
-        result = KnowledgeService().tool(scope, operation, arguments, context.get("knowledge_cancelled"))
+        if "sources" in scope:
+            from .knowledge_sources import MultiSourceKnowledgeService
+            service = MultiSourceKnowledgeService()
+        else:
+            service = KnowledgeService()
+        result = service.tool(scope, operation, arguments, context.get("knowledge_cancelled"))
         return {"ok": True, "operation": operation, "data": result}
     except (KnowledgeError, ValueError, TypeError) as error:
         return {"ok": False, "code": getattr(error, "code", "invalid_arguments"), "error": str(error)}

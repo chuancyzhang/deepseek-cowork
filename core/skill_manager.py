@@ -1387,10 +1387,12 @@ class SkillManager:
                 "status": "denied",
                 "message": "当前运行上下文不允许读取全局普通变量。",
             }
+        exact_name = str(name or "").strip()
+        if run_context.get("knowledge_context") and any(marker in exact_name.lower() for marker in ("weknora", "tencent_docs", "lexiang")):
+            return {"status": "denied", "message": "资料来源凭据由宿主管理，请通过资料库入口访问本次任务范围。"}
         manager = self.config_manager
         if manager is None or not hasattr(manager, "get_variable_store"):
             return {"status": "unavailable", "message": "全局变量存储不可用。"}
-        exact_name = str(name or "").strip()
         if not exact_name:
             return {"status": "error", "message": "必须提供准确的变量名称。"}
         store = manager.get_variable_store()
@@ -3376,7 +3378,16 @@ class SkillManager:
             normalized_name = str(skill_name or "").strip()
             record = self.skill_records.get(normalized_name) or {}
             server = record.get("mcp_server") or {}
-            if normalized_name == "weknora" or self._source_skill_for_record(normalized_name) == "weknora" or server.get("runtime_skill") == "weknora":
+            sources = {"weknora", "tencent-docs", "lexiang", "lexiang-mcp-skill", "lexiang-mcp"}
+            if normalized_name == "knowledge-library":
+                allowed = self._allowed_skill_names(run_context)
+                if not allowed or "knowledge-library" in allowed or sources.intersection(allowed) or (run_context["knowledge_context"].get("refs")):
+                    return True
+            from urllib.parse import urlsplit
+            host = (urlsplit(str(server.get("url") or "")).hostname or "").lower()
+            cloud_host = host in {"docs.qq.com", "mcp.lexiang-app.com"}
+            if (normalized_name in sources or self._source_skill_for_record(normalized_name) in sources
+                    or server.get("runtime_skill") in sources or cloud_host):
                 return False
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:

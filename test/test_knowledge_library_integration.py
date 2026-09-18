@@ -14,6 +14,7 @@ from core.message_persistence import filter_persistable_messages
 from core.conversation_render import _is_hidden_context_message
 from core.skill_manager import SkillManager
 from core.variable_store import WindowsDpapiProtector
+from core.execution_authorization import ExecutionAuthorization
 from test_knowledge_library import TestProtector, WeKnoraFixture
 
 
@@ -54,7 +55,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         manager = self.manager()
         with patch("core.knowledge_library.KnowledgeService", return_value=self.service), patch("core.sandbox_runtime.run_skill_script_in_sandbox", side_effect=AssertionError("No subprocess allowed")):
             result = manager.call_tool("run_skill_script", {"skill_name": "knowledge-library", "script_name": "search", "input_text": '{"query":"权限"}'},
-                                       context={"run_context": {"knowledge_context": self.scope}})
+                                       context={"run_context": {"knowledge_context": self.scope},
+                                                "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")})
         self.assertIsInstance(result, dict, result)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["data"]["results"][0]["knowledge_id"], "doc-a")
@@ -68,6 +70,39 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertTrue(manager._is_skill_allowed_by_scope("mcp_weknora", {}))
         self.assertFalse(manager._is_skill_allowed_by_scope("mcp_weknora", {"knowledge_context": self.scope}))
         self.assertFalse(manager._is_skill_allowed_by_scope("weknora", {"knowledge_context": self.scope}))
+
+    def test_cloud_skills_aliases_and_credentials_cannot_bypass_scope(self):
+        manager = self.manager()
+        context = {"knowledge_context": self.scope, "app_variable_access": True}
+        for source in ("tencent-docs", "lexiang", "lexiang-mcp-skill"):
+            manager.skill_records["alias"] = {"spec": {"source_skill": source}}
+            self.assertFalse(manager._is_skill_allowed_by_scope(source, context))
+            self.assertFalse(manager._is_skill_allowed_by_scope("alias", context))
+        manager.skill_records["alias"] = {"mcp_server": {"url": "https://docs.qq.com/openapi/mcp"}}
+        self.assertFalse(manager._is_skill_allowed_by_scope("alias", context))
+        manager.skill_records["tencent-docs"] = {"spec": {"name": "tencent-docs"}}
+        self.assertTrue(manager._is_skill_allowed_by_scope("knowledge-library", {**context, "allowed_skill_names": ["tencent-docs"]}))
+        result = manager._lookup_app_variable("LEXIANG_TOKEN", {"run_context": context})
+        self.assertEqual(result["status"], "denied")
+
+    def test_multisource_context_is_append_only_without_identity_or_credentials(self):
+        from core.knowledge_sources import MultiSourceKnowledgeService
+        service = MultiSourceKnowledgeService(self.service.store, {"weknora": self.service})
+        scope = service.snapshot(requested_source="weknora")
+        before = [{"role": "user", "content": "原问题"}]
+        messages = copy.deepcopy(before)
+        messages.append(knowledge_context_message(scope, "multi"))
+        self.assertEqual(messages[:1], before)
+        self.assertEqual(filter_persistable_messages(messages), messages)
+        self.assertNotIn(self.scope["connection_id"], messages[-1]["content"])
+        worker = LLMWorker.__new__(LLMWorker)
+        worker.workspace_dir, worker.config_manager = self.temp.name, None
+        worker.run_context = {}
+        prompt = worker._build_stable_system_prompt()
+        worker.run_context = {"knowledge_context": scope}
+        self.assertEqual(prompt, worker._build_stable_system_prompt())
+        self.assertEqual(self.manager(False).get_tool_definitions(run_mode="execution", run_context={}),
+                         self.manager().get_tool_definitions(run_mode="execution", run_context=worker.run_context))
 
     def test_system_prompt_is_identical_with_knowledge_scope(self):
         worker = LLMWorker.__new__(LLMWorker)
@@ -115,7 +150,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         results = []
         with patch("core.agent.SkillManager", return_value=manager), patch("core.agent.LLMFactory.create_provider", return_value=Provider()):
             worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
-                               run_context={"knowledge_context": self.scope})
+                               run_context={"knowledge_context": self.scope},
+                               execution_authorization=ExecutionAuthorization("session-a", "test", True, ""))
             worker.finished_signal.connect(results.append)
             worker.run()
         self.assertTrue(results)

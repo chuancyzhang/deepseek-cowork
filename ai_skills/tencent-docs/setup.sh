@@ -277,7 +277,6 @@ tdoc_fetch_token() {
         '.data.token // empty' \
         '"token":"[^"]*"' \
         's/"token":"//;s/"$//')
-    echo "DEBUG:token=$token"
     if [[ -n "$token" && "$token" != "null" ]]; then
         if _tdoc_save_token "$token"; then
             _tdoc_cleanup

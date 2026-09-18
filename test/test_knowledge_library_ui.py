@@ -314,5 +314,130 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.assertEqual(self.page.items.count(), 2)
 
 
+class MultiSourceLibraryUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from core.knowledge_sources import MultiSourceKnowledgeService, TencentDocsProvider, LexiangProvider
+        from ui.knowledge_sources import MultiSourceKnowledgePage
+        from test_knowledge_library import CloudMcpFixture
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = KnowledgeStore(self.temp.name, TestProtector())
+        self.remote = CloudMcpFixture()
+        self.tencent = TencentDocsProvider(self.store, self.remote, self.remote.call, self.remote.discover)
+        self.lexiang = LexiangProvider(self.store, self.remote, self.remote.call, self.remote.discover)
+        self.tencent.start_authorization()
+        self.tencent.finish_authorization(confirmed=True)
+        self.lexiang.connect("acme", "secret-token")
+        self.service = MultiSourceKnowledgeService(self.store, {
+            "weknora": KnowledgeService(self.store, WeKnoraFixture()), "tencent-docs": self.tencent, "lexiang": self.lexiang})
+        self.service.select_source("tencent-docs")
+        self.page = MultiSourceKnowledgePage(service=self.service)
+        self.page.resize(1000, 750)
+        self.page.show()
+        self.wait_for(lambda: self.page.page("tencent-docs").tree.topLevelItemCount() >= 4)
+
+    def tearDown(self):
+        for page in self.page.pages.values():
+            page.upload_timer.stop()
+            page.jobs.pool.shutdown(wait=True)
+        self.app.processEvents()
+        self.page.close()
+        self.page.deleteLater()
+        self.app.processEvents()
+        self.temp.cleanup()
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            self.app.processEvents()
+            QTest.qWait(10)
+        self.assertTrue(predicate())
+
+    def test_source_switch_retains_page_state_and_late_results_stay_on_their_page(self):
+        from unittest.mock import Mock
+        tencent = self.page.page("tencent-docs")
+        tencent.query.setText("腾讯搜索条件")
+        pending = []
+        with patch.object(tencent.jobs, "submit", side_effect=lambda work, done, failed: pending.append(done)):
+            tencent.run(lambda: [], lambda _: tencent.title.setText("腾讯迟到结果"))
+        self.page.sources.setCurrentIndex(self.page.sources.findData("lexiang"))
+        lexiang = self.page.page("lexiang")
+        self.wait_for(lambda: lexiang.tree.topLevelItemCount() >= 4)
+        lexiang.query.setText("乐享搜索条件")
+        title = lexiang.title.text()
+        pending[0]([])
+        self.assertEqual(lexiang.title.text(), title)
+        self.page.sources.setCurrentIndex(self.page.sources.findData("tencent-docs"))
+        self.assertEqual(tencent.query.text(), "腾讯搜索条件")
+        self.assertEqual(tencent.title.text(), "腾讯迟到结果")
+
+    def test_cloud_read_back_and_reference_keeps_source_and_url(self):
+        page = self.page.page("tencent-docs")
+        page.open_kb({"id": "space", "name": "团队资料"})
+        self.wait_for(lambda: page.items.count() == 1)
+        page.select_item(page.items.item(0))
+        self.wait_for(lambda: "正文" in page.reader.toPlainText())
+        self.assertEqual(page.content_stack.currentIndex(), 1)
+        emitted = []
+        self.page.referenceRequested.connect(lambda ref, mode: emitted.append(ref))
+        page.use_reference("current")
+        self.assertEqual(emitted[0]["source"], "tencent-docs")
+        self.assertEqual(emitted[0]["url"], "https://docs.qq.com/doc/doc")
+        page.back_to_list()
+        self.assertEqual(page.items.count(), 1)
+        self.assertFalse(page.wiki_button.isVisible())
+
+    def test_upload_dialog_cancel_never_writes_and_source_change_selects_correct_identity(self):
+        from ui.knowledge_sources import KnowledgeUploadDialog
+        dialog = KnowledgeUploadDialog(self.page, self.service, ["report.md"], "tencent-docs", {})
+        dialog.show()
+        try:
+            self.wait_for(lambda: dialog.submit.isEnabled())
+            dialog.sources.setCurrentIndex(dialog.sources.findData("lexiang"))
+            self.wait_for(lambda: dialog.submit.isEnabled() and dialog.scope["source"] == "lexiang")
+            self.assertEqual(dialog.targets.currentData(), "space")
+            dialog.reject()
+            self.assertFalse(any(name in {"manage.pre_import", "file_apply_upload", "put"} for name, _ in self.remote.calls))
+        finally:
+            dialog.jobs.pool.shutdown(wait=True)
+            self.app.processEvents()
+            dialog.deleteLater()
+
+    def test_tencent_connect_only_opens_link_until_confirmation(self):
+        page = self.page.page("tencent-docs")
+        calls = []
+        with patch.object(self.tencent, "finish_authorization", side_effect=lambda **kwargs: calls.append(kwargs)), patch("ui.knowledge_sources.QDesktopServices.openUrl"):
+            page.connect_source()
+            self.wait_for(lambda: page.confirm_button.isEnabled())
+            self.assertEqual(calls, [])
+            page.finish_authorization()
+            self.wait_for(lambda: bool(calls))
+        self.assertTrue(calls[0]["confirmed"])
+
+    def test_import_finishes_in_background_and_401_stops_automatic_checks(self):
+        path = os.path.join(self.temp.name, "upload.md")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("测试文件")
+        task = self.tencent.upload(self.tencent.snapshot(), path, "space", "folder")
+        page = self.page.page("tencent-docs")
+        page.view = "recent"
+        self.page.hide()
+        page.poll_uploads()
+        self.wait_for(lambda: not page.upload_poll_busy)
+        self.assertEqual(self.store.uploads()[0]["status"], "saved")
+        task.update(status="processing", knowledge_id="", stage="importing")
+        self.store.save_upload(task)
+        self.remote.fail = "401"
+        page.poll_uploads()
+        self.wait_for(lambda: not page.upload_poll_busy)
+        self.assertEqual(self.store.uploads()[0]["status"], "action_required")
+        count = len(self.remote.calls)
+        page.poll_uploads()
+        self.assertEqual(count, len(self.remote.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

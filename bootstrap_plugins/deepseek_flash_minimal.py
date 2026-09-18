@@ -16,8 +16,8 @@ class DeepSeekFlashMinimalBootstrap:
         self.executable = ""
 
     def supports(self, provider, model):
-        # Exact current model and official HTTPS endpoint; no name/host substring matches.
-        if str(model or "").strip() != "deepseek-flash":
+        # Exact supported models and official HTTPS endpoint; no substring matches.
+        if str(model or "").strip() not in {"deepseek-flash", "deepseek-v4-pro", "deepseek-pro"}:
             return False
         if str(provider.get("provider_type") or provider.get("provider") or "openai").lower() != "openai":
             return False

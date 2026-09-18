@@ -150,7 +150,16 @@ class TestAgentBootstrap(unittest.TestCase):
         self.assertFalse(result.get("error"), result)
 
     def test_scope_and_explicit_normal_contexts(self):
-        self.assertIsNotNone(resolve(PROFILE, "deepseek-flash"))
+        for model_name in ("deepseek-flash", "deepseek-v4-pro", "deepseek-pro"):
+            with self.subTest(model_name=model_name):
+                profile = {**PROFILE, "model_name": model_name}
+                self.assertIsNotNone(resolve(profile, model_name))
+                requests, result, events, _, _, _ = self.run_worker(
+                    [[{"type": "content", "content": "done"}]], profile=profile,
+                )
+                self.assertNotIn("error", result)
+                self.assertEqual(requests[0]["messages"][0]["content"], "You are a helpful software engineer assistant.")
+                self.assertEqual([e["phase"] for e in events if e["type"] == "bootstrap_phase_changed"], ["BOOTSTRAP", "COMPLETED"])
         for base_url in (
             "https://api.deepseek.com.evil.test", "https://proxy.test/api.deepseek.com",
             "http://api.deepseek.com", "https://api.deepseek.com:8443", "https://api.deepseek.com/custom",
@@ -159,7 +168,7 @@ class TestAgentBootstrap(unittest.TestCase):
                 self.assertIsNone(resolve({**PROFILE, "base_url": base_url}, "deepseek-flash"))
         normal_cases = [
             {"profile": {**PROFILE, "model_name": name}}
-            for name in ("deepseek-v4-flash", "deepseek-pro", "deepseek-flash-custom", "gpt-5")
+            for name in ("deepseek-v4-flash", "deepseek-pro-custom", "deepseek-v4-pro-custom", "deepseek-flash-custom", "gpt-5")
         ] + [
             {"profile": {**PROFILE, "bootstrap_plugin": ""}},
             {"context": {"workflow_mode": "office_html_first"}},

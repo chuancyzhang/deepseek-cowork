@@ -320,10 +320,10 @@ class ModelConfigurationUiTests(unittest.TestCase):
         finally:
             dialog.close()
 
-    def test_flash_bootstrap_switch_excludes_other_models_and_services(self):
+    def test_bootstrap_switch_tracks_supported_models_and_official_service(self):
         for provider, base_url, model_name in (
             ("openai", "https://api.deepseek.com", "deepseek-v4-flash"),
-            ("openai", "https://api.deepseek.com", "deepseek-pro"),
+            ("openai", "https://api.deepseek.com", "deepseek-pro-custom"),
             ("openai", "https://proxy.example.com", "deepseek-flash"),
             ("openai", "https://api.deepseek.com.example.com", "deepseek-flash"),
             ("anthropic", "https://api.deepseek.com", "deepseek-flash"),
@@ -336,7 +336,16 @@ class ModelConfigurationUiTests(unittest.TestCase):
                 dialog.deleteLater()
         dialog = ModelEditDialog("openai", {"model_name": "deepseek-flash"}, base_url="https://api.deepseek.com")
         dialog.bootstrap_check.setChecked(True)
-        dialog.model_name_input.setText("deepseek-pro")
+        for model_name in ("deepseek-v4-pro", "deepseek-pro"):
+            dialog.model_name_input.setText(model_name)
+            self.assertTrue(dialog.bootstrap_check.isEnabled())
+            self.assertTrue(dialog.bootstrap_check.isChecked())
+            restored = dialog.get_model()
+            self.assertEqual(restored["bootstrap_plugin"], "deepseek_flash_minimal")
+            reopened = ModelEditDialog("openai", restored, base_url="https://api.deepseek.com")
+            self.assertTrue(reopened.bootstrap_check.isChecked())
+            reopened.deleteLater()
+        dialog.model_name_input.setText("deepseek-pro-custom")
         self.assertFalse(dialog.bootstrap_check.isChecked())
         dialog.deleteLater()
 

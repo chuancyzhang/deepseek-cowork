@@ -353,7 +353,7 @@ class KnowledgePage(QDialog):
         login_help.setWordWrap(True)
         login_layout.addWidget(login_help)
         self.base = QLineEdit()
-        self.base.setPlaceholderText("例如：http://localhost:8080 或团队提供的服务地址")
+        self.base.setPlaceholderText("粘贴 WeKnora 网页链接或服务地址，将自动识别根地址")
         self.email = QLineEdit()
         self.email.setPlaceholderText("注册 WeKnora 时使用的邮箱")
         self.password = QLineEdit()
@@ -414,7 +414,7 @@ class KnowledgePage(QDialog):
         search.clicked.connect(self.search)
         toolbar.layout.addWidget(search)
         refresh = QPushButton("刷新")
-        refresh.clicked.connect(self.refresh)
+        refresh.clicked.connect(self.refresh_content)
         toolbar.layout.addWidget(refresh)
         self.search_toolbar = toolbar
 
@@ -654,6 +654,9 @@ class KnowledgePage(QDialog):
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
 
+    def refresh_content(self):
+        self.refresh()
+
     def refresh(self):
         self.clear_view()
         self.tree.clear()
@@ -667,10 +670,6 @@ class KnowledgePage(QDialog):
         self.upload_button.setEnabled(False)
         if not connected:
             self.notice.clear()
-            self.tree.addTopLevelItem(self.node("本地产物", {"kind": "artifacts"}))
-            self.splitter.show()
-            self.login_spacer.hide()
-            self.navigate(self.tree.topLevelItem(0))
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])
@@ -732,6 +731,13 @@ class KnowledgePage(QDialog):
             self.notice.setText("请填写服务地址、邮箱和密码。")
             return
         base, email, password = self.base.text(), self.email.text().strip(), self.password.text()
+        from core.knowledge_library import service_url
+        try:
+            base = service_url(base)
+        except KnowledgeError as error:
+            self.error(error)
+            return
+        self.base.setText(base)
         self.login_button.setEnabled(False)
         def done(_result):
             self.password.clear()

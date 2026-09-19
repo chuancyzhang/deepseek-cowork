@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from urllib.parse import urlencode, urlsplit
 
 import requests
@@ -141,6 +142,17 @@ class McpKnowledgeProvider:
     required_tools = ()
     _active_uploads = set()
     _upload_lock = threading.RLock()
+    # Cache only read data. Identity, membership, write and progress tools stay live.
+    _cache_ttls = {
+        "query_space_list": 60, "query_space_node": 60, "manage.folder_list": 60,
+        "manage.search_file": 60, "get_content": 120,
+        "space_list_spaces": 60, "space_describe_space": 60,
+        "entry_list_children": 60, "lexiang_search": 60,
+        "entry_describe_ai_parse_content": 120,
+    }
+    _write_tools = {"manage.pre_import", "manage.async_import", "manage.move_file",
+                    "manage.move_file_to_space", "file_apply_upload", "file_commit_upload"}
+    _cache_limit = 16 * 1024 * 1024
 
     def __init__(self, store, transport=None, caller=None, discover=None):
         self.store = store
@@ -150,6 +162,38 @@ class McpKnowledgeProvider:
         self._schemas = {}
         self._schema_lock = threading.RLock()
         self._page_sizes = {}
+        self._cache = OrderedDict()
+        self._cache_lock = threading.RLock()
+        self._cache_epoch = 0
+        self._cache_bytes = 0
+
+    def clear_cache(self):
+        with self._cache_lock:
+            self._cache_epoch += 1
+            self._cache.clear()
+            self._cache_bytes = 0
+
+    def _cache_get(self, key):
+        with self._cache_lock:
+            for expired in [k for k, v in self._cache.items() if v[0] <= time.monotonic()]:
+                self._cache_bytes -= self._cache.pop(expired)[2]
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+            return (copy.deepcopy(cached[1]) if cached is not None else None), self._cache_epoch
+
+    def _cache_put(self, key, value, ttl, epoch):
+        size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        with self._cache_lock:
+            # Refresh/logout/writes must also invalidate reads already in flight.
+            if epoch != self._cache_epoch or size > self._cache_limit:
+                return
+            if key in self._cache:
+                self._cache_bytes -= self._cache.pop(key)[2]
+            while self._cache and (len(self._cache) >= 128 or self._cache_bytes + size > self._cache_limit):
+                self._cache_bytes -= self._cache.popitem(last=False)[1][2]
+            self._cache[key] = (time.monotonic() + ttl, copy.deepcopy(value), size)
+            self._cache_bytes += size
 
     @property
     def display_name(self):
@@ -164,6 +208,7 @@ class McpKnowledgeProvider:
     def logout(self):
         self.store.remove_connection(self.source)
         self._schemas.clear()
+        self.clear_cache()
 
     def identity(self, scope):
         connection = self.store.connection(source=self.source, secret=True)
@@ -259,11 +304,34 @@ class McpKnowledgeProvider:
     def call(self, scope, tool, arguments, cancelled=None):
         if cancelled and cancelled():
             raise KnowledgeError("cancelled", "资料操作已停止。")
-        result = self._call(self.identity(scope), tool, arguments)
-        self.identity(scope)
-        if cancelled and cancelled():
-            raise KnowledgeError("cancelled", "资料操作已停止。")
-        return result
+        connection = self.identity(scope)
+        ttl = self._cache_ttls.get(tool, 0)
+        key = (self.source, *(connection.get(k, "") for k in
+               ("connection_id", "tenant_id", "user_id", "generation")), tool,
+               json.dumps(arguments, sort_keys=True))
+        result, epoch = self._cache_get(key) if ttl else (None, None)
+        writing = tool in self._write_tools
+        if writing:
+            self.clear_cache()
+        try:
+            if result is None:
+                result = self._call(connection, tool, arguments)
+                self.identity(scope)
+                if not (cancelled and cancelled()) and ttl:
+                    self._cache_put(key, result, ttl, epoch)
+            else:
+                log.info("knowledge_cache hit source=%s tool=%s session=%s", self.source, tool, scope.get("session_id", ""))
+            self.identity(scope)
+            if cancelled and cancelled():
+                raise KnowledgeError("cancelled", "资料操作已停止。")
+            return result
+        except KnowledgeError as error:
+            if error.code in {"unauthenticated", "forbidden", "identity_changed", "not_connected"}:
+                self.clear_cache()
+            raise
+        finally:
+            if writing:
+                self.clear_cache()
 
     @staticmethod
     def _rows(data, key):
@@ -294,6 +362,7 @@ class McpKnowledgeProvider:
         return (item or {}).get("url", "")
 
     def verify(self):
+        self.clear_cache()
         scope = self.snapshot()
         self.identity(scope)
         self.catalog(scope)
@@ -371,6 +440,7 @@ class McpKnowledgeProvider:
     def _save_connection(self, connection):
         public = {k: v for k, v in connection.items() if k != "credentials"}
         self.store.save_connection(public, connection["credentials"])
+        self.clear_cache()
         log.info("knowledge_connection complete source=%s", self.source)
         return public
 
@@ -591,6 +661,7 @@ class TencentDocsProvider(McpKnowledgeProvider):
                 if not result.get("file_id"):
                     raise KnowledgeError("invalid_response", "导入完成但缺少文件标识，请核对远端结果。")
                 task.update(knowledge_id=result["file_id"], url=result.get("file_url", ""), stage="placing", status="placement_pending")
+                self.clear_cache()
             with self.store.connect(write=True) as db:
                 row = db.execute("SELECT payload FROM uploads WHERE id=?", (task["id"],)).fetchone()
                 current = json.loads(row[0]) if row else task
@@ -649,6 +720,7 @@ class LexiangProvider(McpKnowledgeProvider):
         return self._save_connection(connection)
 
     def verify(self):
+        self.clear_cache()
         scope = self.snapshot()
         info = self.call(scope, "whoami", {})
         if str((info.get("company") or {}).get("code")) != scope["tenant_id"] or str((info.get("user") or {}).get("id")) != scope["user_id"]:

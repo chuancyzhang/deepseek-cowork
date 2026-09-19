@@ -120,9 +120,15 @@ class KnowledgeLibraryTests(unittest.TestCase):
         self.assertEqual(service_url("http://localhost/api/v1"), "http://localhost")
         self.assertEqual(service_url("http://192.168.1.20:8080"), "http://192.168.1.20:8080")
         self.assertEqual(service_url("http://team.example"), "http://team.example")
-        for bad in ( "https://user:password@team.example", "https://team.example/a", "file:///a"):
+        for bad in ("https://user:password@team.example", "file:///a", "http://team.example:bad", "http://[broken"):
             with self.assertRaises(KnowledgeError):
                 service_url(bad)
+
+    def test_browser_links_resolve_to_service_origin(self):
+        self.assertEqual(service_url("http://localhost/platform/knowledge-bases/abc"), "http://localhost")
+        self.assertEqual(service_url(" https://team.example:8443/platform/knowledge-bases/abc?q=word#files "),
+                         "https://team.example:8443")
+        self.assertEqual(service_url("http://[::1]:8080/#/platform"), "http://[::1]:8080")
 
     def test_html_preview_does_not_require_completed_index(self):
         self.transport.documents["doc-a"]["parse_status"] = "finalizing"
@@ -346,6 +352,63 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
             action()
         self.assertEqual(result.exception.code, code)
 
+    def test_cloud_cache_reuses_reads_and_expires_without_caching_identity_checks(self):
+        from unittest.mock import patch
+        for provider, tool, arguments in (
+                (self.tencent, "query_space_node", {"space_id": "space", "parent_id": "", "num": 0}),
+                (self.lexiang, "entry_describe_ai_parse_content", {"entry_id": "doc"})):
+            scope = provider.snapshot()
+            with patch("core.knowledge_sources.time.monotonic", return_value=100):
+                original = provider.call(scope, tool, arguments)
+                count = len(self.remote.calls)
+                original["changed"] = True
+                self.assertNotIn("changed", provider.call(scope, tool, arguments))
+                self.assertEqual(len(self.remote.calls), count)
+            with patch("core.knowledge_sources.time.monotonic", return_value=221):
+                provider.call(scope, tool, arguments)
+                self.assertEqual(len(self.remote.calls), count + 1)
+        count = len(self.remote.calls)
+        self.lexiang.call(self.lexiang.snapshot(), "whoami", {})
+        self.lexiang.call(self.lexiang.snapshot(), "whoami", {})
+        self.assertEqual(len(self.remote.calls), count + 2)
+
+    def test_cloud_cache_refresh_failure_and_late_read_invalidation(self):
+        scope = self.tencent.snapshot()
+        self.tencent.catalog(scope)
+        self.remote.fail = "401"
+        self.assertCode("unauthenticated", self.tencent.verify)
+        self.assertFalse(self.tencent._cache)
+        self.remote.fail = None
+        caller = self.tencent.caller
+        def invalidate_during_read(config, tool, arguments):
+            result = caller(config, tool, arguments)
+            self.tencent.clear_cache()
+            return result
+        self.tencent.caller = invalidate_during_read
+        self.tencent.catalog(scope)
+        self.assertFalse(self.tencent._cache)
+        self.tencent.caller = caller
+        self.tencent.catalog(scope)
+        self.remote.fail = "manage.move_file"
+        self.assertCode("remote_error", lambda: self.tencent.call(scope, "manage.move_file", {"file_id": "doc", "target_folder_id": "folder"}))
+        self.assertFalse(self.tencent._cache)
+
+    def test_cloud_cache_does_not_cross_accounts_sources_or_scope(self):
+        scope = self.tencent.snapshot()
+        self.tencent.call(scope, "get_content", {"file_id": "doc"})
+        self.lexiang.read(self.lexiang.snapshot(), "doc", "space")
+        self.assertEqual(self.lexiang.read(self.lexiang.snapshot(), "doc", "space")["content"], "乐享正文")
+        ref = self.tencent.reference(scope, "space", "文档", "allowed")
+        self.assertCode("outside_scope", lambda: self.tencent.tool({**scope, "refs": [ref]}, "read", {"item_id": "doc", "collection_id": "space"}))
+        self.tencent.logout()
+        self.assertFalse(self.tencent._cache)
+        self.tencent.start_authorization()
+        self.tencent.finish_authorization(confirmed=True)
+        self.assertCode("identity_changed", lambda: self.tencent.call(scope, "get_content", {"file_id": "doc"}))
+        count = len(self.remote.calls)
+        self.tencent.call(self.tencent.snapshot(), "get_content", {"file_id": "doc"})
+        self.assertEqual(len(self.remote.calls), count + 1)
+
     def test_two_stage_auth_never_fetches_before_explicit_confirmation(self):
         from unittest.mock import Mock
         self.tencent.transport = Mock()
@@ -518,6 +581,20 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         self.assertEqual(task["status"], "saved")
         self.assertEqual(sum(name == "manage.async_import" for name, _ in self.remote.calls), 1)
         self.assertCode("duplicate_upload", lambda: self.upload(self.tencent))
+
+    def test_tencent_completed_personal_import_invalidates_directory_cache(self):
+        from core.knowledge_sources import PERSONAL
+        path = os.path.join(self.temp.name, "personal.md")
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write("成果")
+        scope = self.tencent.snapshot()
+        task = self.tencent.upload(scope, path, PERSONAL)
+        self.tencent.children(scope, PERSONAL)
+        self.assertTrue(self.tencent._cache)
+        self.tencent.check_upload(task)
+        self.assertEqual(task["status"], "saved")
+        self.assertEqual(self.remote.move_count, 0)
+        self.assertFalse(self.tencent._cache)
 
     def test_lexiang_commit_unknown_never_replayed(self):
         self.remote.fail = "file_commit_upload"

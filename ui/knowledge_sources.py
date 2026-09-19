@@ -97,9 +97,12 @@ class CloudKnowledgePage(KnowledgePage):
         self._current_task = None
         self.login_box.hide()
         self.login_box = QWidget()
+        self.login_box.setMaximumWidth(680)
         layout = QVBoxLayout(self.login_box)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel("连接" + self.service.display_name))
+        title = QLabel("连接" + self.service.display_name)
+        title.setObjectName("LibraryHeading")
+        layout.addWidget(title)
         help_text = ("在腾讯文档使用 QQ 或微信授权，完成后返回并点击“已完成授权”。链接有效期 5 分钟。"
                      if self.service.source == "tencent-docs" else
                      "在乐享官方配置页获取企业标识和 Token，填写后验证连接。Token 仅加密保存在本机。")
@@ -107,12 +110,14 @@ class CloudKnowledgePage(KnowledgePage):
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
         self.company = QLineEdit()
-        self.company.setPlaceholderText("企业标识（COMPANY_FROM）")
+        self.company.setPlaceholderText("官方配置页中的企业标识")
         self.token = QLineEdit()
-        self.token.setPlaceholderText("访问令牌（LEXIANG_TOKEN）")
+        self.token.setPlaceholderText("官方配置页中的 Token")
         self.token.setEchoMode(QLineEdit.Password)
         if self.service.source == "lexiang":
+            layout.addWidget(QLabel("企业标识"))
             layout.addWidget(self.company)
+            layout.addWidget(QLabel("访问令牌"))
             layout.addWidget(self.token)
         actions = QHBoxLayout()
         self.connect_button = QPushButton("打开授权页面" if self.service.source == "tencent-docs" else "连接")
@@ -236,10 +241,6 @@ class CloudKnowledgePage(KnowledgePage):
         self.login_spacer.setVisible(not connected)
         if not connected:
             self.notice.setText("连接后即可浏览、阅读和引用资料。")
-            self.tree.addTopLevelItem(self.node("本地产物", {"kind": "artifacts"}))
-            self.splitter.show()
-            self.login_spacer.hide()
-            self.navigate(self.tree.topLevelItem(0))
             return
         self.account_label.setText("凭据已保存 · 正在检查连接")
         scope = copy.deepcopy(self.scope)
@@ -247,6 +248,16 @@ class CloudKnowledgePage(KnowledgePage):
             self.service.verify()
             return self.service.catalog(scope)
         self.run(load, self.loaded_cloud)
+
+    def refresh_content(self):
+        self.service.clear_cache()
+        if self.scope and self.view == "files" and self.current_kb:
+            self.clear_view()
+            self.load_files()
+        elif self.scope and self.view == "search":
+            self.search()
+        else:
+            self.refresh()
 
     def loaded_cloud(self, catalog):
         self.account_label.setText("已连接 · " + " · ".join(filter(None, [self.scope.get("tenant_name"), self.scope.get("email")])))

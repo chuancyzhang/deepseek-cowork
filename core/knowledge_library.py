@@ -27,13 +27,16 @@ class KnowledgeError(RuntimeError):
 
 def service_url(value):
     value = str(value).strip().rstrip("/")
-    parts = urlsplit(value)
-    if parts.username or parts.password or parts.query or parts.fragment:
-        raise KnowledgeError("invalid_url", "服务地址不能包含凭据、查询参数或片段。")
-    if parts.path not in ("", "/api/v1"):
-        raise KnowledgeError("invalid_url", "请输入 WeKnora 服务根地址。")
+    try:
+        parts = urlsplit(value)
+        parts.port  # Validate malformed ports before using this address.
+    except ValueError:
+        raise KnowledgeError("invalid_url", "请输入有效的 HTTP 或 HTTPS 服务地址。") from None
+    if parts.username or parts.password or "\\" in value:
+        raise KnowledgeError("invalid_url", "服务地址不能包含凭据或反斜杠。")
     if not parts.hostname or parts.scheme not in ("http", "https"):
         raise KnowledgeError("invalid_url", "请输入有效的 HTTP 或 HTTPS 服务地址。")
+    # Browser links carry frontend routes, queries and fragments, not API roots.
     return f"{parts.scheme}://{parts.netloc}"
 
 

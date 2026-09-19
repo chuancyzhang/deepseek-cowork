@@ -306,12 +306,14 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.wait_for(lambda: "无权" in self.page.notice.text())
         self.assertEqual(self.page.items.count(), 0)
 
-    def test_offline_artifacts_still_visible(self):
+    def test_disconnected_page_only_shows_connection_form(self):
         self.service.logout()
         self.page.refresh()
         self.assertTrue(self.page.login_box.isVisible())
-        self.page.navigate(self.page.tree.topLevelItem(0))
-        self.assertEqual(self.page.items.count(), 2)
+        self.assertFalse(self.page.splitter.isVisible())
+        self.assertTrue(self.page.login_spacer.isVisible())
+        self.assertEqual(self.page.tree.topLevelItemCount(), 0)
+        self.assertEqual(self.page.items.count(), 0)
 
 
 class MultiSourceLibraryUiTests(unittest.TestCase):
@@ -389,6 +391,27 @@ class MultiSourceLibraryUiTests(unittest.TestCase):
         page.back_to_list()
         self.assertEqual(page.items.count(), 1)
         self.assertFalse(page.wiki_button.isVisible())
+
+    def test_cloud_disconnected_form_hides_artifacts(self):
+        for source in ("tencent-docs", "lexiang"):
+            self.page.sources.setCurrentIndex(self.page.sources.findData(source))
+            page = self.page.page(source)
+            self.service.provider(source).logout()
+            page.refresh()
+            self.assertTrue(page.login_box.isVisible())
+            self.assertFalse(page.splitter.isVisible())
+            self.assertEqual(page.tree.topLevelItemCount(), 0)
+            self.assertEqual(page.items.count(), 0)
+
+    def test_cloud_refresh_bypasses_cache_and_preserves_directory(self):
+        page = self.page.page("tencent-docs")
+        page.open_kb({"id": "space", "name": "团队资料"})
+        self.wait_for(lambda: page.items.count() == 1)
+        count = sum(tool == "query_space_node" for tool, _ in self.remote.calls)
+        page.refresh_content()
+        self.wait_for(lambda: page.items.count() == 1)
+        self.assertEqual(page.current_kb["id"], "space")
+        self.assertEqual(sum(tool == "query_space_node" for tool, _ in self.remote.calls), count + 1)
 
     def test_upload_dialog_cancel_never_writes_and_source_change_selects_correct_identity(self):
         from ui.knowledge_sources import KnowledgeUploadDialog

@@ -138,6 +138,47 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertEqual(merge_messages_by_id(merged, generated), merged)
         self.assertEqual(original[0]["content"], "看看这篇资料")
 
+    def test_history_restore_keeps_knowledge_context_hidden_and_one_answer(self):
+        from main import MainWindow
+        from types import SimpleNamespace, MethodType
+        from unittest.mock import Mock, MagicMock
+        from core.conversation_render import build_conversation_render_spans
+        context = knowledge_context_message({"sources": {"weknora": self.scope},
+                                             "default_source": "weknora"}, "request-a")
+        context["id"] = "context-a"
+        final_meta = {"ui_turn_group_id": "group-a", "ui_stage_id": "final-a", "ui_reply_kind": "final"}
+        messages = [
+            {"id": "user-a", "role": "user", "content": "看看这篇资料"},
+            {"id": "live-a", "role": "assistant", "content": "能看到，正文已读取。", "meta": {
+                **final_meta, "ui_visible_fragment": True, "ui_source_message_id": "answer-a"}},
+            context,
+            {"id": "answer-a", "role": "assistant", "content": "能看到，正文已读取。", "meta": final_meta},
+        ]
+        state = SimpleNamespace(session_id="history-a", messages=json.loads(json.dumps(messages)),
+                                ui_timeline_events=[], chat_layout=MagicMock())
+        state.chat_layout.count.return_value = 0
+        # Exercise the real history routing; stub only widget construction.
+        host = SimpleNamespace(render_message_batch=Mock(return_value=1),
+                               _render_history_assistant_summary=Mock(return_value=1),
+                               _message_is_office_draft_request=lambda _: False,
+                               _register_render_node=Mock(), get_session=lambda _: state,
+                               _submit_session_request=Mock(side_effect=AssertionError("History must not submit")))
+        host._render_projected_history_summary = MethodType(MainWindow._render_projected_history_summary, host)
+        for _ in range(2):
+            host.render_message_batch.reset_mock()
+            host._render_history_assistant_summary.reset_mock()
+            for span in build_conversation_render_spans(state.messages):
+                MainWindow._render_history_span(host, state, span)
+            host.render_message_batch.assert_called_once()
+            self.assertEqual(host.render_message_batch.call_args.args[0], [messages[0]])
+            host._render_history_assistant_summary.assert_called_once()
+            summary = host._render_history_assistant_summary.call_args.args[1]
+            self.assertEqual(len(summary), 1)
+            self.assertEqual(summary[0]["content"], "能看到，正文已读取。")
+            self.assertEqual(state.messages, messages)
+        self.assertEqual(MainWindow.render_message_batch(host, [context], state.session_id), 0)
+        host._submit_session_request.assert_not_called()
+
     def test_worker_result_merges_with_knowledge_context(self):
         from core.conversation_integrity import merge_messages_by_id
         from test_plan_mode import _ConfigStub

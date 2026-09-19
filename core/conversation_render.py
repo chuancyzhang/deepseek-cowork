@@ -21,6 +21,7 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
         return (
             isinstance(message, dict)
             and message.get("role") == "user"
+            and not _is_hidden_context_message(message)
             and not is_same_turn_guidance_message(message)
         )
 
@@ -155,7 +156,15 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
     for anchor in set(before) | set(after):
         slots[anchor] = before.get(anchor, []) + slots[anchor] + after.get(anchor, [])
     _restore_projected_thinking(slots, timeline_events)
-    return [message for slot in slots[start:end] for message in slot]
+    # Preserve ledger offsets until after projection/paging. Internal user-role
+    # context is neither a conversational boundary nor a visible user question.
+    projected = [message for slot in slots[start:end] for message in slot]
+    visible = [message for message in projected if not _is_hidden_context_message(message)]
+    logging.getLogger(__name__).debug(
+        "history_projection_completed start=%s end=%s visible_count=%s hidden_count=%s",
+        start + scope_start, end + scope_start, len(visible), len(projected) - len(visible),
+    )
+    return visible
 
 
 def _restore_projected_thinking(slots, timeline_events):

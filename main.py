@@ -107,9 +107,9 @@ from core.chat_recovery_journal import ChatRecoveryJournal
 from core.runtime_journal import RuntimeJournal
 from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
 from core.conversation_render import (
+    _is_hidden_context_message,
     project_visible_messages,
     build_conversation_render_spans,
-    is_legacy_skill_change_notice_message,
     is_ppt_agent_internal_stage_message,
     is_same_turn_guidance_message,
 )
@@ -32304,6 +32304,8 @@ class MainWindow(QMainWindow):
             answer_candidates = []
             for following in messages[index + 1:]:
                 if isinstance(following, dict) and following.get("role") == "user":
+                    if _is_hidden_context_message(following):
+                        continue
                     if not is_same_turn_guidance_message(following) and not is_auto_query_skill_context_message(following):
                         break
                     continue
@@ -42762,7 +42764,7 @@ class MainWindow(QMainWindow):
         messages = [
             message
             for message in (messages or [])
-            if not is_legacy_skill_change_notice_message(message)
+            if not _is_hidden_context_message(message)
         ]
         if not messages:
             return 0

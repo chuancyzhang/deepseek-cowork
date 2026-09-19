@@ -1,13 +1,70 @@
+import copy
+import json
 import unittest
 
 from core.conversation_render import (
     build_conversation_render_items,
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
+    project_visible_messages,
 )
 
 
 class TestConversationRender(unittest.TestCase):
+    def test_hidden_knowledge_context_does_not_split_streamed_and_canonical_answer(self):
+        from core.knowledge_library import knowledge_context_message
+        from core.message_persistence import filter_persistable_messages, project_provider_messages
+        context = knowledge_context_message({"sources": {"tencent-docs": {"refs": []}},
+                                             "default_source": "tencent-docs"}, "request")
+        context["id"] = "knowledge-context"
+        stage_meta = {"ui_turn_group_id": "group", "ui_stage_id": "stage", "ui_reply_kind": "stage"}
+        final_meta = {"ui_turn_group_id": "group", "ui_stage_id": "final", "ui_reply_kind": "final"}
+        messages = [
+            {"id": "user", "role": "user", "content": "能看到文档吗"},
+            {"id": "live-stage", "role": "assistant", "content": "正在读取", "meta": {
+                **stage_meta, "ui_visible_fragment": True, "ui_source_message_id": "round-stage"}},
+            {"id": "live-final", "role": "assistant", "content": "能看到，正文如下。", "meta": {
+                **final_meta, "ui_visible_fragment": True, "ui_source_message_id": "round-final"}},
+            context,
+            {"id": "round-stage", "role": "assistant", "content": "正在读取", "meta": stage_meta,
+             "tool_calls": [{"id": "read", "function": {"name": "run_skill_script", "arguments": "{}"}}]},
+            {"id": "tool", "role": "tool", "tool_call_id": "read", "content": "资料内容"},
+            {"id": "hidden", "role": "system", "content": "内部上下文", "meta": {
+                "hidden": True, "kind": "runtime_context_update"}},
+            {"id": "round-final", "role": "assistant", "content": "能看到，正文如下。", "meta": final_meta},
+        ]
+        restored = json.loads(json.dumps(filter_persistable_messages(messages)))
+        before = copy.deepcopy(restored)
+        provider_before = project_provider_messages(restored)
+        projected = project_visible_messages(restored)
+        self.assertEqual([m["id"] for m in projected], ["user", "live-stage", "tool", "live-final"])
+        self.assertEqual(project_visible_messages(restored, start=3), [])
+        spans = build_conversation_render_spans(restored)
+        self.assertEqual([m for span in spans for m in project_visible_messages(restored, **{
+            "start": span["start"], "end": span["end"]})], projected)
+        self.assertEqual([item["type"] for item in build_conversation_render_items(restored)], ["user", "assistant"])
+        self.assertEqual(restored, before)
+        self.assertEqual(project_provider_messages(restored), provider_before)
+
+    def test_hidden_context_is_not_rendered_without_stream_fragments(self):
+        messages = [
+            {"role": "user", "content": "问题"},
+            {"role": "assistant", "content": "查询中"},
+            {"role": "user", "content": "内部说明", "meta": {"hidden": True, "kind": "runtime_context"}},
+            {"role": "assistant", "content": "结果"},
+        ]
+        self.assertEqual([m["content"] for m in project_visible_messages(messages)], ["问题", "查询中", "结果"])
+
+    def test_real_user_turn_still_blocks_projection_across_turns(self):
+        messages = [
+            {"id": "u1", "role": "user", "content": "相同问题"},
+            {"id": "live", "role": "assistant", "content": "相同回答", "meta": {
+                "ui_visible_fragment": True, "ui_source_message_id": "source"}},
+            {"id": "u2", "role": "user", "content": "相同问题"},
+            {"id": "source", "role": "assistant", "content": "相同回答"},
+        ]
+        self.assertEqual(project_visible_messages(messages), messages)
+
     def test_builds_basic_user_and_assistant_items(self):
         items = build_conversation_render_items(
             [

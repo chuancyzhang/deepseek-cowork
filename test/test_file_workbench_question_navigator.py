@@ -376,7 +376,6 @@ class QuestionNavigatorTest(unittest.TestCase):
                 "messages": [
                     {"id": "u1", "role": "user", "content": "第一问\n补充内容"},
                     {"id": "a1", "role": "assistant", "content": "处理中", "meta": {"ui_reply_kind": "stage"}},
-                    {"id": "a2", "role": "assistant", "content": "最终回答", "meta": {"ui_reply_kind": "final"}},
                     {"id": "g1", "role": "user", "content": "同轮补充", "meta": {"same_turn_guidance": True}},
                     {
                         "id": "hidden",
@@ -384,6 +383,7 @@ class QuestionNavigatorTest(unittest.TestCase):
                         "content": "运行上下文",
                         "meta": {"hidden": True, "kind": "runtime_context"},
                     },
+                    {"id": "a2", "role": "assistant", "content": "最终回答", "meta": {"ui_reply_kind": "final"}},
                     {"id": "u2", "role": "user", "content": "第二问"},
                 ]
             },

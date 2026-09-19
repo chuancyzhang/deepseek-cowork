@@ -443,12 +443,23 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
     def test_credentials_are_encrypted_and_identity_is_not_in_model_context(self):
         from core.knowledge_sources import context_message
         self.facade.select_source("lexiang")
-        scope = self.facade.snapshot()
+        scope = self.facade.snapshot(requested_source="lexiang")
         message = json.dumps(context_message(scope, "request"))
         self.assertNotIn("secret-token", message)
         self.assertNotIn(scope["sources"]["lexiang"]["connection_id"], message)
         with open(self.store.path, "rb") as stream:
             self.assertNotIn(b"secret-token", stream.read())
+
+    def test_saved_connections_and_selected_library_tab_do_not_enable_chat_scope(self):
+        for source in ("weknora", "tencent-docs", "lexiang"):
+            self.facade.select_source(source)
+            self.assertIsNone(self.facade.snapshot(session_id="ordinary-chat"))
+        explicit = self.facade.snapshot(requested_source="tencent-docs")
+        self.assertEqual(set(explicit["sources"]), {"tencent-docs"})
+        self.assertFalse(explicit["sources"]["tencent-docs"].get("unavailable"))
+        self.tencent.logout()
+        missing = self.facade.snapshot(requested_source="tencent-docs")
+        self.assertTrue(missing["sources"]["tencent-docs"]["unavailable"])
 
     def test_mixed_same_id_references_require_source_and_cannot_expand(self):
         refs = [p.reference(p.snapshot(), "space", "同名", "doc") for p in (self.tencent, self.lexiang)]

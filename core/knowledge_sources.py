@@ -91,16 +91,18 @@ class MultiSourceKnowledgeService:
 
     def snapshot(self, refs=None, session_id="", requested_source=None):
         refs = [normalized_ref(r) for r in refs or []]
-        names = list(dict.fromkeys(r["source"] for r in refs)) if refs else [requested_source or self.source]
+        # A saved connection or the library's current tab is not a request to
+        # consult that source. Ordinary chats need no knowledge instructions.
+        if not refs and not requested_source:
+            log.debug("knowledge_scope skipped reason=no_references_or_explicit_source session=%s", session_id)
+            return None
+        names = list(dict.fromkeys(r["source"] for r in refs)) if refs else [requested_source]
         snapshots = {}
         for name in names:
             selected = [r for r in refs if r["source"] == name]
             provider = self.providers.get(name)
             snapshots[name] = (provider.snapshot(selected, session_id) if provider else None) or {
                 "source": name, "refs": selected, "unavailable": True, "session_id": session_id}
-        # Missing selected references must remain visible failures, never an unrestricted task.
-        if not refs and not requested_source and all(s.get("unavailable") for s in snapshots.values()):
-            return None
         return {"sources": snapshots, "default_source": names[0] if len(names) == 1 else None,
                 "refs": refs, "session_id": session_id}
 

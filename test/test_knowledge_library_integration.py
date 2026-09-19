@@ -203,6 +203,60 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         merged = merge_messages_by_id(original, generated)
         self.assertEqual(merged[0], original[0])
 
+    def test_ordinary_chat_does_not_inject_knowledge_context_for_saved_connection(self):
+        from main import MainWindow
+        from types import SimpleNamespace
+        from core.knowledge_sources import MultiSourceKnowledgeService
+        from test_plan_mode import _ConfigStub
+        facade = MultiSourceKnowledgeService(self.service.store, {"weknora": self.service})
+        host = SimpleNamespace(_knowledge_service=lambda: facade)
+        state = SimpleNamespace(session_id="ordinary-chat", knowledge_refs=[], selected_skill_names=[],
+                                messages=[{"id": "user", "role": "user", "content": "分析今天的股市行情"}])
+        before = copy.deepcopy(state.messages)
+        scope = MainWindow._knowledge_snapshot(host, state)
+        self.assertIsNone(scope)
+        results, requests = [], []
+        class Provider:
+            provider_name, model_name, base_url, thinking_enabled = "stub", "stub", "", False
+            def chat_stream(self, messages, tools=None):
+                requests.append(copy.deepcopy(messages))
+                yield {"type": "content", "content": "普通回答"}
+        with patch("core.agent.SkillManager", return_value=self.manager()), patch("core.agent.LLMFactory.create_provider", return_value=Provider()):
+            worker = LLMWorker(state.messages, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
+                               run_context={"knowledge_context": scope},
+                               execution_authorization=ExecutionAuthorization("ordinary-chat", "test", True, ""))
+            worker.finished_signal.connect(results.append)
+            worker.run()
+        self.assertTrue(requests)
+        self.assertTrue(results)
+        self.assertNotIn("error", results[-1])
+        for messages in requests + [results[-1]["generated_messages"]]:
+            self.assertFalse(any((m.get("meta") or {}).get("source") == "knowledge_submission" for m in messages))
+            self.assertFalse(any("本次任务资料库范围" in str(m.get("content", "")) for m in messages))
+        self.assertEqual(state.messages, before)
+
+    def test_chat_scope_requires_refs_or_explicit_source_not_previous_messages(self):
+        from main import MainWindow
+        from types import SimpleNamespace
+        from core.knowledge_sources import MultiSourceKnowledgeService
+        facade = MultiSourceKnowledgeService(self.service.store, {"weknora": self.service})
+        host = SimpleNamespace(_knowledge_service=lambda: facade)
+        state = SimpleNamespace(session_id="chat", knowledge_refs=[], selected_skill_names=[], messages=[
+            {"role": "user", "content": "在 WeKnora 中搜索资料"},
+            {"role": "user", "content": "帮我写一首诗"},
+            knowledge_context_message(self.scope, "previous"),
+        ])
+        self.assertIsNone(MainWindow._knowledge_snapshot(host, state))
+        state.messages.append({"role": "user", "content": "在 WeKnora 中搜索产品说明"})
+        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["default_source"], "weknora")
+        state.messages.append({"role": "user", "content": "总结所选资料"})
+        state.knowledge_refs = [self.service.reference(self.scope, "kb-a", "文档", "doc-a")]
+        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["refs"], state.knowledge_refs)
+        state.knowledge_refs = []
+        self.assertIsNone(MainWindow._knowledge_snapshot(host, state))
+        state.selected_skill_names = ["weknora"]
+        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["default_source"], "weknora")
+
     def test_batch_reference_creates_one_conversation_and_saves_once(self):
         from main import MainWindow
         from types import SimpleNamespace

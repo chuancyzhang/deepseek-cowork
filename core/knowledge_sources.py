@@ -144,11 +144,11 @@ class McpKnowledgeProvider:
     _upload_lock = threading.RLock()
     # Cache only read data. Identity, membership, write and progress tools stay live.
     _cache_ttls = {
-        "query_space_list": 60, "query_space_node": 60, "manage.folder_list": 60,
-        "manage.search_file": 60, "get_content": 120,
-        "space_list_spaces": 60, "space_describe_space": 60,
-        "entry_list_children": 60, "lexiang_search": 60,
-        "entry_describe_ai_parse_content": 120,
+        "query_space_list": 600, "query_space_node": 600, "manage.folder_list": 600,
+        "manage.search_file": 600, "get_content": 1200,
+        "space_list_spaces": 600, "space_describe_space": 600,
+        "entry_list_children": 600, "lexiang_search": 600,
+        "entry_describe_ai_parse_content": 1200,
     }
     _write_tools = {"manage.pre_import", "manage.async_import", "manage.move_file",
                     "manage.move_file_to_space", "file_apply_upload", "file_commit_upload"}

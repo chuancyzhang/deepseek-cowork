@@ -354,9 +354,13 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
 
     def test_cloud_cache_reuses_reads_and_expires_without_caching_identity_checks(self):
         from unittest.mock import patch
-        for provider, tool, arguments in (
-                (self.tencent, "query_space_node", {"space_id": "space", "parent_id": "", "num": 0}),
-                (self.lexiang, "entry_describe_ai_parse_content", {"entry_id": "doc"})):
+        for provider, tool, arguments, ttl in (
+                (self.tencent, "query_space_node", {"space_id": "space", "parent_id": "", "num": 0}, 600),
+                (self.tencent, "manage.search_file", {"search_key": "资料"}, 600),
+                (self.tencent, "get_content", {"file_id": "doc"}, 1200),
+                (self.lexiang, "entry_list_children", {"parent_id": "root", "page": 1}, 600),
+                (self.lexiang, "lexiang_search", {"query": "资料", "type": "doc"}, 600),
+                (self.lexiang, "entry_describe_ai_parse_content", {"entry_id": "doc"}, 1200)):
             scope = provider.snapshot()
             with patch("core.knowledge_sources.time.monotonic", return_value=100):
                 original = provider.call(scope, tool, arguments)
@@ -364,7 +368,10 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
                 original["changed"] = True
                 self.assertNotIn("changed", provider.call(scope, tool, arguments))
                 self.assertEqual(len(self.remote.calls), count)
-            with patch("core.knowledge_sources.time.monotonic", return_value=221):
+            with patch("core.knowledge_sources.time.monotonic", return_value=100 + ttl - 1):
+                provider.call(scope, tool, arguments)
+                self.assertEqual(len(self.remote.calls), count)
+            with patch("core.knowledge_sources.time.monotonic", return_value=100 + ttl):
                 provider.call(scope, tool, arguments)
                 self.assertEqual(len(self.remote.calls), count + 1)
         count = len(self.remote.calls)

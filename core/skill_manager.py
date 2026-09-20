@@ -793,6 +793,14 @@ class SkillManager:
         spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
         spec["config_fields"] = self._normalize_config_fields(spec.get("config_fields"))
         spec["config_requirements"] = self._normalize_config_requirements(spec.get("config_requirements"))
+        if "connection_requirements" in spec:
+            from .connections.broker import requirement_list
+            from .connections.errors import ConnectionError
+            try:
+                spec["connection_requirements"] = requirement_list(spec["connection_requirements"])
+                spec.pop("connection_requirements_error", None)
+            except ConnectionError:
+                spec["connection_requirements_error"] = "连接需求声明无效，请检查能力配置。"
         try:
             spec["authorization"] = normalize_authorization_declaration(spec.get("authorization"))
             spec.pop("authorization_error", None)
@@ -1610,6 +1618,20 @@ class SkillManager:
         return errors
 
     def get_skill_config_status(self, skill_name, values=None):
+        if values is None and skill_name == "superset-mcp":
+            from .connections.mcp import broker_for
+            broker = broker_for(self.config_manager)
+            selected = broker.store.selection("mcp:superset-mcp", "default")
+            if selected:
+                from .connections.errors import ConnectionError
+                try:
+                    connected = broker.store.get(selected)
+                    ready = connected["state"] == "ready"
+                    errors = [] if ready else ["请到账号与连接完成认证；原有配置不会自动接管。"]
+                except ConnectionError as exc:
+                    ready, errors = False, [str(exc)]
+                return {"has_config": True, "configured_count": int(ready), "required_count": 1,
+                        "missing_required": [], "config_errors": errors, "complete": ready, "connection_mode": "connection"}
         fields = self.get_skill_config_fields(skill_name)
         if isinstance(values, dict):
             resolved_values = dict(values)
@@ -1642,6 +1664,17 @@ class SkillManager:
         }
 
     def build_skill_config_env(self, skill_name):
+        if skill_name == "superset-mcp":
+            from .connections.mcp import broker_for
+            broker = broker_for(self.config_manager)
+            selected = broker.store.selection("mcp:superset-mcp", "default")
+            if selected:
+                item = broker.store.get(selected)
+                template = item["template"]
+                return {"SUPERSET_BASE_URL": template["base_url"],
+                        "SUPERSET_MCP_URL": template.get("parameters", {}).get("mcp_url") or template["base_url"] + "/mcp",
+                        "SUPERSET_PROVIDER": template.get("parameters", {}).get("provider", "db"),
+                        "SUPERSET_MCP_TIMEOUT_SECONDS": "30"}
         fields = self.get_skill_config_fields(skill_name)
         values = self._resolved_skill_config_values(skill_name)
         env = {}
@@ -1926,15 +1959,18 @@ class SkillManager:
                 suffix += 1
             used_names.add(local_name)
 
-            def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, **kwargs):
+            def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, _context=None, **kwargs):
                 payload = dict(_arguments or {})
                 payload.update(kwargs)
+                from .connections.mcp import selected_connection
+                private = {"context": _context} if selected_connection(_server, self.config_manager) else {}
                 return call_mcp_tool(
                     _server,
                     _remote_name,
                     payload,
                     config_manager=self.config_manager,
                     skill_manager=self,
+                    **private,
                 )
 
             export = {
@@ -3587,7 +3623,7 @@ class SkillManager:
         effective_context.setdefault("workspace_dir", self.workspace_dir)
         # Private host arguments must never come from model JSON (including MCP kwargs).
         arguments = dict(args or {})
-        if any(key in {"_context", "_server", "_remote_name", "execution_authorization", "authorization_started", "authorization_event"} for key in arguments):
+        if any(key in {"_context", "_server", "_remote_name", "execution_authorization", "authorization_started", "authorization_event", "connection_binding", "connection_broker", "connection_ref"} for key in arguments):
             return {"ok": False, "status": "denied", "executed": False, "error": "Private execution arguments are not accepted."}
 
         def preparation():
@@ -3659,6 +3695,12 @@ class SkillManager:
             args["workspace_dir"] = effective_context.get("workspace_dir") or self.workspace_dir
         if "_context" in sig.parameters:
             effective_context.setdefault("skill_change_publisher", self.change_publisher)
+            requirements = ((self.skill_records.get(skill_name) or {}).get("spec") or {}).get("connection_requirements")
+            if requirements:
+                from .connections.host import CapabilityConnections
+                from .execution_authorization import current_authorization
+                effective_context["connections"] = CapabilityConnections(skill_name, requirements,
+                    current_authorization(effective_context), data_dir=getattr(self.config_manager, "data_dir", None))
         if "_context" in sig.parameters:
             args["_context"] = effective_context
         try:

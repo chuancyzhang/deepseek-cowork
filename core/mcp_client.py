@@ -597,6 +597,9 @@ def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
 
 
 def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None):
+    from .connections.mcp import selected_connection, execute_mcp
+    if selected_connection(server_config, config_manager):
+        return execute_mcp(server_config, config_manager, skill_manager)
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
@@ -644,7 +647,10 @@ def test_mcp_server_connection(server_config, config_manager=None, skill_manager
     }
 
 
-def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None):
+def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None, *, context=None):
+    from .connections.mcp import selected_connection, execute_mcp
+    if selected_connection(server_config, config_manager):
+        return execute_mcp(server_config, config_manager, skill_manager, tool_name=tool_name, arguments=arguments, context=context)
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}

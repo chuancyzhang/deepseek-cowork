@@ -12081,7 +12081,7 @@ class SettingsDialog(QDialog):
 
         def add_settings_page(label, icon_name, page):
             allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "工作区与存储", "变量与凭据", "消息连接", "组件与依赖", "更新与关于"},
+                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "消息连接", "组件与依赖", "更新与关于"},
                 "capabilities": {"MCP 服务", "智能体"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
@@ -12750,6 +12750,10 @@ class SettingsDialog(QDialog):
         add_settings_page("外观", "fa5s.palette", appearance_page)
         add_settings_page("回答偏好", "fa5s.comment", preference_page)
         add_settings_page("模型与服务", "fa5s.brain", model_page)
+        if domain == "settings":
+            from ui.account_connections import AccountConnectionsPage
+            self.account_connections_page = AccountConnectionsPage(config_manager=self.config_manager)
+            add_settings_page("账号与连接", "fa5s.user-circle", self.account_connections_page)
         add_settings_page("MCP 服务", "fa5s.plug", mcp_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
         add_settings_page("记忆", "fa5s.brain", memory_page)
@@ -12762,7 +12766,7 @@ class SettingsDialog(QDialog):
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
             from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "消息连接", "变量与凭据", "工作区与存储", "组件与依赖", "更新与关于"]
+            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "工作区与存储", "组件与依赖", "更新与关于"]
             pages = dict(zip(self._page_labels, self._settings_pages))
             items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
             self.nav_combo.clear()
@@ -12778,7 +12782,8 @@ class SettingsDialog(QDialog):
         def show_settings_page(row):
             if row < 0 or row >= len(self._settings_pages):
                 return
-            if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None):
+            if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
+                    or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
                 if not self._confirm_discard_settings():
                     self.nav_list.blockSignals(True)
                     self.nav_list.setCurrentRow(self._active_settings_row)
@@ -12796,7 +12801,7 @@ class SettingsDialog(QDialog):
             self.nav_combo.setCurrentIndex(row)
             self.nav_combo.blockSignals(False)
             if hasattr(self, "settings_action_bar"):
-                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "变量与凭据", "消息连接", "更新与关于"})
+                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "更新与关于"})
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
@@ -13092,6 +13097,8 @@ class SettingsDialog(QDialog):
             self.settings_dirty_label.setText("没有未保存的修改")
 
     def _confirm_discard_settings(self):
+        if hasattr(self, "account_connections_page") and not self.account_connections_page.confirm_leave():
+            return False
         if not self.mcp_server_manager.confirm_editor():
             return False
         if self._settings_dirty:

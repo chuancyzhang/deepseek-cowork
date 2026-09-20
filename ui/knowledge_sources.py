@@ -39,6 +39,9 @@ class MultiSourceKnowledgePage(QDialog):
         for source, name in SOURCES.items():
             self.sources.addItem(name, source)
         header.addWidget(self.sources)
+        connections_button = QPushButton("管理账号与连接")
+        connections_button.clicked.connect(self.open_connections)
+        header.addWidget(connections_button)
         header.addStretch()
         layout.addLayout(header)
         self.stack = QStackedWidget()
@@ -59,6 +62,14 @@ class MultiSourceKnowledgePage(QDialog):
             self.pages[source] = page
             self.stack.addWidget(page)
         return self.pages[source]
+
+    def open_connections(self):
+        current = self.parent()
+        while current is not None:
+            if callable(getattr(current, "open_settings", None)):
+                current.open_settings("账号与连接")
+                return
+            current = current.parent()
 
     def switch_source(self, _index=0):
         source = self.sources.currentData()
@@ -219,7 +230,11 @@ class CloudKnowledgePage(KnowledgePage):
             self.confirm_button.setEnabled(True)
         if getattr(error, "code", "") in ("unauthenticated", "not_connected"):
             self.account_label.setText("授权失效 · " + self.service.display_name)
-            self.login_box.show()
+            if self.scope and self.scope.get("_connection_ref"):
+                self.login_box.hide()
+                self.notice.setText("此服务使用已连接的账号，请到设置 → 账号与连接重新登录，再返回刷新。")
+            else:
+                self.login_box.show()
 
     def clear_view(self):
         super().clear_view()
@@ -234,13 +249,17 @@ class CloudKnowledgePage(KnowledgePage):
         self.tree.clear()
         self.current_kb = None
         self.scope = self.service.snapshot()
-        connected = bool(self.scope)
+        connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
         self.splitter.setVisible(connected)
         self.login_spacer.setVisible(not connected)
         if not connected:
-            self.notice.setText("连接后即可浏览、阅读和引用资料。")
+            if self.scope and self.scope.get("_connection_ref"):
+                self.login_box.hide()
+                self.notice.setText("所选账号当前不可用，请到设置 → 账号与连接重新登录或明确切回原有配置。")
+            else:
+                self.notice.setText("连接后即可浏览、阅读和引用资料。")
             return
         self.account_label.setText("凭据已保存 · 正在检查连接")
         scope = copy.deepcopy(self.scope)

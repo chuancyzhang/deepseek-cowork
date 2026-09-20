@@ -662,14 +662,18 @@ class KnowledgePage(QDialog):
         self.tree.clear()
         self.current_kb = None
         self.scope = self.service.snapshot()
-        connected = bool(self.scope)
+        connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
         self.splitter.setVisible(connected)
         self.login_spacer.setVisible(not connected)
         self.upload_button.setEnabled(False)
         if not connected:
-            self.notice.clear()
+            if self.scope and self.scope.get("_connection_ref"):
+                self.login_box.hide()
+                self.notice.setText("统一连接不可用，请打开“管理账号与连接”重新认证或明确切回原有配置。")
+            else:
+                self.notice.clear()
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])
@@ -758,6 +762,18 @@ class KnowledgePage(QDialog):
         tenant = self.tenants.itemData(index)
         if tenant == self.scope["tenant_id"]:
             return
+        if self.scope.get("_connection_ref"):
+            from ui.primitives import ProductMessageDialog
+            grants = self.service.broker.store.grants(self.scope["_connection_ref"])
+            affected = [g for g in grants if g["capability"] in {"library:weknora", "knowledge-library"}]
+            details = "\n".join(g["capability"] + "：" + ", ".join(g["operations"]) + "；范围：" + (", ".join(g["resources"]) or "该空间中服务允许的资料") for g in affected)
+            choice = ProductMessageDialog("使用另一个工作空间", "将创建此账号的新空间连接，并将以下授权用于新空间。原连接和运行任务保留。\n" + details,
+                "confirm", [("创建并切换", "switch", "primary", False), ("取消", "cancel", "secondary", True)], parent=self).exec_result("cancel")
+            if choice != "switch":
+                self.tenants.blockSignals(True)
+                self.tenants.setCurrentIndex(self.tenants.findData(self.scope["tenant_id"]))
+                self.tenants.blockSignals(False)
+                return
         self.clear_view()
         self.run(lambda: self.service.switch_tenant(tenant), lambda _: self.refresh(), "正在切换工作空间…")
 

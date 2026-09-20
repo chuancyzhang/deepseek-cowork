@@ -160,6 +160,10 @@ def normalize_mcp_server(server, index=0, used_ids=None):
         "source_skill": source_skill,
         "managed_by_skill": bool(source.get("managed_by_skill") or source_skill),
     }
+    if source.get("connection_ref"):
+        if not isinstance(source["connection_ref"], str):
+            raise ValueError("MCP connection_ref 必须是连接 ID。")
+        normalized["connection_ref"] = source["connection_ref"]
     return normalized
 
 

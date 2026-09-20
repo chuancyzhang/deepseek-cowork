@@ -71,6 +71,9 @@ class MultiSourceKnowledgeService:
         self.providers = providers or {"weknora": KnowledgeService(self.store),
                                        "tencent-docs": TencentDocsProvider(self.store),
                                        "lexiang": LexiangProvider(self.store)}
+        if providers is None:
+            from .connections.knowledge import KnowledgeConnectionRouter
+            self.providers = {name: KnowledgeConnectionRouter(provider, name) for name, provider in self.providers.items()}
 
     @property
     def source(self):
@@ -87,7 +90,7 @@ class MultiSourceKnowledgeService:
         return self.providers[source]
 
     def connected(self):
-        return any(self.store.connection(source=name) for name in SOURCES)
+        return any(scope and not scope.get("unavailable") for scope in (self.provider(name).snapshot() for name in SOURCES))
 
     def snapshot(self, refs=None, session_id="", requested_source=None):
         refs = [normalized_ref(r) for r in refs or []]

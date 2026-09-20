@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": "company-login",
+      "version": 1,
+      "name": "公司统一登录",
+      "company": "示例公司",
+      "service": "company-api",
+      "adapter": "oauth2",
+      "base_url": "https://api.example.com",
+      "parameters": {
+        "issuer": "https://login.example.com",
+        "client_id": "cowork-desktop-public",
+        "scope": "openid profile read",
+        "audience": "company-api",
+        "oidc": true,
+        "redirect_port": 0
+      },
+      "suggested_capabilities": ["connection-example"],
+      "locked": false
+    },
+    {
+      "id": "company-weknora",
+      "version": 1,
+      "name": "公司资料库",
+      "service": "weknora",
+      "adapter": "weknora",
+      "base_url": "https://knowledge.example.com",
+      "parameters": {},
+      "suggested_capabilities": ["library:weknora", "knowledge-library"]
+    },
+    {
+      "id": "company-superset",
+      "version": 1,
+      "name": "公司 Superset",
+      "service": "superset",
+      "adapter": "superset",
+      "base_url": "https://superset.example.com",
+      "parameters": {"provider": "ldap", "mcp_url": "https://superset.example.com/mcp"},
+      "suggested_capabilities": ["mcp:superset-mcp"]
+    },
+    {
+      "id": "tencent-docs",
+      "version": 1,
+      "name": "腾讯文档",
+      "service": "tencent-docs",
+      "adapter": "tencent_docs",
+      "base_url": "https://docs.qq.com/openapi/mcp",
+      "parameters": {},
+      "suggested_capabilities": ["library:tencent-docs", "knowledge-library"]
+    },
+    {
+      "id": "company-lexiang",
+      "version": 1,
+      "name": "公司乐享",
+      "service": "lexiang",
+      "adapter": "lexiang",
+      "base_url": "https://mcp.lexiang-app.com/mcp",
+      "parameters": {"company": "replace-with-company-code"},
+      "suggested_capabilities": ["library:lexiang", "knowledge-library"]
+    },
+    {
+      "id": "company-directory",
+      "version": 1,
+      "name": "公司目录账号",
+      "service": "company-directory",
+      "adapter": "ldap",
+      "parameters": {"host": "directory.example.com", "port": 636, "tls": "ldaps", "base_dn": "dc=example,dc=com", "user_filter": "(uid={username})", "identity_attribute": "entryUUID"},
+      "suggested_capabilities": []
+    },
+    {
+      "id": "wecom-company-login",
+      "version": 1,
+      "name": "企业微信成员登录",
+      "service": "company-api",
+      "adapter": "wecom_member",
+      "base_url": "https://api.example.com",
+      "parameters": {"issuer": "https://company-auth.example.com", "client_id": "cowork-desktop", "scope": "openid profile", "oidc": true},
+      "suggested_capabilities": []
+    },
+    {
+      "id": "wecom-company-app",
+      "version": 1,
+      "name": "企业微信自建应用",
+      "service": "wecom",
+      "adapter": "wecom_app",
+      "base_url": "https://qyapi.weixin.qq.com",
+      "parameters": {"corp_id": "replace-with-corp-id", "agent_id": "1000001"},
+      "suggested_capabilities": []
+    }
+  ]
+}

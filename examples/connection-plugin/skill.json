@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "name": "connection-example",
+  "display_name": "连接契约示例",
+  "kind": "knowledge",
+  "default_enabled": false,
+  "description": "Read a configured service status through the host connection API.",
+  "tool_refs": ["connected_service_status"],
+  "connection_requirements": [
+    {"id": "default", "service": "company-api", "auth": "optional", "operations": ["read"], "delivery": "host"}
+  ]
+}

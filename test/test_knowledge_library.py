@@ -485,6 +485,39 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         self.assertCode("schema_mismatch", lambda: provider.children(provider.snapshot(), "space", "folder"))
         self.assertEqual(len(self.remote.calls), count)
 
+    def test_lexiang_identity_uses_staff_for_login_and_connection_checks(self):
+        payload = {"company": {"code": "acme", "company_domain": "https://lexiangla.com"},
+                   "staff": {"id": "staff-reader", "display_name": "企业用户"},
+                   "user": {"id": "legacy-reader", "name": "旧用户"}}
+        self.lexiang.caller = lambda *_: {"status": "ok", "structured_content": payload}
+        self.lexiang.connect("acme", "secret-token")
+        scope = self.lexiang.snapshot()
+        self.assertEqual(scope["user_id"], "staff-reader")
+        self.assertEqual(scope["email"], "企业用户")
+        self.assertEqual(self.lexiang.verify(), scope)
+        payload["staff"]["id"] = "another-staff"
+        self.assertCode("identity_changed", self.lexiang.verify)
+        payload["staff"] = {}
+        self.assertCode("invalid_response", self.lexiang.verify)
+        self.assertEqual(self.lexiang.snapshot(), scope)
+
+    def test_lexiang_identity_diagnostics_only_expose_field_names_and_types(self):
+        original = self.lexiang.snapshot()
+        payload = {"company": {"code": "acme", "company_domain": "https://private.example"},
+                   "staff": {"staff_id": "private-user-id", "name": "private-user-name"},
+                   "token": "lxmcp_secret-token", "lxmcp_secret_token_as_key": "secret-value"}
+        self.lexiang.caller = lambda *_: {"status": "ok", "structured_content": payload}
+        with self.assertLogs("core.knowledge_sources", level="WARNING") as logs:
+            with self.assertRaises(KnowledgeError) as caught:
+                self.lexiang.connect("acme", "secret-token")
+        text = str(caught.exception) + " ".join(logs.output)
+        self.assertEqual(caught.exception.code, "invalid_response")
+        self.assertIn("staff.id", text)
+        self.assertIn("staff_id:str", text)
+        for value in ("private.example", "private-user-id", "private-user-name", "secret-token", "secret_value", "lxmcp_secret"):
+            self.assertNotIn(value, text)
+        self.assertEqual(self.lexiang.snapshot(), original)
+
     def test_credentials_are_encrypted_and_identity_is_not_in_model_context(self):
         from core.knowledge_sources import context_message
         self.facade.select_source("lexiang")

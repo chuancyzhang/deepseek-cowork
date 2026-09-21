@@ -755,26 +755,58 @@ class LexiangProvider(McpKnowledgeProvider):
         super().logout()
         self._resolved_names.clear()
 
+    def _identity_response_error(self, info, missing):
+        # Only structural field names and types are diagnostic data. Never log
+        # values from whoami (including names, domains or unexpected secrets).
+        def structure(value, depth=0):
+            if not isinstance(value, dict) or depth >= 3:
+                return type(value).__name__
+            fields = []
+            for key, child in list(value.items())[:16]:
+                if (isinstance(key, str) and key.isascii() and key.isidentifier()
+                        and len(key) <= 40 and not key.lower().startswith("lxmcp")):
+                    fields.append(key + ":" + structure(child, depth + 1))
+            return "{" + ", ".join(fields) + "}"
+        fields = structure(info)[:900]
+        request_id = uuid.uuid4().hex[:12]
+        log.warning("knowledge_identity incompatible source=lexiang request=%s missing=%s fields=%s",
+                    request_id, ",".join(missing), fields)
+        return KnowledgeError("invalid_response", "乐享身份信息格式不兼容，未保存连接。缺少：" +
+                              "、".join(missing) + "。返回字段（不含值）：" + fields + "；诊断编号：" + request_id)
+
     def connect(self, company, token):
         company, token = company.strip(), token.strip()
         if not company or not token:
             raise KnowledgeError("invalid_credentials", "请填写企业标识和 Token。")
         connection = self._new_connection(token, company)
         info = self._call(connection, "whoami", {})
-        tenant, user = info.get("company") or {}, info.get("user") or {}
+        tenant = info.get("company") or {}
+        if not isinstance(tenant, dict):
+            raise self._identity_response_error(info, ["company 对象"])
         if str(tenant.get("code", "")) != company:
             raise KnowledgeError("tenant_mismatch", "企业标识与 Token 所属企业不一致，未保存连接。")
-        if not user.get("id") or not tenant.get("company_domain"):
-            raise KnowledgeError("invalid_response", "服务未返回完整用户和企业信息，未保存连接。")
-        connection.update(user_id=str(user["id"]), email=user.get("name") or "已授权用户",
+        user_id, name = self._whoami_account(info)
+        if not tenant.get("company_domain"):
+            raise self._identity_response_error(info, ["company.company_domain"])
+        connection.update(user_id=user_id, email=name,
                           tenant_name=tenant.get("name") or company, domain=tenant["company_domain"])
         return self._save_connection(connection)
+
+    def _whoami_account(self, info):
+        # Live Lexiang whoami identifies enterprise users as staff. Preserve
+        # compatibility with servers that expose the older user object.
+        field = "staff" if "staff" in info else "user"
+        account = info.get(field)
+        if not isinstance(account, dict) or not account.get("id"):
+            raise self._identity_response_error(info, [field + ".id"])
+        return str(account["id"]), account.get("display_name") or account.get("name") or "已授权用户"
 
     def verify(self):
         self.clear_cache()
         scope = self.snapshot()
         info = self.call(scope, "whoami", {})
-        if str((info.get("company") or {}).get("code")) != scope["tenant_id"] or str((info.get("user") or {}).get("id")) != scope["user_id"]:
+        user_id, _ = self._whoami_account(info)
+        if str((info.get("company") or {}).get("code")) != scope["tenant_id"] or user_id != scope["user_id"]:
             raise KnowledgeError("identity_changed", "远端账号或企业与已保存连接不一致，请重新连接。")
         return scope
 

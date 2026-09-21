@@ -713,6 +713,7 @@ class TencentDocsProvider(McpKnowledgeProvider):
 
 class LexiangProvider(McpKnowledgeProvider):
     source = "lexiang"
+    _cache_ttls = {**McpKnowledgeProvider._cache_ttls, "team_list_teams": 600}
     required_tools = ("whoami", "space_list_spaces", "space_describe_space", "entry_list_children",
                       "entry_describe_entry", "entry_describe_ai_parse_content", "lexiang_search")
     # Official server README uses these older names; select only names actually
@@ -824,6 +825,11 @@ class LexiangProvider(McpKnowledgeProvider):
     def _paged(self, scope, tool, args, key, page=1):
         connection = self.identity(scope)
         props = self.schemas(connection)[tool].get("properties", {})
+        if "page_token" in props:
+            for number, (values, more) in enumerate(self._cursor_pages(scope, tool, args, key), 1):
+                if number == page:
+                    return values, more
+            return [], False
         args = dict(args)
         cache_key = (connection["generation"], tool, json.dumps(args, sort_keys=True))
         if "page" in props:
@@ -844,16 +850,63 @@ class LexiangProvider(McpKnowledgeProvider):
             raise KnowledgeError("invalid_response", "服务返回空分页但仍声明有下一页，请在原平台核对。")
         return values, more
 
-    def catalog(self, scope):
-        spaces, page = [], 1
+    def _cursor_pages(self, scope, tool, args, key):
+        # Follow the actual cursor chain. The existing identity-scoped read
+        # cache also lets page navigation reuse earlier pages without a second
+        # mutable cursor store that could survive refresh or an account change.
+        token, seen = "", set()
+        for _ in range(1000):
+            arguments = {**args, "page_token": token}
+            result = self.call(scope, tool, arguments)
+            # Lexiang omits the repeated field on an empty terminal page,
+            # while still returning a nonempty next_page_token.
+            values = self._rows({key: []} if key not in result and "next_page_token" in result else result, key)
+            next_token = result.get("next_page_token")
+            if not isinstance(next_token, str):
+                log.warning("knowledge_pagination error source=lexiang tool=%s code=missing_cursor", tool)
+                raise KnowledgeError("invalid_response", "乐享列表缺少有效分页信息，请刷新后重试。")
+            if not values:
+                yield [], False
+                return
+            if next_token and next_token in seen:
+                log.warning("knowledge_pagination error source=lexiang tool=%s code=repeated_cursor", tool)
+                raise KnowledgeError("invalid_response", "乐享列表分页未前进，请刷新后重试。")
+            yield values, bool(next_token)
+            if not next_token:
+                return
+            seen.add(next_token)
+            token = next_token
+        raise KnowledgeError("pagination_limit", "知识库列表过多，请在原平台核对。")
+
+    def _all_rows(self, scope, tool, args, key):
+        props = self.schemas(self.identity(scope))[tool].get("properties", {})
+        if "page_token" in props:
+            return [item for values, _ in self._cursor_pages(scope, tool, args, key) for item in values]
+        rows, page = [], 1
         while True:
-            values, more = self._paged(scope, "space_list_spaces", {}, "spaces", page)
-            spaces.extend(values)
+            values, more = self._paged(scope, tool, args, key, page)
+            rows.extend(values)
             if not more:
                 break
             page += 1
             if page > 1000:
                 raise KnowledgeError("pagination_limit", "知识库列表过多，请在原平台核对。")
+        return rows
+
+    def catalog(self, scope):
+        schemas = self.schemas(self.identity(scope))
+        spaces = []
+        if "team_id" in schemas["space_list_spaces"].get("properties", {}):
+            if "team_list_teams" not in schemas:
+                raise KnowledgeError("schema_mismatch", "乐享未提供团队列表能力，无法加载知识库。")
+            teams = self._all_rows(scope, "team_list_teams", {}, "teams")
+            for team in teams:
+                if not team.get("id"):
+                    raise KnowledgeError("invalid_response", "乐享团队列表缺少标识。")
+                for space in self._all_rows(scope, "space_list_spaces", {"team_id": str(team["id"])}, "spaces"):
+                    spaces.append({**space, "team_id": str(team["id"]), "team_name": team.get("name"), "team": team})
+        else:
+            spaces = self._all_rows(scope, "space_list_spaces", {}, "spaces")
         organizations, shared = {}, []
         for space in spaces:
             team = space.get("team") or {}
@@ -875,6 +928,9 @@ class LexiangProvider(McpKnowledgeProvider):
 
     def children(self, scope, collection, parent="", page=1):
         values, more = self._paged(scope, "entry_list_children", {"parent_id": parent or self.root(scope, collection)}, "entries", page)
+        if any(not any(item.get(key) for key in ("id", "file_id", "entry_id", "node_id")) for item in values):
+            log.warning("knowledge_directory error source=lexiang page=%s rows=%s code=missing_item_identity", page, len(values))
+            raise KnowledgeError("invalid_response", "乐享返回的目录条目缺少文档标识，暂时无法展示。请稍后刷新，或在乐享原平台查看。")
         return [self._document(scope, i, collection) for i in values], more
 
     def search(self, scope, query, cancelled=None):

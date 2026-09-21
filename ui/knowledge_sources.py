@@ -225,6 +225,8 @@ class CloudKnowledgePage(KnowledgePage):
 
     def error(self, error):
         self.notice.setText(str(error))
+        if self.account_label.text() == "凭据已保存 · 正在检查连接":
+            self.account_label.setText("凭据已保存 · 连接检查或资料加载未完成")
         if hasattr(self, "connect_button"):
             self.connect_button.setEnabled(True)
             self.confirm_button.setEnabled(True)

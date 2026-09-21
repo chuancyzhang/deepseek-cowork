@@ -572,6 +572,60 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         catalog = self.lexiang.catalog(self.lexiang.snapshot())
         self.assertEqual(len(catalog["shared"]), 4)
 
+    def test_lexiang_team_catalog_and_cursor_pages_match_live_contract(self):
+        from core.knowledge_sources import LexiangProvider
+        fields = {"team_list_teams": {"page_token": {"type": "string"}},
+                  "space_list_spaces": {"team_id": {"type": "string"}, "page_token": {"type": "string"}},
+                  "entry_list_children": {"parent_id": {"type": "string"}, "page_token": {"type": "string"}}}
+        def discover(config):
+            tools = [t for t in self.remote.discover(config)["tools"] if t["name"] not in fields]
+            for name, props in fields.items():
+                required = [k for k in props if k != "page_token"]
+                tools.append({"name": name, "input_schema": {"type": "object", "properties": props, "required": required}})
+            return {"ok": True, "tools": tools}
+        calls = []
+        repeat_cursor = False
+        def caller(config, tool, args):
+            if tool not in fields:
+                return self.remote.call(config, tool, args)
+            calls.append((tool, dict(args)))
+            token = args.get("page_token", "")
+            if tool == "team_list_teams":
+                data = {"teams": [{"id": "b" if token else "a", "name": "团队"}], "next_page_token": "teams-2" if not token else "teams-3"}
+                if token == "teams-3":
+                    data = {"next_page_token": "teams-4"}
+            elif tool == "space_list_spaces":
+                team = args["team_id"]
+                data = {"spaces": [{"id": team + ("2" if token else "1"), "name": "资料库"}],
+                        "next_page_token": team + "-next" if not token else ""}
+            else:
+                data = {"entries": [{"id": args["parent_id"] + ("2" if token else "1"), "name": "资料"}],
+                        "next_page_token": "children-next" if not token or repeat_cursor else ""}
+            return {"status": "ok", "structured_content": data}
+        provider = LexiangProvider(self.store, self.remote, caller, discover)
+        provider.connect("acme", "secret-token")
+        scope = provider.snapshot()
+        catalog = provider.catalog(scope)
+        self.assertEqual([s["id"] for s in catalog["shared"]], ["a1", "a2", "b1", "b2"])
+        self.assertEqual([s["organization_id"] for s in catalog["shared"]], ["a", "a", "b", "b"])
+        self.assertIn(("space_list_spaces", {"team_id": "b", "page_token": "b-next"}), calls)
+        count = len(calls)
+        provider.catalog(scope)
+        self.assertEqual(len(calls), count)
+        items, more = provider.children(scope, "a1", "folder", 2)
+        self.assertEqual(items[0]["id"], "folder2")
+        self.assertFalse(more)
+        self.assertEqual(provider.children(scope, "a1", "other", 1)[0][0]["id"], "other1")
+        self.assertEqual(provider.children(scope, "a1", "folder", 3), ([], False))
+        repeat_cursor = True
+        provider.clear_cache()
+        self.assertCode("invalid_response", lambda: provider.children(scope, "a1", "folder", 2))
+        provider.clear_cache()
+        provider.caller = lambda *_: {"status": "ok", "structured_content": {"entries": [{}], "next_page_token": "next"}}
+        with self.assertLogs("core.knowledge_sources", level="WARNING") as logs:
+            self.assertCode("invalid_response", lambda: provider.children(scope, "a1", "folder", 1))
+        self.assertIn("missing_item_identity", " ".join(logs.output))
+
     def test_switching_page_preserves_submitted_scope_and_auth_change_invalidates_only_its_source(self):
         refs = [p.reference(p.snapshot(), "space", "文档", "doc") for p in (self.tencent, self.lexiang)]
         scope = self.facade.snapshot(refs)

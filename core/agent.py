@@ -74,6 +74,7 @@ from core.filesystem_ops import (
     resolve_path,
 )
 from core.generated_images import GeneratedImageError, persist_generated_image
+from core.process_utils import terminate_process_tree
 
 try:
     from openai import OpenAI
@@ -158,11 +159,8 @@ class CodeWorker(QThread):
         if self.execution_authorization is not None:
             self.execution_authorization.cancel()
         if self.process:
-            try:
-                self.process.terminate() # Try graceful termination
-                self.output_signal.emit("System: Terminating process...")
-            except:
-                pass
+            stopped = terminate_process_tree(self.process)
+            self.output_signal.emit("工具进程已停止。" if stopped else "工具进程终止未完成，请检查运行状态。")
 
     def run(self):
         from core.execution_authorization import invoke
@@ -275,8 +273,8 @@ def input(prompt=""):
             # Real-time output reading
             while True:
                 if self.is_stopped:
-                    self.process.kill()
-                    self.output_signal.emit("⚠️ Process stopped by user.")
+                    stopped = terminate_process_tree(self.process)
+                    self.output_signal.emit("工具进程已停止。" if stopped else "工具进程终止未完成，请检查运行状态。")
                     break
                 
                 output = self.process.stdout.readline()
@@ -1408,6 +1406,8 @@ class LLMWorker(QThread):
         self.is_paused = False # Ensure loop breaks if paused
         if not self.is_subagent:
             self.execution_authorization.cancel()
+        # Tool cancellation must not wait for a blocking provider close().
+        self.abort_signal.emit()
         self.step_signal.emit("System: Stopping...")
         requested_at = time.time()
         self.observability_signal.emit({
@@ -1439,7 +1439,6 @@ class LLMWorker(QThread):
                 f"Provider stream cancellation failed: {cancel_result['error']}"
             )
         self.observability_signal.emit(cancel_event)
-        self.abort_signal.emit()
 
     def steer(self, message, expected_turn_id=None):
         """Queue a user message for the next safe model-request boundary."""

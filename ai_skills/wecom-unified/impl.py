@@ -1,8 +1,8 @@
+from core.tool_cancellation import init_abort_state as _init_abort_state
 import json
 import os
 import time
 
-from PySide6.QtCore import QObject, Qt
 
 from core.wecom_capability import (
     WECOM_CLI_COMPONENT_ID,
@@ -167,21 +167,6 @@ def _json_has_local_path(args):
         except (TypeError, ValueError) as exc:
             raise ValueError("--json 后必须是有效 JSON。") from exc
     return False
-
-
-def _init_abort_state(context):
-    state = {"aborted": False, "bridge": None}
-    if not isinstance(context, dict) or not context.get("abort_signal"):
-        return state
-
-    class SignalBridge(QObject):
-        def trigger(self):
-            state["aborted"] = True
-
-    bridge = SignalBridge()
-    context["abort_signal"].connect(bridge.trigger, Qt.DirectConnection)
-    state["bridge"] = bridge
-    return state
 
 
 def _emit_diagnostic(context, status, started_at, command_category, **fields):

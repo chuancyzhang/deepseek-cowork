@@ -693,6 +693,9 @@ def run_skill_script_in_sandbox(
     extra_env=None,
     abort_check=None,
 ):
+    if callable(abort_check) and abort_check():
+        return {"ok": False, "aborted": True, "status": "cancelled",
+                "error": "任务已停止，本次操作未执行。", "stdout": "", "stderr": ""}
     command, shell_kind = build_skill_script_command(runtime, script_path, args=args)
     process = run_in_sandbox(
         command,
@@ -707,13 +710,9 @@ def run_skill_script_in_sandbox(
     first_poll = True
     while True:
         if callable(abort_check) and bool(abort_check()):
-            terminate_process_tree(process)
+            from core.tool_cancellation import stop_tool_process
             return {
-                "ok": False,
-                "aborted": True,
-                "exit_code": process.poll(),
-                "stdout": "",
-                "stderr": "Execution aborted by user.",
+                **stop_tool_process(process),
                 "runtime": (runtime or "").strip().lower(),
                 "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
                 "cwd": cwd or os.path.dirname(os.path.abspath(script_path)),

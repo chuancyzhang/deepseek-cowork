@@ -1,3 +1,4 @@
+from core.tool_cancellation import init_abort_state as _init_abort_state, stop_tool_process
 import sys
 import subprocess
 import tempfile
@@ -5,7 +6,6 @@ import os
 import ast
 import shutil
 import locale
-from PySide6.QtCore import QObject, Qt
 from core.env_utils import ensure_package_installed
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 
@@ -63,24 +63,6 @@ def validate_code_safety(code, allowed_dir, god_mode=False):
                      raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
     return True
  
-def _init_abort_state(context):
-    state = {"aborted": False, "bridge": None}
-    if not context:
-        return state
-    abort_signal = context.get("abort_signal")
-    if not abort_signal:
-        return state
-    class SignalBridge(QObject):
-        def __init__(self, state_ref):
-            super().__init__()
-            self.state_ref = state_ref
-        def trigger(self):
-            self.state_ref["aborted"] = True
-    bridge = SignalBridge(state)
-    abort_signal.connect(bridge.trigger, Qt.DirectConnection)
-    state["bridge"] = bridge
-    return state
-
 def _decode_output(raw):
     if raw is None:
         return ""
@@ -160,6 +142,8 @@ def run_python_code(workspace_dir, code, _context=None):
     
     try:
         abort_state = _init_abort_state(_context)
+        if abort_state["aborted"]:
+            return {"ok": False, "status": "cancelled", "error": "任务已停止，本次操作未执行。"}
         process = run_in_sandbox(
             [python_exe, "-X", "utf8", temp_path],
             cwd=workspace_dir,
@@ -170,15 +154,7 @@ def run_python_code(workspace_dir, code, _context=None):
         )
         while True:
             if abort_state["aborted"]:
-                try:
-                    process.terminate()
-                    process.wait(timeout=2)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                return "Error: Execution aborted by user."
+                return stop_tool_process(process, _context)
             try:
                 output_raw, error_raw = process.communicate(timeout=0.2)
                 break

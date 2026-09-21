@@ -539,12 +539,28 @@ async def _list_mcp_server_tools_async(server_config):
 
 
 async def _call_mcp_tool_async(server_config, tool_name, arguments):
+    import anyio
     async with _open_mcp_session(server_config) as (session, timeout_seconds):
+        # Each call owns its session. The SDK allocates this ID in send_request.
+        request_id = getattr(session, "_request_id", None)
         try:
             result = await asyncio.wait_for(
                 session.call_tool(str(tool_name or "").strip(), arguments=arguments or {}),
                 timeout=timeout_seconds,
             )
+        except anyio.get_cancelled_exc_class():
+            if isinstance(request_id, (int, str)):
+                from mcp.types import ClientNotification, CancelledNotification, CancelledNotificationParams
+                # Give the server a bounded opportunity to cancel before closing
+                # the transport, even though the surrounding scope is cancelled.
+                with anyio.move_on_after(1, shield=True):
+                    try:
+                        await session.send_notification(ClientNotification(CancelledNotification(
+                            params=CancelledNotificationParams(requestId=request_id, reason="Stopped by user"),
+                        )))
+                    except Exception as exc:
+                        logger.warning("mcp_tool.cancel.notification_failed error_type=%s", type(exc).__name__)
+            raise
         except Exception as exc:
             raise McpOperationError("tools/call", exc) from exc
     content = [_serialize_content_block(item) for item in (getattr(result, "content", None) or [])]
@@ -563,6 +579,45 @@ async def _call_mcp_tool_async(server_config, tool_name, arguments):
 
 def _run_async(coro):
     return asyncio.run(coro)
+
+
+class McpCallCancelled(Exception):
+    pass
+
+
+def _run_cancellable_mcp(factory, context=None):
+    from .tool_cancellation import abort_requested
+    from .execution_authorization import current_authorization
+    context = dict(context or {})
+    context.setdefault("execution_authorization", current_authorization())
+
+    async def run():
+        if abort_requested(context):
+            raise McpCallCancelled("MCP 调用已取消。")
+        task = asyncio.create_task(factory())
+        try:
+            while not task.done():
+                if abort_requested(context):
+                    # Cancel the session owner first, so it can notify the server
+                    # before its transport task group is closed.
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    logger.info("mcp_tool.call.cancelled session=%s tool_call=%s",
+                                context.get("session_id", ""), context.get("tool_call_id", ""))
+                    raise McpCallCancelled("MCP 调用已取消；远端已完成的操作不会撤销。")
+                await asyncio.wait({task}, timeout=0.1)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+    return _run_async(run())
 
 
 def _managed_auth_error(server_config, exc):
@@ -678,7 +733,10 @@ def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None,
             prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
-        payload = _run_async(_call_mcp_tool_async(prepared, tool_name, arguments or {}))
+        payload = _run_cancellable_mcp(lambda: _call_mcp_tool_async(prepared, tool_name, arguments or {}), context)
+    except McpCallCancelled as exc:
+        return {"ok": False, "status": "cancelled", "server": server_name,
+                "tool": str(tool_name or ""), "error": str(exc)}
     except Exception as exc:
         error = _managed_auth_error(server_config, exc)
         logger.error("mcp_tool.call.error server=%s tool=%s error=%s", server_name, str(tool_name or "").strip(), error)

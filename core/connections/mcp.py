@@ -41,14 +41,16 @@ def _error_from_exception(exc, *, writing=False):
 def execute_mcp(server, config_manager=None, skill_manager=None, *, tool_name=None, arguments=None, context=None):
     from ..execution_authorization import current_authorization
     from ..mcp_client import (_run_async, _list_mcp_server_tools_async, _call_mcp_tool_async,
-                             _ensure_runtime_skill_dependencies, normalize_mcp_transport, TRANSPORT_STREAMABLE_HTTP)
+                             _ensure_runtime_skill_dependencies, normalize_mcp_transport, TRANSPORT_STREAMABLE_HTTP,
+                             _run_cancellable_mcp, McpCallCancelled)
     broker = broker_for(config_manager)
     capability = "mcp:" + str(server.get("id", ""))
     operation = "discover" if tool_name is None else "call"
     authorization = current_authorization(context)
     task_id = task_identity(authorization) if authorization else "mcp-ui:" + uuid.uuid4().hex
     def cancelled():
-        return authorization is not None and authorization._cancelled.is_set()
+        from ..tool_cancellation import abort_requested
+        return abort_requested({**(context or {}), "execution_authorization": authorization})
     try:
         if not server.get("enabled", True):
             raise ConnectionError("revoked")
@@ -74,7 +76,9 @@ def execute_mcp(server, config_manager=None, skill_manager=None, *, tool_name=No
             try:
                 if tool_name is None:
                     return _run_async(_list_mcp_server_tools_async(config))
-                output = _run_async(_call_mcp_tool_async(config, tool_name, arguments or {}))
+                output = _run_cancellable_mcp(lambda: _call_mcp_tool_async(config, tool_name, arguments or {}), context)
+            except McpCallCancelled:
+                raise
             except Exception as exc:
                 raise _error_from_exception(exc, writing=tool_name is not None) from None
             output["status"] = "error" if output.get("is_error") else "ok"
@@ -82,6 +86,9 @@ def execute_mcp(server, config_manager=None, skill_manager=None, *, tool_name=No
         value = broker.execute(binding, operation, perform, cancelled=cancelled, safe_retry=tool_name is None,
                                wait_for_auth=authorization is not None)
         return {"ok": True, "error": "", "tools": value} if tool_name is None else value
+    except McpCallCancelled as exc:
+        return {"ok": False, "status": "cancelled", "server": server.get("id"),
+                "tool": tool_name, "error": str(exc)}
     except ConnectionError as exc:
         if tool_name is None:
             return {**exc.public(), "tools": []}

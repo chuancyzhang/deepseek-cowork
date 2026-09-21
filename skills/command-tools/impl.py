@@ -1,3 +1,4 @@
+from core.tool_cancellation import init_abort_state as _init_abort_state, stop_tool_process
 import json
 import locale
 import os
@@ -6,34 +7,11 @@ import subprocess
 import tempfile
 import time
 
-from PySide6.QtCore import QObject, Qt
 
 from core.filesystem_ops import glob_paths, grep_contents
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
 from core.interaction import ask_user
 from core.runtime_components import install_node_runtime, load_saved_download_sources, selected_source
-
-def _init_abort_state(context):
-    state = {"aborted": False, "bridge": None}
-    if not context:
-        return state
-    abort_signal = context.get("abort_signal")
-    if not abort_signal:
-        return state
-
-    class SignalBridge(QObject):
-        def __init__(self, state_ref):
-            super().__init__()
-            self.state_ref = state_ref
-
-        def trigger(self):
-            self.state_ref["aborted"] = True
-
-    bridge = SignalBridge(state)
-    abort_signal.connect(bridge.trigger, Qt.DirectConnection)
-    state["bridge"] = bridge
-    return state
-
 
 def _decode_bytes(raw):
     if raw is None:
@@ -74,6 +52,8 @@ def bash(workspace_dir, command, _context=None):
     try:
         cwd = workspace_dir if workspace_dir else os.getcwd()
         abort_state = _init_abort_state(_context)
+        if abort_state["aborted"]:
+            return {"ok": False, "status": "cancelled", "error": "任务已停止，本次操作未执行。"}
         process = run_in_sandbox(
             command,
             cwd=cwd,
@@ -83,15 +63,7 @@ def bash(workspace_dir, command, _context=None):
         )
         while True:
             if abort_state["aborted"]:
-                try:
-                    process.terminate()
-                    process.wait(timeout=2)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                return "Error: Command aborted by user."
+                return stop_tool_process(process, _context)
             try:
                 output_raw, error_raw = process.communicate(timeout=0.2)
                 break
@@ -145,6 +117,8 @@ def run_node_code(workspace_dir, code, _context=None):
 
     try:
         abort_state = _init_abort_state(_context)
+        if abort_state["aborted"]:
+            return {"ok": False, "status": "cancelled", "error": "任务已停止，本次操作未执行。"}
         process = run_in_sandbox(
             [node_exe, temp_path],
             cwd=workspace_dir,
@@ -154,15 +128,7 @@ def run_node_code(workspace_dir, code, _context=None):
         )
         while True:
             if abort_state["aborted"]:
-                try:
-                    process.terminate()
-                    process.wait(timeout=2)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                return "Error: Execution aborted by user."
+                return stop_tool_process(process, _context)
             try:
                 output_raw, error_raw = process.communicate(timeout=0.2)
                 break
@@ -357,6 +323,10 @@ def run_skill_script(
             "command": result.get("command", ""),
             "cwd": result.get("cwd", record["path"]),
         }
+        if result.get("aborted"):
+            payload.update({key: result[key] for key in ("aborted", "status", "error") if key in result})
+            emit_diagnostic("cancelled", exit_code=payload["exit_code"])
+            return payload
         emit_diagnostic(
             "finish" if payload["ok"] else "error",
             exit_code=payload["exit_code"],

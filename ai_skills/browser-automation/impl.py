@@ -1,9 +1,9 @@
+from core.tool_cancellation import init_abort_state as _init_abort_state
 import json
 import os
 import re
 import urllib.parse
 
-from PySide6.QtCore import QObject, Qt
 
 from core.browser_skill_component import (
     BROWSER_SKILL_COMPONENT_ID,
@@ -123,21 +123,6 @@ def _normalize_args(args, workspace_root):
                 "evaluate cannot read cookies, browser storage, authorization data, or access tokens"
             )
     return normalized
-
-
-def _init_abort_state(context):
-    state = {"aborted": False, "bridge": None}
-    if not isinstance(context, dict) or not context.get("abort_signal"):
-        return state
-
-    class SignalBridge(QObject):
-        def trigger(self):
-            state["aborted"] = True
-
-    bridge = SignalBridge()
-    context["abort_signal"].connect(bridge.trigger, Qt.DirectConnection)
-    state["bridge"] = bridge
-    return state
 
 
 def browser_skill_cli(

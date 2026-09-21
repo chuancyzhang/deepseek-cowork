@@ -319,6 +319,8 @@ def invoke(name, args, handler, context, execute, *, preparation=None):
     executing = False
     try:
         authorization.check()
+        if callable(context.get("abort_check")) and context["abort_check"]():
+            raise AuthorizationError("cancelled", "任务已停止，本次操作未执行。")
         # Preserve the existing full-access path, without action preparation or I/O.
         if authorization.god_mode:
             with bind_authorization(authorization):

@@ -1,3 +1,4 @@
+from core.tool_cancellation import init_abort_state as _init_abort_state
 import json
 import os
 import re
@@ -6,7 +7,6 @@ import tempfile
 import time
 from datetime import date
 
-from PySide6.QtCore import QObject, Qt
 
 from core.audio_attachments import is_audio_attachment
 from core.runtime_components import speech_to_text_component_status
@@ -211,21 +211,6 @@ def _require_component():
     if not required.issubset(paths):
         raise ComponentNotReadyError("语音转文字组件状态缺少模型路径，请在“组件与依赖”中修复。")
     return paths
-
-
-def _init_abort_state(context):
-    state = {"aborted": False, "bridge": None}
-    if not isinstance(context, dict) or not context.get("abort_signal"):
-        return state
-
-    class SignalBridge(QObject):
-        def trigger(self):
-            state["aborted"] = True
-
-    bridge = SignalBridge()
-    context["abort_signal"].connect(bridge.trigger, Qt.DirectConnection)
-    state["bridge"] = bridge
-    return state
 
 
 def _frontmatter_value(value):

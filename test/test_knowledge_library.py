@@ -440,6 +440,51 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         self.assertNotIn("secret-token", str(error.exception))
         self.assertEqual(len(self.remote.calls), count + 1)
 
+    def test_lexiang_preset_discovers_business_tools_and_dispatches_declared_names(self):
+        from core.knowledge_sources import LexiangProvider
+        from urllib.parse import parse_qs, urlsplit
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                names = LexiangProvider._legacy_names if legacy else {}
+                reverse = {value: key for key, value in names.items()}
+                wire_calls = []
+                def discover(config):
+                    query = parse_qs(urlsplit(config["url"]).query)
+                    self.assertEqual(query.get("company_from"), ["acme"])
+                    tools = copy.deepcopy(self.remote.discover(config)["tools"])
+                    if query.get("preset") != ["knowledge"]:
+                        tools = [t for t in tools if t["name"] in {"whoami", "lexiang_search"}]
+                    for tool in tools:
+                        tool["name"] = names.get(tool["name"], tool["name"])
+                    return {"ok": True, "tools": tools}
+                def caller(config, tool, args):
+                    wire_calls.append(tool)
+                    self.assertEqual(parse_qs(urlsplit(config["url"]).query).get("preset"), ["knowledge"])
+                    return self.remote.call(config, reverse.get(tool, tool), args)
+                provider = LexiangProvider(self.store, self.remote, caller, discover)
+                provider.connect("acme", "secret-token")
+                scope = provider.snapshot()
+                self.assertEqual(provider.catalog(scope)["shared"][0]["id"], "space")
+                self.assertEqual(provider.children(scope, "space")[0][0]["id"], "doc")
+                self.assertTrue(provider.belongs(scope, "doc", "space"))
+                self.assertEqual(provider.read(scope, "doc", "space")["content"], "乐享正文")
+                self.assertIn(names.get("entry_list_children", "entry_list_children"), wire_calls)
+
+    def test_lexiang_preset_does_not_guess_incompatible_legacy_parameters(self):
+        from core.knowledge_sources import LexiangProvider
+        def discover(config):
+            tools = copy.deepcopy(self.remote.discover(config)["tools"])
+            for tool in tools:
+                if tool["name"] == "entry_list_children":
+                    tool["name"] = "knowledge_list_children"
+                    tool["input_schema"] = {"type": "object", "properties": {"different_parent": {"type": "string"}}}
+            return {"ok": True, "tools": tools}
+        provider = LexiangProvider(self.store, self.remote, self.remote.call, discover)
+        provider.connect("acme", "secret-token")
+        count = len(self.remote.calls)
+        self.assertCode("schema_mismatch", lambda: provider.children(provider.snapshot(), "space", "folder"))
+        self.assertEqual(len(self.remote.calls), count)
+
     def test_credentials_are_encrypted_and_identity_is_not_in_model_context(self):
         from core.knowledge_sources import context_message
         self.facade.select_source("lexiang")

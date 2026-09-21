@@ -262,12 +262,19 @@ class McpKnowledgeProvider:
                     result = result.get("tools")
                 if not isinstance(result, list):
                     raise KnowledgeError("schema_mismatch", "无法读取资料服务的工具定义。")
-                schemas = {t["name"]: t.get("input_schema", t.get("inputSchema", {})) for t in result}
+                schemas = self._normalize_schemas(connection, {
+                    t["name"]: t.get("input_schema", t.get("inputSchema", {})) for t in result})
                 missing = set(self.required_tools) - schemas.keys()
                 if missing:
                     raise KnowledgeError("schema_mismatch", "资料服务缺少必要能力：" + "、".join(sorted(missing)))
                 self._schemas[generation] = schemas
             return self._schemas[generation]
+
+    def _normalize_schemas(self, connection, schemas):
+        return schemas
+
+    def _remote_tool_name(self, connection, tool):
+        return tool
 
     def _call(self, connection, tool, arguments):
         schema = self.schemas(connection).get(tool)
@@ -282,7 +289,7 @@ class McpKnowledgeProvider:
         request_id = uuid.uuid4().hex
         log.info("knowledge_mcp start source=%s tool=%s request=%s", self.source, tool, request_id)
         try:
-            result = self.caller(self._config(connection), tool, arguments)
+            result = self.caller(self._config(connection), self._remote_tool_name(connection, tool), arguments)
             if result.get("status") == "error" or result.get("is_error"):
                 raise self._error(result)
             data = result.get("structured_content")
@@ -708,6 +715,45 @@ class LexiangProvider(McpKnowledgeProvider):
     source = "lexiang"
     required_tools = ("whoami", "space_list_spaces", "space_describe_space", "entry_list_children",
                       "entry_describe_entry", "entry_describe_ai_parse_content", "lexiang_search")
+    # Official server README uses these older names; select only names actually
+    # returned by tools/list and validate their own schemas before dispatch.
+    _legacy_names = {
+        "space_list_spaces": "knowledge_list_spaces",
+        "space_describe_space": "knowledge_describe_space",
+        "entry_list_children": "knowledge_list_children",
+        "entry_describe_entry": "knowledge_describe_entry",
+        "entry_describe_ai_parse_content": "knowledge_describe_ai_parse_content",
+        "file_apply_upload": "knowledge_apply_upload",
+        "file_commit_upload": "knowledge_commit_upload",
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._resolved_names = {}
+
+    def _config(self, connection):
+        config = super()._config(connection)
+        # The default endpoint may expose discovery/meta tools only. The
+        # documented knowledge preset exposes the business tools directly.
+        config["url"] += "&preset=knowledge"
+        return config
+
+    def _normalize_schemas(self, connection, schemas):
+        names = {}
+        for name, legacy in self._legacy_names.items():
+            if name not in schemas and legacy in schemas:
+                schemas[name] = schemas[legacy]
+                names[name] = legacy
+        self._resolved_names[connection["generation"]] = names
+        log.info("knowledge_capabilities source=lexiang preset=knowledge tools=%s aliases=%s", len(schemas), len(names))
+        return schemas
+
+    def _remote_tool_name(self, connection, tool):
+        return self._resolved_names.get(connection["generation"], {}).get(tool, tool)
+
+    def logout(self):
+        super().logout()
+        self._resolved_names.clear()
 
     def connect(self, company, token):
         company, token = company.strip(), token.strip()

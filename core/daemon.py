@@ -2269,12 +2269,12 @@ class DaemonClient:
         effective_timeout = self.timeout if timeout is None else timeout
         with socket.create_connection((self.host, self.port), timeout=effective_timeout) as sock:
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-            data = b""
+            data = bytearray()
             while not data.endswith(b"\n"):
-                chunk = sock.recv(4096)
+                chunk = sock.recv(64 * 1024)
                 if not chunk:
                     break
-                data += chunk
+                data.extend(chunk)
         if not data:
             return None
         return json.loads(data.decode("utf-8"))
@@ -2379,7 +2379,9 @@ class DaemonClient:
                 "session_id": str(session_id or ""),
                 "run_id": str(run_id or ""),
                 "starting_after": int(starting_after or 0),
-            }
+            },
+            # Recovery reads and verifies durable events, unlike a small ping.
+            timeout=max(float(self.timeout or 0), 30.0),
         )
 
     def steer_message(self, session_id, expected_turn_id, message):

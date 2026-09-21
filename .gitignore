@@ -161,3 +161,6 @@ git_bash_env/
 
 # Offline editor development dependencies; only web/editors/dist is shipped.
 /web/editors/node_modules/
+
+# JetBrains
+.tmp/

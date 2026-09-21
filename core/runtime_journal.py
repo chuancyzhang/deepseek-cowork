@@ -228,17 +228,24 @@ class RuntimeJournal:
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             position = handle.tell()
-            buffer = b""
+            chunks = []
             while position > 0:
-                size = min(8192, position)
+                size = min(64 * 1024, position)
                 position -= size
                 handle.seek(position)
-                buffer = handle.read(size) + buffer
-                stripped = buffer.rstrip(b"\r\n")
-                if b"\n" in stripped or position == 0:
-                    raw = stripped.rsplit(b"\n", 1)[-1].rstrip(b"\r")
-                    return raw.decode("utf-8")
-        return ""
+                chunk = handle.read(size)
+                if not chunks:
+                    chunk = chunk.rstrip(b"\r\n")
+                    if not chunk:
+                        continue
+                boundary = chunk.rfind(b"\n")
+                if boundary >= 0:
+                    chunks.append(chunk[boundary + 1:])
+                    break
+                chunks.append(chunk)
+            # Large tool results can occupy a single JSONL record. Prepending
+            # every block copies the entire accumulated tail quadratically.
+            return b"".join(reversed(chunks)).decode("utf-8")
 
     @staticmethod
     def _process_role():

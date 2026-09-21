@@ -19634,6 +19634,7 @@ class DaemonStreamWorker(QThread):
 
     def _reattach_until_terminal(self):
         consecutive_failures = 0
+        connected_reported = False
         self.stream_state_signal.emit({"status": "reconnecting", "sequence": self._last_sequence})
         while not self._aborted:
             try:
@@ -19644,9 +19645,24 @@ class DaemonStreamWorker(QThread):
                 )
             except Exception as exc:
                 response = {"status": "error", "error": str(exc)}
+            if self._aborted:
+                return True
             if isinstance(response, dict) and response.get("status") == "ok":
                 consecutive_failures = 0
+                if not connected_reported:
+                    log_sub_agent_runtime(
+                        "daemon_stream_reattach_connected", session_id=self.session_id,
+                        run_id=self.request_id, last_sequence=self._last_sequence,
+                        replay_events=len(response.get("events") or []),
+                        run_status=str((response.get("run") or {}).get("status") or ""),
+                    )
+                    connected_reported = True
+                # An idle live run may have no new events. The successful
+                # status response still confirms that the connection recovered.
+                self.stream_state_signal.emit({"status": "connected", "sequence": self._last_sequence})
                 for event in response.get("events") or []:
+                    if self._aborted:
+                        return True
                     if not isinstance(event, dict):
                         continue
                     payload = event.get("payload")
@@ -19677,12 +19693,14 @@ class DaemonStreamWorker(QThread):
                     )
                     return True
             else:
+                connected_reported = False
                 consecutive_failures += 1
                 log_sub_agent_runtime(
                     "daemon_stream_reattach_failed", session_id=self.session_id,
                     run_id=self.request_id, attempt=consecutive_failures,
                     last_sequence=self._last_sequence,
-                    error=str((response or {}).get("error") or "invalid response"),
+                    error=str(response.get("error") or "invalid response")
+                    if isinstance(response, dict) else "invalid response",
                 )
                 self.stream_state_signal.emit({
                     "status": "reconnecting", "attempt": consecutive_failures,
@@ -19690,7 +19708,7 @@ class DaemonStreamWorker(QThread):
                 })
                 if consecutive_failures >= 6:
                     return False
-            self.msleep(250)
+            self.msleep(250 if isinstance(response, dict) and response.get("events") else 1000)
         return True
 
     def run(self):
@@ -42182,6 +42200,7 @@ class MainWindow(QMainWindow):
         if previous_callback is not None:
             notice.actionRequested.disconnect(previous_callback)
         notice._conversation_action_callback = action_callback
+        notice._daemon_reconnect_run_id = ""
         notice.set_action(action_text if action_callback is not None else "")
         if action_callback is not None:
             notice.actionRequested.connect(action_callback)
@@ -51923,6 +51942,8 @@ a {{ overflow-wrap: anywhere; }}
         state.replay_content_skip = 0
         state.daemon_cursor_run_id = submit_request_id
         state.daemon_applied_sequence = 0
+        state.daemon_reconnect_attempts = 0
+        state.daemon_transport_state = ""
         state.active_turn_user_message_id = user_message_id
         state.active_history_writer_owner = history_writer_owner
         if is_first_submit:
@@ -53164,6 +53185,7 @@ a {{ overflow-wrap: anywhere; }}
         state = self.get_session(session_id)
         if not self._event_matches_active_run(state, turn_id, run_id):
             return
+        previous_status = getattr(state, "daemon_transport_state", "")
         if getattr(state, "daemon_cursor_run_id", "") != run_id:
             state.daemon_cursor_run_id = run_id
             state.daemon_applied_sequence = 0
@@ -53172,12 +53194,48 @@ a {{ overflow-wrap: anywhere; }}
                 int(getattr(state, "daemon_applied_sequence", 0)),
                 int(data.get("sequence") or 0),
             )
-            if getattr(state, "daemon_transport_state", "") != "connected":
+            if previous_status != "connected":
+                state.turn_steerable = not bool(getattr(state, "favorite_run_id", ""))
                 self.set_session_phase("Analyzing", session_id)
+                self._clear_daemon_reconnect_notice(state, run_id)
         else:
             state.turn_steerable = False
             self.set_session_phase("正在重新连接", session_id)
+            self._show_daemon_reconnect_notice(
+                state, run_id, reconnecting=True, attempt=int(data.get("attempt") or 0),
+            )
         state.daemon_transport_state = str(data.get("status") or "")
+        if previous_status != state.daemon_transport_state and session_id == self.current_session_id:
+            self.normalize_session_ui(state)
+
+    def _show_daemon_reconnect_notice(self, state, run_id, *, reconnecting=False, attempt=0):
+        manual_attempts = int(getattr(state, "daemon_reconnect_attempts", 0))
+        count_text = f"已手动重连 {manual_attempts} 次。" if manual_attempts else ""
+        if reconnecting:
+            retry_text = f"正在自动重试（{min(attempt, 5)}/5）" if attempt else "正在重新连接"
+            text = f"{retry_text}，获取后台运行状态。{count_text}已显示内容保留，可停止当前任务。"
+        else:
+            text = (
+                "连接中断，暂时无法获取后台运行状态。"
+                f"{count_text}已显示内容保留，可重新连接，或点击输入框旁的停止按钮。"
+            )
+        notice = self._show_conversation_notice(
+            state, text, "info" if reconnecting else "warning",
+            action_text="" if reconnecting else "重新连接",
+            action_callback=None if reconnecting else (
+                lambda sid=state.session_id, rid=run_id: self._reconnect_daemon_stream(sid, rid)
+            ),
+        )
+        notice._daemon_reconnect_run_id = str(run_id)
+
+    def _clear_daemon_reconnect_notice(self, state, run_id):
+        notice = getattr(state, "conversation_notice", None)
+        if (notice is not None and _qt_object_alive(notice)
+                and getattr(notice, "_daemon_reconnect_run_id", "") == str(run_id)):
+            state.chat_layout.removeWidget(notice)
+            notice.hide()
+            notice.deleteLater()
+            state.conversation_notice = None
 
     def _reconnect_daemon_stream(self, session_id, run_id):
         state = self.get_session(session_id)
@@ -53192,7 +53250,15 @@ a {{ overflow-wrap: anywhere; }}
             return
         if getattr(state, "stop_pending", False) or not state.daemon_running:
             return
+        state.daemon_reconnect_attempts = int(getattr(state, "daemon_reconnect_attempts", 0)) + 1
+        state.daemon_transport_state = "reconnecting"
+        self._show_daemon_reconnect_notice(state, run_id, reconnecting=True)
         self.set_session_phase("正在重新连接", session_id)
+        log_chat_runtime_debug(
+            "daemon_manual_reconnect", session_id=session_id, run_id=run_id,
+            attempt=state.daemon_reconnect_attempts,
+            last_sequence=getattr(state, "daemon_applied_sequence", 0),
+        )
         state.daemon_worker = DaemonAttachWorker(
             self.daemon_client, session_id, run_id, turn_id=state.active_turn_id,
             starting_after=(getattr(state, "daemon_applied_sequence", 0)
@@ -53416,20 +53482,18 @@ a {{ overflow-wrap: anywhere; }}
             state.daemon_running = True
             state.turn_steerable = False
             state.daemon_transport_state = "disconnected"
-            self.set_session_phase("连接中断，后台状态待确认", state.session_id)
-            notice = self._show_conversation_notice(
-                state, "连接中断，后台状态待确认。已显示内容保留，可重新连接或停止。", "warning",
+            self.set_session_phase("连接中断，暂时无法获取后台运行状态", state.session_id)
+            log_chat_runtime_debug(
+                "daemon_reconnect_exhausted", session_id=state.session_id,
+                run_id=request_id, manual_attempts=getattr(state, "daemon_reconnect_attempts", 0),
+                last_sequence=getattr(state, "daemon_applied_sequence", 0),
+                error=str(result.get("error") or ""),
             )
-            reconnect = QPushButton("重新连接")
-            reconnect.setStyleSheet(product_button_style("secondary"))
-            reconnect.clicked.connect(
-                lambda checked=False, sid=state.session_id, rid=request_id:
-                    self._reconnect_daemon_stream(sid, rid)
-            )
-            notice.layout().addWidget(reconnect)
+            self._show_daemon_reconnect_notice(state, request_id)
             if state.session_id == self.current_session_id:
                 self.normalize_session_ui(state)
             return
+        self._clear_daemon_reconnect_notice(state, request_id)
         state.daemon_running = False
         state.turn_steerable = False
         state.execution_authorization = getattr(state.daemon_worker, "execution_authorization", None)

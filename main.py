@@ -213,6 +213,7 @@ from ui.primitives import (
 )
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
+from ui.chat_log_export import ChatLogExportButton
 from ui.theme_workspace import (
     WorkspaceThemeController,
     apply_theme_component_visibility,
@@ -30063,6 +30064,17 @@ class MainWindow(QMainWindow):
         td_layout.setContentsMargins(14, 12, 14, 14)
         td_layout.setSpacing(10)
 
+        chat_export_row = QHBoxLayout()
+        chat_export_row.addStretch()
+        self.chat_log_export_btn = ChatLogExportButton(
+            self._capture_chat_log_snapshot,
+            self.add_system_toast,
+            append_background_process_log,
+            self.tool_details_tab,
+        )
+        chat_export_row.addWidget(self.chat_log_export_btn)
+        td_layout.addLayout(chat_export_row)
+
         self.OBS_SECTION_PROMPT = 0
         self.OBS_SECTION_LOG = 1
         self.OBS_SECTION_DETAILS = 2
@@ -46339,6 +46351,39 @@ a {{ overflow-wrap: anywhere; }}
         if not path:
             return
         QApplication.clipboard().setText(path)
+
+    def _capture_chat_log_snapshot(self):
+        state = self.get_current_session()
+        if not state:
+            raise ValueError("请先打开一个对话。")
+        if not session_history_ready(state):
+            raise ValueError("对话记录尚未加载完成，请等待加载完成后重试。")
+        messages = copy.deepcopy(state.messages)
+        if not any(
+            isinstance(message, dict) and message.get("role") == "user"
+            and not _is_hidden_context_message(message)
+            for message in messages
+        ):
+            raise ValueError("当前对话还没有聊天记录，发送消息后即可下载。")
+        running = self._session_is_busy(state)
+        live_tools = {}
+        if running:
+            for tool_id, card in state.tool_cards.items():
+                if _qt_object_alive(card):
+                    live_tools[str(tool_id)] = {
+                        "args": copy.deepcopy(getattr(card, "args", None)),
+                        "result": copy.deepcopy(card.result or card.result_obj),
+                    }
+        return {
+            "session_id": state.session_id,
+            "title": self._resolved_session_title(state, messages),
+            "captured_at": datetime.now().astimezone(),
+            "messages": messages,
+            "timeline": snapshot_thinking_timeline(state.ui_timeline_events),
+            "running": running,
+            "turn_id": str(state.active_turn_id),
+            "live_tools": live_tools,
+        }
 
     def copy_observability_full_prompt(self):
         state = self.get_current_session()

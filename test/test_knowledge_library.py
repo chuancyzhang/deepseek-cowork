@@ -572,6 +572,17 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         catalog = self.lexiang.catalog(self.lexiang.snapshot())
         self.assertEqual(len(catalog["shared"]), 4)
 
+    def test_lexiang_entry_type_distinguishes_folders_from_pages_with_children(self):
+        scope = self.lexiang.snapshot()
+        for kind, has_children in (("folder", True), ("folder", False), ("page", True), ("file", False)):
+            with self.subTest(kind=kind, has_children=has_children):
+                item = self.lexiang._document(scope, {"id": "entry", "name": "资料", "entry_type": kind,
+                    "has_children": has_children, "edited_at": "2026-09-23T08:00:00Z"}, "space")
+                self.assertEqual(item["is_folder"], kind == "folder")
+                self.assertEqual(item["readable"], kind != "folder")
+                self.assertEqual(item["item_type"], kind)
+                self.assertEqual(item["updated_at"], "2026-09-23T08:00:00Z")
+
     def test_lexiang_team_catalog_and_cursor_pages_match_live_contract(self):
         from core.knowledge_sources import LexiangProvider
         fields = {"team_list_teams": {"page_token": {"type": "string"}},

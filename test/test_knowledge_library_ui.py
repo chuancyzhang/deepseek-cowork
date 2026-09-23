@@ -403,6 +403,40 @@ class MultiSourceLibraryUiTests(unittest.TestCase):
             self.assertEqual(page.tree.topLevelItemCount(), 0)
             self.assertEqual(page.items.count(), 0)
 
+    def test_lexiang_folders_navigate_before_reading_leaf_document(self):
+        caller = self.remote.call
+        def nested(config, tool, args):
+            if tool == "entry_list_children":
+                parent = args["parent_id"]
+                self.remote.calls.append((tool, dict(args)))
+                entry = ({"id": "folder", "name": "制度目录", "entry_type": "folder", "has_children": True}
+                         if parent == "root" else {"id": "subfolder", "name": "子目录", "entry_type": "folder", "has_children": True}
+                         if parent == "folder" else {"id": "doc", "name": "制度文件", "entry_type": "file"})
+                return {"status": "ok", "structured_content": {"entries": [entry]}}
+            return caller(config, tool, args)
+        self.lexiang.caller = nested
+        self.page.sources.setCurrentIndex(self.page.sources.findData("lexiang"))
+        page = self.page.page("lexiang")
+        self.wait_for(lambda: page.tree.topLevelItemCount() >= 4)
+        page.open_kb({"id": "space", "name": "公司制度库"})
+        self.wait_for(lambda: page.items.count() == 1)
+        for name in ("制度目录", "子目录"):
+            self.assertEqual(page.items.item(0).text(1), "文件夹")
+            page.select_item(page.items.item(0))
+            self.wait_for(lambda: page.items.count() == 1 and page.title.text().endswith(name))
+            self.assertEqual(page.content_stack.currentIndex(), 0)
+        self.assertFalse(any(tool == "entry_describe_ai_parse_content" for tool, _ in self.remote.calls))
+        self.assertTrue(page.up_button.isVisible())
+        page.select_item(page.items.item(0))
+        self.wait_for(lambda: "乐享正文" in page.reader.toPlainText())
+        page.back_to_list()
+        page.go_up()
+        self.wait_for(lambda: page.items.count() == 1 and page.title.text() == "公司制度库 / 制度目录")
+        self.assertEqual(page.folder, "folder")
+        page.go_up()
+        self.wait_for(lambda: page.items.count() == 1 and page.title.text() == "公司制度库")
+        self.assertFalse(page.up_button.isVisible())
+
     def test_cloud_refresh_bypasses_cache_and_preserves_directory(self):
         page = self.page.page("tencent-docs")
         page.open_kb({"id": "space", "name": "团队资料"})

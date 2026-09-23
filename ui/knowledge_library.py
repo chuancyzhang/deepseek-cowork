@@ -805,7 +805,7 @@ class KnowledgePage(QDialog):
             self.open_management("/platform/organizations/" + segment(data["id"]))
 
     def add_item(self, title, payload):
-        document = payload.get("document", payload.get("wiki", {}))
+        document = payload.get("document", payload.get("wiki", payload.get("folder", {})))
         task = payload.get("task", {})
         path = payload.get("path", task.get("path", ""))
         extension = (document.get("file_type") or os.path.splitext(path or str(title))[1].lstrip(".")).lower()
@@ -813,8 +813,10 @@ class KnowledgePage(QDialog):
                 "html": "网页", "pptx": "演示文稿"}.get(extension, "资料")
         if payload.get("ref", {}).get("wiki_slug"):
             kind = WIKI_TYPES.get(document.get("page_type"), "Wiki")
+        if "folder" in payload:
+            kind = "文件夹"
         state = task.get("status") or document.get("parse_status", "")
-        icon = qta.icon("fa5s.file-alt", color=DesignTokens.primary)
+        icon = qta.icon("fa5s.folder" if "folder" in payload else "fa5s.file-alt", color=DesignTokens.primary)
         return self.items.append([str(title), kind, friendly_date(document.get("updated_at") or task.get("updated_at")),
                                   STATUS.get(state, state)], payload, icon, payload.get("group_name", payload.get("project", "")))
 

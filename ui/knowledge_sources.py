@@ -331,7 +331,8 @@ class CloudKnowledgePage(KnowledgePage):
             else:
                 ref = self.service.reference(self.scope, value["knowledge_base_id"], value["title"], value["id"], url=value["url"])
                 self.add_item(value["title"], {"ref": ref, "document": value})
-        self.notice.setText("点击资料阅读，勾选后可批量添加。" if values else "此目录暂无资料。")
+        self.notice.setText(("点击文件夹进入下一级，点击文档阅读。" if any(v["is_folder"] for v in values)
+                             else "点击资料阅读，勾选后可批量添加。") if values else "此目录暂无资料。")
 
     def go_up(self):
         self.clear_view()

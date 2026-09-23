@@ -926,6 +926,15 @@ class LexiangProvider(McpKnowledgeProvider):
             raise KnowledgeError("invalid_response", "知识库响应缺少根目录。")
         return root
 
+    def _document(self, scope, item, collection):
+        # Lexiang uses entry_type for page/folder/file. has_children is not a
+        # folder flag: pages can have children and folders can be empty.
+        normalized = dict(item)
+        if item.get("entry_type"):
+            normalized["type"] = item["entry_type"]
+        normalized["updated_at"] = item.get("updated_at") or item.get("edited_at")
+        return super()._document(scope, normalized, collection)
+
     def children(self, scope, collection, parent="", page=1):
         values, more = self._paged(scope, "entry_list_children", {"parent_id": parent or self.root(scope, collection)}, "entries", page)
         if any(not any(item.get(key) for key in ("id", "file_id", "entry_id", "node_id")) for item in values):

@@ -31,7 +31,9 @@ except ImportError:  # pragma: no cover - dependency contract requires Pillow
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "5.2.0"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from core.app_version import APP_VERSION
 PRESET_NAME = "compact_reference_guide"
 
 BODY_ASCII_FONT = "Calibri"

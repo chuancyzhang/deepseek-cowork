@@ -8,13 +8,14 @@ deliverables into one observable, steerable, and recoverable workflow.
 
 This is a personal exploration project and is not affiliated with DeepSeek.
 
-Current app version: **5.2.0** · [Read the release notes](docs/releases/5.2.0.md)
+Current app version: **5.2.5** · [Read the release notes](docs/releases/5.2.5.md)
 
-## What matters in 5.2.0
+## Current highlights
 
-- **Bring knowledge into Agent work:** the new WeKnora-backed knowledge library lets you browse, search, and read documents and Wiki pages, then add selected references to conversations or projects.
-- **Save results for future work:** save local artifacts, conversation files, and project deliverables to a chosen knowledge base and folder, with multi-file uploads, file previews, and processing status.
-- **Discover skills through SkillHub:** browse, search, install, and update skills in the capability marketplace, then configure and enable them when ready.
+- **Multiple knowledge sources:** connect WeKnora, Tencent Docs, and Lexiang, use selected references, and save results within the chosen source and account scope.
+- **Optional accounts and connections:** manage sign-in, service connections, and capability permissions; existing configuration remains available until explicitly replaced.
+- **Optional data security:** all features start disabled; opt into capability checks, credential warnings, or tokenization of selected model-request text.
+- **Task control and recovery:** stopping signals supported tools to cancel while preserving existing output; knowledge context is added on demand without creating extra historical questions.
 
 ## Core workflow
 
@@ -49,7 +50,7 @@ See the [product document](docs/product.md) for the complete product model.
 
 1. Download the latest ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
 2. Extract it completely, then run `deepseek-cowork.exe`; do not launch it from inside the archive.
-3. On first launch, paste a DeepSeek API key to validate the official service, sync its models, and select the recommended `deepseek-v4-flash`. You can also configure another service later under **Settings → Models & Services**.
+3. On first launch, paste a DeepSeek API key to validate the official service, sync its models, and select the recommended `deepseek-flash`. You can also configure another service later under **Settings → Models & Services**.
 
 The reference environment is a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is
 recommended; a discrete GPU is not required.
@@ -65,6 +66,8 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+For the full optional authentication feature, also install `requirements-connections.txt`; see [source and release setup](docs/account-connections.md#源码与发行包).
+
 ### Build a release
 
 ```powershell
@@ -78,6 +81,10 @@ Treat the report from the current build as authoritative for size and contents.
 
 ## Documentation
 
+- [Settings and capability management](docs/unified-management.md) (Chinese): navigation and save boundaries
+- [Knowledge library](docs/knowledge_library.md) (Chinese): sources, references, uploads, and recovery
+- [Accounts and connections](docs/account-connections.md) (Chinese): sign-in, permissions, and administrator setup
+- [Data security](docs/data-security.md) (Chinese): optional checks and model-request text processing
 - [User guide](docs/user-guide.md) (Chinese): installation, setup, and complete task workflows
 - [Product document](docs/product.md) (Chinese): goals, principles, and boundaries
 - [Technical design](docs/technical-design.md) (Chinese): Agent Loop, Tools, safety, persistence, and desktop runtime

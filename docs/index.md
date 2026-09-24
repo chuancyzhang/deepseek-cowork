@@ -1,6 +1,6 @@
 # DeepSeek Cowork 文档中心
 
-当前应用版本：**5.2.0**
+当前应用版本：**5.2.5**
 
 这里集中维护 DeepSeek Cowork 的当前态文档。第一次使用先读用户指南；准备升级
 先读发布说明；理解实现或扩展能力时再进入技术文档。
@@ -9,7 +9,10 @@
 
 | 你的目标 | 从这里开始 | 继续阅读 |
 | --- | --- | --- |
-| 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.2.0 发布说明](releases/5.2.0.md) |
+| 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.2.5 发布说明](releases/5.2.5.md) |
+| 管理能力、项目和设置 | [设置与能力管理](unified-management.md) | [执行授权](GOD_MODE.md) |
+| 使用资料与保存成果 | [资料库](knowledge_library.md) | [账号与连接](account-connections.md) |
+| 登录外部服务或恢复认证 | [账号与连接](account-connections.md) | [用户指南](user-guide.md) |
 | 判断产品适合什么工作 | [产品文档](product.md) | [路线图](roadmap.md) |
 | 理解 Agent 如何执行与恢复 | [技术设计](technical-design.md) | [Skill 系统](skill-system.md) |
 | 创建、安装或调试能力 | [Skill 系统](skill-system.md) | [技术设计](technical-design.md) |
@@ -40,7 +43,11 @@
 ## 内容基线
 
 - 当前行为以 `core/`、`main.py`、`ui/`、内置能力清单和测试为准。
-- 当前态文档只描述 5.2.0；历史版本号只保留在 `docs/releases/`。
+- 当前态文档以 `core/app_version.py` 的 5.2.5 为源码基线；历史版本可在发布记录、兼容说明和带日期的验证记录中引用，不代表当前版本已完成全部验收。
 - Markdown 是权威内容源；已删除的派生 Word 文档不属于当前文档基线。
 - `skills/**/SKILL.md` 与 `ai_skills/**` 是运行时或上游能力内容，不与产品文档混写。
 - 发布变化先进入对应版本的发布说明；只有仍然成立的行为才进入当前态文档。
+- 截图以[用户指南](user-guide.md)引用的 `docs/guides/user-guide/` 为基准，同场景直接复用；独有专题图按需保留。旧 UI 验证脚本默认输出到 `.tmp/documentation-qa/`，不自动覆盖文档截图。
+- 文档校验使用 `.venv/Scripts/python.exe scripts/check_docs.py` 与 `.venv/Scripts/python.exe -m pytest test/test_documentation.py -q`；检查版本声明、链接、锚点和截图场景，不固定截图张数。
+
+本次同步范围、截图清单和验证边界见[5.2.5 文档维护记录](documentation-update-5.2.5.md)。

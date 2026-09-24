@@ -1,3 +1,8 @@
+"""Capture isolated UI QA scenarios, not the canonical user-guide images.
+
+The maintained guide uses docs/guides/user-guide/. Review captures manually
+before promoting them to documentation; legacy scenario names stay in .tmp.
+"""
 import os
 import sys
 import tempfile
@@ -29,7 +34,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 import main
 
 
-OUTPUT_DIR = Path(os.environ.get("COWORK_SCREENSHOT_OUTPUT_DIR") or (ROOT / "images" / "user-guide"))
+OUTPUT_DIR = Path(os.environ.get("COWORK_SCREENSHOT_OUTPUT_DIR") or (ROOT / ".tmp" / "documentation-qa"))
 SCREENSHOT_SCOPE = str(os.environ.get("COWORK_SCREENSHOT_SCOPE") or "").strip().lower()
 
 
@@ -891,7 +896,7 @@ def main_run():
             render_browser_skill_setup(window, app)
             return
         if SCREENSHOT_SCOPE == "attachment-preview":
-            image_path = ROOT / "images" / "user-guide" / "s09-interface-overview.png"
+            image_path = ROOT / "docs" / "guides" / "user-guide" / "03-first-chat-01.png"
             if not image_path.is_file():
                 raise RuntimeError(f"Attachment preview fixture is missing: {image_path}")
             window.show_conversation_page()

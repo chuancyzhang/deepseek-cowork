@@ -19,6 +19,7 @@ from .deepseek import (
 from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
 from core.conversation_integrity import ensure_tool_call_sequence
 from core.tool_images import build_responses_tool_output
+from core.data_security import project_provider_request
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -646,6 +647,7 @@ class OpenAIProvider(LLMProvider):
         elif self.reasoning_effort:
             params["reasoning_effort"] = self.reasoning_effort
 
+        params = project_provider_request(self, params, "chat_completions", request_context)
         stream = self._create_chat_completion_stream(params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -916,6 +918,7 @@ class OpenAIProvider(LLMProvider):
         if client_request_id:
             params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
 
+        params = project_provider_request(self, params, "responses", request_context)
         stream = self.client.responses.create(**params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -1640,6 +1643,7 @@ class AnthropicProvider(LLMProvider):
         if api_tools:
             kwargs["tools"] = api_tools
 
+        kwargs = project_provider_request(self, kwargs, "anthropic", request_context)
         with self.client.messages.stream(**kwargs) as stream:
             if not _register_provider_stream(request_context, stream):
                 return

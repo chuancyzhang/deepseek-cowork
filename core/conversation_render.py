@@ -34,6 +34,13 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
     while scope_end < len(messages) and not starts_scope(messages[scope_end]):
         scope_end += 1
     messages = messages[scope_start:scope_end]
+    # Display projections only. Never mutate provider/native replay history.
+    messages = [
+        {**message, "content": message["meta"]["security_display_content"]}
+        if isinstance(message, dict) and message.get("role") == "assistant"
+        and isinstance(message.get("meta"), dict) and "security_display_content" in message["meta"]
+        else message for message in messages
+    ]
     start -= scope_start
     end -= scope_start
     slots = [[message] for message in messages]
@@ -389,6 +396,8 @@ def build_conversation_render_items(messages):
             if reasoning:
                 assistant_group["reasoning_segments"].append(reasoning)
             content = "" if internal_ppt_stage else raw_message.get("content") or ""
+            if not internal_ppt_stage:
+                content = (raw_message.get("meta") or {}).get("security_display_content", content)
             if content:
                 assistant_group["content_segments"].append(content)
             content_parts = raw_message.get("content_parts")

@@ -881,6 +881,7 @@ class LLMWorker(QThread):
         dependency_coordinator=None,
         request_id=None,
         execution_authorization=None,
+        data_security_policy=None,
     ):
         super().__init__()
         self.messages, self.excluded_provider_message_ids = project_provider_messages(messages)
@@ -912,6 +913,15 @@ class LLMWorker(QThread):
         # Flags for control
         self.is_paused = False
         self.is_stopped = False
+        from core.data_security import begin_run
+        self.data_security_run = begin_run(
+            config_manager, policy=data_security_policy, scope=self.conversation_id or self.session_id,
+            run_id=self.request_id or self.turn_id,
+            callback=self._data_security_event, abort_check=lambda: self.is_stopped,
+        )
+        self._security_compat = bool(self.data_security_run.policy["enabled"] and self.data_security_run.policy["tokenize"]) or any(
+            (m.get("meta") or {}).get("data_security_tokens") for m in self.messages if isinstance(m, dict)
+        )
         self._provider_stream_lock = threading.Lock()
         self._active_provider_stream = None
         self._active_provider_stream_opened_at = 0.0
@@ -1319,6 +1329,7 @@ class LLMWorker(QThread):
             run_context=run_context,
             skill_catalog_service=self.skill_catalog_service,
             dependency_coordinator=self.dependency_coordinator,
+            data_security_policy=self.data_security_run.policy,
         )
 
     @Slot(str)
@@ -1558,6 +1569,15 @@ class LLMWorker(QThread):
         self.step_signal.emit(f"System: Applied {len(pending)} guidance message(s).")
         return True
 
+    def _data_security_event(self, event):
+        self.observability_signal.emit(event)
+        self.step_signal.emit("数据安全：" + str(event.get("message") or ""))
+
+    def _close_data_security(self):
+        run = getattr(self, "data_security_run", None)
+        if run is not None:
+            run.close()
+
     def _append_ledger_message(self, current_messages, generated_messages, message):
         ledger_message = json_copy(message, {})
         if not ledger_message.get("id"):
@@ -1568,6 +1588,14 @@ class LLMWorker(QThread):
         worker_request_id = str(getattr(self, "request_id", "") or "")
         meta = ledger_message.get("meta") if isinstance(ledger_message.get("meta"), dict) else {}
         meta = dict(meta)
+        security_run = getattr(self, "data_security_run", None)
+        if security_run is not None and self._security_compat and ledger_message.get("role") == "assistant":
+            if getattr(self, "_security_compat", False):
+                meta["data_security_tokens"] = True
+            original = ledger_message.get("content")
+            display = security_run.restore_text(original)
+            if display != original:
+                meta["security_display_content"] = display
         if worker_turn_id:
             meta.setdefault("turn_id", worker_turn_id)
         if worker_request_id:
@@ -2963,6 +2991,12 @@ class LLMWorker(QThread):
         return True
 
     def run(self):
+        try:
+            self._run_main()
+        finally:
+            self._close_data_security()
+
+    def _run_main(self):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is
         # sanitized after the concrete provider/protocol is known so Responses
         # replay data is not discarded before request preparation.
@@ -3088,6 +3122,7 @@ class LLMWorker(QThread):
                         reasoning_effort=self.run_context.get("reasoning_effort") or None,
                         model_profile=self.run_context.get("selected_model_profile"),
                     )
+                    provider.data_security_run = self.data_security_run
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     attempt_id = f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}"
                     assistant_message_id = uuid.uuid5(
@@ -3286,12 +3321,15 @@ class LLMWorker(QThread):
                             elif type_ == "content":
                                 c_content = chunk["content"]
                                 chunk_content += c_content
-                                self.content_signal.emit(c_content)
+                                if self._security_compat and "[[CW:" in chunk_content:
+                                    self.content_snapshot_signal.emit(self.data_security_run.restore_text(chunk_content))
+                                else:
+                                    self.content_signal.emit(c_content)
 
                             elif type_ == "content_snapshot":
                                 canonical_content = str(chunk.get("content") or "")
                                 chunk_content = canonical_content
-                                self.content_snapshot_signal.emit(canonical_content)
+                                self.content_snapshot_signal.emit(self.data_security_run.restore_text(canonical_content) if self._security_compat else canonical_content)
                                 self.observability_signal.emit({
                                     "type": "provider_content_reconciled",
                                     "turn_id": self.turn_id,
@@ -3824,6 +3862,37 @@ class LLMWorker(QThread):
                         }
                     
                     if tool_calls:
+                        # Resolve before journal identity and before any tool in the
+                        # batch executes. The assistant/native replay stays original.
+                        security_args = {}
+                        original_required = False
+                        for security_tool in (tool_calls if self._security_compat else []):
+                            try:
+                                raw = security_tool.function.arguments
+                                candidate = json.loads(raw) if isinstance(raw, str) else raw
+                            except (ValueError, TypeError):
+                                continue  # existing invalid-JSON behavior owns this
+                            name = str(security_tool.function.name or "")
+                            record = self.skill_manager.get_tool_record(name) or {}
+                            trusted = record.get("source_kind") == "core_builtin"
+                            resolved = self.data_security_run.resolve_tool_arguments(name, candidate, trusted=trusted)
+                            if resolved["status"] != "complete":
+                                original_required = True
+                            security_args[str(security_tool.id)] = resolved["arguments"]
+                        if original_required:
+                            already_raw = self.data_security_run.raw_mode
+                            self.data_security_run.use_original()
+                            for security_tool in tool_calls:
+                                self._append_ledger_message(current_messages, generated_messages, {
+                                    "id": uuid.uuid4().hex, "role": "tool", "tool_call_id": security_tool.id,
+                                    "content": json.dumps({"status": "not_executed_original_context_required",
+                                        "message": "本批工具均未执行。请根据用户原文重新生成参数，不要使用 [[CW: 开头的占位符。"}, ensure_ascii=False),
+                                })
+                            tool_round_context = None
+                            if already_raw:
+                                final_content = "工具参数仍包含无法还原的占位符，相关操作未执行。原始消息和已有成果已保留，请调整请求后继续。"
+                                break
+                            continue
                         prepared_tool_executions = {}
                         for tool in tool_calls:
                             prepared_name = str(tool.function.name or "").strip()
@@ -3837,6 +3906,7 @@ class LLMWorker(QThread):
                                     prepared_args = {"_invalid_json": prepared_raw_args}
                             else:
                                 prepared_args = {}
+                            prepared_args = security_args.get(str(tool.id), prepared_args)
                             execution_id, args_hash = self._tool_execution_identity(
                                 tool,
                                 prepared_args,
@@ -3964,6 +4034,7 @@ class LLMWorker(QThread):
                                     args = {}
                                     self.output_signal.emit(f"Tool Args Parse Fallback: {name} received invalid JSON arguments.")
                             execution_info = prepared_tool_executions.get(str(tool.id or ""), {})
+                            args = security_args.get(str(tool.id), args)
                             execution_id = str(execution_info.get("execution_id") or "")
                             execution_policy = execution_info.get("policy") or self._tool_execution_policy(name)
                             existing_execution = execution_info.get("existing")
@@ -4719,7 +4790,7 @@ class LLMWorker(QThread):
         self._append_pending_guidance(current_messages, generated_messages, close=True)
         self.finished_signal.emit({
             "reasoning": full_reasoning.strip(),
-            "content": final_content,
+            "content": self.data_security_run.restore_text(final_content) if self._security_compat else final_content,
             "content_parts": final_content_parts,
             "role": "assistant",
             "duration": total_duration,

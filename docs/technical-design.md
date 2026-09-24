@@ -536,3 +536,13 @@ while not stopped:
 | `core/process_utils.py` | 外部程序进程环境隔离 |
 | `web/editors/` | 固定版本离线编辑器与许可证 |
 | `main.py` | 桌面 UI、会话状态与协议到界面的投影 |
+
+## 14. 可选数据安全插件
+
+`core/data_security.py` 是轻量宿主边界，提供 `begin_run`、`inspect_capability`、`project_request`、`resolve_tool_arguments`、`close`。应用侧插件位于 `bundled_plugins/data_security/`，配置页面主体也由插件提供；`ui/data_security.py` 隔离页面加载失败。未启用的请求保持原对象，不导入检测模块或创建安全存储。
+
+任务创建时冻结配置，子 Agent 显式继承策略和所属会话。Provider 在原有附件展开后、SDK 发送前转换用户/工具文本副本，固定系统前缀、工具定义顺序、鉴权和助手原生回放不变。令牌策略改变可能影响历史前缀缓存，稳定策略下使用会话 HMAC 令牌及有限转换缓存。映射事务提交后才发送转换结果，失败可见地使用原文。
+
+工具参数处理早于原有授权和执行记录身份计算。仅宿主允许的结构化字段可还原；不确定参数整批记录未执行并切换原文重新生成一次，不重放已完成副作用。模型原始回复和显示副本分别保存，关闭插件后通过独立兼容模块与历史显示副本维持阅读。
+
+本地风险检查在能力安装更新、MCP 配置保存或正常连接取得描述时异步触发，使用单并发有界队列；不在启动时扫描，不新增完整 AI-Infra-Guard 或常驻服务依赖。设置、覆盖范围及上限见[数据安全说明](data-security.md)，源码测试与性能见[验证记录](data-security-validation.md)。

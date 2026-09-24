@@ -12082,7 +12082,7 @@ class SettingsDialog(QDialog):
 
         def add_settings_page(label, icon_name, page):
             allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "消息连接", "组件与依赖", "更新与关于"},
+                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "组件与依赖", "更新与关于"},
                 "capabilities": {"MCP 服务", "智能体"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
@@ -12761,13 +12761,19 @@ class SettingsDialog(QDialog):
         add_settings_page("工作区与存储", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("变量与凭据", "fa5s.key", variable_page)
+        from ui.data_security import create_data_security_panel
+        from core.data_security import read_config
+        security_page, security_layout = make_scroll_page("数据安全", "按需启用的本地安全插件。")
+        self.data_security_panel = create_data_security_panel(read_config(self.config_manager))
+        security_layout.addWidget(self.data_security_panel)
+        add_settings_page("数据安全", "fa5s.shield-alt", security_page)
         add_settings_page("消息连接", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
             from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "工作区与存储", "组件与依赖", "更新与关于"]
+            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "组件与依赖", "更新与关于"]
             pages = dict(zip(self._page_labels, self._settings_pages))
             items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
             self.nav_combo.clear()
@@ -12926,6 +12932,8 @@ class SettingsDialog(QDialog):
             self.history_dir_input.setText(config["history_dir"])
             self.chat_workspace_root_input.setText(config["chat_workspace_root"])
             self.god_mode_check.setChecked(config["god_mode"])
+            from core.data_security import read_config
+            self.data_security_panel.set_value(read_config(self.config_manager))
             self.agent_profile_manager.profiles = json.loads(json.dumps(config["agent_profiles"]))
             self.agent_profile_manager._current_index = -1
             self.agent_profile_manager._refresh_profile_list()
@@ -13016,6 +13024,7 @@ class SettingsDialog(QDialog):
         for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
             manager.changed.connect(callback)
         self.theme_settings_panel.changed.connect(callback)
+        self.data_security_panel.changed.connect(callback)
 
     @staticmethod
     def _strip_settings_state_metadata(value):
@@ -13048,6 +13057,7 @@ class SettingsDialog(QDialog):
                 "history_dir": self.history_dir_input.text().strip(),
                 "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
                 "god_mode": self.god_mode_check.isChecked(),
+                "data_security": self.data_security_panel.state(),
                 "download_sources": source_state,
             },
             "appearance": self.theme_settings_panel.state_signature(),
@@ -14518,6 +14528,14 @@ class SettingsDialog(QDialog):
         current_config_state = current_state["config"]
         baseline_config_state = baseline_state["config"]
         changed_keys = {key for key in current_config_state if current_config_state[key] != baseline_config_state[key]}
+        if "data_security" in changed_keys:
+            if not self.data_security_panel.validate():
+                self.select_initial_page("数据安全")
+                return
+            from core.data_security import read_config
+            if read_config(self.config_manager) not in (baseline_config_state["data_security"], current_config_state["data_security"]):
+                QMessageBox.warning(self, "配置已更新", "数据安全配置已在其他位置更新，当前输入已保留，请重新核对。")
+                return
         config_changed = bool(changed_keys)
         from core.settings_changes import merge_settings_objects
         try:
@@ -14583,6 +14601,7 @@ class SettingsDialog(QDialog):
                 "history_dir": self.config_manager.get_chat_history_dir(),
                 "chat_workspace_root": self.config_manager.get_chat_workspace_root(),
                 "god_mode": self.config_manager.get_god_mode(),
+                "data_security": self.config_manager.get("data_security", {}),
                 "download_sources": self.config_manager.get("download_sources", {}),
             }
         if config_changed:
@@ -14619,6 +14638,8 @@ class SettingsDialog(QDialog):
                         )
                     if "god_mode" in changed_keys:
                         self.config_manager.set_god_mode(current_config_state["god_mode"])
+                    if "data_security" in changed_keys:
+                        self.config_manager.set_data_security(current_config_state["data_security"])
                     self.download_sources = pending_download_sources
                     if "download_sources" in changed_keys:
                         self.config_manager.set("download_sources", self.download_sources)
@@ -14664,6 +14685,8 @@ class SettingsDialog(QDialog):
                             )
                         if "god_mode" in changed_keys:
                             self.config_manager.set_god_mode(previous_config["god_mode"])
+                        if "data_security" in changed_keys:
+                            self.config_manager.set("data_security", previous_config["data_security"])
                         if "download_sources" in changed_keys:
                             self.config_manager.set(
                                 "download_sources",
@@ -15135,6 +15158,26 @@ class AdvancedSkillsCenterDialog(QDialog):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        from core.data_security import read_config, recent_events
+        security_config = read_config(self.config_manager)
+        if security_config["enabled"] and (security_config["skill_check"] or security_config["mcp_check"]):
+            security_status = QLabel()
+            security_status.setWordWrap(True)
+            security_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            security_status.setObjectName("CapabilitySecurityStatus")
+            bind_theme(security_status, lambda _resolved=None: security_status.setStyleSheet(
+                f"QLabel#CapabilitySecurityStatus {{ color: {DesignTokens.text_secondary}; }}"), surface="management")
+            object_ids = {str(skill.get("name") or ""), str(skill.get("mcp_server_id") or "")}
+            def refresh_security_status():
+                latest = next((e for e in reversed(recent_events()) if e.get("event") in {"skill", "mcp"}
+                               and e.get("object_id") in object_ids), None)
+                security_status.setText("数据安全：" + (latest["message"] if latest else "尚未检查；不代表安全。"))
+            refresh_security_status()
+            security_timer = QTimer(panel)
+            security_timer.setInterval(2000)
+            security_timer.timeout.connect(refresh_security_status)
+            security_timer.start()
+            layout.addWidget(security_status)
         title_row = QHBoxLayout()
         title = QLabel(skill.get("display_name") or skill.get("name") or "未命名能力")
         title.setWordWrap(True)

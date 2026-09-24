@@ -1,0 +1,7 @@
+Based on Tencent Zhuque Lab AI-Infra-Guard
+https://github.com/Tencent/AI-Infra-Guard
+
+The local capability risk categories and candidate-pattern approach are adapted
+from AI-Infra-Guard (Apache-2.0), commit 30f421257c3d1f0ce0a50b32e8f75dc0a3180773.
+Local adaptation: bounded, advisory static checks; no model-based audit runtime.
+Matches are audit hints, not proof of malicious execution or data exfiltration.

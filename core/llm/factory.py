@@ -33,7 +33,10 @@ class LLMFactory:
                 "prompt_cache_key_param": config_manager.get("prompt_cache_key_param", ""),
                 "api_protocol": config_manager.get("api_protocol", "chat_completions"),
             }
-        return LLMFactory.create_provider_from_profile(profile, reasoning_effort=reasoning_effort)
+        provider = LLMFactory.create_provider_from_profile(profile, reasoning_effort=reasoning_effort)
+        from core.data_security import read_config
+        provider.data_security_policy = read_config(config_manager)
+        return provider
 
     @staticmethod
     def create_provider_from_profile(profile, reasoning_effort=None):

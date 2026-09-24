@@ -1,0 +1,118 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtWidgets import QApplication, QScrollArea, QMessageBox
+from core.config_manager import ConfigManager
+from core.data_security import normalize_config
+from main import SettingsDialog
+
+
+class DataSecurityUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msyh.ttc"
+        if font_path.exists():
+            QFontDatabase.addApplicationFont(str(font_path))
+            cls.app.setFont(QFont("Microsoft YaHei UI", 9))
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        events = patch("bundled_plugins.data_security.panel.recent_events", return_value=[])
+        events.start()
+        self.addCleanup(events.stop)
+        for target in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir", "core.env_utils.get_app_data_dir"):
+            patcher = patch(target, return_value=self.temp.name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.config = ConfigManager()
+        self.dialog = SettingsDialog(self.config, initial_page_label="数据安全")
+        self.panel = self.dialog.data_security_panel
+        self.addCleanup(self.close_dialog)
+
+    def close_dialog(self):
+        self.dialog._allow_close_without_prompt = True
+        self.dialog.close()
+        self.dialog.deleteLater()
+        self.app.processEvents()
+
+    def capture(self, name):
+        root = os.environ.get("COWORK_SECURITY_SCREENSHOTS")
+        if root:
+            Path(root).mkdir(parents=True, exist_ok=True)
+            self.dialog.resize(820, 740)
+            # Suppress unrelated updater IO in screenshot-only showEvent.
+            self.dialog._automatic_update_check_started = True
+            self.dialog.show()
+            self.app.processEvents()
+            self.assertTrue(self.dialog.grab().save(str(Path(root) / (name + ".png"))))
+
+    def test_default_off_enable_does_not_select_features_and_persistence(self):
+        self.assertEqual(self.panel.state(), normalize_config())
+        self.assertFalse(self.dialog._settings_dirty)
+        self.capture("data-security-disabled")
+        self.panel.enabled.setChecked(True)
+        self.assertFalse(any(c.isChecked() for c in self.panel.checks.values()))
+        self.assertFalse(any(c.isChecked() for c in self.panel.categories.values()))
+        self.panel.checks["tokenize"].setChecked(True)
+        self.dialog.save_settings()
+        self.assertIn("至少", self.panel.validation.text())
+        self.assertFalse(self.config.get_data_security()["enabled"])
+        self.capture("data-security-validation")
+        self.panel.categories["email"].setChecked(True)
+        self.dialog.save_settings()
+        self.assertTrue(ConfigManager().get_data_security()["categories"]["email"])
+        self.assertFalse(self.dialog._settings_dirty)
+        self.capture("data-security-enabled")
+
+    def test_save_failure_preserves_draft_and_rollback(self):
+        self.panel.enabled.setChecked(True)
+        self.panel.checks["skill_check"].setChecked(True)
+        with patch.object(self.config, "_write_config", side_effect=[OSError("disk full"), None]), patch("main.QMessageBox.critical") as error:
+            self.dialog.save_settings()
+        self.assertTrue(error.called)
+        self.assertFalse(ConfigManager().get_data_security()["enabled"])
+        self.assertTrue(self.panel.enabled.isChecked())
+        self.assertTrue(self.dialog._settings_dirty)
+        self.dialog.discard_page_changes()
+        self.assertFalse(self.panel.enabled.isChecked())
+
+    def test_missing_plugin_does_not_break_settings_and_can_be_disabled(self):
+        from ui.data_security import create_data_security_panel, UnavailableSecurityPanel
+        with patch("bundled_plugins.data_security.panel.DataSecurityPanel", side_effect=ImportError("missing")):
+            panel = create_data_security_panel({"enabled": True})
+        self.assertIsInstance(panel, UnavailableSecurityPanel)
+        panel.disable.click()
+        self.assertFalse(panel.state()["enabled"])
+        panel.deleteLater()
+
+    def test_small_scrollable_page_keeps_controls_reachable(self):
+        from bundled_plugins.data_security.panel import DataSecurityPanel
+        panel = DataSecurityPanel({"enabled": True})
+        panel.refresh_button.click()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        scroll.resize(460, 640)
+        scroll.show()
+        self.app.processEvents()
+        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
+        self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
+        scroll.ensureWidgetVisible(panel.cancel_button)
+        self.app.processEvents()
+        self.assertGreater(scroll.verticalScrollBar().value(), 0)
+        root = os.environ.get("COWORK_SECURITY_SCREENSHOTS")
+        if root:
+            self.assertTrue(scroll.grab().save(str(Path(root) / "data-security-small.png")))
+        scroll.close()
+        scroll.deleteLater()
+
+
+if __name__ == "__main__":
+    unittest.main()

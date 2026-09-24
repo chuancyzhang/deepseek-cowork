@@ -39,6 +39,31 @@ class SkillGenerator:
         )
         return params
 
+    def _complete(self, messages):
+        from core.data_security import begin_run, delete_scope
+        run = begin_run(self.config_manager)
+        try:
+            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            original = self._build_chat_params(messages)
+            response = client.chat.completions.create(**run.project_request(original, "chat_completions"))
+            content = response.choices[0].message.content
+            if run.policy["enabled"] and run.policy["tokenize"] and "[[CW:" in str(content):
+                # Generated executable code is opaque: never perform string
+                # substitution inside it. Regenerate once from original inputs.
+                run.use_original()
+                response = client.chat.completions.create(**original)
+                content = response.choices[0].message.content
+                if "[[CW:" in str(content):
+                    raise ValueError("生成内容仍含未还原占位符，尚未安装或执行，请调整输入后重试。")
+            return json.loads(content)
+        finally:
+            run.close()
+            if run.plugin is not None:
+                try:
+                    delete_scope(run.scope)
+                except Exception:
+                    run.notice("cleanup", "failed", "临时令牌映射清理未完成，可在数据安全记录中查看。")
+
     def refactor_code(self, code: str) -> dict:
         """
         Refactor the given code into a reusable skill function using LLM.
@@ -71,16 +96,10 @@ Return ONLY a JSON object with the following structure (no markdown, no extra te
         user_prompt = f"Refactor this code into a reusable skill:\n\n```python\n{code}\n```"
 
         try:
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            response = client.chat.completions.create(
-                **self._build_chat_params([
+            return self._complete([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ])
-            )
-            
-            content = response.choices[0].message.content
-            return json.loads(content)
         except Exception as e:
             return {"error": str(e)}
 
@@ -131,15 +150,9 @@ Return ONLY a JSON object:
         user_prompt = f"User Requirement: {user_requirement}\n\nRepository Context:\n{repo_context}"
 
         try:
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            response = client.chat.completions.create(
-                **self._build_chat_params([
+            return self._complete([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ])
-            )
-            
-            content = response.choices[0].message.content
-            return json.loads(content)
         except Exception as e:
             return {"error": str(e)}

@@ -2668,6 +2668,8 @@ class SkillManager:
             os.replace(staging_path, target_path)
             installed = True
             staging_path = ""
+            from .data_security import inspect_capability
+            inspect_capability(self.config_manager, "skill", skill_name, target_path)
             dependency_status = self._prepare_skill_dependencies(skill_name, target_path) if prepare_dependencies else {"ok": True}
             if on_commit:
                 on_commit(skill_name)

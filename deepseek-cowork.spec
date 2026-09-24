@@ -711,6 +711,8 @@ def _collect_minimal_pyside6():
 qt_minimal_datas = _collect_minimal_pyside6()
 
 application_datas = []
+application_datas.append((os.path.join(SPEC_DIR, "bundled_plugins", "data_security", "NOTICE.txt"), "bundled_plugins/data_security"))
+application_datas.append((os.path.join(SPEC_DIR, "bundled_plugins", "data_security", "LICENSE.txt"), "bundled_plugins/data_security"))
 for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editors", "dist")):
     application_datas.extend(
         _collect_tree_for_analysis(
@@ -781,6 +783,7 @@ a = Analysis(
         + qqbot_hidden
         + MCP_ANALYSIS_HIDDENIMPORTS
         + DYNAMIC_SKILL_CORE_HIDDENIMPORTS
+        + collect_submodules("bundled_plugins.data_security")
         + [
             'bs4',
             'yaml',

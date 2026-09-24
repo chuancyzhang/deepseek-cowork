@@ -194,6 +194,14 @@ def build_incremental_memory_update_messages(current_memory, batch_text, batch_i
 
 
 def collect_llm_content(provider, messages, max_retries=5, progress_callback=None):
+    from core.data_security import close_provider_run
+    try:
+        return _collect_llm_content_with_retry(provider, messages, max_retries, progress_callback)
+    finally:
+        close_provider_run(provider)
+
+
+def _collect_llm_content_with_retry(provider, messages, max_retries=5, progress_callback=None):
     max_retries = max(1, int(max_retries or 1))
     last_error = None
     for attempt in range(1, max_retries + 1):
@@ -221,6 +229,9 @@ def _collect_llm_content_once(provider, messages):
     if errors:
         raise RuntimeError("; ".join(errors))
     content = "".join(parts).strip()
+    security_run = getattr(provider, "data_security_run", None)
+    if security_run is not None:
+        content = security_run.restore_text(content)
     if not content:
         raise RuntimeError("LLM did not return memory content.")
     return content

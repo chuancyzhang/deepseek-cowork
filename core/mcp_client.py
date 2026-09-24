@@ -654,7 +654,12 @@ def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
 def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None):
     from .connections.mcp import selected_connection, execute_mcp
     if selected_connection(server_config, config_manager):
-        return execute_mcp(server_config, config_manager, skill_manager)
+        result = execute_mcp(server_config, config_manager, skill_manager)
+        if result.get("ok"):
+            from .data_security import inspect_capability
+            inspect_capability(config_manager, "mcp", server_config.get("id", "MCP"),
+                               {"transport": server_config.get("transport"), "tools": result.get("tools", [])})
+        return result
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
@@ -676,6 +681,9 @@ def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
         tools = _run_async(_list_mcp_server_tools_async(prepared))
+        from .data_security import inspect_capability
+        inspect_capability(config_manager, "mcp", server_config.get("id", server_name),
+                           {"transport": server_config.get("transport"), "tools": tools})
         logger.info("mcp_tools.list.finish server=%s tool_count=%s", server_name, len(tools))
         return {"ok": True, "error": "", "tools": tools}
     except Exception as exc:

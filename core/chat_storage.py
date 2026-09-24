@@ -1883,6 +1883,13 @@ class ChatStorage:
             ]
             conn.execute("DELETE FROM im_sessions WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        try:
+            from .data_security import delete_scope
+            delete_scope(conversation_id)
+        except Exception as exc:
+            from .data_security import publish
+            publish({"event": "delete_mapping", "status": "failed", "error_type": type(exc).__name__,
+                     "message": "会话已删除，但本地令牌映射清理未完成。"})
         if artifact_paths:
             from .env_utils import get_app_data_dir
 

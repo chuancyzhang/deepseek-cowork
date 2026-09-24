@@ -1405,8 +1405,15 @@ class ConfigManager:
         normalized = self._normalize_mcp_servers(servers)
         if normalized == self.config.get("mcp_servers"):
             return
+        previous = {s.get("id"): s for s in self.config.get("mcp_servers", [])}
         self.config["mcp_servers"] = normalized
         self.save_config()
+        from .data_security import inspect_capability
+        for server in normalized:
+            if previous.get(server.get("id")) != server:
+                inspect_capability(self, "mcp", server.get("id", "MCP"),
+                                   {"transport": server.get("transport"), "command": server.get("command"),
+                                    "tools": server.get("tools", [])})
 
     def upsert_mcp_servers(self, servers):
         current = self.get_mcp_servers()
@@ -1613,6 +1620,14 @@ class ConfigManager:
         if skill_name in self.config.get("enabled_skills", []):
             return True
         return bool(default_enabled)
+
+    def get_data_security(self):
+        from .data_security import read_config
+        return read_config(self)
+
+    def set_data_security(self, value):
+        from .data_security import validate_config
+        self.set("data_security", validate_config(value))
 
     def set_skill_enabled(self, skill_name, enabled, *, persist_strict=False):
         disabled = set(self.config.get("disabled_skills", []))

@@ -3883,14 +3883,29 @@ class LLMWorker(QThread):
                             already_raw = self.data_security_run.raw_mode
                             self.data_security_run.use_original()
                             for security_tool in tool_calls:
+                                feedback = {"status": "not_executed_original_context_required",
+                                    "original_values": self.data_security_run.original_values(security_tool.function.arguments),
+                                    "message": "本批工具均未执行。请根据用户原文重新生成参数，不要使用 [[CW: 开头的占位符。"}
+                                feedback_text = json.dumps(feedback, ensure_ascii=False)
                                 self._append_ledger_message(current_messages, generated_messages, {
                                     "id": uuid.uuid4().hex, "role": "tool", "tool_call_id": security_tool.id,
-                                    "content": json.dumps({"status": "not_executed_original_context_required",
-                                        "message": "本批工具均未执行。请根据用户原文重新生成参数，不要使用 [[CW: 开头的占位符。"}, ensure_ascii=False),
+                                    "content": feedback_text, "result_obj": feedback,
+                                    "meta": {"not_executed": True, "reason": "data_security_original_context"},
+                                })
+                                self.tool_result_signal.emit({
+                                    "id": security_tool.id, "name": security_tool.function.name,
+                                    "args": security_tool.function.arguments,
+                                    "result": feedback_text, "result_obj": feedback,
+                                    "meta": {"not_executed": True, "duration": 0},
                                 })
                             tool_round_context = None
                             if already_raw:
                                 final_content = "工具参数仍包含无法还原的占位符，相关操作未执行。原始消息和已有成果已保留，请调整请求后继续。"
+                                self._append_ledger_message(current_messages, generated_messages, {
+                                    "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{self.session_id}:{self.request_id}:security-not-executed").hex,
+                                    "role": "assistant", "content": final_content,
+                                    "meta": {"ui_display_anchor_only": True, "source": "data_security"},
+                                })
                                 break
                             continue
                         prepared_tool_executions = {}

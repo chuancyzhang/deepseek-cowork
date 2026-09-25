@@ -142,6 +142,22 @@ class SecurityRun:
         self.raw_mode = True
         self.notice("original_context", "partial", "该操作需要真实内容：尚未执行相关工具，已切换原文重新生成；本轮后续不再脱敏。")
 
+    def original_values(self, arguments):
+        """Give the model data for regeneration; never rewrite executable text."""
+        try:
+            from bundled_plugins.data_security.compat import TOKEN
+            import json
+            tokens = dict.fromkeys(TOKEN.findall(json.dumps(arguments, ensure_ascii=False)))
+            values = {}
+            for token in list(tokens)[:100]:
+                original = self.restore_text(token)
+                if original != token:
+                    values[token] = original
+            return values
+        except Exception as exc:
+            self.notice("arguments", "failed", "原文参考未能恢复，已保留原始输入。", error_type=type(exc).__name__)
+            return {}
+
     def close(self):
         self.closed = True
         if self.plugin is not None:

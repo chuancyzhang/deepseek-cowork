@@ -93,8 +93,29 @@ class DataSecurityIntegrationTests(unittest.TestCase):
         self.assertEqual(len(requests), 3)
         skipped = [m for m in result["generated_messages"] if m.get("role") == "tool" and "not_executed_original_context_required" in m.get("content", "")]
         self.assertEqual(len(skipped), 2)
+        first_feedback = json.loads(skipped[0]["content"])
+        self.assertEqual(list(first_feedback["original_values"].values()), ["alice@example.org"])
         self.assertEqual(sum(e.get("event") == "original_context" for e in events), 1)
         self.assertTrue(worker_ref["worker"].data_security_run.closed)
+
+    def test_unresolved_second_round_is_saved_as_display_only_without_execution(self):
+        import test_agent_bootstrap as bootstrap
+        from core.message_persistence import project_provider_messages
+        def ready(worker):
+            worker.data_security_run.policy = enabled()
+            worker.data_security_run.data_dir = worker.workspace_dir
+            worker._security_compat = True
+        _, result, _, calls, _, _ = bootstrap.TestAgentBootstrap().run_worker(
+            [[bootstrap.tool_call("read_file", "unknown-1", '{"path":"[[CW:unknown]]"}')],
+             [bootstrap.tool_call("read_file", "unknown-2", '{"path":"[[CW:unknown]]"}')]],
+            history=[{"role": "user", "content": "read"}], profile={**bootstrap.PROFILE, "bootstrap_plugin": ""},
+            on_worker_ready=ready)
+        self.assertEqual(calls, [])
+        saved = result["generated_messages"][-1]
+        self.assertEqual(saved["content"], result["content"])
+        self.assertTrue(saved["meta"]["ui_display_anchor_only"])
+        projected, _ = project_provider_messages(result["generated_messages"])
+        self.assertNotIn(saved["id"], [m["id"] for m in projected])
 
     def test_display_projection_joins_stream_fragments_without_mutating_native_history(self):
         token = "[[CW:111111111111:email:1111111111111111]]"

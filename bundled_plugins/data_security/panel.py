@@ -34,7 +34,15 @@ class DataSecurityPanel(QWidget):
             check.setObjectName("security_" + key)
             features.layout.addWidget(check)
             self.checks[key] = check
+            if key == "credential_warning":
+                hint = QLabel("检查 API Key、密码等凭证；手机号、邮箱不触发此提醒。保存后对新任务生效，提醒不阻断发送。")
+                hint.setWordWrap(True)
+                features.layout.addWidget(hint)
         options.addWidget(features)
+        self.validation = QLabel()
+        self.validation.setObjectName("SecurityValidation")
+        self.validation.setWordWrap(True)
+        options.addWidget(self.validation)
         types = ProductSection("令牌化的数据类别", "只转换发给模型的用户输入、附件提取文本和工具结果；AI 回复不做脱敏。", kind="plain")
         self.categories = {}
         for key, label in CATEGORIES.items():
@@ -43,10 +51,6 @@ class DataSecurityPanel(QWidget):
             types.layout.addWidget(check)
             self.categories[key] = check
         options.addWidget(types)
-        self.validation = QLabel()
-        self.validation.setObjectName("SecurityValidation")
-        self.validation.setWordWrap(True)
-        options.addWidget(self.validation)
         note = QLabel("原始消息和文件不修改。检查失败或复杂操作需要真实内容时，会提示并按原文继续；正常鉴权不受影响。系统指令、工具定义、图片及脚本内部外发不在脱敏范围内。改变令牌化设置可能影响模型历史缓存命中。")
         note.setWordWrap(True)
         options.addWidget(note)
@@ -89,6 +93,7 @@ class DataSecurityPanel(QWidget):
         self.setStyleSheet(f"QWidget#DataSecurityPanel QLabel, QWidget#DataSecurityPanel QCheckBox {{ color: {DesignTokens.text_primary}; }} "
                           f"QLabel#SecurityValidation {{ color: {DesignTokens.error_text}; }}")
         self.events.setStyleSheet(product_code_style())
+        self.validation.setStyleSheet(f"QLabel#SecurityValidation {{ color: {DesignTokens.error_text}; font-weight: 600; }}")
         for button in (self.refresh_button, self.cancel_button, self.retry_button):
             button.setStyleSheet(product_button_style("secondary"))
 
@@ -106,19 +111,26 @@ class DataSecurityPanel(QWidget):
             check.setChecked(value["categories"][key])
         self._changed()
 
-    def validate(self):
+    def validate(self, *, reveal=True):
         try:
             validate_config(self.state())
         except ValueError as exc:
             self.validation.setText(str(exc))
-            self.validation.setFocus()
+            if reveal:
+                from PySide6.QtWidgets import QScrollArea
+                parent = self.parentWidget()
+                while parent is not None:
+                    if isinstance(parent, QScrollArea):
+                        parent.ensureWidgetVisible(self.validation, 0, 32)
+                        break
+                    parent = parent.parentWidget()
             return False
         return True
 
     def _changed(self):
         self.options.setVisible(self.enabled.isChecked())
         self.validation.setText("")
-        self.validate()
+        self.validate(reveal=False)
         self.status.setText("未启用：不会新增扫描或脱敏。" if not self.enabled.isChecked()
                             else "仅处理明确选择的功能；更改需保存后生效。" if any(c.isChecked() for c in self.checks.values())
                             else "尚未选择功能，不会启动安全处理。")

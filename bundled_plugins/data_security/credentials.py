@@ -23,9 +23,9 @@ def submit(run, texts):
 
 
 def _check(run, texts):
-    from .rules import SECRET, EXAMPLES
     count = 0
     try:
+        from .rules import SECRET, EXAMPLES
         for text in texts:
             # A candidate is at most ~550 chars. Overlap preserves chunk-boundary
             # matches without counting them twice; yield the GIL between chunks.

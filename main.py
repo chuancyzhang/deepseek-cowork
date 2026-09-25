@@ -36807,6 +36807,15 @@ class MainWindow(QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
+            if event_type == "data_security":
+                notice_key = (str(event.get("run_id") or ""), event.get("event"), event.get("status"))
+                notices = getattr(state, "data_security_notice_keys", set())
+                if notice_key not in notices and event.get("message"):
+                    self._show_data_security_notice(state, event)
+                    if len(notices) >= 100:
+                        notices.clear()
+                    notices.add(notice_key)
+                    state.data_security_notice_keys = notices
             if event_type == "authorization" and event.get("status") != "awaiting_approval":
                 for interaction_id, card in list(state.pending_interactions.items()):
                     metadata = (card.request or {}).get("metadata") or {}
@@ -42232,6 +42241,23 @@ class MainWindow(QMainWindow):
             error=state.ui_timeline_warning,
         )
         return 0
+
+    def _show_data_security_notice(self, state, event):
+        # Keep optional security hints separate from persistence/recovery errors.
+        priority = 2 if event.get("status") in {"failed", "partial"} or event.get("event") == "credential" else 1
+        run_id = str(event.get("run_id") or "")
+        notice = getattr(state, "data_security_notice", None)
+        if notice is not None and _qt_object_alive(notice):
+            if getattr(notice, "_security_run_id", "") == run_id and getattr(notice, "_security_priority", 0) > priority:
+                return notice
+            notice.set_text("数据安全：" + str(event["message"]), "warning" if priority == 2 else "info")
+        else:
+            notice = ProductInlineNotice("数据安全：" + str(event["message"]), "warning" if priority == 2 else "info")
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
+            state.data_security_notice = notice
+        notice._security_priority = priority
+        notice._security_run_id = run_id
+        return notice
 
     def _show_conversation_notice(
         self,
@@ -54452,7 +54478,8 @@ a {{ overflow-wrap: anywhere; }}
                 continue
             if message.get("tool_calls"):
                 continue
-            message_content = str(message.get("content") or "").strip()
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            message_content = str(meta.get("security_display_content", message.get("content")) or "").strip()
             message_images = MainWindow._output_image_identity(
                 message.get("content_parts")
             )
@@ -55273,7 +55300,18 @@ a {{ overflow-wrap: anywhere; }}
                 stage_id=str(getattr(bubble, "ui_stage_id", "")),
                 error=str(exc),
             )
-            self._fail_terminal_persistence(state, bubble, final_content_event, exc)
+            # Canonical generated messages are already in state.messages. Stage
+            # them durably even if linking the displayed final bubble failed.
+            recovery_saved = False
+            try:
+                recovery_saved = bool(self.save_chat_history(state.session_id, flush=True))
+            except Exception as recovery_error:
+                log_chat_runtime_debug("terminal_recovery_stage_failed", session_id=state.session_id,
+                                       error_type=type(recovery_error).__name__)
+            log_chat_runtime_debug("terminal_message_reconcile_failed", session_id=state.session_id,
+                                   error_type=type(exc).__name__, recovery_staged=recovery_saved)
+            self._fail_terminal_persistence(state, bubble, final_content_event, exc,
+                                            recovery_snapshot_saved=recovery_saved)
             return
         log_sub_agent_runtime(
             "ui_assistant_turn_finished",

@@ -1,12 +1,11 @@
 """Settings only; importing the panel never loads a scanner or token vault."""
-import json
-from datetime import datetime
 
 from PySide6.QtCore import Signal, QTimer
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QCheckBox, QLabel, QPushButton, QPlainTextEdit
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QCheckBox, QLabel, QPushButton, QHBoxLayout
 from core.data_security import CATEGORIES, FEATURES, normalize_config, recent_events, validate_config
 from core.theme import DesignTokens, bind_theme
-from ui.primitives import ProductSection, product_code_style, product_button_style
+from ui.primitives import ProductSection, product_button_style
+from .records import SecurityRecords
 
 
 class DataSecurityPanel(QWidget):
@@ -51,32 +50,36 @@ class DataSecurityPanel(QWidget):
             types.layout.addWidget(check)
             self.categories[key] = check
         options.addWidget(types)
-        note = QLabel("原始消息和文件不修改。检查失败或复杂操作需要真实内容时，会提示并按原文继续；正常鉴权不受影响。系统指令、工具定义、图片及脚本内部外发不在脱敏范围内。改变令牌化设置可能影响模型历史缓存命中。")
+        note = QLabel("原始消息和文件保持不变。无法脱敏或任务需要真实内容时，会提示并使用原文继续。图片及第三方工具自行发送的内容不在保护范围内。")
         note.setWordWrap(True)
         options.addWidget(note)
         layout.addWidget(self.options)
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.refresh_button = QPushButton("查看／刷新安全记录")
+        records_section = ProductSection("安全记录", "了解最近的处理结果，需要时再查看详情。记录保存在本机，旧记录会自动轮换。", kind="plain")
+        self.refresh_button = QPushButton("刷新记录")
         self.refresh_button.clicked.connect(self.refresh_events)
-        layout.addWidget(self.refresh_button)
-        self.events = QPlainTextEdit()
-        self.events.setReadOnly(True)
-        self.events.setMinimumHeight(140)
-        self.events.setMaximumHeight(260)
-        self.events.setPlaceholderText("暂无安全事件。所有功能默认关闭，不会自动扫描。")
-        self.events.hide()
-        layout.addWidget(self.events)
-        self.retry_button = QPushButton("重新检查最近的能力")
+        records_section.layout.addWidget(self.refresh_button)
+        self.events = SecurityRecords()
+        records_section.layout.addWidget(self.events)
+        self.check_status = QLabel()
+        self.check_status.setWordWrap(True)
+        records_section.layout.addWidget(self.check_status)
+        actions = QHBoxLayout()
+        self.retry_button = QPushButton("重新检查 Skill / MCP")
+        self.retry_button.setToolTip("按已保存的设置，重新检查本次打开应用后检查过的项目。")
         self.retry_button.clicked.connect(self.retry_checks)
-        self.retry_button.hide()
-        layout.addWidget(self.retry_button)
-        self.cancel_button = QPushButton("取消后台检查")
+        actions.addWidget(self.retry_button)
+        self.cancel_button = QPushButton("停止检查")
         self.cancel_button.clicked.connect(self.cancel_checks)
         self.cancel_button.hide()
-        layout.addWidget(self.cancel_button)
-        attribution = QLabel("Based on Tencent Zhuque Lab AI-Infra-Guard\nhttps://github.com/Tencent/AI-Infra-Guard")
+        actions.addWidget(self.cancel_button)
+        actions.addStretch()
+        records_section.layout.addLayout(actions)
+        layout.addWidget(records_section)
+        attribution = QLabel('规则参考：<a href="https://github.com/Tencent/AI-Infra-Guard">腾讯朱雀实验室 AI-Infra-Guard</a>')
+        attribution.setOpenExternalLinks(True)
         attribution.setWordWrap(True)
         layout.addWidget(attribution)
         layout.addStretch()
@@ -87,12 +90,12 @@ class DataSecurityPanel(QWidget):
         bind_theme(self, self.refresh_theme, surface="management")
         self.timer = QTimer(self)
         self.timer.setInterval(2000)
-        self.timer.timeout.connect(self.refresh_events)
+        self.timer.timeout.connect(self.refresh_check_controls)
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(f"QWidget#DataSecurityPanel QLabel, QWidget#DataSecurityPanel QCheckBox {{ color: {DesignTokens.text_primary}; }} "
                           f"QLabel#SecurityValidation {{ color: {DesignTokens.error_text}; }}")
-        self.events.setStyleSheet(product_code_style())
+        self.events.render()
         self.validation.setStyleSheet(f"QLabel#SecurityValidation {{ color: {DesignTokens.error_text}; font-weight: 600; }}")
         for button in (self.refresh_button, self.cancel_button, self.retry_button):
             button.setStyleSheet(product_button_style("secondary"))
@@ -137,41 +140,35 @@ class DataSecurityPanel(QWidget):
         self.changed.emit()
 
     def refresh_events(self):
-        if self.sender() is self.refresh_button:
-            self.events.show()
-            self.cancel_button.show()
-            self.retry_button.show()
-        lines = []
         try:
             from .events import read_recent
             events = read_recent() + recent_events()
         except (OSError, ValueError):
-            events = recent_events() + [{"message": "已保存的安全日志暂时无法读取；可稍后刷新，任务不受影响。"}]
-        seen = set()
-        unique = []
-        for event in sorted(events, key=lambda e: e.get("timestamp", 0)):
-            key = (event.get("event"), event.get("run_id"), event.get("object_id"), event.get("status"), event.get("message"))
-            if key not in seen:
-                unique.append(event)
-                seen.add(key)
-        for event in unique[-60:]:
-            stamp = datetime.fromtimestamp(event.get("timestamp", 0)).strftime("%H:%M:%S")
-            lines.append(f'{stamp} · {event.get("object_id", event.get("event", ""))} · {event.get("message", "")}')
-            for finding in event.get("findings", []):
-                lines.append(f'  {finding["file"]}:{finding["line"]} · {finding["rule"]}')
-            if event.get("coverage"):
-                lines.append("  " + event["coverage"])
-            if event.get("error_type"):
-                lines.append("  不可用原因：" + event["error_type"])
-        text = "\n".join(lines)
-        if text != self.events.toPlainText():
-            self.events.setPlainText(text)
+            import time
+            events = recent_events() + [{"event": "log", "status": "failed", "timestamp": time.time(),
+                "message": "已保存的记录暂时无法读取，请稍后刷新；任务不受影响。"}]
+        self.events.set_records(events)
+        self.refresh_check_controls()
+
+    def refresh_check_controls(self):
+        # No scanner import and no disk IO during polling. Browsing stays stable.
+        import sys
+        scanner = sys.modules.get("bundled_plugins.data_security.capabilities")
+        activity = scanner.activity() if scanner is not None else {"pending": 0, "recent": 0}
+        pending = activity["pending"]
+        self.cancel_button.setVisible(bool(pending))
+        self.retry_button.setEnabled(bool(activity["recent"]) and not pending)
+        self.check_status.setText(f"{pending} 项检查正在进行或等待中。完成后点击“刷新记录”查看结果。" if pending
+            else "可重新检查本次打开应用后检查过的 Skill / MCP；使用已保存的设置。" if activity["recent"]
+            else "暂无可重新检查的项目。启用并保存检查功能后，安装、更新 Skill 或连接 MCP 时会进行检查。")
 
     def cancel_checks(self):
         import sys
         scanner = sys.modules.get("bundled_plugins.data_security.capabilities")
         if scanner is not None:
             scanner.cancel_all()
+        self.refresh_check_controls()
+        self.refresh_events()
 
     def retry_checks(self):
         # Use saved configuration, never an uncommitted settings draft.
@@ -184,6 +181,7 @@ class DataSecurityPanel(QWidget):
             self.refresh_events()
             return
         scanner.retry_recent(ConfigManager().get_data_security())
+        self.refresh_events()
 
     def showEvent(self, event):
         super().showEvent(event)

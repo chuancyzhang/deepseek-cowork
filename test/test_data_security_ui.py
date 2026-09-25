@@ -104,7 +104,7 @@ class DataSecurityUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
         self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
-        scroll.ensureWidgetVisible(panel.cancel_button)
+        scroll.ensureWidgetVisible(panel.events)
         self.app.processEvents()
         self.assertGreater(scroll.verticalScrollBar().value(), 0)
         root = os.environ.get("COWORK_SECURITY_SCREENSHOTS")

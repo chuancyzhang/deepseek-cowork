@@ -27,6 +27,12 @@ _cache = OrderedDict()
 _requests = OrderedDict()
 
 
+def activity():
+    """Lightweight settings status; caller must not import the scanner just for this."""
+    with _lock:
+        return {"pending": len(_pending), "recent": len(_requests)}
+
+
 def cancel_all():
     with _lock:
         for cancel in _pending.values():

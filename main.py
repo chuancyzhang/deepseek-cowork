@@ -26,7 +26,6 @@ from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
-from core.knowledge_library import KnowledgeStore, KnowledgeError
 from core.knowledge_sources import MultiSourceKnowledgeService as KnowledgeService
 from core.variable_store import (
     VARIABLE_KIND_SECRET,
@@ -90,7 +89,7 @@ from core.single_instance import (
     notify_existing_ui,
     notify_existing_ui_with_retries,
 )
-from core.chat_storage import ChatStorage, ConversationWriteConflict
+from core.chat_storage import ChatStorage
 from core.chat_save_queue import (
     ChatSaveRequest,
     ChatSaveWorker,
@@ -139,7 +138,6 @@ from core.deliverable_pdf_export import (
 )
 from core.deliverable_editing import (
     DeliverableEditError,
-    EditSession,
     atomic_save_session,
     backup_paths,
     create_edit_session,
@@ -171,10 +169,8 @@ from core.inline_visualization import (
 )
 from core.theme import (
     apply_tooltip_theme,
-    default_design_tokens,
     DesignTokens,
     bind_theme,
-    resolve_theme,
     ThemeRuntimeManager,
 )
 from core.theme_service import ThemeRepository
@@ -195,7 +191,6 @@ from ui.primitives import (
     ProductStatusBadge,
     ProductResultViewer,
     SidebarInlineNameEditor,
-    ProductToolbar,
     ProductTooltipController,
     PageScrollSafeComboBox,
     PageScrollSafeDateTimeEdit,
@@ -255,7 +250,6 @@ from core.runtime_components import (
     node_runtime_status,
     normalize_download_sources,
     selected_source,
-    source_options,
     test_source,
     speech_to_text_component_status,
     toolkit_status,
@@ -317,7 +311,6 @@ from core.mcp_client import (
     build_mcp_skill_name,
     call_mcp_tool,
     list_mcp_server_tools,
-    mcp_transport_label,
     summarize_mcp_server,
     test_mcp_server_connection,
 )
@@ -357,13 +350,11 @@ from core.favorites_manager import (
     favorite_effective_prompt,
     make_favorite_run_record,
     normalize_favorite,
-    validate_cron_expression as validate_favorite_cron_expression,
 )
 from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
-    DEFAULT_DEEPSEEK_THINKING_ENABLED,
     SUPPORTED_REASONING_EFFORTS,
     normalize_reasoning_effort,
     normalize_reasoning_efforts,
@@ -421,7 +412,6 @@ from core.ppt_agent import (
     normalize_ppt_agent_strategy,
     ppt_agent_builtin_skill_names,
     ppt_agent_strategy_skill_name,
-    ppt_agent_strategy_label,
     validate_pptx_structure,
 )
 from core.presentation_renderer import (
@@ -439,9 +429,9 @@ from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIco
                            QDesktopServices, QGuiApplication, QColor, QPainter,
                            QBrush, QCursor, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
-                               QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
+                               QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -2690,17 +2680,6 @@ def readable_skill_name(skill):
     return skill.get("display_name") or skill.get("description_cn") or skill.get("name", "")
 
 
-def readable_risk_level(value):
-    text = (value or "").strip().lower()
-    if text == "high":
-        return ("高风险", DesignTokens.error_text)
-    if text == "medium":
-        return ("中风险", DesignTokens.warning_text)
-    if text == "low":
-        return ("低风险", DesignTokens.info_text)
-    return ("常规", DesignTokens.text_secondary)
-
-
 def summarize_skill_terms(values, max_items=3, max_chars=72):
     parts = [str(item).strip() for item in (values or []) if str(item).strip()]
     if not parts:
@@ -3008,57 +2987,6 @@ def flush_pending_skill_runtime_reload(skill_manager):
     skill_manager.load_skills()
     mark_skill_runtime_reload_pending(skill_manager, False)
     return True
-
-
-def session_status_text(status, im_provider=None):
-    if im_provider == "feishu":
-        return ("来自飞书", DesignTokens.info_text, DesignTokens.info_bg)
-    mapping = {
-        "running": ("进行中", DesignTokens.info_text, DesignTokens.info_bg),
-        "finalizing": ("收尾中", DesignTokens.info_text, DesignTokens.info_bg),
-        "completed": ("已完成", DesignTokens.success_text, DesignTokens.success_bg),
-        "interrupted": ("中断", DesignTokens.warning_text, DesignTokens.warning_bg),
-        "error": ("异常", DesignTokens.error_text, DesignTokens.error_bg),
-        "failed": ("失败", DesignTokens.error_text, DesignTokens.error_bg),
-        "draft": ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary),
-    }
-    return mapping.get(status or "draft", ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary))
-
-
-def summarize_tool_action(tool_name, args):
-    args = args or {}
-    name = tool_name or "tool"
-    path = ""
-    for key in ("path", "file_path", "src", "source", "target", "dst", "directory"):
-        value = args.get(key)
-        if isinstance(value, str) and value.strip():
-            path = value.strip()
-            break
-    if name in {"text_file_read", "document_read"}:
-        return "查看文件", path or "读取内容"
-    if name == "apply_patch":
-        related = extract_related_paths(name, args)
-        detail = f"处理 {len(related)} 个文本路径" if related else "创建、更新、移动或删除文本文件"
-        return "应用文本补丁", detail
-    if name in {"workspace_rename_path"}:
-        return "整理文件", path or "移动或重命名"
-    if name in {"workspace_delete_path"}:
-        return "删除文件", path or "删除项目"
-    if name in {"workspace_list_files", "search_files", "glob", "grep", "search_codebase"}:
-        return "扫描工作区", path or "查找相关文件"
-    if name in {"web_search", "browser_search"}:
-        query = args.get("query") or args.get("q") or ""
-        return "搜索网页", str(query)[:64] if query else "查找相关信息"
-    if name in {"bash", "run_command"}:
-        cmd = args.get("command") or args.get("cmd") or ""
-        return "执行命令", cmd[:48] if cmd else "运行系统命令"
-    if name in {"request_user_approval"}:
-        return "等待确认", "需要你决定下一步"
-    if name in {"request_user_input"}:
-        return "等待输入", "需要你补充信息"
-    if name in {"publish_artifacts"}:
-        return "交付产物", "准备交付文件或图片"
-    return name.replace("_", " ").title(), path or "执行步骤"
 
 
 def extract_related_paths(tool_name, args):
@@ -3478,174 +3406,6 @@ class SafeApplication(QApplication):
             log_ui_exception(receiver, event, exception_text)
             self._queue_ui_error_toast()
             return False
-
-class _LegacySettingsDialog(QDialog):
-    def __init__(self, config_manager, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("设置")
-        self.resize(520, 360)
-        self.config_manager = config_manager
-        self._main = parent
-        
-        layout = QVBoxLayout(self)
-
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
-
-        base_tab = QWidget()
-        base_layout = QVBoxLayout(base_tab)
-        form_layout = QFormLayout()
-
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItem("OpenAI / DeepSeek / Compatible", "openai")
-        self.provider_combo.addItem("Anthropic / Claude / Minimax", "anthropic")
-        
-        current_provider = self.config_manager.get("llm_provider", "openai")
-        index = self.provider_combo.findData(current_provider)
-        if index >= 0:
-            self.provider_combo.setCurrentIndex(index)
-        
-        form_layout.addRow("LLM Provider:", self.provider_combo)
-
-        # API Key
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setText(self.config_manager.get("api_key", ""))
-        form_layout.addRow("API Key:", self.api_key_input)
-        
-        # API Key Guide
-        guide_label = QLabel('API Key 获取方法：<br>① DeepSeek: <a href="https://platform.deepseek.com/">DeepSeek 开发者平台</a>')
-        guide_label.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_caption}px; margin-bottom: 8px;"
-        )
-        guide_label.setOpenExternalLinks(True)
-        guide_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-        form_layout.addRow("", guide_label)
-        
-        # Base URL
-        self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL)
-        self.base_url_input.setText(self.config_manager.get("base_url", DEFAULT_DEEPSEEK_BASE_URL))
-        form_layout.addRow("API Base URL (可选):", self.base_url_input)
-
-        # Model Name
-        self.model_name_input = QLineEdit()
-        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL)
-        self.model_name_input.setText(self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL))
-        form_layout.addRow("Model Name:", self.model_name_input)
-
-        self.default_ws_input = QLineEdit()
-        self.default_ws_input.setPlaceholderText("未设置")
-        self.default_ws_input.setText(self.config_manager.get("default_workspace", ""))
-        default_ws_container = QWidget()
-        default_ws_layout = QHBoxLayout(default_ws_container)
-        default_ws_layout.setContentsMargins(0, 0, 0, 0)
-        default_ws_layout.addWidget(self.default_ws_input, 1)
-        default_ws_btn = QPushButton("选择")
-        default_ws_btn.setFixedWidth(60)
-        default_ws_layout.addWidget(default_ws_btn)
-        form_layout.addRow("默认工作区:", default_ws_container)
-
-        def choose_default_workspace():
-            directory = QFileDialog.getExistingDirectory(self, "选择默认工作区")
-            if directory:
-                self.default_ws_input.setText(directory)
-
-        default_ws_btn.clicked.connect(choose_default_workspace)
-
-        # Chat History Dir
-        self.history_dir_input = QLineEdit()
-        self.history_dir_input.setText(self.config_manager.get_chat_history_dir())
-        history_dir_container = QWidget()
-        history_dir_layout = QHBoxLayout(history_dir_container)
-        history_dir_layout.setContentsMargins(0, 0, 0, 0)
-        history_dir_layout.addWidget(self.history_dir_input, 1)
-        history_dir_btn = QPushButton("选择")
-        history_dir_btn.setFixedWidth(60)
-        history_dir_layout.addWidget(history_dir_btn)
-        form_layout.addRow("聊天记录存储:", history_dir_container)
-
-        def choose_history_dir():
-            directory = QFileDialog.getExistingDirectory(self, "选择聊天记录目录")
-            if directory:
-                self.history_dir_input.setText(directory)
-
-        history_dir_btn.clicked.connect(choose_history_dir)
-        
-        # God Mode Toggle
-        self.god_mode_check = QCheckBox("启用上帝模式（持续授权执行）")
-        self.god_mode_check.setToolTip("开启后，新启动的任务可以按当前系统用户权限执行操作，保留已有业务确认。关闭后，读取和分析不受影响，修改原有资产或运行代码时请求本次许可。")
-        self.god_mode_check.setChecked(self.config_manager.get_god_mode())
-        self.god_mode_check.setStyleSheet(
-            f"QCheckBox {{ color: {DesignTokens.error_text}; font-weight: bold; }}"
-        )
-        form_layout.addRow("", self.god_mode_check)
-        
-
-        base_layout.addLayout(form_layout)
-        self.tabs.addTab(base_tab, "基础设置")
-
-        im_tab = QWidget()
-        im_layout = QVBoxLayout(im_tab)
-        im_intro = QLabel("企业消息配置使用 im_gateway.providers 的多平台结构。")
-        im_intro.setWordWrap(True)
-        im_layout.addWidget(im_intro)
-        gateway_bar = QHBoxLayout()
-        gateway_info = QLabel("支持飞书、钉钉和企业微信智能机器人。")
-        gateway_info.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_caption}px;"
-        )
-        gateway_btn = QPushButton("启动网关")
-        gateway_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.icon_secondary))
-        def start_gateway():
-            try:
-                if hasattr(self._main, "queue_daemon_connection"):
-                    self._main.queue_daemon_connection(allow_start=True, retries=6)
-                elif hasattr(self._main, "try_connect_daemon"):
-                    self._main.try_connect_daemon(allow_start=True, retries=6)
-                if hasattr(self._main, "start_gateway_process"):
-                    self._main.start_gateway_process()
-                QMessageBox.information(self, "统一消息网关", "已启动。")
-            except Exception:
-                QMessageBox.warning(self, "统一消息网关", "启动失败，请检查环境和依赖。")
-        gateway_btn.clicked.connect(start_gateway)
-        gateway_bar.addWidget(gateway_info, 1)
-        gateway_bar.addWidget(gateway_btn)
-        im_layout.addLayout(gateway_bar)
-        self.tabs.addTab(im_tab, "企业消息")
-
-        # Buttons
-        btn_layout = QHBoxLayout()
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self.save_settings)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(save_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-    def save_settings(self):
-        # Save Provider
-        self.config_manager.set("llm_provider", self.provider_combo.currentData())
-        # Save API Key
-        self.config_manager.set("api_key", self.api_key_input.text().strip())
-        # Save Base URL
-        base_url = self.base_url_input.text().strip()
-        if not base_url:
-            base_url = DEFAULT_DEEPSEEK_BASE_URL
-        self.config_manager.set("base_url", base_url)
-        # Save Model Name
-        model_name = self.model_name_input.text().strip()
-        if not model_name:
-            model_name = DEFAULT_DEEPSEEK_MODEL
-        self.config_manager.set("model_name", model_name)
-
-        self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
-        self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
-        # Save God Mode
-        self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-
-        self.accept()
 
 class AppleSwitch(QCheckBox):
     def __init__(self, parent=None):
@@ -5582,269 +5342,6 @@ class CapabilityWorkbenchDialog(QDialog):
         self.mcp_server = updated
         QMessageBox.information(self, "MCP 调试", "MCP 配置已保存并重新加载。")
 
-
-class _LegacySkillsCenterDialog(QDialog):
-    def __init__(self, skill_manager, config_manager, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("功能中心 (Skills Center)")
-        self.resize(600, 500)
-        self.skill_manager = skill_manager
-        self.config_manager = config_manager
-        
-        layout = QVBoxLayout(self)
-        
-        # Tabs
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
-        
-        # Tab 1: Standard Skills
-        self.tab_standard = QWidget()
-        self.layout_standard = QVBoxLayout(self.tab_standard)
-        self.scroll_standard = QScrollArea()
-        self.scroll_standard.setWidgetResizable(True)
-        self.content_standard = QWidget()
-        self.layout_content_standard = QVBoxLayout(self.content_standard)
-        self.layout_content_standard.addStretch()
-        self.scroll_standard.setWidget(self.content_standard)
-        self.layout_standard.addWidget(self.scroll_standard)
-        self.tabs.addTab(self.tab_standard, "已安装的功能模块")
-        
-        # Tab 2: AI Generated Skills
-        self.tab_ai = QWidget()
-        self.layout_ai = QVBoxLayout(self.tab_ai)
-        self.scroll_ai = QScrollArea()
-        self.scroll_ai.setWidgetResizable(True)
-        self.content_ai = QWidget()
-        self.layout_content_ai = QVBoxLayout(self.content_ai)
-        self.layout_content_ai.addStretch()
-        self.scroll_ai.setWidget(self.content_ai)
-        self.layout_ai.addWidget(self.scroll_ai)
-        self.tabs.addTab(self.tab_ai, "AI 生成的技能")
-        
-        # Bottom Bar (Import & Refresh)
-        bottom_layout = QHBoxLayout()
-        import_btn = QPushButton(" 导入新功能包")
-        import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.icon_secondary))
-        import_btn.clicked.connect(self.import_skill)
-        bottom_layout.addWidget(import_btn)
-        
-        refresh_btn = QPushButton(" 刷新列表")
-        refresh_btn.setIcon(qta.icon('fa5s.sync', color=DesignTokens.icon_secondary))
-        refresh_btn.clicked.connect(self.manual_refresh)
-        bottom_layout.addWidget(refresh_btn)
-
-        bottom_layout.addStretch()
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.accept)
-        bottom_layout.addWidget(close_btn)
-        layout.addLayout(bottom_layout)
-        
-        self.refresh_list()
-
-    def manual_refresh(self):
-        self.skill_manager.load_skills()
-        self.refresh_list()
-        QMessageBox.information(self, "刷新成功", "已重新扫描并加载所有技能模块。")
-
-    def refresh_list(self):
-        # Clear existing
-        self._clear_layout(self.layout_content_standard)
-        self._clear_layout(self.layout_content_ai)
-        
-        # Get skills
-        skills = self.skill_manager.get_all_skills()
-        for skill in skills:
-            # Determine type
-            is_ai = False
-            if skill.get('type') == 'ai_generated' or skill.get('created_by') == 'ai':
-                is_ai = True
-            
-            if is_ai:
-                self.add_skill_card(skill, self.layout_content_ai)
-            else:
-                self.add_skill_card(skill, self.layout_content_standard)
-
-    def _clear_layout(self, layout):
-        while layout.count() > 1: # Keep stretch
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-    def add_skill_card(self, skill, parent_layout):
-        card = QFrame()
-        card.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
-        card.setStyleSheet(
-            f"background: {DesignTokens.management_panel_bg}; "
-            f"border: 1px solid {DesignTokens.management_border}; "
-            f"border-radius: {DesignTokens.radius_sm}px; margin-bottom: 5px;"
-        )
-        
-        h_layout = QHBoxLayout(card)
-        
-        # Info
-        v_layout = QVBoxLayout()
-        name_lbl = QLabel(f"{skill['name']}")
-        name_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
-        desc_lbl = QLabel(skill.get('description_cn') or skill.get('description', ''))
-        desc_lbl.setWordWrap(True)
-        desc_lbl.setStyleSheet(f"color: {DesignTokens.text_secondary};")
-        
-        v_layout.addWidget(name_lbl)
-        v_layout.addWidget(desc_lbl)
-
-        # Dependencies
-        deps = skill.get('dependencies', [])
-        if deps and isinstance(deps, list):
-            deps_str = ", ".join(deps)
-            deps_lbl = QLabel(f" 依赖: {deps_str}")
-            deps_lbl.setPixmap(qta.icon('fa5s.box', color=DesignTokens.primary).pixmap(12, 12))
-            deps_lbl = QLabel() # Re-create to use layout for icon+text or just text with emoji? 
-            # Let's keep it simple with text but replace emoji with a small icon if possible or just text
-            # Using simple text for now to avoid layout complexity in this list
-            deps_lbl.setText(f"  依赖: {deps_str}")
-            # Actually, let's use rich text to insert an icon or just use a simple char if qta is hard here
-            # We can use a small pixmap label + text label in a horizontal layout
-            
-            deps_container = QWidget()
-            deps_layout = QHBoxLayout(deps_container)
-            deps_layout.setContentsMargins(0,0,0,0)
-            deps_layout.setSpacing(4)
-            
-            icon_lbl = QLabel()
-            icon_lbl.setPixmap(qta.icon('fa5s.box', color=DesignTokens.primary).pixmap(12, 12))
-            icon_lbl.setFixedSize(14, 14)
-            
-            txt_lbl = QLabel(f"依赖: {deps_str}")
-            txt_lbl.setStyleSheet(
-                f"color: {DesignTokens.primary}; font-size: {DesignTokens.font_size_caption}px;"
-            )
-            
-            deps_layout.addWidget(icon_lbl)
-            deps_layout.addWidget(txt_lbl)
-            deps_layout.addStretch()
-            
-            v_layout.addWidget(deps_container)
-
-        # Experience (Evolution)
-        exp = skill.get('experience', [])
-        if exp and isinstance(exp, list):
-             exp_frame = QFrame()
-             exp_frame.setStyleSheet(
-                 f"background: {DesignTokens.success_bg}; border-radius: {DesignTokens.radius_sm}px; "
-                 "padding: 4px; margin-top: 4px;"
-             )
-             exp_layout = QVBoxLayout(exp_frame)
-             exp_layout.setContentsMargins(4,4,4,4)
-             exp_layout.setSpacing(2)
-             
-             header_container = QWidget()
-             h_layout_exp = QHBoxLayout(header_container)
-             h_layout_exp.setContentsMargins(0,0,0,0)
-             h_layout_exp.setSpacing(4)
-             
-             exp_icon = QLabel()
-             exp_icon.setPixmap(qta.icon('fa5s.chart-line', color=DesignTokens.success_icon).pixmap(12, 12))
-             exp_header = QLabel(f"进化记录 ({len(exp)})")
-             exp_header.setStyleSheet(
-                 f"font-weight: bold; color: {DesignTokens.success_text}; "
-                 f"font-size: {DesignTokens.font_size_caption}px;"
-             )
-             
-             h_layout_exp.addWidget(exp_icon)
-             h_layout_exp.addWidget(exp_header)
-             h_layout_exp.addStretch()
-             
-             exp_layout.addWidget(header_container)
-             
-             for e in exp:
-                 e_lbl = QLabel(f"• {e}")
-                 e_lbl.setStyleSheet(
-                     f"color: {DesignTokens.success_text}; "
-                     f"font-size: {max(9, DesignTokens.font_size_caption - 1)}px;"
-                 )
-                 e_lbl.setWordWrap(True)
-                 exp_layout.addWidget(e_lbl)
-             v_layout.addWidget(exp_frame)
-
-        # Security Level
-        if 'security_level' in skill:
-             sec_lvl = skill['security_level']
-             color = (
-                 DesignTokens.error_text
-                 if "high" in sec_lvl.lower()
-                 else DesignTokens.warning_text
-             )
-             
-             sec_container = QWidget()
-             sec_layout = QHBoxLayout(sec_container)
-             sec_layout.setContentsMargins(0,4,0,0)
-             sec_layout.setSpacing(4)
-             
-             sec_icon = QLabel()
-             sec_icon.setPixmap(qta.icon('fa5s.shield-alt', color=color).pixmap(12, 12))
-             
-             sec_lbl = QLabel(f"安全等级: {sec_lvl}")
-             sec_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
-             
-             sec_layout.addWidget(sec_icon)
-             sec_layout.addWidget(sec_lbl)
-             sec_layout.addStretch()
-             
-             v_layout.addWidget(sec_container)
-
-        h_layout.addLayout(v_layout, 1)
-        h_layout.addStretch()
-        
-        # Controls
-        controls_container = QWidget()
-        controls_container.setFixedWidth(96)
-        c_layout = QVBoxLayout(controls_container)
-        c_layout.setContentsMargins(0, 0, 0, 0)
-        c_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        
-        is_enabled = skill['enabled']
-        toggle_btn = QPushButton("已启用" if is_enabled else "已禁用")
-        toggle_btn.setFixedWidth(80)
-        toggle_btn.setCursor(Qt.PointingHandCursor)
-        
-        if is_enabled:
-             toggle_btn.setStyleSheet(
-                 f"QPushButton {{ background: {DesignTokens.success_bg}; "
-                 f"color: {DesignTokens.success_text}; border: none; "
-                 f"border-radius: {DesignTokens.radius_sm}px; font-weight: bold; padding: 6px; }}"
-                 f"QPushButton:hover {{ background: {DesignTokens.primary_soft}; }}"
-             )
-             toggle_btn.setToolTip("点击禁用")
-        else:
-             toggle_btn.setStyleSheet(
-                 f"QPushButton {{ background: {DesignTokens.bg_disabled}; "
-                 f"color: {DesignTokens.text_secondary}; border: none; "
-                 f"border-radius: {DesignTokens.radius_sm}px; font-weight: bold; padding: 6px; }}"
-                 f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; }}"
-             )
-             toggle_btn.setToolTip("点击启用")
-
-        toggle_btn.clicked.connect(lambda: self.toggle_skill(skill['name'], not is_enabled))
-        
-        c_layout.addWidget(toggle_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
-        h_layout.addWidget(controls_container, 0, Qt.AlignRight | Qt.AlignVCenter)
-        
-        # Insert before stretch
-        parent_layout.insertWidget(parent_layout.count()-1, card)
-
-    def toggle_skill(self, name, enabled):
-        self.config_manager.set_skill_enabled(name, enabled)
-        self.refresh_list()
-
-    def import_skill(self):
-        path = QFileDialog.getExistingDirectory(self, "选择功能包目录 (包含 SKILL.md)")
-        if path:
-            success, msg = self.skill_manager.import_skill(path)
-            if success:
-                QMessageBox.information(self, "成功", msg)
-                self.refresh_list()
-            else:
-                QMessageBox.warning(self, "失败", msg)
 
 class ModelCatalogFetchWorker(QThread):
     finished_signal = Signal(dict)

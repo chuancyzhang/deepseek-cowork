@@ -6,7 +6,7 @@ import threading
 
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QScrollArea, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit)
 
 from core.connections.broker import ConnectionBroker

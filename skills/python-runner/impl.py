@@ -1,10 +1,8 @@
 from core.tool_cancellation import init_abort_state as _init_abort_state, stop_tool_process
-import sys
 import subprocess
 import tempfile
 import os
 import ast
-import shutil
 import locale
 from core.env_utils import ensure_package_installed
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox

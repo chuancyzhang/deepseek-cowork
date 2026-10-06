@@ -5,7 +5,7 @@ import os
 import time
 from urllib.parse import urlencode
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
                               QListWidget, QPushButton, QStackedWidget, QVBoxLayout, QWidget)

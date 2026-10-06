@@ -12,7 +12,7 @@ import copy
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 MESSAGE_ID_NAMESPACE = "deepseek-cowork-message"

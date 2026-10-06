@@ -1,19 +1,16 @@
 import sys
-import subprocess
 import tempfile
 import os
 import ast
-import re
 import json
 import platform
 import time
-import shutil
 import uuid
 import threading
 import hashlib
 import inspect
 from datetime import datetime
-from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
+from PySide6.QtCore import QThread, Signal, Slot
 from core.skill_manager import SkillManager
 from core.env_utils import get_python_executable, get_runtime_snapshot
 from core.im_gateway_registry import (

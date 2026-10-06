@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, Qt, Signal
-from core.chat_storage import AGENT_TERMINAL_STATUSES, ChatStorage
+from core.chat_storage import AGENT_TERMINAL_STATUSES
 from core.env_utils import get_app_data_dir
 from core.process_utils import runtime_debug_logging_enabled
 

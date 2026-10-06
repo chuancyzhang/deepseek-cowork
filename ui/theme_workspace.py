@@ -12,13 +12,11 @@ import qtawesome as qta
 from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QMovie, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLayout,
     QPushButton,
-    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,

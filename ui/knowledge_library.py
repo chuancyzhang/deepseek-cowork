@@ -1,7 +1,6 @@
 """Native knowledge workspace; all network operations run outside the UI thread."""
 
 import copy
-import json
 import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor

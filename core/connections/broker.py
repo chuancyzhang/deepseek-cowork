@@ -2,17 +2,15 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import logging
 import time
-import uuid
 from urllib.parse import unquote, urlsplit
 
 from .adapters import adapter_for, check_cancelled
 from .errors import ConnectionError
 from .store import ConnectionStore
-from .templates import TemplateCatalog, safe_url, validate_template
+from .templates import TemplateCatalog, safe_url
 
 log = logging.getLogger(__name__)
 

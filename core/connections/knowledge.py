@@ -6,7 +6,7 @@ import uuid
 
 from .broker import ConnectionBroker, task_identity
 from .errors import ConnectionError
-from ..knowledge_library import KnowledgeError, KnowledgeService, same_identity
+from ..knowledge_library import KnowledgeError, KnowledgeService
 
 
 def knowledge_error(exc):

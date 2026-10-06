@@ -2292,12 +2292,6 @@ class DaemonClient:
         except Exception:
             return None
 
-    def shutdown(self):
-        try:
-            return self._request({"action": "shutdown"})
-        except Exception:
-            return None
-
     def send_message(
         self,
         session_id,

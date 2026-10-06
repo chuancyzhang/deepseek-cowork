@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import shutil
 import re
 import uuid

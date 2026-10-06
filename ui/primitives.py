@@ -8,7 +8,7 @@ prevents parent styling from leaking into labels and nested controls.
 import json
 import re
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSpinBox,
     QSplitter,
-    QStackedWidget,
     QStyle,
     QStyleOptionSlider,
     QToolButton,

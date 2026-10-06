@@ -35,7 +35,6 @@ from core.theme_service import (
     append_theme_log,
     resolve_theme,
     theme_contrast_warnings,
-    validate_theme_document,
     validate_theme_overrides,
 )
 from ui.primitives import ProductInlineNotice, ProductMessageBox, product_code_style, product_field_style

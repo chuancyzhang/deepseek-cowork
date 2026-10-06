@@ -2,7 +2,7 @@
 import os
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QStyledItemDelegate, QStyleOptionViewItem
 from PySide6.QtGui import QColor
 from core.theme import DesignTokens
 

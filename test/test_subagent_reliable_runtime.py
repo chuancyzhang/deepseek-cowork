@@ -160,6 +160,75 @@ class ReliableSubagentTests(unittest.TestCase):
             dispatch_subagent(other, "send", {"agent_id": aid, "message_id": "bad", "content": "wrong"})
         with self.assertRaises(ValueError):
             dispatch_subagent(self.manager, "history", {"agent_id": "name"})
+        self.workers[0].complete("done")
+        run_id = self.manager._agents[aid].run_id
+        self.manager.close_agent(aid)
+        with self.assertRaises(ValueError):
+            self.manager.interrupt_agent(aid, run_id)
+        self.assertEqual(self.manager._agents[aid].status, "closed")
+
+    def test_final_save_failure_releases_worker_and_recovers_without_reexecution(self):
+        aid = self.spawn()
+        self.manager.send_input(aid, "next", "u2")
+        self.workers[0].content_signal.emit("already visible")
+        with patch.object(self.storage, "merge_agent_messages", side_effect=OSError("disk full")):
+            self.workers[0].complete("already visible")
+        record = self.manager._agents[aid]
+        self.assertIsNone(record.worker)
+        self.assertTrue(record.paused)
+        self.assertIsNotNone(record.final_result)
+        self.manager.resume_agent(aid)
+        self.assertEqual(len(self.workers), 2)
+        self.assertEqual(self.workers[1].messages[-1]["content"], "next")
+        messages = self.storage.get_agent_messages(aid)
+        self.assertEqual(sum(m.get("content") == "already visible" for m in messages), 1)
+
+    def test_concurrent_input_and_result_do_not_overwrite_each_other(self):
+        aid = self.spawn()
+        gate = threading.Barrier(3)
+        errors = []
+        def send():
+            try:
+                gate.wait()
+                self.manager.send_input(aid, "concurrent", "u2")
+            except Exception as exc:
+                errors.append(exc)
+        def finish():
+            try:
+                gate.wait()
+                self.workers[0].complete("finished")
+            except Exception as exc:
+                errors.append(exc)
+        threads = [threading.Thread(target=send), threading.Thread(target=finish)]
+        for thread in threads:
+            thread.start()
+        gate.wait()
+        for thread in threads:
+            thread.join(3)
+        self.assertEqual(errors, [])
+        contents = [m["content"] for m in self.storage.get_agent_messages(aid)]
+        self.assertEqual(contents.count("concurrent"), 1)
+        self.assertEqual(contents.count("finished"), 1)
+
+    def test_empty_final_keeps_streamed_output(self):
+        aid = self.spawn()
+        self.workers[0].content_signal.emit("visible partial")
+        self.workers[0].complete("", error="provider failed")
+        self.assertIn("visible partial", [m["content"] for m in self.storage.get_agent_messages(aid)])
+
+    def test_legacy_history_is_read_only_and_not_rewritten_by_browsing(self):
+        self.storage.upsert_conversation("parent", title="legacy")
+        self.storage.upsert_agent("old", "parent", status="completed")
+        self.storage.replace_agent_messages("old", [{"id": "old-u", "role": "user", "content": "old input"}])
+        before = self.storage.get_agent("old")
+        control = SubagentControl(self.storage, self.config)
+        self.assertTrue(control.request("parent", "list")[0]["read_only"])
+        page = control.request("parent", "history", agent_id="old")
+        self.assertEqual(page["messages"][0]["content"], "old input")
+        self.assertEqual(self.storage.get_agent("old"), before)
+        with self.assertRaises(ValueError):
+            control.request("parent", "send", agent_id="old", message_id="new", content="new")
+
 
     def test_usage_deduplicates_requests_without_double_counting_cache(self):
         aid = self.spawn()
@@ -180,6 +249,10 @@ class ReliableSubagentTests(unittest.TestCase):
         self.assertIsNotNone(page["before"])
         older = self.manager.history(aid, before=page["before"])
         self.assertEqual(len(older["activity"]), 2)
+        other = self.manager.spawn_agent("independent")["agent_id"]
+        self.workers[-1].tool_call_signal.emit({"id": "same", "name": "other", "args": {}})
+        self.assertEqual({e["payload"]["agent_id"] for e in self.manager.history(other)["activity"]}, {other})
+        self.assertEqual({e["payload"]["tool_name"] for e in self.manager.history(aid)["activity"]}, {"read"})
 
     def test_daemon_failure_does_not_create_local_runtime(self):
         aid = self.spawn()
@@ -188,7 +261,11 @@ class ReliableSubagentTests(unittest.TestCase):
         self.manager._persist_record_unlocked(record)
         client = types.SimpleNamespace(subagent_control=lambda *a, **k: (_ for _ in ()).throw(ConnectionError("offline")))
         control = SubagentControl(self.storage, self.config, client)
+        self.workers[0].content_signal.emit("durable partial")
         with patch("core.subagent_control.get_agent_manager_registry") as registry:
+            page = control.request("parent", "history", agent_id=aid)
+            self.assertTrue(page["summary"]["read_only"])
+            self.assertIn("durable partial", [m.get("content") for m in page["messages"]])
             with self.assertRaises(ConnectionError):
                 control.request("parent", "send", agent_id=aid, message_id="u2", content="hello")
             registry.assert_not_called()

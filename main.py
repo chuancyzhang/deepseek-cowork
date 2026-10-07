@@ -24948,6 +24948,7 @@ class OfficeDraftTaskCard(QFrame):
             self.deliverablePathActivated.emit(path)
 
 class ToolCallCard(QFrame):
+    agent_open_requested = Signal(str)
     clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
 
     def __init__(self, tool_name, args, tool_id, meta=None, parent=None):
@@ -25166,7 +25167,10 @@ class ToolCallCard(QFrame):
             display_name = agent_name or agent_id
             if agent_name and agent_name != agent_id:
                 display_name = f"{agent_name} ({agent_id[:8]})"
-            name = QLabel(display_name, row_widget)
+            name = QPushButton(display_name, row_widget)
+            name.setFlat(True)
+            name.setCursor(Qt.PointingHandCursor)
+            name.clicked.connect(lambda checked=False, aid=agent_id: self.agent_open_requested.emit(aid))
             name.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 11px;")
             
             status_label = QLabel(status, row_widget)
@@ -49485,6 +49489,7 @@ a {{ overflow-wrap: anywhere; }}
                 parent=bubble.think_container,
             )
             card.clicked.connect(self.show_tool_details)
+            card.agent_open_requested.connect(self._open_subagent_panel)
             projection["tool_cards"][tool_call_id] = card
             bubble.add_tool_card(card)
             pending = projection["pending_tool_results"].pop(tool_call_id, None)
@@ -51926,6 +51931,7 @@ a {{ overflow-wrap: anywhere; }}
         meta = data.get('meta') or {}
         card = ToolCallCard(data['name'], data['args'], data['id'], meta=meta)
         card.clicked.connect(self.show_tool_details)
+        card.agent_open_requested.connect(self._open_subagent_panel)
         
         state = self.get_session(session_id)
         if not state: return
@@ -53206,6 +53212,24 @@ a {{ overflow-wrap: anywhere; }}
         attention = sum(s.get("status") in {"failed", "failed_recovered", "interrupted"} or bool(s.get("control_error")) for s in summaries)
         button.setText(f"子任务 {len(summaries)} · 运行中 {running}" + (f" · 待处理 {attention}" if attention else ""))
         button.setVisible(bool(summaries))
+        state = self.get_session(session_id)
+        if state is not None:
+            observed = getattr(state, "observed_subagent_runs", set())
+            state.observed_subagent_runs = observed
+            for summary in summaries:
+                run_id = summary.get("run_id")
+                if not run_id:
+                    continue
+                key = (summary["id"], run_id)
+                if summary.get("status") in {"running", "stopping", "queued"}:
+                    observed.add(key)
+                elif key in observed and summary.get("status") in {"completed", "failed", "interrupted"}:
+                    payload = dict(summary.get("meta") or {})
+                    payload.update(agent_id=summary["id"], agent_name=summary.get("name", ""),
+                                   run_id=run_id, status=summary["status"],
+                                   content=summary.get("last_result", ""), error=summary.get("last_error", ""))
+                    self._append_summoned_agent_result(state, payload)
+                    observed.discard(key)
 
     def _render_subagent_conversation_item(self, item, parent, existing=None):
         role = "user" if item.get("type") == "user" else "assistant"
@@ -53214,19 +53238,30 @@ a {{ overflow-wrap: anywhere; }}
         reasoning = item.get("reasoning", "")
         bubble = existing
         if bubble is None:
-            bubble = ChatBubble(role, content, thinking=reasoning, parent=parent)
-            bubble.set_message_actions_enabled(False)
+            bubble = ChatBubble("User" if role == "user" else "agent", content, thinking=reasoning, parent=parent)
+            if role == "assistant":
+                bubble.set_message_actions_enabled(False)
+            else:
+                if bubble.user_action_bar is not None:
+                    bubble.user_action_bar.hide()
+                bubble._message_actions_theme_enabled = False
             bubble._subagent_tools = {}
+            bubble._subagent_reasoning = reasoning
         else:
-            bubble.set_main_content(content, content_parts=item.get("content_parts"), final=True)
-            if reasoning:
-                bubble.update_thinking(reasoning, is_final=True)
+            if role == "assistant":
+                bubble.set_main_content(content, content_parts=item.get("content_parts"), final=True)
+                previous = bubble._subagent_reasoning
+                if reasoning.startswith(previous) and reasoning != previous:
+                    bubble.update_thinking(reasoning[len(previous):], is_final=True)
+                bubble._subagent_reasoning = reasoning
         if role == "user":
             if not hasattr(bubble, "_delivery_label"):
                 bubble._delivery_label = QLabel(bubble)
-                bubble.layout().addWidget(bubble._delivery_label)
+                bubble._delivery_label.setWordWrap(True)
+                bubble.user_wrapper_layout.addWidget(bubble._delivery_label)
             queued = item.get("delivery_state") == "queued"
             bubble._delivery_label.setText("已保存 · 待处理" if queued else "")
+            bubble._delivery_label.setStyleSheet(f"color:{DesignTokens.text_secondary};")
             bubble._delivery_label.setVisible(queued)
         for tool in item.get("tool_calls", []):
             card = bubble._subagent_tools.get(tool["id"])
@@ -53489,7 +53524,11 @@ a {{ overflow-wrap: anywhere; }}
                 status=status,
             )
             return
-        if not self._event_matches_active_run(state, turn_id, request_id):
+        child_addressed = False
+        if payload.get("conversation_id") == state.session_id and payload.get("run_id") and agent_id:
+            child_row = self.chat_storage.get_agent(agent_id)
+            child_addressed = bool(child_row and child_row.get("conversation_id") == state.session_id)
+        if not child_addressed and not self._event_matches_active_run(state, turn_id, request_id):
             log_sub_agent_runtime(
                 "ui_agent_state_stale_run_rejected",
                 session_id=state.session_id,
@@ -53631,7 +53670,7 @@ a {{ overflow-wrap: anywhere; }}
 
         try:
             _log_stage("summoned_result", "ui_agent_state_stage_begin", session_id=state.session_id)
-            if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
+            if status in {"completed", "failed", "failed_recovered", "killed", "closed", "interrupted"}:
                 self._append_summoned_agent_result(state, payload)
             _log_stage("summoned_result", "ui_agent_state_stage_done", session_id=state.session_id)
         except Exception:

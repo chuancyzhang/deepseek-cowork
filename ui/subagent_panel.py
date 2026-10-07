@@ -1,15 +1,19 @@
 """Compact child overview and an addressed conversation, sharing the host renderer."""
 import copy
 import json
+import re
 import uuid
+import qtawesome as qta
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QStackedWidget, QPlainTextEdit,
+    QSizePolicy,
 )
 from core.theme import DesignTokens, bind_theme
 from core.conversation_render import build_conversation_render_items
+from shiboken6 import isValid
 
 
 STATUS = {"running": "运行中", "queued": "等待执行", "stopping": "正在停止",
@@ -35,6 +39,33 @@ class _Call(QRunnable):
         self.reply.done.emit(result)
 
 
+class _TaskRow(QPushButton):
+    """A keyboard-accessible button whose progress wraps at the drawer width."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.symbol = QLabel(self)
+        self.label = QLabel(self)
+        self.label.setWordWrap(True)
+        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        for child in (self.symbol, self.label):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.symbol, 0, Qt.AlignTop)
+        layout.addWidget(self.label, 1)
+
+    def setText(self, value):
+        self.label.setText(value)
+        self.setAccessibleName(value)
+
+    def text(self):
+        return self.label.text()
+
+    def setIcon(self, icon):
+        self.symbol.setPixmap(icon.pixmap(16, 16))
+
+
 class SubagentPanel(QWidget):
     overview_changed = Signal(str, object)
 
@@ -57,6 +88,7 @@ class SubagentPanel(QWidget):
         self.event_tools = {}
         self.busy = set()
         self.replies = set()
+        self.last_action_error = ""
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         self.notice = QLabel("尚未分配子任务。可在主对话中描述要并行完成的工作。", self)
@@ -80,6 +112,8 @@ class SubagentPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         head = QHBoxLayout()
         back = QPushButton("返回子任务", detail)
+        self.back = back
+        self.detail = detail
         back.clicked.connect(self.show_overview)
         head.addWidget(back)
         self.title = QLabel(detail)
@@ -137,16 +171,22 @@ class SubagentPanel(QWidget):
         bind_theme(self, self.apply_theme, surface="conversation")
 
     def apply_theme(self, _resolved=None):
-        self.setObjectName("SubagentPanel")
-        self.setStyleSheet(f"QWidget#SubagentPanel {{background:{DesignTokens.bg_main}; color:{DesignTokens.text_primary};}}")
+        for index, widget in enumerate((self, self.stack, self.detail, self.list_content, self.content)):
+            widget.setObjectName(f"SubagentSurface{index}")
+            widget.setAttribute(Qt.WA_StyledBackground, True)
+            widget.setStyleSheet(f"#{widget.objectName()} {{background:{DesignTokens.bg_main}; color:{DesignTokens.text_primary};}}")
         for widget in (self.overview, self.scroll):
             widget.setStyleSheet(f"QScrollArea {{border: none; background:{DesignTokens.bg_main};}}")
         for editor in (self.editor, self.raw):
             editor.setStyleSheet(f"QPlainTextEdit {{background:{DesignTokens.bg_secondary}; color:{DesignTokens.text_primary}; border:1px solid {DesignTokens.border_subtle}; border-radius:6px; padding:6px;}}")
-        for button in (*self.rows.values(), self.send, self.stop, self.resume, self.older, self.retry, self.raw_toggle):
+        for button in (*self.rows.values(), self.back, self.send, self.stop, self.resume, self.older, self.retry, self.raw_toggle):
             button.setStyleSheet(f"QPushButton {{color:{DesignTokens.text_primary}; background:{DesignTokens.bg_secondary}; border:1px solid {DesignTokens.border_subtle}; padding:8px; border-radius:6px;}} QPushButton:disabled {{color:{DesignTokens.text_tertiary};}} QPushButton:focus {{border-color:{DesignTokens.primary};}}")
         self.notice.setStyleSheet(f"color:{DesignTokens.text_secondary};")
         self.metrics.setStyleSheet(f"color:{DesignTokens.text_secondary};")
+        for label in (self.title, self.recipient):
+            label.setStyleSheet(f"color:{DesignTokens.text_primary};")
+        for row in self.rows.values():
+            row.label.setStyleSheet(f"color:{DesignTokens.text_primary}; background:transparent;")
 
     def bind(self, conversation_id, control):
         self.control = control
@@ -166,7 +206,7 @@ class SubagentPanel(QWidget):
         self.notice.setText("正在加载子任务…")
         self.refresh()
 
-    def _request(self, operation, callback, **data):
+    def _request(self, operation, callback, settled=None, **data):
         if self.control is None or not self.conversation_id:
             return
         identity = (self.generation, self.conversation_id, self.agent_id)
@@ -174,18 +214,24 @@ class SubagentPanel(QWidget):
         if key in self.busy:
             return
         self.busy.add(key)
-        reply = _Reply(self)
+        reply = _Reply()
         self.replies.add(reply)
         control, conversation_id = self.control, self.conversation_id
         def completed(response):
+            if not isValid(self):
+                reply.deleteLater()
+                return
             self.busy.discard(key)
             self.replies.discard(reply)
             reply.deleteLater()
+            if settled is not None:
+                settled(response)
             if identity != (self.generation, self.conversation_id, self.agent_id):
                 return
             result, error = response
             if error:
-                self.notice.setText("操作未完成，输入和已保存内容已保留。" + error)
+                self.last_action_error = "操作未完成，输入和已保存内容已保留。" + error
+                self.notice.setText(self.last_action_error)
                 self.retry.show()
                 self.send.setEnabled(True)
                 return
@@ -208,17 +254,21 @@ class SubagentPanel(QWidget):
             agent_id = summary["id"]
             row = self.rows.get(agent_id)
             if row is None:
-                row = QPushButton(self.list_content)
+                row = _TaskRow(self.list_content)
                 row.clicked.connect(lambda checked=False, aid=agent_id: self.open_agent(aid))
                 self.rows[agent_id] = row
                 self.apply_theme()
             name = summary.get("name") or "子任务"
-            progress = summary.get("last_error") or summary.get("last_result") or ""
+            progress = summary.get("last_error") or summary.get("latest_progress") or summary.get("last_result") or ""
             text = f"{name}  ·  {self.status_text(summary)}\n{self.metric_text(summary)}"
             if progress:
                 text += "\n" + progress.replace("\n", " ")[:100]
             if row.text() != text:
                 row.setText(text)
+            symbol = {"running": "play", "queued": "clock", "stopping": "pause",
+                      "interrupted": "pause", "completed": "check", "failed": "exclamation-circle",
+                      "closed": "lock", "killed": "lock"}.get(summary.get("status"), "info-circle")
+            row.setIcon(qta.icon("fa5s." + symbol, color=DesignTokens.text_secondary))
             self.list_layout.removeWidget(row)
             self.list_layout.insertWidget(index, row)
             row.show()
@@ -260,6 +310,7 @@ class SubagentPanel(QWidget):
     def open_agent(self, agent_id):
         self._save_view()
         self.agent_id = agent_id
+        self.last_action_error = ""
         self.generation += 1
         self.messages = {}
         self.before = None
@@ -297,12 +348,13 @@ class SubagentPanel(QWidget):
         self.stop.setEnabled(summary.get("status") == "running" and not unavailable)
         self.resume.setVisible(bool(summary.get("paused") and summary.get("pending_count")))
         self.resume.setEnabled(summary.get("status") != "stopping" and not unavailable)
-        self.notice.setText(summary.get("control_error") or ("此子任务已关闭，历史只读。" if closed else summary.get("last_error") or ("已停止；排队消息已保留。" if summary.get("paused") else "运行中发送的消息将按顺序处理。")))
+        self.notice.setText(self.last_action_error or summary.get("control_error") or ("此子任务已关闭，历史只读。" if closed else summary.get("last_error") or ("已停止；排队消息已保留。" if summary.get("paused") else "运行中发送的消息将按顺序处理。")))
 
     def load_history(self, older=False):
         if not self.agent_id:
             return
         def loaded(page):
+            self._prepending = older
             for message in page["messages"]:
                 self.messages[message["id"]] = message
             # Dictionary insertion order follows the stable SQLite positions; earlier pages prepend.
@@ -323,7 +375,8 @@ class SubagentPanel(QWidget):
             run_id = page["summary"].get("run_id", "")
             if run_id != self.events_run:
                 self.events_run, self.events_cursor = run_id, 0
-            self._request("events", self._events, agent_id=self.agent_id, run_id=run_id, after=self.events_cursor)
+            if not page["summary"].get("read_only"):
+                self._request("events", self._events, agent_id=self.agent_id, run_id=run_id, after=self.events_cursor)
         self._request("history", loaded, agent_id=self.agent_id, before=self.before if older else None)
 
     def _events(self, result):
@@ -343,7 +396,7 @@ class SubagentPanel(QWidget):
         grouped = {}
         for message in messages:
             mid = message["id"]
-            if ":message:" in mid or mid.endswith(":assistant"):
+            if re.fullmatch(r"[0-9a-f]{32}:(message:\d+|assistant)", mid):
                 grouped.setdefault(mid.split(":")[0], []).append(message)
         ordered, emitted = [], set()
         for message in messages:
@@ -384,6 +437,9 @@ class SubagentPanel(QWidget):
                 self.items[key] = (widget, signature)
             self.content_layout.removeWidget(widget)
             self.content_layout.insertWidget(index, widget)
+            if hasattr(widget, "apply_dynamic_widths"):
+                width = max(160, self.scroll.viewport().width() - 16)
+                widget.apply_dynamic_widths(width, max(140, width - 16))
             widget.show()
         for key, (widget, _) in self.items.items():
             if key not in visible_keys:
@@ -391,9 +447,25 @@ class SubagentPanel(QWidget):
                 widget.hide()
         desired = getattr(self, "_restore_scroll", None)
         self._restore_scroll = None
-        QTimer.singleShot(0, lambda: bar.setValue(desired if desired is not None else bar.maximum() if follow else previous + max(0, bar.maximum() - maximum) if previous == 0 else previous))
+        prepend = getattr(self, "_prepending", False)
+        self._prepending = False
+        identity = (self.generation, self.conversation_id, self.agent_id)
+        def restore():
+            if not isValid(self) or identity != (self.generation, self.conversation_id, self.agent_id):
+                return
+            bar.setValue(desired if desired is not None else previous + max(0, bar.maximum() - maximum)
+                         if prepend else bar.maximum() if follow else previous)
+        QTimer.singleShot(0, restore)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.agent_id:
+            self._render()
 
     def command(self, operation):
+        identity = (self.generation, self.conversation_id, self.agent_id)
+        if (identity, operation) in self.busy:
+            return
         summary = self.summaries.get(self.agent_id, {})
         data = {"agent_id": self.agent_id, "run_id": summary.get("run_id", "")}
         key = (self.conversation_id, self.agent_id)
@@ -407,13 +479,22 @@ class SubagentPanel(QWidget):
             data.update(content=text, message_id=view["message_id"])
             self.send.setEnabled(False)
         def done(result):
+            self.last_action_error = ""
             if operation == "send":
                 if self.editor.toPlainText().strip() == text:
                     self.editor.clear()
                 self.views.setdefault(key, {}).pop("pending_text", None)
                 self.notice.setText("已接收并保存；待处理消息按顺序执行。")
             self.refresh()
-        self._request(operation, done, **data)
+        def settled(response):
+            result, error = response
+            if not error and operation == "send":
+                view = self.views.setdefault(key, {})
+                if view.get("draft", "").strip() == text:
+                    view["draft"] = ""
+                if view.get("pending_text") == text:
+                    view.pop("pending_text", None)
+        self._request(operation, done, settled=settled, **data)
 
     # Compatibility with existing drawer clearing and event coalescing entrypoints.
     def reset(self):

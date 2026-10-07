@@ -41,6 +41,9 @@ def get_runtime_signature():
             os.path.join(base_dir, "main.py"),
             os.path.join(base_dir, "core", "agent.py"),
             os.path.join(base_dir, "core", "daemon.py"),
+            os.path.join(base_dir, "core", "agent_manager.py"),
+            os.path.join(base_dir, "core", "agent_inbox.py"),
+            os.path.join(base_dir, "core", "subagent_control.py"),
             os.path.join(base_dir, "core", "clarify_mode.py"),
             os.path.join(base_dir, "skills", "file-system", "impl.py"),
         ]
@@ -732,7 +735,7 @@ class DaemonState:
 
     def _close_live_subagents(self, session_id, force=False):
         try:
-            close_reason = "Daemon 会话已停止，子 Agent 被终止。" if force else "Daemon 会话已结束，子 Agent 已关闭。"
+            close_reason = "父会话已停止，子任务本轮已停止，消息与队列已保留。"
             manager = get_agent_manager_registry().get_session_manager(
                 session_id,
                 chat_storage=self.chat_storage,

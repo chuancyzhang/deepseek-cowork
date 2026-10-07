@@ -3,18 +3,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tempfile
 import time
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtGui import QFontDatabase, QFont
 from PySide6.QtTest import QTest
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from core.chat_storage import ChatStorage
 from core.agent_manager import get_agent_manager_registry
 from core.subagent_control import SubagentControl
 from ui.subagent_panel import SubagentPanel
+from core.theme import ThemeRuntimeManager, default_design_tokens, DesignTokens
+from core.theme_service import ThemeRepository, DEFAULT_THEME_ID
 from test_subagent_reliable_runtime import Worker
 from main import MainWindow
 
@@ -23,12 +26,16 @@ class PanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
-        font = Path("C:/Windows/Fonts/msyh.ttc")
-        if font.exists():
-            QFontDatabase.addApplicationFont(str(font))
+        for name in ("msyh.ttc", "consola.ttf"):
+            font = Path("C:/Windows/Fonts") / name
+            if font.exists():
+                QFontDatabase.addApplicationFont(str(font))
         cls.app.setFont(QFont("Microsoft YaHei", 10))
 
     def setUp(self):
+        self.qt_errors = []
+        self.previous_excepthook = sys.excepthook
+        sys.excepthook = lambda kind, value, trace: self.qt_errors.append(str(value))
         self.tmp = tempfile.TemporaryDirectory()
         self.storage = ChatStorage(os.path.join(self.tmp.name, "chat.sqlite"))
         self.config = SimpleNamespace(get=lambda key, default=None: default, get_god_mode=lambda: False,
@@ -46,6 +53,21 @@ class PanelTests(unittest.TestCase):
         self.panel = SubagentPanel(lambda item, parent, existing: MainWindow._render_subagent_conversation_item(None, item, parent, existing), self.host)
         layout.addWidget(self.panel)
         self.control = SubagentControl(self.storage, self.config)
+        self.original_tokens = default_design_tokens()
+        self.original_style = self.app.styleSheet()
+        self.original_registry = getattr(self.app, "theme_binding_registry", None)
+        self.original_manager = getattr(self.app, "theme_manager", None)
+        self.theme_manager = None
+        if os.environ.get("SUBAGENT_DARK"):
+            self.theme_manager = ThemeRuntimeManager(self.app, ThemeRepository(self.tmp.name))
+            self.app.theme_manager = self.theme_manager
+            tokens = {"bg_main": "#202124", "bg_secondary": "#292b30", "text_primary": "#eeeeee",
+                      "text_secondary": "#b6b8bd", "text_tertiary": "#989ba2", "border_subtle": "#42454b",
+                      "separator": "#42454b", "bg_chat": "#202124", "bg_assistant_stream": "#202124",
+                      "bg_user_bubble": "#353849", "bg_app": "#202124"}
+            self.assertTrue(self.theme_manager.apply_profile({"id": "qa-dark", "name": "QA dark",
+                "base": DEFAULT_THEME_ID, "overrides": {"tokens": tokens}}, reason="subagent-qa"), self.theme_manager.last_error)
+            self.panel.apply_theme()
         self.host.show()
 
     def drain(self):
@@ -65,7 +87,20 @@ class PanelTests(unittest.TestCase):
         self.host.close()
         self.host.deleteLater()
         self.app.processEvents()
+        if self.theme_manager is not None:
+            self.theme_manager.stop()
+            for name, value in self.original_tokens.items():
+                setattr(DesignTokens, name, value)
+            self.app.setStyleSheet(self.original_style)
+            self.theme_manager.deleteLater()
+            self.app.processEvents()
+            self.app.theme_binding_registry = self.original_registry
+            self.app.theme_manager = self.original_manager
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        QThreadPool.globalInstance().waitForDone(5000)
         self.tmp.cleanup()
+        sys.excepthook = self.previous_excepthook
+        self.assertEqual(self.qt_errors, [], "Qt callback failed")
 
     def seed(self):
         ids = []
@@ -143,6 +178,22 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(first, self.panel.messages[self.manager._agents[ids[0]].assistant_id]["content"])
         self.assertTrue(all(self.panel.rows[k] is v for k, v in rows.items()))
 
+    def test_parent_result_deduplicates_reconnect_but_accepts_next_run(self):
+        aid = self.manager.spawn_agent("task")["agent_id"]
+        state = SimpleNamespace(session_id="parent", messages=[], completed_agent_result_ids=set(),
+                                displayed_count=0, render_items=[])
+        window = SimpleNamespace(chat_storage=self.storage,
+            _rebuild_session_render_spans=lambda state: None, save_chat_history=lambda **kwargs: None)
+        event = dict(agent_id=aid, run_id="first", status="completed", content="answer",
+                     summon_source="mention", agent_name="检查")
+        MainWindow._append_summoned_agent_result(window, state, event)
+        state.completed_agent_result_ids.clear()
+        MainWindow._append_summoned_agent_result(window, state, event)
+        self.assertEqual(len(state.messages), 1)
+        MainWindow._append_summoned_agent_result(window, state, dict(event, run_id="second"))
+        self.assertEqual(len(state.messages), 2)
+        self.assertNotEqual(state.messages[0]["id"], state.messages[1]["id"])
+
     def test_screenshots_and_parented_widgets(self):
         ids = self.seed()
         output = os.environ.get("SUBAGENT_SCREENSHOTS")
@@ -163,6 +214,14 @@ class PanelTests(unittest.TestCase):
         for row in self.panel.rows.values():
             self.assertFalse(row.isWindow())
             self.assertIsNotNone(row.parentWidget())
+        self.panel.show_overview()
+        self.drain()
+        self.host.resize(380, 820)
+        summaries = list(self.panel.summaries.values())
+        summaries[0] = dict(summaries[0], latest_progress="长摘要需要在小窗口内完整换行。" * 8)
+        self.panel.set_summaries(summaries)
+        QTest.qWait(100)
+        self.assertEqual(self.panel.overview.horizontalScrollBar().maximum(), 0)
 
 
 if __name__ == "__main__":

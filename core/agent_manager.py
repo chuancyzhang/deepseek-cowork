@@ -45,6 +45,7 @@ def _debug_worker_summary(worker):
 
 
 def _log_agent_runtime(event, **fields):
+    fields = {k: v for k, v in fields.items() if not any(x in k for x in ("preview", "content", "traceback"))}
     try:
         payload = {
             "event": event,
@@ -151,6 +152,7 @@ class AgentRuntimeRecord:
     draft_reasoning: str = ""
     assistant_id: str = ""
     storage_error: str = ""
+    final_result: object = None
     execution_authorization: object = field(default=None, repr=False)
 
     def is_live(self):
@@ -271,7 +273,8 @@ class SessionAgentManager:
             event = self.journal.append_event(self._journal_id(record), record.run_id, "agent_state", payload)
             payload["sequence"] = event["sequence"]
         _log_agent_runtime("child_" + status, conversation_id=self.conversation_id,
-                           agent_id=record.agent_id, run_id=record.run_id)
+                           agent_id=record.agent_id, run_id=record.run_id,
+                           message_id=extra.get("message_id", record.assistant_id))
         if not self.agent_state_signal:
             if self._event_bridge is None:
                 return
@@ -327,6 +330,9 @@ class SessionAgentManager:
                 run_id=meta.get("run_id", ""), paused=bool(meta.get("paused")),
             )
             self._agents[record.agent_id] = record
+            if not meta.get("execution_owner"):
+                record.paused = True
+                continue
             if record.status not in AGENT_TERMINAL_STATUSES:
                 record.status = "interrupted"
                 record.paused = True
@@ -357,7 +363,9 @@ class SessionAgentManager:
         if not run:
             return
         record.assistant_id = run.get("assistant_id", record.run_id + ":assistant")
+        last_activity = record.meta.get("run_started_at", 0)
         for event in self.journal.read_events(self._journal_id(record), record.run_id):
+            last_activity = max(last_activity, event.get("created_at", 0))
             payload = event.get("payload") or {}
             if payload.get("status") == "content":
                 record.draft_content += payload.get("content_delta", "")
@@ -365,6 +373,11 @@ class SessionAgentManager:
                 record.draft_content = payload.get("content", "")
             elif payload.get("status") == "thinking":
                 record.draft_reasoning += payload.get("reasoning_delta", "")
+        record.finished_at = last_activity
+        if record.meta.get("run_started_at"):
+            elapsed = max(0, last_activity - record.meta["run_started_at"])
+            record.meta["last_duration"] = elapsed
+            record.meta["total_duration"] = record.meta.get("run_total_base", 0) + elapsed
         if record.draft_content or record.draft_reasoning:
             self._save_draft(record)
 
@@ -385,6 +398,7 @@ class SessionAgentManager:
             "created_at": record.created_at, "updated_at": record.updated_at,
             "started_at": record.started_at, "finished_at": record.finished_at,
             "last_error": record.last_error, "last_result": record.last_result,
+            "latest_progress": record.draft_content[-160:] or record.last_result,
             "meta": _json_copy(record.meta, {}), "paused": record.paused,
             "has_pending_input": bool(record.pending_inputs), "pending_count": len(record.pending_inputs),
             "duration": elapsed, "total_duration": record.meta.get("total_duration"),
@@ -489,6 +503,9 @@ class SessionAgentManager:
         record.assistant_id = record.run_id + ":assistant"
         record.draft_content = record.draft_reasoning = record.storage_error = ""
         record.interrupted = record.worker_result_received = record.worker_cleanup_pending = False
+        record.last_error = ""
+        record.final_result = None
+        record.meta["run_total_base"] = record.meta.get("total_duration", 0)
         record.meta["run_started_at"] = time.time()
         record.meta["run_usage"] = {}
         self.journal.begin_run(self._journal_id(record), record.run_id, extra={"assistant_id": record.assistant_id})
@@ -497,6 +514,9 @@ class SessionAgentManager:
         claimed = self.chat_storage.claim_agent_input(record.agent_id, record.run_id)
         if not claimed:
             return
+        _log_agent_runtime("child_input_claimed", conversation_id=self.conversation_id,
+                           agent_id=record.agent_id, run_id=record.run_id,
+                           message_id=claimed["message_id"])
         record.status = "running"
         record.started_at = record.started_at or time.time()
         record.finished_at = 0
@@ -534,7 +554,7 @@ class SessionAgentManager:
             record = self._agents[agent_id]
             if record.worker_result_received:
                 return
-            record.worker_result_received = True
+            record.final_result = _json_copy(result, {})
             generated = [dict(m) for m in result.get("generated_messages", []) if isinstance(m, dict)]
             # Only the child's new output is merged; queued user messages remain untouched.
             for index, message in enumerate(generated):
@@ -566,13 +586,15 @@ class SessionAgentManager:
             record.finished_at = time.time()
             elapsed = max(0, record.finished_at - record.meta["run_started_at"])
             record.meta["last_duration"] = elapsed
-            record.meta["total_duration"] = record.meta.get("total_duration", 0) + elapsed
+            record.meta["total_duration"] = record.meta.get("run_total_base", 0) + elapsed
             self.chat_storage.settle_agent_input(agent_id, record.run_id, record.status)
             self.journal.update_run(self._journal_id(record), record.run_id, {
                 "status": "interrupted" if record.status in {"closed", "killed", "interrupted"} else record.status,
                 "finished_at": record.finished_at})
             self._persist_record_unlocked(record)
             self._emit_agent_state(record, record.status, content=record.last_result, error=record.last_error)
+            record.worker_result_received = True
+            record.final_result = None
             worker = record.worker
             if self._worker_has_thread_finished_signal(worker):
                 record.worker_cleanup_pending = True
@@ -584,21 +606,38 @@ class SessionAgentManager:
     def _schedule_ready(self):
         for item in sorted(self._agents.values(), key=lambda r: r.created_at):
             if item.status not in {"closed", "killed"}:
-                self._start_worker_unlocked(item)
+                try:
+                    self._start_worker_unlocked(item)
+                except Exception as exc:
+                    item.paused = True
+                    item.status = "failed"
+                    item.last_error = str(exc)
+                    _log_agent_runtime("child_start_failed", conversation_id=self.conversation_id,
+                                       agent_id=item.agent_id, run_id=item.run_id, error=str(exc))
 
     def _on_worker_thread_finished(self, agent_id, worker):
         with self._lock:
             record = self._agents.get(agent_id)
             if not record or record.worker is not worker:
                 return
-            if not record.worker_result_received:
-                self._on_worker_finished(agent_id, {"error": record.storage_error or "运行线程意外退出", "content": record.draft_content})
-            record.worker = None
-            record.worker_cleanup_pending = False
-            record.pending_restart = False
-            worker.deleteLater()
+            try:
+                if not record.worker_result_received:
+                    self._on_worker_finished(agent_id, record.final_result or {
+                        "error": record.storage_error or "运行线程意外退出", "content": record.draft_content})
+            except Exception as exc:
+                record.paused = True
+                record.storage_error = str(exc)
+                record.last_error = "运行记录保存失败：" + str(exc)
+                record.status = "failed"
+                _log_agent_runtime("child_final_save_failed", conversation_id=self.conversation_id,
+                                   agent_id=agent_id, run_id=record.run_id, error=str(exc))
+            finally:
+                record.worker = None
+                record.worker_cleanup_pending = False
+                record.pending_restart = False
+                worker.deleteLater()
+                self._condition.notify_all()
             self._schedule_ready()
-            self._condition.notify_all()
 
     def spawn_agent(self, message, name=None, fork_context=False, current_messages_snapshot=None,
                     parent_message_id=None, source_tool_call_id=None, run_context=None, meta=None):
@@ -624,9 +663,10 @@ class SessionAgentManager:
                 for i, m in enumerate(seed):
                     m["id"] = agent_id + ":seed:" + str(i)
                 self.chat_storage.merge_agent_messages(agent_id, seed)
-            self.chat_storage.enqueue_agent_input(agent_id, text, uuid.uuid4().hex, "parent")
+            message_id = uuid.uuid4().hex
+            self.chat_storage.enqueue_agent_input(agent_id, text, message_id, "parent")
             self._agents[agent_id] = record
-            self._emit_agent_state(record, "input", content=text, input_text=text)
+            self._emit_agent_state(record, "input", content=text, input_text=text, message_id=message_id)
             self._start_worker_unlocked(record)
             return {"status": "spawned", "agent_id": agent_id, "name": record.name, "conversation_id": self.conversation_id}
 
@@ -634,18 +674,20 @@ class SessionAgentManager:
         text = str(message or "").strip()
         with self._lock:
             record = self._resolve(target)
+            if not record.meta.get("execution_owner"):
+                raise ValueError("旧版子任务缺少运行归属，只能查看历史")
             row, inserted = self.chat_storage.enqueue_agent_input(record.agent_id, text, message_id or uuid.uuid4().hex, source)
             self._refresh_queue(record)
             if inserted:
                 self._emit_agent_state(record, "input", content=text, input_text=text, message_id=row["message_id"])
-                if not record.paused:
-                    from core.execution_authorization import current_authorization
-                    if record.worker is None:
-                        record.execution_authorization = current_authorization()
-                    self._start_worker_unlocked(record)
-                    if record.worker_result_received and record.pending_inputs:
-                        record.status = "queued"
-                        self._persist_record_unlocked(record)
+            if not record.paused:
+                from core.execution_authorization import current_authorization
+                if record.worker is None:
+                    record.execution_authorization = current_authorization()
+                self._start_worker_unlocked(record)
+                if record.worker_result_received and record.pending_inputs:
+                    record.status = "queued"
+                    self._persist_record_unlocked(record)
             self._condition.notify_all()
             return {"status": "queued", "agent_id": record.agent_id,
                     "message_id": row["message_id"], "pending_inputs": len(record.pending_inputs)}
@@ -653,6 +695,8 @@ class SessionAgentManager:
     def interrupt_agent(self, target, expected_run_id):
         with self._lock:
             record = self._resolve(target, exact=True)
+            if record.status in {"closed", "killed"} or not record.meta.get("execution_owner"):
+                raise ValueError("此子任务历史只读，不能停止或恢复")
             if record.run_id != expected_run_id:
                 raise ValueError("运行已更新，请刷新后再停止")
             record.paused = True
@@ -668,10 +712,14 @@ class SessionAgentManager:
     def resume_agent(self, target):
         with self._lock:
             record = self._resolve(target, exact=True)
+            if not record.meta.get("execution_owner"):
+                raise ValueError("旧版子任务缺少运行归属，只能查看历史")
             if record.status in {"closed", "killed"}:
                 raise ValueError("已关闭的子任务不能继续")
             if record.worker is not None:
                 raise ValueError("上一轮尚未停止，请稍后继续")
+            if record.final_result is not None:
+                self._on_worker_finished(record.agent_id, record.final_result)
             from core.execution_authorization import ExecutionAuthorization
             record.execution_authorization = ExecutionAuthorization.start(self.config_manager,
                 self.conversation_id, uuid.uuid4().hex, self.workspace_dir or record.meta.get("workspace_dir"))

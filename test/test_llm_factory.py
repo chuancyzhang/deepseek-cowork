@@ -1,6 +1,7 @@
 import sys
 import os
 import unittest
+import httpx
 from unittest.mock import MagicMock
 from types import ModuleType
 
@@ -55,6 +56,7 @@ class TestLLMFactory(unittest.TestCase):
         self.anthropic_module.Anthropic.assert_called_with(
             api_key="test_key",
             base_url="https://test.url",
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=60.0),
         )
 
     def test_create_anthropic_provider_uses_bearer_for_tencent_coding_endpoint(self):
@@ -69,6 +71,7 @@ class TestLLMFactory(unittest.TestCase):
             auth_token="coding-token",
             base_url="https://api.lkeap.cloud.tencent.com/coding/anthropic",
             default_headers={"X-Api-Key": self.anthropic_module.omit},
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=60.0),
         )
 
     def test_create_provider_uses_new_default_model_name(self):
@@ -97,6 +100,7 @@ class TestLLMFactory(unittest.TestCase):
         self.openai_module.OpenAI.assert_called_with(
             api_key="profile_key",
             base_url="https://profile.url",
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=60.0),
         )
         self.assertFalse(provider.thinking_enabled)
         self.assertEqual(provider.reasoning_effort, "max")
@@ -159,6 +163,7 @@ class TestLLMFactory(unittest.TestCase):
         self.openai_module.OpenAI.assert_called_with(
             api_key="snapshot_key",
             base_url="https://snapshot.url",
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=60.0),
         )
 
     def test_create_provider_from_unsaved_profile(self):
@@ -193,6 +198,7 @@ class TestLLMFactory(unittest.TestCase):
         self.anthropic_module.Anthropic.assert_called_with(
             api_key="anthropic_key",
             base_url="https://anthropic.url",
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=60.0),
         )
 
 if __name__ == '__main__':

@@ -25227,9 +25227,9 @@ class ToolCallCard(QFrame):
              style = apple_status_chip_style(status)
              detail_text = _trim(task or detail_cache)
         elif status == "waiting_input":
-            status_text = "等待输入"
+            status_text = "有待处理消息"
             style = apple_status_chip_style(status)
-            detail_text = "等待新的 send_input..."
+            detail_text = "已保存补充消息，将按顺序处理"
         elif status == "thinking":
             status_text = "思考中"
             style = apple_status_chip_style(status)
@@ -25756,19 +25756,6 @@ class SubAgentMonitor(QWidget):
                 traceback=traceback.format_exc(),
             )
             return
-
-class SubAgentMonitorWindow(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("DeepSeek Cowork - AI 分身监控")
-        self.resize(600, 400)
-        self.setWindowFlags(self.windowFlags() | Qt.Window) # Ensure it acts like a window
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.monitor = SubAgentMonitor(self)
-        layout.addWidget(self.monitor)
 
 class SessionActivityIndicator(QWidget):
     """Small, quiet activity ring used by live conversations in the sidebar."""
@@ -29775,12 +29762,17 @@ class MainWindow(QMainWindow):
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
         sub_agent_layout.setContentsMargins(14, 12, 14, 14)
         sub_agent_layout.setSpacing(8)
-        self.sub_agent_monitor = SubAgentMonitor(self.sub_agent_tab)
+        from ui.subagent_panel import SubagentPanel
+        self.sub_agent_monitor = SubagentPanel(self._render_subagent_conversation_item, self.sub_agent_tab)
+        self.sub_agent_monitor.overview_changed.connect(self._update_subagent_overview)
+        self._subagent_header_buttons = {}
+        self._subagent_poll = QTimer(self)
+        self._subagent_poll.setInterval(1500)
+        self._subagent_poll.timeout.connect(self._refresh_subagent_panel_context)
+        self._subagent_poll.start()
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
         self.right_stack.addWidget(self.sub_agent_tab)
 
-        # Sub-Agent Monitor (legacy independent window entry)
-        self.sub_agent_monitor_window = None
         self._set_deliverable_controls_enabled("")
         
         right_layout.addWidget(self.right_stack)
@@ -37968,6 +37960,11 @@ class MainWindow(QMainWindow):
         active_skills_label.setVisible(False)
         session_header_layout.addWidget(active_skills_label)
         session_header_layout.addStretch(1)
+        child_button = QPushButton("子任务", session_header)
+        child_button.hide()
+        child_button.clicked.connect(lambda checked=False: self._open_subagent_panel())
+        self._subagent_header_buttons[session_id] = child_button
+        session_header_layout.addWidget(child_button)
 
         token_usage_label = TokenUsageChip()
         session_header_layout.addWidget(token_usage_label, 0, Qt.AlignRight)
@@ -48723,7 +48720,7 @@ a {{ overflow-wrap: anywhere; }}
             if not agent_id:
                 continue
             try:
-                manager.close_agent(agent_id, force=bool(force), reason=reason)
+                manager.interrupt_agent(agent_id, item.get("run_id", ""))
             except Exception:
                 continue
 
@@ -49803,7 +49800,8 @@ a {{ overflow-wrap: anywhere; }}
         if data.get("summon_source") != "mention":
             return
         agent_id = str(data.get("agent_id") or "").strip()
-        if not agent_id or agent_id in getattr(state, "completed_agent_result_ids", set()):
+        result_key = agent_id + ":" + str(data.get("run_id") or "legacy")
+        if not agent_id or result_key in getattr(state, "completed_agent_result_ids", set()):
             return
         content = str(data.get("content") or "").strip()
         error = str(data.get("error") or "").strip()
@@ -49814,7 +49812,10 @@ a {{ overflow-wrap: anywhere; }}
         else:
             detail = error or content or "任务未成功完成。"
             text = f"[{profile_name}] {detail}"
-        state.completed_agent_result_ids.add(agent_id)
+        message_id = uuid.uuid5(uuid.NAMESPACE_URL, "subagent-result:" + state.session_id + ":" + result_key).hex
+        if any(m.get("id") == message_id for m in state.messages):
+            return
+        state.completed_agent_result_ids.add(result_key)
         try:
             agent_parent_message_id = str(
                 (self.chat_storage.get_agent(agent_id) or {}).get("parent_message_id") or ""
@@ -49827,7 +49828,6 @@ a {{ overflow-wrap: anywhere; }}
                 agent_id=agent_id,
                 error=str(exc),
             )
-        message_id = self._new_message_id()
         state.messages.append(
             {
                 "id": message_id,
@@ -49840,6 +49840,7 @@ a {{ overflow-wrap: anywhere; }}
                     "agent_profile_name": profile_name,
                     "summon_source": data.get("summon_source") or "mention",
                     "agent_status": status,
+                    "agent_run_id": data.get("run_id") or "",
                     "embedded_agent_result": True,
                     "agent_parent_message_id": agent_parent_message_id,
                 },
@@ -53178,83 +53179,64 @@ a {{ overflow-wrap: anywhere; }}
         state.sub_agent_history_loaded = True
 
     def _render_sub_agent_monitor_for_state(self, state):
-        if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:
+        if state and state is self.get_current_session():
+            self._refresh_subagent_panel_context()
+
+    def _refresh_subagent_panel_context(self):
+        state = self.get_current_session()
+        if state is None or not getattr(self, "chat_storage", None):
             return
-        self._ensure_sub_agent_history_loaded(state)
-        if not _qt_object_alive(self.sub_agent_monitor):
-            log_sub_agent_runtime(
-                "ui_sub_agent_monitor_invalid",
-                session_id=getattr(state, "session_id", ""),
-            )
+        from core.subagent_control import SubagentControl
+        self.sub_agent_monitor.bind(state.session_id, SubagentControl(
+            self.chat_storage, self.config_manager, self.daemon_client))
+
+    def _open_subagent_panel(self, agent_id=""):
+        self._refresh_subagent_panel_context()
+        self.context_available_tabs.add(self.RIGHT_TAB_SUB_AGENTS)
+        self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
+        self.show_context_drawer(self.RIGHT_TAB_SUB_AGENTS)
+        if agent_id:
+            self.sub_agent_monitor.open_agent(agent_id)
+
+    def _update_subagent_overview(self, session_id, summaries):
+        button = self._subagent_header_buttons.get(session_id)
+        if button is None or not _qt_object_alive(button):
             return
-        all_events = list(getattr(state, "sub_agent_events", []) or [])
-        events = all_events[-SUB_AGENT_MONITOR_RENDER_LIMIT:]
-        omitted_count = max(0, len(all_events) - len(events))
-        log_sub_agent_runtime(
-            "ui_sub_agent_monitor_render_begin",
-            session_id=getattr(state, "session_id", ""),
-            total_event_count=len(all_events),
-            render_event_count=len(events),
-            omitted_event_count=omitted_count,
-            drawer_open=bool(getattr(self, "right_drawer_open", False)),
-            drawer_tab=getattr(self, "right_drawer_tab", None),
-        )
-        return True
-        try:
-            self.sub_agent_monitor.reset()
-            log_sub_agent_runtime(
-                "ui_sub_agent_monitor_render_reset_done",
-                session_id=getattr(state, "session_id", ""),
-            )
-            if omitted_count:
-                self.sub_agent_monitor.set_notice(
-                    f"为保证稳定性，仅显示最近 {len(events)} 条子 Agent 事件，已省略更早的 {omitted_count} 条。"
-                )
-            rendered_count = 0
-            skipped_count = 0
-            for index, event in enumerate(events, start=1):
-                if not isinstance(event, dict):
-                    skipped_count += 1
-                    continue
-                agent_id = event.get("agent_id")
-                if not agent_id:
-                    skipped_count += 1
-                    continue
-                status = event.get("status") or "running"
-                content = event.get("content") or ""
-                log_sub_agent_runtime(
-                    "ui_sub_agent_monitor_render_event_begin",
-                    session_id=getattr(state, "session_id", ""),
-                    agent_id=agent_id,
-                    status=status,
-                    render_index=index,
-                    content_len=len(str(content or "")),
-                )
-                self.sub_agent_monitor.update_log(
-                    agent_id,
-                    content,
-                    status,
-                    agent_name=event.get("agent_name") or "",
-                    event=event,
-                )
-                rendered_count += 1
-            log_sub_agent_runtime(
-                "ui_sub_agent_monitor_render_done",
-                session_id=state.session_id,
-                event_count=len(events),
-                rendered_event_count=rendered_count,
-                skipped_event_count=skipped_count,
-                agent_count=len(getattr(self.sub_agent_monitor, "agents", {}) or {}),
-                drawer_open=bool(getattr(self, "right_drawer_open", False)),
-                drawer_tab=getattr(self, "right_drawer_tab", None),
-            )
-        except Exception:
-            log_sub_agent_runtime(
-                "ui_sub_agent_monitor_render_failed",
-                session_id=getattr(state, "session_id", ""),
-                traceback=traceback.format_exc(),
-            )
-            return
+        running = sum(s.get("status") in {"running", "stopping"} for s in summaries)
+        attention = sum(s.get("status") in {"failed", "failed_recovered", "interrupted"} or bool(s.get("control_error")) for s in summaries)
+        button.setText(f"子任务 {len(summaries)} · 运行中 {running}" + (f" · 待处理 {attention}" if attention else ""))
+        button.setVisible(bool(summaries))
+
+    def _render_subagent_conversation_item(self, item, parent, existing=None):
+        role = "user" if item.get("type") == "user" else "assistant"
+        message = item.get("message") or {}
+        content = message.get("content", "") if role == "user" else item.get("content", "")
+        reasoning = item.get("reasoning", "")
+        bubble = existing
+        if bubble is None:
+            bubble = ChatBubble(role, content, thinking=reasoning, parent=parent)
+            bubble.set_message_actions_enabled(False)
+            bubble._subagent_tools = {}
+        else:
+            bubble.set_main_content(content, content_parts=item.get("content_parts"), final=True)
+            if reasoning:
+                bubble.update_thinking(reasoning, is_final=True)
+        if role == "user":
+            if not hasattr(bubble, "_delivery_label"):
+                bubble._delivery_label = QLabel(bubble)
+                bubble.layout().addWidget(bubble._delivery_label)
+            queued = item.get("delivery_state") == "queued"
+            bubble._delivery_label.setText("已保存 · 待处理" if queued else "")
+            bubble._delivery_label.setVisible(queued)
+        for tool in item.get("tool_calls", []):
+            card = bubble._subagent_tools.get(tool["id"])
+            if card is None:
+                card = ToolCallCard(tool.get("name", "工具"), tool.get("args", {}), tool["id"], parent=bubble)
+                bubble.add_tool_card(card)
+                bubble._subagent_tools[tool["id"]] = card
+            if tool.get("result") or tool.get("result_obj") is not None:
+                card.set_result(tool.get("result", ""), result_obj=tool.get("result_obj"))
+        return bubble
 
     def _flush_sub_agent_monitor_render(self, session_id):
         state = self.get_session(session_id)

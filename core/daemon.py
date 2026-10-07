@@ -180,7 +180,7 @@ class DaemonState:
         if time.time() - self.last_activity < self.idle_timeout:
             return
         with self.lock:
-            if self.active_workers or self.detached_workers:
+            if self.active_workers or self.detached_workers or get_agent_manager_registry().active_count(self.chat_storage.db_path):
                 return
             self.sessions = {}
             self.suspended = True
@@ -738,6 +738,7 @@ class DaemonState:
                 chat_storage=self.chat_storage,
                 config_manager=self.config_manager,
             )
+            manager.execution_owner = "daemon"
             manager.step_signal = None
             manager.agent_state_signal = None
             live_items = manager.list_agent_summaries(status_filter=list(AGENT_LIVE_STATUSES))
@@ -746,7 +747,7 @@ class DaemonState:
                 if not agent_id:
                     continue
                 try:
-                    summary = manager.close_agent(agent_id, force=bool(force), reason=close_reason)
+                    summary = manager.interrupt_agent(agent_id, item.get("run_id", ""))
                     _log_daemon(
                         "close sub-agent "
                         + json.dumps(
@@ -799,6 +800,9 @@ class DaemonState:
             skill_catalog_service=self.skill_catalog,
             dependency_coordinator=self.dependency_coordinator,
         )
+        if worker.agent_manager is not None:
+            worker.agent_manager.execution_owner = "daemon"
+
         worker.finished_signal.connect(on_finished)
         activated = self.set_active_worker(
             session_id,
@@ -1371,6 +1375,18 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             self._send({"status": "error", "error": "Invalid JSON"})
             return
         action = data.get("action")
+        if action == "subagent_control":
+            try:
+                from core.subagent_control import dispatch_subagent
+                state = self.server.state
+                manager = get_agent_manager_registry().get_session_manager(
+                    str(data.get("session_id") or ""), state.chat_storage, state.config_manager)
+                manager.execution_owner = "daemon"
+                result = dispatch_subagent(manager, data.get("operation"), data)
+                self._send({"status": "ok", "result": result})
+            except Exception as exc:
+                self._send({"status": "error", "error": str(exc)})
+            return
         if action == "ping":
             self._send({"status": "ok", "pid": os.getpid(), "signature": get_runtime_signature()})
             return
@@ -1382,7 +1398,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "suspended": state.suspended,
                     "last_activity": state.last_activity,
                     "sessions": len(state.sessions),
-                    "active_runs": len(state.active_workers) + len(state.detached_workers),
+                    "active_runs": len(state.active_workers) + len(state.detached_workers) + get_agent_manager_registry().active_count(state.chat_storage.db_path),
                     "pid": os.getpid(),
                     "signature": get_runtime_signature(),
                 }
@@ -1745,6 +1761,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 skill_catalog_service=state.skill_catalog,
                 dependency_coordinator=state.dependency_coordinator,
             )
+            if worker.agent_manager is not None:
+                worker.agent_manager.execution_owner = "daemon"
             worker_holder["worker"] = worker
             pipeline = RuntimeStream(
                 state.runtime_journal, session_id, request_id,
@@ -2278,6 +2296,12 @@ class DaemonClient:
         if not data:
             return None
         return json.loads(data.decode("utf-8"))
+
+    def subagent_control(self, session_id, operation, **data):
+        response = self._request(dict(data, action="subagent_control", session_id=session_id, operation=operation))
+        if not response or response.get("status") != "ok":
+            raise RuntimeError((response or {}).get("error") or "守护进程未返回结果")
+        return response["result"]
 
     def ping(self):
         try:

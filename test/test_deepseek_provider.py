@@ -137,7 +137,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual([item["role"] for item in responses_input], ["developer", "developer"])
 
     def test_openai_stream_read_timeout_is_sixty_seconds(self):
-        self._build_provider()
+        self._build_provider(base_url="https://api.openai.com/v1", model_name="gpt-4.1-mini")
         timeout = sys.modules["openai"].OpenAI.call_args.kwargs["timeout"]
         self.assertEqual(MODEL_API_STREAM_IDLE_TIMEOUT_SECONDS, 60.0)
         self.assertEqual(timeout.read, 60.0)
@@ -218,7 +218,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         self.assertEqual(result, "OK")
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["timeout"], 20)
+        self.assertEqual(kwargs["timeout"], httpx.Timeout(20, read=660.0))
         self.assertEqual(kwargs["reasoning_effort"], "max")
 
     def test_responses_protocol_maps_stream_tools_reasoning_and_usage(self):
@@ -1438,7 +1438,9 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(client.responses.create.call_count, 6)
         self.assertEqual(len([chunk for chunk in chunks if chunk["type"] == "provider_retry"]), 5)
         errors = [chunk for chunk in chunks if chunk["type"] == "error"]
-        self.assertEqual(errors, [{"type": "error", "content": "stream_read_error"}])
+        self.assertEqual(errors, [{
+            "type": "error", "content": "stream_read_error", "error_type": "RuntimeError",
+        }])
 
     @patch("core.llm.providers._wait_before_model_retry", return_value=True)
     def test_chat_completions_does_not_retry_after_visible_partial_output(

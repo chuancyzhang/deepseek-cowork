@@ -27,6 +27,7 @@ AGENT_TERMINAL_STATUSES = {
     "closed",
     "killed",
     "failed_recovered",
+    "interrupted",
 }
 
 MESSAGE_JSON_COLUMNS = {
@@ -53,11 +54,15 @@ LEGACY_PLAN_META_KEYS = {
 }
 
 
-class ChatStorage:
+from .agent_inbox import AgentInboxStorage
+
+
+class ChatStorage(AgentInboxStorage):
     def __init__(self, db_path):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._ensure_schema()
+        self._ensure_agent_inbox()
 
     @contextmanager
     def _connect(self):

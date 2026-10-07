@@ -3366,6 +3366,80 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_chat_repeated_finish_with_usage_completes_tool_round_once(self):
+        from core.llm.providers import OpenAIProvider
+
+        class Skills:
+            def __init__(self):
+                self.calls = []
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [{"type": "function", "function": {
+                    "name": "read_file", "description": "read",
+                    "parameters": {"type": "object", "properties": {}},
+                }}]
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, name):
+                return ""
+
+            def get_skill_display_name(self, name):
+                return name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+            def get_tool_record(self, name):
+                return {"source_kind": "core_builtin", "read_only": True}
+
+            def call_tool(self, name, args, context=None):
+                self.calls.append((name, args))
+                return "file contents"
+
+        def frame(delta, reason=None, usage=None):
+            return {"choices": [{"delta": delta, "finish_reason": reason}], "usage": usage}
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            [frame({"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "read_file", "arguments": "{}"}}]}),
+             frame({}, "tool_calls"), frame({}, "tool_calls", {"prompt_tokens": 10, "completion_tokens": 3})],
+            [frame({"content": "done"}), frame({}, "stop"), frame({}, "stop", {"prompt_tokens": 15, "completion_tokens": 4})],
+        ]
+        with patch("openai.OpenAI", return_value=client):
+            provider = OpenAIProvider("test-key", "https://provider.example/v1", "test-model", thinking_enabled=False, reasoning_effort="")
+        skills = Skills()
+        finished = []
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch("core.agent.SkillManager", return_value=skills),
+            patch("core.agent.LLMFactory.create_provider", return_value=provider),
+        ):
+            worker = LLMWorker(
+                [{"role": "user", "content": "read file"}],
+                _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                workspace_dir=temp_dir,
+                session_id="repeated-finish", turn_id="turn-1", request_id="run-1",
+                run_context={"mode": RUN_MODE_EXECUTION},
+            )
+            worker.finished_signal.connect(finished.append)
+            worker.run()
+
+            self.assertEqual(len(finished), 1)
+            self.assertNotIn("error", finished[0])
+            self.assertEqual(finished[0]["content"], "done")
+            self.assertEqual(skills.calls, [("read_file", {})])
+            self.assertEqual(client.chat.completions.create.call_count, 2)
+            generated = finished[0]["generated_messages"]
+            self.assertEqual(sum(bool(message.get("tool_calls")) for message in generated), 1)
+            self.assertEqual(sum(message.get("role") == "tool" for message in generated), 1)
+            replay = client.chat.completions.create.call_args.kwargs["messages"]
+            self.assertTrue(any(message.get("role") == "tool" and message.get("tool_call_id") == "call-1" for message in replay))
+
     def test_provider_stream_error_does_not_commit_partial_tool_call_block(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

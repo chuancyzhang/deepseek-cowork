@@ -17,6 +17,7 @@ from .deepseek import (
     normalize_reasoning_effort,
 )
 from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
+from .chat_completions_stream import iter_chat_completions_events
 from core.conversation_integrity import ensure_tool_call_sequence
 from core.tool_images import build_responses_tool_output
 from core.data_security import project_provider_request
@@ -659,66 +660,11 @@ class OpenAIProvider(LLMProvider):
                 "message_count": len(clean_messages),
                 "chat_cache_projection_count": cache_projection_count,
             }
-            terminal_seen = False
-            for chunk in stream:
-                usage_payload = self._usage_payload(chunk)
-                if usage_payload:
-                    yield {"type": "usage", "usage": usage_payload}
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.delta
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    yield {"type": "reasoning", "content": delta.reasoning_content}
-                delta_content = getattr(delta, "content", None)
-                if delta_content:
-                    yield {"type": "content", "content": delta_content}
-                delta_tool_calls = getattr(delta, "tool_calls", None)
-                if delta_tool_calls:
-                    for tc in delta_tool_calls:
-                        function = getattr(tc, "function", None)
-                        raw_arguments = getattr(function, "arguments", None) if function else None
-                        if raw_arguments is None:
-                            arguments = None
-                        elif isinstance(raw_arguments, str):
-                            arguments = raw_arguments
-                        else:
-                            try:
-                                arguments = json.dumps(raw_arguments, ensure_ascii=False)
-                            except Exception:
-                                arguments = str(raw_arguments)
-                        function_payload = {}
-                        name = getattr(function, "name", None) if function else None
-                        if name:
-                            function_payload["name"] = str(name)
-                        if arguments is not None:
-                            function_payload["arguments"] = arguments
-                        tool_call_payload = {
-                            "type": "tool_call",
-                            "index": getattr(tc, "index", 0),
-                            "function": function_payload,
-                        }
-                        tool_call_id = getattr(tc, "id", None)
-                        if tool_call_id:
-                            tool_call_payload["id"] = str(tool_call_id)
-                        yield tool_call_payload
-                finish_reason = getattr(choice, "finish_reason", None)
-                if finish_reason is not None:
-                    terminal_seen = True
-                    yield {
-                        "type": "provider_terminal",
-                        "status": (
-                            "completed"
-                            if str(finish_reason) in {"stop", "tool_calls"}
-                            else "incomplete"
-                        ),
-                        "finish_reason": str(finish_reason),
-                    }
-            if not terminal_seen:
-                raise ProviderStreamError(
-                    "Chat Completions stream ended without a finish_reason."
-                )
+            yield from iter_chat_completions_events(
+                stream,
+                usage_payload=self._usage_payload,
+                error_factory=ProviderStreamError,
+            )
         finally:
             try:
                 _close_provider_stream(stream)

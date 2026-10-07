@@ -95,6 +95,29 @@ Responses 协议组合；启用后 Provider 在现有 Tool 数组末尾稳定加
 `output_image` content part，Responses 回放元数据只保留调用 `id`，避免 base64
 进入 SQLite、运行日志或后续上下文。纯图片响应同样属于有效终态。
 
+#### Chat Completions 流解析
+
+`core/llm/chat_completions_stream.py` 只把 SDK 对象或字典分片转换为既有 Provider
+事件，不构造请求、不管理连接、不执行工具，也不持有跨请求状态。请求参数、
+历史投影、系统提示词、工具顺序和缓存参数仍由原路径处理；Responses 与
+Anthropic 不调用该解析器。
+
+- 忽略空 choices、空 delta 和仅角色分片；保留独立用量分片及终止后的用量。
+- 推理优先读取 `reasoning_content`，仅在缺失或为 null 时读取字符串 `reasoning`；
+  不重复输出，不拆分正文中的 `<think>` 标签。
+- 工具参数按原始字符串增量传递，不对累计 JSON 逐片解析。索引与调用 ID 在
+  本次尝试内绑定；缺少索引时只接受已知 ID 或唯一工具调用的明确归属，冲突及
+  多工具歧义直接报错，不生成替代 ID、不合并不同调用。
+- `stop` / `tool_calls` 表示完成，其他 finish_reason 保持未完成状态。finish_reason
+  不等于传输结束：继续读取 SDK 流，按原顺序传递后续增量、用量和重复结束标记，
+  不丢弃后续未完成状态。EOF 缺少 finish_reason 或明确的流内 error 均报告失败。流内错误只报告
+  分片位置和可识别的 HTTP 状态，不转储可能包含请求内容的上游错误体。
+- 解析异常沿既有错误事件进入请求诊断；Provider 继续负责关闭和释放流，以及
+  首个语义输出之前的有界重试。已有正文、推理或工具分片后不重新发送请求。
+
+这不是厂商能力自动探测。需要新增请求参数、特殊认证或原生推理回放的模型仍受
+原有连接能力限制；尤其不新增 OpenRouter `reasoning_details` 的持久化与回传。
+
 ### 3.2 DeepSeek Responses 兼容
 
 官方 DeepSeek Responses 按无状态协议处理。流结束后，Provider 从完整 response

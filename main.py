@@ -90,6 +90,7 @@ from core.single_instance import (
     notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage
+from core.sidebar_projects import visible_sidebar_projects
 from core.chat_save_queue import (
     ChatSaveRequest,
     ChatSaveWorker,
@@ -28742,6 +28743,9 @@ class MainWindow(QMainWindow):
         self.project_inline_hosts = {}
         self.project_preview_paths = set()
         self.project_history_visible_limits = {}
+        self.project_list_expanded = False
+        self._sidebar_project_entries = []
+        self._project_list_refresh_pending = False
         self.optimistic_history_session_ids = set()
         self.unassigned_history_visible_limit = CHAT_HISTORY_INITIAL_LIMIT
         self.sidebar_sort_mode = "recent"
@@ -35664,6 +35668,8 @@ class MainWindow(QMainWindow):
                 self.refresh_project_activity_indicator(workspace_dir)
         self.refresh_skill_capture_sidebar_indicator(session_id)
 
+        self._queue_project_list_visibility_refresh()
+
     def _project_activity_summary(self, path):
         project_key = self._project_key(path)
         running = 0
@@ -39845,6 +39851,10 @@ class MainWindow(QMainWindow):
             row._history_updated_at = int(timestamp)
             self.history_age_timestamps[session_id] = int(timestamp)
             self.refresh_history_age_labels(session_id)
+            for project in getattr(self, "_sidebar_project_entries", []):
+                if self._project_key(project["path"]) == workspace_key:
+                    project["updated_at"] = max(int(project.get("updated_at") or 0), int(timestamp))
+                    project["has_conversations"] = True
         self.update_history_selection()
         self.refresh_session_activity_indicator(session_id)
 
@@ -39869,6 +39879,7 @@ class MainWindow(QMainWindow):
                 None,
             )
             if project_row is not None:
+                project_row._history_project_has_conversations = True
                 project_row._history_project_updated_at = max(
                     int(getattr(project_row, "_history_project_updated_at", 0) or 0),
                     int(timestamp or 0),
@@ -39879,6 +39890,7 @@ class MainWindow(QMainWindow):
                         "_history_project_key",
                         lambda widget: (
                             not bool(getattr(widget, "_history_project_pinned", False)),
+                            not bool(getattr(widget, "_history_project_has_conversations", False)),
                             -int(getattr(widget, "_history_project_updated_at", 0) or 0),
                             str(getattr(widget, "_history_project_name", "") or "").lower(),
                         ),
@@ -39891,6 +39903,40 @@ class MainWindow(QMainWindow):
                 self._restore_history_session_anchor(sid, y, token),
             )
         return True
+
+    def _visible_sidebar_projects(self, projects):
+        current_key = self._project_key(self._workspace_dir_for_state()) if self._session_workspace_source() == "project" else ""
+        required = set()
+        for project in projects:
+            if self._project_key(project["path"]) == current_key or self._project_activity_summary(project["path"])[0] != "idle":
+                required.add(project["path"])
+        return visible_sidebar_projects(
+            projects, required, expanded=getattr(self, "project_list_expanded", False),
+            query=bool(self._history_query_text()),
+        )
+
+    def _queue_project_list_visibility_refresh(self):
+        projects = getattr(self, "_sidebar_project_entries", [])
+        container = getattr(self, "history_container", None)
+        if not projects or not _qt_object_alive(container) or not container.updatesEnabled():
+            return
+        desired = {item["path"] for item in self._visible_sidebar_projects(projects)}
+        if desired == set(self.project_rows) or getattr(self, "_project_list_refresh_pending", False):
+            return
+        self._project_list_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_project_list_membership)
+
+    def _refresh_project_list_membership(self):
+        self._project_list_refresh_pending = False
+        scrollbar = self.history_scroll.verticalScrollBar()
+        previous_scroll = scrollbar.value()
+        self.refresh_history_list()
+        scrollbar.setValue(previous_scroll)
+
+    def toggle_project_list(self, anchor=None):
+        self.project_list_expanded = not getattr(self, "project_list_expanded", False)
+        log_ui_navigation("sidebar_project_list_disclosure", expanded=self.project_list_expanded)
+        self._refresh_history_with_disclosure_anchor(("projects", ""), anchor)
 
     def _history_disclosure_key(self, group_type, path=""):
         if group_type == "project":
@@ -40121,6 +40167,7 @@ class MainWindow(QMainWindow):
         row._history_project_key = self._project_key(path)
         row._history_project_name = name
         row._history_project_pinned = bool(project.get("pinned"))
+        row._history_project_has_conversations = bool(project.get("has_conversations", sessions))
         row._history_project_updated_at = int(project.get("updated_at") or 0)
         row.setObjectName("ProjectRow")
         row.setMinimumWidth(0)
@@ -40910,13 +40957,14 @@ class MainWindow(QMainWindow):
                 "name": self._project_display_name(path, meta),
                 "pinned": bool(meta.get("pinned")),
                 "updated_at": latest,
+                "has_conversations": bool(sessions),
                 "sessions": sessions,
             })
 
         if self.sidebar_sort_mode == "name":
             project_entries.sort(key=lambda item: (not item.get("pinned"), item.get("name", "").lower()))
         else:
-            project_entries.sort(key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0), item.get("name", "").lower()))
+            project_entries.sort(key=lambda item: (not item.get("pinned"), not item["has_conversations"], -int(item.get("updated_at") or 0), item.get("name", "").lower()))
 
         if not query_active:
             project_totals = {
@@ -40937,6 +40985,8 @@ class MainWindow(QMainWindow):
                     int(self.unassigned_history_visible_limit or 0),
                 )
 
+        self._sidebar_project_entries = [dict(project) for project in project_entries]
+        visible_project_paths = {project["path"] for project in self._visible_sidebar_projects(project_entries)}
         rendered_any = False
         pinned_sessions = [entry for project in project_entries for entry in project["sessions"] if entry.get("pinned")]
         pinned_sessions.extend(entry for entry in unassigned_entries if entry.get("pinned"))
@@ -40956,9 +41006,21 @@ class MainWindow(QMainWindow):
         if project_entries:
             self._add_history_group_label("项目")
         for project in project_entries:
+            if project["path"] not in visible_project_paths:
+                continue
             row = self._make_project_row(project, project.get("sessions") or [], query=query)
             self.history_layout.addWidget(row)
             rendered_any = True
+
+        hidden_projects = sum(project["path"] not in visible_project_paths for project in project_entries)
+        if not query_active and (hidden_projects or self.project_list_expanded):
+            disclosure = QPushButton(f" 展开显示（{hidden_projects} 个项目）" if hidden_projects else " 收起显示")
+            disclosure.setObjectName("HistoryDisclosureButton")
+            disclosure.setCursor(Qt.PointingHandCursor)
+            disclosure.setStyleSheet(apple_disclosure_button_style())
+            disclosure.clicked.connect(lambda checked=False, anchor=disclosure: self.toggle_project_list(anchor))
+            self.history_disclosure_buttons[("projects", "")] = disclosure
+            self.history_layout.addWidget(disclosure)
 
         unassigned_entries.sort(
             key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0))
@@ -41040,6 +41102,7 @@ class MainWindow(QMainWindow):
         current_key = self._project_key(self._workspace_dir_for_state()) if self._session_workspace_source() == "project" else ""
         for path, button in self.project_buttons.items():
             button.setIcon(sidebar_symbol_icon("folder-open" if self._project_key(path) == current_key else "folder", DesignTokens.text_secondary, 16))
+        self._queue_project_list_visibility_refresh()
 
     def show_session_menu(self, session_id, anchor, position=None):
         menu = create_styled_menu(self)
@@ -41061,15 +41124,17 @@ class MainWindow(QMainWindow):
         menu.addAction(archive_action)
         menu.addSeparator()
         menu.setToolTipsVisible(True)
-        for kind, label in (("chat", "下载聊天记录…"), ("request", "下载最近一次请求…")):
-            action = menu.addAction(label)
+        for kind, label in (("chat", "聊天记录"), ("request", "最近一次请求")):
             available = kind == "chat" or RequestSnapshotStore(self.chat_history_dir).available(session_id)
             state = self.sessions.get(session_id)
             if kind == "request" and getattr(state, "request_snapshot_failed", False):
                 available = False
-            action.setEnabled(available and not self.conversation_exports.busy(session_id, kind))
-            action.setToolTip("选择保存位置" if available else "尚无已记录的请求，或最近一次请求采集失败")
-            action.triggered.connect(lambda _checked=False, sid=session_id, k=kind: self.conversation_exports.export(sid, k))
+            for operation, prefix in (("export", "下载"), ("copy", "复制")):
+                action = menu.addAction(prefix + label + ("…" if operation == "export" else ""))
+                action.setEnabled(available and not self.conversation_exports.busy(session_id, kind))
+                action.setToolTip(("选择保存位置" if operation == "export" else "复制完整内容到剪贴板") if available else "尚无已记录的请求，或最近一次请求采集失败")
+                action.triggered.connect(lambda _checked=False, sid=session_id, k=kind, op=operation:
+                                         getattr(self.conversation_exports, op)(sid, k))
         menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(position if position is not None else anchor.mapToGlobal(anchor.rect().bottomLeft()))
@@ -46004,7 +46069,7 @@ a {{ overflow-wrap: anywhere; }}
             return self._capture_chat_log_snapshot(session_id)
         state = self.sessions.get(session_id)
         if getattr(state, "request_snapshot_failed", False):
-            raise ValueError("最近一次请求快照采集失败，无法下载。")
+            raise ValueError("最近一次请求快照采集失败，无法下载或复制。")
         request = RequestSnapshotStore(self.chat_history_dir).read(session_id)
         record = self.chat_storage.get_conversation_record(session_id) or {}
         return {"session_id": session_id, "title": record.get("title") or "新对话",

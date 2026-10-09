@@ -23,6 +23,12 @@ This bundled capability is enabled by default and reads structured document form
 
 Reads DOCX, PPTX, XLSX, XLS, or PDF files from the current workspace and returns a unified structured payload with extracted text.
 
+- The first call returns a bounded batch. `max_chars` limits the entire JSON result (including `sections` and metadata), defaults to 12000, and accepts 2000–60000.
+- Check `has_more` and `range`. Continue only as needed by passing `next_cursor` as `cursor` with the same `path`; omit selectors or keep them identical. A changed file requires a fresh read.
+- For Excel, prefer `sheet_name` and `cell_range` (for example `A1:D100`); without a sheet selector, batches traverse sheets in workbook order. `metadata.sheet_count` is the workbook total, while `sheet_names` lists only sheets included in the current batch.
+- PDF supports `pages`, for example `2-4`. Long pages, paragraphs and cells may span batches; concatenate `content` without adding separators to reconstruct the selected text.
+- Do not automatically load every batch. Read the ranges needed for the user's task, and keep findings concise before continuing.
+
 ## Boundaries
 
 - Use `text_file_read` only for plain text files.

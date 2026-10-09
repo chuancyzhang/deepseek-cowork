@@ -15,6 +15,16 @@ def chat_log_filename(title, captured_at):
     return f"聊天记录-{title or '新对话'}-{captured_at:%Y%m%d-%H%M%S}.log"
 
 
+def iter_conversation_export(snapshot, kind="chat"):
+    """One serializer for file downloads and clipboard copies."""
+    if kind == "chat":
+        yield from iter_chat_log(snapshot)
+    elif kind == "request":
+        yield json.dumps(snapshot["request"], ensure_ascii=False, indent=2) + "\n"
+    else:
+        raise ValueError("未知的会话导出类型")
+
+
 def _text(value):
     if value is None:
         return ""

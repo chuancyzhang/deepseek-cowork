@@ -80,6 +80,62 @@ class TestOfficeSkill(unittest.TestCase):
         self.assertEqual(manifest["python_dependencies"], [])
         self.assertNotIn("ensure_package_installed", implementation)
 
+    def _read_batches(self, filename, **selectors):
+        chunks, cursors, context = [], set(), {}
+        for _ in range(500):
+            result = document_impl.document_read(self.workspace_dir, filename, max_chars=2000,
+                                                 _context=context, **selectors)
+            self.assertTrue(result["ok"], result)
+            self.assertLessEqual(len(json.dumps(result, ensure_ascii=False)), 2000)
+            self.assertEqual(result["content"], "".join(section["text"] for section in result["sections"]))
+            chunks.append(result["content"])
+            if not result["has_more"]:
+                self.assertIsNone(result["next_cursor"])
+                self.assertNotIn("file_state", context)  # A batch is never a full-file read.
+                return "".join(chunks)
+            self.assertTrue(result["content"])
+            self.assertNotIn(result["next_cursor"], cursors)
+            cursors.add(result["next_cursor"])
+            selectors = {"cursor": result["next_cursor"]}
+        self.fail("续读未能结束")
+
+    def test_large_excel_batches_reconstruct_selected_content_for_xlsx_and_xls(self):
+        import openpyxl
+
+        long_cell = '续读\t"内容"\\' * 1200
+        expected = f"Sheet 数据:\nName\tValue\n长单元格\t{long_cell}\ntail\tdone\nSheet 第二表:\n最后一项\n"
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "数据"
+        for row in (("Name", "Value"), ("长单元格", long_cell), ("tail", "done")):
+            sheet.append(row)
+        book.create_sheet("第二表").append(["最后一项"])
+        book.save(os.path.join(self.workspace_dir, "large.xlsx"))
+        book.close()
+        shutil.copyfile(os.path.join(os.path.dirname(__file__), "fixtures/document-reader-batches.xls"),
+                        os.path.join(self.workspace_dir, "large.xls"))
+        for ext in ("xlsx", "xls"):
+            with self.subTest(format=ext):
+                self.assertEqual(self._read_batches(f"large.{ext}"), expected)
+                self.assertEqual(self._read_batches(f"large.{ext}", sheet_name="数据", cell_range="B2:B3"),
+                                 f"Sheet 数据:\n{long_cell}\ndone\n")
+
+    def test_long_paragraph_continuation_and_changed_file(self):
+        from docx import Document
+
+        text = '长段落"\\\t' * 1400
+        document = Document()
+        document.add_paragraph(text)
+        document.add_paragraph("尾段")
+        path = os.path.join(self.workspace_dir, "long.docx")
+        document.save(path)
+        self.assertEqual(self._read_batches("long.docx"), text + "\n尾段\n")
+        batch = document_impl.document_read(self.workspace_dir, "long.docx", max_chars=2000)
+        document.add_paragraph("文件已改")
+        document.save(path)
+        result = document_impl.document_read(self.workspace_dir, "long.docx", cursor=batch["next_cursor"])
+        self.assertEqual(result["error"]["code"], "file_changed")
+
     def test_explicit_disable_still_overrides_document_reader_default(self):
         from core.config_manager import ConfigManager
 

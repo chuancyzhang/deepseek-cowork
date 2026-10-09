@@ -69,6 +69,7 @@ REQUIRED_PATHS = (
     "deepseek-cowork.exe",
     "_internal/python_env/python.exe",
     "_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
+    "_internal/python_env/Lib/site-packages/xlrd/__init__.py",
     "_internal/python_env/Lib/site-packages/docx/__init__.py",
     "_internal/python_env/Lib/site-packages/pptx/__init__.py",
     "_internal/python_env/Lib/site-packages/PIL/__init__.py",

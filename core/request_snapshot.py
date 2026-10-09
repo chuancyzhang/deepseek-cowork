@@ -54,7 +54,7 @@ class RequestSnapshotStore:
 
     def read(self, session_id):
         if not self.available(session_id):
-            raise ValueError("尚无可下载的请求，或最近一次请求快照采集失败。")
+            raise ValueError("尚无可下载或复制的请求，或最近一次请求快照采集失败。")
         with open(self.path(session_id), encoding="utf-8") as handle:
             payload = json.load(handle)
         if payload.get("session_id") != str(session_id):

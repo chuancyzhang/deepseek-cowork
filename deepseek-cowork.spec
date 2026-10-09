@@ -457,7 +457,7 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
-SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]
+SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]
 SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS
 MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
@@ -799,6 +799,7 @@ a = Analysis(
             'docx',
             'pptx',
             'openpyxl',
+            'xlrd',
             'pypdf',
         ]
     ),

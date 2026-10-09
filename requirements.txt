@@ -5,6 +5,7 @@ pyinstaller>=6.0.0
 python-docx
 python-pptx
 openpyxl
+xlrd>=2.0.1,<3
 pypdf
 Pillow
 reportlab

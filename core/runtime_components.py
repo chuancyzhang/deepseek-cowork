@@ -112,9 +112,9 @@ SPEECH_TO_TEXT_MODEL_SOURCES = {
 TOOLKITS = {
     "documents": {
         "name": "文档工具包",
-        "description": "读取与生成 XLSX、DOCX、PPTX 和 PDF",
-        "packages": ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"],
-        "imports": ["openpyxl", "docx", "pptx", "PIL.Image", "pypdf", "reportlab"],
+        "description": "读取 XLS/XLSX、DOCX、PPTX 和 PDF，生成现代 Office 与 PDF 文件",
+        "packages": ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"],
+        "imports": ["openpyxl", "xlrd", "docx", "pptx", "PIL.Image", "pypdf", "reportlab"],
         "skills": ["document-reader"],
         "bundled": True,
     },

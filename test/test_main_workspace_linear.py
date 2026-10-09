@@ -652,6 +652,39 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             ]
             self.assertNotIn("显示更多历史", history_copy)
 
+    def test_project_list_disclosure_search_and_live_membership(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = [os.path.normpath(os.path.join(root, str(i))) for i in range(8)]
+            projects = [dict(path=path, name=f"项目 {i}", created_at=i) for i, path in enumerate(paths)]
+            conversations = [dict(id=f"project-list-{i}", title=f"对话 {i}", updated_at=i + 1,
+                                  meta={"workspace_dir": path, "workspace_source": "project"})
+                             for i, path in enumerate(paths)]
+            running = {paths[1]}
+            with patch.object(self.window.chat_storage, "list_conversations", return_value=conversations), \
+                 patch.object(self.window.config_manager, "get_projects", return_value=projects), \
+                 patch.object(self.window.config_manager, "get", return_value=[]), \
+                 patch.object(self.window, "_workspace_dir_for_state", return_value=paths[0]), \
+                 patch.object(self.window, "_session_workspace_source", return_value="project"), \
+                 patch.object(self.window, "_project_activity_summary", side_effect=lambda path: ("running", 1) if path in running else ("idle", 0)), \
+                 patch.object(self.window, "_history_query_text", return_value="") as query:
+                self.window.refresh_history_list()
+                expected = {paths[0], paths[1], *paths[3:]}
+                self.assertEqual(set(self.window.project_rows), expected)
+                self.window.history_disclosure_buttons[("projects", "")].click()
+                self.assertEqual(set(self.window.project_rows), set(paths))
+                self.window.history_disclosure_buttons[("projects", "")].click()
+                self.assertEqual(set(self.window.project_rows), expected)
+                query.return_value = "项目"
+                self.window.refresh_history_list()
+                self.assertEqual(set(self.window.project_rows), set(paths))
+                query.return_value = ""
+                self.window.refresh_history_list()
+                self.assertEqual(set(self.window.project_rows), expected)
+                running.add(paths[2])
+                self.window._queue_project_list_visibility_refresh()
+                self.app.processEvents()
+                self.assertEqual(set(self.window.project_rows), set(paths))
+
     def test_history_batches_always_include_running_and_waiting_sessions(self):
         live_state = self.window.get_current_session()
         live_state.session_status = "running"

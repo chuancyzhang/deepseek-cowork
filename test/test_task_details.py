@@ -98,7 +98,8 @@ class TaskDetailsTests(unittest.TestCase):
     def test_menu_export_binds_clicked_session_without_switching(self):
         menu = QMenu()
         export = MagicMock()
-        controller = SimpleNamespace(busy=lambda sid, kind: False, export=export)
+        copy_record = MagicMock()
+        controller = SimpleNamespace(busy=lambda sid, kind: False, export=export, copy=copy_record)
         values = dict(chat_history_dir="unused", sessions={}, current_session_id="B",
             chat_storage=SimpleNamespace(get_conversation_record=lambda sid: {}),
             conversation_exports=controller, begin_session_inline_rename=MagicMock(),
@@ -114,13 +115,48 @@ class TaskDetailsTests(unittest.TestCase):
                 self_case.assertLess(labels.index("归档"), labels.index("下载聊天记录…"))
                 self_case.assertLess(labels.index("下载最近一次请求…"), labels.index("删除"))
                 next(action for action in menu.actions() if action.text() == "下载聊天记录…").trigger()
+                next(action for action in menu.actions() if action.text() == "复制聊天记录").trigger()
+                self_case.assertFalse(next(action for action in menu.actions() if action.text() == "复制最近一次请求").isEnabled())
         self_case = self
         with patch("main.create_styled_menu", return_value=MenuCapture()):
             MainWindow.show_session_menu(window, "A", None, position=0)
         export.assert_called_once_with("A", "chat")
+        copy_record.assert_called_once_with("A", "chat")
         self.assertEqual(window.current_session_id, "B")
         menu.deleteLater()
         window.deleteLater()
+
+    def test_clipboard_matches_download_snapshot_for_chat_and_request(self):
+        owner = QWidget()
+        selected = ["A"]
+        snapshot = {"session_id": "A", "title": "对话 A", "captured_at": datetime.now().astimezone(),
+                    "running": False, "messages": [{"role": "user", "content": "用户消息"},
+                    {"role": "assistant", "content": "回答" * 12000, "reasoning_content": "思考过程"}],
+                    "timeline": [], "turn_id": "", "live_tools": {},
+                    "request": {"session_id": "A", "parameters": {"messages": ["长内容" * 12000]}}}
+        capture = MagicMock(side_effect=lambda sid, kind: copy.deepcopy(snapshot))
+        notify = MagicMock()
+        controller = ConversationExportController(capture, notify, MagicMock(), owner)
+        with tempfile.TemporaryDirectory() as root:
+            for kind in ("chat", "request"):
+                with self.subTest(kind=kind):
+                    selected[0] = "A"
+                    controller.copy(selected[0], kind)
+                    worker = controller.workers[("A", kind)]
+                    selected[0] = "B"
+                    self.assertTrue(worker.wait(5000))
+                    self.app.processEvents()
+                    self.assertFalse(controller.busy("A", kind))
+                    self.assertEqual(notify.call_args.args[1], "success")
+                    target = os.path.join(root, kind + ".txt")
+                    download = ChatLogExportWorker(snapshot, target, MagicMock(), owner, kind)
+                    download.run()
+                    self.assertFalse(download.error)
+                    with open(target, encoding="utf-8") as handle:
+                        self.assertEqual(self.app.clipboard().text(), handle.read())
+                    self.assertEqual(capture.call_args.args, ("A", kind))
+        self.app.clipboard().clear()
+        owner.deleteLater()
 
     def test_success_toast_actions_do_not_open_until_clicked(self):
         open_file, reveal = MagicMock(), MagicMock()

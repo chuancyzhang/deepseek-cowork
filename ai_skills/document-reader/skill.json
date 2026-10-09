@@ -23,7 +23,8 @@
   "node_dependencies": [],
   "workflow": [
     "Use this bundled capability when a task requires reading DOCX, PPTX, XLSX, XLS, or PDF files.",
-    "Call document_read with the workspace-relative document path.",
+    "Call document_read with the workspace-relative path. It returns a bounded first batch, not necessarily the whole document.",
+    "Inspect has_more and range; pass next_cursor as cursor only when more content is needed. Prefer sheet_name/cell_range for Excel or pages for PDF. Do not automatically read all batches into context.",
     "For writing Office/PDF files, use run_python_code instead of expecting a document write tool."
   ]
 }

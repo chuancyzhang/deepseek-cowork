@@ -1,10 +1,9 @@
 """Session-bound exports, independent of selected page or button lifetime."""
-import json
 import os
 
 from PySide6.QtCore import QObject, QIODevice, QSaveFile, QStandardPaths, QThread, Signal, Slot
 from PySide6.QtWidgets import QApplication, QFileDialog
-from core.chat_log_export import chat_log_filename, iter_chat_log
+from core.chat_log_export import chat_log_filename, iter_conversation_export
 
 
 class ChatLogExportWorker(QThread):
@@ -25,8 +24,7 @@ class ChatLogExportWorker(QThread):
             self.audit("chat_log_export.log", f"stage=start session_id={session_id} kind={self.kind}")
             if not output.open(QIODevice.WriteOnly):
                 raise OSError(output.errorString())
-            sections = (iter_chat_log(self.snapshot) if self.kind == "chat" else
-                        (json.dumps(self.snapshot["request"], ensure_ascii=False, indent=2) + "\n",))
+            sections = iter_conversation_export(self.snapshot, self.kind)
             for section in sections:
                 if self.isInterruptionRequested():
                     raise InterruptedError("应用退出，导出已取消。")
@@ -44,6 +42,29 @@ class ChatLogExportWorker(QThread):
             self.audit("chat_log_export.log", f"stage=failed session_id={session_id} kind={self.kind} error_type={type(exc).__name__}")
 
 
+class ConversationCopyWorker(QThread):
+    def __init__(self, snapshot, kind, parent):
+        super().__init__(parent)
+        self.snapshot, self.kind = snapshot, kind
+        self.error, self.text = "", ""
+
+    @Slot()
+    def shutdown(self):
+        self.requestInterruption()
+        self.wait()
+
+    def run(self):
+        try:
+            sections = []
+            for section in iter_conversation_export(self.snapshot, self.kind):
+                if self.isInterruptionRequested():
+                    raise InterruptedError("应用退出，复制已取消。")
+                sections.append(section)
+            self.text = "".join(sections)
+        except Exception as exc:
+            self.error = str(exc)
+
+
 class ConversationExportController(QObject):
     saved = Signal(str, str, str, str)
 
@@ -55,6 +76,54 @@ class ConversationExportController(QObject):
 
     def busy(self, session_id, kind):
         return (session_id, kind) in self.pending
+
+    def copy(self, session_id, kind="chat"):
+        key = (session_id, kind)
+        if key in self.pending:
+            return
+        self.pending.add(key)
+        label = "聊天记录" if kind == "chat" else "最近一次请求"
+        try:
+            snapshot = self.capture_snapshot(session_id, kind)
+            app = QApplication.instance()
+            worker = ConversationCopyWorker(snapshot, kind, app)
+            self.workers[key] = worker
+            app.aboutToQuit.connect(worker.shutdown)
+            worker.finished.connect(self.copy_finished)
+            self.audit("chat_log_export.log", f"stage=copy_start session_id={session_id} kind={kind}")
+            self.notify(f"正在准备“{snapshot['title']}”的{label}…", "info")
+            worker.start()
+        except Exception as exc:
+            self.pending.discard(key)
+            self.audit("chat_log_export.log", f"stage=copy_snapshot_failed session_id={session_id} kind={kind} error_type={type(exc).__name__}")
+            self.notify(f"{label}未复制：{exc}\n原有内容已保留，可重试。", "error")
+
+    @Slot()
+    def copy_finished(self):
+        worker = self.sender()
+        key = (worker.snapshot["session_id"], worker.kind)
+        self.workers.pop(key, None)
+        self.pending.discard(key)
+        label = "聊天记录" if worker.kind == "chat" else "最近一次请求"
+        try:
+            if worker.error:
+                raise RuntimeError(worker.error)
+            if worker.isInterruptionRequested():
+                raise InterruptedError("应用退出，复制已取消。")
+            clipboard = QApplication.clipboard()
+            if clipboard is None:
+                raise RuntimeError("剪贴板不可用")
+            clipboard.setText(worker.text)
+            if clipboard.text() != worker.text:
+                raise RuntimeError("剪贴板写入未成功，请重试")
+            self.audit("chat_log_export.log", f"stage=copy_completed session_id={key[0]} kind={key[1]} chars={len(worker.text)}")
+            self.notify(f"“{worker.snapshot['title']}”的{label}已复制", "success")
+        except Exception as exc:
+            self.audit("chat_log_export.log", f"stage=copy_failed session_id={key[0]} kind={key[1]} error_type={type(exc).__name__}")
+            self.notify(f"“{worker.snapshot['title']}”的{label}未复制：{exc}\n原有内容已保留，可重试。", "error")
+        finally:
+            worker.text = ""
+            worker.deleteLater()
 
     def export(self, session_id, kind="chat"):
         key = (session_id, kind)

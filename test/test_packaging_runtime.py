@@ -32,19 +32,19 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             release_text = handle.read()
 
         self.assertIn(
-            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]',
+            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]',
             spec_text,
         )
         self.assertIn('SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS', spec_text)
         self.assertIn('node_env = []', spec_text)
         excludes = spec_text.split("excludes=[", 1)[1].split("],", 1)[0]
-        for module_name in ("docx", "pptx", "openpyxl", "pypdf"):
+        for module_name in ("docx", "pptx", "openpyxl", "xlrd", "pypdf"):
             self.assertNotIn(f"'{module_name}'", excludes)
             self.assertIn(f"'{module_name}'", spec_text.split("hiddenimports=", 1)[1].split("hookspath=", 1)[0])
         self.assertNotIn("'lxml'", excludes)
-        for package_name in ("Pillow", "reportlab"):
+        for package_name in ("Pillow", "reportlab", "xlrd"):
             self.assertIn(package_name, requirements)
-        for import_path in ("openpyxl", "docx", "pptx", "PIL", "pypdf", "reportlab"):
+        for import_path in ("openpyxl", "xlrd", "docx", "pptx", "PIL", "pypdf", "reportlab"):
             self.assertIn(f"_internal/python_env/Lib/site-packages/{import_path}/__init__.py", release_text)
 
     def test_webengine_is_a_required_packaging_dependency(self):

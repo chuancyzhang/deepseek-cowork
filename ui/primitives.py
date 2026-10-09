@@ -1451,6 +1451,7 @@ class ProductInlineNotice(QFrame):
         super().__init__(parent)
         self.setObjectName("ProductInlineNotice")
         self.label = QLabel(str(text or ""))
+        self.label.setTextFormat(Qt.PlainText)
         self.label.setWordWrap(True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -1462,6 +1463,10 @@ class ProductInlineNotice(QFrame):
         self.action_button.clicked.connect(self.actionRequested.emit)
         self.action_button.hide()
         layout.addWidget(self.action_button, 0, Qt.AlignRight)
+        self.details_button = QPushButton("错误详情", self)
+        self.details_button.hide()
+        layout.addWidget(self.details_button, 0, Qt.AlignRight)
+        self._details_callback = None
         self.set_tone(tone)
         bind_theme(self, self.refresh_theme, surface="feedback")
 
@@ -1483,6 +1488,16 @@ class ProductInlineNotice(QFrame):
     def refresh_theme(self, _resolved=None):
         self.set_tone(getattr(self, "_tone", "neutral"))
         self.action_button.setStyleSheet(product_button_style("secondary", radius=6))
+        self.details_button.setStyleSheet(product_button_style("ghost"))
+
+    def set_details(self, callback=None):
+        if self._details_callback is not None:
+            self.details_button.clicked.disconnect(self._details_callback)
+        self._details_callback = callback
+        if callback is not None:
+            self.details_button.clicked.connect(callback)
+        self.details_button.setVisible(callback is not None)
+        self.details_button.setStyleSheet(product_button_style("ghost"))
 
     def set_text(self, text, tone=None):
         self.label.setText(str(text or ""))

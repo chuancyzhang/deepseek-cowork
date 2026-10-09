@@ -2747,6 +2747,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     "abort_check",
                     "register_stream",
                     "release_stream",
+                    "capture_request",
                 },
             )
         finally:

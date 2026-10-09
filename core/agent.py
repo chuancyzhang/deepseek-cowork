@@ -2625,6 +2625,22 @@ class LLMWorker(QThread):
             })
             raise RuntimeError(f"provider attempt journal write failed: {exc}") from exc
 
+    def _capture_request_snapshot(self, protocol, params, attempt_id):
+        if self.is_subagent or not self.session_id:
+            return
+        from core.request_snapshot import RequestSnapshotStore
+        event = {"type": "request_snapshot", "request_id": attempt_id,
+                 "run_id": self.request_id, "session_id": self.session_id,
+                 "timestamp": time.time(), "status": "completed"}
+        try:
+            store = RequestSnapshotStore(self.config_manager.get_chat_history_dir())
+            event["captured_at"] = store.capture(
+                self.session_id, self.request_id, attempt_id, protocol, params)
+        except Exception as exc:
+            event.update(status="failed", error_type=type(exc).__name__,
+                         message="最近一次请求快照未能保存，暂时无法下载；对话继续运行。")
+        self.observability_signal.emit(event)
+
     def _tool_execution_policy(self, name):
         if self.bootstrap.active:
             return {"read_only": False, "destructive": True, "idempotent": False, "safe_retry": False}
@@ -3271,6 +3287,8 @@ class LLMWorker(QThread):
                                 "abort_check": lambda: self.is_stopped,
                                 "register_stream": self._register_provider_stream,
                                 "release_stream": self._release_provider_stream,
+                                "capture_request": lambda protocol, params, aid=attempt_id:
+                                    self._capture_request_snapshot(protocol, params, aid),
                             },
                         )
 

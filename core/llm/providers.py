@@ -21,6 +21,7 @@ from .chat_completions_stream import iter_chat_completions_events
 from core.conversation_integrity import ensure_tool_call_sequence
 from core.tool_images import build_responses_tool_output
 from core.data_security import project_provider_request
+from core.request_snapshot import capture_provider_request
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -649,6 +650,7 @@ class OpenAIProvider(LLMProvider):
             params["reasoning_effort"] = self.reasoning_effort
 
         params = project_provider_request(self, params, "chat_completions", request_context)
+        capture_provider_request(params, "chat_completions", request_context)
         stream = self._create_chat_completion_stream(params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -865,6 +867,7 @@ class OpenAIProvider(LLMProvider):
             params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
 
         params = project_provider_request(self, params, "responses", request_context)
+        capture_provider_request(params, "responses", request_context)
         stream = self.client.responses.create(**params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -1590,6 +1593,7 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = api_tools
 
         kwargs = project_provider_request(self, kwargs, "anthropic", request_context)
+        capture_provider_request(kwargs, "anthropic", request_context)
         with self.client.messages.stream(**kwargs) as stream:
             if not _register_provider_stream(request_context, stream):
                 return

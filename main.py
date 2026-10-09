@@ -208,7 +208,9 @@ from ui.primitives import (
 )
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
-from ui.chat_log_export import ChatLogExportButton
+from ui.chat_log_export import ConversationExportController
+from core.request_snapshot import RequestSnapshotStore
+from core.task_details import redact_diagnostic, tool_result_status, tool_result_summary
 from ui.theme_workspace import (
     WorkspaceThemeController,
     apply_theme_component_visibility,
@@ -21133,7 +21135,7 @@ class SystemToast(QFrame):
     """Compact, closable notification that pauses while hovered."""
     closeRequested = Signal(object)
 
-    def __init__(self, text, type="info", parent=None):
+    def __init__(self, text, type="info", parent=None, actions=()):
         super().__init__(parent)
         self.base_text = str(text or "")
         self.toast_type = str(type or "info")
@@ -21174,7 +21176,11 @@ class SystemToast(QFrame):
         surface.setObjectName("SystemToastSurface")
         outer_layout.addWidget(surface)
 
-        layout = QHBoxLayout(surface)
+        surface_layout = QVBoxLayout(surface)
+        surface_layout.setContentsMargins(0, 0, 0, 0)
+        surface_layout.setSpacing(0)
+        layout = QHBoxLayout()
+        surface_layout.addLayout(layout)
         layout.setContentsMargins(10, 9, 8, 9)
         layout.setSpacing(8)
 
@@ -21187,10 +21193,11 @@ class SystemToast(QFrame):
         layout.addWidget(icon_badge, 0, Qt.AlignVCenter)
 
         msg_label = QLabel(text)
+        msg_label.setTextFormat(Qt.PlainText)
         msg_label.setObjectName("SystemToastText")
         msg_label.setWordWrap(True)
         msg_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        msg_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        msg_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         msg_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         layout.addWidget(msg_label, 1)
 
@@ -21238,9 +21245,24 @@ class SystemToast(QFrame):
         self.icon_badge = icon_badge
         self.icon_label = icon_badge
         self.close_button = close_btn
+        self.action_buttons = []
+        if actions:
+            action_row = QHBoxLayout()
+            action_row.setContentsMargins(10, 0, 8, 6)
+            for label, callback in actions:
+                button = QPushButton(label)
+                button.setStyleSheet(product_button_style("ghost"))
+                button.setCursor(Qt.PointingHandCursor)
+                button.clicked.connect(lambda _checked=False, cb=callback: cb())
+                action_row.addWidget(button)
+                self.action_buttons.append(button)
+            action_row.addStretch()
+            surface_layout.addLayout(action_row)
         bind_theme(self, self.refresh_theme, surface="feedback")
 
     def refresh_theme(self, _resolved=None):
+        for button in getattr(self, "action_buttons", []):
+            button.setStyleSheet(product_button_style("ghost"))
         icon_name = "fa5s.info-circle"
         icon_color = DesignTokens.info_icon
         tint_color = DesignTokens.toast_tint_info
@@ -24818,6 +24840,7 @@ class OfficeDraftTaskCard(QFrame):
                 pass
         self._retry_failure_callback = None
         self.retry_failure_notice.set_action("")
+        self.retry_failure_notice.set_details(None)
         self.retry_failure_notice.set_text("", "error")
         self.retry_failure_notice.setVisible(False)
 
@@ -25349,10 +25372,7 @@ class ToolCallCard(QFrame):
             """)
 
     def set_result(self, result_text, result_obj=None):
-        failed = isinstance(result_obj, dict) and (
-            result_obj.get("ok") is False
-            or str(result_obj.get("status") or "").strip().lower() in {"error", "failed", "partial_apply"}
-        )
+        failed = tool_result_status(result_obj if result_obj is not None else result_text) in {"error", "partial"}
         if failed:
             self.status_icon.setPixmap(qta.icon('fa5s.exclamation-circle', color=DesignTokens.error_text).pixmap(14, 14))
         else:
@@ -29595,16 +29615,10 @@ class MainWindow(QMainWindow):
         td_layout.setContentsMargins(14, 12, 14, 14)
         td_layout.setSpacing(10)
 
-        chat_export_row = QHBoxLayout()
-        chat_export_row.addStretch()
-        self.chat_log_export_btn = ChatLogExportButton(
-            self._capture_chat_log_snapshot,
-            self.add_system_toast,
-            append_background_process_log,
-            self.tool_details_tab,
-        )
-        chat_export_row.addWidget(self.chat_log_export_btn)
-        td_layout.addLayout(chat_export_row)
+        self.conversation_exports = ConversationExportController(
+            self._capture_conversation_export, self.add_system_toast,
+            append_background_process_log, self)
+        self.conversation_exports.saved.connect(self._conversation_export_saved)
 
         self.OBS_SECTION_PROMPT = 0
         self.OBS_SECTION_LOG = 1
@@ -29665,9 +29679,11 @@ class MainWindow(QMainWindow):
         self.step_list = QListWidget()
         self.step_list.setAccessibleName("调用记录")
         self.step_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=8, padding=2))
-        self.step_list.itemClicked.connect(self.select_step_item)
+        self.step_list.itemClicked.connect(self.on_step_item_clicked)
         self.step_list.itemActivated.connect(self.on_step_item_clicked)
         self.step_list.setMinimumHeight(120)
+        self.step_list.setWordWrap(True)
+        self.step_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         log_layout.addWidget(self.step_list, 1)
 
         self.observability_log_edit = ReadOnlyTextEdit()
@@ -29682,6 +29698,7 @@ class MainWindow(QMainWindow):
         details_layout = QVBoxLayout(details_page)
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(10)
+
 
         details_info_bar = QFrame()
         details_info_bar.setProperty("uiSurface", True)
@@ -32275,7 +32292,7 @@ class MainWindow(QMainWindow):
             return
         page_titles = {
             self.RIGHT_TAB_FILES: ("文件与交付物", "查看工作区文件、预览交付物并继续生成"),
-            self.RIGHT_TAB_OBSERVABILITY: ("任务观测", "查看系统提示词、工具调用与返回"),
+            self.RIGHT_TAB_OBSERVABILITY: ("任务详情", "查看系统提示词、执行过程和错误原因"),
             self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
         }
         title, description = page_titles.get(tab_index, ("任务上下文", "查看文件与执行步骤"))
@@ -35850,6 +35867,21 @@ class MainWindow(QMainWindow):
         if not state:
             return
         if session_id is None or state.session_id == self.current_session_id:
+            same_session = getattr(self, "_step_list_session_id", None) == state.session_id
+            selected = self.step_list.currentItem()
+            selected_id = selected.data(Qt.UserRole) if selected and same_session else None
+            scroll_value = self.step_list.verticalScrollBar().value() if same_session else 0
+            self._step_list_session_id = state.session_id
+            if getattr(self, "_tool_detail_session_id", state.session_id) != state.session_id:
+                self.current_selected_tool_id = None
+                self._detail_full_result = ""
+                self.td_info_label.setText("在调用记录中选择工具后查看详情")
+                self.td_meta_label.hide()
+                self.td_args_edit.set_code("", "json")
+                self.td_args_meta_edit.hide()
+                self.td_args_meta_label.hide()
+                self.td_result_edit.set_result("")
+                self._tool_detail_session_id = state.session_id
             self.step_list.clear()
             if not state.step_records:
                 item = QListWidgetItem(qta.icon('fa5s.stream', color=DesignTokens.text_tertiary), "本轮还没有工具调用")
@@ -35859,23 +35891,26 @@ class MainWindow(QMainWindow):
                 for record in state.step_records:
                     status = record.get("status") or "running"
                     title = record.get("display_title") or record.get("tool_name") or "Step"
-                    summary = record.get("summary") or "Waiting for more output"
+                    summary = record.get("summary") or "等待返回结果"
                     step_title = record.get("plan_step_title") or ""
                     duration = record.get("duration")
                     duration_text = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
                     line2 = summary
                     if step_title:
                         line2 = f"[步骤] {step_title} | {summary}"
-                    failed = status in {"failed", "error", "killed"}
+                    failed = status in {"failed", "error", "killed", "partial"}
                     icon_name = "fa5s.exclamation-circle" if failed else ("fa5s.check-circle" if status == "done" else "fa5s.play-circle")
                     icon_color = DesignTokens.status_error if failed else (DesignTokens.status_success if status == "done" else DesignTokens.status_running)
                     item = QListWidgetItem(
                         qta.icon(icon_name, color=icon_color),
-                        f"{title} · {status_label_text(status)}{duration_text}\n{line2}",
+                        f"{title} · {'部分完成' if status == 'partial' else ('失败' if failed else status_label_text(status))}{duration_text}\n{line2}",
                     )
                     item.setData(Qt.UserRole, record.get("tool_id"))
-                    item.setToolTip("选择后按 Enter 或点击查看技术详情")
+                    item.setToolTip("点击或按 Enter 查看完整参数和结果")
                     self.step_list.addItem(item)
+                    if record.get("tool_id") == selected_id:
+                        self.step_list.setCurrentItem(item)
+            self.step_list.verticalScrollBar().setValue(scroll_value)
             self.refresh_context_badges(state.session_id)
 
     def _observability_pretty_json(self, value):
@@ -36300,6 +36335,12 @@ class MainWindow(QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
+            if event_type == "request_snapshot":
+                state.request_snapshot_failed = event.get("status") == "failed"
+                append_background_process_log("chat_log_export.log",
+                    f"stage=request_snapshot session_id={state.session_id} run_id={event.get('run_id')} status={event.get('status')} error_type={event.get('error_type', '')}")
+                if state.request_snapshot_failed:
+                    self.add_system_toast(str(event.get("message")), "warning", session_id=state.session_id)
             if event_type == "data_security":
                 notice_key = (str(event.get("run_id") or ""), event.get("event"), event.get("status"))
                 notices = getattr(state, "data_security_notice_keys", set())
@@ -41019,6 +41060,17 @@ class MainWindow(QMainWindow):
         menu.addAction(pin_action)
         menu.addAction(archive_action)
         menu.addSeparator()
+        menu.setToolTipsVisible(True)
+        for kind, label in (("chat", "下载聊天记录…"), ("request", "下载最近一次请求…")):
+            action = menu.addAction(label)
+            available = kind == "chat" or RequestSnapshotStore(self.chat_history_dir).available(session_id)
+            state = self.sessions.get(session_id)
+            if kind == "request" and getattr(state, "request_snapshot_failed", False):
+                available = False
+            action.setEnabled(available and not self.conversation_exports.busy(session_id, kind))
+            action.setToolTip("选择保存位置" if available else "尚无已记录的请求，或最近一次请求采集失败")
+            action.triggered.connect(lambda _checked=False, sid=session_id, k=kind: self.conversation_exports.export(sid, k))
+        menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(position if position is not None else anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
@@ -41688,6 +41740,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            RequestSnapshotStore(self.chat_history_dir).delete(session_id)
+        except Exception as exc:
+            self.add_system_toast(f"请求快照清理失败：{exc}", "warning")
+        try:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
             if os.path.exists(history_path):
                 os.remove(history_path)
@@ -41779,6 +41835,7 @@ class MainWindow(QMainWindow):
         if previous_callback is not None:
             notice.actionRequested.disconnect(previous_callback)
         notice._conversation_action_callback = action_callback
+        notice.set_details(None)
         notice._daemon_reconnect_run_id = ""
         notice.set_action(action_text if action_callback is not None else "")
         if action_callback is not None:
@@ -41816,7 +41873,7 @@ class MainWindow(QMainWindow):
         if str(context.get("source_run_id") or "").strip() != run_id:
             context = self._mark_run_retryable_failure(state, run_id)
         if not context:
-            return self._show_conversation_notice(state, text, "error")
+            return self._present_run_failure_notice(state, self._show_conversation_notice(state, text, "error"), run_id)
         if context.get("retry_of_run_id"):
             log_chat_runtime_debug(
                 "failed_run_retry_error",
@@ -41840,14 +41897,33 @@ class MainWindow(QMainWindow):
                     run_id=run_id,
                     retry_of_run_id=str(context.get("retry_of_run_id") or ""),
                 )
-                return card.set_retry_failure(text, retry_callback)
-        return self._show_conversation_notice(
+                return self._present_run_failure_notice(state, card.set_retry_failure(text, retry_callback), run_id, move=False)
+        notice = self._show_conversation_notice(
             state,
             text,
             "error",
             action_text="重试",
             action_callback=retry_callback,
         )
+        return self._present_run_failure_notice(state, notice, run_id)
+
+    def _present_run_failure_notice(self, state, notice, run_id, *, move=True):
+        if not state or notice is None:
+            return notice
+        event = getattr(state, "run_failure_details", {}) or {}
+        if event.get("run_id") == run_id:
+            detail = copy.deepcopy(event)
+            notice.set_details(lambda _checked=False, sid=state.session_id, e=detail: self._show_run_failure_details(sid, e))
+        if move:
+            layout = state.chat_layout
+            layout.removeWidget(notice)
+            anchor = getattr(state, "failure_notice_anchor", None)
+            while anchor is not None and _qt_object_alive(anchor) and layout.indexOf(anchor) < 0:
+                anchor = anchor.parentWidget()
+            index = layout.indexOf(anchor) + 1 if anchor is not None and _qt_object_alive(anchor) else max(0, layout.count() - 1)
+            layout.insertWidget(index, notice)
+            notice.show()
+        return notice
 
     def retry_failed_run(self, session_id, run_id):
         state = self.get_session(session_id)
@@ -42180,6 +42256,7 @@ class MainWindow(QMainWindow):
         )
 
     def _show_run_failure_details(self, session_id, event):
+        event = redact_diagnostic(event)
         self.activate_session(session_id)
         self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
         self.set_observability_section(self.OBS_SECTION_DETAILS)
@@ -42195,6 +42272,7 @@ class MainWindow(QMainWindow):
             json.dumps(
                 {
                     "category": event.get("category") or "provider_error",
+                    "error_type": event.get("error_type") or "",
                     "retry_attempt": int(event.get("retry_attempt") or 0),
                     "max_retries": int(event.get("max_retries") or 0),
                 },
@@ -42204,6 +42282,8 @@ class MainWindow(QMainWindow):
             "json",
         )
         self.td_result_edit.set_result(str(event.get("error") or "未知错误"))
+        self._tool_detail_session_id = session_id
+        self._detail_full_result = str(event.get("error") or "未知错误")
 
     def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
         """Restore every assistant/tool round as stages in one conversational turn."""
@@ -45919,10 +45999,51 @@ a {{ overflow-wrap: anywhere; }}
             return
         QApplication.clipboard().setText(path)
 
-    def _capture_chat_log_snapshot(self):
-        state = self.get_current_session()
+    def _capture_conversation_export(self, session_id, kind):
+        if kind == "chat":
+            return self._capture_chat_log_snapshot(session_id)
+        state = self.sessions.get(session_id)
+        if getattr(state, "request_snapshot_failed", False):
+            raise ValueError("最近一次请求快照采集失败，无法下载。")
+        request = RequestSnapshotStore(self.chat_history_dir).read(session_id)
+        record = self.chat_storage.get_conversation_record(session_id) or {}
+        return {"session_id": session_id, "title": record.get("title") or "新对话",
+                "captured_at": datetime.now().astimezone(), "request": request}
+
+    def _conversation_export_saved(self, session_id, kind, title, path):
+        label = "聊天记录" if kind == "chat" else "AI 请求"
+        self.add_system_toast(f"“{title}”的{label}已保存：\n{os.path.basename(path)}", "success",
+                              session_id=session_id, auto_close_ms=12000,
+                              actions=(("打开文件", lambda: self._open_exported_file(path)),
+                                       ("打开所在文件夹", lambda: self._reveal_exported_file(path))))
+
+    def _open_exported_file(self, path):
+        ok = os.path.isfile(path) and QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        append_background_process_log("chat_log_export.log", f"stage=open_file ok={bool(ok)}")
+        if not ok:
+            self.add_system_toast(f"无法打开文件，文件可能已移动或没有关联应用。可重新导出或复制路径：\n{path}", "error")
+        return bool(ok)
+
+    def _reveal_exported_file(self, path):
+        if not os.path.isfile(path):
+            self.add_system_toast(f"文件已不存在，可重新导出。原保存位置：\n{path}", "warning")
+            return False
+        return self.reveal_in_explorer(path)
+
+    def _capture_chat_log_snapshot(self, session_id=None):
+        session_id = session_id or self.current_session_id
+        state = self.get_session(session_id)
         if not state:
-            raise ValueError("请先打开一个对话。")
+            record = self.chat_storage.get_conversation_record(session_id)
+            if not record:
+                raise ValueError("对话已不存在。")
+            messages = copy.deepcopy(self.chat_storage.get_messages(session_id))
+            if not messages:
+                raise ValueError("该对话还没有可导出的聊天记录。")
+            return {"session_id": session_id, "title": record.get("title") or "新对话",
+                    "captured_at": datetime.now().astimezone(), "messages": messages,
+                    "timeline": snapshot_thinking_timeline((record.get("meta") or {}).get("ui_timeline_v1", [])),
+                    "running": False, "turn_id": "", "live_tools": {}}
         if not session_history_ready(state):
             raise ValueError("对话记录尚未加载完成，请等待加载完成后重试。")
         messages = copy.deepcopy(state.messages)
@@ -45965,7 +46086,7 @@ a {{ overflow-wrap: anywhere; }}
             QTimer.singleShot(1200, lambda: self.observability_copy_prompt_btn.setText("复制全量"))
 
     def copy_tool_result(self):
-        text = self.td_result_edit.toPlainText().strip()
+        text = getattr(self, "_detail_full_result", self.td_result_edit.toPlainText())
         if not text:
             return
         QApplication.clipboard().setText(text)
@@ -49028,6 +49149,7 @@ a {{ overflow-wrap: anywhere; }}
                 "neutral",
             )
         else:
+            state.failure_notice_anchor = bubble
             self._show_retryable_run_failure(
                 state,
                 str(reason_text or "本轮未完成，请重试"),
@@ -49060,6 +49182,10 @@ a {{ overflow-wrap: anywhere; }}
             return "interrupted", "已停止"
         normalized_error = str(error_text or "").strip()
         lowered_error = normalized_error.lower()
+        if "invalid_model" in lowered_error or "model does not exist" in lowered_error:
+            return "invalid_model", "模型不存在或当前账号无权访问，请检查模型名称和访问权限。"
+        if "system message must be at the beginning" in lowered_error:
+            return "invalid_message_order", "服务端要求系统消息位于开头，本次请求被拒绝。请查看错误详情并下载最近一次请求。"
         if "会话请求前缀被改写" in normalized_error:
             return (
                 "conversation_prefix_conflict",
@@ -51822,6 +51948,11 @@ a {{ overflow-wrap: anywhere; }}
             QTimer.singleShot(0, check_unexpected_windows)
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
+        retain_view = (not switch_tab and getattr(self, "current_selected_tool_id", None) == tool_id
+                       and getattr(self, "_tool_detail_session_id", None) == self.current_session_id)
+        viewers = (self.td_args_edit, self.td_args_meta_edit, self.td_result_edit)
+        view_state = [(edit, edit.verticalScrollBar().value(), edit.textCursor().anchor(), edit.textCursor().position())
+                      for edit in viewers] if retain_view else []
         log_sub_agent_runtime(
             "ui_tool_details_begin",
             tool_id=str(tool_id or ""),
@@ -51842,6 +51973,10 @@ a {{ overflow-wrap: anywhere; }}
                     selected_card = card
 
         self.current_selected_tool_id = tool_id
+        self._tool_detail_session_id = state.session_id if state else self.current_session_id
+        args = redact_diagnostic(args)
+        result = redact_diagnostic(result)
+        meta = redact_diagnostic(meta)
 
         # 2. Open Drawer & Switch Tab for explicit tool-detail requests.
         if switch_tab:
@@ -51884,23 +52019,23 @@ a {{ overflow-wrap: anywhere; }}
             code_text = args_obj.get("code") or ""
             remaining = {key: value for key, value in args_obj.items() if key != "code"}
             args_text = code_text
-            self.td_args_edit.set_code(detail_text(code_text, 12000), language)
+            self.td_args_edit.set_code(code_text, language)
             if remaining:
                 remaining_text = json.dumps(remaining, indent=2, ensure_ascii=False)
                 args_text += "\n" + remaining_text
-                self.td_args_meta_edit.set_code(detail_text(remaining_text, 6000), "json")
+                self.td_args_meta_edit.set_code(remaining_text, "json")
                 self.td_args_meta_label.show()
                 self.td_args_meta_edit.show()
         elif args_obj is not None:
             args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
-            self.td_args_edit.set_code(detail_text(args_text, 12000), "json")
+            self.td_args_edit.set_code(args_text, "json")
         else:
             args_text = f"{args_parse_error}\n\n原始参数：\n{str(args)}"
-            self.td_args_edit.set_code(detail_text(args_text, 12000), "text")
+            self.td_args_edit.set_code(args_text, "text")
         
         try:
             if selected_card and getattr(selected_card, "result_obj", None) is not None:
-                res_text = json.dumps(selected_card.result_obj, indent=2, ensure_ascii=False)
+                res_text = json.dumps(redact_diagnostic(selected_card.result_obj), indent=2, ensure_ascii=False)
             elif isinstance(result, str):
                 # Try to parse result if it looks like JSON
                 if result.strip().startswith("{") or result.strip().startswith("["):
@@ -51916,7 +52051,15 @@ a {{ overflow-wrap: anywhere; }}
         if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
             res_text = "(Running...)"
              
-        self.td_result_edit.set_result(detail_text(res_text, 16000))
+        self._detail_full_result = res_text
+        self.td_result_edit.set_result(res_text)
+        for edit, scroll, anchor, position in view_state:
+            limit = max(0, edit.document().characterCount() - 1)
+            restored = edit.textCursor()
+            restored.setPosition(min(anchor, limit))
+            restored.setPosition(min(position, limit), QTextCursor.KeepAnchor)
+            edit.setTextCursor(restored)
+            edit.verticalScrollBar().setValue(scroll)
         log_sub_agent_runtime(
             "ui_tool_details_done",
             tool_id=str(tool_id or ""),
@@ -52215,16 +52358,12 @@ a {{ overflow-wrap: anywhere; }}
             if record.get("tool_id") != tool_id:
                 continue
             has_result = bool((result or "").strip()) or result_obj is not None
-            record["status"] = "error" if card.failed else ("done" if has_result else "running")
+            record["status"] = tool_result_status(result_obj if result_obj is not None else result) if has_result else "running"
             duration = (meta or {}).get("duration") if isinstance(meta, dict) else None
             if isinstance(duration, (int, float)):
                 record["duration"] = duration
-            if result_obj is not None:
-                preview = str(result_obj.get("content") or json.dumps(result_obj, ensure_ascii=False)).strip().replace("\n", " ")
-                record["summary"] = preview[:120]
-            elif (result or "").strip():
-                preview = str(result).strip().replace("\n", " ")
-                record["summary"] = preview[:120]
+            if has_result:
+                record["summary"] = tool_result_summary(result_obj if result_obj is not None else result)
             applied_paths = []
             if isinstance(result_obj, dict):
                 applied_items = result_obj.get("changes") if result_obj.get("ok") is True else result_obj.get("applied_changes")
@@ -52257,6 +52396,7 @@ a {{ overflow-wrap: anywhere; }}
         # [Optimization] Real-time refresh if currently viewing this tool
         if (hasattr(self, 'current_selected_tool_id') and 
             self.current_selected_tool_id == tool_id and 
+            state.session_id == self.current_session_id and
             self.right_sidebar.isVisible() and 
             self.right_drawer_tab == self.RIGHT_TAB_OBSERVABILITY):
             
@@ -52485,7 +52625,7 @@ a {{ overflow-wrap: anywhere; }}
     def _show_next_system_toast(self):
         while self._system_toast_queue and len(self._visible_system_toasts) < DesignTokens.toast_max_visible:
             payload = self._system_toast_queue.pop(0)
-            toast = SystemToast(payload["text"], payload["type"], self.main_container)
+            toast = SystemToast(payload["text"], payload["type"], self.main_container, actions=payload.get("actions", ()))
             toast.set_repeat_count(payload.get("count", 1))
             toast.closeRequested.connect(self._dismiss_system_toast)
             self._visible_system_toasts.append(toast)
@@ -52513,19 +52653,19 @@ a {{ overflow-wrap: anywhere; }}
     def _complete_system_toast_exit(self, toast):
         self._dismiss_system_toast(toast)
 
-    def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
+    def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None, *, actions=()):
         message = str(text or "").strip()
         if not message:
             return
         visible = getattr(self, "_visible_system_toasts", [])
-        if visible:
+        if visible and not actions:
             latest = visible[-1]
             if latest.base_text == message and latest.toast_type == type:
                 latest.set_repeat_count(latest.repeat_count + 1)
                 latest.start_auto_close(self._system_toast_duration(type, auto_close_ms))
                 self._position_active_system_toast()
                 return
-        if self._system_toast_queue:
+        if self._system_toast_queue and not actions:
             latest_payload = self._system_toast_queue[-1]
             if latest_payload["text"] == message and latest_payload["type"] == type:
                 latest_payload["count"] = int(latest_payload.get("count", 1)) + 1
@@ -52536,6 +52676,7 @@ a {{ overflow-wrap: anywhere; }}
             "duration_ms": self._system_toast_duration(type, auto_close_ms),
             "count": 1,
             "session_id": session_id,
+            "actions": actions,
         })
         self._show_next_system_toast()
 
@@ -54544,6 +54685,12 @@ a {{ overflow-wrap: anywhere; }}
             self._reject_unapplied_guidance(state, restore_input=False)
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
+            state.run_failure_details = {
+                "session_id": state.session_id, "turn_id": str(turn_id or state.active_turn_id or ""),
+                "run_id": run_id, "summary": failure_summary, "category": failure_category,
+                "error": error_text, "error_type": error_type,
+                "retry_attempt": retry_attempt, "max_retries": retry_max,
+            }
             bubble.stop_thinking_timers()
             interruption_text = self._finish_interrupted_turn(
                 state,

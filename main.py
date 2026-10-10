@@ -90,6 +90,7 @@ from core.single_instance import (
     notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage
+from core.theme_package import CONTENT_DEFAULTS
 from core.conversation_actions import append_reference_context, branch_display_text
 from ui.conversation_actions import ConversationActionsMixin, reference_button
 from core.sidebar_projects import visible_sidebar_projects
@@ -29994,8 +29995,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
-        self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
-        self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
+        self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
+        self.input_field.setToolTip(
+            "在输入开头或空格后键入 @，选择“引用会话”或“召唤智能体”。\n"
+            "引用会话：把其他会话的文字记录作为参考资料，AI 在当前会话回答；发送时保存引用快照。\n"
+            "召唤智能体：选择智能体参与执行，再补充要完成的任务。"
+        )
         self.input_field.returnPressed.connect(self.handle_send)
         self.input_field.mentionRequested.connect(self.show_conversation_mention_menu)
         self.input_field.clipboardFilesPasted.connect(self._add_clipboard_files)
@@ -30188,9 +30193,19 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.prompt_toolbar.addWidget(self.prompt_action_group)
         self._composer_toolbar_mode = ""
         input_card_layout.addWidget(self.prompt_toolbar_container)
-        self.composer_permission = QCheckBox("上帝模式 · 所有对话复用")
+        self.composer_permission = QCheckBox("完全访问")
+        self.composer_permission.setObjectName("ComposerPermission")
+        bind_theme(self.composer_permission, lambda _=None: self.composer_permission.setStyleSheet(
+            f"QCheckBox#ComposerPermission {{ color: {DesignTokens.text_primary}; "
+            f"font-size: {DesignTokens.font_size_meta}px; }}"
+        ), surface="composer")
         self.composer_permission.setChecked(self.config_manager.get_god_mode())
-        self.composer_permission.setToolTip("全局默认执行授权，仅影响新启动任务。关闭后仍可读取、分析和制作任务产物；修改原有资产或执行代码时请求本次许可。正在运行的任务保持启动时权限，可停止后重新启动。")
+        self.composer_permission.setToolTip(
+            "完全访问（上帝模式）：勾选后提供持续执行授权，可直接修改文件、执行代码，无需逐次申请执行许可；"
+            "访问范围以当前系统账号权限为限，原有删除确认仍保留。\n"
+            "设置全局保存，所有对话的新任务沿用；正在运行的任务保持启动时权限。\n"
+            "取消勾选后仍可读取、分析和制作任务产物；修改原有资产或执行代码时请求本次许可。"
+        )
         self.composer_permission.toggled.connect(self._save_composer_permission)
         input_card_layout.addWidget(self.composer_permission)
         self._apply_composer_toolbar_layout(compact=False)
@@ -34575,12 +34590,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
+            self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(True))
         else:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("直接开始聊天；需要处理文件时再连接项目")
+            self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
             self.ws_label.setText("未连接项目 · 聊天")
@@ -37930,9 +37945,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
                 self.action_btn.setText("加载中")
-                self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
+                self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             else:
-                self.input_field.setPlaceholderText("直接开始聊天；需要处理文件时再连接项目")
+                self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
         self.refresh_grill_mode_controls(state.session_id)

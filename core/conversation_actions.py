@@ -1,14 +1,10 @@
 """Conversation references and forks, independent of widgets and running agents."""
 
 import copy
-import hashlib
 import logging
 import os
-import re
-import shutil
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from core.chat_log_export import iter_conversation_export
 from core.conversation_integrity import ensure_tool_call_sequence
@@ -66,7 +62,7 @@ def write_reference_snapshot(snapshot, directory):
 
 def append_reference_context(payload, references, file_map=None):
     """Append only to the new user message; never turn snapshots into input_file parts."""
-    references = copy.deepcopy(references or [])
+    references = [copy.deepcopy(ref) for ref in references or [] if not ref.get("history_only")]
     if not references and not file_map:
         return payload
     result = copy.deepcopy(payload)
@@ -187,96 +183,27 @@ def clone_branch(messages, source_meta, target_id, source_id, source_title, mess
     return cloned, meta
 
 
-def branch_file_paths(messages, workspace):
-    """Collect explicit attachments, snapshots and linked local results, not whole directories."""
-    paths = set()
-
-    def add(value):
-        if not isinstance(value, str) or not value.strip():
-            return
-        value = unquote(value.strip().strip("<>"))
-        if value.startswith("file:"):
-            parsed = urlparse(value)
-            value = parsed.path.lstrip("/") if os.name == "nt" else parsed.path
-        elif re.match(r"^[a-zA-Z][\w+.-]*://", value) or value.startswith("#"):
-            return
-        path = Path(value)
-        if not path.is_absolute():
-            path = Path(workspace) / path
-        paths.add(str(path.resolve()))
-
+def retain_branch_text_history(messages):
+    """Keep file provenance as text, without replaying source attachments in a new workspace."""
+    file_fields = ("user_added_files", "user_added_images", "workspace_referenced_images",
+                   "local_only_audio_files", "transcription_only_audio_files")
     for message in messages:
-        meta = message.get("meta") or {}
-        for key in ("user_added_files", "user_added_images", "workspace_referenced_images", "local_only_audio_files", "transcription_only_audio_files"):
-            for path in meta.get(key) or []:
-                add(path)
-        for ref in meta.get("conversation_refs") or []:
-            add(ref.get("snapshot_path"))
-            for part in ref.get("snapshot_parts") or []:
-                add(part)
-        for part in message.get("content_parts") or []:
-            if isinstance(part, dict) and part.get("type") != "text":
-                add(part.get("path"))
-        text = str(message.get("content") or "")
-        for match in _PATH_PATTERN.finditer(_mask_markdown_code(text)):
-            add(_coerce_local_path(match.group("path")))
-        for match in re.finditer(r"\]\((<[^>]+>|[^)\n]+)\)", text):
-            add(match.group(1))
-    return sorted(paths)
-
-
-class MissingBranchFiles(ValueError):
-    def __init__(self, paths):
-        self.paths = paths
-        super().__init__("部分历史文件已不存在：\n" + "\n".join(paths))
-
-
-def copy_branch_files(paths, source_workspace, target_workspace, *, allow_missing=False):
-    missing = [path for path in paths if not Path(path).is_file()]
-    if missing and not allow_missing:
-        raise MissingBranchFiles(missing)
-    mapping = {}
-    source_root = Path(source_workspace).resolve()
-    target_root = Path(target_workspace).resolve()
-    # Only this newly allocated directory may be removed on a failed creation.
-    target_root.mkdir(parents=True, exist_ok=False)
-    try:
-        for path in paths:
-            source = Path(path).resolve()
-            if str(path) in missing:
-                continue
-            try:
-                relative = source.relative_to(source_root)
-            except ValueError:
-                relative = Path("attachments") / hashlib.sha256(str(source).encode()).hexdigest()[:12] / source.name
-            destination = target_root / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            mapping[str(source)] = str(destination)
-    except Exception:
-        shutil.rmtree(target_root)
-        raise
-    return mapping, missing
-
-
-def remap_branch_file_metadata(messages, mapping):
-    """Relocate owned assets without modifying native protocol text or tool arguments."""
-    def mapped(path):
-        return mapping.get(str(Path(path).resolve()), path) if isinstance(path, str) else path
-
-    for message in messages:
-        meta = message.get("meta") or {}
-        for key in ("user_added_files", "user_added_images", "workspace_referenced_images", "local_only_audio_files", "transcription_only_audio_files"):
-            if key in meta:
-                meta[key] = [mapped(path) for path in meta[key]]
-        for ref in meta.get("conversation_refs") or []:
-            if ref.get("snapshot_path"):
-                ref["snapshot_path"] = mapped(ref["snapshot_path"])
-            if ref.get("snapshot_parts"):
-                ref["snapshot_parts"] = [mapped(part) for part in ref["snapshot_parts"]]
-        for part in message.get("content_parts") or []:
+        meta = message.setdefault("meta", {})
+        names = list(meta.get("branch_historical_files") or [])
+        for field in file_fields:
+            names.extend(Path(path).name for path in meta.pop(field, []) or [])
+        parts = message.get("content_parts") or []
+        for part in parts:
             if isinstance(part, dict) and part.get("path"):
-                part["path"] = mapped(part["path"])
+                names.append(Path(part["path"]).name)
+        if parts:
+            message["content_parts"] = [part for part in parts if isinstance(part, dict) and part.get("type") == "text"]
+        if names:
+            meta["branch_historical_files"] = list(dict.fromkeys(names))
+        for ref in meta.get("conversation_refs") or []:
+            ref["history_only"] = True
+            ref.pop("snapshot_path", None)
+            ref.pop("snapshot_parts", None)
 
 
 def branch_display_text(text, mapping):

@@ -1,4 +1,4 @@
-"""Three focused behavior checks; no visual or product acceptance tests."""
+"""Focused behavior checks; no visual or product acceptance tests."""
 
 import copy
 import os
@@ -11,15 +11,16 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
 from core.chat_storage import ChatStorage
 from core.conversation_actions import (
-    append_reference_context, branch_display_text, branch_file_paths, clone_branch,
+    append_reference_context, clone_branch,
     regeneration_source, write_reference_snapshot,
 )
 from core.filesystem_ops import read_text_file
 from core.runtime_journal import RuntimeJournal
-from ui.conversation_actions import BranchWorker
+from ui.conversation_actions import BranchWorker, ConversationActionsMixin, ConversationMentionPopover
 from main import MainWindow
 
 
@@ -27,6 +28,63 @@ class ConversationActionsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_branch_progress_is_removed_on_success_and_failure(self):
+        class Worker(QObject):
+            completed = Signal(str)
+            failed = Signal(str)
+            finished = Signal()
+
+            def start(self):
+                pass
+
+        for success in (True, False):
+            with self.subTest(success=success):
+                host = QWidget()
+                state = SimpleNamespace(session_id="source", history_loaded=True,
+                    messages=[{"id": "u", "role": "user", "content": "问题"},
+                              {"id": "a", "role": "assistant", "content": "回答"}],
+                    persisted_conversation_meta={}, chat_layout=QVBoxLayout(host),
+                    conversation_notice=object())
+                other_notice = state.conversation_notice
+                window = SimpleNamespace(get_session=lambda sid: state,
+                    _flush_ui_stream_buffers=MagicMock(), _resolved_session_title=lambda s: "原会话",
+                    _compose_session_meta=lambda s: {}, _workspace_dir_for_state=lambda s: ".",
+                    _session_workspace_source=lambda s: "project", chat_storage=MagicMock(),
+                    _show_conversation_notice=MagicMock(), sync_current_session_state=MagicMock(),
+                    refresh_history_list=MagicMock(), input_field=MagicMock(),
+                    load_session=MagicMock(side_effect=lambda sid: self.assertEqual(state.chat_layout.count(), 0)))
+                worker = Worker()
+                with patch("ui.conversation_actions.BranchWorker", return_value=worker):
+                    ConversationActionsMixin.branch_conversation(window, "source", "a")
+                self.assertEqual(state.chat_layout.count(), 1)
+                if success:
+                    worker.completed.emit("fork")
+                    window.load_session.assert_called_once_with("fork")
+                else:
+                    worker.failed.emit("copy failed")
+                    window.load_session.assert_not_called()
+                    window._show_conversation_notice.assert_called_once()
+                worker.finished.emit()
+                self.assertEqual(state.chat_layout.count(), 0)
+                self.assertFalse(state.branch_in_progress)
+                self.assertIs(state.conversation_notice, other_notice)
+                host.deleteLater()
+
+    def test_mention_picker_separates_reference_and_agent_selection(self):
+        picker = ConversationMentionPopover(
+            [{"id": "chat", "title": "同名", "updated_at": 0, "meta": {}}],
+            [{"id": "agent", "name": "同名"}], "", None)
+        selected = []
+        picker.selected.connect(lambda kind, record: selected.append((kind, record["id"])))
+        picker.search.setText("同名")
+        self.assertEqual(picker.items.count(), 1)
+        picker.choose(picker.items.item(0))
+        picker.tabs.buttons["智能体"].click()
+        self.assertEqual(picker.items.count(), 1)
+        picker.choose(picker.items.item(0))
+        self.assertEqual(selected, [("会话", "chat"), ("智能体", "agent")])
+        picker.deleteLater()
 
     def test_reference_snapshot_submission_failure_and_running_guidance(self):
         with tempfile.TemporaryDirectory() as root:
@@ -103,7 +161,7 @@ class ConversationActionsTests(unittest.TestCase):
             attachment.write_text("成果", encoding="utf-8")
             db = ChatStorage(str(Path(root) / "history.sqlite"))
             messages = [
-                {"id": "u", "role": "user", "content": "处理附件", "meta": {"user_added_files": [str(attachment)]}},
+                {"id": "u", "role": "user", "content": "处理附件", "content_parts": [{"type": "text", "text": "处理附件"}, {"type": "input_file", "path": str(attachment)}], "meta": {"user_added_files": [str(attachment), str(source / "missing.md")], "conversation_refs": [{"session_id": "ref", "title": "参考", "snapshot_path": str(source / "missing-snapshot.txt")}]}},
                 {"id": "call", "role": "assistant", "content": "", "tool_calls": [{"id": "tool", "type": "function", "function": {"name": "text_file_read", "arguments": "{}"}}]},
                 {"id": "result", "role": "tool", "tool_call_id": "tool", "content": "成果"},
                 {"id": "answer", "role": "assistant", "content": f"[成果]({attachment})", "meta": {"ui_source_message_id": "answer", "ui_turn_group_id": "group"}},
@@ -119,28 +177,30 @@ class ConversationActionsTests(unittest.TestCase):
             self.assertTrue(meta["manual_title"])
             target = Path(root) / "fork"
             meta.update(workspace_dir=str(target), workspace_source="chat")
-            worker = BranchWorker(db, "fork", "原会话 · 分支", branch, meta, branch_file_paths(branch, source), str(source), str(target), False, None)
+            worker = BranchWorker(db, "fork", "原会话 · 分支", branch, meta, None)
             errors = []
             worker.failed.connect(errors.append)
             worker.run()
             self.assertEqual(errors, [])
-            self.assertTrue((target / "result.txt").is_file())
+            self.assertFalse(target.exists())
             fork = db.get_messages("fork")
             self.assertEqual(fork[-1]["content"], original[3]["content"])
-            copied_path = fork[0]["meta"]["user_added_files"][0]
-            self.assertEqual(copied_path, str(target / "result.txt"))
+            self.assertNotIn("user_added_files", fork[0]["meta"])
+            self.assertEqual(fork[0]["meta"]["branch_historical_files"], ["result.txt", "missing.md"])
+            self.assertEqual(fork[0]["content_parts"], [{"type": "text", "text": "处理附件"}])
+            self.assertTrue(fork[0]["meta"]["conversation_refs"][0]["history_only"])
+            self.assertNotIn("snapshot_path", fork[0]["meta"]["conversation_refs"][0])
             self.assertEqual(db.get_messages("source"), original)
+            self.assertEqual(attachment.read_text(encoding="utf-8"), "成果")
             db.delete_conversation("source")
             attachment.unlink()
-            self.assertEqual(Path(copied_path).read_text(encoding="utf-8"), "成果")
-            self.assertIn(str(target / "result.txt"), branch_display_text(fork[-1]["content"], meta["branch_file_map"]))
+            self.assertEqual(db.get_messages("fork"), fork)
 
-            # A failure after the new conversation row was inserted rolls back
-            # both the row and the directory created by this operation.
+            # A database failure rolls back the conversation without creating files.
             failure_target = Path(root) / "failed"
             next_messages, next_meta = clone_branch(fork, {}, "failed", "fork", "分支", fork[-1]["id"])
             next_meta.update(workspace_dir=str(failure_target), workspace_source="chat")
-            failed = BranchWorker(db, "failed", "失败分支", next_messages, next_meta, [copied_path], str(target), str(failure_target), False, None)
+            failed = BranchWorker(db, "failed", "失败分支", next_messages, next_meta, None)
             failed.failed.connect(errors.append)
             with self.assertLogs("ui.conversation_actions", level="ERROR"), patch.object(db, "_replace_messages_in_connection", side_effect=OSError("database write failed")):
                 failed.run()
@@ -148,10 +208,12 @@ class ConversationActionsTests(unittest.TestCase):
             self.assertFalse(failure_target.exists())
             self.assertTrue(errors)
             # Project forks intentionally keep the same directory without copying.
-            project_meta = {"workspace_dir": str(target), "workspace_source": "project"}
-            project = BranchWorker(db, "project-fork", "项目分支", next_messages, project_meta, [], str(target), str(target), False, None)
+            project_messages, project_meta = clone_branch(original, {}, "project-fork", "source", "项目", "answer")
+            project_meta.update(workspace_dir=str(source), workspace_source="project")
+            project = BranchWorker(db, "project-fork", "项目分支", project_messages, project_meta, None)
             project.run()
-            self.assertEqual(db.get_conversation_meta("project-fork")["workspace_dir"], str(target))
+            self.assertEqual(db.get_conversation_meta("project-fork")["workspace_dir"], str(source))
+            self.assertEqual(db.get_messages("project-fork")[0]["content_parts"], original[0]["content_parts"])
 
     def test_regeneration_cancel_failure_and_original_request_identity(self):
         with tempfile.TemporaryDirectory() as root:

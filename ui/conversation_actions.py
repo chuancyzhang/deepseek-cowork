@@ -3,25 +3,24 @@
 import copy
 import logging
 import os
-import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from shiboken6 import isValid
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from core.conversation_actions import (
-    branch_file_paths, clone_branch, copy_branch_files,
-    regeneration_source, remap_branch_file_metadata, write_reference_snapshot,
+    clone_branch, retain_branch_text_history, regeneration_source, write_reference_snapshot,
 )
 from core.theme import DesignTokens, bind_theme
 from core.inline_visualization import find_inline_visualization_files
-from ui.primitives import ProductMessageDialog, ProductPopover, product_button_style
+from ui.primitives import ProductInlineNotice, ProductPopover, ProductSegmentedControl
 
 
 logger = logging.getLogger(__name__)
@@ -30,7 +29,14 @@ logger = logging.getLogger(__name__)
 def reference_button(text, parent=None):
     button = QPushButton(text, parent)
     button.setCursor(Qt.PointingHandCursor)
-    bind_theme(button, lambda _=None: button.setStyleSheet(product_button_style("ghost")), surface="conversation")
+    button.setObjectName("ConversationContextLink")
+    bind_theme(button, lambda _=None: button.setStyleSheet(
+        f"QPushButton#ConversationContextLink {{ border: none; background: transparent; "
+        f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px; "
+        f"font-weight: 400; padding: 3px 5px; text-align: left; }} "
+        f"QPushButton#ConversationContextLink:hover {{ color: {DesignTokens.primary}; "
+        f"background: {DesignTokens.bg_hover}; border-radius: {DesignTokens.radius_sm}px; }}"
+    ), surface="conversation")
     return button
 
 
@@ -43,13 +49,20 @@ class ConversationMentionPopover(ProductPopover):
         self.profiles = profiles
         self.workspace = workspace
         layout = QVBoxLayout(self)
+        self.kind = "会话"
+        self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "召唤智能体")], current=self.kind)
+        layout.addWidget(self.tabs)
+        self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+        self.tabs.currentChanged.connect(self.change_kind)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索会话或智能体")
+        self.search.setPlaceholderText("搜索会话标题或项目")
         layout.addWidget(self.search)
         self.items = QListWidget()
         self.items.setMinimumHeight(250)
         layout.addWidget(self.items)
-        self.empty = QLabel("没有匹配的会话或智能体")
+        self.empty = QLabel("没有匹配的会话")
         layout.addWidget(self.empty)
         self.search.textChanged.connect(self.refresh_items)
         self.items.itemClicked.connect(self.choose)
@@ -62,6 +75,14 @@ class ConversationMentionPopover(ProductPopover):
         self.search.setStyleSheet(f"QLineEdit {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; padding: 6px; }}")
         self.items.setStyleSheet(f"QListWidget {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; border: none; }} QListWidget::item {{ padding: 7px; }} QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}")
         self.empty.setStyleSheet(f"color: {DesignTokens.text_secondary};")
+        self.hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
+
+    def change_kind(self, kind):
+        self.kind = kind
+        self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索智能体名称或描述")
+        self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "选择智能体参与执行当前任务")
+        self.empty.setText("没有匹配的" + kind)
+        self.refresh_items()
 
     def refresh_items(self):
         query = self.search.text().strip().casefold()
@@ -71,7 +92,7 @@ class ConversationMentionPopover(ProductPopover):
             -(row.get("updated_at") or 0),
         ))
         first = None
-        for kind, entries in (("会话", records), ("智能体", self.profiles)):
+        for kind, entries in ((self.kind, records if self.kind == "会话" else self.profiles),):
             found = []
             for record in entries:
                 meta = record.get("meta") or {}
@@ -87,8 +108,6 @@ class ConversationMentionPopover(ProductPopover):
                 found.append((record, f"{title}\n{subtitle}"))
             if not found:
                 continue
-            heading = QListWidgetItem(kind, self.items)
-            heading.setFlags(Qt.NoItemFlags)
             for record, text in found:
                 item = QListWidgetItem(text, self.items)
                 item.setData(Qt.UserRole, (kind, record))
@@ -108,32 +127,19 @@ class BranchWorker(QThread):
     completed = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, storage, target_id, title, messages, meta, paths, source_workspace, target_workspace, allow_missing, parent):
+    def __init__(self, storage, target_id, title, messages, meta, parent):
         super().__init__(parent)
         self.storage, self.target_id, self.title = storage, target_id, title
-        self.messages, self.meta, self.paths = messages, meta, paths
-        self.source_workspace, self.target_workspace = source_workspace, target_workspace
-        self.allow_missing = allow_missing
+        self.messages, self.meta = messages, meta
 
     def run(self):
-        copied = False
         try:
             if self.meta["workspace_source"] == "chat":
-                inherited_map = self.meta.pop("branch_file_map", {})
-                mapping, missing = copy_branch_files(self.paths, self.source_workspace, self.target_workspace, allow_missing=self.allow_missing)
-                copied = True
-                mapping.update({old: mapping[current] for old, current in inherited_map.items() if current in mapping})
-                remap_branch_file_metadata(self.messages, mapping)
-                self.meta["branch_file_map"] = mapping
-                self.meta["branch_missing_files"] = missing
+                retain_branch_text_history(self.messages)
+                self.meta["branch_history_only"] = True
             artifacts = self.meta.pop("branch_visualizations", [])
-            mapping = self.meta.get("branch_file_map") or {}
-            for artifact in artifacts:
-                artifact["path"] = mapping.get(artifact["path"], artifact["path"])
             self.storage.create_branch_conversation(self.target_id, self.messages, title=self.title, meta=self.meta, artifacts=artifacts)
         except Exception as exc:
-            if copied:
-                shutil.rmtree(self.target_workspace)
             logger.exception("conversation_branch_failed target=%s", self.target_id)
             self.failed.emit(str(exc))
             return
@@ -216,14 +222,18 @@ class ConversationActionsMixin:
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            button = reference_button("@" + ref["title"])
-            button.setToolTip("引用此会话；发送时固定上下文。点击查看来源。")
+            button = reference_button("引用：" + ref["title"])
+            button.setText(button.fontMetrics().elidedText("引用：" + ref["title"], Qt.ElideRight, 300))
+            button.setToolTip(ref["title"] + "\n作为参考资料，发送时固定上下文。点击查看。")
             button.clicked.connect(lambda checked=False, r=copy.deepcopy(ref): self.show_conversation_reference(r))
             remove = reference_button("×")
+            remove.setFixedWidth(24)
             remove.setToolTip("移除此会话引用")
             remove.clicked.connect(lambda checked=False, sid=state.session_id, rid=ref["session_id"]: self.remove_conversation_reference(sid, rid))
             row_layout.addWidget(button)
+            row_layout.setSpacing(0)
             row_layout.addWidget(remove)
+            row_layout.addStretch()
             layout.addWidget(row)
         container.setVisible(bool(refs))
 
@@ -245,6 +255,8 @@ class ConversationActionsMixin:
         directory = Path(workspace) / ".cowork" / state.session_id
         try:
             for ref in references:
+                if ref.get("history_only"):
+                    continue
                 if ref.get("snapshot_path"):
                     if not all(os.path.isfile(path) for path in [ref["snapshot_path"], *(ref.get("snapshot_parts") or [])]):
                         raise ValueError(f"“{ref['title']}”的引用快照不存在，请重新选择来源。")
@@ -280,7 +292,17 @@ class ConversationActionsMixin:
         if bubble.role != "User":
             return
         message = self._find_message_by_id(state.messages, bubble.source_message_id) or {}
-        refs = (message.get("meta") or {}).get("conversation_refs") or []
+        meta = message.get("meta") or {}
+        names = meta.get("branch_historical_files") or []
+        if names:
+            label = QLabel("历史附件未带入：" + "、".join(names[:3]) + (f" 等 {len(names)} 个文件" if len(names) > 3 else ""))
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            label.setToolTip("需要时请重新添加。\n" + "\n".join(names))
+            bind_theme(label, lambda _=None, widget=label: widget.setStyleSheet(
+                f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;"), surface="conversation")
+            (bubble.user_wrapper_layout or bubble.layout()).addWidget(label)
+        refs = meta.get("conversation_refs") or []
         if not refs:
             return
         row = QWidget(bubble)
@@ -288,6 +310,14 @@ class ConversationActionsMixin:
         layout.setContentsMargins(0, 0, 0, 0)
         for ref in refs:
             buttons = QHBoxLayout()
+            if ref.get("history_only"):
+                source = reference_button("历史引用：" + ref["title"] + " · 打开来源")
+                source.setToolTip("原对话的引用记录；快照文件未带入此分支。如需使用，请重新 @ 引用。")
+                source.clicked.connect(lambda checked=False, sid=ref["session_id"]: self.open_conversation_source(sid))
+                buttons.addWidget(source)
+                buttons.addStretch()
+                layout.addLayout(buttons)
+                continue
             snapshot = reference_button("@" + ref["title"] + " · 查看引用快照")
             snapshot.setToolTip("引用时间：" + ref.get("captured_at", ""))
             snapshot.clicked.connect(lambda checked=False, r=copy.deepcopy(ref): self.show_conversation_reference(r))
@@ -326,44 +356,46 @@ class ConversationActionsMixin:
             project = self._session_workspace_source(state) == "project"
             destination = workspace if project else self._chat_workspace_dir_for_session(target_id)
             meta.update(workspace_dir=destination, workspace_source="project" if project else "chat")
-            inherited_map = (getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map") or {}
-            meta["branch_file_map"] = copy.deepcopy(inherited_map)
-            paths = [] if project else sorted({inherited_map.get(path, path) for path in branch_file_paths(messages, workspace)})
-            artifacts = []
-            for file in {file for message in messages for file in find_inline_visualization_files(message.get("content") or "")}:
-                artifact = self.chat_storage.get_inline_visualization(session_id, file)
-                if artifact:
-                    artifacts.append(artifact)
-                    if not project:
-                        paths.append(artifact["path"])
-            paths = sorted(set(paths))
-            meta["branch_visualizations"] = artifacts
-            missing = [path for path in paths if not os.path.isfile(path)]
-            allow_missing = False
-            if missing:
-                dialog = ProductMessageDialog("部分历史文件已不存在", "\n".join(missing) + "\n\n继续创建会保留文字记录，并标记缺失文件。", tone="warning",
-                    buttons=[("取消", QMessageBox.No, "secondary", False), ("仅保留记录继续", QMessageBox.Yes, "primary", True)], parent=self)
-                if dialog.exec_result(QMessageBox.No) != QMessageBox.Yes:
-                    return
-                allow_missing = True
+            # Project branches reuse existing assets; chat branches carry records only.
+            if project:
+                artifacts = []
+                for file in {file for message in messages for file in find_inline_visualization_files(message.get("content") or "")}:
+                    artifact = self.chat_storage.get_inline_visualization(session_id, file)
+                    if artifact:
+                        artifacts.append(artifact)
+                meta["branch_visualizations"] = artifacts
         except Exception as exc:
             logger.exception("conversation_branch_prepare_failed source=%s", session_id)
             self._show_conversation_notice(state, f"无法创建分支：{exc}", "error")
             return
-        worker = BranchWorker(self.chat_storage, target_id, title + " · 分支", messages, meta, paths, workspace, destination, allow_missing, self)
+        worker = BranchWorker(self.chat_storage, target_id, title + " · 分支", messages, meta, self)
         state.branch_in_progress = True
         state.branch_worker = worker
-        self._show_conversation_notice(state, "正在创建分支并准备关联文件…", "info")
+        # Keep operation progress separate from the session's shared error notice.
+        progress = ProductInlineNotice("正在创建分支…", "info")
+        state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), progress)
+
+        def clear_progress():
+            if isValid(progress):
+                state.chat_layout.removeWidget(progress)
+                progress.hide()
+                progress.deleteLater()
 
         def completed(new_id):
+            clear_progress()
             self.sync_current_session_state()
             self.refresh_history_list()
             self.load_session(new_id)
             self.input_field.setFocus()
 
         worker.completed.connect(completed)
-        worker.failed.connect(lambda error: self._show_conversation_notice(state, f"分支创建失败，原会话已保留：{error}", "error"))
+        def failed(error):
+            clear_progress()
+            self._show_conversation_notice(state, f"分支创建失败，原会话已保留：{error}", "error")
+
+        worker.failed.connect(failed)
         def finished():
+            clear_progress()
             state.branch_in_progress = False
             state.branch_worker = None
         worker.finished.connect(finished)
@@ -376,11 +408,11 @@ class ConversationActionsMixin:
             return
         meta = getattr(state, "persisted_conversation_meta", {}) or {}
         origin = meta.get("branch_origin") or {}
-        button.setVisible(bool(origin))
+        self.branch_origin_row.setVisible(bool(origin))
         if origin:
-            detail = " · 共用项目文件" if meta.get("workspace_source") == "project" else ""
-            if meta.get("branch_missing_files"):
-                detail += f" · {len(meta['branch_missing_files'])} 个文件缺失"
-            button.setText("分支自：" + origin["title"] + detail)
-            button.setToolTip("打开来源会话" + ("\n" + "\n".join(meta.get("branch_missing_files") or []) if meta.get("branch_missing_files") else ""))
+            shared = meta.get("workspace_source") == "project"
+            button.setText("查看原会话" + (" · 共用项目文件" if shared else ""))
+            button.setToolTip("分支来源：" + origin["title"])
             button.setProperty("sourceSessionId", origin["session_id"])
+            if not shared and meta.get("branch_history_only"):
+                button.setToolTip("分支来源：" + origin["title"] + "\n仅继承对话记录，历史文件未带入；需要时请重新添加。")

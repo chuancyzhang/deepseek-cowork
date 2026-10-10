@@ -90,6 +90,8 @@ from core.single_instance import (
     notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage
+from core.conversation_actions import append_reference_context, branch_display_text
+from ui.conversation_actions import ConversationActionsMixin, reference_button
 from core.sidebar_projects import visible_sidebar_projects
 from core.chat_save_queue import (
     ChatSaveRequest,
@@ -23149,6 +23151,8 @@ class ChatBubble(QFrame):
     deliverablePathsChanged = Signal(object)
     officeDraftRequested = Signal(str, str, str)
     skillCaptureRequested = Signal(str)
+    regenerateRequested = Signal(str)
+    branchRequested = Signal(str)
     geometryChanged = Signal()
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
@@ -23516,33 +23520,16 @@ class ChatBubble(QFrame):
             self._main_content_render_timer = QTimer(self)
             self._main_content_render_timer.setSingleShot(True)
             self._main_content_render_timer.timeout.connect(self._flush_pending_main_content_render)
-            self.copy_result_btn = QPushButton("复制结果")
-            self.copy_result_btn.setCursor(Qt.PointingHandCursor)
-            self.copy_result_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
-            self.copy_result_btn.setVisible(False)
-            self.copy_result_btn.setFixedHeight(26)
-            self.copy_result_btn.setStyleSheet(f"""
-                QPushButton {{
-                    border: none;
-                    border-radius: 6px;
-                    padding: 2px 9px;
-                    background: transparent;
-                    color: {DesignTokens.text_secondary};
-                    font-size: 12px;
-                }}
-                QPushButton:hover {{
-                    color: {DesignTokens.primary};
-                    background: {DesignTokens.primary_soft};
-                }}
-            """)
-            self.copy_result_btn.clicked.connect(self.copy_main_content)
-            self.office_draft_btn = QPushButton("生成办公稿")
-            self.office_draft_btn.setCursor(Qt.PointingHandCursor)
-            self.office_draft_btn.setIcon(qta.icon('fa5s.file-code', color=DesignTokens.text_secondary))
-            self.office_draft_btn.setVisible(False)
-            self.office_draft_btn.setFixedHeight(26)
-            self.office_draft_btn.setStyleSheet(self.copy_result_btn.styleSheet())
-            self.office_draft_menu = create_styled_menu(self.office_draft_btn)
+            self.copy_result_btn = self._create_message_action_button("fa5s.copy", "复制结果", self.copy_main_content)
+            self.regenerate_btn = self._create_message_action_button(
+                "fa5s.redo", "重新生成此轮回答", lambda: self.regenerateRequested.emit(self.source_message_id))
+            self.branch_btn = self._create_message_action_button(
+                "fa5s.code-branch", "从这里分支", lambda: self.branchRequested.emit(self.source_message_id))
+            self.more_actions_btn = self._create_message_action_button(
+                "fa5s.ellipsis-h", "更多操作", self.show_more_message_actions)
+            self.more_actions_menu = create_styled_menu(self.more_actions_btn)
+            self.office_draft_menu = create_styled_menu(self.more_actions_menu)
+            self.office_draft_menu.setTitle("生成办公稿")
             for label, profile in (
                 ("自由", OFFICE_OUTPUT_PROFILE_FREE),
                 ("PPT", OFFICE_OUTPUT_PROFILE_PPT),
@@ -23552,22 +23539,17 @@ class ChatBubble(QFrame):
                 action = QAction(label, self.office_draft_menu)
                 action.triggered.connect(lambda _checked=False, value=profile: self._emit_office_draft_request(value))
                 self.office_draft_menu.addAction(action)
-            self.office_draft_btn.clicked.connect(self.show_office_draft_menu)
-            self.skill_capture_btn = QPushButton("沉淀为 Skill")
-            self.skill_capture_btn.setCursor(Qt.PointingHandCursor)
-            self.skill_capture_btn.setIcon(qta.icon('fa5s.magic', color=DesignTokens.text_secondary))
-            self.skill_capture_btn.setVisible(False)
-            self.skill_capture_btn.setFixedHeight(26)
-            self.skill_capture_btn.setStyleSheet(self.copy_result_btn.styleSheet())
-            self.skill_capture_btn.clicked.connect(
-                lambda: self.skillCaptureRequested.emit(self.source_message_id)
-            )
+            self.more_actions_menu.addMenu(self.office_draft_menu)
+            self.skill_capture_action = self.more_actions_menu.addAction("沉淀为 Skill")
+            self.skill_capture_action.triggered.connect(lambda: self.skillCaptureRequested.emit(self.source_message_id))
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
             copy_row.setSpacing(DesignTokens.message_action_gap)
-            copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
-            copy_row.addWidget(self.office_draft_btn, 0, Qt.AlignLeft)
-            copy_row.addWidget(self.skill_capture_btn, 0, Qt.AlignLeft)
+            for button in (self.copy_result_btn, self.regenerate_btn, self.branch_btn, self.more_actions_btn):
+                button.setObjectName("ConversationAnswerAction")
+                button.setAccessibleName(button.toolTip())
+                button.hide()
+                copy_row.addWidget(button, 0, Qt.AlignLeft)
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
 
@@ -23665,15 +23647,16 @@ class ChatBubble(QFrame):
                     DesignTokens.selection_text,
                 )
         action_style = (
-            f"QPushButton {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
-            f"padding: 2px {DesignTokens.spacing_sm + 1}px; background: transparent; "
+            f"QToolButton#ConversationAnswerAction {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
+            f"padding: 0px; background: transparent; "
             f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta}px; }}"
-            f"QPushButton:hover {{ color: {DesignTokens.primary}; background: {DesignTokens.primary_soft}; }}"
+            f"QToolButton#ConversationAnswerAction:hover {{ color: {DesignTokens.primary}; background: {DesignTokens.primary_soft}; }}"
         )
         action_icons = (
             ("copy_result_btn", "fa5s.copy"),
-            ("office_draft_btn", "fa5s.file-code"),
-            ("skill_capture_btn", "fa5s.magic"),
+            ("regenerate_btn", "fa5s.redo"),
+            ("branch_btn", "fa5s.code-branch"),
+            ("more_actions_btn", "fa5s.ellipsis-h"),
         )
         for attribute, icon_name in action_icons:
             button = getattr(self, attribute, None)
@@ -23754,8 +23737,9 @@ class ChatBubble(QFrame):
         for button in self.message_action_buttons + [
             item for item in (
                 getattr(self, "copy_result_btn", None),
-                getattr(self, "office_draft_btn", None),
-                getattr(self, "skill_capture_btn", None),
+                getattr(self, "regenerate_btn", None),
+                getattr(self, "branch_btn", None),
+                getattr(self, "more_actions_btn", None),
             ) if item is not None
         ]:
             if action_spec.get("visible") is False:
@@ -23972,10 +23956,19 @@ class ChatBubble(QFrame):
         if self.source_message_id:
             self.deleteRequested.emit(self.source_message_id)
 
+    def show_more_message_actions(self):
+        self.skill_capture_action.setEnabled(bool(self.source_message_id))
+        self.more_actions_menu.exec(self.more_actions_btn.mapToGlobal(self.more_actions_btn.rect().bottomLeft()))
+
     def show_office_draft_menu(self):
-        if not getattr(self, "office_draft_menu", None) or not getattr(self, "office_draft_btn", None):
-            return
-        self.office_draft_menu.exec(self.office_draft_btn.mapToGlobal(self.office_draft_btn.rect().bottomLeft()))
+        self.office_draft_menu.exec(self.more_actions_btn.mapToGlobal(self.more_actions_btn.rect().bottomLeft()))
+
+    def _refresh_assistant_actions(self, visible):
+        visible = bool(visible and getattr(self, "_message_actions_theme_enabled", True))
+        for name in ("copy_result_btn", "regenerate_btn", "branch_btn", "more_actions_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setVisible(visible and (bool(self.source_message_id) or name == "copy_result_btn"))
 
     def _emit_office_draft_request(self, profile):
         text = (getattr(self, "main_content_text", "") or "").strip()
@@ -23993,6 +23986,8 @@ class ChatBubble(QFrame):
             if self.delete_btn is not None:
                 self.delete_btn.setVisible(False)
             return
+        if self.role != "User":
+            self._refresh_assistant_actions(self.message_actions_enabled and bool(self.main_content_text.strip()) and self._pending_main_content_final)
         if self.edit_btn is not None:
             self.edit_btn.setVisible(self.role == "User")
         if self.delete_btn is not None:
@@ -24189,13 +24184,7 @@ class ChatBubble(QFrame):
     def set_message_actions_enabled(self, enabled):
         self.message_actions_enabled = bool(enabled)
         final_text = bool((self.main_content_text or "").strip() and self._pending_main_content_final)
-        self.copy_result_btn.setVisible(bool(self.message_actions_enabled and final_text))
-        if getattr(self, "office_draft_btn", None) is not None:
-            self.office_draft_btn.setVisible(bool(self.message_actions_enabled and final_text))
-        if getattr(self, "skill_capture_btn", None) is not None:
-            self.skill_capture_btn.setVisible(
-                bool(self.message_actions_enabled and final_text and self.source_message_id)
-            )
+        self._refresh_assistant_actions(self.message_actions_enabled and final_text)
 
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None or duration is not None:
@@ -24275,7 +24264,7 @@ class ChatBubble(QFrame):
 
     def set_main_content(self, text, content_parts=None, final=False):
         """设置对话气泡的主要内容，并合并高频流式渲染。"""
-        text = text or ""
+        text = branch_display_text(text or "", getattr(self, "branch_file_map", {}))
         changed = (
             self._pending_main_content_text != text
             or self._pending_main_content_parts != content_parts
@@ -24297,11 +24286,7 @@ class ChatBubble(QFrame):
                 parent.complete_pending_process_finalization(self)
         self._notify_stage_visibility_changed()
         actions_visible = bool(self.message_actions_enabled and final and text.strip())
-        self.copy_result_btn.setVisible(actions_visible)
-        if getattr(self, "office_draft_btn", None) is not None:
-            self.office_draft_btn.setVisible(actions_visible)
-        if getattr(self, "skill_capture_btn", None) is not None:
-            self.skill_capture_btn.setVisible(bool(actions_visible and self.source_message_id))
+        self._refresh_assistant_actions(actions_visible)
 
         parts_signature = self._output_image_parts_signature(content_parts)
         already_rendered = (
@@ -24647,7 +24632,8 @@ class ChatBubble(QFrame):
         if not text:
             return
         QApplication.clipboard().setText(text)
-        self.copy_result_btn.setText("已复制")
+        self.copy_result_btn.setIcon(qta.icon("fa5s.check", color=DesignTokens.icon_secondary))
+        self.copy_result_btn.setToolTip("已复制")
         QTimer.singleShot(1200, self._reset_copy_result_button)
 
     def _reset_copy_result_button(self):
@@ -24655,7 +24641,8 @@ class ChatBubble(QFrame):
             return
         button = getattr(self, "copy_result_btn", None)
         if _qt_object_alive(button):
-            button.setText("复制结果")
+            button.setIcon(qta.icon("fa5s.copy", color=DesignTokens.icon_secondary))
+            button.setToolTip("复制结果")
         
     def add_tool_card(self, card_widget, session_id=None):
         self.think_container_layout.addWidget(card_widget)
@@ -26406,6 +26393,7 @@ class SessionState:
         self.chat_save_revision = 0
         self.last_chat_recovery_checkpoint_at = 0.0
         self.composer_draft = ""
+        self.conversation_refs = []
         self.conversation_notice = None
         self.saved_scroll_position = None
         self.drawer_open = False
@@ -28523,7 +28511,7 @@ class ThemePreviewSafetyBar(QFrame):
         self.setVisible(True)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(ConversationActionsMixin, QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
     skill_catalog_changed_ui_signal = Signal(object, object)
 
@@ -30009,9 +29997,10 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
         self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
-        self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
+        self.input_field.mentionRequested.connect(self.show_conversation_mention_menu)
         self.input_field.clipboardFilesPasted.connect(self._add_clipboard_files)
         self.input_field.textChanged.connect(self.refresh_composer_action_state)
+        self.input_field.textChanged.connect(self.queue_reference_draft_save)
         self.input_field.setStyleSheet(
             f"QTextEdit#MainInput {{ background: transparent; border: none; color: {DesignTokens.text_primary}; "
             "padding: 4px 2px; font-size: 14px; }}"
@@ -30100,6 +30089,18 @@ class MainWindow(QMainWindow):
         input_card_layout = QVBoxLayout(self.input_card)
         input_card_layout.setContentsMargins(16, 12, 16, 12)
         input_card_layout.setSpacing(10)
+        self.branch_origin_button = reference_button("", self.input_card)
+        self.branch_origin_button.hide()
+        self.branch_origin_button.clicked.connect(
+            lambda: self.open_conversation_source(self.branch_origin_button.property("sourceSessionId"))
+        )
+        input_card_layout.addWidget(self.branch_origin_button)
+        self.conversation_reference_chips = QWidget(self.input_card)
+        reference_layout = QVBoxLayout(self.conversation_reference_chips)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setSpacing(2)
+        self.conversation_reference_chips.hide()
+        input_card_layout.addWidget(self.conversation_reference_chips)
         self.prompt_files_section = QWidget()
         prompt_files_section_layout = QVBoxLayout(self.prompt_files_section)
         prompt_files_section_layout.setContentsMargins(0, 0, 0, 0)
@@ -33367,6 +33368,8 @@ class MainWindow(QMainWindow):
         resolve_text_references=True,
         keep_audio_local=False,
         audio_transcription_backend=ASR_BACKEND_LOCAL,
+        conversation_refs=None,
+        branch_file_map=None,
     ):
         display_text = str(user_text or "").strip()
         normalized_files = self._normalize_prompt_file_paths(file_paths)
@@ -33448,13 +33451,13 @@ class MainWindow(QMainWindow):
                 image_count=len(image_paths),
                 supports_vision=bool(supports_vision),
             )
-        return {
+        return append_reference_context({
             "content": content,
             "display_content": display_text,
             "attachments": self._prompt_file_items(normalized_files),
             "content_parts": content_parts or None,
             "meta": meta or None,
-        }
+        }, conversation_refs, branch_file_map)
 
     def _speech_to_text_runtime_config(self):
         values = (
@@ -33607,8 +33610,10 @@ class MainWindow(QMainWindow):
         self._flush_ui_stream_buffers(state)
         if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
             return (False, "历史消息仍在加载，请稍后再试。")
+        if getattr(state, "history_page_loading", False):
+            return (False, "历史消息仍在加载，请稍后再试。")
         if self._session_is_busy(state):
-            return (False, "当前会话正在运行，请先停止任务后再编辑或删除消息。")
+            return (False, "当前会话正在运行，请先停止任务后再修改历史或重新生成。")
         return (True, "")
 
     def _message_attachment_paths(self, message):
@@ -33643,6 +33648,16 @@ class MainWindow(QMainWindow):
         raise RuntimeError("全量历史重写已禁用；请使用渲染节点局部重写事务。")
 
     def _capture_history_rewrite(self, state, message_id):
+        # The answer can be visible while its initial request is on the previous
+        # history page. Materialize only the missing prefix needed by the rewrite.
+        if message_id not in state.render_node_by_message_id:
+            target = next((i for i, item in enumerate(state.messages) if item.get("id") == message_id), -1)
+            spans = state.render_items or []
+            start = len(spans) - state.displayed_render_count
+            target_span = next((i for i, span in enumerate(spans) if int(span.get("start") or 0) <= target < int(span.get("end") or 0)), start)
+            if target_span < start:
+                self._render_session_history_spans(state, spans[target_span:start], insert_index=0)
+                state.displayed_render_count += start - target_span
         node = (getattr(state, "render_node_by_message_id", {}) or {}).get(str(message_id or ""))
         widget = (node or {}).get("widget") if isinstance(node, dict) else None
         if widget is None or not _qt_object_alive(widget):
@@ -33658,6 +33673,12 @@ class MainWindow(QMainWindow):
             viewport_offset = 0
         snapshot = {
             "messages": copy.deepcopy(state.messages),
+            "runtime_fields": {field: copy.deepcopy(getattr(state, field)) for field in (
+                "session_status", "run_phase", "live_activity", "turn_steerable", "daemon_running",
+                "active_turn_id", "active_turn_request_id", "active_turn_user_message_id",
+                "active_run_retry_context", "failed_run_retry_context", "grill_mode_state",
+                "current_content_buffer", "last_flushed_content_buffer",
+            ) if hasattr(state, field)},
             "render_items": copy.deepcopy(state.render_items),
             "render_nodes": dict(state.render_nodes),
             "render_node_by_message_id": dict(state.render_node_by_message_id),
@@ -33797,6 +33818,11 @@ class MainWindow(QMainWindow):
             "displayed_render_count",
         ):
             setattr(state, field, snapshot[field])
+        for field, value in snapshot.get("runtime_fields", {}).items():
+            setattr(state, field, value)
+        self.normalize_session_ui(state)
+        if state.session_id == self.current_session_id:
+            self.refresh_composer_action_state()
         QTimer.singleShot(0, lambda s=state, snap=snapshot: self._restore_rewrite_viewport(s, snap))
 
     def _restore_rewrite_viewport(self, state, snapshot, message_id=""):
@@ -33897,7 +33923,7 @@ class MainWindow(QMainWindow):
         )
         return result
 
-    def edit_user_message_inline(self, session_id, message_id, edited_text):
+    def edit_user_message_inline(self, session_id, message_id, edited_text, *, regenerate=False):
         session_id = str(session_id or "").strip()
         message_id = str(message_id or "").strip()
         if not session_id or not message_id:
@@ -33918,7 +33944,21 @@ class MainWindow(QMainWindow):
             self._show_conversation_notice(state, "消息内容不能为空。", "warning")
             return False
 
-        self.save_chat_history(session_id=session_id, flush=True)
+        if regenerate:
+            missing = [path for path in prompt_files if not os.path.isfile(path)]
+            if missing:
+                self._show_conversation_notice(state, "重新生成所需的附件已不存在，请恢复文件后再试。", "error")
+                return False
+            if not self._model_profile_for_state(state):
+                self._show_conversation_notice(state, "当前模型不可用，请重新选择模型。", "error")
+                return False
+            try:
+                self.prepare_conversation_references(state, (source_message.get("meta") or {}).get("conversation_refs") or [])
+            except Exception as exc:
+                self._show_conversation_notice(state, str(exc), "error")
+                return False
+        if not self.save_chat_history(session_id=session_id, flush=True):
+            return False
         rewrite_guard = self._history_rewrite_guard(state)
         messages = list(getattr(state, "messages", []) or [])
         target_index = next(
@@ -33943,9 +33983,13 @@ class MainWindow(QMainWindow):
             downstream_count=downstream_count,
         )
         if downstream_count:
+            downstream_users = sum(item.get("role") == "user" and not _is_hidden_context_message(item) for item in messages[target_index + 1:])
+            impact = (f"将替换此轮回答及其后的对话，其中包含 {downstream_users} 条用户消息（含本轮补充）。"
+                      "已生成的文件不会撤销，重新生成可能再次执行工具。" if regenerate else
+                      f"这会替换此消息之后的 {downstream_count} 条消息；已经生成的工作区文件不会删除。")
             dialog = ProductMessageDialog(
                 "从这里重新生成？",
-                f"这会替换此消息之后的 {downstream_count} 条消息；已经生成的工作区文件不会删除。",
+                impact,
                 tone="destructive",
                 buttons=[
                     ("取消", QMessageBox.No, "secondary", False),
@@ -33981,6 +34025,18 @@ class MainWindow(QMainWindow):
         )
         log_ui_navigation("history_rewrite_submit_started", session_id=session_id, target_index=target_index)
         state.last_history_rewrite_committed = False
+        submit_options = {}
+        source_meta = source_message.get("meta") or {}
+        if regenerate:
+            # Keep workflow intent, but allocate new task/run identities for this execution.
+            for key in ("workflow_mode", "office_output_profile", "office_conversion_target",
+                        "ppt_agent_mode", "ppt_agent_strategy", "ppt_agent_selected_strategy",
+                        "ppt_agent_preference", "ppt_agent_template_file", "ppt_agent_output_format",
+                        "ppt_agent_template_screenshots", "ppt_agent_template_hash", "ppt_agent_renderer",
+                        "ppt_agent_renderer_prog_id", "ppt_agent_verification_level"):
+                if key in source_meta:
+                    submit_options[key] = copy.deepcopy(source_meta[key])
+            submit_options["history_source_message"] = copy.deepcopy(source_message)
         try:
             submitted = self._submit_session_request(
                 state,
@@ -33988,8 +34044,10 @@ class MainWindow(QMainWindow):
                 prompt_files,
                 check_duplicates=False,
                 clear_current_input=False,
-                user_message_meta={"edited": True},
+                user_message_meta={**({"regenerated": True} if regenerate else {"edited": True}),
+                                   "conversation_refs": copy.deepcopy(source_meta.get("conversation_refs") or [])},
                 history_rewrite_guard=rewrite_guard,
+                **submit_options,
             )
         except Exception as exc:
             submitted = False
@@ -34028,9 +34086,9 @@ class MainWindow(QMainWindow):
         edited_message_id = str((state.messages[-1] if state.messages else {}).get("id") or "")
         edited_node = state.render_node_by_message_id.get(edited_message_id)
         edited_widget = (edited_node or {}).get("widget") if isinstance(edited_node, dict) else None
-        if isinstance(edited_widget, ChatBubble):
+        if isinstance(edited_widget, ChatBubble) and not regenerate:
             edited_widget.mark_edited()
-        elif edited_widget is not None:
+        elif edited_widget is not None and not regenerate:
             for bubble in edited_widget.findChildren(ChatBubble):
                 if bubble.role == "User" and bubble.source_message_id == edited_message_id:
                     bubble.mark_edited()
@@ -34525,6 +34583,9 @@ class MainWindow(QMainWindow):
 
     def refresh_context_badges(self, session_id=None):
         state = self.get_session(session_id)
+        if state and state.session_id == self.current_session_id:
+            self.refresh_conversation_reference_chips()
+            self.refresh_branch_origin(state)
         if hasattr(self, "knowledge_refs_button"):
             references = getattr(state, "knowledge_refs", []) if state else []
             self.knowledge_refs_button.setVisible(bool(references))
@@ -35738,6 +35799,13 @@ class MainWindow(QMainWindow):
         if status not in allowed:
             raise ValueError(f"不支持的会话运行状态：{status}")
         state.session_status = status
+        session_widget = getattr(state, "session_widget", None)
+        if session_widget is not None and _qt_object_alive(session_widget):
+            for bubble in session_widget.findChildren(ChatBubble):
+                button = getattr(bubble, "regenerate_btn", None)
+                if button is not None:
+                    button.setEnabled(status not in {"running", "finalizing"})
+                    button.setToolTip("当前会话正在运行，请先停止" if status in {"running", "finalizing"} else "重新生成此轮回答")
         if status in {"running", "finalizing"}:
             state.live_activity = True
         else:
@@ -37539,6 +37607,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        if any(getattr(state, "branch_in_progress", False) for state in self.sessions.values()):
+            self.add_system_toast("分支文件仍在准备，请完成后再退出。", "info")
+            return
         if any(worker.isRunning() for worker in getattr(self, "skillhub_workers", [])):
             self.add_system_toast("SkillHub 操作仍在进行，请完成后再退出。", "info")
             return
@@ -37690,6 +37761,10 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if any(getattr(state, "branch_in_progress", False) for state in getattr(self, "sessions", {}).values()):
+            self.add_system_toast("分支文件仍在准备，请完成后再退出。", "info")
+            event.ignore()
+            return
         if getattr(self, "_checkpoint_close_ready", False):
             event.accept()
             return
@@ -37784,6 +37859,8 @@ class MainWindow(QMainWindow):
         ):
             self.refresh_deliverables(render_current=True)
         self._sync_file_header()
+        self.refresh_conversation_reference_chips()
+        self.refresh_branch_origin(state)
         QTimer.singleShot(0, lambda sid=session_id: self._sync_question_navigator(sid))
 
     def normalize_session_ui(self, state):
@@ -39077,6 +39154,10 @@ class MainWindow(QMainWindow):
             conversation_meta.get("selected_skill_names")
         )
         state.knowledge_refs = copy.deepcopy(conversation_meta.get("knowledge_refs") or [])
+        if not state.composer_draft and not state.conversation_refs:
+            state.conversation_refs = copy.deepcopy(conversation_meta.get("composer_conversation_refs") or [])
+            if state.conversation_refs:
+                state.composer_draft = str(conversation_meta.get("composer_reference_draft") or "")
         state.selected_model_id = str(
             conversation_meta.get("selected_model_id") or self.config_manager.get_selected_model_id() or ""
         ).strip()
@@ -42054,6 +42135,7 @@ class MainWindow(QMainWindow):
                 "user_message_meta": {
                     "retry_of_run_id": run_id,
                     "retry_of_user_message_id": original_message_id,
+                    "conversation_refs": copy.deepcopy((original_message.get("meta") or {}).get("conversation_refs") or []),
                     "display_content": "重试上一轮未完成的请求",
                     "ppt_task_id": retry_task_id,
                     "ppt_agent_internal_stage": retry_internal_stage,
@@ -43076,6 +43158,13 @@ class MainWindow(QMainWindow):
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta["knowledge_refs"] = copy.deepcopy(getattr(state, "knowledge_refs", []))
+        refs = copy.deepcopy(getattr(state, "conversation_refs", []))
+        if refs:
+            meta["composer_conversation_refs"] = refs
+            meta["composer_reference_draft"] = str(getattr(state, "composer_draft", "") or "")
+        else:
+            meta.pop("composer_conversation_refs", None)
+            meta.pop("composer_reference_draft", None)
         timeline_events = snapshot_thinking_timeline(getattr(state, "ui_timeline_events", []) or [])
         if timeline_events:
             meta["ui_timeline_v1"] = timeline_events
@@ -43097,6 +43186,7 @@ class MainWindow(QMainWindow):
         messages=None,
         status=None,
         revision=0,
+        consume_reference_draft=False,
     ):
         if not state:
             return None
@@ -43123,12 +43213,15 @@ class MainWindow(QMainWindow):
             getattr(state, "persisted_conversation_meta", {}) or {}
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and not getattr(state, "knowledge_refs", []):
+        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and not getattr(state, "knowledge_refs", []) and not getattr(state, "conversation_refs", []) and not self._session_base_meta(state).get("composer_conversation_refs"):
             return None
         title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
         )
         meta = self._compose_session_meta(state)
+        if consume_reference_draft:
+            meta.pop("composer_conversation_refs", None)
+            meta.pop("composer_reference_draft", None)
         state.persisted_conversation_meta = copy.deepcopy(meta)
         return ChatSaveRequest(
             session_id=state.session_id,
@@ -43191,6 +43284,7 @@ class MainWindow(QMainWindow):
         messages=None,
         status=None,
         failure_context="background",
+        consume_reference_draft=False,
     ):
         if not state:
             return None
@@ -43200,6 +43294,7 @@ class MainWindow(QMainWindow):
             messages=messages,
             status=status,
             revision=state.chat_save_revision,
+            consume_reference_draft=consume_reference_draft,
         )
         if request is None:
             return None
@@ -50059,12 +50154,20 @@ a {{ overflow-wrap: anywhere; }}
         *,
         toast_text,
         tone,
+        conversation_refs=None,
     ):
         if not state:
             return False
         state.prompt_files = self._normalize_prompt_file_paths(
             list(getattr(state, "prompt_files", []) or []) + list(prompt_files or [])
         )
+        if conversation_refs:
+            refs = copy.deepcopy(getattr(state, "conversation_refs", []))
+            known = {ref.get("id") or ref["session_id"] for ref in refs}
+            refs.extend(copy.deepcopy(ref) for ref in conversation_refs if (ref.get("id") or ref["session_id"]) not in known)
+            state.conversation_refs = refs
+            if state.session_id == self.current_session_id:
+                self.refresh_conversation_reference_chips()
         restored_text = str(raw_user_text or "").strip()
         if state.session_id == self.current_session_id:
             current_text = self.input_field.toPlainText().strip()
@@ -50393,6 +50496,8 @@ a {{ overflow-wrap: anywhere; }}
             resolve_text_references=False,
             keep_audio_local=keep_audio_local,
             audio_transcription_backend=transcription_config["backend"],
+            conversation_refs=(source_message.get("meta") or {}).get("conversation_refs"),
+            branch_file_map=(getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"),
         )
         if not payload.get("content"):
             return None
@@ -50461,7 +50566,13 @@ a {{ overflow-wrap: anywhere; }}
             self._show_conversation_notice(state, "这条补充引导已不在待应用队列中。", "warning")
             return False
         source_message = self._pending_guidance_message(state, message_id)
-        replacement = self._build_edited_guidance_message(state, source_message, edited_text)
+        try:
+            replacement = self._build_edited_guidance_message(state, source_message, edited_text)
+        except Exception as exc:
+            self._log_guidance_mutation(state, message_id, "update", "error", str(exc))
+            self._show_conversation_notice(state, f"补充引导未修改，输入已保留：{exc}", "error")
+            card.keep_inline_edit_after_failure()
+            return False
         if replacement is None:
             self._show_conversation_notice(state, "补充引导内容不能为空。", "warning")
             card.keep_inline_edit_after_failure()
@@ -50714,6 +50825,7 @@ a {{ overflow-wrap: anywhere; }}
             restored_paths,
             toast_text="已撤回补充引导，内容已恢复到输入框。",
             tone="success",
+            conversation_refs=(source_message.get("meta") or {}).get("conversation_refs"),
         )
         self.save_chat_history(session_id=state.session_id)
         self.queue_session_bubble_virtualization(state.session_id)
@@ -50797,7 +50909,7 @@ a {{ overflow-wrap: anywhere; }}
                         self.get_session(sid)
                     ),
                 )
-    def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False):
+    def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False, conversation_refs=None):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if not state:
             return False
@@ -50825,6 +50937,8 @@ a {{ overflow-wrap: anywhere; }}
             supports_vision=self._selected_model_supports_vision(state),
             keep_audio_local=keep_audio_local,
             audio_transcription_backend=transcription_config["backend"],
+            conversation_refs=conversation_refs,
+            branch_file_map=(getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"),
         )
         if not payload.get("content"):
             return False
@@ -50855,12 +50969,10 @@ a {{ overflow-wrap: anywhere; }}
                 self._reject_unapplied_guidance(state, restore_input=False)
                 self._persist_pending_guidance(state)
                 if clear_current_input and state.session_id == self.current_session_id:
-                    self.input_field.clear()
-                    self._clear_prompt_files(state.session_id)
+                    self._clear_submitted_composer(state, clear_current_input=True)
                 return True
             if clear_current_input and state.session_id == self.current_session_id:
-                self.input_field.clear()
-                self._clear_prompt_files(state.session_id)
+                self._clear_submitted_composer(state, clear_current_input=True)
             self._accept_turn_guidance(
                 state, message, payload.get("display_content") or "", payload.get("attachments") or []
             )
@@ -50868,8 +50980,7 @@ a {{ overflow-wrap: anywhere; }}
 
         if state.daemon_running and self.daemon_client:
             if clear_current_input and state.session_id == self.current_session_id:
-                self.input_field.clear()
-                self._clear_prompt_files(state.session_id)
+                self._clear_submitted_composer(state, clear_current_input=True)
             self._accept_turn_guidance(
                 state, message, payload.get("display_content") or "", payload.get("attachments") or []
             )
@@ -50934,8 +51045,7 @@ a {{ overflow-wrap: anywhere; }}
         self._reject_unapplied_guidance(state, restore_input=False)
         self._persist_pending_guidance(state)
         if clear_current_input and state.session_id == self.current_session_id:
-            self.input_field.clear()
-            self._clear_prompt_files(state.session_id)
+            self._clear_submitted_composer(state, clear_current_input=True)
         return True
 
     def _persist_pending_guidance(self, state):
@@ -51019,11 +51129,13 @@ a {{ overflow-wrap: anywhere; }}
         if not state or not clear_current_input:
             return
         state.composer_draft = ""
+        state.conversation_refs = []
         if state.session_id != self.current_session_id:
             state.prompt_files = []
             return
         self.input_field.clear()
         self._clear_prompt_files()
+        self.refresh_conversation_reference_chips()
 
     def _submit_session_request(
         self,
@@ -51053,12 +51165,31 @@ a {{ overflow-wrap: anywhere; }}
             return False
         state.submit_in_progress = True
         try:
-            return self._submit_session_request_once(
+            references = options.get("conversation_refs")
+            if references is None:
+                source_meta = options.get("user_message_meta") or (options.get("existing_message_payload") or {}).get("meta") or {}
+                references = source_meta.get("conversation_refs")
+            if references is None and options.get("clear_current_input"):
+                references = getattr(state, "conversation_refs", [])
+            if references:
+                try:
+                    prepared = self.prepare_conversation_references(state, references)
+                except Exception as exc:
+                    log_chat_runtime_debug("conversation_reference_failed", session_id=state.session_id, error=str(exc))
+                    self._show_conversation_notice(state, f"会话引用准备失败，输入已保留：{exc}", "error")
+                    return False
+                options["conversation_refs"] = prepared
+                if options.get("clear_current_input"):
+                    state.conversation_refs = copy.deepcopy(prepared)
+            submitted = self._submit_session_request_once(
                 state,
                 raw_user_text,
                 prompt_files,
                 **options,
             )
+            if submitted and references and options.get("clear_current_input"):
+                self.save_chat_history(session_id=state.session_id)
+            return submitted
         finally:
             state.submit_in_progress = False
 
@@ -51092,6 +51223,8 @@ a {{ overflow-wrap: anywhere; }}
         user_message_meta=None,
         history_rewrite_guard=None,
         existing_message_payload=None,
+        conversation_refs=None,
+        history_source_message=None,
     ):
         if getattr(self, "skillhub_update_in_progress", False):
             self.add_system_toast("技能正在更新，请完成后再发送；输入内容已保留。", "info")
@@ -51171,6 +51304,7 @@ a {{ overflow-wrap: anywhere; }}
                 raw_user_text,
                 prompt_files,
                 clear_current_input=clear_current_input,
+                conversation_refs=conversation_refs,
             )
         if not raw_user_text and not prompt_files:
             log_chat_runtime_debug("submit_session_empty_payload", session_id=state.session_id)
@@ -51256,7 +51390,17 @@ a {{ overflow-wrap: anywhere; }}
             supports_vision=supports_vision,
             keep_audio_local=keep_audio_local,
             audio_transcription_backend=transcription_config["backend"],
+            conversation_refs=conversation_refs,
+            branch_file_map=(getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"),
         )
+        if history_source_message:
+            payload["content"] = history_source_message.get("content") or ""
+            payload["content_parts"] = copy.deepcopy(history_source_message.get("content_parts"))
+            payload["meta"] = copy.deepcopy(history_source_message.get("meta") or {})
+            for obsolete in ("ppt_task_id", "ppt_agent_run_id", "retry_of_run_id", "retry_of_user_message_id", "deferred_guidance_consumed", "same_turn_guidance", "deferred_from_turn"):
+                payload["meta"].pop(obsolete, None)
+            payload["display_content"] = self._message_display_content(history_source_message)
+            payload = append_reference_context(payload, [], (getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"))
         if isinstance(user_message_meta, dict) and user_message_meta.get("display_content") is not None:
             payload["display_content"] = str(user_message_meta.get("display_content") or "")
         user_text = payload.get("content") or ""
@@ -51283,7 +51427,7 @@ a {{ overflow-wrap: anywhere; }}
             existing_message_payload
             and is_same_turn_guidance_message(existing_message_payload)
         )
-        user_message_id = str((existing_message_payload or {}).get("id") or self._new_message_id())
+        user_message_id = str((history_source_message or existing_message_payload or {}).get("id") or self._new_message_id())
         next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
         submit_request_id = uuid.uuid4().hex
         log_chat_runtime_debug(
@@ -51300,6 +51444,8 @@ a {{ overflow-wrap: anywhere; }}
             supports_vision=supports_vision,
             keep_audio_local=keep_audio_local,
             audio_transcription_backend=transcription_config["backend"],
+            conversation_refs=conversation_refs,
+            branch_file_map=(getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"),
         ).get("content") or delegated_text
         if check_duplicates:
             # Compatibility flag retained for existing callers.  Idempotency
@@ -51379,6 +51525,7 @@ a {{ overflow-wrap: anywhere; }}
             "source_turn_id": str(next_turn_id),
             "source_user_message_id": user_message_id,
             "original_user_text": str(raw_user_text or ""),
+            "conversation_refs": copy.deepcopy(conversation_refs or []),
             "retry_of_run_id": str((user_message_meta or {}).get("retry_of_run_id") or "")
             if isinstance(user_message_meta, dict)
             else "",
@@ -51426,7 +51573,7 @@ a {{ overflow-wrap: anywhere; }}
             "id": user_message_id,
             "role": "user",
             "content": user_text,
-            "created_at": int((existing_message_payload or {}).get("created_at") or time.time()),
+            "created_at": int((history_source_message or existing_message_payload or {}).get("created_at") or time.time()),
         }
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
@@ -51546,6 +51693,7 @@ a {{ overflow-wrap: anywhere; }}
                 messages=staged_messages,
                 status="running",
                 revision=state.chat_save_revision,
+                consume_reference_draft=clear_current_input and bool(conversation_refs),
             )
         else:
             staged_save_request = self._stage_chat_save_request(
@@ -51553,6 +51701,7 @@ a {{ overflow-wrap: anywhere; }}
                 messages=staged_messages,
                 status="running",
                 failure_context="before_submit",
+                consume_reference_draft=clear_current_input and bool(conversation_refs),
             )
         if staged_save_request is None:
             if grill_started:
@@ -51767,7 +51916,7 @@ a {{ overflow-wrap: anywhere; }}
                 history_rewrite_result = self._persist_history_rewrite(
                     state,
                     history_rewrite_guard,
-                    operation="edit_message",
+                    operation="regenerate_answer" if history_source_message else "edit_message",
                 )
             except Exception:
                 state.messages.pop()
@@ -52624,6 +52773,18 @@ a {{ overflow-wrap: anywhere; }}
         if bubble is None or state is None or getattr(bubble, "_main_window_actions_connected", False):
             return
         bubble._main_window_actions_connected = True
+        self.attach_conversation_reference_actions(bubble, state)
+        bubble.branch_file_map = (getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map") or {}
+        if bubble.role != "User" and bubble.branch_file_map and bubble.main_content_text:
+            bubble.set_main_content(bubble.main_content_text, content_parts=bubble._pending_main_content_parts, final=bubble._pending_main_content_final)
+        bubble.regenerateRequested.connect(
+            lambda msg_id, sid=state.session_id: self.regenerate_conversation_answer(sid, msg_id)
+        )
+        bubble.branchRequested.connect(
+            lambda msg_id, sid=state.session_id: self.branch_conversation(sid, msg_id)
+        )
+        if hasattr(bubble, "regenerate_btn"):
+            bubble.regenerate_btn.setEnabled(not self._session_is_busy(state))
         bubble.editSubmitRequested.connect(
             lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
         )

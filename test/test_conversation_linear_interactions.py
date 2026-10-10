@@ -2792,7 +2792,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(continuation.session_id, state.session_id)
             self.assertIs(continuation.chat_storage, window.chat_storage)
             self.assertFalse(first.copy_result_btn.isVisible())
-            self.assertFalse(first.office_draft_btn.isVisible())
+            self.assertFalse(first.more_actions_btn.isVisible())
         finally:
             window.close()
             window.deleteLater()
@@ -3190,7 +3190,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(state.conversation_notice.action_button.isHidden())
             self.assertEqual(state.active_run_retry_context, {})
             self.assertTrue(bubble.copy_result_btn.isHidden())
-            self.assertTrue(bubble.office_draft_btn.isHidden())
+            self.assertTrue(bubble.more_actions_btn.isHidden())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
             self.assertFalse(window._session_is_busy(state))
@@ -3846,7 +3846,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIsInstance(group, AssistantTurnGroup)
             self.assertEqual(len(group.stage_bubbles), 1)
             self.assertFalse(first.copy_result_btn.isVisible())
-            self.assertFalse(first.office_draft_btn.isVisible())
+            self.assertFalse(first.more_actions_btn.isVisible())
 
             window.handle_thinking_signal("继续分析", state.session_id, turn_id=1)
             second = state.temp_thinking_bubble
@@ -3927,9 +3927,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(len(group.stage_bubbles), 2)
             stage, final = group.stage_bubbles
             self.assertTrue(stage.copy_result_btn.isHidden())
-            self.assertTrue(stage.office_draft_btn.isHidden())
+            self.assertTrue(stage.more_actions_btn.isHidden())
             self.assertFalse(final.copy_result_btn.isHidden())
-            self.assertFalse(final.office_draft_btn.isHidden())
+            self.assertFalse(final.more_actions_btn.isHidden())
             self.assertEqual(final.main_content_text, "检查已通过。")
         finally:
             window.close()
@@ -4012,7 +4012,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIn("未收到最终答复", final.main_content_text)
             self.assertNotIn("阶段内容不能成为最终答复", final.main_content_text)
             self.assertTrue(final.copy_result_btn.isHidden())
-            self.assertTrue(final.office_draft_btn.isHidden())
+            self.assertTrue(final.more_actions_btn.isHidden())
         finally:
             window.close()
             window.deleteLater()

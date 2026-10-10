@@ -1272,6 +1272,24 @@ class ChatStorage(AgentInboxStorage):
                 now,
             )
 
+    def create_branch_conversation(self, conversation_id, messages, *, title, meta, artifacts=()):
+        """Commit a new fork and its independent message identities as one transaction."""
+        normalized = self.normalize_messages(messages, conversation_id=conversation_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                raise ValueError("分支会话已存在，不能覆盖。")
+            self._upsert_conversation_in_connection(
+                conn, conversation_id, title=title, status="completed", meta=meta,
+            )
+            self._replace_messages_in_connection(conn, conversation_id, normalized)
+            for artifact in artifacts:
+                conn.execute(
+                    "INSERT INTO inline_visualizations (conversation_id, file, path, sha256, title, origins, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (conversation_id, artifact["file"], artifact["path"], artifact["sha256"],
+                     artifact.get("title") or "", self._json_dumps(artifact.get("origins") or []), int(time.time())),
+                )
+
     def save_conversation(self, conversation_id, messages, title=None, status="active", meta=None):
         normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
         with self._connect() as conn:

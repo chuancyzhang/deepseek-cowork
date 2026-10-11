@@ -26791,7 +26791,7 @@ class DeliverableEditLoadWorker(QThread):
                 error=exc.message,
             )
             self.finished_signal.emit(
-                {"ok": False, "code": exc.code, "message": exc.message}
+                {"ok": False, "code": exc.code, "message": exc.message, "editor_mode": self.editor_mode}
             )
         except Exception as exc:
             log_sub_agent_runtime(
@@ -44318,16 +44318,11 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         session = getattr(self, "deliverable_edit_session", None)
         if os.path.splitext(path)[1].lower() in {".html", ".htm"}:
             if not editor_mode:
-                editor_mode = self.config_manager.get("html_editor_mode", "")
-                if not editor_mode:
-                    with open(path, "rb") as handle:
-                        sample = handle.read(TEXT_FILE_MAX_BYTES)
-                    editor_mode = "source" if re.search(rb"<script\b|\bon\w+\s*=", sample, re.I) else "content"
+                editor_mode = "content"
             if session is not None and session.metadata.get("editor_mode", "content") != editor_mode:
                 if not self.confirm_leave_deliverable_edit("切换 HTML 编辑方式"):
                     return
                 session = getattr(self, "deliverable_edit_session", None)
-            self.config_manager.set("html_editor_mode", editor_mode)
         if (
             session is not None
             and os.path.normcase(session.path) == os.path.normcase(path)
@@ -44370,7 +44365,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             if code == "encoding_required":
                 encoding = self._choose_deliverable_encoding()
                 if encoding:
-                    self.begin_deliverable_edit(encoding)
+                    self.begin_deliverable_edit(encoding, editor_mode=str(result.get("editor_mode") or ""))
                     return
             self._set_deliverable_edit_state("blocked", message)
             self.deliverable_text_preview.setPlainText(

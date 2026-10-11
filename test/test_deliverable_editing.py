@@ -184,6 +184,17 @@ class DeliverableEditingCoreTest(unittest.TestCase):
         self.assertNotIn("file:///D:/workspace/", restored)
         self.assertIn('src="image.png"', restored)
 
+    def test_html_visual_edit_resolves_existing_relative_base(self):
+        from bs4 import BeautifulSoup
+        source = '<html><head><base href="assets/"><link rel="stylesheet" href="styles.css"></head><body><h1>Before</h1></body></html>'
+        editable, preserved = prepare_html_edit_source(source, "file:///D:/workspace/")
+        self.assertEqual(BeautifulSoup(editable, "html.parser").find("base")["href"],
+                         "file:///D:/workspace/assets/")
+        result = apply_html_dom_patch(source, editable.replace("Before", "After"), preserved)
+        self.assertIn('href="assets/"', result)
+        self.assertNotIn("file:///D:/workspace", result)
+        self.assertIn("After", result)
+
     def test_html_dom_patch_changes_body_but_preserves_original_head(self):
         source = (
             "<!doctype html><html><head><title>原始标题</title>"

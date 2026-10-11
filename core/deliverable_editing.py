@@ -895,6 +895,7 @@ def prepare_html_edit_source(source: str, base_url: str = "") -> tuple[str, list
     """Build a script-free editing copy while retaining restorable nodes."""
 
     from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
 
     soup = BeautifulSoup(str(source or ""), "html.parser")
     for node in soup.find_all(True):
@@ -939,7 +940,9 @@ def prepare_html_edit_source(source: str, base_url: str = "") -> tuple[str, list
                 soup.append(html_node)
             head = soup.new_tag("head")
             html_node.insert(0, head)
-        base = soup.new_tag("base", href=str(base_url))
+        original_base = head.find("base", href=True)
+        effective_base = urljoin(base_url, str(original_base["href"])) if original_base else base_url
+        base = soup.new_tag("base", href=str(effective_base))
         base["data-cowork-edit-base"] = "true"
         head.insert(0, base)
     return str(soup), preserved

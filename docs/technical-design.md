@@ -599,7 +599,9 @@ while not stopped:
 
 `WorkbenchStore` 是运行期标签状态源，按聊天保存 `new/file/web/terminal` 的顺序和激活状态，不写入聊天历史。旧文件入口投影为同一模型。网页和终端保留自己的实例；文件继续复用现有编辑与离开守卫。隐藏的网页仍保留原 Page，在不显示到屏幕的同一个控件上渲染，保证后台观察能截图，不打开替代网页。
 
-网页使用共享持久 Profile；HTML 预览、内容编辑、PDF、只读工作表和终端分别使用独立 Profile。在线网页没有保存文件或终端的 WebChannel。清除浏览数据会关闭网页并切换到新的存储目录，再释放旧目录。PDF 阅读缓存副本以避免占用源文件，Office 通过后台 PowerShell COM helper 只读转换。只对确认属于本次转换的 Office PID 创建 Job；复用已有进程时明确拒绝转换，避免关闭用户文档。Windows Word 的 HWND 来自临时文档 Window，Excel/PowerPoint 来自 Application（[Word Window.Hwnd](https://learn.microsoft.com/en-us/office/vba/api/word.window.hwnd)）。
+网页使用共享持久 Profile；HTML 预览、内容编辑、PDF、只读工作表和终端分别使用独立 Profile。在线网页没有保存文件或终端的 WebChannel。清除浏览数据会关闭网页并切换到新的存储目录，再释放旧目录。PDF 阅读缓存副本以避免占用源文件，Office 通过后台 PowerShell COM helper 只读转换。Word/Excel 只对确认新建的独立 PID 创建 Job；PowerPoint 使用 MultiUse COM，可复用无窗口的后台进程，按 Office 类型串行转换，仅打开和关闭本次只读隐藏副本，宏安全设置在打开后立即恢复。PowerPoint 不加入 kill-on-close Job，已有实例不调用 Quit；取消或超时通过标记文件通知 helper，在当前 COM 调用结束后关闭副本并清理文件，桌面不等待阻塞的共享调用。新建 PowerPoint 仅在没有剩余文档时退出。Windows Word 的 HWND 来自临时文档 Window，Excel/PowerPoint 来自 Application（[Word Window.Hwnd](https://learn.microsoft.com/en-us/office/vba/api/word.window.hwnd)、[Office COM 实例复用规则](https://learn.microsoft.com/en-us/previous-versions/troubleshoot/microsoft-365/microsoft-365-apps/office-suite-problems/getobject-createobject-behavior)）。
+
+HTML 普通编辑入口固定进入可视化内容编辑，不按脚本存在与否或旧的全局源码偏好改变入口。编辑副本禁用脚本，按原始 base 与文件目录解析本地资源；保存只将编辑后的 body 合并回原文档，保护原始 head、脚本和嵌入节点。源码编辑仍由显式菜单进入。
 
 终端使用固定版本 pywinpty 的原生 ConPTY 非阻塞接口和离线 xterm.js，后台线程读取，UI 分批确认输出，字符缓冲上限 2 MiB。每个终端拥有 Windows Job，关闭清理其进程树。xterm 的 DA/DSR 协议回复与用户输入分别处理，接管锁不会阻断屏幕协议。字号、目录、控制权与退出状态属于标签。
 
@@ -610,3 +612,5 @@ while not stopped:
 文件变化使用内容版本区分自己的保存与外部修改，没有草稿时自动刷新；有草稿时保留双方版本并展示冲突操作。受管理的补丁、文件写入、另存和恢复通过规范路径锁协调；Windows 命名互斥量覆盖 UI 与 daemon 进程，仍在原子替换前复核哈希，外部 shell 和软件不依赖该锁。读取工具只报告草稿状态，不返回草稿正文。
 
 验证入口：`test/test_browser_workbench.py`、`scripts/smoke_browser_workbench.py`、`scripts/render_browser_workbench_screenshots.py`。前两者覆盖会话/运行隔离、一次性领取、冲突保护、源码往返、真实浏览器与 ConPTY；截图脚本在隔离配置中检查窄窗口及主题预览取消，使用 `QT_SCALE_FACTOR=1/1.25/1.5`。
+
+HTML 编辑回归：`scripts/smoke_html_visual_editor.py` 验证普通入口、已有源码偏好、本地 CSS/base、真实键盘编辑和保存后的脚本/文档头保留；`test/test_deliverable_editor_web.py` 在三个缩放比例下运行。Windows 已安装 Office 时可手动运行 `scripts/smoke_office_preview.py`，验证共享 PowerPoint 中的未保存文档、应用设置，以及成功、失败、提前取消、打开后取消和超时清理。

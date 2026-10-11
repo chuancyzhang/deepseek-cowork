@@ -9,6 +9,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeliverableEditorWebTest(unittest.TestCase):
+    def test_html_visual_entry_preserves_styled_document_in_isolated_process(self):
+        for scale in ("1", "1.25", "1.5"):
+            with self.subTest(scale=scale):
+                environment = os.environ.copy()
+                environment.update(QT_QPA_PLATFORM="offscreen", QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu",
+                                   QT_SCALE_FACTOR=scale, PYTHONUTF8="1")
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts/smoke_html_visual_editor.py")],
+                    cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", timeout=90,
+                )
+                self.assertEqual(completed.returncode, 0, msg=f"scale={scale}\n{completed.stdout}\n{completed.stderr}")
+
     def test_editor_sources_keep_readability_and_force_string_configuration(self):
         editor_root = ROOT / "web" / "editors"
         sheet_source = (editor_root / "src" / "sheet-editor.js").read_text(

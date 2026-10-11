@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .file_write_locks import file_write_lock
 
 from dataclasses import dataclass, field
 import os
@@ -734,109 +735,110 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
     for index, change in enumerate(prepared):
         failure_phase = "commit"
         try:
-            _assert_commit_path(
-                workspace_dir,
-                change.path,
-                change.abs_path,
-                context,
-                action,
-                must_exist=change.kind != "add",
-            )
-            if change.abs_move_path and change.move_path:
+            with file_write_lock(change.abs_path, change.abs_move_path):
                 _assert_commit_path(
                     workspace_dir,
-                    change.move_path,
-                    change.abs_move_path,
+                    change.path,
+                    change.abs_path,
                     context,
                     action,
-                    must_exist=False,
+                    must_exist=change.kind != "add",
                 )
-            if change.kind == "add":
-                if os.path.lexists(change.abs_path):
-                    raise PatchError(
-                        "destination_exists",
-                        "Add destination appeared after preflight.",
-                        path=change.rel_path,
-                    )
-                _atomic_write_bytes(change.abs_path, change.data or b"", existed_before=False)
-                applied.append(_change_summary(change))
-                failure_phase = "audit_state"
-                mark_file_written(
-                    change.abs_path,
-                    context,
-                    data=change.data or b"",
-                    encoding="utf-8",
-                    newline="\n",
-                )
-            elif change.kind == "update":
-                _assert_expected_file(change)
-                _atomic_write_bytes(
-                    change.abs_path,
-                    change.data or b"",
-                    existed_before=True,
-                    expected_sha256=change.expected_sha256,
-                )
-                applied.append(_change_summary(change))
-                failure_phase = "audit_state"
-                mark_file_written(
-                    change.abs_path,
-                    context,
-                    data=change.data or b"",
-                    encoding=change.encoding,
-                    bom=change.bom,
-                    newline=change.newline,
-                )
-            elif change.kind == "delete":
-                _assert_expected_file(change)
-                os.remove(change.abs_path)
-                clear_read_state(change.abs_path, context)
-                applied.append(_change_summary(change))
-            elif change.kind == "move":
-                _assert_expected_file(change)
-                if not change.abs_move_path or not change.rel_move_path:
-                    raise PatchError("move_failed", "Move destination is missing.", path=change.rel_path)
-                if os.path.lexists(change.abs_move_path):
-                    raise PatchError(
-                        "destination_exists",
-                        "Move destination appeared after preflight.",
-                        path=change.rel_move_path,
-                    )
-                parent = os.path.dirname(change.abs_move_path)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-                if change.has_content_update:
-                    _atomic_write_bytes(
+                if change.abs_move_path and change.move_path:
+                    _assert_commit_path(
+                        workspace_dir,
+                        change.move_path,
                         change.abs_move_path,
-                        change.data or b"",
-                        existed_before=False,
+                        context,
+                        action,
+                        must_exist=False,
                     )
-                    try:
-                        _assert_expected_file(change)
-                        os.remove(change.abs_path)
-                    except Exception:
-                        applied.append(
-                            _change_summary(
-                                change,
-                                change_type="add",
-                                path=change.rel_move_path,
-                            )
+                if change.kind == "add":
+                    if os.path.lexists(change.abs_path):
+                        raise PatchError(
+                            "destination_exists",
+                            "Add destination appeared after preflight.",
+                            path=change.rel_path,
                         )
-                        raise
-                    clear_read_state(change.abs_path, context)
+                    _atomic_write_bytes(change.abs_path, change.data or b"", existed_before=False)
                     applied.append(_change_summary(change))
                     failure_phase = "audit_state"
                     mark_file_written(
-                        change.abs_move_path,
+                        change.abs_path,
+                        context,
+                        data=change.data or b"",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                elif change.kind == "update":
+                    _assert_expected_file(change)
+                    _atomic_write_bytes(
+                        change.abs_path,
+                        change.data or b"",
+                        existed_before=True,
+                        expected_sha256=change.expected_sha256,
+                    )
+                    applied.append(_change_summary(change))
+                    failure_phase = "audit_state"
+                    mark_file_written(
+                        change.abs_path,
                         context,
                         data=change.data or b"",
                         encoding=change.encoding,
                         bom=change.bom,
                         newline=change.newline,
                     )
-                else:
-                    os.rename(change.abs_path, change.abs_move_path)
-                    _mark_moved_file(change, context)
+                elif change.kind == "delete":
+                    _assert_expected_file(change)
+                    os.remove(change.abs_path)
+                    clear_read_state(change.abs_path, context)
                     applied.append(_change_summary(change))
+                elif change.kind == "move":
+                    _assert_expected_file(change)
+                    if not change.abs_move_path or not change.rel_move_path:
+                        raise PatchError("move_failed", "Move destination is missing.", path=change.rel_path)
+                    if os.path.lexists(change.abs_move_path):
+                        raise PatchError(
+                            "destination_exists",
+                            "Move destination appeared after preflight.",
+                            path=change.rel_move_path,
+                        )
+                    parent = os.path.dirname(change.abs_move_path)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    if change.has_content_update:
+                        _atomic_write_bytes(
+                            change.abs_move_path,
+                            change.data or b"",
+                            existed_before=False,
+                        )
+                        try:
+                            _assert_expected_file(change)
+                            os.remove(change.abs_path)
+                        except Exception:
+                            applied.append(
+                                _change_summary(
+                                    change,
+                                    change_type="add",
+                                    path=change.rel_move_path,
+                                )
+                            )
+                            raise
+                        clear_read_state(change.abs_path, context)
+                        applied.append(_change_summary(change))
+                        failure_phase = "audit_state"
+                        mark_file_written(
+                            change.abs_move_path,
+                            context,
+                            data=change.data or b"",
+                            encoding=change.encoding,
+                            bom=change.bom,
+                            newline=change.newline,
+                        )
+                    else:
+                        os.rename(change.abs_path, change.abs_move_path)
+                        _mark_moved_file(change, context)
+                        applied.append(_change_summary(change))
         except PatchError as exc:
             pending = [_change_summary(item) for item in prepared[index + 1 :]]
             _emit_diagnostic(context, "error", started_at, error_code=exc.code)

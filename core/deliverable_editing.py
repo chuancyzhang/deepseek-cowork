@@ -6,6 +6,7 @@ run in background workers and be tested without constructing the desktop UI.
 """
 
 from __future__ import annotations
+from .file_write_locks import locked_path
 
 import codecs
 import csv
@@ -19,7 +20,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable
@@ -860,7 +861,7 @@ def preflight_edit(path: str, selected_encoding: str = "") -> CompatibilityRepor
     return report
 
 
-def create_edit_session(path: str, selected_encoding: str = "") -> tuple[EditSession, CompatibilityReport]:
+def create_edit_session(path: str, selected_encoding: str = "", editor_mode: str = "") -> tuple[EditSession, CompatibilityReport]:
     report = preflight_edit(path, selected_encoding=selected_encoding)
     if not report.allowed or report.descriptor is None:
         raise DeliverableEditError(
@@ -878,6 +879,12 @@ def create_edit_session(path: str, selected_encoding: str = "") -> tuple[EditSes
         bom_hex=str(report.metadata.get("bom_hex") or ""),
         metadata=dict(report.metadata),
     )
+    if editor_mode == "source":
+        capability = FILE_CAPABILITIES.get(os.path.splitext(normalized)[1].lower())
+        if capability is None or not capability.source_editable:
+            raise DeliverableEditError("source_mode_unavailable", "此格式不支持源码编辑。")
+        session.descriptor = replace(session.descriptor, kind="text", label="HTML 源码", web_based=False, visual=False)
+        session.metadata["editor_mode"] = "source"
     return session, report
 
 
@@ -1156,16 +1163,18 @@ def _safe_sheet_id(index: int, title: str) -> str:
     return f"sheet-{digest}"
 
 
-def xlsx_to_univer_snapshot(path: str) -> dict[str, Any]:
+def xlsx_to_univer_snapshot(path: str, *, preview: bool = False) -> dict[str, Any]:
     import openpyxl
     from openpyxl.utils.cell import coordinate_to_tuple
 
-    workbook = openpyxl.load_workbook(path, read_only=False, data_only=False)
+    workbook = openpyxl.load_workbook(path, read_only=False, data_only=preview, keep_links=False)
     styles: dict[str, Any] = {}
     sheets: dict[str, Any] = {}
     order: list[str] = []
     try:
         for sheet_index, worksheet in enumerate(workbook.worksheets):
+            if preview and (sheet_index >= MAX_WORKSHEETS or len(worksheet._cells) > MAX_POPULATED_CELLS):
+                raise DeliverableEditError("preview_too_large", "工作表规模超过内置阅读上限，请使用打印预览或系统应用打开。")
             sheet_id = _safe_sheet_id(sheet_index, worksheet.title)
             order.append(sheet_id)
             frozen_row = 0
@@ -2098,6 +2107,7 @@ def _validate_serialized_path(path: str, extension: str, selected_encoding: str 
                 )
 
 
+@locked_path(session=True)
 def atomic_save_session(
     session: EditSession,
     data: bytes,
@@ -2182,6 +2192,7 @@ def atomic_save_session(
                     pass
 
 
+@locked_path(2)
 def save_copy(
     session: EditSession,
     data: bytes,
@@ -2230,6 +2241,7 @@ def save_copy(
                 pass
 
 
+@locked_path()
 def restore_previous_version(
     path: str,
     backup_root: str | None = None,

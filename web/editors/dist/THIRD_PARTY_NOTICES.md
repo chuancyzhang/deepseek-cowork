@@ -64,6 +64,8 @@
 | `@univerjs/themes@0.25.1` | Apache-2.0 | LICENSE |
 | `@univerjs/ui@0.25.1` | Apache-2.0 | LICENSE |
 | `@wendellhu/redi@1.1.1` | MIT | LICENSE |
+| `@xterm/addon-fit@0.11.0` | MIT | LICENSE |
+| `@xterm/xterm@6.0.0` | MIT | LICENSE |
 | `aria-hidden@1.2.6` | MIT | LICENSE |
 | `async-lock@1.4.1` | MIT | LICENSE |
 | `base64-js@1.5.1` | MIT | LICENSE |

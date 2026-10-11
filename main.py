@@ -19144,6 +19144,13 @@ class DaemonStreamWorker(QThread):
             data = msg.get("data") or {}
             if isinstance(data, dict):
                 self.agent_state_signal.emit(data)
+        elif message_type == "workbench_request":
+            data = msg.get("data") or {}
+            if isinstance(data, dict) and data.get("request_id") and not self._aborted:
+                from core.workbench_transport import run_desktop_request
+                threading.Thread(target=run_desktop_request,
+                    args=(self.client, data["request_id"], self.session_id, self.request_id),
+                    name="workbench-desktop", daemon=True).start()
         elif message_type == "interaction_request":
             data = msg.get("data") or {}
             if isinstance(data, dict) and data.get("request_id"):
@@ -26738,10 +26745,11 @@ class DeliverableEditorBridge(QObject):
 class DeliverableEditLoadWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, path, selected_encoding="", parent=None):
+    def __init__(self, path, selected_encoding="", parent=None, editor_mode=""):
         super().__init__(parent)
         self.path = os.path.abspath(str(path or ""))
         self.selected_encoding = str(selected_encoding or "")
+        self.editor_mode = editor_mode
 
     def run(self):
         started = time.monotonic()
@@ -26754,6 +26762,7 @@ class DeliverableEditLoadWorker(QThread):
             session, report = create_edit_session(
                 self.path,
                 selected_encoding=self.selected_encoding,
+                editor_mode=self.editor_mode,
             )
             payload = load_editor_payload(session)
             log_sub_agent_runtime(
@@ -27053,6 +27062,7 @@ class FileTabStrip(QWidget):
         self.active_path = ""
         self._tab_frames = {}
         self._tab_bodies = {}
+        self._entries = {}
         self.setObjectName("FileTabStrip")
         self.setMinimumWidth(0)
         self.setFixedHeight(36)
@@ -27183,6 +27193,10 @@ class FileTabStrip(QWidget):
         self.tabs_host.adjustSize()
 
     def _file_icon(self, path):
+        entry = self._entries.get(self._path_key(path), {})
+        if entry.get("kind") in {"new", "web", "terminal"}:
+            return qta.icon({"new": "fa5s.globe", "web": "fa5s.globe", "terminal": "fa5s.terminal"}[entry["kind"]], color=DesignTokens.text_secondary)
+        path = entry.get("path") or path
         if not os.path.isfile(path):
             return qta.icon("fa5s.exclamation-triangle", color=DesignTokens.warning_text)
         ext = os.path.splitext(path)[1].lower()
@@ -27197,6 +27211,11 @@ class FileTabStrip(QWidget):
         else:
             name = "fa5s.file-alt"
         return qta.icon(name, color=DesignTokens.text_secondary)
+
+    def set_entries(self, entries, active_key=""):
+        self._entries = {self._path_key(entry["key"]): entry for entry in entries}
+        self.overflow_btn.setToolTip("全部标签")
+        self.set_paths([entry["key"] for entry in entries], active_key)
 
     def set_paths(self, paths, active_path=""):
         normalized = []
@@ -27220,7 +27239,8 @@ class FileTabStrip(QWidget):
         self._clear_tabs()
         for path in normalized:
             active = self._path_key(path) == self._path_key(self.active_path)
-            missing = not os.path.isfile(path)
+            entry = self._entries.get(self._path_key(path), {})
+            missing = entry.get("kind", "file") == "file" and not os.path.isfile(entry.get("path") or path)
             frame = QFrame(self.tabs_host)
             frame.setObjectName("FileTab")
             frame.setProperty("active", active)
@@ -27233,10 +27253,11 @@ class FileTabStrip(QWidget):
             body.setObjectName("FileTabBody")
             body.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             body.setIcon(self._file_icon(path))
-            name = os.path.basename(path) or path
+            name = entry.get("title") or os.path.basename(path) or path
             body.setProperty("fullName", name)
             body.setText(name)
-            body.setToolTip(path if not missing else f"文件已不存在\n{path}")
+            detail = entry.get("url") or entry.get("cwd") or entry.get("path") or name
+            body.setToolTip(detail if not missing else f"文件已不存在\n{path}")
             body.setCursor(Qt.PointingHandCursor)
             body.setMinimumWidth(0)
             body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -27264,8 +27285,9 @@ class FileTabStrip(QWidget):
         self.overflow_menu.clear()
         active_key = self._path_key(self.active_path) if self.active_path else ""
         for path in self.paths:
-            name = os.path.basename(path) or path
-            if not os.path.isfile(path):
+            entry = self._entries.get(self._path_key(path), {})
+            name = entry.get("title") or os.path.basename(path) or path
+            if entry.get("kind", "file") == "file" and not os.path.isfile(entry.get("path") or path):
                 name = f"{name}（已不存在）"
             action = QAction(self._file_icon(path), name, self.overflow_menu)
             action.setCheckable(True)
@@ -29051,7 +29073,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.file_navigator_btn.clicked.connect(self.toggle_file_navigator)
         file_header_layout.addWidget(self.file_navigator_btn)
 
-        self.file_header_identity_label = QLabel("文件与交付物")
+        self.file_header_identity_label = QLabel("浏览器")
         self.file_header_identity_label.setStyleSheet(
             f"font-size: 13px; font-weight: 650; color: {DesignTokens.text_primary};"
         )
@@ -29403,8 +29425,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_more_menu.addAction(self.deliverable_more_open_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_reveal_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_copy_action)
+        self.deliverable_html_content_action = self.deliverable_more_menu.addAction("编辑内容", lambda: self.begin_deliverable_edit(editor_mode="content"))
+        self.deliverable_html_source_action = self.deliverable_more_menu.addAction("编辑源码", lambda: self.begin_deliverable_edit(editor_mode="source"))
+        self.deliverable_html_resources_action = self.deliverable_more_menu.addAction("关联的 CSS / JavaScript…", self.show_html_resources)
         self.deliverable_more_menu.addSeparator()
         self.deliverable_more_menu.addAction(self.deliverable_more_export_pdf_action)
+        self.deliverable_office_print_action = self.deliverable_more_menu.addAction("打印预览", self.show_office_print_preview)
         self.deliverable_more_menu.addAction(self.deliverable_more_refresh_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_save_copy_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_restore_action)
@@ -29486,7 +29512,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
-        self.preview_text = ReadOnlyTextEdit()
+        from ui.file_code import FileCodeViewer
+        self.preview_text = FileCodeViewer()
         # self.preview_text.setReadOnly(True) # Handled by class
         self.preview_text.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=14, subtle=True, padding=12))
         self.preview_text.setPlaceholderText("点击文件预览内容")
@@ -29503,7 +29530,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_text_editor_layout = deliverable_text_editor_layout
         deliverable_text_editor_layout.setContentsMargins(0, 0, 0, 0)
         deliverable_text_editor_layout.setSpacing(8)
-        self.deliverable_text_editor = QPlainTextEdit()
+        self.deliverable_text_editor = FileCodeViewer(editable=True)
         self.deliverable_text_editor.setObjectName("DeliverableTextEditor")
         self.deliverable_text_editor.setPlaceholderText("文件内容")
         self.deliverable_text_editor.setStyleSheet(
@@ -29576,6 +29603,15 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_edit_status_label.setWordWrap(True)
         self.deliverable_edit_status_label.setStyleSheet(apple_caption_style())
         edit_action_layout.addWidget(self.deliverable_edit_status_label, 1)
+        conflict_actions = QVBoxLayout()
+        self.deliverable_conflict_copy = QPushButton("另存副本…")
+        self.deliverable_conflict_reload = QPushButton("放弃草稿并重新加载")
+        self.deliverable_conflict_copy.clicked.connect(self.save_deliverable_copy)
+        self.deliverable_conflict_reload.clicked.connect(self.discard_conflicted_deliverable)
+        for control in (self.deliverable_conflict_copy, self.deliverable_conflict_reload):
+            control.setStyleSheet(product_button_style("secondary"))
+            conflict_actions.addWidget(control)
+        edit_action_layout.addLayout(conflict_actions)
         self.deliverable_edit_action_bar.setVisible(False)
         preview_layout.addWidget(self.deliverable_edit_action_bar)
         bind_theme(
@@ -29585,7 +29621,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         )
         preview_layout.addWidget(self.deliverable_conversion_row)
         
-        self.file_workbench = FileWorkbench(self.file_navigator_panel, preview_container)
+        from ui.browser_workbench import BrowserWorkbench
+        self.browser_workbench = BrowserWorkbench(self, preview_container)
+        self.file_workbench = FileWorkbench(self.file_navigator_panel, self.browser_workbench.stack)
         self.file_workbench.effectiveModeChanged.connect(self._on_file_navigator_effective_mode_changed)
         self.file_workbench.autoDismissRequested.connect(self._auto_dismiss_file_navigator)
         self.file_workbench.set_auto_dismiss_anchors(self.file_navigator_btn)
@@ -29869,7 +29907,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         context_rail_layout.setContentsMargins(5, 5, 5, 5)
         context_rail_layout.setSpacing(4)
         context_actions = [
-            (self.RIGHT_TAB_FILES, "文件与交付物", "fa5s.folder-open"),
+            (self.RIGHT_TAB_FILES, "浏览器", "fa5s.globe"),
             (self.RIGHT_TAB_OBSERVABILITY, "观测", "fa5s.chart-line"),
             (self.RIGHT_TAB_SUB_AGENTS, "子 Agent", "fa5s.project-diagram"),
         ]
@@ -31137,6 +31175,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         return normalized
 
     def _ensure_open_file_tab(self, path, state=None):
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            return browser.remember_file(path, state or self.get_current_session())
         raw_path = str(path or "").strip()
         path = os.path.normpath(raw_path) if raw_path else ""
         state = state or (self.get_current_session() if hasattr(self, "get_current_session") else None)
@@ -31219,6 +31260,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         return True
 
     def close_file_tab(self, path):
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            return browser.close_tab(path)
         state = self.get_current_session()
         raw_path = str(path or "").strip()
         path = os.path.normpath(raw_path) if raw_path else ""
@@ -31270,6 +31314,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         return True
 
     def _sync_file_header(self, state=None):
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            browser.sync(state)
+            return
         state = state or (self.get_current_session() if hasattr(self, "get_current_session") else None)
         identity = getattr(self, "file_header_identity_label", None)
         strip = getattr(self, "file_tab_strip", None)
@@ -31312,6 +31360,13 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         path = getattr(self, "current_deliverable_path", "")
         ext = os.path.splitext(path)[1].lower() if path else ""
         is_html = ext in {".html", ".htm"} and os.path.isfile(path)
+        print_action = getattr(self, "deliverable_office_print_action", None)
+        if print_action is not None:
+            print_action.setVisible(ext in {".xls", ".xlsx"} and os.path.isfile(path))
+        for name in ("deliverable_html_content_action", "deliverable_html_source_action", "deliverable_html_resources_action"):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setVisible(is_html)
         exportable_pdf = ext in PDF_EXPORT_EXTENSIONS and os.path.isfile(path)
         row = getattr(self, "deliverable_conversion_row", None)
         if row is not None:
@@ -32317,7 +32372,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         if not hasattr(self, "right_title_label") or not hasattr(self, "right_desc_label"):
             return
         page_titles = {
-            self.RIGHT_TAB_FILES: ("文件与交付物", "查看工作区文件、预览交付物并继续生成"),
+            self.RIGHT_TAB_FILES: ("浏览器", "查看和修改文件，浏览网页，使用终端"),
             self.RIGHT_TAB_OBSERVABILITY: ("任务详情", "查看系统提示词、执行过程和错误原因"),
             self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
         }
@@ -37670,6 +37725,20 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         worker.request_stop()
 
     def _dispose_application_event_filters(self):
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            browser.dispose()
+        document = getattr(self, "document_preview", None)
+        if document is not None:
+            document.dispose()
+        for name in ("deliverable_editor_web_view", "deliverable_web_view"):
+            view = getattr(self, name, None)
+            if isinstance(view, QWidget) and _qt_object_alive(view):
+                view.stop()
+                view.page().setWebChannel(None)
+                view.page().deleteLater()
+                view.deleteLater()
+                setattr(self, name, None)
         for attribute in ("deliverable_web_preview", "file_workbench"):
             target = getattr(self, attribute, None)
             if target is not None and _qt_object_alive(target):
@@ -37874,6 +37943,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         ):
             self._queue_render_sub_agent_monitor_for_state(state)
         self._sync_workspace_ui_for_session(session_id, refresh_sidebar=False)
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            browser.restore_session(state)
         if (
             getattr(self, "right_drawer_open", False)
             and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_DELIVERABLES
@@ -37995,6 +38067,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self.flush_session_content(state.session_id, final=False)
             self.flush_session_thinking(state.session_id)
             self._cancel_token_speed_monitor(state, "session_closed")
+            self.browser_workbench.dispose_session(session_id)
             del self.sessions[session_id]
         self.session_tabs.removeTab(index)
         if self.session_tabs.count() == 0: self.create_new_session()
@@ -43994,6 +44067,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self.render_selected_deliverable(force=False)
 
     def refresh_deliverable_editor_theme(self, _resolved=None):
+        for name in ("deliverable_conflict_copy", "deliverable_conflict_reload"):
+            control = getattr(self, name, None)
+            if control:
+                control.setStyleSheet(product_button_style("secondary"))
         action_bar = getattr(self, "deliverable_edit_action_bar", None)
         if action_bar:
             action_bar.setStyleSheet(
@@ -44048,6 +44125,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_edit_state = str(state or "idle")
         busy = self.deliverable_edit_state in {"loading", "saving", "restoring"}
         active = self.deliverable_edit_state != "idle"
+        for name in ("deliverable_conflict_copy", "deliverable_conflict_reload"):
+            control = getattr(self, name, None)
+            if control:
+                control.setVisible(self.deliverable_edit_state == "conflict")
         action_bar = getattr(self, "deliverable_edit_action_bar", None)
         if action_bar:
             action_bar.setVisible(self.deliverable_edit_state in {"conflict", "blocked", "failed"})
@@ -44057,6 +44138,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             save_btn.setEnabled(
                 active
                 and not busy
+                and self.deliverable_edit_state != "conflict"
                 and bool(getattr(self, "deliverable_edit_dirty", False))
             )
             save_btn.setText("保存中…" if self.deliverable_edit_state == "saving" else "保存")
@@ -44204,7 +44286,23 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             return ""
         return str(combo.currentData() or "")
 
-    def begin_deliverable_edit(self, selected_encoding=""):
+    def show_html_resources(self):
+        from ui.file_refresh import html_resources
+        path = getattr(self, "current_deliverable_path", "")
+        try:
+            menu = create_styled_menu(self.deliverable_more_btn)
+            resources = html_resources(path)
+            for target in resources:
+                action = menu.addAction(os.path.relpath(target, os.path.dirname(path)))
+                action.setEnabled(os.path.isfile(target))
+                action.triggered.connect(lambda checked=False, value=target: self.select_deliverable(value, render_html=True))
+            if not resources:
+                menu.addAction("没有引用本地 CSS 或 JavaScript 文件").setEnabled(False)
+            menu.exec(self.deliverable_more_btn.mapToGlobal(self.deliverable_more_btn.rect().bottomLeft()))
+        except Exception as exc:
+            self.add_system_toast(f"无法读取关联资源：{exc}", "error")
+
+    def begin_deliverable_edit(self, selected_encoding="", editor_mode=""):
         path = os.path.abspath(
             getattr(self, "current_deliverable_path", "")
             or getattr(self, "current_preview_path", "")
@@ -44218,6 +44316,18 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self._reset_deliverable_mode_buttons()
             return
         session = getattr(self, "deliverable_edit_session", None)
+        if os.path.splitext(path)[1].lower() in {".html", ".htm"}:
+            if not editor_mode:
+                editor_mode = self.config_manager.get("html_editor_mode", "")
+                if not editor_mode:
+                    with open(path, "rb") as handle:
+                        sample = handle.read(TEXT_FILE_MAX_BYTES)
+                    editor_mode = "source" if re.search(rb"<script\b|\bon\w+\s*=", sample, re.I) else "content"
+            if session is not None and session.metadata.get("editor_mode", "content") != editor_mode:
+                if not self.confirm_leave_deliverable_edit("切换 HTML 编辑方式"):
+                    return
+                session = getattr(self, "deliverable_edit_session", None)
+            self.config_manager.set("html_editor_mode", editor_mode)
         if (
             session is not None
             and os.path.normcase(session.path) == os.path.normcase(path)
@@ -44240,7 +44350,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_text_preview.setPlainText("正在检查文件结构、大小和兼容性…")
         self.preview_stack.setCurrentWidget(self.deliverable_text_preview)
         log_sub_agent_runtime("deliverable_edit_enter", path=path)
-        worker = DeliverableEditLoadWorker(path, selected_encoding, self)
+        worker = DeliverableEditLoadWorker(path, selected_encoding, self, editor_mode=editor_mode)
         self.deliverable_edit_worker = worker
         worker.finished_signal.connect(
             lambda result, expected=generation: self._handle_deliverable_edit_loaded(
@@ -44277,6 +44387,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.deliverable_editor_external_conflict = False
         payload = result["payload"]
         if payload.get("kind") == "text":
+            self.deliverable_text_editor.set_language({".py": "python", ".js": "javascript", ".htm": "html"}.get(os.path.splitext(session.path)[1].lower(), os.path.splitext(session.path)[1].lstrip(".") or "text"))
             self.deliverable_text_loading = True
             try:
                 self.deliverable_text_editor.setPlainText(str(payload.get("content") or ""))
@@ -44289,6 +44400,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 f"正在编辑 · {session.descriptor.label}"
             )
             self._set_deliverable_dirty(False)
+            position = getattr(self, "_browser_restore_editor_scroll", None)
+            if position is not None:
+                self.deliverable_text_editor.verticalScrollBar().setValue(position)
+                del self._browser_restore_editor_scroll
             self._set_deliverable_edit_state(
                 "ready",
                 f"{session.descriptor.label} 编辑已就绪 · Ctrl+S 保存",
@@ -44323,6 +44438,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 f"QWebEngineView#DeliverableEditorWebView {{ background: {DesignTokens.bg_secondary}; border: none; }}"
             )
             core_module = importlib.import_module("PySide6.QtWebEngineCore")
+            self.deliverable_editor_profile = core_module.QWebEngineProfile(view)
+            view.setPage(core_module.QWebEnginePage(self.deliverable_editor_profile, view))
             settings = view.settings()
             settings_enum = getattr(core_module.QWebEngineSettings, "WebAttribute")
             settings.setAttribute(settings_enum.JavascriptEnabled, True)
@@ -44602,7 +44719,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             else:
                 self.deliverable_editor_external_conflict = False
                 self.deliverable_pending_serialized = b""
-                self.deliverable_recent_internal_save_until = time.monotonic() + 1.5
+                from ui.file_refresh import schedule_file_refresh
+                schedule_file_refresh(self)
                 if (
                     session is not None
                     and session.descriptor.kind == "sheet"
@@ -44872,6 +44990,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             return False
         try:
             self.deliverable_web_view = webengine_view_cls()
+            from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+            self.deliverable_preview_profile = QWebEngineProfile(self)
+            self.deliverable_web_view.setPage(QWebEnginePage(self.deliverable_preview_profile, self.deliverable_web_view))
             self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
             self.deliverable_web_configuration_error = self._configure_deliverable_web_view()
             self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view)
@@ -45046,9 +45167,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             if state and not self.current_deliverable_path:
                 state.selected_deliverable_path = ""
                 state.deliverable_preview_rendered = False
-            elif state and self.current_deliverable_path:
+            elif state and self.current_deliverable_path and (not hasattr(self, "browser_workbench") or self.browser_workbench.file_active()):
                 self.activate_file_tab(self.current_deliverable_path)
-        elif render_current:
+        elif render_current and (not hasattr(self, "browser_workbench") or self.browser_workbench.file_active()):
             self.select_deliverable(self.current_deliverable_path, render_html=True)
         self.apply_file_workspace_filters()
         self._sync_file_header()
@@ -45122,62 +45243,30 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 if current_dir and os.path.isdir(current_dir):
                     watch_dirs.add(os.path.abspath(current_dir))
                 watcher.addPath(os.path.abspath(current))
+                if os.path.splitext(current)[1].lower() in {".html", ".htm"}:
+                    from ui.file_refresh import html_resources
+                    for resource in html_resources(current)[:100]:
+                        if os.path.isfile(resource):
+                            watcher.addPath(resource)
+                            watch_dirs.add(os.path.dirname(resource))
             if watch_dirs:
                 watcher.addPaths(sorted(watch_dirs)[:200])
         except Exception:
             pass
 
     def handle_deliverable_fs_changed(self, path):
-        current = getattr(self, "current_deliverable_path", "")
-        session = getattr(self, "deliverable_edit_session", None)
-        if (
-            current
-            and session is not None
-            and os.path.normcase(session.path)
-            == os.path.normcase(os.path.abspath(current))
-            and not os.path.isfile(current)
-            and not getattr(self, "deliverable_editor_internal_write", False)
-        ):
-            self.deliverable_editor_external_conflict = True
-            self._set_deliverable_edit_state(
-                "conflict",
-                "原文件已被删除；当前内容只能另存为。",
-            )
-            log_sub_agent_runtime(
-                "deliverable_edit_external_conflict",
-                path=current,
-                deleted=True,
-            )
-        if current and os.path.normcase(os.path.abspath(path or "")) == os.path.normcase(os.path.abspath(current)):
-            self.current_deliverable_stale = True
-            editing_current = bool(
-                session
-                and os.path.normcase(session.path)
-                == os.path.normcase(os.path.abspath(current))
-            )
-            recent_until = float(
-                getattr(self, "deliverable_recent_internal_save_until", 0.0) or 0.0
-            )
-            if (
-                editing_current
-                and not getattr(self, "deliverable_editor_internal_write", False)
-                and time.monotonic() > recent_until
-            ):
-                self.deliverable_editor_external_conflict = True
-                self._set_deliverable_edit_state(
-                    "conflict",
-                    "文件已在外部修改；当前内容只能重新载入或另存为。",
-                )
-                log_sub_agent_runtime(
-                    "deliverable_edit_external_conflict",
-                    path=current,
-                )
-            self._set_deliverable_status("文件已更新，点击“刷新预览”查看最新内容。", tone="warning")
+        from ui.file_refresh import schedule_file_refresh
+        schedule_file_refresh(self)
         timer = getattr(self, "deliverable_refresh_timer", None)
         if timer is not None:
             timer.start()
         else:
             self.refresh_deliverables()
+
+    def discard_conflicted_deliverable(self):
+        if not self.confirm_leave_deliverable_edit("放弃草稿并重新加载"):
+            return
+        self.render_selected_deliverable(force=True)
 
     def on_deliverable_item_clicked(self, item):
         path = item.data(Qt.UserRole) if item else ""
@@ -45433,7 +45522,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self._render_markdown_deliverable(path, force=force)
             return
         if kind == "pdf":
-            self._show_pdf_deliverable(path)
+            self._show_document_preview(path, force=force)
             return
         if kind == "image":
             self._show_image_deliverable(path)
@@ -45512,6 +45601,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self._set_deliverable_status("")
 
     def _show_text_deliverable(self, path):
+        if hasattr(self.deliverable_text_preview, "set_language"):
+            self.deliverable_text_preview.set_language({".py": "python", ".js": "javascript"}.get(os.path.splitext(path)[1].lower(), os.path.splitext(path)[1].lstrip(".") or "text"))
         max_preview_bytes = TEXT_FILE_MAX_BYTES
         try:
             size = os.path.getsize(path)
@@ -45575,57 +45666,41 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self._show_deliverable_web_preview()
         self._set_deliverable_status("正在渲染 Markdown 预览…")
 
-    def _ensure_deliverable_pdf_view(self):
-        if getattr(self, "deliverable_pdf_view", None) is not None:
-            return self.deliverable_pdf_view
-        document_cls, view_cls = load_qpdf_classes()
-        if document_cls is None or view_cls is None:
-            return None
-        self.deliverable_pdf_document = document_cls(self)
-        self.deliverable_pdf_view = view_cls()
-        if hasattr(self.deliverable_pdf_view, "setDocument"):
-            self.deliverable_pdf_view.setDocument(self.deliverable_pdf_document)
-        page_mode_enum = getattr(view_cls, "PageMode", view_cls)
-        zoom_mode_enum = getattr(view_cls, "ZoomMode", view_cls)
-        if hasattr(self.deliverable_pdf_view, "setPageMode"):
-            self.deliverable_pdf_view.setPageMode(getattr(page_mode_enum, "MultiPage"))
-        if hasattr(self.deliverable_pdf_view, "setZoomMode"):
-            self.deliverable_pdf_view.setZoomMode(getattr(zoom_mode_enum, "FitToWidth"))
-        self.deliverable_pdf_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: none;")
-        self.deliverable_preview_stack.addWidget(self.deliverable_pdf_view)
-        return self.deliverable_pdf_view
+    def _show_document_preview(self, path, mode='', force=False):
+        from ui.document_preview import DocumentPreview
+        preview = getattr(self, 'document_preview', None)
+        if preview is None:
+            preview = DocumentPreview(self)
+            preview.simpleRequested.connect(self._render_simplified_office_deliverable)
+            preview.externalRequested.connect(self.open_path_in_system)
+            self.document_preview = preview
+            self.preview_stack.addWidget(preview)
+        browser = getattr(self, 'browser_workbench', None)
+        tab = browser.active_tab() if browser else None
+        view_state = tab.view_state if tab and tab.kind == 'file' else {}
+        preview.open(path, mode, force=force, view_state=view_state)
+        self.preview_stack.setCurrentWidget(preview)
+        self._set_deliverable_status('')
+        self.deliverable_render_path = path
+        self.deliverable_render_fingerprint = self._deliverable_fingerprint(path)
+        self.current_deliverable_stale = False
 
     def _show_pdf_deliverable(self, pdf_path, source_path=None):
-        view = self._ensure_deliverable_pdf_view()
-        if view is None:
-            try:
-                text = render_pdf_text_preview(pdf_path)
-            except Exception as exc:
-                detail = str(QPDF_IMPORT_ERROR or "QtPdf 组件不可用")
-                self.deliverable_text_preview.setPlainText(
-                    f"无法加载 PDF 版式预览组件：{detail}\n\nPDF 文本预览也无法生成：{exc}"
-                )
-                self._set_deliverable_status("PDF 预览失败。", tone="error")
-                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-                return
-            self.deliverable_text_preview.setPlainText(text)
-            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.current_deliverable_stale = False
-            self._set_deliverable_status("QtPdf 不可用，当前显示 PDF 文本预览。", tone="warning")
-            return
-        error = self.deliverable_pdf_document.load(os.path.abspath(pdf_path))
-        no_error = getattr(type(error), "None_", None)
-        if no_error is not None and error != no_error:
-            self.deliverable_text_preview.setPlainText(f"PDF 加载失败：{error}")
-            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self._set_deliverable_status("PDF 预览失败。", tone="error")
-            return
-        self.deliverable_preview_stack.setCurrentWidget(view)
-        display_path = source_path or pdf_path
-        self.current_deliverable_stale = False
-        self._set_deliverable_status("")
+        self._show_document_preview(pdf_path)
 
     def _render_office_deliverable(self, path, force=False):
+        mode = 'sheet' if os.path.splitext(path)[1].lower() in {'.xls', '.xlsx'} else 'office'
+        self._show_document_preview(path, mode, force)
+
+    def show_office_print_preview(self):
+        if not self.confirm_leave_deliverable_edit('查看打印预览'):
+            return
+        path = getattr(self, 'current_deliverable_path', '')
+        if path and os.path.isfile(path):
+            self._show_document_preview(path, 'office')
+
+
+    def _render_simplified_office_deliverable(self, path, force=False):
         try:
             preview = render_structured_document_preview(path)
         except Exception as exc:

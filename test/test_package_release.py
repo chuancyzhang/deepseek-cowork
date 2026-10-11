@@ -19,6 +19,7 @@ SPEC.loader.exec_module(package_release)
 class PackageReleaseTests(unittest.TestCase):
     CLI_FIXTURE = b"browser-skill-cli-fixture"
     EXTENSION_FIXTURE = b"browser-skill-extension-fixture"
+    WECOM_FIXTURE = b"wecom-cli-fixture"
 
     def setUp(self):
         self.fixture_hashes = {
@@ -35,16 +36,27 @@ class PackageReleaseTests(unittest.TestCase):
             clear=True,
         )
         self.hash_patch.start()
+        self.wecom_hash_patch = patch.object(package_release, "WECOM_CLI_SHA256", hashlib.sha256(self.WECOM_FIXTURE).hexdigest().upper())
+        self.wecom_hash_patch.start()
 
     def tearDown(self):
         self.hash_patch.stop()
+        self.wecom_hash_patch.stop()
 
     def _create_minimal_dist(self, root):
         dist = Path(root) / "deepseek-cowork"
         for relative in package_release.REQUIRED_PATHS:
             path = dist / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
-            if relative.endswith("/bundle.json"):
+            if relative.endswith("wecom_cli/bundle.json"):
+                manifest = json.loads((ROOT / "resources/wecom_cli/bundle.json").read_text(encoding="utf-8"))
+                manifest["executable_sha256"] = package_release.WECOM_CLI_SHA256
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+            elif relative.endswith("wecom-cli.exe"):
+                path.write_bytes(self.WECOM_FIXTURE)
+            elif relative.endswith("wecom_cli/LICENSE.txt"):
+                path.write_text("MIT License\nCopyright (c) 2026 WeCom\n", encoding="utf-8")
+            elif relative.endswith("/bundle.json"):
                 path.write_text(
                     json.dumps({
                         "schema": 1,
@@ -80,6 +92,7 @@ class PackageReleaseTests(unittest.TestCase):
                 path.write_bytes(self.EXTENSION_FIXTURE)
             else:
                 path.write_bytes(f"fixture:{relative}".encode("utf-8"))
+        (dist / "_internal/winpty/_winpty.cp314-win_amd64.pyd").write_bytes(b"native-extension-fixture")
         return dist
 
     def test_audit_reports_components_and_required_runtime(self):
@@ -88,7 +101,7 @@ class PackageReleaseTests(unittest.TestCase):
 
             report = package_release.audit_distribution(dist, max_dist_mb=1)
 
-            self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS))
+            self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS) + 1)
             self.assertTrue(any(item["name"] == "_internal/PySide6" for item in report["components"]))
             self.assertIn("_internal/python_env/python.exe", report["required_paths"])
             self.assertLessEqual(
@@ -125,6 +138,7 @@ class PackageReleaseTests(unittest.TestCase):
             "_internal/PySide6/translations/qtbase_fr.qm",
             "_internal/PySide6/translations/qtwebengine_locales/fr.pak",
             "_internal/PySide6/qml/QtQuick/qmldir",
+            "_internal/icuuc.dll",
             "_internal/python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
         )
         for relative in cases:
@@ -136,6 +150,13 @@ class PackageReleaseTests(unittest.TestCase):
 
                 with self.assertRaises(package_release.PackageAuditError):
                     package_release.audit_distribution(dist, max_dist_mb=1)
+
+    def test_native_terminal_extension_is_required(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist = self._create_minimal_dist(temp_dir)
+            (dist / "_internal/winpty/_winpty.cp314-win_amd64.pyd").unlink()
+            with self.assertRaisesRegex(package_release.PackageAuditError, "pywinpty"):
+                package_release.audit_distribution(dist, max_dist_mb=1)
 
     def test_audit_rejects_editor_source_maps_node_modules_and_cdn_imports(self):
         cases = (

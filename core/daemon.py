@@ -1801,6 +1801,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 request_payload["session_id"] = session_id
                 send_stream({"type": "interaction_request", "data": request_payload})
 
+            from core.workbench import workbench_bridge
+            from core.workbench_transport import dispatch as dispatch_workbench
+            workbench_host = workbench_bridge()
+            route_key = (worker.execution_authorization.session_id, worker.execution_authorization.run_id)
+            with workbench_host._lock:
+                workbench_host.remote_routes[route_key] = lambda act, args, ctx, timeout: dispatch_workbench(send_stream, act, args, ctx, timeout)
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
             activated = state.set_active_worker(
                 session_id,
@@ -1859,6 +1865,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "turn_id": turn_id,
                     "request_id": request_id,
                 }
+            with workbench_host._lock:
+                workbench_host.remote_routes.pop(route_key, None)
             result = result_holder.get("result") or {"error": "No response"}
             try:
                 pipeline.flush()
@@ -2179,6 +2187,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 self._send({"status": "ok", "event": applied.to_dict()})
             except Exception as exc:
                 self._send({"status": "error", "error": str(exc)})
+            return
+        if action in {"workbench_claim", "workbench_active", "workbench_result"}:
+            from core.workbench_transport import handle_host_request
+            self._send(handle_host_request(data))
             return
         if action == "respond_interaction":
             request_id = data.get("request_id")

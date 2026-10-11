@@ -15,6 +15,7 @@ let commandListener = null;
 let suppressDirty = true;
 let cleanSnapshot = "";
 let dirtyCheckScheduled = false;
+let readOnly = false;
 
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
@@ -99,8 +100,8 @@ function loadWorkbook() {
       presets: [
         UniverSheetsCorePreset({
           container: "sheet-root",
-          header: true,
-          toolbar: true,
+          header: !readOnly,
+          toolbar: !readOnly,
           footer: true,
           disableForceStringAlert: true,
           disableForceStringMark: true
@@ -111,6 +112,10 @@ function loadWorkbook() {
     univerAPI = created.univerAPI;
     suppressDirty = true;
     workbook = univerAPI.createWorkbook(snapshot);
+    if (snapshot.coworkActiveSheet && workbook.getSheetBySheetId(snapshot.coworkActiveSheet)) {
+      workbook.setActiveSheet(workbook.getSheetBySheetId(snapshot.coworkActiveSheet));
+    }
+    if (readOnly) workbook.setEditable(false);
     commandListener = univerAPI.addEvent(
       univerAPI.Event.CommandExecuted,
       trackWorkbookMutation
@@ -127,6 +132,7 @@ function loadWorkbook() {
 }
 
 function requestSave() {
+  if (readOnly) return;
   try {
     sendTextPayload("sheet", serializedWorkbook());
   } catch (error) {
@@ -141,6 +147,14 @@ function setTheme(theme) {
 }
 
 window.coworkEditor = {
+  setReadOnly(value) { readOnly = !!value; },
+  getViewState() {
+    if (!workbook) return {};
+    const data = workbook.save();
+    const sheet = workbook.getActiveSheet();
+    return { activeSheet: sheet?.getSheetId(), sheets: Object.fromEntries(
+      Object.entries(data.sheets || {}).map(([id, value]) => [id, {scrollTop:value.scrollTop, scrollLeft:value.scrollLeft, zoomRatio:value.zoomRatio}])) };
+  },
   beginLoad(id, total) {
     dispose();
     sessionId = String(id || "");

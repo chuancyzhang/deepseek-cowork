@@ -1,6 +1,6 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**5.2.5**
+当前应用版本：**5.2.6**
 
 本文描述当前源码中长期成立的运行模型。发布流水账放在
 [5.2.5 发布说明](releases/5.2.5.md)，Skill 包格式和安装流程放在
@@ -575,6 +575,9 @@ while not stopped:
 | `core/chat_storage.py`、`core/chat_save_queue.py` | SQLite 与版本化异步保存 |
 | `core/chat_recovery_journal.py` | 异常退出恢复 |
 | `core/deliverable_editing.py` | 交付物预检、转换、冲突与事务保存 |
+| `core/workbench.py`、`core/workbench_transport.py` | 聊天标签、控制权、可取消桌面请求与后台一次性领取 |
+| `ui/browser_workbench.py`、`ui/browser_panes.py` | 统一右侧浏览器、共享网页 Profile 与终端表面 |
+| `core/document_preview.py`、`ui/document_preview.py` | 内容版本 PDF 缓存、后台 Office 渲染与只读工作表 |
 | `core/im_gateway_registry.py`、`core/im_gateway/` | 企业消息注册与运行适配 |
 | `core/theme_package.py`、`core/theme_service.py` | 声明式主题与预览事务 |
 | `core/process_utils.py` | 外部程序进程环境隔离 |
@@ -590,3 +593,20 @@ while not stopped:
 工具参数处理早于原有授权和执行记录身份计算。仅宿主允许的结构化字段可还原；不确定参数整批记录未执行并切换原文重新生成一次，不重放已完成副作用。模型原始回复和显示副本分别保存，关闭插件后通过独立兼容模块与历史显示副本维持阅读。
 
 本地风险检查在能力安装更新、MCP 配置保存或正常连接取得描述时异步触发，使用单并发有界队列；不在启动时扫描，不新增完整 AI-Infra-Guard 或常驻服务依赖。设置、覆盖范围及上限见[数据安全说明](data-security.md)，源码测试与性能见[验证记录](data-security-validation.md)。
+
+
+## 15. 统一右侧浏览器
+
+`WorkbenchStore` 是运行期标签状态源，按聊天保存 `new/file/web/terminal` 的顺序和激活状态，不写入聊天历史。旧文件入口投影为同一模型。网页和终端保留自己的实例；文件继续复用现有编辑与离开守卫。隐藏的网页仍保留原 Page，在不显示到屏幕的同一个控件上渲染，保证后台观察能截图，不打开替代网页。
+
+网页使用共享持久 Profile；HTML 预览、内容编辑、PDF、只读工作表和终端分别使用独立 Profile。在线网页没有保存文件或终端的 WebChannel。清除浏览数据会关闭网页并切换到新的存储目录，再释放旧目录。PDF 阅读缓存副本以避免占用源文件，Office 通过后台 PowerShell COM helper 只读转换。只对确认属于本次转换的 Office PID 创建 Job；复用已有进程时明确拒绝转换，避免关闭用户文档。Windows Word 的 HWND 来自临时文档 Window，Excel/PowerPoint 来自 Application（[Word Window.Hwnd](https://learn.microsoft.com/en-us/office/vba/api/word.window.hwnd)）。
+
+终端使用固定版本 pywinpty 的原生 ConPTY 非阻塞接口和离线 xterm.js，后台线程读取，UI 分批确认输出，字符缓冲上限 2 MiB。每个终端拥有 Windows Job，关闭清理其进程树。xterm 的 DA/DSR 协议回复与用户输入分别处理，接管锁不会阻断屏幕协议。字号、目录、控制权与退出状态属于标签。
+
+`ai_skills/workbench` 的十个工具经 `tool_search` 按需发现，定义顺序固定，不改变已有工具的相对顺序，不把动态页面状态写入系统前缀。工具从 `ExecutionAuthorization` 取得聊天与 run_id，模型不能自行传入聊天标识。后台 daemon 通过已认证的运行流发出请求 ID；桌面只领取仍在等待的请求，领取不可重复，终态或取消后不能再次领取。重连和历史回放不重执行动作；没有桌面宿主时明确失败。授权仍由现有工具调用边界处理。
+
+网页观察返回版本、元素和截图，截图走现有持久工具图片管线；不支持工具图片的模型接口获得明确说明及文本/元素结果。动作在提交前再次校验控制权与页面版本，用户接管使排队动作失效。已经提交的操作保留实际页面结果，并标记是否已经发出，不声称撤销。终端接管与 Ctrl+C 中断是两个独立动作。
+
+文件变化使用内容版本区分自己的保存与外部修改，没有草稿时自动刷新；有草稿时保留双方版本并展示冲突操作。受管理的补丁、文件写入、另存和恢复通过规范路径锁协调；Windows 命名互斥量覆盖 UI 与 daemon 进程，仍在原子替换前复核哈希，外部 shell 和软件不依赖该锁。读取工具只报告草稿状态，不返回草稿正文。
+
+验证入口：`test/test_browser_workbench.py`、`scripts/smoke_browser_workbench.py`、`scripts/render_browser_workbench_screenshots.py`。前两者覆盖会话/运行隔离、一次性领取、冲突保护、源码往返、真实浏览器与 ConPTY；截图脚本在隔离配置中检查窄窗口及主题预览取消，使用 `QT_SCALE_FACTOR=1/1.25/1.5`。

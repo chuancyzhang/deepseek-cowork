@@ -77,6 +77,8 @@ DESTRUCTIVE_PREFIXES = (
 )
 
 EXECUTION_ONLY_TOOL_NAMES = {
+    "browser_open", "browser_close", "browser_navigate", "browser_action",
+    "terminal_input", "terminal_resize", "terminal_interrupt",
     "bash",
     "run_python_code",
     "run_node_code",

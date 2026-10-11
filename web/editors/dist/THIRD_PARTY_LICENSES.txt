@@ -352,6 +352,56 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ==============================================================================
 License text 9
+Used by: @xterm/addon-fit@0.11.0/LICENSE
+==============================================================================
+Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+==============================================================================
+License text 10
+Used by: @xterm/xterm@6.0.0/LICENSE
+==============================================================================
+Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+==============================================================================
+License text 11
 Used by: aria-hidden@1.2.6/LICENSE, react-remove-scroll@2.7.2/LICENSE, react-style-singleton@2.2.3/LICENSE, use-callback-ref@1.3.3/LICENSE, use-sidecar@1.1.3/LICENSE
 ==============================================================================
 MIT License
@@ -377,7 +427,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 10
+License text 12
 Used by: async-lock@1.4.1/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -403,7 +453,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 11
+License text 13
 Used by: base64-js@1.5.1/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -429,7 +479,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-License text 12
+License text 14
 Used by: buffer@6.0.3/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -455,7 +505,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-License text 13
+License text 15
 Used by: cjk-regex@3.4.0/LICENSE, regexp-util@2.0.3/LICENSE, unicode-regex@4.2.0/LICENSE
 ==============================================================================
 MIT License
@@ -481,7 +531,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 14
+License text 16
 Used by: class-variance-authority@0.7.1/LICENSE
 ==============================================================================
 Apache License
@@ -676,7 +726,7 @@ Apache License
    limitations under the License.
 
 ==============================================================================
-License text 15
+License text 17
 Used by: clsx@2.1.1/license
 ==============================================================================
 MIT License
@@ -690,7 +740,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 16
+License text 18
 Used by: collapse-white-space@2.1.0/license
 ==============================================================================
 (The MIT License)
@@ -717,7 +767,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 17
+License text 19
 Used by: decimal.js@10.6.0/LICENCE.md
 ==============================================================================
 The MIT Licence.
@@ -744,7 +794,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 18
+License text 20
 Used by: detect-node-es@1.1.0/LICENSE
 ==============================================================================
 MIT License
@@ -770,7 +820,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 19
+License text 21
 Used by: dom-helpers@5.2.1/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -796,7 +846,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 20
+License text 22
 Used by: fast-diff@1.3.0/LICENSE
 ==============================================================================
 Apache License
@@ -1002,7 +1052,7 @@ Apache License
    limitations under the License.
 
 ==============================================================================
-License text 21
+License text 23
 Used by: franc-min@6.2.0/package.json attribution + MIT terms
 ==============================================================================
 Copyright (c) Titus Wormer <tituswormer@gmail.com> (http://wooorm.com); Kamil Bielawski <k_bielawski@fastmail.fm>; Andrew Pantyukhin <infofarmer@gmail.com>; Dmitriy Sobolev <disobolev@icloud.com>; Jeff Huijsmans <jeffhuys@gmail.com>
@@ -1026,7 +1076,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 22
+License text 24
 Used by: get-nonce@1.0.1/LICENSE
 ==============================================================================
 MIT License
@@ -1052,7 +1102,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 23
+License text 25
 Used by: ieee754@1.2.1/LICENSE
 ==============================================================================
 Copyright 2008 Fair Oaks Labs, Inc.
@@ -1068,7 +1118,7 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-License text 24
+License text 26
 Used by: kdbush@4.1.0/LICENSE
 ==============================================================================
 ISC License
@@ -1088,7 +1138,7 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 
 ==============================================================================
-License text 25
+License text 27
 Used by: localforage@1.10.0/LICENSE
 ==============================================================================
 Apache License
@@ -1294,7 +1344,7 @@ Apache License
    limitations under the License.
 
 ==============================================================================
-License text 26
+License text 28
 Used by: lodash-es@4.18.1/LICENSE
 ==============================================================================
 Copyright OpenJS Foundation and other contributors <https://openjsf.org/>
@@ -1346,7 +1396,7 @@ licenses; we recommend you read them, as their terms may differ from the
 terms above.
 
 ==============================================================================
-License text 27
+License text 29
 Used by: n-gram@2.0.2/license, trigram-utils@2.0.1/license
 ==============================================================================
 (The MIT License)
@@ -1373,7 +1423,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 28
+License text 30
 Used by: nanoid@5.1.11/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -1398,7 +1448,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 29
+License text 31
 Used by: numfmt@3.2.6/LICENSE
 ==============================================================================
 Copyright (c) 2020, Borgar Þorsteinsson <borgar@borgar.net>
@@ -1422,7 +1472,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-License text 30
+License text 32
 Used by: opentype.js@2.0.0/LICENSE
 ==============================================================================
 The MIT License (MIT)
@@ -1447,7 +1497,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-License text 31
+License text 33
 Used by: ot-json1@1.0.2/package.json attribution + ISC terms, ot-text-unicode@4.0.0/package.json attribution + ISC terms, unicount@1.1.0/package.json attribution + ISC terms
 ==============================================================================
 Copyright (c) Joseph Gentle <me@josephg.com>
@@ -1465,7 +1515,7 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-License text 32
+License text 34
 Used by: prop-types@15.8.1/LICENSE
 ==============================================================================
 MIT License
@@ -1491,7 +1541,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 33
+License text 35
 Used by: quickselect@3.0.0/LICENSE
 ==============================================================================
 ISC License
@@ -1511,7 +1561,7 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 
 ==============================================================================
-License text 34
+License text 36
 Used by: rbush@4.0.1/LICENSE
 ==============================================================================
 MIT License
@@ -1537,7 +1587,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-License text 35
+License text 37
 Used by: react-dom@19.2.8/LICENSE, react@19.2.8/LICENSE, scheduler@0.27.0/LICENSE
 ==============================================================================
 MIT License
@@ -1563,7 +1613,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 36
+License text 38
 Used by: react-remove-scroll-bar@2.3.8/package.json attribution + MIT terms
 ==============================================================================
 Copyright (c) Anton Korzunov <thekashey@gmail.com>
@@ -1587,7 +1637,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 37
+License text 39
 Used by: react-transition-group@4.4.5/LICENSE
 ==============================================================================
 BSD 3-Clause License
@@ -1622,7 +1672,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-License text 38
+License text 40
 Used by: rxjs@7.8.2/LICENSE.txt
 ==============================================================================
 Apache License
@@ -1828,7 +1878,7 @@ Apache License
  limitations under the License.
 
 ==============================================================================
-License text 39
+License text 41
 Used by: sonner@2.0.7/LICENSE.md
 ==============================================================================
 MIT License
@@ -1854,7 +1904,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 40
+License text 42
 Used by: tailwind-merge@2.6.0/LICENSE.md
 ==============================================================================
 MIT License
@@ -1880,7 +1930,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-License text 41
+License text 43
 Used by: tslib@2.8.1/LICENSE.txt
 ==============================================================================
 Copyright (c) Microsoft Corporation.

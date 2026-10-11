@@ -23,6 +23,7 @@ class FileCapability:
     web_based: bool = False
     visual: bool = False
     office_family: str = ""
+    source_editable: bool = False
 
     @property
     def editable(self) -> bool:
@@ -53,6 +54,7 @@ def _capability(
         web_based=web_based,
         visual=visual,
         office_family=office_family,
+        source_editable=preview_kind == "html",
     )
 
 

@@ -1,4 +1,5 @@
 import codecs
+from .file_write_locks import locked_path, file_write_lock
 import fnmatch
 import hashlib
 import os
@@ -780,6 +781,7 @@ def read_text_file(
         return _build_error(action, "read_failed", str(exc), path=rel_path)
 
 
+@locked_path()
 def _atomic_write_bytes(abs_path, data, *, existed_before, expected_sha256=None):
     parent = os.path.dirname(abs_path)
     if parent:
@@ -847,23 +849,24 @@ def rename_path(workspace_dir, old_path, new_path, context=None, action="rename_
     new_key = _cache_key(abs_new)
 
     try:
-        os.rename(abs_old, abs_new)
-        state = _get_file_state(context)
-        reads = state.get("reads", {})
-        if isinstance(reads, dict):
-            moved_entry = reads.pop(old_key, None)
-            if moved_entry is not None:
-                reads[new_key] = moved_entry
-            prefix = old_key + os.sep
-            moved_children = [(key, value) for key, value in reads.items() if key.startswith(prefix)]
-            for key, value in moved_children:
-                reads.pop(key, None)
-                suffix = key[len(old_key) :]
-                reads[new_key + suffix] = value
-        return _build_ok(
-            action,
-            {"from_path": rel_old, "to_path": rel_new, "change_type": "rename"},
-        )
+        with file_write_lock(abs_old, abs_new):
+            os.rename(abs_old, abs_new)
+            state = _get_file_state(context)
+            reads = state.get("reads", {})
+            if isinstance(reads, dict):
+                moved_entry = reads.pop(old_key, None)
+                if moved_entry is not None:
+                    reads[new_key] = moved_entry
+                prefix = old_key + os.sep
+                moved_children = [(key, value) for key, value in reads.items() if key.startswith(prefix)]
+                for key, value in moved_children:
+                    reads.pop(key, None)
+                    suffix = key[len(old_key) :]
+                    reads[new_key + suffix] = value
+            return _build_ok(
+                action,
+                {"from_path": rel_old, "to_path": rel_new, "change_type": "rename"},
+            )
     except Exception as exc:
         return _build_error(action, "rename_failed", str(exc), path=rel_old)
 
@@ -897,28 +900,29 @@ def delete_path(workspace_dir, path, recursive=False, confirm_callback=None, con
 
     recursive_flag = bool(recursive)
     try:
-        if os.path.isfile(abs_path):
-            os.remove(abs_path)
-            clear_read_state(abs_path, context, recursive=False)
-            removed = "file"
-        elif os.path.isdir(abs_path):
-            if recursive_flag:
-                shutil.rmtree(abs_path)
-                removed = "directory_recursive"
+        with file_write_lock(abs_path):
+            if os.path.isfile(abs_path):
+                os.remove(abs_path)
+                clear_read_state(abs_path, context, recursive=False)
+                removed = "file"
+            elif os.path.isdir(abs_path):
+                if recursive_flag:
+                    shutil.rmtree(abs_path)
+                    removed = "directory_recursive"
+                else:
+                    os.rmdir(abs_path)
+                    removed = "directory"
+                clear_read_state(abs_path, context, recursive=True)
             else:
-                os.rmdir(abs_path)
-                removed = "directory"
-            clear_read_state(abs_path, context, recursive=True)
-        else:
-            return _build_error(action, "unknown_path_type", "Unknown path type.", path=rel_path)
-        return _build_ok(
-            action,
-            {
-                "path": rel_path,
-                "change_type": "delete",
-                "removed": removed,
-                "requires_confirmation": True,
-            },
-        )
+                return _build_error(action, "unknown_path_type", "Unknown path type.", path=rel_path)
+            return _build_ok(
+                action,
+                {
+                    "path": rel_path,
+                    "change_type": "delete",
+                    "removed": removed,
+                    "requires_confirmation": True,
+                },
+            )
     except Exception as exc:
         return _build_error(action, "delete_failed", str(exc), path=rel_path)

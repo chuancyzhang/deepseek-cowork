@@ -83,7 +83,19 @@ REQUIRED_PATHS = (
     "_internal/PySide6/QtPdf.pyd",
     "_internal/PySide6/QtPdfWidgets.pyd",
     "_internal/PySide6/QtWebChannel.pyd",
+    "_internal/PySide6/QtTest.pyd",
     "_internal/PySide6/QtWebEngineProcess.exe",
+    "_internal/winpty/conpty.dll",
+    "_internal/winpty/OpenConsole.exe",
+    "_internal/pywinpty-3.0.5.dist-info/licenses/LICENSE.txt",
+    "_internal/ai_skills/workbench/SKILL.md",
+    "_internal/ai_skills/workbench/impl.py",
+    "_internal/web/editors/dist/terminal.html",
+    "_internal/web/editors/dist/terminal.js",
+    "_internal/web/editors/dist/terminal.css",
+    "_internal/web/editors/dist/browser-automation.js",
+    "_internal/web/editors/dist/LICENSE-XTERM.txt",
+    "_internal/web/editors/dist/LICENSE-XTERM-FIT.txt",
     "_internal/web/editors/dist/docx.html",
     "_internal/web/editors/dist/docx-editor.js",
     "_internal/web/editors/dist/html.html",
@@ -143,6 +155,8 @@ def _forbidden_reason(relative: Path) -> str:
         return "compiled help file"
     if lowered.startswith("_internal/pyside6/qml/"):
         return "unused Qt QML tree"
+    if relative.parent.as_posix().lower() == "_internal" and basename.lower().startswith(("icuuc", "icuin", "icudt")) and lowered.endswith(".dll"):
+        return "root ICU shadows the Windows ICU required by Qt"
     if lowered.startswith("_internal/pyside6/resources/"):
         if ".debug." in basename.lower() or basename.lower().endswith(".debug"):
             return "Qt debug resource"
@@ -320,6 +334,8 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
     missing = [path for path in REQUIRED_PATHS if path not in paths]
     if missing:
         raise PackageAuditError("Missing required packaged files: " + ", ".join(missing))
+    if not any(path.startswith("_internal/winpty/_winpty") and path.endswith(".pyd") for path in paths):
+        raise PackageAuditError("Missing native pywinpty extension in _internal/winpty.")
 
     forbidden = [
         {"path": path.as_posix(), "reason": reason}

@@ -9,7 +9,7 @@ import re
 import sys
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
-from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata, collect_dynamic_libs, collect_data_files
 
 block_cipher = None
 
@@ -272,6 +272,11 @@ def _normalized_bundle_path(path):
 def _allow_qt_bundle_entry(entry):
     dest = _normalized_bundle_path(entry[0])
     lowered = dest.lower()
+    # Qt uses the unversioned Windows ICU API. A foreign ICU copied from PATH to the
+    # bundle root exports versioned symbols and prevents QtCore from loading.
+    # Keep each runtime's own nested ICU, and let Qt resolve the Windows DLL.
+    if "/" not in lowered and lowered.startswith(("icuuc", "icuin", "icudt")) and lowered.endswith(".dll"):
+        return False
     if not lowered.startswith("pyside6/"):
         return True
     if lowered.startswith("pyside6/qml/"):
@@ -711,6 +716,8 @@ def _collect_minimal_pyside6():
 qt_minimal_datas = _collect_minimal_pyside6()
 
 application_datas = []
+application_datas.extend(copy_metadata("pywinpty"))
+application_datas.extend(collect_data_files("winpty", includes=["*.exe"]))
 application_datas.append((os.path.join(SPEC_DIR, "bundled_plugins", "data_security", "NOTICE.txt"), "bundled_plugins/data_security"))
 application_datas.append((os.path.join(SPEC_DIR, "bundled_plugins", "data_security", "LICENSE.txt"), "bundled_plugins/data_security"))
 for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editors", "dist")):
@@ -756,6 +763,7 @@ pyside6_hidden = [
     "PySide6.QtSvg",
     "PySide6.QtWebChannel",
     "PySide6.QtWidgets",
+    "PySide6.QtTest",
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
 ]
@@ -773,10 +781,21 @@ qqbot_metadata = copy_metadata(
     str(qqbot_dist.metadata.get("Name") or "qqbot-agent-sdk")
 )
 
+# Resolve Windows dependencies from this Python installation and Windows, rather
+# than unrelated tools (e.g. Poppler) prepended to the caller's PATH. Package hooks
+# add their own library directories during analysis.
+original_build_path = os.environ.get("PATH", "")
+if os.name == "nt":
+    windows_root = os.environ.get("SystemRoot", r"C:\Windows")
+    os.environ["PATH"] = os.pathsep.join([
+        os.path.dirname(sys.executable), sys.base_prefix,
+        os.path.join(sys.base_prefix, "DLLs"),
+        os.path.join(windows_root, "System32"), windows_root,
+    ])
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=collect_dynamic_libs("winpty"),
     datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
     hiddenimports=(
         pyside6_hidden
@@ -784,6 +803,7 @@ a = Analysis(
         + MCP_ANALYSIS_HIDDENIMPORTS
         + DYNAMIC_SKILL_CORE_HIDDENIMPORTS
         + collect_submodules("bundled_plugins.data_security")
+        + collect_submodules("winpty", filter=lambda name: not name.startswith("winpty.tests"))
         + [
             'bs4',
             'yaml',
@@ -848,7 +868,6 @@ a = Analysis(
         'PySide6.QtSpatialAudio',
         'PySide6.QtStateMachine',
         'PySide6.QtSvgWidgets',
-        'PySide6.QtTest',
         'PySide6.QtTextToSpeech',
         'PySide6.QtUiTools',
         'PySide6.QtWebEngineQuick',
@@ -862,6 +881,7 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+os.environ["PATH"] = original_build_path
 a.datas = _filter_entries(a.datas, _allow_qt_bundle_entry, "Qt data")
 a.binaries = _filter_entries(a.binaries, _allow_qt_bundle_entry, "Qt binary")
 print(f"Bundled minimal python env entries: {len(python_env)}")

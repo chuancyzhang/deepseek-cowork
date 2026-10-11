@@ -12,6 +12,7 @@ await mkdir(output, { recursive: true });
 
 const buildResult = await build({
   entryPoints: {
+    "terminal": join(root, "src", "terminal.js"),
     "docx-editor": join(root, "src", "docx-editor.js"),
     "sheet-editor": join(root, "src", "sheet-editor.js")
   },
@@ -36,6 +37,8 @@ const buildResult = await build({
 });
 
 for (const name of [
+  "browser-automation.js",
+  "terminal.html",
   "docx.html",
   "sheet.html",
   "html.html",
@@ -59,6 +62,8 @@ if (
 }
 
 for (const [source, target] of [
+  [join(root, "node_modules", "@xterm", "xterm", "LICENSE"), "LICENSE-XTERM.txt"],
+  [join(root, "node_modules", "@xterm", "addon-fit", "LICENSE"), "LICENSE-XTERM-FIT.txt"],
   [join(root, "node_modules", "@hufe921", "canvas-editor", "LICENSE"), "LICENSE-CANVAS-EDITOR.txt"],
   [join(root, "node_modules", "@hufe921", "canvas-editor-plugin-docx", "LICENSE"), "LICENSE-CANVAS-EDITOR-DOCX.txt"],
   [join(root, "node_modules", "@univerjs", "preset-sheets-core", "LICENSE"), "LICENSE-UNIVER.txt"],

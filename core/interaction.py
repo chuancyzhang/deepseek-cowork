@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal
 import threading
 import time
 import uuid
+from core.tool_tasks import tool_interaction_wait
 
 
 def _utc_now_iso() -> str:
@@ -370,6 +371,7 @@ class InteractionService(QObject):
         self._lock = threading.Lock()
         self._pending: dict[str, dict[str, Any]] = {}
 
+    @tool_interaction_wait
     def create_request(
         self,
         session_id: str,

@@ -195,9 +195,9 @@ class TestAgentBootstrap(unittest.TestCase):
         self.assertEqual(requests[0]["messages"], [
             {"role": "system", "content": "You are a helpful software engineer assistant."}, TASK,
         ])
-        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["pwsh"])
+        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["pwsh", "wait_tool"])
         self.assertEqual(requests[1]["messages"][0]["content"], "NORMAL COWORK")
-        self.assertEqual([t["function"]["name"] for t in requests[1]["tools"]], ["read_file"])
+        self.assertEqual([t["function"]["name"] for t in requests[1]["tools"]], ["read_file", "wait_tool"])
         self.assertTrue(any("bootstrap command result" in str(m.get("content")) for m in requests[1]["messages"]))
         self.assertEqual(calls, [("read_file", {})])
         self.assertEqual((shell_calls, snapshot_calls), (1, 1))
@@ -471,7 +471,7 @@ class TestAgentBootstrap(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(shell_calls, 1)
         self.assertEqual(len(requests[0]["messages"]), 2)
-        self.assertEqual([tool["function"]["name"] for tool in requests[0]["tools"]], ["pwsh"])
+        self.assertEqual([tool["function"]["name"] for tool in requests[0]["tools"]], ["pwsh", "wait_tool"])
         self.assertTrue(any("Selected skill instructions: web" in str(m.get("content")) for m in requests[1]["messages"]))
         self.assertTrue(any("本次任务资料库上下文" in str(m.get("content")) for m in requests[1]["messages"]))
         replayed = next(m for m in requests[1]["messages"] if m.get("tool_calls"))

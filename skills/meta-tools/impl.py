@@ -1,5 +1,6 @@
 import json
 import time
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.tool_images import tool_image_content_parts
@@ -172,6 +173,7 @@ def parallel_tools(calls, max_concurrency=4, _context=None):
                 )
                 continue
             future = executor.submit(
+                contextvars.copy_context().run,
                 _execute_parallel_subcall,
                 index,
                 item["id"],

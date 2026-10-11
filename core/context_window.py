@@ -238,7 +238,9 @@ class ContextWindowManager:
             result = result if isinstance(result, dict) else {}
             tools.append({"message_id": message["id"], "tool_call_id": message.get("tool_call_id", ""),
                           "reported_status": str(result.get("status") or "result_saved")})
+        task_manager = getattr(self.worker, "tool_tasks", None)
         return {"session_id": self.session_id, "request_id": self.run_id,
+                "pending_tool_tasks": task_manager.snapshot() if task_manager else [],
                 "current_user_message_id": self.current_user_id, "workspace": self.worker.workspace_dir,
                 "source_message_count": len(source),
                 "covered_from": source[0]["id"] if source else "",

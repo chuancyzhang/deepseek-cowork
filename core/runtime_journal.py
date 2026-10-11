@@ -873,6 +873,18 @@ class RuntimeJournal:
     def get_tool(self, session_id, execution_id):
         return self._read(self._record_path(session_id, "tools", execution_id), default=None)
 
+    def list_background_tools(self, session_id):
+        """Execution evidence only; records never authorize resuming an operation."""
+        directory = self._category_dir(session_id, "tools")
+        with self.session_lock(session_id):
+            records = []
+            for filename in os.listdir(directory):
+                if filename.endswith(".json"):
+                    record = self._read(os.path.join(directory, filename), default=None)
+                    if isinstance(record, dict) and record.get("background_tool"):
+                        records.append(record)
+        return sorted(records, key=lambda item: float(item.get("created_at") or 0))
+
     def find_tool_execution(
         self,
         session_id,

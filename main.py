@@ -25158,11 +25158,15 @@ class ToolCallCard(QFrame):
         )
         if self.is_finished:
             self.status_icon.setPixmap(
-                qta.icon("fa5s.check-circle", color=DesignTokens.success_accent).pixmap(
+                qta.icon("fa5s.exclamation-circle" if self.failed else "fa5s.check-circle",
+                         color=DesignTokens.error_text if self.failed else DesignTokens.success_accent).pixmap(
                     DesignTokens.icon_size_sm,
                     DesignTokens.icon_size_sm,
                 )
             )
+        elif getattr(self, "_background_pending", False):
+            self.status_icon.setPixmap(qta.icon("fa5s.hourglass-half", color=DesignTokens.status_running).pixmap(
+                DesignTokens.icon_size_sm, DesignTokens.icon_size_sm))
         else:
             self.status_icon.setPixmap(
                 qta.icon(
@@ -25393,15 +25397,30 @@ class ToolCallCard(QFrame):
             """)
 
     def set_result(self, result_text, result_obj=None):
+        from core.tool_tasks import is_pending_tool_result
+        pending = is_pending_tool_result(result_obj)
         failed = tool_result_status(result_obj if result_obj is not None else result_text) in {"error", "partial"}
-        if failed:
+        if pending:
+            self.status_icon.setPixmap(qta.icon('fa5s.hourglass-half', color=DesignTokens.status_running).pixmap(14, 14))
+            seconds = max(0, int(result_obj.get("elapsed_seconds") or 0))
+            label = "排队中，前序工具完成后执行" if result_obj.get("status") == "queued" else f"仍在运行，已等待 {seconds // 60} 分 {seconds % 60} 秒"
+            self.args_preview_label.setText(label)
+            self.args_preview_label.setWordWrap(True)
+        elif failed:
             self.status_icon.setPixmap(qta.icon('fa5s.exclamation-circle', color=DesignTokens.error_text).pixmap(14, 14))
         else:
             self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
+        if not pending and getattr(self, "_background_pending", False):
+            self.args_preview_label.setText("执行失败，查看详情" if failed else "工具已完成，结果已返回")
+        if isinstance(result_obj, dict) and result_obj.get("status") == "unknown":
+            self.args_preview_label.setText("执行已中断，结果尚未确认")
+        elif isinstance(result_obj, dict) and result_obj.get("status") == "cancelled":
+            self.args_preview_label.setText("已取消，未执行" if result_obj.get("not_executed") else "已取消，查看详情")
+        self._background_pending = pending
         self.result = result_text
         self.result_obj = result_obj
         self.failed = failed
-        self.is_finished = True
+        self.is_finished = not pending
         
         if not self.is_selected:
             self.set_selected(False)
@@ -31979,6 +31998,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 "runtime_context",
                 "runtime_context_update",
                 "runtime_instruction",
+                "tool_completion",
                 "skill_context",
                 "skill_context_update",
                 "skill_state_update",
@@ -49469,6 +49489,10 @@ a {{ overflow-wrap: anywhere; }}
         previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
         previous_render_total = len(getattr(state, "render_items", []) or [])
         timeline_status = "interrupted" if str(outcome or "") == "interrupted" else "failed"
+        for card in (getattr(state, "tool_cards", {}) or {}).values():
+            if getattr(card, "_background_pending", False):
+                result = {"status": "unknown", "content": "已请求停止工具，结果尚未确认；已有输出已保留。"}
+                card.set_result(json.dumps(result, ensure_ascii=False), result_obj=result)
         self._timeline_close_open_events(state, status=timeline_status)
         self._timeline_append_event(
             state,
@@ -52674,10 +52698,13 @@ a {{ overflow-wrap: anywhere; }}
             self.refresh_step_list(state.session_id)
             return
         card.set_result(result, result_obj=data.get("result_obj"))
+        if not card.is_finished and (meta or {}).get("waiting"):
+            card.args_preview_label.setText("AI 正在继续等待工具结果")
         timeline_event = self._timeline_find_event(state, kind="tool", tool_call_id=tool_id)
         if timeline_event is not None:
-            timeline_event["status"] = "failed" if card.failed else "completed"
-            timeline_event["finished_at"] = time.time()
+            timeline_event["status"] = "running" if not card.is_finished else "failed" if card.failed else "completed"
+            if card.is_finished:
+                timeline_event["finished_at"] = time.time()
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")

@@ -32,9 +32,11 @@ def tool_result_status(value):
     if not isinstance(value, dict):
         return "done"
     status = str(value.get("status") or "").lower()
+    if value.get("background_tool") is True and status in {"running", "queued"}:
+        return "running"
     if status == "partial_apply":
         return "partial"
-    if value.get("ok") is False or status in {"error", "failed"}:
+    if value.get("ok") is False or status in {"error", "failed", "unknown", "cancelled"}:
         return "error"
     return "done"
 

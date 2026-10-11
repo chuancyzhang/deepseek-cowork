@@ -33,6 +33,7 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
     scope_end = end
     while scope_end < len(messages) and not starts_scope(messages[scope_end]):
         scope_end += 1
+    completion_sources = messages
     messages = messages[scope_start:scope_end]
     # Display projections only. Never mutate provider/native replay history.
     messages = [
@@ -41,6 +42,45 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
         and isinstance(message.get("meta"), dict) and "security_display_content" in message["meta"]
         else message for message in messages
     ]
+    # Completion events update display copies of the original tool cards only.
+    # The provider ledger retains its immutable running acknowledgement.
+    completed_tasks = {}
+    interrupted_tools = {
+        str(event.get("tool_call_id")): event for event in timeline_events
+        if isinstance(event, dict) and event.get("tool_call_id")
+        and event.get("status") in {"interrupted", "cancelled", "failed", "stopped"}
+    }
+    for message in completion_sources:
+        if not isinstance(message, dict):
+            continue
+        meta = message.get("meta") or {}
+        result = message.get("result_obj") or {}
+        if meta.get("kind") == "tool_completion":
+            completed_tasks[meta.get("task_id")] = (message.get("result_obj"), meta,
+                                                     meta.get("result_text", ""))
+        elif (isinstance(result, dict) and result.get("background_tool") is True
+              and result.get("status") == "completed"):
+            value = result.get("result")
+            completed_tasks[result.get("task_id")] = (value, {}, "")
+    for index, message in enumerate(messages):
+        result = message.get("result_obj") if isinstance(message, dict) else None
+        if not isinstance(result, dict) or result.get("background_tool") is not True:
+            continue
+        completion = completed_tasks.get(result.get("task_id"))
+        if completion is None and str(message.get("tool_call_id")) in interrupted_tools:
+            value = {"status": "unknown", "content": "工具执行已中断，结果尚未确认；请先只读核实。"}
+            completion = (value, {}, "")
+        if result.get("status") not in {"running", "queued"} or completion is None:
+            continue
+        value, completion_meta, text = completion
+        projected_message = copy.deepcopy(message)
+        projected_message["result_obj"] = value if isinstance(value, dict) else None
+        projected_message["content"] = text or (json.dumps(value, ensure_ascii=False, default=str)
+                                                if isinstance(value, dict) else str(value))
+        projected_message["meta"] = {**(message.get("meta") or {}),
+                                     **{key: completion_meta[key] for key in ("start_time", "end_time", "duration")
+                                        if key in completion_meta}}
+        messages[index] = projected_message
     start -= scope_start
     end -= scope_start
     slots = [[message] for message in messages]
@@ -268,6 +308,7 @@ def _is_hidden_context_message(message):
             "runtime_context",
             "runtime_context_update",
             "runtime_instruction",
+            "tool_completion",
             "skill_context",
             "skill_context_update",
             "skill_state_update",

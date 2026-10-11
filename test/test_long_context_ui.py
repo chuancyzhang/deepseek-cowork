@@ -134,6 +134,23 @@ class TestLongContextUI(unittest.TestCase):
         self.assertEqual(popover.capacity_value.text(), "待统计")
         self.assertEqual(popover.capacity_bar._segments, [])
 
+    def test_unestimated_images_note_remains_readable(self):
+        anchor = self.widget(QWidget())
+        anchor.resize(380, 500)
+        anchor.show()
+        popover = self.widget(TokenUsagePopover(anchor))
+        data = format_token_usage_overview({}, {}, {}, {}, {}, {}, False)
+        budget = ContextBudget.from_profile({"context_window_tokens": 128000}, normalize_policy({"enabled": True}))
+        data["capacity"] = format_capacity({**budget.snapshot(18000), "run_id": "r", "unestimated_images": 2},
+            policy={"enabled": True}, active_run_id="r")
+        popover.set_overview(data)
+        popover.show_for(anchor)
+        self.app.processEvents()
+        self.assertIn("2 张图片未计入", data["capacity"]["note"])
+        self.assertNotIn("暂缓", data["capacity"]["note"])
+        self.assertTrue(popover.capacity_box.isVisible())
+        self.capture("image-budget", popover)
+
     def test_notice_same_identity_order_and_no_ledger_entry(self):
         host = self.widget(QWidget())
         layout = QVBoxLayout(host)

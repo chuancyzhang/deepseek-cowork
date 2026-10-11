@@ -2690,7 +2690,7 @@ class LLMWorker(QThread):
             self.run_context.get("selected_model_id"))
         try:
             budget = ContextBudget.from_profile(profile, self.long_context_policy)
-            used = estimate_request(messages, self.tools)
+            used = estimate_request(messages, self.tools, model_name=profile.get("model_name", ""))
         except ContextError:
             return  # With the feature off, unknown estimates use the original provider path.
         if used > budget.model_tokens - budget.output_tokens - budget.safety_tokens:
@@ -3037,9 +3037,6 @@ class LLMWorker(QThread):
                 name, args, self.bootstrap.call_tool, context,
                 lambda: self.bootstrap.call_tool(name, args, {**context, "abort_check": lambda: self.is_stopped}),
             )
-        if name in {"history_search", "history_read"} and self.context_window_manager is not None:
-            self.context_window_manager.persist_history()
-            context = {**context, "context_window_manager": self.context_window_manager}
         return self.skill_manager.call_tool(name, args, context=context)
 
     def _ensure_tool_tasks(self):
@@ -3142,6 +3139,13 @@ class LLMWorker(QThread):
             finally:
                 self._drain_tool_events()
         context = dict(context)
+        if (not self.bootstrap.active and name in {"history_search", "history_read"}
+                and self.context_window_manager is not None):
+            # The run owner crosses the save barrier before starting a reader.
+            # Background invokers must inherit this context without mutating the
+            # manager or bypassing its persistence boundary during dispatch.
+            self.context_window_manager.persist_history()
+            context["context_window_manager"] = self.context_window_manager
         for signal in ("step_signal", "observability_signal", "agent_state_signal"):
             context[signal] = ToolEventSignal(manager, signal)
         context["abort_check"] = lambda: self.is_stopped or manager.closed.is_set()

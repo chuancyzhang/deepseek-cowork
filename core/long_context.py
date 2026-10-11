@@ -1,4 +1,4 @@
-"""Opt-in context policy and conservative request budgets (no UI or IO)."""
+"""Opt-in context policy and request budgets; provider payloads stay unchanged."""
 
 import copy
 import json
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .context_usage import _text_weight, estimate_context_usage
+from .context_images import ImageBudgetUnavailable, image_token_budget
 
 
 TARGETS = (300_000, 1_000_000)
@@ -39,26 +40,52 @@ def text_tokens(value):
     return _text_weight(value)
 
 
-def estimate_request(messages, tools):
-    snapshot = estimate_context_usage(messages, tools)
-    if snapshot.get("has_media"):
-        raise ContextError("当前请求含尚无法估算的图片或媒体，超长上下文暂不可用。请移除媒体或关闭实验功能后重试。")
-    # Include opaque protocol replay and text attachments in the budget. File/image
-    # expansion is explicitly blocked until it has a provider-specific estimator.
+def estimate_request(messages, tools, *, model_name="", image_stats=None):
+    # This projection is for counting only: image bytes and detail stay intact
+    # in the actual request. Unknown image rules do not block text budgeting.
+    text_messages, image_tokens, unestimated_images = [], 0, 0
+    for message in messages:
+        projected = dict(message)
+        content = message.get("content") or ""
+        texts = [content] if isinstance(content, str) else []
+        groups = [(content, False)] if isinstance(content, list) else []
+        groups.append((message.get("content_parts") or [], True))
+        for parts, attachment in groups:
+            for part in parts:
+                if not isinstance(part, dict):
+                    raise ContextError("附件内容块无效，无法估算上下文。")
+                kind = part.get("type")
+                if kind in {"text", "input_text", "output_text"}:
+                    texts.append(str(part.get("text") or ""))
+                elif kind in {"input_image", "image_url", "image"}:
+                    try:
+                        # User attachments are sent by the existing adapter at
+                        # auto detail; tool results preserve their own detail.
+                        image_tokens += image_token_budget(part, model_name,
+                            detail="auto" if attachment and message.get("role") == "user" else None)
+                    except ImageBudgetUnavailable:
+                        unestimated_images += 1
+                elif kind == "output_image" and message.get("role") == "assistant":
+                    continue  # UI asset, not an input image in provider replay.
+                else:
+                    raise ContextError("当前附件类型尚无法估算，请用工具读取正文或关闭超长上下文后重试。")
+        projected["content"] = "\n".join(texts)
+        projected.pop("content_parts", None)
+        text_messages.append(projected)
+    snapshot = estimate_context_usage(text_messages, tools)
+    # Include opaque protocol replay in addition to plain text.
     replay = 0
     whitespace = 0
-    for message in messages:
+    for message in text_messages:
         meta = message.get("meta") or {}
         whitespace += len(re.findall(r"\s", str(message.get("content") or "")))
         for key, value in meta.items():
             if "replay" in key:
                 replay += text_tokens(value)
-        parts = message.get("content")
-        if isinstance(parts, list) and any(p.get("type") not in {"text", "input_text", "output_text"}
-                                          for p in parts if isinstance(p, dict)):
-            raise ContextError("附件内容尚无法可靠估算，请移除附件或关闭实验功能后重试。")
-    estimate = int((snapshot["total"] + replay + (whitespace + 3) // 4) * 1.15)
+    estimate = int((snapshot["total"] + replay + image_tokens + (whitespace + 3) // 4) * 1.15)
     estimate += len(messages) * 12 + len(tools or []) * 16
+    if image_stats is not None:
+        image_stats.update(image_tokens=image_tokens, unestimated_images=unestimated_images)
     return max(1, estimate)
 
 
@@ -192,6 +219,8 @@ def format_capacity(snapshot, *, policy=None, active_run_id=""):
         note += f"目标 {compact(snapshot.get('target_tokens', effective))}，受当前模型容量、输出预留和安全余量限制。"
     if current and (not policy["enabled"] or policy["target_tokens"] != snapshot.get("target_tokens")):
         note += "新设置下一轮生效。"
+    if snapshot.get("unestimated_images"):
+        note += f"有 {snapshot['unestimated_images']} 张图片未计入本地估算。"
     return {"visible": True, "value": f"约 {compact(used)} / {compact(effective)} tokens · {used / effective:.0%}",
-            "note": note + "文本估算，实际用量以服务返回为准。",
+            "note": note + "上下文估算，实际用量以服务返回为准。",
             "segments": [(min(used, effective), "accent_ai"), (max(0, effective - used), "bg_tertiary")]}

@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,10 +21,11 @@ from test_long_context import checkpoint
 
 
 class ContextSkills(SkillStub):
-    def __init__(self):
+    def __init__(self, tool_result=None):
         super().__init__()
         self.tool_registry = ToolRegistry()
         self.tools, self.tool_records = {}, {}
+        self.tool_result = tool_result
 
     def get_tool_definitions(self, **kwargs):
         return super().get_tool_definitions(**kwargs) + self.tool_registry.definitions()
@@ -32,6 +34,8 @@ class ContextSkills(SkillStub):
         if name in self.tools:
             return self.tools[name](**args, _context=context)
         self.calls.append((name, copy.deepcopy(args)))
+        if self.tool_result is not None:
+            return copy.deepcopy(self.tool_result)
         return {"status": "success", "content": "evidence " * 350}
 
 
@@ -65,7 +69,7 @@ class ContextProvider:
 
 
 class TestLongContextAgent(unittest.TestCase):
-    def run_agent(self, enabled, rounds=0):
+    def run_agent(self, enabled, rounds=0, provider=None, tool_result=None):
         from main import MainWindow
         self.app = QApplication.instance() or QApplication([])
         profile = {"id": "test", "model_name": "test-model", "base_url": "https://example.test/v1",
@@ -75,7 +79,7 @@ class TestLongContextAgent(unittest.TestCase):
                    {"id": "old", "role": "assistant", "content": "older findings " * 8000},
                    {"id": "recent", "role": "assistant", "content": "Ready to continue."},
                    {"id": "u1", "role": "user", "content": "Continue the task."}]
-        provider, skills = ContextProvider(rounds), ContextSkills()
+        provider, skills = provider or ContextProvider(rounds), ContextSkills(tool_result)
         events, results = [], []
         with tempfile.TemporaryDirectory() as directory:
             storage = ChatStorage(os.path.join(directory, "chat_history.sqlite"))
@@ -143,6 +147,80 @@ class TestLongContextAgent(unittest.TestCase):
         self.assertTrue(any(e.get("type") == "llm_usage" and e["usage"].get("purpose") == "context_checkpoint" for e in events))
         self.assertTrue(any(e.get("type") == "context_capacity" and e["capacity"].get("phase") == "finished" for e in events))
         self.assertFalse(any(m.get("meta", {}).get("kind") == "context_checkpoint" for m in result["generated_messages"]))
+
+    def test_browser_image_result_reaches_next_model_request_with_context_enabled(self):
+        from PIL import Image
+        from core.llm.providers import OpenAIProvider
+        from core.tool_images import persist_tool_image
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "screenshot.png")
+            Image.new("RGB", (1920, 1080), "white").save(path)
+            part = persist_tool_image(path, directory, "s")
+            browser_result = {"status": "success", "content": "Page text", "content_parts": [part]}
+            for model in ("gpt-5.6-sol", "unlisted-vision-model"):
+                with self.subTest(model=model):
+                    provider = ContextProvider(1)
+                    provider.model_name = model
+                    provider, skills, events, result, active = self.run_agent(True, provider=provider, tool_result=browser_result)
+                    self.assertEqual(len(provider.main_requests), 2)
+                    message = next(m for m in provider.main_requests[-1]["messages"] if m.get("role") == "tool")
+                    self.assertEqual(message["content_parts"], [part])
+                    # Exercise the actual Responses wire projection as well as
+                    # the Agent loop; there must still be an image in the result.
+                    encoder = OpenAIProvider.__new__(OpenAIProvider)
+                    encoder.supports_vision = True
+                    wire = encoder._prepare_responses_input([message])
+                    image = next(p for p in wire[0]["output"] if p["type"] == "input_image")
+                    self.assertTrue(image["image_url"].startswith("data:image/png;base64,"))
+                    self.assertEqual(image["detail"], part["detail"])
+                    capacity = [e["capacity"] for e in events if e.get("type") == "context_capacity"][-1]
+                    self.assertEqual(capacity["status"], "available")
+                    self.assertEqual(capacity["unestimated_images"], int(model == "unlisted-vision-model"))
+                    self.assertTrue(all(e["ok"] for e in events if e.get("type") == "conversation_prefix_check"))
+
+    def test_managed_history_tools_read_saved_results_after_rollover(self):
+        from core.context_window import ContextWindowManager
+        owner = threading.get_ident()
+        barriers = []
+        original = ContextWindowManager.persist_history
+
+        def persist(manager, *args, **kwargs):
+            barriers.append(threading.get_ident())
+            return original(manager, *args, **kwargs)
+
+        class HistoryProvider(ContextProvider):
+            def chat_stream(inner, messages, tools=None, prompt_cache_key=None, request_context=None):
+                if request_context.get("tools_disabled"):
+                    yield from super().chat_stream(messages, tools, prompt_cache_key, request_context)
+                    return
+                inner.main_requests.append(copy.deepcopy(messages))
+                turn = len(inner.main_requests)
+                if turn == 1:
+                    name, args = "read_file", {"step": 0}
+                elif turn == 2:
+                    name, args = "history_search", {"query": "evidence"}
+                elif turn == 3:
+                    found = next(m["result_obj"] for m in reversed(messages) if m.get("role") == "tool")
+                    self.assertIn("matches", found)
+                    match = next(m for m in found["matches"] if m["role"] == "tool")
+                    name, args = "history_read", {"message_id": match["id"], "length": 100}
+                else:
+                    result = next(m["result_obj"] for m in reversed(messages) if m.get("role") == "tool")
+                    self.assertIn("evidence", result["content"])
+                    self.assertEqual(len(result["content"]), 100)
+                    yield {"type": "content", "content": "Saved evidence recovered."}
+                    return
+                yield {"type": "tool_call", "index": 0, "id": f"history-{turn}", "function": {
+                    "name": name, "arguments": json.dumps(args)}}
+
+        with patch.object(ContextWindowManager, "persist_history", persist):
+            provider, skills, events, result, active = self.run_agent(True, provider=HistoryProvider(0))
+        self.assertIsNotNone(active)
+        self.assertEqual(len(provider.main_requests), 4)
+        self.assertEqual(result["content"], "Saved evidence recovered.")
+        self.assertGreaterEqual(len(barriers), 3)  # rollover + both history queries
+        self.assertEqual(set(barriers), {owner})
+        self.assertTrue(all(e["ok"] for e in events if e.get("type") == "conversation_prefix_check"))
 
 
 if __name__ == "__main__":

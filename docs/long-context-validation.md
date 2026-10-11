@@ -48,4 +48,14 @@
 
 输出预留沿用各协议的请求字段：OpenAI 官方 Chat Completions 使用 `max_completion_tokens`，兼容服务使用 `max_tokens`，Responses 使用 `max_output_tokens`，Anthropic 使用 `max_tokens`。OpenAI 官方字段同时限制可见输出和 reasoning tokens，依据[官方 API 定义](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)及本地 SDK 核对；没有为兼容错误增加自动切换协议或重复请求。
 
-当前限制：容量是估算，未对所有模型逐一校准；多模态预算不可用时明确拒绝开启该请求的压缩；此轮未构建冻结发行包。
+当前限制：容量是估算，未对所有模型逐一校准；没有计量规则或无法取得尺寸的图片不计入本地预算，文本仍正常统计和压缩，图片继续按原流程发送；其他未支持的附件类型仍明确报错。此轮未构建冻结发行包。
+
+## 历史查询与图片组合回归（2026-10-11）
+
+后台工具入口现在先由运行所有者完成历史保存屏障，再把绑定本会话的上下文传入冻结调用器。Agent Loop 回归覆盖压缩换窗、生成新的工具证据、`history_search` 检索和 `history_read` 分页读取，并检查保存发生在运行所有者线程；保存失败时不启动后台读取。
+
+图片估算只作用于预算副本，未修改图片精度、实际请求或聊天账本。已知 GPT 模型按[官方图片计量规则](https://developers.openai.com/api/docs/guides/images-vision)估算，Claude 按[官方视觉计量规则](https://platform.claude.com/docs/en/build-with-claude/vision)估算；缩放后的分块数采用上界，仍由实际用量向上校准。未知模型不读取图片文件、不猜测图片用量，仅记录未计入数量。远程图片不为估算额外下载。
+
+新增用例覆盖：短图片请求、纯文本内容块、图片原样进入下一轮及实际 Responses 投影、已知与未知模型的文本换窗、最近完整工具轮次保留、原始账本不变、窗口内前缀稳定，以及未计量图片在用量浮窗中的说明。此轮使用离线 Provider 模拟和实际协议序列化，不将结果宣称为真实模型理解验收。
+
+运行入口：`test_long_context*.py`（37 项）、`test_context_images.py`（4 项）、`test_tool_tasks*.py`（23 项），全部通过。用量浮窗另在 100% 和 150% 下验证，未计量图片提示截图见[100% 用量说明](images/long-context/image-budget.png)、[150% 用量说明](images/long-context/image-budget-150.png)。

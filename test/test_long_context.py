@@ -319,6 +319,63 @@ class TestContextManager(ContextFixture):
         self.assertEqual(self.summary_requests, [])
         self.assertIsNone(self.storage.get_context_window("s"))
 
+    def test_unknown_image_budget_keeps_request_and_reports_partial_estimate(self):
+        from PIL import Image
+        manager = self.make_manager()
+        path = os.path.join(self.temp.name, "image.png")
+        Image.new("RGB", (1024, 1024)).save(path)
+        current = [{"role": "system", "content": "stable"}, *self.messages,
+                   {"id": "image", "role": "user", "content": "Describe the image.",
+                    "content_parts": [{"type": "input_image", "path": path}]}]
+        original = copy.deepcopy(current)
+        provider = SimpleNamespace(model_name="unlisted-vision-model")
+        for _ in range(2):
+            projected, switched = manager.prepare(current, [], [], provider)
+            self.assertFalse(switched)
+            self.assertEqual(projected, original)
+        self.assertEqual(current, original)
+        manager.stream_snapshot("partial answer")
+        manager.update_snapshot(current, [], "finished")
+        self.assertEqual(self.events[-1]["capacity"]["status"], "available")
+        self.assertEqual(self.events[-1]["capacity"]["unestimated_images"], 1)
+        self.assertIn("1 张图片未计入", format_capacity(self.events[-1]["capacity"])["note"])
+        self.assertEqual(self.summary_requests, [])
+        self.assertIsNone(manager.window)
+        self.assertFalse(any(e.get("phase") == "failed" for e in self.events))
+        # A later budgeted request restores the normal estimate and behavior.
+        projected, switched = manager.prepare(current, [], [], SimpleNamespace(model_name="gpt-5.6-sol"))
+        self.assertEqual(projected, original)
+        self.assertFalse(switched)
+        self.assertEqual(self.events[-1]["capacity"]["status"], "available")
+        self.assertEqual(self.events[-1]["capacity"]["unestimated_images"], 0)
+        self.assertGreater(self.events[-1]["capacity"]["used_tokens"], 1229)
+        # No rule for images must not disable ordinary text compaction either.
+        large = [*current[:2], {"id": "old-text", "role": "assistant", "content": "findings " * 30000},
+                 {"id": "recent-text", "role": "assistant", "content": "Ready to inspect."}, current[-1]]
+        projected, switched = manager._prepare_once(large, large[2:], [], provider)
+        self.assertTrue(switched)
+        self.assertEqual(projected[-1], original[-1])
+        self.assertTrue(self.summary_requests)
+        self.assertEqual(self.events[-2]["capacity"]["unestimated_images"], 1)
+
+    def test_known_image_survives_rollover_and_recent_tool_pair_is_complete(self):
+        from PIL import Image
+        manager = self.make_manager()
+        path = os.path.join(self.temp.name, "screenshot.png")
+        Image.new("RGB", (1920, 1080)).save(path)
+        recent = [
+            {"id": "call", "role": "assistant", "content": "Inspect page", "tool_calls": [
+                {"id": "observe", "type": "function", "function": {"name": "observe", "arguments": "{}"}}]},
+            {"id": "screenshot", "role": "tool", "tool_call_id": "observe", "content": "Page text",
+             "content_parts": [{"type": "input_image", "path": path, "detail": "auto"}]}]
+        current = [{"role": "system", "content": "stable"}, *self.messages,
+                   {"id": "old", "role": "assistant", "content": "old findings " * 20000}, *recent]
+        projected, switched = manager._prepare_once(current, current[2:], [], SimpleNamespace(model_name="gpt-5.6-sol"))
+        self.assertTrue(switched)
+        self.assertEqual(projected[-2:], recent)
+        self.assertEqual(self.storage.context_history_read("s", "screenshot")["content"], "Page text")
+        self.assertLess(manager.estimate(projected, []), manager.budget.trigger_tokens)
+
 
 class TestContextBudget(unittest.TestCase):
     def test_default_policy_and_capacity_limits(self):
@@ -331,8 +388,9 @@ class TestContextBudget(unittest.TestCase):
         self.assertLess(budget.trigger_tokens, budget.effective_tokens)
         with self.assertRaises(ContextError):
             ContextBudget.from_profile({}, policy)
-        with self.assertRaises(ContextError):
-            estimate_request([{"role": "user", "content_parts": [{"type": "image"}]}], [])
+        stats = {}
+        estimate_request([{"role": "user", "content_parts": [{"type": "image"}]}], [], image_stats=stats)
+        self.assertEqual(stats["unestimated_images"], 1)
 
     def test_checkpoint_refs_and_length(self):
         self.assertEqual(validate_checkpoint(json.dumps(checkpoint(["m"])), {"m"})["refs"], ["m"])

@@ -6,6 +6,18 @@ import test_deepseek_provider as helpers
 
 
 class TestContextProviderContract(unittest.TestCase):
+    def test_history_save_failure_does_not_start_background_reader(self):
+        from core.agent import LLMWorker
+        manager = SimpleNamespace(submit=Mock())
+        worker = SimpleNamespace(
+            _ensure_tool_tasks=lambda: manager,
+            bootstrap=SimpleNamespace(active=False),
+            context_window_manager=SimpleNamespace(persist_history=Mock(side_effect=RuntimeError("save failed"))))
+        with self.assertRaisesRegex(RuntimeError, "save failed"):
+            LLMWorker._run_managed_tool(worker, "history_read", {"message_id": "m"},
+                {"tool_call_id": "call"}, "execution", {"read_only": True}, None)
+        manager.submit.assert_not_called()
+
     def test_summary_disables_native_search_and_image_tools_with_output_limit(self):
         provider, client = helpers.TestOpenAIProviderDeepSeek._build_provider(self,
             api_protocol="responses", supports_image_generation=True)

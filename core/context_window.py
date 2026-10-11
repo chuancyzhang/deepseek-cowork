@@ -23,6 +23,7 @@ class ContextWindowManager:
         profile = worker.run_context.get("selected_model_profile") or worker.config_manager.get_model_profile(
             worker.run_context.get("selected_model_id"))
         self.budget = ContextBudget.from_profile(profile, policy, worker.config_manager)
+        self.model_name = str(profile.get("model_name") or "")
         self.window = self.storage.get_context_window(self.session_id)
         run = worker.runtime_journal.get_run(self.session_id, self.run_id) or {}
         initial_user = self._latest_user(getattr(worker, "messages", [])) or {}
@@ -37,6 +38,7 @@ class ContextWindowManager:
         self.stream_tokens = 0
         self.rollover_id = ""
         self.provider = None
+        self.image_budget = {}
 
     def check_cancelled(self):
         if self.worker.is_stopped:
@@ -57,7 +59,7 @@ class ContextWindowManager:
         self.last_used = used
         self.stream_tokens = 0
         value = self.budget.snapshot(used, window_id=self.window["id"] if self.window else "", phase=phase)
-        value.update(updated_at=time.time(), run_id=self.run_id)
+        value.update(updated_at=time.time(), run_id=self.run_id, **self.image_budget)
         self.worker.observability_signal.emit({"type": "context_capacity", "capacity": value})
         return value
 
@@ -65,7 +67,10 @@ class ContextWindowManager:
         if (getattr(self.provider, "api_protocol", "") == "responses"
                 and callable(getattr(self.provider, "_prepare_responses_tools", None))):
             tools = self.provider._prepare_responses_tools(tools)
-        return int(estimate_request(messages, tools) * self.estimate_factor)
+        self.image_budget = {}
+        return int(estimate_request(messages, tools,
+            model_name=getattr(self.provider, "model_name", "") or self.model_name,
+            image_stats=self.image_budget) * self.estimate_factor)
 
     def stream_snapshot(self, delta):
         self.stream_tokens += text_tokens(delta)
@@ -75,7 +80,7 @@ class ContextWindowManager:
         self.last_stream_update = now
         value = self.budget.snapshot(self.last_used + self.stream_tokens,
                                     window_id=self.window["id"] if self.window else "", phase="generating")
-        value.update(updated_at=time.time(), run_id=self.run_id)
+        value.update(updated_at=time.time(), run_id=self.run_id, **self.image_budget)
         self.worker.observability_signal.emit({"type": "context_capacity", "capacity": value})
 
     def observe_usage(self, usage):

@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from core.config_manager import ConfigManager
 from core.long_context import ContextBudget, format_capacity, normalize_policy
@@ -97,12 +97,19 @@ class TestLongContextUI(unittest.TestCase):
         self.assertIn("保存失败", panel.result.text())
         self.assertEqual(panel.apply_button.text(), "启用")
 
-    def test_model_capacity_survives_channel_normalization(self):
+    def test_model_editor_needs_no_capacity_and_preserves_existing_metadata(self):
         dialog = self.widget(ModelEditDialog("openai", model={"id": "test", "model_name": "test"}))
-        dialog.context_capacity_input.setText("128000")
-        dialog.output_reserve_input.setText("4096")
+        item = dialog.get_model("test")
+        self.assertNotIn("context_window_tokens", item)
+        self.assertNotIn("max_output_tokens", item)
+        self.assertFalse(any("上下文容量" in label.text() or "输出预留" in label.text()
+                             for label in dialog.findChildren(QLabel)))
+        self.capture("model-editor", dialog)
+        existing = self.widget(ModelEditDialog("openai", model={**item,
+            "context_window_tokens": 128000, "max_output_tokens": 4096}))
+        existing.display_name_input.setText("Renamed model")
         channels = self.config.get_model_channels()
-        channels[0]["models"] = [dialog.get_model("test")]
+        channels[0]["models"] = [existing.get_model("test")]
         self.config.set_model_channels(channels, "test")
         profile = ConfigManager().get_model_profile("test")
         self.assertEqual(profile["context_window_tokens"], 128000)
@@ -115,13 +122,14 @@ class TestLongContextUI(unittest.TestCase):
         popover = self.widget(TokenUsagePopover(anchor))
         data = format_token_usage_overview({"total_tokens": 700000, "input_tokens": 650000, "output_tokens": 50000},
                                           {}, {}, {}, {}, {}, False)
-        budget = ContextBudget.from_profile({"context_window_tokens": 1000000}, normalize_policy({"enabled": True}))
+        budget = ContextBudget.from_profile({"model_name": "custom-model"}, normalize_policy({"enabled": True}))
         data["capacity"] = format_capacity({**budget.snapshot(186000), "run_id": "r"},
             policy={"enabled": True}, active_run_id="r")
         popover.set_overview(data)
         popover.show_for(anchor)
         self.app.processEvents()
         self.assertIn("62%", popover.capacity_value.text())
+        self.assertIn("沿用设置", data["capacity"]["note"])
         self.assertIn("700", popover.metrics["total"][1].text())
         self.assertTrue(popover.capacity_box.isVisible())
         self.assertLessEqual(popover.width(), anchor.screen().availableGeometry().width())

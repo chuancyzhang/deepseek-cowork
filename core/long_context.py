@@ -92,12 +92,14 @@ def estimate_request(messages, tools, *, model_name="", image_stats=None):
 @dataclass(frozen=True)
 class ContextBudget:
     target_tokens: int
-    model_tokens: int
+    model_tokens: int | None
     output_tokens: int
     safety_tokens: int
 
     @property
     def effective_tokens(self):
+        if self.model_tokens is None:
+            return self.target_tokens
         return min(self.target_tokens, self.model_tokens - self.output_tokens - self.safety_tokens)
 
     @property
@@ -117,11 +119,15 @@ class ContextBudget:
                 if is_gpt_5_6_model(profile.get("model_name")):
                     capacity = GPT_5_6_CONTEXT_WINDOW_TOKENS
         if type(capacity) is not int or capacity <= 0:
-            raise ContextError("模型上下文容量未知。请在“模型与服务 → 编辑模型”填写上下文容量后重试。")
+            # The selected input target is sufficient to enable the feature.
+            # Keep unknown service capacity unknown, rather than inventing a
+            # model limit or making users configure one before their first run.
+            capacity = None
         output = profile.get("max_output_tokens") or 8192
         if type(output) is not int or output < 1:
             raise ContextError("模型输出预留必须为正整数。")
-        result = cls(policy["target_tokens"], capacity, output, max(2048, capacity // 20))
+        result = cls(policy["target_tokens"], capacity, output,
+                     max(2048, capacity // 20) if capacity is not None else 0)
         if result.effective_tokens <= MAX_CHECKPOINT_TOKENS + 4096:
             raise ContextError("当前模型可用上下文太小，无法同时保留任务状态和下一次回答。")
         return result
@@ -130,6 +136,7 @@ class ContextBudget:
         return {"status": status, "used_tokens": used, "target_tokens": self.target_tokens,
                 "effective_tokens": self.effective_tokens, "trigger_tokens": self.trigger_tokens,
                 "model_tokens": self.model_tokens, "output_tokens": self.output_tokens,
+                "budget_source": "model_capacity" if self.model_tokens is not None else "target_setting",
                 "window_id": window_id, "phase": phase, "estimated": True}
 
 
@@ -217,6 +224,8 @@ def format_capacity(snapshot, *, policy=None, active_run_id=""):
     note = f"{prefix} · 接近约 {compact(snapshot.get('trigger_tokens', int(effective * .8)))} 时自动压缩。"
     if snapshot.get("target_tokens") != effective:
         note += f"目标 {compact(snapshot.get('target_tokens', effective))}，受当前模型容量、输出预留和安全余量限制。"
+    elif snapshot.get("budget_source") == "target_setting":
+        note += "沿用设置中的上下文档位。"
     if current and (not policy["enabled"] or policy["target_tokens"] != snapshot.get("target_tokens")):
         note += "新设置下一轮生效。"
     if snapshot.get("unestimated_images"):

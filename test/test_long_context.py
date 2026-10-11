@@ -140,6 +140,9 @@ class TestContextStorage(ContextFixture):
             LLMWorker._check_disabled_context_capacity(worker,
                 [{"role": "user", "content": "large history " * 50000}])
         LLMWorker._check_disabled_context_capacity(worker, self.messages)
+        worker.run_context["selected_model_profile"] = {"model_name": "custom-model"}
+        LLMWorker._check_disabled_context_capacity(worker,
+            [{"role": "user", "content": "large history " * 50000}])
         self.assertEqual(self.storage.get_context_window("s")["id"], "w1")
         self.assertEqual(len(self.storage.get_messages("s")), 1)
 
@@ -172,9 +175,9 @@ class TestContextSaveQueue(ContextFixture):
 
 
 class TestContextManager(ContextFixture):
-    def make_manager(self):
+    def make_manager(self, profile=None):
         self.events, self.summary_requests = [], []
-        profile = {"context_window_tokens": 32000, "max_output_tokens": 4096}
+        profile = profile if profile is not None else {"context_window_tokens": 32000, "max_output_tokens": 4096}
         self.queue = ChatSaveWorker(self.storage.db_path, debounce_ms=10000)
         self.queue.start()
         self.addCleanup(lambda: self.queue.stop_worker(2000))
@@ -205,6 +208,19 @@ class TestContextManager(ContextFixture):
         self.worker._generate_context_checkpoint = summarize
         self.manager = ContextWindowManager(self.worker, normalize_policy({"enabled": True}))
         return self.manager
+
+    def test_unconfigured_capacity_rolls_over_at_setting_target(self):
+        manager = self.make_manager(profile={"model_name": "custom-model"})
+        current = [{"role": "system", "content": "stable"}, *self.messages,
+                   {"id": "large-history", "role": "assistant", "content": "evidence " * 130000},
+                   {"id": "recent", "role": "assistant", "content": "Continue the current task."}]
+        projected, switched = manager.prepare(current, current[2:], [], None)
+        self.assertTrue(switched)
+        self.assertEqual(manager.budget.effective_tokens, 300000)
+        self.assertLess(manager.estimate(projected, []), 240000)
+        self.assertEqual(self.storage.context_history_read("s", "large-history")["total_chars"],
+                         len(current[2]["content"]))
+        self.assertEqual(manager.window["ordinal"], 1)
 
     def test_four_windows_keep_goal_new_requirements_and_full_history(self):
         manager = self.make_manager()
@@ -386,11 +402,24 @@ class TestContextBudget(unittest.TestCase):
         budget = ContextBudget.from_profile({"context_window_tokens": 128000}, policy)
         self.assertEqual(budget.effective_tokens, 128000 - 8192 - 6400)
         self.assertLess(budget.trigger_tokens, budget.effective_tokens)
-        with self.assertRaises(ContextError):
-            ContextBudget.from_profile({}, policy)
         stats = {}
         estimate_request([{"role": "user", "content_parts": [{"type": "image"}]}], [], image_stats=stats)
         self.assertEqual(stats["unestimated_images"], 1)
+
+    def test_unconfigured_model_uses_selected_target_without_inventing_capacity(self):
+        for target in (300000, 1000000):
+            with self.subTest(target=target):
+                policy = normalize_policy({"enabled": True, "target_tokens": target})
+                budget = ContextBudget.from_profile({"model_name": "custom-model"}, policy)
+                self.assertEqual(budget.effective_tokens, target)
+                self.assertEqual(budget.trigger_tokens, int(target * .8))
+                self.assertIsNone(budget.model_tokens)
+                snapshot = {**budget.snapshot(target // 2), "run_id": "run"}
+                self.assertEqual(snapshot["budget_source"], "target_setting")
+                view = format_capacity(snapshot, policy=policy, active_run_id="run")
+                self.assertIn("50%", view["value"])
+                self.assertIn("沿用设置", view["note"])
+                self.assertNotIn("受当前模型", view["note"])
 
     def test_checkpoint_refs_and_length(self):
         self.assertEqual(validate_checkpoint(json.dumps(checkpoint(["m"])), {"m"})["refs"], ["m"])

@@ -5900,6 +5900,10 @@ class ModelEditDialog(QDialog):
         source_model = dict(model or {})
         self._editing_existing = bool(source_model)
         model = source_model or build_new_model_defaults(provider_id, self.base_url, "")
+        self._stored_context_limits = {
+            key: model[key] for key in ("context_window_tokens", "max_output_tokens")
+            if type(model.get(key)) is int and 0 < model[key] <= 100000000
+        }
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
         screen = self.screen() or QGuiApplication.primaryScreen()
         available_height = screen.availableGeometry().height() if screen else 760
@@ -6000,15 +6004,6 @@ class ModelEditDialog(QDialog):
 
         self.model_name_input.textChanged.connect(sync_bootstrap_control)
         sync_bootstrap_control()
-
-        self.context_capacity_input = QLineEdit()
-        self.context_capacity_input.setPlaceholderText("未知时留空；例如 128000")
-        self.context_capacity_input.setText(str(model.get("context_window_tokens") or ""))
-        form.addRow(build_form_row_label("上下文容量（tokens）"), self.context_capacity_input)
-        self.output_reserve_input = QLineEdit()
-        self.output_reserve_input.setPlaceholderText("超长上下文输出预留，默认 8192")
-        self.output_reserve_input.setText(str(model.get("max_output_tokens") or ""))
-        form.addRow(build_form_row_label("输出预留（tokens）"), self.output_reserve_input)
 
         self.vision_check = QCheckBox("支持图片理解")
         self.vision_check.setChecked(bool(model.get("supports_vision", False)))
@@ -6140,8 +6135,7 @@ class ModelEditDialog(QDialog):
                 and self.image_generation_check.isChecked()
             ),
         }
-        item["context_window_tokens"] = int(self.context_capacity_input.text()) if self.context_capacity_input.text().strip() else None
-        item["max_output_tokens"] = int(self.output_reserve_input.text()) if self.output_reserve_input.text().strip() else None
+        item.update(self._stored_context_limits)
         if self.provider_id == "openai":
             item["api_protocol"] = normalize_openai_api_protocol(
                 self.api_protocol_combo.currentData() if self.api_protocol_combo else ""
@@ -6159,11 +6153,6 @@ class ModelEditDialog(QDialog):
         return item
 
     def accept(self):
-        for field in (self.context_capacity_input, self.output_reserve_input):
-            text = field.text().strip()
-            if text and (not text.isascii() or not text.isdecimal() or not 0 < int(text) <= 100000000):
-                QMessageBox.warning(self, "模型配置", "容量与输出预留须为 1 到 100000000 的整数，未知时留空。")
-                return
         if not self.model_name_input.text().strip():
             QMessageBox.warning(self, "模型配置", "请填写模型名称。")
             return

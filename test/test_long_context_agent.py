@@ -69,12 +69,16 @@ class ContextProvider:
 
 
 class TestLongContextAgent(unittest.TestCase):
-    def run_agent(self, enabled, rounds=0, provider=None, tool_result=None):
+    def run_agent(self, enabled, rounds=0, provider=None, tool_result=None,
+                  known_capacity=True, target_tokens=300000):
         from main import MainWindow
         self.app = QApplication.instance() or QApplication([])
         profile = {"id": "test", "model_name": "test-model", "base_url": "https://example.test/v1",
                    "provider": "openai", "api_protocol": "chat_completions",
                    "context_window_tokens": 32000, "max_output_tokens": 4096}
+        if not known_capacity:
+            profile.pop("context_window_tokens")
+            profile.pop("max_output_tokens")
         initial = [{"id": "u0", "role": "user", "content": "Finish without sending email."},
                    {"id": "old", "role": "assistant", "content": "older findings " * 8000},
                    {"id": "recent", "role": "assistant", "content": "Ready to continue."},
@@ -116,7 +120,7 @@ class TestLongContextAgent(unittest.TestCase):
                     worker = LLMWorker(initial, ConfigStub(directory, profile), directory,
                         session_id="s", turn_id="1", request_id="run",
                         run_context={"selected_model_profile": profile,
-                                     "desktop_long_context": {"enabled": enabled}},
+                                     "desktop_long_context": {"enabled": enabled, "target_tokens": target_tokens}},
                         execution_authorization=ExecutionAuthorization("s", "run", True, ""))
                     worker.observability_signal.connect(event)
                     worker.finished_signal.connect(results.append)
@@ -136,6 +140,20 @@ class TestLongContextAgent(unittest.TestCase):
         self.assertEqual(len(provider.main_requests), 1)
         self.assertFalse(any(t["function"]["name"].startswith("history_") for t in provider.main_requests[0]["tools"]))
         self.assertFalse(any(e.get("type", "").startswith("context_") for e in events))
+
+    def test_enabled_unconfigured_model_reaches_provider_for_both_targets(self):
+        for target in (300000, 1000000):
+            with self.subTest(target=target):
+                provider, skills, events, result, active = self.run_agent(
+                    True, known_capacity=False, target_tokens=target)
+                self.assertEqual(len(provider.main_requests), 1)
+                self.assertEqual(provider.summary_requests, [])
+                self.assertIn("Task complete", result["content"])
+                snapshots = [e["capacity"] for e in events if e.get("type") == "context_capacity"]
+                self.assertTrue(snapshots)
+                self.assertTrue(all(s["effective_tokens"] == target for s in snapshots))
+                self.assertTrue(all(s["model_tokens"] is None for s in snapshots))
+                self.assertIsNone(active)
 
     def test_real_loop_three_windows_tools_once_and_prefix_checks(self):
         provider, skills, events, result, active = self.run_agent(True, rounds=18)

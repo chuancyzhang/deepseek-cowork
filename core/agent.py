@@ -2690,6 +2690,8 @@ class LLMWorker(QThread):
             self.run_context.get("selected_model_id"))
         try:
             budget = ContextBudget.from_profile(profile, self.long_context_policy)
+            if budget.model_tokens is None:
+                return
             used = estimate_request(messages, self.tools, model_name=profile.get("model_name", ""))
         except ContextError:
             return  # With the feature off, unknown estimates use the original provider path.

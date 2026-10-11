@@ -59,3 +59,11 @@
 新增用例覆盖：短图片请求、纯文本内容块、图片原样进入下一轮及实际 Responses 投影、已知与未知模型的文本换窗、最近完整工具轮次保留、原始账本不变、窗口内前缀稳定，以及未计量图片在用量浮窗中的说明。此轮使用离线 Provider 模拟和实际协议序列化，不将结果宣称为真实模型理解验收。
 
 运行入口：`test_long_context*.py`（37 项）、`test_context_images.py`（4 项）、`test_tool_tasks*.py`（23 项），全部通过。用量浮窗另在 100% 和 150% 下验证，未计量图片提示截图见[100% 用量说明](images/long-context/image-budget.png)、[150% 用量说明](images/long-context/image-budget-150.png)。
+
+## 启用后直接沿用档位（2026-10-11）
+
+取消模型容量未知时的启动拦截，移除编辑模型中的容量和输出预留填写项。未知容量使用设置中的输入目标，快照保留 `model_tokens=null` 和 `budget_source=target_setting`，不把目标伪装成模型真实容量。已知容量继续自动限制预算；已有模型元数据在编辑其他字段时保留。关闭功能后，未知容量不会被错误地按实验档位拦截完整历史。
+
+回归覆盖：未填写容量的自定义模型在 300k／1m 下实际进入 Agent 请求流程；超出 300k 档位触发点的历史可正常压缩并保持完整保存；用量浮窗沿用所选档位且比例正确；编辑模型不再出现额外填写项。此项只调整预算来源及界面，不改变系统提示、工具定义、消息排列和既有窗口提交规则。
+
+`test_long_context*.py` 40 项及 `test_default_model_settings.py` 8 项通过。模型编辑与用量浮窗在 100%／150% 下各 2 项通过，并检查了实际截图：[模型编辑](images/long-context/model-editor.png)、[150% 模型编辑](images/long-context/model-editor-150.png)、[150% 用量浮窗](images/long-context/usage-150.png)。此轮使用离线 Provider 模拟，未额外发起真实 API 请求。

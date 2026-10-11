@@ -1,11 +1,13 @@
 import os
 import tempfile
 import unittest
+import sys
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 
@@ -446,6 +448,14 @@ class QuestionNavigatorTest(unittest.TestCase):
                 window.question_navigator_theme_host.x(),
                 DesignTokens.question_navigator_sidebar_gap,
             )
+            state.messages = [dict(id=f"u{i}", role="user", content=f"提问 {i}") for i in range(200)]
+            window.resize(920, 580)
+            self.app.processEvents()
+            window._sync_question_navigator(state.session_id)
+            rail = window.question_navigator_rail
+            self.assertEqual(len(rail.entries), 200)
+            self.assertLessEqual(rail.height(), DesignTokens.question_navigator_max_height)
+            self.assertLessEqual(rail.height(), state.chat_scroll.viewport().height())
         finally:
             window.close()
             window.deleteLater()
@@ -495,6 +505,118 @@ class QuestionNavigatorTest(unittest.TestCase):
         self.assertFalse(state.pending_scroll_force)
         self.assertEqual(state.history_page_jump_target_id, "u1")
         single_shot.assert_called_once()
+
+
+class LongQuestionNavigatorTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.errors = []
+        self.hook = patch.object(sys, "excepthook", lambda *error: self.errors.append(error))
+        self.hook.start()
+        self.parent = QWidget()
+        self.parent.resize(200, 360)
+        self.rail = QuestionNavigatorRail(self.parent)
+        self.rail.setGeometry(10, 30, 40, 280)
+        self.entries = [dict(message_id=f"u{i}", title=f"提问 {i}", answer=f"回答 {i}")
+                        for i in range(1, 201)]
+        self.rail.set_entries(self.entries)
+        self.parent.show()
+        self.app.processEvents()
+        self.jumps = []
+        self.previews = []
+        self.rail.jumpRequested.connect(self.jumps.append)
+        self.rail.previewRequested.connect(lambda entry, point: self.previews.append(entry))
+
+    def tearDown(self):
+        self.parent.close()
+        self.parent.deleteLater()
+        self.app.processEvents()
+        self.hook.stop()
+        self.assertEqual(self.errors, [])
+
+    def wheel(self, angle=0, pixels=0):
+        event = QWheelEvent(QPointF(18, 136), QPointF(self.rail.mapToGlobal(QPoint(18, 136))),
+                            QPoint(0, pixels), QPoint(0, angle), Qt.NoButton, Qt.NoModifier,
+                            Qt.NoScrollPhase, False)
+        QApplication.sendEvent(self.rail, event)
+
+    def test_200_questions_scroll_smoothly_without_navigating_and_clamp_at_ends(self):
+        end = self.rail.window_start
+        self.wheel(120)
+        QTest.qWait(35)
+        self.assertLess(self.rail._scroll_position, end)
+        self.assertGreater(self.rail._scroll_position, end - 3)
+        self.assertEqual(self.jumps, [])
+        self.assertEqual(self.rail.active_message_id, "u200")
+        # Streaming refresh must not snap a manually browsed rail back to the active question.
+        self.rail.set_entries(self.entries)
+        self.assertEqual(self.rail.window_start, end - 3)
+        self.wheel(120000)
+        QTest.qWait(500)
+        self.assertEqual(self.rail._scroll_position, 0)
+        self.wheel(120)
+        QTest.qWait(60)
+        self.assertEqual(self.rail._scroll_position, 0)
+        self.wheel(-120000)
+        QTest.qWait(500)
+        self.assertEqual(self.rail._scroll_position, end)
+        self.assertLess(len(self.rail._marker_geometry()), 22)
+
+    def test_pixel_scrolling_preview_and_click_use_the_same_visible_question(self):
+        self.wheel(pixels=24)
+        QTest.qWait(500)
+        index = self.rail._entry_index_at(QPoint(18, 136))
+        self.assertEqual(self.previews[-1]["message_id"], self.entries[index]["message_id"])
+        self.assertEqual(self.previews[-1]["ordinal"], index + 1)
+        self.assertEqual(self.previews[-1]["total"], 200)
+        QTest.mouseClick(self.rail, Qt.LeftButton, pos=QPoint(18, 136))
+        self.assertEqual(self.jumps, [self.previews[-1]["message_id"]])
+        count = len(self.previews)
+        QTest.qWait(400)
+        self.assertEqual(len(self.previews), count)
+
+    def test_wave_is_local_and_preview_does_not_return_after_escape(self):
+        self.rail._pointer = QPoint(18, 136)
+        self.rail._wave_y = 136
+        self.rail._start_motion()
+        QTest.qWait(400)
+        self.assertGreater(self.rail._wave_weight(136), 0.95)
+        self.assertEqual(self.rail._wave_weight(136 + 4 * self.rail._step()), 0)
+        self.assertGreater(self.rail._wave_weight(136 + 16), self.rail._wave_weight(136 + 32))
+        count = len(self.previews)
+        QTest.keyClick(self.rail, Qt.Key_Escape)
+        QTest.qWait(400)
+        self.assertEqual(len(self.previews), count)
+        self.assertEqual(self.rail._wave_strength, 0)
+
+    def test_keyboard_can_reach_first_and_last_without_scrolling_chat_until_enter(self):
+        QTest.keyClick(self.rail, Qt.Key_Home)
+        self.assertEqual(self.previews[-1]["ordinal"], 1)
+        self.assertEqual(self.rail.window_start, 0)
+        QTest.keyClick(self.rail, Qt.Key_PageDown)
+        self.assertGreater(self.previews[-1]["ordinal"], 1)
+        self.assertEqual(self.jumps, [])
+        QTest.keyClick(self.rail, Qt.Key_End)
+        QTest.keyClick(self.rail, Qt.Key_Return)
+        self.assertEqual(self.jumps, ["u200"])
+
+    def test_switch_or_hide_cancels_pending_preview_and_motion(self):
+        self.wheel(120)
+        self.rail.set_entries([dict(message_id="other1"), dict(message_id="other2")])
+        QTest.qWait(400)
+        self.assertEqual(self.previews, [])
+        self.assertEqual(self.rail.window_start, 0)
+        self.assertEqual(self.rail.active_message_id, "other2")
+        self.rail.set_entries(self.entries)
+        self.wheel(120)
+        self.rail.setVisible(False)
+        QTest.qWait(400)
+        self.assertEqual(self.previews, [])
+        self.assertFalse(self.rail._motion.isActive())
+        self.assertFalse(self.rail._preview_timer.isActive())
 
 
 if __name__ == "__main__":

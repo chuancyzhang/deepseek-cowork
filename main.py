@@ -27581,13 +27581,17 @@ class QuestionNavigatorPreviewCard(QFrame):
         super().__init__(parent)
         self.setObjectName("QuestionNavigatorPreviewCard")
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.position_label = QLabel()
         self.title_label = QLabel()
+        self.title_label.setTextFormat(Qt.PlainText)
         self.title_label.setWordWrap(True)
         self.answer_label = QLabel()
+        self.answer_label.setTextFormat(Qt.PlainText)
         self.answer_label.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(5)
+        layout.addWidget(self.position_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.answer_label)
         self.hide()
@@ -27600,19 +27604,25 @@ class QuestionNavigatorPreviewCard(QFrame):
             f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
         )
         self.title_label.setStyleSheet(
-            f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 650; border: none;"
+            f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 650; border: none;"
         )
         self.answer_label.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; font-size: 11px; border: none;"
+            f"color: {DesignTokens.text_secondary}; font-size: 12px; border: none;"
+        )
+        self.position_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 11px; border: none;"
         )
 
     def show_entry(self, entry, anchor, bounds):
+        self.position_label.setText(
+            f"第 {entry.get('ordinal', 1)} / {entry.get('total', 1)} 问 · 滚轮浏览，点击定位"
+        )
         self.title_label.setText(str((entry or {}).get("title") or "未命名提问"))
         self.answer_label.setText(str((entry or {}).get("answer") or "尚无回复"))
-        width = min(420, max(260, int(bounds.width()) - int(anchor.x()) - 16))
+        width = max(1, min(380, int(bounds.width()) - int(anchor.x()) - 8))
         self.setFixedWidth(width)
         self.adjustSize()
-        height = min(max(self.sizeHint().height(), 72), 156)
+        height = min(max(self.sizeHint().height(), 90), bounds.height() - 16)
         x = max(8, min(int(anchor.x()), int(bounds.width()) - width - 8))
         y = max(8, min(int(anchor.y()) - 18, int(bounds.height()) - height - 8))
         self.setGeometry(x, y, width, height)
@@ -27635,8 +27645,20 @@ class QuestionNavigatorRail(QFrame):
         self.entries = []
         self.active_message_id = ""
         self.window_start = 0
+        self._scroll_position = 0.0
         self.hover_index = -1
+        self._pointer = None
+        self._wave_y = 0.0
+        self._wave_strength = 0.0
         self._marker_hits = []
+        self._motion = QTimer(self)
+        self._motion.setInterval(16)
+        self._motion.timeout.connect(self._animate)
+        self._last_frame = 0.0
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(100)
+        self._preview_timer.timeout.connect(self._show_hover_preview)
         self._feature_visible = False
         self._theme_visible = True
         self.refresh_theme()
@@ -27658,7 +27680,88 @@ class QuestionNavigatorRail(QFrame):
         self.update()
 
     def _capacity(self):
-        return max(1, int(max(18, self.height()) // 18))
+        return max(1, int(max(16, self.height() - 16) // self._step()))
+
+    def _step(self):
+        return max(12, int(DesignTokens.question_navigator_step))
+
+    def _maximum_start(self):
+        return max(0, len(self.entries) - self._capacity())
+
+    def _start_motion(self):
+        if not self._motion.isActive():
+            self._last_frame = time.monotonic()
+            self._motion.start()
+
+    def _animate(self):
+        now = time.monotonic()
+        blend = 1 - pow(0.001, min(0.05, now - self._last_frame) / 0.24)
+        self._last_frame = now
+        self._scroll_position += (self.window_start - self._scroll_position) * blend
+        target_strength = 1.0 if self._pointer is not None else 0.0
+        self._wave_strength += (target_strength - self._wave_strength) * blend
+        if self._pointer is not None:
+            self._wave_y += (self._pointer.y() - self._wave_y) * blend
+        settled = abs(self.window_start - self._scroll_position) < 0.005
+        if settled:
+            self._scroll_position = float(self.window_start)
+        self._update_hover()
+        self.update()
+        wave_settled = (
+            abs(target_strength - self._wave_strength) < 0.005
+            and (self._pointer is None or abs(self._pointer.y() - self._wave_y) < 0.1)
+        )
+        if settled and wave_settled:
+            self._wave_strength = target_strength
+            self._motion.stop()
+            if self.hover_index >= 0 and not self._preview_timer.isActive():
+                self._preview_timer.start()
+
+    def _marker_geometry(self):
+        step = self._step()
+        count = min(len(self.entries), self._capacity())
+        top = (self.height() - count * step) / 2
+        first = max(0, int(self._scroll_position) - 1)
+        last = min(len(self.entries), int(self._scroll_position) + count + 2)
+        return [(index, top + (index - self._scroll_position + 0.5) * step)
+                for index in range(first, last)]
+
+    def _wave_weight(self, y):
+        distance = abs(y - self._wave_y) / (self._step() * 3.5)
+        return self._wave_strength * max(0.0, 1.0 - distance * distance) ** 2
+
+    def _update_hover(self):
+        index = self._entry_index_at(self._pointer) if self._pointer is not None else -1
+        if index != self.hover_index:
+            self.hover_index = index
+            self._preview_timer.stop()
+            self.previewDismissed.emit()
+            if index >= 0:
+                self._preview_timer.start()
+
+    def _preview_entry(self, index):
+        return dict(self.entries[index], ordinal=index + 1, total=len(self.entries))
+
+    def _show_hover_preview(self):
+        if self._pointer is None or abs(self.window_start - self._scroll_position) >= 0.005:
+            return
+        index = self._entry_index_at(self._pointer)
+        if 0 <= index < len(self.entries):
+            self.previewRequested.emit(self._preview_entry(index), self._pointer)
+
+    def hideEvent(self, event):
+        self._motion.stop()
+        self._preview_timer.stop()
+        self._pointer = None
+        self.hover_index = -1
+        self._wave_strength = 0.0
+        self._scroll_position = float(self.window_start)
+        self.previewDismissed.emit()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ensure_active_visible()
 
     def _active_index(self):
         return next(
@@ -27677,15 +27780,28 @@ class QuestionNavigatorRail(QFrame):
             elif active_index >= self.window_start + capacity:
                 self.window_start = active_index - capacity + 1
         self.window_start = max(0, min(self.window_start, maximum_start))
+        self._scroll_position = float(self.window_start)
 
     def set_entries(self, entries):
+        previous_ids = [str(entry.get("message_id") or "") for entry in self.entries]
         self.entries = list(entries or [])
         valid_ids = {str(entry.get("message_id") or "") for entry in self.entries}
+        changed = previous_ids != [str(entry.get("message_id") or "") for entry in self.entries]
         if self.active_message_id not in valid_ids:
             self.active_message_id = str((self.entries[-1] if self.entries else {}).get("message_id") or "")
-        self._ensure_active_visible()
+        if changed:
+            self._motion.stop()
+            self._preview_timer.stop()
+            self._pointer = None
+            self.hover_index = -1
+            self._wave_strength = 0.0
+            self.previewDismissed.emit()
+            self._ensure_active_visible()
         self.set_feature_visible(len(self.entries) >= 2)
-        self.setAccessibleDescription(f"共 {len(self.entries)} 个历史提问")
+        self.setAccessibleDescription(
+            f"共 {len(self.entries)} 个历史提问。滚轮浏览，悬停预览，点击定位；"
+            "方向键选择，Home / End 到首尾，回车定位。"
+        )
         self.update()
 
     def set_active_message_id(self, message_id):
@@ -27693,93 +27809,136 @@ class QuestionNavigatorRail(QFrame):
         if message_id == self.active_message_id:
             return
         self.active_message_id = message_id
+        self._preview_timer.stop()
+        self.previewDismissed.emit()
         self._ensure_active_visible()
+        self._update_hover()
         self.update()
 
     def _visible_entries(self):
         capacity = self._capacity()
-        return list(enumerate(self.entries[self.window_start:self.window_start + capacity], self.window_start))
+        start = int(self._scroll_position)
+        return list(enumerate(self.entries[start:start + capacity], start))
 
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        visible = self._visible_entries()
-        if not visible:
+        if not self.entries:
             return
-        cell_height = 18
-        total_height = len(visible) * cell_height
-        top = max(0, (self.height() - total_height) // 2)
         self._marker_hits = []
-        for offset, (entry_index, entry) in enumerate(visible):
+        painter.setClipRect(self.rect().adjusted(0, 4, 0, -4))
+        for entry_index, y in self._marker_geometry():
+            entry = self.entries[entry_index]
             message_id = str(entry.get("message_id") or "")
             active = message_id == self.active_message_id
             hovered = entry_index == self.hover_index
-            line_width = 28 if active else (22 if hovered else 15)
+            wave = self._wave_weight(y)
+            line_width = max(23 if active else 8, 8 + 25 * wave)
             color = QColor(DesignTokens.text_primary if active else DesignTokens.text_tertiary)
             if hovered and not active:
                 color = QColor(DesignTokens.text_secondary)
-            y = top + offset * cell_height + cell_height // 2
+            fade = 1.0
+            if self._scroll_position > 0:
+                fade = min(fade, max(0.15, (y - 4) / 24))
+            if self._scroll_position < self._maximum_start():
+                fade = min(fade, max(0.15, (self.height() - 4 - y) / 24))
+            color.setAlphaF(min(1.0, fade))
             painter.setPen(QPen(color, 2 if active else 1.5, Qt.SolidLine, Qt.RoundCap))
-            painter.drawLine(4, y, 4 + line_width, y)
-            self._marker_hits.append((QRect(0, y - 8, 38, 16), entry_index))
+            painter.drawLine(QPointF(4, y), QPointF(4 + line_width, y))
+            self._marker_hits.append((QRect(0, int(y - self._step() / 2), 40, self._step()), entry_index))
+        if self.hasFocus():
+            painter.setPen(QPen(QColor(DesignTokens.border_subtle), 1, Qt.DotLine))
+            painter.drawRoundedRect(self.rect().adjusted(1, 4, -1, -4), 4, 4)
 
     def _entry_index_at(self, point):
-        for rect, index in self._marker_hits:
-            if rect.contains(point):
+        if not self.rect().adjusted(0, 4, 0, -4).contains(point):
+            return -1
+        for index, y in self._marker_geometry():
+            if abs(point.y() - y) <= self._step() / 2:
                 return index
         return -1
 
     def mouseMoveEvent(self, event):
-        index = self._entry_index_at(event.position().toPoint())
-        if index != self.hover_index:
-            self.hover_index = index
-            self.update()
-            if 0 <= index < len(self.entries):
-                self.previewRequested.emit(self.entries[index], event.position().toPoint())
-            else:
-                self.previewDismissed.emit()
+        if self._pointer is None:
+            self._wave_y = event.position().y()
+        self._pointer = event.position().toPoint()
+        self._update_hover()
+        self._start_motion()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        self._pointer = None
         self.hover_index = -1
+        self._preview_timer.stop()
         self.previewDismissed.emit()
-        self.update()
+        self._start_motion()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             index = self._entry_index_at(event.position().toPoint())
             if 0 <= index < len(self.entries):
+                self._pointer = None
+                self.hover_index = -1
+                self._preview_timer.stop()
+                self.previewDismissed.emit()
+                self._start_motion()
                 self.jumpRequested.emit(str(self.entries[index].get("message_id") or ""))
                 event.accept()
                 return
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        delta = -1 if event.angleDelta().y() > 0 else 1
-        maximum_start = max(0, len(self.entries) - self._capacity())
-        self.window_start = max(0, min(maximum_start, self.window_start + delta))
-        self.update()
+        if not event.pixelDelta().isNull():
+            delta = -event.pixelDelta().y() / self._step()
+        else:
+            delta = -event.angleDelta().y() / 120 * 3
+        if delta:
+            self.window_start = max(0.0, min(self._maximum_start(), self.window_start + delta))
+            if self._pointer is None:
+                self._wave_y = event.position().y()
+            self._pointer = event.position().toPoint()
+            self._preview_timer.stop()
+            self.previewDismissed.emit()
+            self._start_motion()
         event.accept()
 
     def keyPressEvent(self, event):
         if not self.entries:
             return super().keyPressEvent(event)
         active = self._active_index()
-        if event.key() in {Qt.Key_Up, Qt.Key_Down}:
-            step = -1 if event.key() == Qt.Key_Up else 1
+        if event.key() in {Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp, Qt.Key_PageDown}:
+            step = -1 if event.key() in {Qt.Key_Up, Qt.Key_PageUp} else 1
+            if event.key() in {Qt.Key_PageUp, Qt.Key_PageDown}:
+                step *= self._capacity()
             active = max(0, min(len(self.entries) - 1, (active if active >= 0 else 0) + step))
+            if event.key() == Qt.Key_Home:
+                active = 0
+            elif event.key() == Qt.Key_End:
+                active = len(self.entries) - 1
+            self._pointer = None
+            self._preview_timer.stop()
+            self._wave_strength = 0.0
             self.set_active_message_id(self.entries[active].get("message_id"))
-            self.previewRequested.emit(self.entries[active], QPoint(self.width(), self.height() // 2))
+            self._ensure_active_visible()
+            y = next(y for index, y in self._marker_geometry() if index == active)
+            self.previewRequested.emit(self._preview_entry(active), QPoint(self.width(), int(y)))
             event.accept()
             return
         if event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space} and active >= 0:
+            self._pointer = None
+            self._preview_timer.stop()
+            self.previewDismissed.emit()
+            self._start_motion()
             self.jumpRequested.emit(str(self.entries[active].get("message_id") or ""))
             event.accept()
             return
         if event.key() == Qt.Key_Escape:
+            self._pointer = None
+            self._preview_timer.stop()
             self.previewDismissed.emit()
+            self._start_motion()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -32055,13 +32214,15 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
             return
         origin = viewport.mapTo(self.main_container, QPoint(0, 0))
-        height = max(54, viewport.height() - 24)
+        available_height = max(1, viewport.height() - 24)
+        height = min(available_height, int(DesignTokens.question_navigator_max_height),
+                     max(54, len(rail.entries) * rail._step() + 16))
         if len(rail.entries) < 2:
             self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
             return
         self.question_navigator_theme_host.setGeometry(
             int(getattr(DesignTokens, "question_navigator_sidebar_gap", 8)),
-            origin.y() + 12,
+            origin.y() + (viewport.height() - height) // 2,
             40,
             height,
         )

@@ -171,6 +171,8 @@ class DesignTokens:
     file_tab_preferred_width = 240
     file_tab_min_width = 120
     question_navigator_sidebar_gap = 8
+    question_navigator_max_height = 280
+    question_navigator_step = 16
 
     conversation_min_width = 840
     conversation_compact_min_width = 560

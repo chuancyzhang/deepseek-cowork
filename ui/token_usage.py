@@ -77,6 +77,20 @@ class TokenUsagePopover(QFrame):
         self.scope = self._label("当前会话 · 当前模型", "muted")
         layout.addWidget(self.scope)
 
+        self.capacity_box = QWidget()
+        capacity_layout = QVBoxLayout(self.capacity_box)
+        capacity_layout.setContentsMargins(0, 0, 0, 8)
+        capacity_layout.setSpacing(7)
+        capacity_layout.addWidget(self._label("当前上下文", "section"))
+        self.capacity_value = self._label("待统计", "section")
+        capacity_layout.addWidget(self.capacity_value)
+        self.capacity_bar = UsageProportionBar()
+        capacity_layout.addWidget(self.capacity_bar)
+        self.capacity_note = self._label("", "note")
+        capacity_layout.addWidget(self.capacity_note)
+        layout.addWidget(self.capacity_box)
+        self.capacity_box.hide()
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(14)
@@ -184,9 +198,15 @@ class TokenUsagePopover(QFrame):
         )
         self.context_bar.update()
         self.cache_bar.update()
+        self.capacity_bar.update()
 
     def set_overview(self, data):
         self.scope.setText(data.get("scope", "当前会话 · 当前模型"))
+        capacity = data.get("capacity", {})
+        self.capacity_box.setVisible(bool(capacity.get("visible")))
+        self.capacity_value.setText(capacity.get("value", "待统计"))
+        self.capacity_bar.set_segments(capacity.get("segments", []))
+        self.capacity_note.setText(capacity.get("note", ""))
         for key, labels in self.metrics.items():
             metric = data.get(key, {})
             for label, field in zip(labels, ("title", "value", "note")):

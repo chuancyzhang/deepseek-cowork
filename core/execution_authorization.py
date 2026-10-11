@@ -161,6 +161,8 @@ def trusted_kind(name, handler):
             return "control"
     if name in {"tool_search", "lookup_app_variable"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "core", "skill_manager.py"))):
         return "read"
+    if name in {"history_search", "history_read"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "core", "long_context.py"))):
+        return "read"
     if name in _FILES and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "file-system", "impl.py"))):
         return "file"
     return "opaque"

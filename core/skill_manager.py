@@ -3444,6 +3444,8 @@ class SkillManager:
                 return False
         if resolved_name == "lookup_app_variable":
             return bool((run_context or {}).get("app_variable_access"))
+        if resolved_name in {"history_search", "history_read"}:
+            return bool(((run_context or {}).get("desktop_long_context") or {}).get("enabled"))
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:
             return True

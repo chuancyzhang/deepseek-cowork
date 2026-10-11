@@ -568,6 +568,32 @@ class RuntimeJournal:
             reverse=True,
         )
 
+    def execute_context_operation(self, session_id, run_id, operation_id, expires_at, action):
+        """Serialize a short context commit with stop and terminal transitions.
+
+        The caller's action only performs a bounded SQLite save/check, never a
+        model request. A stop already recorded here wins over late callbacks.
+        """
+        with self.session_lock(session_id, run_id):
+            path = self._record_path(session_id, "runs", run_id)
+            record = self._read(path, default=None)
+            if record is None:
+                raise RuntimeJournalError(f"runtime run not found: {run_id}")
+            receipt = {"operation_id": operation_id, "ok": False}
+            try:
+                pending = record.get("context_operation") or {}
+                if (pending.get("id") != operation_id or pending.get("status") != "pending"
+                        or record.get("stop_requested") or record.get("status") in RUN_TERMINAL_STATUSES
+                        or time.time() > expires_at):
+                    raise RuntimeJournalError("上下文保存请求已失效，未切换窗口。")
+                receipt.update(ok=True, result=action())
+            except Exception as exc:
+                receipt.update(error=str(exc), error_type=type(exc).__name__)
+            record["context_receipt"] = receipt
+            record["updated_at"] = time.time()
+            self._atomic_write(path, record)
+            return receipt
+
     def update_run(self, session_id, run_id, patch):
         with self.session_lock(session_id, run_id):
             path = self._record_path(session_id, "runs", run_id)

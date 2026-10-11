@@ -55,14 +55,16 @@ LEGACY_PLAN_META_KEYS = {
 
 
 from .agent_inbox import AgentInboxStorage
+from .context_storage import ContextStorage
 
 
-class ChatStorage(AgentInboxStorage):
+class ChatStorage(AgentInboxStorage, ContextStorage):
     def __init__(self, db_path):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._ensure_schema()
         self._ensure_agent_inbox()
+        self._ensure_context_schema()
 
     @contextmanager
     def _connect(self):
@@ -1133,6 +1135,7 @@ class ChatStorage(AgentInboxStorage):
             next_revision = current_revision + 1
             next_meta = dict(meta) if isinstance(meta, dict) else dict(current_meta)
             next_meta["history_save_revision"] = next_revision
+            self._invalidate_context_for_rewrite(conn, conversation_id, normalized_messages)
             normalized_messages = self._remap_cross_conversation_message_ids(
                 conn,
                 conversation_id,

@@ -891,6 +891,12 @@ class LLMWorker(QThread):
         self.agent_id = agent_id or parent_agent_id or ""
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
+        from core.long_context import normalize_policy
+        self.long_context_policy = normalize_policy(self.run_context.get("desktop_long_context"))
+        if self.is_subagent or self.run_context.get("im_provider") or self.run_context.get("channel"):
+            self.long_context_policy["enabled"] = False
+            self.run_context.pop("desktop_long_context", None)
+        self.context_window_manager = None
         if self.is_subagent:
             self.run_context["app_variable_access"] = False
         self.started_in_grill_mode = (
@@ -1040,6 +1046,9 @@ class LLMWorker(QThread):
         if self.bootstrap.active:
             self.tools = json_copy(self.bootstrap.definitions, [])
             return
+        if getattr(self, "long_context_policy", {}).get("enabled"):
+            from core.long_context import register_history_tools
+            register_history_tools(self.skill_manager)
         for tool_name in self._selected_skill_tool_names():
             self.discovered_tool_names.add(tool_name)
         try:
@@ -2606,6 +2615,80 @@ class LLMWorker(QThread):
             kwargs["request_context"] = request_context or {}
         return provider.chat_stream(messages, **kwargs)
 
+    def _generate_context_checkpoint(self, provider, messages, rollover_id, part, repair):
+        """A separate, tool-free request. Never becomes assistant dialogue or replay."""
+        from core.long_context import ContextError, ContextCancelled
+        attempt_id = f"{self.request_id}:context:{rollover_id}:{part}:{repair}:{uuid.uuid4().hex}"
+        self._record_provider_attempt(attempt_id, {"status": "running", "purpose": "context_checkpoint",
+                                                 "started_at": time.time(), "run_id": self.request_id})
+        self.observability_signal.emit({"type": "context_checkpoint_request_start",
+            "run_id": self.request_id, "request_id": attempt_id, "timestamp": time.time(),
+            "provider": getattr(provider, "provider_name", ""), "model": getattr(provider, "model_name", "")})
+        stream = None
+        content = []
+        try:
+            stream = self._provider_chat_stream(provider, messages, tools=[], prompt_cache_key=None,
+                request_context={"client_request_id": attempt_id, "run_id": self.request_id,
+                    "abort_check": lambda: self.is_stopped, "register_stream": self._register_provider_stream,
+                    "release_stream": self._release_provider_stream,
+                    "tools_disabled": True,
+                    "max_output_tokens": self.context_window_manager.budget.output_tokens})
+            for chunk in stream:
+                if self.is_stopped:
+                    raise ContextCancelled("已停止压缩上下文。")
+                kind = chunk.get("type")
+                if kind == "content":
+                    content.append(str(chunk.get("content") or ""))
+                elif kind in {"tool_call", "server_tool_status", "output_image"}:
+                    raise ContextError("状态整理请求返回了工具操作，未接受这次检查点。")
+                elif kind == "error":
+                    raise ContextError(str(chunk.get("content") or "状态整理请求失败。"))
+                elif kind == "provider_retry":
+                    self.observability_signal.emit({"type": "context_checkpoint_retry", "run_id": self.request_id,
+                        "request_id": attempt_id, "attempt": chunk.get("attempt"), "reason": chunk.get("reason", "")})
+                elif kind == "provider_terminal" and chunk.get("status") not in {None, "completed"}:
+                    raise ContextError("状态整理响应未完整结束。")
+                elif kind == "usage":
+                    usage = dict(chunk.get("usage") or {})
+                    usage.update(request_id=attempt_id, turn_id=self.turn_id, run_id=self.request_id,
+                                 purpose="context_checkpoint", provider=getattr(provider, "provider_name", ""),
+                                 model=getattr(provider, "model_name", ""), base_url=getattr(provider, "base_url", ""),
+                                 protocol=getattr(provider, "api_protocol", ""))
+                    profile = self.run_context.get("selected_model_profile") or {}
+                    usage["profile_id"] = str(profile.get("profile_id") or profile.get("id") or "")
+                    usage["cache_namespace"] = "|".join([usage["base_url"], usage["model"], usage["protocol"]])
+                    self.observability_signal.emit({"type": "llm_usage", "usage": usage, "timestamp": time.time()})
+            if self.is_stopped:
+                raise ContextCancelled("已停止压缩上下文。")
+            self._record_provider_attempt(attempt_id, {"status": "completed", "finished_at": time.time()})
+            text = "".join(content)
+            security_run = getattr(provider, "data_security_run", None)
+            return security_run.restore_text(text) if security_run is not None else text
+        except Exception as exc:
+            self._record_provider_attempt(attempt_id, {"status": "failed", "error_type": type(exc).__name__,
+                                                     "finished_at": time.time()})
+            raise
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+    def _check_disabled_context_capacity(self, messages):
+        if self.long_context_policy["enabled"] or self.chat_storage is None:
+            return
+        if not self.chat_storage.get_context_window(self.conversation_id):
+            return
+        from core.long_context import ContextBudget, ContextError, estimate_request
+        profile = self.run_context.get("selected_model_profile") or self.config_manager.get_model_profile(
+            self.run_context.get("selected_model_id"))
+        try:
+            budget = ContextBudget.from_profile(profile, self.long_context_policy)
+            used = estimate_request(messages, self.tools)
+        except ContextError:
+            return  # With the feature off, unknown estimates use the original provider path.
+        if used > budget.model_tokens - budget.output_tokens - budget.safety_tokens:
+            raise ContextError("完整历史已超过当前模型可用容量。历史和输入已保留，请重新启用超长上下文或新建会话。")
+
     def _record_provider_attempt(self, attempt_id, payload):
         if not self.runtime_journal or not self.session_id:
             return None
@@ -2942,6 +3025,9 @@ class LLMWorker(QThread):
                 name, args, self.bootstrap.call_tool, context,
                 lambda: self.bootstrap.call_tool(name, args, {**context, "abort_check": lambda: self.is_stopped}),
             )
+        if name in {"history_search", "history_read"} and self.context_window_manager is not None:
+            self.context_window_manager.persist_history()
+            context = {**context, "context_window_manager": self.context_window_manager}
         return self.skill_manager.call_tool(name, args, context=context)
 
     def _authorization_event(self, payload):
@@ -3116,7 +3202,8 @@ class LLMWorker(QThread):
                     return
             current_messages[0]["content"] = stable_system_prompt
             request_messages = self._build_request_messages(current_messages)
-            self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
+            if not self.long_context_policy["enabled"] or self.bootstrap.active:
+                self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
@@ -3127,6 +3214,7 @@ class LLMWorker(QThread):
             if self.api_key:
                 try:
                     start_time = time.time()
+                    self._check_disabled_context_capacity(request_messages)
                     
                     # Create Provider via Factory
                     provider = LLMFactory.create_provider(
@@ -3136,6 +3224,27 @@ class LLMWorker(QThread):
                         model_profile=self.run_context.get("selected_model_profile"),
                     )
                     provider.data_security_run = self.data_security_run
+                    if self.long_context_policy["enabled"] and not self.bootstrap.active:
+                        from core.context_window import ContextWindowManager
+                        if self.context_window_manager is None:
+                            try:
+                                self.context_window_manager = ContextWindowManager(self, self.long_context_policy)
+                            except Exception as exc:
+                                self.observability_signal.emit({"type": "context_capacity", "capacity": {
+                                    "status": "unavailable", "reason": str(exc), "run_id": self.request_id}})
+                                raise
+                        request_messages, context_switched = self.context_window_manager.prepare(
+                            request_messages, generated_messages, self.tools, provider)
+                        if context_switched:
+                            previous_provider_messages = []
+                        if self._append_pending_guidance(current_messages, generated_messages):
+                            # Guidance arriving during checkpoint generation is already
+                            # durable and must reach the first request in the new window.
+                            request_messages, guidance_switched = self.context_window_manager.prepare(
+                                self._build_request_messages(current_messages), generated_messages, self.tools, provider)
+                            if guidance_switched:
+                                previous_provider_messages = []
+                        self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     attempt_id = f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}"
                     assistant_message_id = uuid.uuid5(
@@ -3289,6 +3398,8 @@ class LLMWorker(QThread):
                                 "release_stream": self._release_provider_stream,
                                 "capture_request": lambda protocol, params, aid=attempt_id:
                                     self._capture_request_snapshot(protocol, params, aid),
+                                **({"max_output_tokens": self.context_window_manager.budget.output_tokens}
+                                   if self.context_window_manager is not None else {}),
                             },
                         )
 
@@ -3300,6 +3411,8 @@ class LLMWorker(QThread):
                             if self.is_stopped: break
 
                             type_ = chunk.get("type")
+                            if self.context_window_manager is not None and type_ in {"reasoning", "content"}:
+                                self.context_window_manager.stream_snapshot(chunk.get("content") or "")
                             if (
                                 not first_semantic_sample_at
                                 and type_ in PROVIDER_SEMANTIC_CHUNK_TYPES
@@ -3529,6 +3642,8 @@ class LLMWorker(QThread):
                                     )
                             elif type_ == "usage":
                                 usage_payload = dict(chunk.get("usage") or {})
+                                if self.context_window_manager is not None:
+                                    self.context_window_manager.observe_usage(usage_payload)
                                 usage_payload.setdefault("prompt_cache_key", self.conversation_id or self.session_id)
                                 usage_payload.setdefault("turn_id", self.turn_id)
                                 usage_payload.setdefault(
@@ -4654,6 +4769,9 @@ class LLMWorker(QThread):
                                 else "tool_round_closed"
                             ),
                         )
+                        if self.context_window_manager is not None:
+                            self.context_window_manager.last_generated = json_copy(generated_messages, [])
+                            self.context_window_manager.update_snapshot(current_messages, self.tools, "tool_round_closed")
                         if (
                             self.run_context.get("grill_checkpoint_cancelled")
                             or self.run_context.get("grill_input_cancelled")
@@ -4818,6 +4936,9 @@ class LLMWorker(QThread):
                 break
 
         self._append_pending_guidance(current_messages, generated_messages, close=True)
+        if self.context_window_manager is not None and not self.is_stopped:
+            self.context_window_manager.last_generated = json_copy(generated_messages, [])
+            self.context_window_manager.update_snapshot(current_messages, self.tools, "finished")
         self.finished_signal.emit({
             "reasoning": full_reasoning.strip(),
             "content": self.data_security_run.restore_text(final_content) if self._security_compat else final_content,

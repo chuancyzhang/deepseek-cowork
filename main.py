@@ -96,6 +96,7 @@ from ui.conversation_actions import ConversationActionsMixin, reference_button
 from core.sidebar_projects import visible_sidebar_projects
 from core.chat_save_queue import (
     ChatSaveRequest,
+    ContextSaveRequest,
     ChatSaveWorker,
     SAVE_ERROR_BUSY,
     SAVE_ERROR_CONFLICT,
@@ -6000,6 +6001,15 @@ class ModelEditDialog(QDialog):
         self.model_name_input.textChanged.connect(sync_bootstrap_control)
         sync_bootstrap_control()
 
+        self.context_capacity_input = QLineEdit()
+        self.context_capacity_input.setPlaceholderText("未知时留空；例如 128000")
+        self.context_capacity_input.setText(str(model.get("context_window_tokens") or ""))
+        form.addRow(build_form_row_label("上下文容量（tokens）"), self.context_capacity_input)
+        self.output_reserve_input = QLineEdit()
+        self.output_reserve_input.setPlaceholderText("超长上下文输出预留，默认 8192")
+        self.output_reserve_input.setText(str(model.get("max_output_tokens") or ""))
+        form.addRow(build_form_row_label("输出预留（tokens）"), self.output_reserve_input)
+
         self.vision_check = QCheckBox("支持图片理解")
         self.vision_check.setChecked(bool(model.get("supports_vision", False)))
         form.addRow(build_form_row_label("图片理解"), self.vision_check)
@@ -6130,6 +6140,8 @@ class ModelEditDialog(QDialog):
                 and self.image_generation_check.isChecked()
             ),
         }
+        item["context_window_tokens"] = int(self.context_capacity_input.text()) if self.context_capacity_input.text().strip() else None
+        item["max_output_tokens"] = int(self.output_reserve_input.text()) if self.output_reserve_input.text().strip() else None
         if self.provider_id == "openai":
             item["api_protocol"] = normalize_openai_api_protocol(
                 self.api_protocol_combo.currentData() if self.api_protocol_combo else ""
@@ -6147,6 +6159,11 @@ class ModelEditDialog(QDialog):
         return item
 
     def accept(self):
+        for field in (self.context_capacity_input, self.output_reserve_input):
+            text = field.text().strip()
+            if text and (not text.isascii() or not text.isdecimal() or not 0 < int(text) <= 100000000):
+                QMessageBox.warning(self, "模型配置", "容量与输出预留须为 1 到 100000000 的整数，未知时留空。")
+                return
         if not self.model_name_input.text().strip():
             QMessageBox.warning(self, "模型配置", "请填写模型名称。")
             return
@@ -11585,7 +11602,7 @@ class SettingsDialog(QDialog):
 
         def add_settings_page(label, icon_name, page):
             allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "组件与依赖", "更新与关于"},
+                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "更新与关于"},
                 "capabilities": {"MCP 服务", "智能体"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
@@ -12273,10 +12290,15 @@ class SettingsDialog(QDialog):
         add_settings_page("消息连接", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
+        from ui.long_context import LongContextSettings
+        experiment_page, experiment_layout = make_scroll_page("实验功能", "按需启用，设置从下一轮任务生效。")
+        self.long_context_panel = LongContextSettings(self.config_manager)
+        experiment_layout.addWidget(self.long_context_panel)
+        add_settings_page("实验功能", "fa5s.flask", experiment_page)
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
             from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "组件与依赖", "更新与关于"]
+            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "更新与关于"]
             pages = dict(zip(self._page_labels, self._settings_pages))
             items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
             self.nav_combo.clear()
@@ -12293,6 +12315,7 @@ class SettingsDialog(QDialog):
             if row < 0 or row >= len(self._settings_pages):
                 return
             if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
+                    or self.long_context_panel.has_pending_input()
                     or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
                 if not self._confirm_discard_settings():
                     self.nav_list.blockSignals(True)
@@ -12311,7 +12334,7 @@ class SettingsDialog(QDialog):
             self.nav_combo.setCurrentIndex(row)
             self.nav_combo.blockSignals(False)
             if hasattr(self, "settings_action_bar"):
-                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "更新与关于"})
+                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "实验功能", "更新与关于"})
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
@@ -12611,6 +12634,8 @@ class SettingsDialog(QDialog):
             self.settings_dirty_label.setText("没有未保存的修改")
 
     def _confirm_discard_settings(self):
+        if hasattr(self, "long_context_panel") and not self.long_context_panel.confirm_leave():
+            return False
         if hasattr(self, "account_connections_page") and not self.account_connections_page.confirm_leave():
             return False
         if not self.mcp_server_manager.confirm_editor():
@@ -26393,6 +26418,8 @@ class SessionState:
         self.counted_usage_request_ids = set()
         self.last_token_usage = {}
         self.context_usage_snapshot = {}
+        self.context_capacity_snapshot = {}
+        self.context_rollover_notices = {}
         self.token_usage_rounds = {}
         self.token_speed_tracker = TokenSpeedTracker()
         self.token_speed_timer = None
@@ -33286,13 +33313,21 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         speed_snapshot = self._token_speed_snapshot(state)
         billing_snapshot = getattr(state, "last_deepseek_billing", {}) or getattr(state, "current_deepseek_billing", {})
         label.setText(format_token_usage_chip_text(summary, speed_snapshot, billing_snapshot))
-        label.setOverview(format_token_usage_overview(
+        overview = format_token_usage_overview(
             summary, getattr(state, "last_token_usage", {}), speed_snapshot,
             billing_snapshot, getattr(state, "context_usage_snapshot", {}),
             getattr(state, "token_usage_rounds", {}),
             getattr(state, "session_status", "") in {"running", "finalizing"},
             getattr(state, "active_turn_request_id", ""),
-        ))
+        )
+        from core.long_context import format_capacity
+        overview["capacity"] = format_capacity(
+            getattr(state, "context_capacity_snapshot", {}),
+            policy=self.config_manager.get("experimental_long_context"),
+            active_run_id=(getattr(state, "active_turn_request_id", "")
+                           if self._session_is_busy(state) else ""),
+        )
+        label.setOverview(overview)
         label.setDetailText(
             format_token_usage_tooltip(
                 summary,
@@ -36442,6 +36477,61 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         state.llm_worker = None
         self.handle_llm_response(result, state.session_id, turn_id, request_id)
 
+    def _handle_context_storage_request(self, state, event):
+        run_id = str(event.get("run_id") or "")
+        if (event.get("session_id") != state.session_id
+                or run_id != str(getattr(state, "active_turn_request_id", ""))
+                or time.time() > float(event.get("expires_at") or 0)
+                or self._history_writer_owner_for_session(state.session_id) == "daemon"):
+            return
+        if event.get("operation") == "prepare":
+            messages, _ = self._prepare_generated_messages_for_turn(state, event.get("generated_messages"))
+            state.messages.extend(self._merge_generated_messages(state.messages, messages))
+            self.save_chat_history(state.session_id)
+        self.chat_save_worker.enqueue_context(ContextSaveRequest(
+            session_id=state.session_id, run_id=run_id,
+            operation_id=str(event.get("operation_id") or ""),
+            operation=str(event.get("operation") or ""),
+            payload=copy.deepcopy(event.get("payload") or {}),
+            expires_at=float(event.get("expires_at") or 0),
+        ))
+
+    def _show_context_rollover(self, state, event):
+        from ui.long_context import ContextRolloverNotice
+        key = (event.get("run_id"), event.get("rollover_id"))
+        notices = getattr(state, "context_rollover_notices", {})
+        notice = notices.get(key)
+        if notice is None or not _qt_object_alive(notice):
+            notice = ContextRolloverNotice(
+                lambda: self._retry_context_rollover(state.session_id, key[0], key[1]))
+            notices[key] = notice
+            state.context_rollover_notices = notices
+            self.flush_session_content(state.session_id, final=True)
+            self._close_live_agent_stage(state)
+            state.active_agent_turn_group = None
+            state.current_content_buffer = ""
+            state.current_thinking_buffer = ""
+            state.last_flushed_content_buffer = ""
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
+            self.request_session_scroll_to_bottom(state.session_id, force=False)
+        notice.set_event(event, active=self._session_is_busy(state))
+        log_chat_runtime_debug("context_rollover", session_id=state.session_id,
+                               run_id=key[0], rollover_id=key[1], phase=event.get("phase"),
+                               error=event.get("error", ""))
+
+    def _retry_context_rollover(self, session_id, run_id, rollover_id):
+        state = self.get_session(session_id)
+        if not state or str(getattr(state, "active_turn_request_id", "")) != str(run_id):
+            return
+        run = self.runtime_journal.get_run(session_id, run_id) or {}
+        status = run.get("context_rollover") or {}
+        if status.get("rollover_id") != rollover_id or status.get("phase") != "failed":
+            return
+        self.runtime_journal.update_run(session_id, run_id, {"context_retry": rollover_id})
+        notice = getattr(state, "context_rollover_notices", {}).get((run_id, rollover_id))
+        if notice is not None and _qt_object_alive(notice):
+            notice.retry_button.setEnabled(False)
+
     def handle_observability_event(self, data, session_id=None, turn_id=None, request_id=None):
         try:
             on_ui_thread = QThread.currentThread() is self.thread()
@@ -36485,6 +36575,16 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             event.setdefault("turn_id", str(turn_id or ""))
             event.setdefault("run_id", str(request_id or ""))
             event_type = event.get("type") or ""
+            if event_type == "context_storage_request":
+                self._handle_context_storage_request(state, event)
+                return
+            if event_type == "context_capacity":
+                state.context_capacity_snapshot = copy.deepcopy(event.get("capacity") or {})
+                self.refresh_token_usage_label(state.session_id)
+                return
+            if event_type == "context_rollover":
+                self._show_context_rollover(state, event)
+                return
             if event_type == "request_snapshot":
                 state.request_snapshot_failed = event.get("status") == "failed"
                 append_background_process_log("chat_log_export.log",
@@ -36532,7 +36632,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                         bubble = self._append_live_thinking_segment(state)
                     bubble.ui_source_message_id = source_id
                 return
-            if event_type == "provider_request_start":
+            if event_type in {"provider_request_start", "context_checkpoint_request_start"}:
                 rounds = normalize_usage_rounds(getattr(state, "token_usage_rounds", {}))
                 run_key = str(event.get("run_id") or event.get("turn_id") or "")
                 if run_key and rounds.get("current", {}).get("run_id") != run_key:
@@ -36544,7 +36644,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                         "token_usage_round_started", session_id=state.session_id,
                         run_id=run_key,
                     )
-                self._start_token_speed_monitor(state, event)
+                if event_type == "provider_request_start":
+                    self._start_token_speed_monitor(state, event)
+                else:
+                    self._record_deepseek_billing_request_start(state, event)
             elif event_type == "provider_request_finish":
                 self._finish_token_speed_monitor(state, event)
             elif event_type == "provider_request_error":
@@ -38355,6 +38458,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         state.counted_usage_request_ids = set()
         state.last_token_usage = {}
         state.context_usage_snapshot = {}
+        state.context_capacity_snapshot = {}
+        state.context_rollover_notices = {}
         state.token_usage_rounds = {}
         state.current_deepseek_billing = {}
         state.last_deepseek_billing = {}
@@ -39233,6 +39338,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             conversation_meta.get("last_deepseek_billing")
         )
         state.context_usage_snapshot = normalize_context_usage(conversation_meta.get("context_usage_snapshot"))
+        state.context_capacity_snapshot = copy.deepcopy(conversation_meta.get("context_capacity_snapshot") or {})
         state.token_usage_rounds = normalize_usage_rounds(conversation_meta.get("token_usage_rounds"))
         try:
             state.chat_save_revision = max(
@@ -43232,6 +43338,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             getattr(state, "token_usage_buckets", {})
         )
         meta["context_usage_snapshot"] = normalize_context_usage(getattr(state, "context_usage_snapshot", {}))
+        meta["context_capacity_snapshot"] = copy.deepcopy(getattr(state, "context_capacity_snapshot", {}))
         meta["token_usage_rounds"] = normalize_usage_rounds(getattr(state, "token_usage_rounds", {}))
         meta["history_save_revision"] = max(
             0,
@@ -49624,6 +49731,11 @@ a {{ overflow-wrap: anywhere; }}
             template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
         effective_workspace_dir = self._ensure_session_workspace(state)
         effective_model_id = str(task_model_id or self._model_id_for_state(state) or "").strip()
+        from core.long_context import desktop_policy
+        context_policy = desktop_policy(self.config_manager, excluded=bool(
+            getattr(state, "favorite_run_id", "") or ppt_agent_internal_stage
+            or normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION
+            or self._history_writer_owner_for_session(state.session_id) == "daemon"))
         return normalize_run_context(
             {
                 "mode": mode,
@@ -49647,6 +49759,7 @@ a {{ overflow-wrap: anywhere; }}
                 ),
                 "selected_skill_names": effective_skill_names,
                 "knowledge_context": self._knowledge_snapshot(state),
+                "desktop_long_context": context_policy,
                 "selected_model_id": effective_model_id,
                 "selected_model_profile": self._model_profile_snapshot_for_state(state, model_id=effective_model_id),
                 "reasoning_effort": self._selected_reasoning_effort(state, model_id=effective_model_id),
@@ -53393,6 +53506,9 @@ a {{ overflow-wrap: anywhere; }}
         state.turn_steerable = False
         self.set_session_status("running", state.session_id)
         self.set_session_phase("Reconnecting", state.session_id)
+        rollover = run.get("context_rollover")
+        if isinstance(rollover, dict) and rollover.get("rollover_id"):
+            self._show_context_rollover(state, {**rollover, "run_id": run_id})
         if not self.daemon_available or self.daemon_client is None:
             return True
         state.current_content_buffer = ""

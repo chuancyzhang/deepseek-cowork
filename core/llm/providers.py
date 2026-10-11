@@ -7,6 +7,7 @@ import os
 import json
 import time
 import httpx
+from urllib.parse import urlparse
 from .deepseek import (
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
@@ -650,6 +651,13 @@ class OpenAIProvider(LLMProvider):
             params["reasoning_effort"] = self.reasoning_effort
 
         params = project_provider_request(self, params, "chat_completions", request_context)
+        if request_context.get("max_output_tokens"):
+            output_parameter = (
+                "max_completion_tokens"
+                if urlparse(str(self.base_url)).hostname == "api.openai.com"
+                else "max_tokens"
+            )
+            params[output_parameter] = int(request_context["max_output_tokens"])
         capture_provider_request(params, "chat_completions", request_context)
         stream = self._create_chat_completion_stream(params)
         if not _register_provider_stream(request_context, stream):
@@ -856,7 +864,7 @@ class OpenAIProvider(LLMProvider):
             "input": self._prepare_responses_input(messages),
             "stream": True,
         }
-        api_tools = self._prepare_responses_tools(tools)
+        api_tools = [] if request_context.get("tools_disabled") else self._prepare_responses_tools(tools)
         if api_tools:
             params["tools"] = api_tools
         if self.reasoning_effort:
@@ -867,6 +875,8 @@ class OpenAIProvider(LLMProvider):
             params["extra_headers"] = {"X-Client-Request-Id": client_request_id}
 
         params = project_provider_request(self, params, "responses", request_context)
+        if request_context.get("max_output_tokens"):
+            params["max_output_tokens"] = int(request_context["max_output_tokens"])
         capture_provider_request(params, "responses", request_context)
         stream = self.client.responses.create(**params)
         if not _register_provider_stream(request_context, stream):
@@ -1593,6 +1603,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = api_tools
 
         kwargs = project_provider_request(self, kwargs, "anthropic", request_context)
+        if (request_context or {}).get("max_output_tokens"):
+            kwargs["max_tokens"] = int(request_context["max_output_tokens"])
         capture_provider_request(kwargs, "anthropic", request_context)
         with self.client.messages.stream(**kwargs) as stream:
             if not _register_provider_stream(request_context, stream):

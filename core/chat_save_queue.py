@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import QThread, Signal
@@ -74,6 +74,16 @@ class ChatSaveRequest:
     revision: int = 0
 
 
+@dataclass(frozen=True)
+class ContextSaveRequest:
+    session_id: str
+    run_id: str
+    operation_id: str
+    operation: str
+    payload: dict
+    expires_at: float
+
+
 class ChatSaveWorker(QThread):
     save_failed = Signal(str, int, str, str)
     save_blocked = Signal(str, int, str)
@@ -85,6 +95,7 @@ class ChatSaveWorker(QThread):
         self.debounce_seconds = max(0, int(debounce_ms or 0)) / 1000.0
         self._condition = threading.Condition()
         self._pending = OrderedDict()
+        self._context_pending = deque()
         self._inflight = set()
         self._highest_revision = {}
         self._accepted_signature = {}
@@ -166,9 +177,10 @@ class ChatSaveWorker(QThread):
             self._condition.notify_all()
             while True:
                 if target_session:
-                    idle = target_session not in self._pending and target_session not in self._inflight
+                    idle = (target_session not in self._pending and target_session not in self._inflight
+                            and not any(r.session_id == target_session for r in self._context_pending))
                 else:
-                    idle = not self._pending and not self._inflight
+                    idle = not self._pending and not self._inflight and not self._context_pending
                 if idle:
                     return True
                 if deadline is not None:
@@ -218,10 +230,19 @@ class ChatSaveWorker(QThread):
             self._stop_requested = True
             if not flushed:
                 self._pending.clear()
+                self._context_pending.clear()
             self._condition.notify_all()
         return self.wait(max(0, int(timeout_ms or 0)))
 
     def _next_request_locked(self):
+        if self._context_pending:
+            control = self._context_pending[0]
+            # A control request is a non-coalescing barrier after its UI ledger save.
+            preceding = self._pending.get(control.session_id)
+            if preceding is None or time.time() > control.expires_at:
+                self._context_pending.popleft()
+                self._inflight.add(control.session_id)
+                return control, 0.0
         if self._pending:
             now = time.monotonic()
             next_session_id = None
@@ -242,6 +263,50 @@ class ChatSaveWorker(QThread):
                 return None, max(0.0, next_ready_at - now)
         return None, None
 
+    def enqueue_context(self, request):
+        if not isinstance(request, ContextSaveRequest):
+            return False
+        with self._condition:
+            if self._stop_requested:
+                return False
+            if not any(r.operation_id == request.operation_id for r in self._context_pending):
+                self._context_pending.append(request)
+                preceding = self._pending.get(request.session_id)
+                if preceding is not None:
+                    preceding.ready_at = time.monotonic()
+            self._condition.notify_all()
+        return True
+
+    def _write_context(self, storage, request):
+        from .runtime_journal import RuntimeJournal
+        import os
+        journal = None
+        receipt = {"operation_id": request.operation_id, "ok": False}
+        try:
+            journal = RuntimeJournal(os.path.dirname(self.db_path))
+            if storage is None:
+                storage = ChatStorage(self.db_path)
+            def action():
+                if request.operation == "prepare":
+                    return storage.check_context_source(request.session_id,
+                        request.payload["source_fingerprints"], request.payload["history_revision"])
+                if request.operation == "commit":
+                    return storage.commit_context_window(request.session_id, request.payload)
+                raise ValueError("未知上下文保存操作。")
+            journal.execute_context_operation(request.session_id, request.run_id,
+                                              request.operation_id, request.expires_at, action)
+            return
+        except Exception as exc:
+            receipt["error"] = str(exc)
+            receipt["error_type"] = type(exc).__name__
+        # If the process dies after SQLite commits, the window ID remains the receipt.
+        try:
+            if journal is None:
+                raise RuntimeError(receipt.get("error", "运行日志不可用"))
+            journal.update_run(request.session_id, request.run_id, {"context_receipt": receipt})
+        except Exception as exc:
+            self.save_failed.emit(request.session_id, 0, classify_chat_save_error(exc), str(exc))
+
     def run(self):
         storage = None
         while True:
@@ -253,6 +318,14 @@ class ChatSaveWorker(QThread):
                     self._condition.wait(timeout=wait_time)
                     request, wait_time = self._next_request_locked()
 
+            if isinstance(request, ContextSaveRequest):
+                try:
+                    self._write_context(storage, request)
+                finally:
+                    with self._condition:
+                        self._inflight.discard(request.session_id)
+                        self._condition.notify_all()
+                continue
             try:
                 if storage is None:
                     storage = ChatStorage(self.db_path)

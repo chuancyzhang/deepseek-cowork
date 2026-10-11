@@ -18,6 +18,7 @@
 | 创建、安装或调试能力 | [Skill 系统](skill-system.md) | [技术设计](technical-design.md) |
 | 自定义界面或使用交互可视化 | [AI 主题与 Visualize](guides/ai-theme-and-visualize.md) | [产品文档](product.md) |
 | 按需减少模型请求中的敏感信息 | [可选数据安全插件](data-security.md) | [源码验证记录](data-security-validation.md) |
+| 在长任务中跨越上下文窗口 | [超长上下文](long-context.md) | [验证记录](long-context-validation.md) |
 | 准备升级或验收发行包 | [发布记录](releases/index.md) | [用户指南](user-guide.md) |
 
 ## 推荐阅读顺序

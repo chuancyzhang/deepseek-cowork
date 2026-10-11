@@ -294,6 +294,7 @@ class ConfigManager:
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "deepseek_v4_context_window_tokens": 1000000,
             "context_budget_ratio": 0.8,
+            "experimental_long_context": {"enabled": False, "target_tokens": 300000},
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],
@@ -716,6 +717,9 @@ class ConfigManager:
                 source.get("supports_image_generation", False)
             ),
         }
+        for key in ("context_window_tokens", "max_output_tokens"):
+            if type(source.get(key)) is int and 0 < source[key] <= 100000000:
+                entry[key] = source[key]
         if provider_id == "openai":
             entry["api_protocol"] = normalize_openai_api_protocol(
                 source.get("api_protocol", API_PROTOCOL_CHAT_COMPLETIONS)
@@ -1599,6 +1603,20 @@ class ConfigManager:
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def set_experimental_long_context(self, value):
+        from .long_context import normalize_policy
+        key = "experimental_long_context"
+        previous = self.config.get(key)
+        self.config[key] = normalize_policy(value)
+        try:
+            self._write_config_or_raise()
+        except Exception:
+            if previous is None:
+                self.config.pop(key, None)
+            else:
+                self.config[key] = previous
+            raise
 
     def _set_config_value(self, key, value):
         if self.config.get(key) == value:

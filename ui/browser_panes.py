@@ -461,10 +461,6 @@ class TerminalBridge(QObject):
         if text:
             QApplication.clipboard().setText(text)
 
-    @Slot(bool)
-    def selectionChanged(self, selected):
-        self.pane.copy_button.setEnabled(selected)
-
     @Slot(str)
     def contextMenu(self, selection):
         self.pane.show_terminal_menu(selection)
@@ -493,12 +489,6 @@ class TerminalPane(ControlledPane):
         self.directory.setToolTip(tab.cwd)
         self.directory.setTextInteractionFlags(Qt.TextSelectableByMouse)
         row.addWidget(self.directory, 1)
-        self.copy_button = button("复制", "复制选中文字 · Ctrl+C / Ctrl+Shift+C", self.copy_selection)
-        self.copy_button.setEnabled(False)
-        self.paste_button = button("粘贴", "粘贴剪贴板文本 · Ctrl+V / Ctrl+Shift+V / Shift+Insert", self.paste_clipboard)
-        self.paste_button.setEnabled(False)
-        row.addWidget(self.copy_button)
-        row.addWidget(self.paste_button)
         self.interrupt_button = button("中断", "向当前终端发送 Ctrl+C", self.interrupt)
         self.restart_button = button("重新启动", "启动新的终端进程，不重跑命令", self.restartRequested.emit)
         self.restart_button.hide()
@@ -532,10 +522,6 @@ class TerminalPane(ControlledPane):
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda change=delta: self.change_font_size(change))
             self.zoom_shortcuts.append(shortcut)
-
-    def copy_selection(self):
-        if self.ready:
-            self.page.runJavaScript("window.coworkTerminal.copySelection()")
 
     def paste_clipboard(self):
         if not self.ready or self.tab.owner == "agent":
@@ -571,7 +557,6 @@ class TerminalPane(ControlledPane):
     def refresh_control(self):
         super().refresh_control()
         if getattr(self, "ready", False):
-            self.paste_button.setEnabled(self.tab.owner != "agent")
             self.page.runJavaScript("window.coworkTerminal.setInput(" + str(self.tab.owner != "agent").lower() + ")")
 
     def refresh_theme(self, _resolved=None):

@@ -95,6 +95,11 @@ class TerminalClipboardTest(unittest.TestCase):
         QTest.keyClick(self.pane.view.focusProxy() or self.pane.view, key, modifiers)
         QTest.qWait(150)
 
+    def context_menu(self):
+        QTest.mouseClick(self.pane.view.focusProxy(), Qt.RightButton, pos=QPoint(30, 15))
+        self.wait(lambda: any(m.isVisible() for m in self.pane.findChildren(QMenu)))
+        return next(m for m in self.pane.findChildren(QMenu) if m.isVisible())
+
     def test_copy_selection_and_interrupt(self):
         # Use a mouse selection in the canvas, not the browser DOM selection.
         rect = json.loads(self.js("JSON.stringify((()=>{const r=document.querySelector('.xterm-screen').getBoundingClientRect();return {x:r.x,y:r.y}})())"))
@@ -104,20 +109,18 @@ class TerminalClipboardTest(unittest.TestCase):
         QTest.mouseMove(self.pane.view.focusProxy(), end, 50)
         QTest.qWait(100)
         QTest.mouseRelease(self.pane.view.focusProxy(), Qt.LeftButton, pos=end)
-        self.wait(lambda: self.pane.copy_button.isEnabled())
         for modifiers in (Qt.ControlModifier, Qt.ControlModifier | Qt.ShiftModifier):
             self.app.clipboard().setText("sentinel")
             self.key(Qt.Key_C, modifiers)
             self.assertEqual(self.app.clipboard().text(), "CopyOutput")
         self.assertEqual(self.terminal.inputs, [])
         self.js("window.coworkTerminal.selectAll()")
-        self.pane.copy_button.click()
+        self.key(Qt.Key_C, Qt.ControlModifier)
         self.wait(lambda: "中文命令和输出" in self.app.clipboard().text())
         self.key(Qt.Key_Insert, Qt.ControlModifier)
         self.assertIn("中文命令和输出", self.app.clipboard().text())
         # Clicking the terminal removes the selection; Ctrl+C must reach the PTY.
         QTest.mouseClick(self.pane.view.focusProxy(), Qt.LeftButton, pos=QPoint(300, 100))
-        self.wait(lambda: not self.pane.copy_button.isEnabled())
         self.key(Qt.Key_C, Qt.ControlModifier)
         self.assertEqual(self.terminal.inputs, ["\x03"])
         self.app.clipboard().setText("preserved")
@@ -125,7 +128,7 @@ class TerminalClipboardTest(unittest.TestCase):
         self.assertEqual(self.app.clipboard().text(), "preserved")
         self.assertEqual(self.terminal.inputs, ["\x03"])
 
-    def test_paste_shortcuts_button_and_bracketed_multiline(self):
+    def test_paste_shortcuts_menu_and_bracketed_multiline(self):
         for key, modifiers in ((Qt.Key_V, Qt.ControlModifier),
                                (Qt.Key_V, Qt.ControlModifier | Qt.ShiftModifier),
                                (Qt.Key_Insert, Qt.ShiftModifier)):
@@ -137,16 +140,16 @@ class TerminalClipboardTest(unittest.TestCase):
         self.js('window.coworkTerminal.write("\\x1b[?2004h", 2)')
         self.wait(lambda: self.pane.cursor == 2)
         self.app.clipboard().setText("first\r\n第二行\nlast")
-        self.pane.paste_button.click()
+        menu = self.context_menu()
+        self.assertTrue(menu.actions()[1].isEnabled())
+        menu.actions()[1].trigger()
+        menu.close()
         self.wait(lambda: bool(self.terminal.inputs))
         self.assertEqual(self.terminal.inputs, ["\x1b[200~first\r第二行\rlast\x1b[201~"])
 
     def test_context_menu_and_control_lock(self):
         self.js("window.coworkTerminal.selectAll()")
-        self.wait(lambda: self.pane.copy_button.isEnabled())
-        QTest.mouseClick(self.pane.view.focusProxy(), Qt.RightButton, pos=QPoint(30, 15))
-        self.wait(lambda: any(m.isVisible() for m in self.pane.findChildren(QMenu)))
-        menu = next(m for m in self.pane.findChildren(QMenu) if m.isVisible())
+        menu = self.context_menu()
         self.assertTrue(menu.actions()[0].isEnabled())
         menu.actions()[0].trigger()
         self.assertIn("中文命令和输出", self.app.clipboard().text())
@@ -154,20 +157,22 @@ class TerminalClipboardTest(unittest.TestCase):
         self.store.set_owner(self.tab.session_id, self.tab.id, "agent")
         self.pane.refresh_control()
         self.js("true")
-        self.assertFalse(self.pane.paste_button.isEnabled())
+        menu = self.context_menu()
+        self.assertFalse(menu.actions()[1].isEnabled())
+        menu.close()
         self.terminal.inputs.clear()
         self.app.clipboard().setText("blocked")
         self.key(Qt.Key_V, Qt.ControlModifier)
         self.pane.terminal_bridge.paste()
         self.js('window.coworkTerminal.paste("blocked")')
         self.assertEqual(self.terminal.inputs, [])
-        self.pane.copy_button.click()
+        self.key(Qt.Key_C, Qt.ControlModifier)
         self.wait(lambda: "中文命令和输出" in self.app.clipboard().text())
         self.store.set_owner(self.tab.session_id, self.tab.id, "human")
         self.pane.refresh_control()
         self.js("true")
         self.terminal.status = "exited"
-        self.pane.paste_button.click()
+        self.key(Qt.Key_V, Qt.ControlModifier)
         self.wait(lambda: "终端未运行" in self.pane.notice.text())
         self.assertEqual(self.terminal.inputs, [])
 
@@ -175,7 +180,6 @@ class TerminalClipboardTest(unittest.TestCase):
         directory = os.environ.get("COWORK_TERMINAL_SCREENSHOTS")
         if not directory: return
         self.js("window.coworkTerminal.selectAll()")
-        self.wait(lambda: self.pane.copy_button.isEnabled())
         QTest.qWait(200)
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)

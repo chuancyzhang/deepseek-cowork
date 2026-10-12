@@ -28,7 +28,6 @@ terminal.onData(text => {
 function copySelection() {
   if (terminal.hasSelection()) bridge?.copy(terminal.getSelection());
 }
-terminal.onSelectionChange(() => bridge?.selectionChanged(terminal.hasSelection()));
 terminal.attachCustomKeyEventHandler(event => {
   if (event.type !== "keydown") return true;
   const copy = event.ctrlKey && !event.altKey && !event.metaKey &&
@@ -54,7 +53,6 @@ document.getElementById("terminal").addEventListener("contextmenu", event => {
 });
 window.coworkTerminal = {
   write(text, cursor) { terminal.write(text, () => bridge?.ack(cursor)); },
-  copySelection,
   selectAll() { terminal.selectAll(); },
   paste(text) { if (userInput) { terminal.paste(text); terminal.focus(); } },
   setInput(enabled) { userInput = !!enabled; terminal.options.disableStdin = !userInput; },

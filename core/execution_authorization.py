@@ -282,7 +282,7 @@ def prepare_action(name, args, handler, context, authorization, *, preparation=N
     implementation = _source(handler)
     if kind == "opaque" and implementation and os.path.isfile(implementation):
         script_states.append((implementation, _signature(implementation)))
-    runtime_kind = {"run_python_code": "python", "code_block": "python", "run_node_code": "node", "bash": "bash", "pwsh": "pwsh"}.get(name)
+    runtime_kind = {"run_python_code": "python", "run_node_code": "node", "bash": "bash", "pwsh": "pwsh"}.get(name)
     runtime = None
     if runtime_kind:
         from . import sandbox_runtime

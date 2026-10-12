@@ -65,7 +65,7 @@ from core.skill_manager import SkillManager
 from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier, preferred_version
 from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns, style_store_card
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
-from core.agent import LLMWorker, CodeWorker
+from core.agent import LLMWorker
 from ui.stream_event_buffer import StreamEventBuffer
 from ui.thinking_text import (
     ThinkingAutoTextProbe,
@@ -23259,8 +23259,6 @@ class ChatBubble(QFrame):
         self.message_actions_enabled = True
         self.edit_controls = None
         self.edit_original_text = ""
-        self.code_output_label = None
-        self.code_output_edit = None
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -23685,24 +23683,6 @@ class ChatBubble(QFrame):
             if button is not None:
                 button.setStyleSheet(action_style)
                 button.setIcon(qta.icon(icon_name, color=DesignTokens.icon_secondary))
-        if self.code_output_label is not None:
-            self.code_output_label.setStyleSheet(
-                f"font-weight: {DesignTokens.font_weight_semibold}; "
-                f"color: {DesignTokens.chat_text}; "
-                f"font-size: {DesignTokens.font_size_meta}px; "
-                f"margin-top: {DesignTokens.spacing_sm}px; margin-left: {DesignTokens.spacing_xs}px;"
-            )
-        if self.code_output_edit is not None:
-            mono_family = str(
-                QApplication.instance().property("themeMonoFontFamily") or "Consolas"
-            )
-            self.code_output_edit.setStyleSheet(
-                f"color: {DesignTokens.chat_text}; font-family: '{mono_family}'; "
-                f"font-size: {DesignTokens.font_size_code}px; "
-                f"background: {DesignTokens.bg_code}; border: 1px solid {DesignTokens.chat_border}; "
-                f"padding: {DesignTokens.spacing_sm}px; border-radius: {DesignTokens.radius_sm}px; "
-                f"margin-left: {DesignTokens.spacing_xs}px;"
-            )
         if self.message_time_label is not None:
             self.message_time_label.setStyleSheet(
                 f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta}px; "
@@ -26306,7 +26286,6 @@ class SessionState:
         self.daemon_worker = None
         self.stop_pending = False
         self.stop_pending_run_id = ""
-        self.code_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
         self.token_usage_label = token_usage_label
@@ -33879,7 +33858,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 bool(getattr(state, "live_activity", False))
                 or
                 (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
-                or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
                 or getattr(state, "daemon_running", False)
                 or getattr(state, "stop_pending", False)
             )
@@ -34063,14 +34041,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         if not state:
             return False
         llm_worker = getattr(state, "llm_worker", None)
-        code_worker = getattr(state, "code_worker", None)
         daemon_worker = getattr(state, "daemon_worker", None)
         return bool(
             getattr(state, "submit_in_progress", False)
             or getattr(state, "live_activity", False)
             or getattr(state, "daemon_running", False)
             or (llm_worker is not None and llm_worker.isRunning())
-            or (code_worker is not None and code_worker.isRunning())
             or (daemon_worker is not None and daemon_worker.isRunning())
         )
 
@@ -36617,7 +36593,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         current_worker = {
             "llm": getattr(state, "llm_worker", None),
             "daemon": getattr(state, "daemon_worker", None),
-            "code": getattr(state, "code_worker", None),
         }.get(str(kind or ""))
         if current_worker is not worker or getattr(worker, "_ui_result_received", False) or getattr(worker, "_ui_terminal_handled", False):
             return
@@ -36630,16 +36605,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             request_id=str(request_id or ""),
             worker_kind=str(kind or ""),
         )
-        if kind == "code":
-            state.code_worker = None
-            self._show_conversation_notice(state, message, "error")
-            self.set_session_phase("Failed", state.session_id)
-            self.set_session_status("failed", state.session_id, save=True, error=message)
-            self.refresh_step_list(state.session_id)
-            self.refresh_change_list(state.session_id)
-            if state.session_id == self.current_session_id:
-                self.normalize_session_ui(state)
-            return
         result = {"error": message, "_runtime_terminal": "failed", "request_id": request_id}
         if kind == "daemon":
             self.handle_daemon_response(result, state.session_id, turn_id, request_id)
@@ -37131,10 +37096,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 or (
                     getattr(state, "llm_worker", None) is not None
                     and state.llm_worker.isRunning()
-                )
-                or (
-                    getattr(state, "code_worker", None) is not None
-                    and state.code_worker.isRunning()
                 )
             )
         }
@@ -38074,10 +38035,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 self._disconnect_worker_signals(state.llm_worker)
                 state.llm_worker.stop()
                 state.llm_worker.wait(1000)
-            if state.code_worker and state.code_worker.isRunning():
-                self._disconnect_worker_signals(state.code_worker)
-                state.code_worker.stop()
-                state.code_worker.wait(1000)
             # Finished threads can still have undelivered GUI data. Seal those
             # buffers too, before dropping the session's worker identities.
             for worker in (state.daemon_worker, state.llm_worker):
@@ -38089,7 +38046,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             state.daemon_running = False
             state.daemon_worker = None
             state.llm_worker = None
-            state.code_worker = None
         if self.daemon_timer:
             self.daemon_timer.stop()
         if getattr(self, "chat_save_worker", None):
@@ -38242,17 +38198,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             and state.llm_worker.isRunning()
         )
         running = lifecycle_running
-        running_code = bool(
-            lifecycle_running
-            and state.code_worker
-            and state.code_worker.isRunning()
-        )
         running_daemon = bool(
             lifecycle_running and getattr(state, "daemon_running", False)
         )
 
-        if running or running_code or running_daemon:
-            steerable = bool(getattr(state, "turn_steerable", False) and not running_code)
+        if running or running_daemon:
+            steerable = bool(getattr(state, "turn_steerable", False))
             self.action_btn.setText("调整方向" if steerable else "运行中")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
@@ -38270,11 +38221,11 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             else:
                 loop_text = display_run_phase(
                     getattr(state, "run_phase", "")
-                    or ("Running" if (running_daemon or running_code) else "")
+                    or ("Running" if running_daemon else "")
                 )
             self.loop_hint.setText(loop_text or "处理中")
             self.loop_hint.setToolTip(loop_text or "处理中")
-            self.loop_hint.setVisible(bool(running_daemon or running_code or loop_text))
+            self.loop_hint.setVisible(bool(running_daemon or loop_text))
         else:
             grill_armed = normalize_grill_mode_state(
                 getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
@@ -38329,12 +38280,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 self._disconnect_worker_signals(state.llm_worker)
                 try:
                     state.llm_worker.stop()
-                except Exception:
-                    pass
-            if state.code_worker:
-                self._disconnect_worker_signals(state.code_worker)
-                try:
-                    state.code_worker.stop()
                 except Exception:
                     pass
             self.flush_session_content(state.session_id, final=False)
@@ -40916,7 +40861,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         return not bool(
             (state.llm_worker and state.llm_worker.isRunning())
             or getattr(state, "daemon_running", False)
-            or (state.code_worker and state.code_worker.isRunning())
         )
 
     def refresh_project_selector(self, session_id=None):
@@ -48337,7 +48281,6 @@ a {{ overflow-wrap: anywhere; }}
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
         running = bool(
             (state.llm_worker and state.llm_worker.isRunning())
-            or (state.code_worker and state.code_worker.isRunning())
             or getattr(state, "daemon_running", False)
         )
         if not selected:
@@ -49001,11 +48944,10 @@ a {{ overflow-wrap: anywhere; }}
         running = bool(
             self._session_has_live_activity(state.session_id)
             or (state.llm_worker and state.llm_worker.isRunning())
-            or (state.code_worker and state.code_worker.isRunning())
             or getattr(state, "daemon_running", False)
         )
         if running:
-            steerable = bool(getattr(state, "turn_steerable", False) and not (state.code_worker and state.code_worker.isRunning()))
+            steerable = bool(getattr(state, "turn_steerable", False))
             self.action_btn.setText("调整方向" if steerable else "运行中")
             self.action_btn.setEnabled(steerable)
             return
@@ -49748,7 +49690,6 @@ a {{ overflow-wrap: anywhere; }}
         stopped_run_id = str(getattr(state, "active_turn_request_id", "") or "").strip()
         daemon_worker = state.daemon_worker
         llm_worker = state.llm_worker
-        code_worker = state.code_worker
         was_daemon_running = bool(state.daemon_running)
         needs_daemon_stop = bool(daemon_worker is not None or was_daemon_running)
         daemon_stop_started = False
@@ -49782,11 +49723,6 @@ a {{ overflow-wrap: anywhere; }}
             self._disconnect_worker_signals(llm_worker)
             if llm_worker.isRunning():
                 self._keep_detached_worker(llm_worker)
-        if code_worker:
-            self._disconnect_worker_signals(code_worker)
-            code_worker.stop()
-            if code_worker.isRunning():
-                self._keep_detached_worker(code_worker)
 
         self.flush_session_content(state.session_id, final=False)
         self.flush_session_thinking(state.session_id)
@@ -49801,7 +49737,6 @@ a {{ overflow-wrap: anywhere; }}
         state.daemon_running = False
         state.turn_steerable = False
         state.llm_worker = None
-        state.code_worker = None
         self._finish_grill_mode(state, "stopped")
         self._reject_unapplied_guidance(state, restore_input=False)
         self._persist_pending_guidance(state)
@@ -49836,7 +49771,6 @@ a {{ overflow-wrap: anywhere; }}
         
         # Check if running
         is_running = (state.llm_worker and state.llm_worker.isRunning()) or \
-                     (state.code_worker and state.code_worker.isRunning()) or \
                      state.daemon_running or \
                      getattr(state, "stop_pending", False)
         
@@ -55051,8 +54985,7 @@ a {{ overflow-wrap: anywhere; }}
                     )
         try:
             response_value = self._handle_llm_response_impl(result, session_id, turn_id)
-            if getattr(state, "code_worker", None) is None:
-                self._safe_finalize_deepseek_billing(state, run_id)
+            self._safe_finalize_deepseek_billing(state, run_id)
             return response_value
         except Exception as exc:
             log_chat_runtime_debug(
@@ -55084,8 +55017,7 @@ a {{ overflow-wrap: anywhere; }}
                 )
             if state.session_id == self.current_session_id:
                 self.normalize_session_ui(state)
-            if getattr(state, "code_worker", None) is None:
-                self._safe_finalize_deepseek_billing(state, run_id)
+            self._safe_finalize_deepseek_billing(state, run_id)
             return None
 
     def _handle_llm_response_impl(self, result, session_id=None, turn_id=None):
@@ -55809,160 +55741,32 @@ a {{ overflow-wrap: anywhere; }}
                 self.normalize_session_ui(state)
             return
 
-        code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
-        should_run_code_block = not clarify_active and not grill_read_only_active
-        if code_match and should_run_code_block:
-            code_block = code_match.group(1).strip()
-            self.append_log("System: 检测到代码块，准备执行...")
-            self.set_session_phase("Executing", state.session_id)
-            authorization = getattr(state, "execution_authorization", None)
-            god_mode = bool(authorization and authorization.god_mode)
-            
-            if god_mode:
-                 self._show_conversation_notice(state, "God Mode 已开启，正在执行高权限代码", "warning")
-
-            state.code_worker = CodeWorker(code_block, self._workspace_dir_for_state(state), god_mode=god_mode,
-                                           execution_authorization=authorization, runtime_journal=self.runtime_journal)
-            if not god_mode:
-                state.code_worker.observability_signal.connect(
-                    lambda event, sid=state.session_id, tid=turn_id, rid=run_id:
-                        self.handle_observability_event(event, sid, tid, rid), Qt.QueuedConnection)
-            state.code_worker.output_signal.connect(
-                lambda text, sid=state.session_id, tid=turn_id, rid=run_id:
-                    self.handle_code_output(text, sid, tid, rid)
+        # Reply code fences are display content. Execution belongs to explicit
+        # tool calls in the agent loop, with its authorization and lifecycle.
+        self._finish_grill_mode(
+            state,
+            "completed_without_execution" if grill_read_only_active else "completed",
+        )
+        self.set_session_phase("Completed", state.session_id)
+        self.set_session_status("completed", state.session_id, save=True)
+        if is_first_submit_turn:
+            log_ui_navigation(
+                "first_submit_finish",
+                session_id=state.session_id,
+                turn_id=turn_id or state.active_turn_id,
+                outcome="completed",
             )
-            self._bind_run_worker_finished(
-                state,
-                state.code_worker,
-                "code",
-                turn_id,
-                run_id,
-                lambda _result, sid=state.session_id, tid=turn_id, rid=run_id:
-                    self.handle_code_finished(sid, tid, rid),
-            )
-            state.code_worker.input_request_signal.connect(
-                lambda prompt, sid=state.session_id, tid=turn_id, rid=run_id:
-                    self.handle_code_input_request(prompt, sid, tid, rid)
-            )
-            
-            state.code_worker.start()
-            if is_current: self.normalize_session_ui(state)
-        else:
-            if not clarify_active:
-                self._finish_grill_mode(
-                    state,
-                    "completed_without_execution" if grill_read_only_active else "completed",
-                )
-            if clarify_active:
-                self.set_session_status("draft", state.session_id, save=True)
-            else:
-                self.set_session_phase("Completed", state.session_id)
-                self.set_session_status("completed", state.session_id, save=True)
-                if is_first_submit_turn:
-                    log_ui_navigation(
-                        "first_submit_finish",
-                        session_id=state.session_id,
-                        turn_id=turn_id or state.active_turn_id,
-                        outcome="completed",
-                    )
-                    state.first_submit_diagnostic_turn_id = 0
-            self.refresh_step_list(state.session_id)
-            self.refresh_change_list(state.session_id)
-            if is_current: self.normalize_session_ui(state)
-            QTimer.singleShot(
-                0,
-                lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
-                    self.get_session(sid)
-                ),
-            )
-
-    def handle_code_output(self, text, session_id=None, turn_id=None, request_id=None):
-        state = self.get_session(session_id)
-        if state and not self._event_matches_active_run(state, turn_id, request_id):
-            return
-        if state and state.last_agent_bubble:
-            if state.last_agent_bubble.code_output_edit is None:
-                label = QLabel("执行结果:")
-                label.setStyleSheet(
-                    f"font-weight: {DesignTokens.font_weight_semibold}; "
-                    f"color: {DesignTokens.chat_text}; "
-                    f"font-size: {DesignTokens.font_size_meta}px; "
-                    f"margin-top: {DesignTokens.spacing_sm}px; margin-left: {DesignTokens.spacing_xs}px;"
-                )
-                state.last_agent_bubble.code_output_label = label
-                state.last_agent_bubble.layout().addWidget(label)
-                
-                state.last_agent_bubble.code_output_edit = AutoResizingPlainTextEdit()
-                mono_family = str(
-                    QApplication.instance().property("themeMonoFontFamily") or "Consolas"
-                )
-                state.last_agent_bubble.code_output_edit.setStyleSheet(
-                    f"color: {DesignTokens.chat_text}; font-family: '{mono_family}'; "
-                    f"font-size: {DesignTokens.font_size_code}px; "
-                    f"background: {DesignTokens.bg_code}; border: 1px solid {DesignTokens.chat_border}; "
-                    f"padding: {DesignTokens.spacing_sm}px; border-radius: {DesignTokens.radius_sm}px; "
-                    f"margin-left: {DesignTokens.spacing_xs}px;"
-                )
-                state.last_agent_bubble.code_output_edit.setReadOnly(True)
-                state.last_agent_bubble.layout().addWidget(state.last_agent_bubble.code_output_edit)
-            
-            cursor = state.last_agent_bubble.code_output_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            cursor.insertText(text or "")
-            state.last_agent_bubble.code_output_edit.setTextCursor(cursor)
-            state.last_agent_bubble.code_output_edit.adjustHeight()
-            self.request_session_scroll_to_bottom(state.session_id, force=False)
-
-    def handle_code_finished(self, session_id=None, turn_id=None, request_id=None):
-        state = self.get_session(session_id)
-        if state and not self._event_matches_active_run(state, turn_id, request_id):
-            return
-        if state: state.code_worker = None
-        if state:
-            code_text = ""
-            if state.last_agent_bubble and hasattr(state.last_agent_bubble, "code_output_edit"):
-                try:
-                    code_text = state.last_agent_bubble.code_output_edit.toPlainText().strip()
-                except Exception:
-                    code_text = ""
-            self._finish_grill_mode(state, "completed")
-            self.set_session_phase("Completed", state.session_id)
-            self.set_session_status("completed", state.session_id, save=True)
-            self._safe_finalize_deepseek_billing(state, request_id)
-            diagnostic_turn_id = getattr(state, "first_submit_diagnostic_turn_id", 0)
-            if diagnostic_turn_id:
-                log_ui_navigation(
-                    "first_submit_finish",
-                    session_id=state.session_id,
-                    turn_id=diagnostic_turn_id,
-                    outcome="code_completed",
-                )
-                state.first_submit_diagnostic_turn_id = 0
-            self.refresh_step_list(state.session_id)
-            self.refresh_change_list(state.session_id)
-        if session_id == self.current_session_id:
+            state.first_submit_diagnostic_turn_id = 0
+        self.refresh_step_list(state.session_id)
+        self.refresh_change_list(state.session_id)
+        if is_current:
             self.normalize_session_ui(state)
-        if state:
-            QTimer.singleShot(
-                0,
-                lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
-                    self.get_session(sid)
-                ),
-            )
-
-    def handle_code_input_request(self, prompt, session_id, turn_id=None, request_id=None):
-        state = self.get_session(session_id)
-        if not state or state.code_worker is None:
-            raise RuntimeError(f"代码输入请求缺少运行中的会话 worker：{session_id}")
-        if not self._event_matches_active_run(state, turn_id, request_id):
-            return
-        if any(k in prompt.lower() for k in ["confirm", "yes/no", "是否"]):
-             reply = QMessageBox.question(self, '需要确认', prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-             response = "yes" if reply == QMessageBox.Yes else "no"
-        else:
-             text, ok = QInputDialog.getText(self, "输入请求", prompt)
-             response = text if ok else ""
-        state.code_worker.provide_input(response)
+        QTimer.singleShot(
+            0,
+            lambda sid=state.session_id: self._start_deferred_guidance_if_idle(
+                self.get_session(sid)
+            ),
+        )
 
 if __name__ == "__main__":
     install_native_crash_logging()

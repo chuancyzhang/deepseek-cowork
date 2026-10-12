@@ -266,34 +266,6 @@ class ExecutionAuthorizationTests(unittest.TestCase):
                                              {"request_id": "two", "approved": True})
         self.assertFalse(valid)
 
-    def test_code_block_uses_gate_before_execution(self):
-        from core.agent import CodeWorker
-        from core.runtime_journal import RuntimeJournal
-        worker = CodeWorker("print('test')", self.workspace, execution_authorization=self.auth,
-                            runtime_journal=RuntimeJournal(os.path.join(self.temp.name, "journal")))
-        worker._run_authorized = Mock(return_value={"returncode": 0})
-        with patch("core.interaction.interaction_service.create_request", return_value={"status": "completed", "approved": False}):
-            worker.run()
-        worker._run_authorized.assert_not_called()
-        with self.approve():
-            worker.run()
-        worker._run_authorized.assert_called_once()
-        with patch("core.interaction.interaction_service.create_request") as request:
-            worker.run()
-        worker._run_authorized.assert_called_once()
-        request.assert_not_called()
-
-    def test_code_block_unknown_result_prevents_replay(self):
-        from core.agent import CodeWorker
-        from core.runtime_journal import RuntimeJournal
-        journal = RuntimeJournal(os.path.join(self.temp.name, "journal"))
-        worker = CodeWorker("pass", self.workspace, execution_authorization=self.auth, runtime_journal=journal)
-        worker._run_authorized = Mock(return_value=None)
-        with self.approve():
-            worker.run()
-            worker.run()
-        worker._run_authorized.assert_called_once()
-
     def test_host_snapshot_preserves_policy_and_rejects_wrong_run(self):
         payload = self.auth.runtime_snapshot()
         restored = authorization_from_host_snapshot(payload, session_id=self.auth.session_id, run_id=self.auth.run_id)

@@ -1073,27 +1073,6 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_code_input_reply_is_sent_to_requesting_session_worker(self):
-        window = MainWindow()
-        try:
-            requesting = window.get_current_session()
-            foreground_id = window.create_new_session(make_current=True)
-            requesting_worker = SimpleNamespace(provide_input=MagicMock())
-            foreground_worker = SimpleNamespace(provide_input=MagicMock())
-            requesting.code_worker = requesting_worker
-            window.get_session(foreground_id).code_worker = foreground_worker
-
-            with patch("main.QInputDialog.getText", return_value=("只给 A", True)):
-                window.handle_code_input_request("请输入值", requesting.session_id)
-
-            requesting_worker.provide_input.assert_called_once_with("只给 A")
-            foreground_worker.provide_input.assert_not_called()
-            requesting.code_worker = None
-            window.get_session(foreground_id).code_worker = None
-        finally:
-            window.close()
-            window.deleteLater()
-
     def test_retry_exhaustion_has_specific_notice_and_technical_event(self):
         window = MainWindow()
         try:
@@ -1209,6 +1188,76 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state.daemon_worker = None
             window.close()
             window.deleteLater()
+
+    def test_python_examples_complete_without_execution_or_extra_result_widgets(self):
+        from core.execution_authorization import ExecutionAuthorization
+
+        content = (
+            "以下仅为示例：\n```python\nprint('example one')\n```\n"
+            "第二种方式：\n```Python\nprint('example two')\n```\n"
+            "复制到目标环境后按需运行。"
+        )
+        for god_mode in (False, True):
+            with self.subTest(god_mode=god_mode):
+                window = MainWindow()
+                try:
+                    state = window.get_current_session()
+                    window._retire_session_empty_state(state, reason="test_code_example")
+                    state.messages = [{
+                        "id": "u-example", "role": "user", "content": "请给出示例代码",
+                        "meta": {"turn_id": "1", "request_id": "request-example"},
+                    }]
+                    state.active_turn_id = 1
+                    state.active_turn_request_id = "request-example"
+                    state.execution_authorization = ExecutionAuthorization(
+                        state.session_id, "request-example", god_mode, "",
+                    )
+                    window.set_session_status("running", state.session_id)
+                    bubble = window._append_live_thinking_segment(state)
+                    original_layout_count = bubble.layout().count()
+                    # Also cover completion in a background conversation.
+                    foreground_id = window.create_new_session(make_current=True)
+                    foreground = window.get_session(foreground_id)
+                    foreground_messages = copy.deepcopy(foreground.messages)
+
+                    with patch("main.CodeWorker", create=True) as legacy_worker, patch.object(
+                        window, "_safe_finalize_deepseek_billing",
+                    ) as finalize_billing:
+                        window.handle_llm_response(
+                            {
+                                "request_id": "request-example",
+                                "role": "assistant", "content": content,
+                                "generated_messages": [{
+                                    "id": "a-example", "role": "assistant", "content": content,
+                                    "meta": {"turn_id": "1", "request_id": "request-example"},
+                                }],
+                            },
+                            state.session_id,
+                            turn_id=1,
+                            _checkpoint_ready=True,
+                        )
+                        legacy_worker.assert_not_called()
+                        finalize_billing.assert_called_once_with(state, "request-example")
+
+                    self.assertEqual(state.session_status, "completed")
+                    self.assertEqual(state.run_phase, "Completed")
+                    self.assertFalse(window._session_has_live_activity(state.session_id))
+                    self.assertEqual(bubble.main_content_text, content)
+                    self.assertEqual(bubble.layout().count(), original_layout_count)
+                    self.assertIsNone(getattr(state, "conversation_notice", None))
+                    self.assertEqual(window.current_session_id, foreground_id)
+                    self.assertEqual(foreground.messages, foreground_messages)
+                    self.assertEqual(
+                        [m["content"] for m in state.messages if m.get("id") == "a-example"],
+                        [content],
+                    )
+                    window.set_current_session(state.session_id)
+                    window.normalize_session_ui(state)
+                    self.assertEqual(window.action_btn.text(), "开始")
+                    self.assertTrue(window.stop_btn.isHidden())
+                finally:
+                    window.close()
+                    window.deleteLater()
 
     def test_normal_completion_has_no_interruption_warning_and_clears_activity(self):
         window = MainWindow()

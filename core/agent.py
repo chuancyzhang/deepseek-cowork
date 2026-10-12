@@ -1,7 +1,5 @@
 import sys
-import tempfile
 import os
-import ast
 import json
 import platform
 import time
@@ -19,7 +17,6 @@ from core.im_gateway_registry import (
     get_provider_spec,
     provider_artifact_delivery_mode,
 )
-from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from bootstrap_plugins.session import BootstrapSession
 from core.chat_storage import ChatStorage
@@ -72,17 +69,12 @@ from core.filesystem_ops import (
     resolve_path,
 )
 from core.generated_images import GeneratedImageError, persist_generated_image
-from core.process_utils import terminate_process_tree
 
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-
-class SecurityError(Exception):
-    pass
-
 
 APPEND_ONLY_LEDGER_REVISION = 1
 PROVIDER_SEMANTIC_CHUNK_TYPES = {
@@ -102,211 +94,6 @@ def _stable_json_hash(value):
     except Exception:
         text = str(value)
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
-
-def validate_code_safety(code, allowed_dir, god_mode=False):
-    """AST 静态分析代码安全性"""
-    if god_mode:
-        return True
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        raise SecurityError(f"Syntax Error: {e}")
-
-    allowed_dir = os.path.abspath(allowed_dir).lower()
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            val = node.value
-            if ".." in val:
-                 raise SecurityError(f"Security Alert: Path traversal '..' detected in string: '{val}'")
-            if os.path.isabs(val):
-                abs_val = os.path.abspath(val).lower()
-                if not abs_val.startswith(allowed_dir):
-                     raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
-    return True
-
-class CodeWorker(QThread):
-    """后台执行 Python 代码的线程"""
-    output_signal = Signal(str)
-    finished_signal = Signal()
-    input_request_signal = Signal(str)
-    observability_signal = Signal(dict)
-
-    def __init__(self, code, cwd, god_mode=False, execution_authorization=None, runtime_journal=None):
-        super().__init__()
-        self.code = code
-        self.cwd = cwd
-        self.god_mode = god_mode
-        self.execution_authorization = execution_authorization
-        self.runtime_journal = runtime_journal
-        self.process = None
-        self.is_stopped = False
-
-    def provide_input(self, text):
-        """Write user input to stdin"""
-        if self.process and self.process.stdin:
-            try:
-                self.process.stdin.write(text + "\n")
-                self.process.stdin.flush()
-            except Exception as e:
-                print(f"Error writing to stdin: {e}")
-
-    def stop(self):
-        self.is_stopped = True
-        if self.execution_authorization is not None:
-            self.execution_authorization.cancel()
-        if self.process:
-            stopped = terminate_process_tree(self.process)
-            self.output_signal.emit("工具进程已停止。" if stopped else "工具进程终止未完成，请检查运行状态。")
-
-    def run(self):
-        from core.execution_authorization import invoke
-        if self.execution_authorization is None:
-            self.output_signal.emit("缺少可信的运行授权，代码未执行。请重新启动任务。")
-            self.finished_signal.emit()
-            return
-        executed = False
-        authorization = self.execution_authorization
-        track_execution = not authorization.god_mode
-        execution_id = ("code-block-" + hashlib.sha256(
-            json.dumps([authorization.run_id, self.code, self.cwd], ensure_ascii=False).encode("utf-8")
-        ).hexdigest()) if track_execution else ""
-
-        def authorization_event(payload):
-            if self.runtime_journal is None:
-                raise RuntimeError("无法保存本次授权记录。")
-            self.runtime_journal.record_authorization(payload["session_id"], payload["run_id"], payload["tool_call_id"], payload)
-            self.observability_signal.emit(payload)
-
-        def execute():
-            nonlocal executed
-            executed = True
-            result = self._run_authorized()
-            if track_execution:
-                self.runtime_journal.record_tool(authorization.session_id, execution_id, {
-                    "status": "completed" if isinstance(result, dict) else "unknown",
-                    "result": result if isinstance(result, dict) else None,
-                })
-
-        def started():
-            self.runtime_journal.record_tool(authorization.session_id, execution_id, {
-                "status": "started", "run_id": authorization.run_id, "name": "code_block",
-            }, only_if_absent=True)
-
-        try:
-            if track_execution:
-                if self.runtime_journal is None:
-                    raise ValueError("无法保存代码执行记录，代码未执行。")
-                existing = self.runtime_journal.get_tool(authorization.session_id, execution_id)
-                if isinstance(existing, dict):
-                    if existing.get("status") == "completed":
-                        self.output_signal.emit("本段代码已有执行结果，已保留原输出和成果，不重复执行。")
-                    else:
-                        self.output_signal.emit("本段代码的执行结果尚未确认，已阻止自动重放。请检查已有成果。")
-                    return
-            result = invoke("code_block", {"code": self.code}, self._run_authorized,
-                            {"execution_authorization": self.execution_authorization,
-                             "authorization_event": authorization_event,
-                             "authorization_started": started if track_execution else None,
-                             "tool_call_id": "code-block:" + self.execution_authorization.run_id,
-                             "workspace_dir": self.cwd, "abort_check": lambda: self.is_stopped}, execute)
-            if not executed:
-                self.output_signal.emit(str(result.get("content") or result))
-        except Exception as exc:
-            self.output_signal.emit(f"代码执行或记录失败：{exc}。已保留已有输出和成果。")
-        finally:
-            if not executed or track_execution:
-                self.finished_signal.emit()
-
-    def _run_authorized(self):
-        temp_path = None
-        try:
-            # 1. Validation
-            try:
-                from core.execution_authorization import invocation_authorized
-                validate_code_safety(self.code, self.cwd, god_mode=self.god_mode or invocation_authorized())
-            except SecurityError as e:
-                self.output_signal.emit(f"❌ {str(e)}")
-                # We will let the finally block emit finished_signal
-                return
-
-            # Prepend input() override to capture user interaction
-            input_override = """
-import sys
-import io
-
-# Set stdout/stderr to utf-8 explicitly for Windows console
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-def input(prompt=""):
-    print(f"__REQUEST_INPUT__:{prompt}", flush=True)
-    return sys.stdin.readline().strip()
-"""
-            full_code = input_override + "\n" + self.code
-
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                f.write(full_code)
-                temp_path = f.name
-
-            # Determine python executable
-            python_exe = get_runtime_executable("python")
-            if not python_exe:
-                self.output_signal.emit("Execution Error: Sandbox Python runtime is missing.")
-                return
-
-            if self.is_stopped: return
-
-            self.output_signal.emit(f"Running with {python_exe} in: {self.cwd}...")
-            self.process = run_in_sandbox(
-                [python_exe, "-X", "utf8", temp_path],
-                cwd=self.cwd,
-                skill_id="python-runner",
-                shell_kind="exec",
-                text=True,
-            )
-            
-            # Real-time output reading
-            while True:
-                if self.is_stopped:
-                    stopped = terminate_process_tree(self.process)
-                    self.output_signal.emit("工具进程已停止。" if stopped else "工具进程终止未完成，请检查运行状态。")
-                    break
-                
-                output = self.process.stdout.readline()
-                if output == '' and self.process.poll() is not None:
-                    break
-                if output:
-                    output = output.strip()
-                    if output.startswith("__REQUEST_INPUT__:"):
-                        prompt = output.split(":", 1)[1]
-                        self.input_request_signal.emit(prompt)
-                    else:
-                        self.output_signal.emit(output)
-            
-            if not self.is_stopped:
-                stderr = self.process.stderr.read()
-                if stderr:
-                    self.output_signal.emit(f"Error Output:\n{stderr}")
-                return {"returncode": self.process.poll()}
-            
-        except Exception as e:
-            self.output_signal.emit(f"Execution Error: {e}")
-            # Also print to console for debugging
-            import traceback
-            traceback.print_exc()
-            
-        finally:
-            # Clean up temp file
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-            if self.execution_authorization is None or self.execution_authorization.god_mode:
-                self.finished_signal.emit()
 
 def _reasoning_text_from_message(msg):
     if not isinstance(msg, dict):

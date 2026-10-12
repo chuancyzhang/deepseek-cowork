@@ -10,7 +10,6 @@ def visible_sidebar_projects(projects, required_paths=(), *, expanded=False, que
     required = set(required_paths)
     ordinary = [item for item in projects if not item.get("pinned") and item["path"] not in required]
     recent = sorted(ordinary, key=lambda item: (
-        not bool(item.get("has_conversations")),
         -int(item.get("updated_at") or 0),
         item.get("name", "").casefold(),
         item["path"],

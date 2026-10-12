@@ -685,6 +685,55 @@ class MainWorkspaceLinearTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertEqual(set(self.window.project_rows), set(paths))
 
+    def test_new_project_stays_first_and_visible_before_its_first_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = [os.path.normpath(os.path.join(root, str(i))) for i in range(7)]
+            projects = [dict(path=path, name=f"项目 {i}", created_at=1)
+                        for i, path in enumerate(paths)]
+            projects[-1]["created_at"] = 500
+            conversations = [dict(id=f"new-project-order-{i}", title=f"对话 {i}", updated_at=100 + i,
+                                  meta={"workspace_dir": path, "workspace_source": "project"})
+                             for i, path in enumerate(paths[:-1])]
+            session_id = self.window.create_new_session(make_current=True, workspace_dir=paths[0])
+            state = self.window.get_session(session_id)
+            state.messages = [dict(id="old-message", role="user", content="已有项目", created_at=150)]
+            self.window.sidebar_sort_mode = "recent"
+
+            def visible_order():
+                return [getattr(self.window.history_layout.itemAt(i).widget(), "_history_project_key", "")
+                        for i in range(self.window.history_layout.count())
+                        if getattr(self.window.history_layout.itemAt(i).widget(), "_history_project_key", "")]
+
+            newest_key = self.window._project_key(paths[-1])
+            with patch.object(self.window.chat_storage, "list_conversations", return_value=conversations), \
+                 patch.object(self.window.config_manager, "get_projects", return_value=projects), \
+                 patch.object(self.window.config_manager, "get", return_value=[]):
+                self.window.refresh_history_list()
+                self.assertFalse(self.window.project_list_expanded)
+                self.assertEqual(visible_order()[0], newest_key)
+                self.assertNotIn(paths[1], self.window.project_rows)
+
+                # Incremental updates must use the same ordering as a full refresh.
+                state.messages.append(dict(id="next-message", role="user", content="继续", created_at=200))
+                self.window._ensure_session_visible_in_history(state)
+                self.assertEqual(visible_order()[0], newest_key)
+
+                # Imported older history must not erase the new project's creation time.
+                conversations.append(dict(id="imported-old", title="旧记录", updated_at=2,
+                                          meta={"workspace_dir": paths[-1], "workspace_source": "project"}))
+                self.window.refresh_history_list()
+                self.assertEqual(visible_order()[0], newest_key)
+                self.window.sidebar_sort_mode = "name"
+                self.window.refresh_history_list()
+                self.assertIn(paths[-1], self.window.project_rows)
+                self.window.sidebar_sort_mode = "recent"
+                self.window.refresh_history_list()
+                self.assertEqual(visible_order()[0], newest_key)
+
+                state.messages.append(dict(id="latest-message", role="user", content="最新活动", created_at=600))
+                self.window._ensure_session_visible_in_history(state)
+                self.assertEqual(visible_order()[0], self.window._project_key(paths[0]))
+
     def test_history_batches_always_include_running_and_waiting_sessions(self):
         live_state = self.window.get_current_session()
         live_state.session_status = "running"

@@ -40286,7 +40286,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                         "_history_project_key",
                         lambda widget: (
                             not bool(getattr(widget, "_history_project_pinned", False)),
-                            not bool(getattr(widget, "_history_project_has_conversations", False)),
                             -int(getattr(widget, "_history_project_updated_at", 0) or 0),
                             str(getattr(widget, "_history_project_name", "") or "").lower(),
                         ),
@@ -41343,10 +41342,11 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 payload.get("sessions") or [],
                 key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0)),
             )
-            if sessions:
-                latest = max(int(item.get("updated_at") or 0) for item in sessions)
-            else:
-                latest = int(meta.get("created_at") or meta.get("updated_at") or 0)
+            # Adding a project is activity too, even before its first conversation.
+            latest = max(
+                int(meta.get("created_at") or meta.get("updated_at") or 0),
+                max((int(item.get("updated_at") or 0) for item in sessions), default=0),
+            )
             project_entries.append({
                 "path": path,
                 "name": self._project_display_name(path, meta),
@@ -41359,7 +41359,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         if self.sidebar_sort_mode == "name":
             project_entries.sort(key=lambda item: (not item.get("pinned"), item.get("name", "").lower()))
         else:
-            project_entries.sort(key=lambda item: (not item.get("pinned"), not item["has_conversations"], -int(item.get("updated_at") or 0), item.get("name", "").lower()))
+            project_entries.sort(key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0), item.get("name", "").lower()))
 
         if not query_active:
             project_totals = {

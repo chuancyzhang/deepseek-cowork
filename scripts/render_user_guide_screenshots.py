@@ -1028,6 +1028,34 @@ def main_run():
             if scale_label == "1":
                 save_widget(window, "s22b-deliverable-docx-edit.png", 160)
             return
+        if SCREENSHOT_SCOPE == "sidebar-new-project":
+            from unittest.mock import patch
+
+            now = int(time.time())
+            names = ["算法模型备案", "高净值用户特征", "交割部知识库", "互金流失用户分析",
+                     "数据治理", "原始数据", "用户交易数据", "语音质检方案"]
+            projects = [dict(path=str(TEMP_ROOT / f"project-{i}"), name=name,
+                             created_at=now - 86400 if i < 7 else now)
+                        for i, name in enumerate(names)]
+            conversations = [dict(id=f"project-order-{i}", title="项目分析记录", updated_at=now - 3600 * (i + 1),
+                                  meta={"workspace_dir": project["path"], "workspace_source": "project"})
+                             for i, project in enumerate(projects[:-1])]
+            window.sidebar_sort_mode = "recent"
+            with patch.object(window.config_manager, "get_projects", return_value=projects), \
+                 patch.object(window.chat_storage, "list_conversations", return_value=conversations):
+                window.refresh_history_list()
+                if list(window.project_rows)[0] != projects[-1]["path"] or len(window.project_rows) != 5:
+                    raise RuntimeError("New project must lead the collapsed sidebar list.")
+                window.resize(900, 700)
+                window.show()
+                window.main_splitter.setSizes([main.DesignTokens.sidebar_min_width, 696])
+                scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+                save_widget(window.sidebar, f"sidebar-new-project-{scale_label}x.png", 220)
+                window.history_disclosure_buttons[("projects", "")].click()
+                if list(window.project_rows)[0] != projects[-1]["path"] or len(window.project_rows) != 8:
+                    raise RuntimeError("Expanding must retain the new project's position.")
+                save_widget(window.sidebar, f"sidebar-new-project-expanded-{scale_label}x.png", 220)
+            return
         if SCREENSHOT_SCOPE == "sidebar-history-pagination":
             project_dir = TEMP_ROOT / "sidebar-pagination-project"
             project_dir.mkdir(parents=True, exist_ok=True)

@@ -166,15 +166,69 @@ class TerminalClipboardTest(unittest.TestCase):
         self.pane.terminal_bridge.paste()
         self.js('window.coworkTerminal.paste("blocked")')
         self.assertEqual(self.terminal.inputs, [])
+        # Ownership/status rows change terminal dimensions; select after xterm
+        # has reflowed to verify copying while input is locked.
+        QTest.qWait(150)
+        self.js("window.coworkTerminal.selectAll()")
         self.key(Qt.Key_C, Qt.ControlModifier)
         self.wait(lambda: "中文命令和输出" in self.app.clipboard().text())
         self.store.set_owner(self.tab.session_id, self.tab.id, "human")
         self.pane.refresh_control()
         self.js("true")
         self.terminal.status = "exited"
+        self.pane.flush_output()
         self.key(Qt.Key_V, Qt.ControlModifier)
-        self.wait(lambda: "终端未运行" in self.pane.notice.text())
+        self.assertIn("终端已退出", self.pane.notice.text())
         self.assertEqual(self.terminal.inputs, [])
+
+    def test_stop_menu_control_and_recovery_states(self):
+        self.pane.flush_output()
+        self.assertTrue(self.pane.control.isHidden())
+        self.assertTrue(self.pane.status_row.isHidden())
+        self.assertLess(self.pane.view.y(), 15)
+        menu = self.context_menu()
+        stop = next(action for action in menu.actions() if action.text() == "停止当前命令")
+        stop.trigger()
+        menu.close()
+        self.assertEqual(self.terminal.inputs, ["\x03"])
+        self.assertEqual(self.tab.owner, "available")
+        self.assertIn("停止请求", self.pane.notice.text())
+        self.store.set_owner(self.tab.session_id, self.tab.id, "agent")
+        self.pane.refresh_control()
+        self.terminal.inputs.clear()
+        self.pane.takeover_button.click()
+        self.assertEqual(self.tab.owner, "human")
+        self.assertEqual(self.terminal.inputs, [])
+        self.store.set_owner(self.tab.session_id, self.tab.id, "agent")
+        self.pane.refresh_control()
+        menu = self.context_menu()
+        next(action for action in menu.actions() if action.text() == "接管并停止当前命令").trigger()
+        menu.close()
+        self.assertEqual(self.tab.owner, "human")
+        self.assertEqual(self.terminal.inputs, ["\x03"])
+        reopened = []
+        self.pane.restartRequested.connect(lambda: reopened.append(True))
+        for status, message in (("starting", "正在启动"), ("exited", "终端已退出"),
+                                ("failed", "失败"), ("closed", "终端已关闭")):
+            self.terminal.status = status
+            self.terminal.error = "测试进程启动失败"
+            self.pane.flush_output()
+            self.assertIn(message, self.pane.notice.text())
+            self.assertFalse(self.pane.status_row.isHidden())
+            self.assertTrue(self.pane.control.isHidden())
+            self.assertEqual(self.pane.restart_button.isHidden(), status == "starting")
+            menu = self.context_menu()
+            self.assertFalse(menu.actions()[1].isEnabled())
+            self.assertFalse(menu.actions()[-1].isEnabled())
+            menu.close()
+            self.pane.clear_stop_notice()
+            self.assertIn(message, self.pane.notice.text())
+        self.pane.restart_button.click()
+        self.assertEqual(reopened, [True])
+        QTest.qWait(150)
+        self.js("window.coworkTerminal.selectAll()")
+        self.key(Qt.Key_C, Qt.ControlModifier)
+        self.assertIn("中文命令和输出", self.app.clipboard().text())
 
     def test_capture(self):
         directory = os.environ.get("COWORK_TERMINAL_SCREENSHOTS")
@@ -185,6 +239,19 @@ class TerminalClipboardTest(unittest.TestCase):
         path.mkdir(parents=True, exist_ok=True)
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
         self.assertTrue(self.pane.grab().save(str(path / f"terminal-clipboard-{scale}.png")))
+        for width in (650, 360):
+            self.pane.resize(width, 340)
+            self.store.set_owner(self.tab.session_id, self.tab.id, "agent")
+            self.pane.refresh_control()
+            QTest.qWait(150)
+            self.assertTrue(self.pane.grab().save(str(path / f"terminal-agent-{width}-{scale}.png")))
+            self.terminal.status = "failed"
+            self.terminal.error = "无法启动所选终端"
+            self.pane.flush_output()
+            QTest.qWait(150)
+            self.assertTrue(self.pane.grab().save(str(path / f"terminal-failed-{width}-{scale}.png")))
+            self.terminal.status = "running"
+            self.pane.flush_output()
 
     @unittest.skipUnless(os.name == "nt", "ConPTY requires Windows")
     def test_real_shell_command_and_output(self):

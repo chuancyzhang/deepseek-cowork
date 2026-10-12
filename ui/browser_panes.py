@@ -481,21 +481,28 @@ class TerminalPane(ControlledPane):
         self.terminal = terminal
         self.ready = self.inflight = False
         self.cursor = 0
+        self._display_status = None
         self.font_size = int(tab.view_state.get("terminal_font_size", DesignTokens.font_size_body))
-        self.toolbar = QWidget()
-        row = QHBoxLayout(self.toolbar)
+        # Terminal coordinates are not browser observation coordinates: hidden
+        # ownership controls must not leave an empty row above the prompt.
+        policy = self.control.sizePolicy()
+        policy.setRetainSizeWhenHidden(False)
+        self.control.setSizePolicy(policy)
+        self.takeover_button.setText("接管终端")
+        self.takeover_button.setToolTip("允许你输入命令；已运行的命令会继续执行")
+        self.return_button.setToolTip("允许 Agent 继续操作终端，不重放先前命令")
+        self.status_row = QWidget()
+        row = QHBoxLayout(self.status_row)
         row.setContentsMargins(0, 0, 0, 0)
-        self.directory = QLabel(tab.cwd)
-        self.directory.setToolTip(tab.cwd)
-        self.directory.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        row.addWidget(self.directory, 1)
-        self.interrupt_button = button("中断", "向当前终端发送 Ctrl+C", self.interrupt)
-        self.restart_button = button("重新启动", "启动新的终端进程，不重跑命令", self.restartRequested.emit)
+        row.addWidget(self.notice, 1)
+        self.restart_button = button("打开新终端", "保留此标签和已有输出，在新标签中打开终端，不重跑命令", self.restartRequested.emit)
         self.restart_button.hide()
-        row.addWidget(self.interrupt_button)
         row.addWidget(self.restart_button)
-        self.outer.addWidget(self.toolbar)
-        self.outer.addWidget(self.notice)
+        self.status_row.hide()
+        self.outer.addWidget(self.status_row)
+        self.stop_notice_timer = QTimer(self)
+        self.stop_notice_timer.setSingleShot(True)
+        self.stop_notice_timer.timeout.connect(self.clear_stop_notice)
         self.view = QWebEngineView(self)
         self.profile = QWebEngineProfile(self)
         self.page = QWebEnginePage(self.profile, self.view)
@@ -524,7 +531,7 @@ class TerminalPane(ControlledPane):
             self.zoom_shortcuts.append(shortcut)
 
     def paste_clipboard(self):
-        if not self.ready or self.tab.owner == "agent":
+        if not self.ready or self.tab.owner == "agent" or self.terminal.status != "running":
             return
         text = QApplication.clipboard().text()
         if text:
@@ -537,9 +544,14 @@ class TerminalPane(ControlledPane):
         copy = menu.addAction("复制\tCtrl+Shift+C", lambda: self.terminal_bridge.copy(selection))
         copy.setEnabled(bool(selection))
         paste = menu.addAction("粘贴\tCtrl+V", self.paste_clipboard)
-        paste.setEnabled(self.ready and self.tab.owner != "agent" and bool(QApplication.clipboard().text()))
+        paste.setEnabled(self.ready and self.tab.owner != "agent" and self.terminal.status == "running"
+                         and bool(QApplication.clipboard().text()))
         menu.addSeparator()
         menu.addAction("全选", lambda: self.page.runJavaScript("window.coworkTerminal.selectAll()"))
+        menu.addSeparator()
+        stop = menu.addAction("接管并停止当前命令" if self.tab.owner == "agent" else "停止当前命令", self.interrupt)
+        stop.setToolTip("请求停止当前命令，保留终端与已有输出；无选区时也可按 Ctrl+C")
+        stop.setEnabled(self.terminal.status == "running")
         menu.popup(QCursor.pos())
 
     def change_font_size(self, delta):
@@ -548,16 +560,38 @@ class TerminalPane(ControlledPane):
         self.refresh_theme()
 
     def interrupt(self):
-        self.take_over()
+        if self.terminal.status != "running":
+            return
+        if self.tab.owner == "agent":
+            self.take_over()
         try:
             self.terminal.write("\x03")
+            log.info("terminal.interrupt_requested session=%s tab=%s", self.tab.session_id, self.tab.id)
+            self.show_notice("已发送停止请求，已有输出保留。")
+            self.stop_notice_timer.start(4000)
+            self.page.runJavaScript("window.coworkTerminal.focus()")
         except WorkbenchError as exc:
+            log.warning("terminal.interrupt_failed session=%s tab=%s reason=%s",
+                        self.tab.session_id, self.tab.id, exc.code)
             self.show_notice(str(exc))
+
+    def clear_stop_notice(self):
+        if self.notice.text() == "已发送停止请求，已有输出保留。":
+            self.show_notice("")
+
+    def show_notice(self, message):
+        super().show_notice(message)
+        if hasattr(self, "status_row"):
+            self.status_row.setVisible(bool(message) or not self.restart_button.isHidden())
 
     def refresh_control(self):
         super().refresh_control()
+        if hasattr(self, "terminal"):
+            self.control.setVisible(self.tab.owner in {"agent", "human"} and self.terminal.status == "running")
+            self.control_label.setText("Agent 正在使用终端" if self.tab.owner == "agent" else "你已接管终端")
         if getattr(self, "ready", False):
-            self.page.runJavaScript("window.coworkTerminal.setInput(" + str(self.tab.owner != "agent").lower() + ")")
+            enabled = self.tab.owner != "agent" and self.terminal.status == "running"
+            self.page.runJavaScript("window.coworkTerminal.setInput(" + str(enabled).lower() + ")")
 
     def refresh_theme(self, _resolved=None):
         super().refresh_theme()
@@ -578,14 +612,15 @@ class TerminalPane(ControlledPane):
 
     def flush_output(self):
         status = self.terminal.status
-        if self.tab.status != status:
+        if self._display_status != status:
+            self._display_status = status
             self.tab.status = status
             self.restart_button.setVisible(status in {"exited", "failed", "closed"})
-            self.interrupt_button.setEnabled(status == "running")
-            self.show_notice(self.terminal.error if status == "failed" else
-                             f"进程已退出（{self.terminal.exit_code}），已有输出已保留。" if status == "exited" else
+            self.show_notice(f"终端启动或运行失败：{self.terminal.error}。已有输出保留，可打开新终端重试。" if status == "failed" else
+                             f"终端已退出（退出码 {self.terminal.exit_code}），已有输出保留。" if status == "exited" else
+                             "终端已关闭，已有输出保留。" if status == "closed" else
                              "正在启动终端…" if status == "starting" else "")
-            self.changed.emit()
+            self.refresh_control()
         if not self.ready or self.inflight:
             return
         data = self.terminal.read(self.cursor, 16384)
@@ -596,6 +631,7 @@ class TerminalPane(ControlledPane):
 
     def close_pane(self):
         self.timer.stop()
+        self.stop_notice_timer.stop()
         self.terminal.close()
         self.page.setWebChannel(None)
         self.page.deleteLater()

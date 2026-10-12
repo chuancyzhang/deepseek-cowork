@@ -355,15 +355,16 @@ class BrowserWorkbench(QObject):
 
     def restart_terminal(self, tab):
         pane = self.panes.get(tab.id)
-        if pane and pane.terminal.status in {"starting", "running"}:
+        if not pane or pane.terminal.status in {"starting", "running"}:
             return
-        if pane:
-            pane.close_pane(); self.stack.removeWidget(pane); pane.deleteLater()
-            del self.panes[tab.id]
-        self.store.set_owner(tab.session_id, tab.id, "available")
-        self.ensure_pane(tab)
-        if self.session_id() == tab.session_id and self.active_tab() is tab:
-            self.show_tab(tab)
+        try:
+            new_tab = self.open_terminal(tab.session_id, tab.shell, tab.cwd)
+            if self.session_id() == tab.session_id and self.active_tab() is tab:
+                self.activate(new_tab.id)
+            log.info("terminal.reopen session=%s previous_tab=%s tab=%s", tab.session_id, tab.id, new_tab.id)
+        except WorkbenchError as exc:
+            log.warning("terminal.reopen_failed session=%s tab=%s reason=%s", tab.session_id, tab.id, exc.code)
+            pane.show_notice(f"新终端未能打开：{exc}。原终端输出已保留。")
 
     def close_tab(self, key, *, session_id=None, agent=False, request=None):
         session_id = session_id or self.session_id()

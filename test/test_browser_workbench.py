@@ -243,6 +243,30 @@ class WorkbenchFileUiTest(unittest.TestCase):
                 self.assertEqual(workbench.active_tab().kind, "new")
                 workbench.bridge.pending.pop(queued.id, None)
 
+    def test_terminal_recovery_opens_new_tab_and_preserves_old_output(self):
+        from PySide6.QtWidgets import QWidget
+        workbench = self.window.browser_workbench
+        session_id = self.window.current_session_id
+        tab = workbench.store.open(session_id, "terminal", status="exited", shell="pwsh", cwd=str(ROOT), activate=True)
+        pane = QWidget()
+        pane.terminal = Mock(status="exited")
+        pane.close_pane = Mock()
+        pane.show_notice = Mock()
+        workbench.panes[tab.id] = pane
+        workbench.stack.addWidget(pane)
+        new_tab = workbench.store.open(session_id, "terminal")
+        with patch.object(workbench, "open_terminal", return_value=new_tab) as open_terminal, \
+                patch.object(workbench, "activate") as activate:
+            workbench.restart_terminal(tab)
+        open_terminal.assert_called_once_with(session_id, "pwsh", str(ROOT))
+        activate.assert_called_once_with(new_tab.id)
+        pane.close_pane.assert_not_called()
+        self.assertIs(workbench.panes[tab.id], pane)
+        with patch.object(workbench, "open_terminal", side_effect=WorkbenchError("cwd_unavailable", "启动目录不存在")):
+            workbench.restart_terminal(tab)
+        self.assertIn("原终端输出已保留", pane.show_notice.call_args.args[0])
+        pane.close_pane.assert_not_called()
+
     def test_daemon_request_keeps_original_chat_without_stealing_focus(self):
         from core.workbench_transport import run_desktop_request
         class Client:

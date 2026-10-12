@@ -375,10 +375,6 @@ class BrowserWorkbench(QObject):
             if not agent and not self.window.confirm_leave_deliverable_edit("关闭标签"):
                 return False
         pane = self.panes.get(tab.id)
-        if tab.kind == "terminal" and pane and pane.terminal.status in {"starting", "running"} and not agent:
-            if ProductMessageBox.question(self.window, "关闭终端", "关闭后会结束此终端及其子进程。是否关闭？",
-                                          ProductMessageBox.Yes | ProductMessageBox.No) != ProductMessageBox.Yes:
-                return False
         self.bridge.cancel_tab(session_id, tab.id, exclude_request=request)
         if pane:
             pane.close_pane(); self.stack.removeWidget(pane); pane.deleteLater()

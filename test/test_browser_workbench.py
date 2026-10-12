@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -218,6 +218,30 @@ class WorkbenchFileUiTest(unittest.TestCase):
             refresh_file(self.window)
             self.assertEqual(self.window.preview_text.toPlainText(), "updated")
             self.assertEqual(self.window.browser_workbench.active_tab().path, str(source))
+
+    def test_user_closes_live_terminal_without_confirmation(self):
+        from PySide6.QtWidgets import QWidget
+        workbench = self.window.browser_workbench
+        session_id = self.window.current_session_id
+        for status in ("starting", "running"):
+            with self.subTest(status=status):
+                tab = workbench.store.open(session_id, "terminal", status=status, activate=True)
+                pane = QWidget()
+                pane.terminal = Mock(status=status)
+                pane.close_pane = Mock()
+                workbench.panes[tab.id] = pane
+                workbench.stack.addWidget(pane)
+                queued = WorkbenchRequest(session_id, "r", "terminal_input", {"tab_id": tab.id}, {}, time.monotonic() + 5)
+                workbench.bridge.pending[queued.id] = queued
+                with patch("ui.browser_workbench.ProductMessageBox.question") as question:
+                    self.window.file_tab_strip.closeRequested.emit("@" + tab.id)
+                question.assert_not_called()
+                pane.close_pane.assert_called_once_with()
+                self.assertTrue(queued.cancelled)
+                self.assertNotIn(tab.id, workbench.panes)
+                self.assertNotIn(tab, workbench.store.list(session_id))
+                self.assertEqual(workbench.active_tab().kind, "new")
+                workbench.bridge.pending.pop(queued.id, None)
 
     def test_daemon_request_keeps_original_chat_without_stealing_focus(self):
         from core.workbench_transport import run_desktop_request

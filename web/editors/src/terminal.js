@@ -25,19 +25,38 @@ terminal.onData(text => {
   if (/^\x1b\[(?:\??[0-9;]*c|[0-9;]*[Rn])$/.test(text)) bridge.reply(text);
   else if (userInput) bridge.input(text);
 });
+function copySelection() {
+  if (terminal.hasSelection()) bridge?.copy(terminal.getSelection());
+}
+terminal.onSelectionChange(() => bridge?.selectionChanged(terminal.hasSelection()));
 terminal.attachCustomKeyEventHandler(event => {
   if (event.type !== "keydown") return true;
-  if ((event.ctrlKey && event.shiftKey && event.code === "KeyC") ||
-      (event.ctrlKey && event.code === "KeyC" && terminal.hasSelection())) {
-    bridge?.copy(terminal.getSelection()); return false;
-  }
-  if (event.ctrlKey && event.shiftKey && event.code === "KeyV") {
-    if (userInput) bridge?.paste(); return false;
+  const copy = event.ctrlKey && !event.altKey && !event.metaKey &&
+    ((event.code === "KeyC" && (event.shiftKey || terminal.hasSelection())) ||
+     (event.code === "Insert" && !event.shiftKey));
+  const paste = !event.altKey && !event.metaKey &&
+    ((event.ctrlKey && event.code === "KeyV") ||
+     (event.shiftKey && !event.ctrlKey && event.code === "Insert"));
+  if (copy || paste) {
+    // Returning false only stops xterm; also cancel Chromium's native clipboard
+    // action so it cannot overwrite the selection or paste the same text twice.
+    event.preventDefault();
+    event.stopPropagation();
+    if (copy) copySelection();
+    else if (userInput) bridge?.paste();
+    return false;
   }
   return true;
 });
+document.getElementById("terminal").addEventListener("contextmenu", event => {
+  event.preventDefault();
+  bridge?.contextMenu(terminal.getSelection());
+});
 window.coworkTerminal = {
   write(text, cursor) { terminal.write(text, () => bridge?.ack(cursor)); },
+  copySelection,
+  selectAll() { terminal.selectAll(); },
+  paste(text) { if (userInput) { terminal.paste(text); terminal.focus(); } },
   setInput(enabled) { userInput = !!enabled; terminal.options.disableStdin = !userInput; },
   setTheme(theme, fontFamily, fontSize) {
     terminal.options.theme = theme;

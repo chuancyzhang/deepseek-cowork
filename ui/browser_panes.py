@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QUrl, Qt, QEvent, QPoint
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QFocusEvent
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QFocusEvent, QCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
                               QToolButton, QApplication, QMenu)
 
@@ -432,6 +432,8 @@ class TerminalBridge(QObject):
             try:
                 self.pane.terminal.write(text)
             except WorkbenchError as exc:
+                log.warning("terminal.input_failed session=%s tab=%s reason=%s",
+                            self.pane.tab.session_id, self.pane.tab.id, exc.code)
                 self.pane.show_notice(str(exc))
 
     @Slot(str)
@@ -456,11 +458,20 @@ class TerminalBridge(QObject):
 
     @Slot(str)
     def copy(self, text):
-        QApplication.clipboard().setText(text)
+        if text:
+            QApplication.clipboard().setText(text)
+
+    @Slot(bool)
+    def selectionChanged(self, selected):
+        self.pane.copy_button.setEnabled(selected)
+
+    @Slot(str)
+    def contextMenu(self, selection):
+        self.pane.show_terminal_menu(selection)
 
     @Slot()
     def paste(self):
-        self.input(QApplication.clipboard().text())
+        self.pane.paste_clipboard()
 
 
 class TerminalPane(ControlledPane):
@@ -482,6 +493,12 @@ class TerminalPane(ControlledPane):
         self.directory.setToolTip(tab.cwd)
         self.directory.setTextInteractionFlags(Qt.TextSelectableByMouse)
         row.addWidget(self.directory, 1)
+        self.copy_button = button("复制", "复制选中文字 · Ctrl+C / Ctrl+Shift+C", self.copy_selection)
+        self.copy_button.setEnabled(False)
+        self.paste_button = button("粘贴", "粘贴剪贴板文本 · Ctrl+V / Ctrl+Shift+V / Shift+Insert", self.paste_clipboard)
+        self.paste_button.setEnabled(False)
+        row.addWidget(self.copy_button)
+        row.addWidget(self.paste_button)
         self.interrupt_button = button("中断", "向当前终端发送 Ctrl+C", self.interrupt)
         self.restart_button = button("重新启动", "启动新的终端进程，不重跑命令", self.restartRequested.emit)
         self.restart_button.hide()
@@ -498,7 +515,8 @@ class TerminalPane(ControlledPane):
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, False)
         self.profile.downloadRequested.connect(lambda item: item.cancel())
         self.channel = QWebChannel(self.page)
-        self.channel.registerObject("terminalBridge", TerminalBridge(self))
+        self.terminal_bridge = TerminalBridge(self)
+        self.channel.registerObject("terminalBridge", self.terminal_bridge)
         self.page.setWebChannel(self.channel)
         self.view.setContextMenuPolicy(Qt.NoContextMenu)
         self.outer.addWidget(self.view, 1)
@@ -515,6 +533,29 @@ class TerminalPane(ControlledPane):
             shortcut.activated.connect(lambda change=delta: self.change_font_size(change))
             self.zoom_shortcuts.append(shortcut)
 
+    def copy_selection(self):
+        if self.ready:
+            self.page.runJavaScript("window.coworkTerminal.copySelection()")
+
+    def paste_clipboard(self):
+        if not self.ready or self.tab.owner == "agent":
+            return
+        text = QApplication.clipboard().text()
+        if text:
+            # Let xterm normalize line endings and honor bracketed paste mode.
+            self.page.runJavaScript("window.coworkTerminal.paste(" + json.dumps(text) + ")")
+
+    def show_terminal_menu(self, selection):
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        copy = menu.addAction("复制\tCtrl+Shift+C", lambda: self.terminal_bridge.copy(selection))
+        copy.setEnabled(bool(selection))
+        paste = menu.addAction("粘贴\tCtrl+V", self.paste_clipboard)
+        paste.setEnabled(self.ready and self.tab.owner != "agent" and bool(QApplication.clipboard().text()))
+        menu.addSeparator()
+        menu.addAction("全选", lambda: self.page.runJavaScript("window.coworkTerminal.selectAll()"))
+        menu.popup(QCursor.pos())
+
     def change_font_size(self, delta):
         self.font_size = max(9, min(28, self.font_size + delta)) if delta else DesignTokens.font_size_body
         self.tab.view_state["terminal_font_size"] = self.font_size
@@ -530,6 +571,7 @@ class TerminalPane(ControlledPane):
     def refresh_control(self):
         super().refresh_control()
         if getattr(self, "ready", False):
+            self.paste_button.setEnabled(self.tab.owner != "agent")
             self.page.runJavaScript("window.coworkTerminal.setInput(" + str(self.tab.owner != "agent").lower() + ")")
 
     def refresh_theme(self, _resolved=None):

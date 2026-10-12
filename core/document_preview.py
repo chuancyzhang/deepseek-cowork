@@ -21,6 +21,11 @@ log = logging.getLogger(__name__)
 OFFICE_FAMILIES = {".doc": "word", ".docx": "word", ".ppt": "powerpoint",
                    ".pptx": "powerpoint", ".xls": "excel", ".xlsx": "excel"}
 MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
+OFFICE_RENDERERS = {
+    "word": ("Word.Application", "KWPS.Application", "WPS.Application"),
+    "excel": ("Excel.Application", "KET.Application", "ET.Application"),
+    "powerpoint": ("PowerPoint.Application", "KWPP.Application", "WPP.Application"),
+}
 
 
 def cache_root():
@@ -64,6 +69,7 @@ $cfg = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__'
 Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CoworkWindowProcess { [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId); }'
 $names = @{word='WINWORD'; excel='EXCEL'; powerpoint='POWERPNT'}
 $app = $null; $doc = $null; $bootstrap = $null; $owned = $false
+$wps = $false; $renderer = ''; $stage = 'activate'
 $mutex = New-Object System.Threading.Mutex($false, ('Local\CoworkOfficePreview-' + $cfg.family))
 $locked = $false
 function Assert-Active {
@@ -78,34 +84,93 @@ try {
         catch [System.Threading.AbandonedMutexException] { $locked = $true }
     }
     $ids = @(Get-Process -Name $names[$cfg.family] -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-    $progIds = @{word='Word.Application'; excel='Excel.Application'; powerpoint='PowerPoint.Application'}
-    $type = [Type]::GetTypeFromProgID($progIds[$cfg.family], $false)
-    if ($null -eq $type) { throw '本机没有可用的 Microsoft Office 渲染器。' }
-    $app = [Activator]::CreateInstance($type)
+    # Only discovery/activation may try another provider. Never retry a failed
+    # document open/export with another engine, hiding the actual file error.
+    foreach ($progId in $cfg.renderers) {
+        Assert-Active
+        try {
+            $type = [Type]::GetTypeFromProgID([string]$progId, $false)
+            if ($null -eq $type) { throw '自动化接口未注册' }
+            $app = [Activator]::CreateInstance($type)
+            if ($null -eq $app) { throw '自动化接口未返回应用实例' }
+            $renderer = [string]$progId
+            break
+        } catch {
+            [Console]::Out.WriteLine('COWORK_PROBE:' + $progId + ': ' + $_.Exception.Message)
+        }
+    }
+    if ($null -eq $app) {
+        [Console]::Out.WriteLine('COWORK_UNAVAILABLE')
+        throw '没有可用的 Microsoft Office 或 WPS 自动化接口。请安装或修复办公软件，或用系统应用打开。'
+    }
+    $wps = $renderer -notin @('Word.Application', 'Excel.Application', 'PowerPoint.Application')
+    [Console]::Out.WriteLine('COWORK_RENDERER:' + $renderer)
+    $stage = 'prepare'
     [uint32]$officeProcessId = 0
-    if ($cfg.family -eq 'word') {
+    if ($wps) {
+        # WPS can share a process across windows and document families. Do not
+        # hide/quit the app or assign it to a kill-on-close job, even if new.
+        [Console]::Out.WriteLine('COWORK_SHARED:0')
+    } elseif ($cfg.family -eq 'word') {
         $bootstrap = $app.Documents.Add()
         $windowHandle = $bootstrap.Windows.Item(1).Hwnd
     } else { $windowHandle = $app.Hwnd }
-    [void][CoworkWindowProcess]::GetWindowThreadProcessId([IntPtr][long]$windowHandle, [ref]$officeProcessId)
-    $owned = ($officeProcessId -gt 0 -and $ids -notcontains [int]$officeProcessId)
-    if ($cfg.family -eq 'powerpoint') {
-        # Even a newly created PowerPoint server can later acquire user windows.
-        # Never put this shared server in a kill-on-close process job.
-        [Console]::Out.WriteLine('COWORK_SHARED:' + $officeProcessId)
-    } else {
-        if (-not $owned) { throw '无法创建独立的 Office 渲染实例，请稍后重试或使用系统应用打开。' }
-        [Console]::Out.WriteLine('COWORK_PID:' + $officeProcessId)
+    if (-not $wps) {
+        [void][CoworkWindowProcess]::GetWindowThreadProcessId([IntPtr][long]$windowHandle, [ref]$officeProcessId)
+        $owned = ($officeProcessId -gt 0 -and $ids -notcontains [int]$officeProcessId)
+        if ($cfg.family -eq 'powerpoint') {
+            # Even a newly created PowerPoint server can later acquire user windows.
+            # Never put this shared server in a kill-on-close process job.
+            [Console]::Out.WriteLine('COWORK_SHARED:' + $officeProcessId)
+        } else {
+            if (-not $owned) { throw '无法创建独立的 Office 渲染实例，请稍后重试或使用系统应用打开。' }
+            [Console]::Out.WriteLine('COWORK_PID:' + $officeProcessId)
+        }
     }
     [Console]::Out.Flush()
     Assert-Active
     if ($null -ne $bootstrap) { $bootstrap.Close($false); $bootstrap = $null }
-    if ($cfg.family -eq 'word') {
+    if ($wps) {
+        # Restore shared application settings even when Open throws. Only this
+        # request's read-only snapshot is closed in finally.
+        $security = $app.AutomationSecurity
+        $stage = 'open'
+        try {
+            $app.AutomationSecurity = 3
+            if ($cfg.family -eq 'word') {
+                $links = $app.Options.UpdateLinksAtOpen
+                try {
+                    $app.Options.UpdateLinksAtOpen = $false
+                    $doc = $app.Documents.Open([string]$cfg.source, $false, $true, $false, '', '', $false, '', '', 0, 0, $false)
+                } finally { $app.Options.UpdateLinksAtOpen = $links }
+            } elseif ($cfg.family -eq 'excel') {
+                $events = $app.EnableEvents
+                try {
+                    $app.EnableEvents = $false
+                    $doc = $app.Workbooks.Open([string]$cfg.source, 0, $true, [Type]::Missing, '', '', $true)
+                } finally { $app.EnableEvents = $events }
+            } else {
+                $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
+            }
+        } finally { $app.AutomationSecurity = $security }
+        Assert-Active
+        if ($null -eq $doc) { throw 'WPS 未返回只读文档。' }
+        $stage = 'export'
+        if ($cfg.family -eq 'word') {
+            $doc.ExportAsFixedFormat([string]$cfg.target, 17, $false, 0)
+        } elseif ($cfg.family -eq 'excel') {
+            $doc.ExportAsFixedFormat(0, [string]$cfg.target, 0, $false, $false)
+        } else {
+            $doc.SaveAs([string]$cfg.target, 32)
+        }
+    } elseif ($cfg.family -eq 'word') {
         $app.AutomationSecurity = 3
         $app.Visible = $false
         $app.DisplayAlerts = 0
         $app.Options.UpdateLinksAtOpen = $false
+        $stage = 'open'
         $doc = $app.Documents.Open([string]$cfg.source, $false, $true, $false, '', '', $false, '', '', 0, 0, $false, $false, 0, $true)
+        $stage = 'export'
         $doc.ExportAsFixedFormat([string]$cfg.target, 17, $false, 0)
     } elseif ($cfg.family -eq 'excel') {
         $app.AutomationSecurity = 3
@@ -113,22 +178,26 @@ try {
         $app.DisplayAlerts = $false
         $app.AskToUpdateLinks = $false
         $app.EnableEvents = $false
+        $stage = 'open'
         $doc = $app.Workbooks.Open([string]$cfg.source, 0, $true, [Type]::Missing, '', '', $true, [Type]::Missing, [Type]::Missing, $false, $false, [Type]::Missing, $false)
         $app.Calculation = -4135
+        $stage = 'export'
         $doc.ExportAsFixedFormat(0, [string]$cfg.target, 0, $false, $false)
     } else {
         $security = $app.AutomationSecurity
+        $stage = 'open'
         try {
             $app.AutomationSecurity = 3
             $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
         } finally { $app.AutomationSecurity = $security }
+        $stage = 'export'
         Assert-Active
         $doc.SaveAs([string]$cfg.target, 32)
     }
     Assert-Active
     [Console]::Out.WriteLine('COWORK_OK')
 } catch {
-    [Console]::Error.WriteLine($_.Exception.Message)
+    [Console]::Error.WriteLine($renderer + ' [' + $stage + ']: ' + $_.Exception.Message)
     exit 1
 } finally {
     if ($null -ne $bootstrap) {
@@ -151,12 +220,26 @@ try {
     $mutex.Dispose()
     # Also clean up if the desktop has already stopped waiting for a shared COM
     # call. The helper must reach finally; terminating it would skip Doc.Close.
-    Remove-Item -LiteralPath $cfg.source -Force -ErrorAction SilentlyContinue
+    # Activation-only failure may be followed by a 32-bit helper using this
+    # snapshot. Python owns cleanup if no provider could be activated.
+    if ($null -ne $app) { Remove-Item -LiteralPath $cfg.source -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $cfg.cancel) {
         Remove-Item -LiteralPath $cfg.target,$cfg.cancel -Force -ErrorAction SilentlyContinue
     }
 }
 '''
+
+
+def _office_powershell_executables():
+    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    hosts = [windows / "System32/WindowsPowerShell/v1.0/powershell.exe"]
+    # Some WPS installations register their COM server only in the 32-bit
+    # registry view. Try that host only after *all* activations fail, before
+    # any document is opened; never repeat an open/export in another process.
+    x86 = windows / "SysWOW64/WindowsPowerShell/v1.0/powershell.exe"
+    if x86.is_file():
+        hosts.append(x86)
+    return [str(path) for path in hosts]
 
 
 def _finish_office_helper(process, paths):
@@ -196,28 +279,33 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
     snapshot = root / (uuid.uuid4().hex + source.suffix)
     snapshot.write_bytes(data)
     cancel_path = root / (uuid.uuid4().hex + ".cancel")
-    payload = base64.b64encode(json.dumps({"family": family, "source": str(snapshot), "target": str(partial), "cancel": str(cancel_path)}).encode("utf-8")).decode("ascii")
+    payload = base64.b64encode(json.dumps({"family": family, "renderers": OFFICE_RENDERERS[family], "source": str(snapshot), "target": str(partial), "cancel": str(cancel_path)}).encode("utf-8")).decode("ascii")
     script = _OFFICE_SCRIPT.replace("__PAYLOAD__", payload)
-    executable = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    executables = iter(_office_powershell_executables())
     events = queue.Queue()
     process = None
     owned_job = None
     shared = False
     errors = []
+    renderer = ""
     log.info("office_preview.start family=%s source_version=%s", family, fingerprint[:12])
     try:
-        process = subprocess.Popen([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
-                                    base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   **subprocess_kwargs_no_window())
         def read_lines(helper):
             for raw in iter(helper.stdout.readline, b""):
                 events.put(raw.decode("utf-8", errors="replace").strip())
             events.put(None)
-        reader = threading.Thread(target=read_lines, args=(process,), daemon=True)
-        reader.start()
+        def start_helper(executable):
+            log.info("office_preview.helper family=%s host=%s source_version=%s", family, executable, fingerprint[:12])
+            helper = subprocess.Popen([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
+                                       base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      **subprocess_kwargs_no_window())
+            threading.Thread(target=read_lines, args=(helper,), daemon=True).start()
+            return helper
+        process = start_helper(next(executables))
         deadline = time.monotonic() + timeout
         complete = False
+        unavailable = False
         cancellation_deadline = None
         while True:
             if cancel.is_set():
@@ -228,14 +316,31 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
                 if owned_job or shared or time.monotonic() >= cancellation_deadline:
                     raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
             if time.monotonic() > deadline:
-                raise WorkbenchError("renderer_timeout", "Office 预览超时，请检查文件后重试。")
+                raise WorkbenchError("renderer_timeout", "版式预览超时，请检查文件后重试，或用系统应用打开。")
             try:
                 line = events.get(timeout=0.1)
             except queue.Empty:
                 continue
             if line is None:
+                executable = next(executables, None) if unavailable else None
+                if executable and not cancel.is_set():
+                    process.wait(timeout=2)
+                    process.stdout.close()
+                    unavailable = False
+                    process = start_helper(executable)
+                    continue
                 break
-            if line.startswith("COWORK_PID:"):
+            if line == "COWORK_UNAVAILABLE":
+                unavailable = True
+            elif line.startswith("COWORK_RENDERER:"):
+                renderer = line.partition(":")[2]
+                errors.clear()
+                log.info("office_preview.renderer family=%s renderer=%s source_version=%s", family, renderer, fingerprint[:12])
+            elif line.startswith("COWORK_PROBE:"):
+                detail = line.partition(":")[2]
+                log.info("office_preview.probe_failed family=%s detail=%s", family, detail)
+                errors.append(detail)
+            elif line.startswith("COWORK_PID:"):
                 from .workbench_terminal import WindowsProcessJob
                 owned_job = WindowsProcessJob(int(line.partition(":")[2]))
             elif line.startswith("COWORK_SHARED:"):
@@ -247,16 +352,19 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
                 errors.append(line)
         if cancel.is_set():
             raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
-        if process.wait(timeout=2) != 0 or not complete or not partial.is_file():
-            raise WorkbenchError("renderer_failed", "Office 无法生成版式预览。" + "\n" + "\n".join(errors[-8:]))
+        exit_code = process.wait(timeout=2)
+        if unavailable:
+            raise WorkbenchError("renderer_unavailable", "未找到可用的 Microsoft Office 或 WPS 自动化接口。\n请安装或修复办公软件后重试，也可以选择简化预览或用系统应用打开。")
+        if exit_code != 0 or not complete or not partial.is_file():
+            raise WorkbenchError("renderer_failed", "无法生成版式预览（Microsoft Office / WPS）。" + "\n" + "\n".join(errors[-8:]))
         if not partial.read_bytes().startswith(b"%PDF-"):
-            raise WorkbenchError("invalid_pdf", "Office 没有返回有效的 PDF。")
+            raise WorkbenchError("invalid_pdf", "办公软件没有返回有效的 PDF，请重试或用系统应用打开。")
         if cancel.is_set():
             raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
         if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
             raise WorkbenchError("source_changed", "文件在转换时发生修改，请重新预览最新版本。")
         os.replace(partial, target)
-        log.info("office_preview.finish family=%s source_version=%s", family, fingerprint[:12])
+        log.info("office_preview.finish family=%s renderer=%s source_version=%s", family, renderer, fingerprint[:12])
         return str(target), fingerprint
     except Exception as exc:
         if isinstance(exc, WorkbenchError) and exc.code == "cancelled":

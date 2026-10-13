@@ -9,6 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeliverableEditorWebTest(unittest.TestCase):
+    def test_word_review_edit_and_save_in_isolated_process(self):
+        environment = os.environ.copy()
+        environment.update(QT_QPA_PLATFORM="offscreen", QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu", PYTHONUTF8="1")
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/smoke_docx_review_editor.py")],
+            cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", timeout=90,
+        )
+        self.assertEqual(completed.returncode, 0, msg=f"{completed.stdout}\n{completed.stderr}")
+
     def test_html_visual_entry_preserves_styled_document_in_isolated_process(self):
         for scale in ("1", "1.25", "1.5"):
             with self.subTest(scale=scale):

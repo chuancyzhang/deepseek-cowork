@@ -636,6 +636,33 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "mcp-import":
+            from unittest.mock import patch
+            from PySide6.QtWidgets import QDialog
+            window.skill_manager.load_skills()
+            window.skill_manager_ready = True
+            window.show()
+            assert window.open_skills_center()
+            skills = window.product_pages[window.PAGE_CAPABILITIES]
+            assert skills.select_section("mcp")
+            manager = skills.management_page.mcp_server_manager
+            for width, height, suffix in ((1440, 900, "wide"), (1000, 720, "small")):
+                window.resize(width, height)
+                manager.add_server()
+                save_widget(window, f"mcp-add-json-{suffix}.png")
+                assert manager.editor_dialog.import_button.isVisible()
+                assert manager.editor_dialog.transport_combo.currentData() == "streamable_http"
+                with patch("main.McpJsonImportDialog.exec", return_value=QDialog.Accepted), \
+                        patch("main.McpJsonImportDialog.json_text", return_value='{"mcpServers":{"team-docs":{"url":"https://example.com/mcp","enabled":false}}}'), \
+                        patch("main.QMessageBox.information"):
+                    manager.editor_dialog.import_button.click()
+                assert manager.editor_dialog.url_input.text() == "https://example.com/mcp"
+                assert manager.editor_dialog.transport_stack.currentIndex() == 1
+                save_widget(window, f"mcp-import-http-{suffix}.png")
+                manager._close_editor(discard=True)
+                manager.servers = []
+                manager._refresh_list()
+            return
         if SCREENSHOT_SCOPE == "unified-management":
             window.config_manager.upsert_project(str(workspace), name="产品周报")
             window.config_manager.set_agent_profiles([{"id": "guide-agent", "name": "周报助手", "description": "整理本周进展、风险与下周计划", "enabled": False, "skill_names": []}])
@@ -1989,6 +2016,11 @@ def main_run():
             worker = getattr(window, "chat_save_worker", None)
             if worker is not None and worker.isRunning():
                 worker.stop_worker(timeout_ms=3000)
+            checkpoint_worker = getattr(window, "runtime_checkpoint_worker", None)
+            if checkpoint_worker is not None and checkpoint_worker.isRunning():
+                checkpoint_worker.request_stop()
+                if not checkpoint_worker.wait(3000):
+                    raise RuntimeError("Screenshot checkpoint worker did not stop.")
             window.hide()
         app.quit()
 

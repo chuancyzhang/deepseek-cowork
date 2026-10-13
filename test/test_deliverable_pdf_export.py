@@ -32,6 +32,17 @@ def _one_page_pdf_bytes():
 
 
 class DeliverablePdfExportCoreTest(unittest.TestCase):
+    def test_review_docx_export_explains_limitation_before_rendering(self):
+        from docx_review_fixture import make_review_docx
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "review.docx"
+            make_review_docx(source)
+            original = source.read_bytes()
+            with self.assertRaises(DeliverablePdfExportError) as raised:
+                _prepare_source(str(source))
+            self.assertEqual(raised.exception.code, "docx_review_pdf_unsupported")
+            self.assertEqual(source.read_bytes(), original)
+
     def test_default_target_replaces_supported_source_extension(self):
         self.assertEqual(
             default_pdf_target(os.path.join("C:\\workspace", "report.markdown")),

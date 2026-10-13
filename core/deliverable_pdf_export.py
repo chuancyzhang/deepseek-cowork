@@ -132,6 +132,11 @@ def _prepare_source(source_path: str) -> dict:
         return {"kind": "html", "source_path": source, "size": size}
     try:
         session, report = create_edit_session(source)
+        if report.metadata.get("docx_review"):
+            raise DeliverablePdfExportError(
+                "docx_review_pdf_unsupported",
+                "此文档含脚注、尾注或修订，当前 PDF 渲染器无法完整呈现。请保存后使用 Word 导出 PDF。",
+            )
         payload = load_editor_payload(session)
         page_layout = _read_docx_page_layout(source)
         if int(report.metadata.get("image_count") or 0):

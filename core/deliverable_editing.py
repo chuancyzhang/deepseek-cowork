@@ -598,12 +598,18 @@ def _preflight_docx(
             if "[Content_Types].xml" not in names or "word/document.xml" not in names:
                 raise DeliverableEditError("invalid_docx", "文件不是有效的 DOCX OOXML 文档。")
             document_xml = archive.read("word/document.xml")
+            from core.docx_review import needs_review
+            review_mode = needs_review(names, document_xml, archive)
+            if review_mode:
+                metadata["docx_review"] = True
             for name in sorted(names):
                 lowered = name.lower()
                 if lowered == "word/vbaproject.bin":
                     issues.append(_issue("docx_macro", "文档包含宏，不能在应用内安全编辑。"))
                 for prefix in _DOCX_BLOCKED_PART_PREFIXES:
                     if lowered.startswith(prefix.lower()):
+                        if review_mode and lowered in {"word/footnotes.xml", "word/endnotes.xml"}:
+                            break
                         if _is_safe_docx_export_scaffold(
                             archive,
                             name,
@@ -619,6 +625,8 @@ def _preflight_docx(
                         break
             for marker, label in _DOCX_BLOCKED_XML_MARKERS.items():
                 if marker in document_xml:
+                    if review_mode and marker in {b"<w:ins", b"<w:del"}:
+                        continue
                     issues.append(
                         _issue(
                             "docx_unsupported_markup",
@@ -658,9 +666,8 @@ def _preflight_docx(
                         "DOCX 解压后内容超过 200 MiB，超出安全内存预算。",
                     )
                 )
-            header_footer_plan, header_footer_issues = _inspect_docx_header_footer(
-                archive,
-                names,
+            header_footer_plan, header_footer_issues = (
+                (None, []) if review_mode else _inspect_docx_header_footer(archive, names)
             )
             issues.extend(header_footer_issues)
             if header_footer_plan is not None:
@@ -672,6 +679,8 @@ def _preflight_docx(
         raise DeliverableEditError("invalid_docx", "文件不是有效的 DOCX 压缩包。") from exc
     except ElementTree.ParseError as exc:
         raise DeliverableEditError("invalid_docx", f"DOCX XML 结构无效：{exc}") from exc
+    except ValueError as exc:
+        raise DeliverableEditError("invalid_docx", str(exc)) from exc
 
     if not issues:
         try:
@@ -680,6 +689,10 @@ def _preflight_docx(
             document = Document(path)
             metadata["paragraphs"] = len(document.paragraphs)
             metadata["tables"] = len(document.tables)
+            if metadata.get("docx_review"):
+                from core.docx_review import load_review
+                snapshot = load_review(Path(path).read_bytes())
+                metadata["docx_revision_count"] = len(snapshot["revisions"])
         except Exception as exc:
             issues.append(_issue("docx_open_failed", f"DOCX 结构验证失败：{exc}"))
     return CompatibilityReport(
@@ -1652,6 +1665,11 @@ def univer_snapshot_to_rows(snapshot: dict[str, Any]) -> list[list[str]]:
 def load_editor_payload(session: EditSession) -> dict[str, Any]:
     extension = os.path.splitext(session.path)[1].lower()
     if session.descriptor.kind == "docx":
+        if session.metadata.get("docx_review"):
+            from core.docx_review import load_review
+            source = Path(session.path).read_bytes()
+            session.metadata["_docx_review_source"] = source
+            return {"kind": "docx_review", "snapshot": load_review(source)}
         return {"kind": "docx", "binary": Path(session.path).read_bytes()}
     if extension == ".xlsx":
         return {"kind": "sheet", "snapshot": xlsx_to_univer_snapshot(session.path)}
@@ -1987,6 +2005,19 @@ def restore_docx_header_footer(data: bytes, plan: dict[str, Any]) -> bytes:
 def serialize_editor_payload(session: EditSession, payload: Any) -> bytes:
     extension = os.path.splitext(session.path)[1].lower()
     if session.descriptor.kind == "docx":
+        if session.metadata.get("docx_review"):
+            from core.docx_review import save_review
+            source = session.metadata.get("_docx_review_source")
+            if not source:
+                raise DeliverableEditError("docx_review_missing", "原始文档快照已失效，请重新进入编辑。")
+            try:
+                data = save_review(source, payload)
+            except (ValueError, TypeError) as exc:
+                raise DeliverableEditError("docx_review_invalid", str(exc)) from exc
+            if len(data) > OFFICE_MAX_BYTES:
+                raise DeliverableEditError("file_too_large", "编辑后的 DOCX 超过 25 MiB。")
+            validate_docx_bytes(data)
+            return data
         if not isinstance(payload, (bytes, bytearray)):
             raise DeliverableEditError("docx_payload_invalid", "DOCX 编辑器没有返回有效文档。")
         data = bytes(payload)

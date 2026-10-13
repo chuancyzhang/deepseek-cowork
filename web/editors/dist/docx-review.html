@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: qrc:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <title>Word 文字与修订</title>
+  <link rel="stylesheet" href="editor.css">
+  <link rel="stylesheet" href="docx-review.css">
+</head>
+<body>
+  <main class="editor-shell">
+    <nav class="editor-toolbar" aria-label="Word 编辑工具">
+      <button id="undo" type="button" title="撤销（Ctrl+Z）">撤销</button>
+      <button id="redo" type="button" title="重做（Ctrl+Y）">重做</button>
+      <select id="sections" aria-label="文档导航"></select>
+      <button id="toggle-revisions" type="button" aria-expanded="false">修订</button>
+    </nav>
+    <div id="word-notice" role="status" hidden></div>
+    <div class="word-layout">
+      <article id="word-document" aria-label="Word 文档内容"></article>
+      <aside id="word-revisions" aria-label="文档修订" hidden></aside>
+    </div>
+  </main>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="docx-review-editor.js"></script>
+</body>
+</html>

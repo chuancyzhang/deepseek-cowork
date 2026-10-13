@@ -113,7 +113,14 @@ def normalize_mcp_server(server, index=0, used_ids=None):
     if not isinstance(server, dict):
         return None
     source = dict(server or {})
-    transport = normalize_mcp_transport(source.get("transport", source.get("type")))
+    raw_transport = str(source.get("transport") or source.get("type") or "").strip()
+    # URL-only imports used to be persisted as stdio. Recover that invalid
+    # combination too, while preserving command-backed local services.
+    if (raw_transport.lower() in {"", "stdio"}
+            and str(source.get("url") or "").strip()
+            and not str(source.get("command") or "").strip()):
+        raw_transport = TRANSPORT_STREAMABLE_HTTP
+    transport = normalize_mcp_transport(raw_transport)
     name = str(source.get("name") or f"MCP Server {index + 1}").strip() or f"MCP Server {index + 1}"
     server_id = str(source.get("id") or "").strip() or f"mcp-{_slug_config_value(name)}"
     base_id = server_id

@@ -9169,7 +9169,7 @@ class McpToolDebugWorker(QThread):
 class McpJsonImportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Import MCP JSON")
+        self.setWindowTitle("导入 MCP 配置（JSON）")
         self.resize(640, 560)
         self.setStyleSheet(
             f"""
@@ -9184,7 +9184,7 @@ class McpJsonImportDialog(QDialog):
 
         header = QVBoxLayout()
         header.setSpacing(4)
-        title = QLabel("Import MCP JSON")
+        title = QLabel("导入 MCP 配置（JSON）")
         title.setProperty("roleTitle", True)
         hint = QLabel("支持 `mcpServers`、`mcp_servers`，也支持直接粘贴 server 数组。命名对象键会自动映射为 server ID 和名称。")
         hint.setWordWrap(True)
@@ -9275,10 +9275,9 @@ class McpServerEditDialog(QDialog):
         apply_settings_combo_style(self.transport_combo)
         self.transport_combo.addItem("本地工具（stdio）", TRANSPORT_STDIO)
         self.transport_combo.addItem("远程服务（Streamable HTTP）", TRANSPORT_STREAMABLE_HTTP)
-        transport = str(self.server.get("transport") or self.server.get("type") or TRANSPORT_STDIO)
-        transport_index = self.transport_combo.findData(
-            TRANSPORT_STREAMABLE_HTTP if transport == TRANSPORT_STREAMABLE_HTTP else TRANSPORT_STDIO
-        )
+        transport = (normalize_mcp_servers([self.server])[0]["transport"]
+                     if self.server else TRANSPORT_STREAMABLE_HTTP)
+        transport_index = self.transport_combo.findData(transport)
         self.transport_combo.setCurrentIndex(transport_index if transport_index >= 0 else 0)
         self.transport_combo.currentIndexChanged.connect(self._refresh_transport_stack)
         form.addRow(build_form_row_label("连接方式"), self.transport_combo)
@@ -9377,6 +9376,10 @@ class McpServerEditDialog(QDialog):
         self.transport_stack.addWidget(http_page)
 
         buttons = QHBoxLayout()
+        self.import_button = QPushButton("导入配置（JSON）")
+        self.import_button.setStyleSheet(product_button_style("secondary"))
+        self.import_button.setVisible(not self._editing_existing)
+        buttons.addWidget(self.import_button)
         buttons.addStretch()
         cancel_btn = QPushButton("返回服务列表")
         self.back_button = cancel_btn
@@ -9589,6 +9592,7 @@ class McpServerManager(QWidget):
         dialog.setMinimumSize(0, 0)
         dialog.back_button.clicked.disconnect()
         dialog.back_button.clicked.connect(self.confirm_editor)
+        dialog.import_button.clicked.connect(self.import_servers_from_json)
         self.editor_dialog = dialog
         self._editor_previous_servers = json.loads(json.dumps(self.servers))
         self._editor_baseline = dialog.get_server_config()
@@ -9718,22 +9722,26 @@ class McpServerManager(QWidget):
 
     def import_servers_from_json(self):
         dialog = McpJsonImportDialog(self)
-        if dialog.exec() != QDialog.Accepted:
-            return
+        from_editor = self.editor_dialog is not None
+        log_ui_navigation("mcp_import_start", source="editor" if from_editor else "list")
+        while True:
+            if dialog.exec() != QDialog.Accepted:
+                log_ui_navigation("mcp_import_cancel")
+                return
+            try:
+                raw_text = dialog.json_text()
+                if not raw_text:
+                    raise ValueError("请先粘贴 JSON 配置。")
+                imported_servers = normalize_mcp_servers(parse_mcp_servers_json(raw_text))
+                if not imported_servers:
+                    raise ValueError("没有解析到可导入的 MCP 服务器。")
+            except ValueError as exc:
+                log_ui_navigation("mcp_import_invalid", error_type=type(exc).__name__)
+                QMessageBox.warning(self, "导入 MCP JSON", str(exc))
+                continue  # Keep the JSON available for correction.
+            break
 
-        raw_text = dialog.json_text()
-        if not raw_text:
-            QMessageBox.warning(self, "导入 MCP JSON", "请先粘贴 JSON 配置。")
-            return
-
-        try:
-            imported_servers = normalize_mcp_servers(parse_mcp_servers_json(raw_text))
-        except ValueError as exc:
-            QMessageBox.warning(self, "导入 MCP JSON", str(exc))
-            return
-
-        if not imported_servers:
-            QMessageBox.warning(self, "导入 MCP JSON", "没有解析到可导入的 MCP 服务器。")
+        if from_editor and not self.confirm_editor():
             return
 
         duplicate_matches = []
@@ -9768,6 +9776,7 @@ class McpServerManager(QWidget):
             replace_duplicates = reply == QMessageBox.Yes
 
         updated_servers = list(self.servers)
+        imported_indices = []
         replaced_count = 0
         managed_skipped_count = 0
         if replace_duplicates:
@@ -9776,7 +9785,9 @@ class McpServerManager(QWidget):
                     managed_skipped_count += 1
                     continue
                 updated_servers[index] = server
+                imported_indices.append(index)
                 replaced_count += 1
+        imported_indices.extend(range(len(updated_servers), len(updated_servers) + len(new_servers)))
         updated_servers.extend(new_servers)
         self.servers = normalize_mcp_servers(updated_servers)
         self._refresh_list()
@@ -9785,15 +9796,24 @@ class McpServerManager(QWidget):
         imported_count = len(imported_servers)
         added_count = len(new_servers)
         skipped_count = len(duplicate_matches) - replaced_count
-        message = f"已导入 {imported_count} 个服务器，新增 {added_count} 个。"
+        message = f"已读取 {imported_count} 个服务配置，新增 {added_count} 个。"
         if replaced_count:
             message += f" 已替换 {replaced_count} 个重复配置。"
         if skipped_count:
             message += f" 已跳过 {skipped_count} 个重复配置。"
         if managed_skipped_count:
             message += f" 其中 {managed_skipped_count} 个由 Skill 托管，需在对应 Skill 配置页修改。"
+        if imported_indices:
+            message += " 保存后生效。"
         self.status_label.setText(message)
         self.changed.emit()
+        if from_editor and imported_indices:
+            index = imported_indices[0]
+            self.server_list.setCurrentRow(index)
+            if not self.servers[index].get("managed_by_skill"):
+                self._open_editor(index)
+        log_ui_navigation("mcp_import_finish", added=added_count, replaced=replaced_count,
+                          skipped=skipped_count)
         QMessageBox.information(self, "导入 MCP JSON", message)
 
     def edit_server(self):
@@ -44568,13 +44588,14 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 if encoding:
                     self.begin_deliverable_edit(encoding, editor_mode=str(result.get("editor_mode") or ""))
                     return
-            self._set_deliverable_edit_state("blocked", message)
-            self.deliverable_text_preview.setPlainText(
-                "此文件未通过安全编辑预检。\n\n" + message + "\n\n原文件未发生任何变化。"
+            self._release_deliverable_edit_session(show_preview=True)
+            log_sub_agent_runtime("deliverable_edit_blocked", code=code,
+                                  path=getattr(self, "current_deliverable_path", ""))
+            QMessageBox.warning(
+                self, "无法进入编辑",
+                "无法在应用内编辑，已返回预览。\n\n" + message
+                + "\n\n原文件未修改。如需编辑，可用系统应用打开。",
             )
-            self.preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            QMessageBox.warning(self, "无法进入编辑", message)
-            self._release_deliverable_edit_session(show_preview=False)
             return
         session = result["session"]
         session.metadata["ui_session_id"] = uuid.uuid4().hex
@@ -44675,7 +44696,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             return False
 
     def _editor_asset_path(self, mode):
-        filename = {"docx": "docx.html", "sheet": "sheet.html", "html": "html.html"}.get(mode)
+        filename = {"docx": "docx.html", "docx_review": "docx-review.html", "sheet": "sheet.html", "html": "html.html"}.get(mode)
         if not filename:
             raise DeliverableEditError("editor_mode_invalid", "编辑器格式无效。")
         try:
@@ -44748,7 +44769,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         try:
             if mode == "docx":
                 value = base64.b64encode(bytes(payload.get("binary") or b"")).decode("ascii")
-            elif mode == "sheet":
+            elif mode in {"sheet", "docx_review"}:
                 value = json.dumps(
                     payload.get("snapshot") or {},
                     ensure_ascii=False,
@@ -44859,10 +44880,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         try:
             if kind == "docx":
                 parsed = base64.b64decode(str(payload or ""), validate=True)
-            elif kind == "sheet":
+            elif kind in {"sheet", "docx_review"}:
                 parsed = json.loads(str(payload or ""))
                 if not isinstance(parsed, dict):
-                    raise ValueError("工作簿快照不是对象")
+                    raise ValueError("编辑内容快照不是对象")
             elif kind == "html":
                 parsed = str(payload or "")
             else:
@@ -44919,7 +44940,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 schedule_file_refresh(self)
                 if (
                     session is not None
-                    and session.descriptor.kind == "sheet"
+                    and (session.descriptor.kind == "sheet" or session.metadata.get("docx_review"))
                     and getattr(self, "deliverable_editor_web_view", None) is not None
                 ):
                     self.deliverable_editor_web_view.page().runJavaScript(

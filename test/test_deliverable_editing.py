@@ -230,7 +230,7 @@ class DeliverableEditingCoreTest(unittest.TestCase):
         with self.assertRaisesRegex(DeliverableEditError, "缺少受保护"):
             restore_html_edit_source(edited, preserved)
 
-    def test_docx_common_document_is_editable_and_tracked_changes_are_blocked(self):
+    def test_docx_common_document_and_tracked_changes_are_editable_without_preflight_writes(self):
         from docx import Document
 
         with tempfile.TemporaryDirectory() as directory:
@@ -253,8 +253,8 @@ class DeliverableEditingCoreTest(unittest.TestCase):
             report = preflight_edit(changed)
             after_preflight = Path(changed).read_bytes()
 
-        self.assertFalse(report.allowed)
-        self.assertTrue(any(issue.code == "docx_unsupported_markup" for issue in report.issues))
+        self.assertTrue(report.allowed)
+        self.assertTrue(report.metadata.get("docx_review"))
         self.assertEqual(after_preflight, before_preflight)
 
     def test_docx_plain_header_and_footer_are_preserved_while_body_changes(self):

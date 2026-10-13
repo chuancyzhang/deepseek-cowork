@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from core.config_manager import ConfigManager
 from core.settings_changes import merge_settings_objects
-from main import SettingsDialog, AgentProfileManager, SkillsCenterDialog
+from main import SettingsDialog, AgentProfileManager, SkillsCenterDialog, McpServerEditDialog
 
 
 class UnifiedManagementTests(unittest.TestCase):
@@ -128,6 +128,82 @@ class UnifiedManagementTests(unittest.TestCase):
             manager.editor_dialog.back_button.click()
         self.assertIsNone(manager.editor_dialog)
         self.assertEqual(self.config.get_mcp_servers(), original)
+
+    def test_mcp_editor_transport_matches_imported_config(self):
+        for server in (None, {"type": "streamable-http", "url": "https://example.com/mcp"},
+                       {"url": "https://example.com/mcp"},
+                       {"transport": "stdio", "url": "https://example.com/mcp"}):
+            with self.subTest(server=server):
+                editor = McpServerEditDialog(server)
+                try:
+                    self.assertEqual(editor.transport_combo.currentData(), "streamable_http")
+                    self.assertEqual(editor.transport_stack.currentIndex(), 1)
+                finally:
+                    editor.deleteLater()
+        editor = McpServerEditDialog({"command": "npx"})
+        self.assertEqual(editor.transport_combo.currentData(), "stdio")
+        self.assertEqual(editor.transport_stack.currentIndex(), 0)
+        editor.deleteLater()
+
+    def test_mcp_add_import_opens_remote_form_and_saves_only_on_save(self):
+        page = self.page("capabilities", "MCP 服务")
+        manager = page.mcp_server_manager
+        original = self.config.get_mcp_servers()
+        manager.add_server()
+        self.assertFalse(manager.editor_dialog.import_button.isHidden())
+        payload = '{"mcpServers":{"remote":{"url":"https://example.com/mcp","headers":{"X-Test":"value"}}}}'
+        with patch("main.McpJsonImportDialog.exec", return_value=QDialog.Accepted), \
+                patch("main.McpJsonImportDialog.json_text", return_value=payload), \
+                patch("main.QMessageBox.information"):
+            manager.editor_dialog.import_button.click()
+        editor = manager.editor_dialog
+        self.assertEqual(editor.name_input.text(), "remote")
+        self.assertEqual(editor.transport_stack.currentIndex(), 1)
+        self.assertEqual(editor.url_input.text(), "https://example.com/mcp")
+        self.assertIn("X-Test: value", editor.headers_edit.toPlainText())
+        self.assertEqual(self.config.get_mcp_servers(), original)
+        self.assertTrue(page._settings_dirty)
+        editor.accept()
+        self.assertIsNone(manager.editor_dialog)
+        saved = next(s for s in self.config.get_mcp_servers() if s["id"] == "remote")
+        self.assertEqual(saved["transport"], "streamable_http")
+        self.assertEqual(saved["headers"], {"X-Test": "value"})
+
+    def test_mcp_import_cancel_or_invalid_json_keeps_form_input(self):
+        page = self.page("capabilities", "MCP 服务")
+        manager = page.mcp_server_manager
+        manager.add_server()
+        editor = manager.editor_dialog
+        editor.name_input.setText("正在填写的服务")
+        with patch("main.McpJsonImportDialog.exec", side_effect=[QDialog.Accepted, QDialog.Rejected]) as execute, \
+                patch("main.McpJsonImportDialog.json_text", return_value="{broken"), \
+                patch("main.QMessageBox.warning") as warning:
+            editor.import_button.click()
+        self.assertEqual(execute.call_count, 2)
+        warning.assert_called_once()
+        self.assertIs(manager.editor_dialog, editor)
+        self.assertEqual(editor.name_input.text(), "正在填写的服务")
+        self.assertEqual(manager.servers, [])
+        with patch("main.McpJsonImportDialog.exec", return_value=QDialog.Accepted), \
+                patch("main.McpJsonImportDialog.json_text", return_value='{"url":"https://example.com/mcp"}'), \
+                patch("main.ProductMessageDialog.exec_result", return_value="stay"):
+            editor.import_button.click()
+        self.assertIs(manager.editor_dialog, editor)
+        self.assertEqual(manager.servers, [])
+
+    def test_mcp_list_import_keeps_duplicate_choices_and_supports_mixed_services(self):
+        page = self.page("capabilities", "MCP 服务")
+        manager = page.mcp_server_manager
+        manager.servers = [{"id": "remote", "name": "remote", "transport": "streamable_http", "url": "https://old.example/mcp"}]
+        payload = '{"mcpServers":{"remote":{"url":"https://new.example/mcp"},"local":{"command":"npx","args":["example"]}}}'
+        with patch("main.McpJsonImportDialog.exec", return_value=QDialog.Accepted), \
+                patch("main.McpJsonImportDialog.json_text", return_value=payload), \
+                patch("main.QMessageBox.question", return_value=QMessageBox.Yes), \
+                patch("main.QMessageBox.information"):
+            manager.import_servers_from_json()
+        self.assertIsNone(manager.editor_dialog)
+        self.assertEqual([s["transport"] for s in manager.servers], ["streamable_http", "stdio"])
+        self.assertEqual(manager.servers[0]["url"], "https://new.example/mcp")
 
 
 if __name__ == "__main__":

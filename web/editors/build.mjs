@@ -14,6 +14,7 @@ const buildResult = await build({
   entryPoints: {
     "terminal": join(root, "src", "terminal.js"),
     "docx-editor": join(root, "src", "docx-editor.js"),
+    "docx-review-editor": join(root, "src", "docx-review-editor.js"),
     "sheet-editor": join(root, "src", "sheet-editor.js")
   },
   outdir: output,
@@ -40,6 +41,8 @@ for (const name of [
   "browser-automation.js",
   "terminal.html",
   "docx.html",
+  "docx-review.html",
+  "docx-review.css",
   "sheet.html",
   "html.html",
   "html-editor.js",

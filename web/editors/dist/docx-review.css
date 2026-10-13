@@ -1,0 +1,37 @@
+.word-layout { display: flex; min-height: 0; flex: 1; }
+#word-document { flex: 1; min-width: 0; overflow: auto; padding: 24px; }
+.word-section { max-width: 850px; margin: 0 auto 28px; padding: 20px 28px; background: var(--cowork-bg-primary); }
+.word-section h2 { font-size: 16px; color: var(--cowork-text-secondary); margin: 0 0 20px; padding-bottom: 10px; border-bottom: 1px solid var(--cowork-border-subtle); }
+.word-paragraph { min-height: 1.7em; margin: 10px 0; line-height: 1.8; overflow-wrap: anywhere; }
+.word-text { white-space: pre-wrap; min-width: 1ch; }
+.word-text:empty::before { content: '\200b'; }
+.word-text[contenteditable="true"]:focus { outline: 1px solid var(--cowork-primary); outline-offset: 3px; }
+.word-text[contenteditable="true"] { cursor: text; }
+.word-text[contenteditable="false"] { cursor: default; }
+.word-revision.ins, .word-revision.moveTo { text-decoration: underline; text-decoration-style: double; }
+.word-revision.del, .word-revision.moveFrom { text-decoration: line-through; }
+.word-revision.pending { background: var(--cowork-selection); }
+.word-revision.resolved { background: transparent; text-decoration: none; }
+.word-note-ref { vertical-align: super; margin: 0 3px; font-size: .8em; color: var(--cowork-primary); background: transparent; border: 0; cursor: pointer; }
+.word-preserved { font-size: 12px; color: var(--cowork-text-secondary); padding: 2px 4px; background: var(--cowork-bg-secondary); }
+.word-tab { white-space: pre; }
+.word-table-scroll { overflow-x: auto; }
+.word-section table { border-collapse: collapse; width: 100%; }
+.word-section td { border: 1px solid var(--cowork-border-subtle); min-width: 70px; padding: 8px; vertical-align: top; }
+#word-revisions { width: 300px; flex: 0 0 300px; padding: 16px; border-left: 1px solid var(--cowork-border-subtle); overflow: auto; background: var(--cowork-bg-primary); }
+#word-revisions[hidden] { display: none; }
+#word-revisions h2 { margin-top: 0; font-size: 17px; }
+.word-revision-item { padding: 16px 0; border-bottom: 1px solid var(--cowork-border-subtle); }
+.word-revision-item p { margin: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.word-revision-meta { font-size: 12px; color: var(--cowork-text-secondary); }
+.word-review-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.word-review-actions button { min-height: 32px; border: 1px solid var(--cowork-border-subtle); border-radius: 5px; padding: 4px 10px; color: var(--cowork-text-primary); background: var(--cowork-bg-primary); cursor: pointer; }
+.word-review-actions button:hover { background: var(--cowork-selection); }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--cowork-primary); outline-offset: 2px; }
+#word-notice { padding: 8px 14px; color: var(--cowork-text-primary); background: var(--cowork-selection); }
+@media (max-width: 800px) {
+  .word-layout { flex-direction: column; overflow: auto; }
+  #word-document { flex: 1 0 auto; padding: 12px; overflow: visible; }
+  .word-section { padding: 14px; }
+  #word-revisions { width: auto; flex: 0 0 auto; border-left: 0; border-top: 1px solid var(--cowork-border-subtle); }
+}

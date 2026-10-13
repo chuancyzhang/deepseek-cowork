@@ -884,6 +884,20 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(servers[0]["command"], "npx")
         self.assertEqual(servers[0]["env"]["NODE_ENV"], "production")
 
+    def test_mcp_url_only_import_and_legacy_stdio_use_http_without_losing_headers(self):
+        for transport in (None, "stdio", "http", "streamable-http", "streamable_http"):
+            with self.subTest(transport=transport):
+                server = {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer test"}}
+                if transport is not None:
+                    server["transport"] = transport
+                result = normalize_mcp_servers(parse_mcp_servers_json({"mcpServers": {"remote": server}}))[0]
+                self.assertEqual(result["transport"], "streamable_http")
+                self.assertEqual(result["type"], "streamable_http")
+                self.assertEqual(result["headers"], server["headers"])
+                self.assertEqual(normalize_mcp_servers([result]), [result])
+        local = normalize_mcp_servers([{"command": "npx", "url": "https://example.com/mcp"}])[0]
+        self.assertEqual(local["transport"], "stdio")
+
     def test_parse_mcp_servers_json_supports_direct_server_array(self):
         payload = parse_mcp_servers_json(
             [

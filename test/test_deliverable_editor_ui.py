@@ -2,6 +2,8 @@ import os
 import tempfile
 import time
 import unittest
+import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -319,6 +321,44 @@ class DeliverableEditorUiTest(unittest.TestCase):
             self.assertFalse(self.window.deliverable_mode_btn.isHidden())
             self.assertTrue(self.window.deliverable_mode_btn.isEnabled())
             self.assertTrue(self.window.deliverable_read_only_label.isHidden())
+
+    def test_unsupported_docx_edit_preflight_rejection_returns_to_read_only_preview(self):
+        from docx import Document
+        from core.deliverable_editing import preflight_edit
+        from ui.document_preview import DocumentPreview
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "review.docx"
+            document = Document()
+            document.add_paragraph("正文仍然可以阅读")
+            document.save(source)
+            with zipfile.ZipFile(source) as archive:
+                parts = {name: archive.read(name) for name in archive.namelist()}
+            parts["word/document.xml"] = parts["word/document.xml"].replace(
+                b"<w:body>", b'<w:body><w:p><w:ins w:id="1" w:author="Reviewer"><w:r><w:t>Revision</w:t></w:r></w:ins></w:p>')
+            for name in ("footnotes", "endnotes"):
+                parts[f"word/{name}.xml"] = f'<w:{name} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'.encode()
+            parts["word/vbaProject.bin"] = b"unsupported macro fixture"
+            with zipfile.ZipFile(source, "w") as archive:
+                for name, data in parts.items():
+                    archive.writestr(name, data)
+            before = source.read_bytes()
+            self.assertFalse(preflight_edit(str(source)).allowed)
+            with patch.object(DocumentPreview, "open", autospec=True) as preview_open, \
+                    patch("main.QMessageBox.warning") as warning, \
+                    patch("main.DeliverableEditLoadWorker", wraps=__import__("main").DeliverableEditLoadWorker) as loader:
+                self.window.select_deliverable(str(source), render_html=True)
+                loader.assert_not_called()
+                self.assertIs(self.window.preview_stack.currentWidget(), self.window.document_preview)
+                self.window.begin_deliverable_edit()
+                self._wait_until(lambda: warning.called)
+                self.assertEqual(self.window.deliverable_edit_state, "idle")
+                self.assertIsNone(self.window.deliverable_edit_session)
+                self.assertIs(self.window.preview_stack.currentWidget(), self.window.document_preview)
+                self.assertEqual(preview_open.call_count, 2)
+                self.assertIn("已返回预览", warning.call_args.args[2])
+                self.assertIn("宏", warning.call_args.args[2])
+                self.assertEqual(source.read_bytes(), before)
 
 
 if __name__ == "__main__":

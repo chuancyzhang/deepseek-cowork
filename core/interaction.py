@@ -4,10 +4,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from PySide6.QtCore import QObject, Signal
+import logging
 import threading
 import time
 import uuid
-from core.tool_tasks import tool_interaction_wait
+from core.tool_tasks import current_tool_run, tool_interaction_wait
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -388,6 +392,18 @@ class InteractionService(QObject):
         abort_check=None,
         require_receiver: bool = False,
     ) -> dict[str, Any]:
+        owner = current_tool_run()
+        metadata = dict(metadata or {})
+        if owner is not None:
+            session_id = owner.session_id
+            metadata["run_id"] = owner.run_id
+            original_abort_check = abort_check
+            abort_check = lambda: (
+                owner.closed.is_set() or owner.abort_check()
+                or (callable(original_abort_check) and original_abort_check())
+            )
+        if callable(abort_check) and abort_check():
+            return InteractionResponse(request_id="", status="cancelled", approved=False).to_dict()
         if require_receiver:
             from PySide6.QtCore import QMetaMethod
             if not self.isSignalConnected(QMetaMethod.fromSignal(self.interaction_requested)):
@@ -417,12 +433,16 @@ class InteractionService(QObject):
                 "abort_check": abort_check,
             }
         self.interaction_requested.emit(payload)
+        logger.info("interaction.wait session=%s run=%s request=%s kind=%s",
+                    request.session_id, metadata.get("run_id", ""), request.request_id, request.kind)
         if callable(abort_check):
             deadline = time.monotonic() + request.timeout_seconds
             while not event.wait(min(0.05, max(0, deadline - time.monotonic()))):
                 if abort_check():
                     with self._lock:
                         self._pending.pop(request.request_id, None)
+                    logger.info("interaction.cancelled session=%s run=%s request=%s",
+                                request.session_id, metadata.get("run_id", ""), request.request_id)
                     return InteractionResponse(request_id=request.request_id, status="cancelled", approved=False).to_dict()
                 if time.monotonic() >= deadline:
                     break
@@ -432,6 +452,8 @@ class InteractionService(QObject):
         with self._lock:
             entry = self._pending.pop(request.request_id, None)
         if not resolved or not entry or not isinstance(entry.get("response"), dict):
+            logger.info("interaction.timeout session=%s run=%s request=%s",
+                        request.session_id, metadata.get("run_id", ""), request.request_id)
             if (
                 payload.get("kind") == "questionnaire"
                 and payload.get("metadata", {}).get("auto_select_first_on_timeout")
@@ -451,6 +473,9 @@ class InteractionService(QObject):
                 approved=False,
                 raw_value=None,
             ).to_dict()
+        logger.info("interaction.resolved session=%s run=%s request=%s status=%s",
+                    request.session_id, metadata.get("run_id", ""), request.request_id,
+                    entry["response"].get("status"))
         return dict(entry["response"])
 
     def resolve_request(self, request_id: str, raw_value: Any) -> bool:
@@ -464,7 +489,11 @@ class InteractionService(QObject):
             if callable(abort_check) and abort_check():
                 return False
             request = entry.get("request") or {}
-            payload, valid, _ = parse_interaction_reply(request, raw_value)
+            if raw_value is False or raw_value is None:
+                payload = _build_response_payload(request, status="cancelled", approved=False)
+                valid = True
+            else:
+                payload, valid, _ = parse_interaction_reply(request, raw_value)
             if not valid:
                 return False
             entry["response"] = payload

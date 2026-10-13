@@ -1217,6 +1217,7 @@ class LLMWorker(QThread):
         self.is_paused = False # Ensure loop breaks if paused
         if not self.is_subagent:
             self.execution_authorization.cancel()
+        self._close_tool_tasks()
         # Tool cancellation must not wait for a blocking provider close().
         self.abort_signal.emit()
         self.step_signal.emit("System: Stopping...")
@@ -4614,7 +4615,6 @@ class LLMWorker(QThread):
                                     "start_time": start_tool_time,
                                     "end_time": None if pending_tool else end_tool_time,
                                     "duration": duration_tool,
-                                    "silent_repair": bool(structured_failure),
                                 }
                             })
                             self.observability_signal.emit({

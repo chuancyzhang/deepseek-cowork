@@ -179,6 +179,7 @@ from core.theme import (
     ThemeRuntimeManager,
 )
 from core.theme_service import ThemeRepository
+from ui.conversation_files import ConversationFileTable
 from ui.primitives import (
     ProductActionBar,
     ProductCodeViewer,
@@ -989,13 +990,13 @@ def render_markdown_or_html_with_cache(text, final=False, workspace_dir=""):
     if raw_html:
         html_output = markdown_render_style() + raw_html
         if final and workspace_dir:
-            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir)
+            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir, allow_outside_workspace=True)
         result = ("raw_html", html_output)
     else:
         html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
         html_output = markdown_render_style() + html_content
         if final and workspace_dir:
-            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir)
+            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir, allow_outside_workspace=True)
         result = ("html", html_output)
     _MARKDOWN_RENDER_CACHE[cache_key] = result
     while len(_MARKDOWN_RENDER_CACHE) > MARKDOWN_RENDER_CACHE_SIZE:
@@ -17208,13 +17209,13 @@ class InlineInteractionCard(QFrame):
             self.permission_details_button.toggled.connect(show_permission_details)
 
         self.text_input = QLineEdit()
-        self.text_input.setPlaceholderText("补充说明…")
+        self.text_input.setPlaceholderText("自定义" if self.kind in {"choice", "multi_choice"} else "请输入回答")
         self.text_input.setStyleSheet(product_field_style())
         self.text_input.setVisible(
             self.kind == "text"
             or (self.kind in {"choice", "multi_choice"} and bool(self.request.get("allow_free_text")))
         )
-        if self.text_input.isVisible():
+        if self.kind == "text":
             layout.addWidget(self.text_input)
 
         options = self.request.get("options") if isinstance(self.request.get("options"), list) else []
@@ -17224,12 +17225,20 @@ class InlineInteractionCard(QFrame):
                 self.option_group.setExclusive(True)
             for option in options:
                 label = str(option.get("label") or option.get("value") or "选项")
+                if str(option.get("value") or "") == "__custom__" and self.request.get("allow_free_text"):
+                    continue
                 description = str(option.get("description") or "")
                 choice = InteractionChoiceButton(label, description, str(option.get("value") or label), self)
                 if self.option_group is not None:
                     self.option_group.addButton(choice)
                 self.option_checks.append(choice)
                 layout.addWidget(choice)
+                if self.kind == "choice":
+                    choice.toggled.connect(lambda checked, field=self.text_input: field.clear() if checked else None)
+            if not self.text_input.isHidden():
+                layout.addWidget(self.text_input)
+            if self.option_group is not None:
+                self.text_input.textChanged.connect(lambda text: self._clear_choice_on_text(self.option_group, text))
         elif self.kind == "questionnaire":
             for question in normalize_pending_clarify_questions(self.request.get("questions") or []):
                 question_label = QLabel(str(question.get("question") or question.get("header") or "问题"))
@@ -17242,21 +17251,22 @@ class InlineInteractionCard(QFrame):
                 for option in question.get("options") or []:
                     label = str(option.get("label") or "")
                     value = str(option.get("value") or label)
+                    if value == "__custom__":
+                        continue
                     choice = InteractionChoiceButton(label, str(option.get("description") or ""), value, self)
                     group.addButton(choice)
                     buttons.append(choice)
                 custom = QLineEdit()
-                custom.setPlaceholderText("选择“自定义”后填写…")
+                custom.setPlaceholderText("自定义")
+                custom.setAccessibleName(str(question.get("question") or "问题") + "：自定义回答")
                 custom.setStyleSheet(product_field_style())
-                custom.setEnabled(False)
                 layout.addWidget(question_label)
                 for choice in buttons:
                     layout.addWidget(choice)
                     choice.toggled.connect(
-                        lambda checked=False, source=choice, field=custom: field.setEnabled(
-                            bool(checked and str(source.property("option_value") or "") == "__custom__")
-                        )
+                        lambda checked, field=custom: field.clear() if checked else None
                     )
+                custom.textChanged.connect(lambda text, choices=group: self._clear_choice_on_text(choices, text))
                 layout.addWidget(custom)
                 self.question_controls.append({"id": question.get("id"), "group": group, "buttons": buttons, "input": custom})
 
@@ -17287,7 +17297,17 @@ class InlineInteractionCard(QFrame):
         self.timeout_timer.setSingleShot(True)
         self.timeout_timer.timeout.connect(self._expire)
         self.timeout_timer.start(int(timeout_seconds * 1000))
+        self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="feedback")
+
+    @staticmethod
+    def _clear_choice_on_text(group, text):
+        if not text.strip():
+            return
+        group.setExclusive(False)
+        for button in group.buttons():
+            button.setChecked(False)
+        group.setExclusive(True)
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
@@ -17389,11 +17409,6 @@ class InlineInteractionCard(QFrame):
                 checked = control["group"].checkedButton()
                 value = str(checked.property("option_value") or "") if checked is not None else ""
                 custom_text = control["input"].text().strip()
-                if value == "__custom__":
-                    if not custom_text:
-                        self._show_validation("选择“自定义”后请填写内容。")
-                        return
-                    value = ""
                 if value or custom_text:
                     answers[str(control.get("id") or "")] = {
                         "selected_options": [value] if value else [],
@@ -17411,10 +17426,7 @@ class InlineInteractionCard(QFrame):
         for control in self.question_controls:
             for button in control["buttons"]:
                 button.setEnabled(enabled)
-            checked = control["group"].checkedButton()
-            control["input"].setEnabled(
-                enabled and checked is not None and str(checked.property("option_value") or "") == "__custom__"
-            )
+            control["input"].setEnabled(enabled)
 
     def _finish(self, value):
         if self._resolved:
@@ -17437,6 +17449,13 @@ class InlineInteractionCard(QFrame):
         self.validation_label.show()
         timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
         self.timeout_timer.start(int(timeout_seconds * 1000))
+
+    def stop_waiting(self):
+        self._resolved = True
+        self.timeout_timer.stop()
+        self._set_controls_enabled(False)
+        self.validation_label.setText("任务已停止，未提交的输入保留在这里。")
+        self.validation_label.show()
 
     def _expire(self):
         if self._resolved:
@@ -19381,7 +19400,7 @@ class DaemonStopWorker(QThread):
             if response.get("stopped") and not response.get("released"):
                 timeout_ms = int(response.get("release_timeout_ms") or 0)
                 raise RuntimeError(
-                    f"底层模型请求在 {timeout_ms / 1000:.1f} 秒内未释放"
+                    f"模型请求或工具在 {timeout_ms / 1000:.1f} 秒内尚未确认结束"
                 )
             self.result_signal.emit(response, self.session_id)
         except Exception as exc:
@@ -23573,12 +23592,10 @@ class ChatBubble(QFrame):
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
 
-            self.deliverable_cards = QWidget()
+            self.deliverable_cards = ConversationFileTable()
             self.deliverable_cards.setVisible(False)
-            self.deliverable_cards_layout = QHBoxLayout(self.deliverable_cards)
-            self.deliverable_cards_layout.setContentsMargins(0, 2, 0, 0)
-            self.deliverable_cards_layout.setSpacing(8)
-            self.deliverable_cards_layout.setAlignment(Qt.AlignLeft)
+            self.deliverable_cards.fileActivated.connect(self.deliverablePathActivated)
+            self.deliverable_cards_layout = self.deliverable_cards.rows_layout
             col_layout.addWidget(self.deliverable_cards)
             self._deliverable_paths = []
             
@@ -23689,6 +23706,7 @@ class ChatBubble(QFrame):
                 "padding-right: 2px; border: none; background: transparent;"
             )
         if self.content_edit is not None and self.main_content_text:
+            self._rendered_deliverable_paths = None
             was_final = bool(getattr(self, "_pending_main_content_final", False))
             self._rendered_main_content_text = None
             self._render_main_content(
@@ -24247,7 +24265,7 @@ class ChatBubble(QFrame):
             return True
         if extract_renderable_html_response(text):
             return False
-        if final and self.workspace_dir and iter_workspace_file_paths(text, self.workspace_dir):
+        if final and self.workspace_dir and iter_workspace_file_paths(text, self.workspace_dir, allow_outside_workspace=True):
             return False
         if final and looks_like_markdown_text(text):
             return False
@@ -24430,7 +24448,7 @@ class ChatBubble(QFrame):
             if str(image_part.get("path") or "").strip()
         }
         if final:
-            for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir):
+            for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir, allow_outside_workspace=True):
                 extension = os.path.splitext(path)[1].lower()
                 kind = DELIVERABLE_EXTENSIONS.get(extension, ("file", "", ""))[0]
                 path_key = os.path.normcase(os.path.abspath(path))
@@ -24562,60 +24580,15 @@ class ChatBubble(QFrame):
         if not hasattr(self, "deliverable_cards_layout"):
             return
         paths = self._deliverable_paths if render else [
-            path for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir)
+            path for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir, allow_outside_workspace=True)
         ]
         if paths != self._deliverable_paths:
             self._deliverable_paths = paths
             self.deliverablePathsChanged.emit(list(paths))
         if not render or paths == getattr(self, "_rendered_deliverable_paths", None):
             return
-        while self.deliverable_cards_layout.count():
-            item = self.deliverable_cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        visible_card_count = 0
-        for path in paths:
-            ext = os.path.splitext(path)[1].lower()
-            kind, type_label, icon_name = DELIVERABLE_EXTENSIONS.get(
-                ext, ("file", ext.lstrip(".").upper() or "文件", "fa5s.file")
-            )
-            if kind == "image":
-                continue
-            button = QPushButton(os.path.basename(path))
-            button.setCursor(Qt.PointingHandCursor)
-            button.setIcon(qta.icon(icon_name, color=DesignTokens.primary))
-            button.setToolTip(path)
-            button.setAccessibleName(f"预览交付物 {os.path.basename(path)}")
-            button.setMinimumWidth(110)
-            button.setMaximumWidth(220)
-            button.setStyleSheet(f"""
-                QPushButton {{
-                    background: {DesignTokens.bg_main};
-                    color: {DesignTokens.text_primary};
-                    border: 1px solid {DesignTokens.border_subtle};
-                    border-radius: 14px;
-                    padding: 8px 12px;
-                    font-size: 12px;
-                    font-weight: 600;
-                    text-align: left;
-                }}
-                QPushButton:hover {{
-                    background: {DesignTokens.primary_soft};
-                    border-color: {rgba_from_hex(DesignTokens.primary, 0.28)};
-                    color: {DesignTokens.primary};
-                }}
-                QPushButton:pressed {{
-                    background: {rgba_from_hex(DesignTokens.primary, 0.14)};
-                }}
-            """)
-            button.setProperty("deliverableType", kind)
-            button.setStatusTip(type_label)
-            button.clicked.connect(lambda checked=False, value=path: self.deliverablePathActivated.emit(value))
-            self.deliverable_cards_layout.addWidget(button)
-            visible_card_count += 1
+        self.deliverable_cards.set_files(paths, self.workspace_dir)
         self._rendered_deliverable_paths = paths
-        self.deliverable_cards.setVisible(bool(visible_card_count))
 
     def _render_plain_stream_content(self, text):
         """Avoid full Markdown conversion while a long response is still streaming."""
@@ -25377,6 +25350,8 @@ class ToolCallCard(QFrame):
             self.args_preview_label.setWordWrap(True)
         elif failed:
             self.status_icon.setPixmap(qta.icon('fa5s.exclamation-circle', color=DesignTokens.error_text).pixmap(14, 14))
+            self.args_preview_label.setText("执行失败 · " + tool_result_summary(result_obj if result_obj is not None else result_text))
+            self.args_preview_label.setWordWrap(True)
         else:
             self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
         if not pending and getattr(self, "_background_pending", False):
@@ -30207,11 +30182,6 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
         self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
-        self.input_field.setToolTip(
-            "在输入开头或空格后键入 @，选择“引用会话”或“召唤智能体”。\n"
-            "引用会话：把其他会话的文字记录作为参考资料，AI 在当前会话回答；发送时保存引用快照。\n"
-            "召唤智能体：选择智能体参与执行，再补充要完成的任务。"
-        )
         self.input_field.returnPressed.connect(self.handle_send)
         self.input_field.mentionRequested.connect(self.show_conversation_mention_menu)
         self.input_field.clipboardFilesPasted.connect(self._add_clipboard_files)
@@ -39616,6 +39586,9 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
     def handle_interaction_request(self, request):
         request = dict(request or {})
         session_id = str(request.get("session_id") or self.current_session_id or "")
+        run_id = (request.get("metadata") or {}).get("run_id")
+        if run_id and not self._event_matches_active_run(self.get_session(session_id), request_id=run_id):
+            return
         self._show_inline_interaction_request(
             request,
             session_id,
@@ -39633,7 +39606,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
 
         def resolve(value):
             if self.daemon_client:
-                self.daemon_client.respond_interaction(request.get("request_id"), value)
+                return self.daemon_client.respond_interaction(request.get("request_id"), value)
+            raise RuntimeError("后台连接不可用，回答尚未提交")
 
         self._show_inline_interaction_request(request, target_session_id, resolve)
 
@@ -39643,7 +39617,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             raise RuntimeError("无法显示交互请求：目标会话不存在。")
         request_id = str((request or {}).get("request_id") or uuid.uuid4().hex)
         if request_id in state.pending_interactions:
-            raise RuntimeError(f"交互请求重复：{request_id}")
+            return state.pending_interactions[request_id]
         self.set_session_phase("Awaiting input", state.session_id)
         log_ui_navigation(
             "interaction_inline_show",
@@ -39658,7 +39632,12 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
 
         def finish(value):
             try:
-                resolver(value)
+                acknowledgement = resolver(value)
+                if acknowledgement is False or (
+                    isinstance(acknowledgement, dict)
+                    and (acknowledgement.get("status") != "ok" or not acknowledgement.get("resolved"))
+                ):
+                    raise RuntimeError("请求已结束或未被接收，回答尚未提交")
             except Exception as exc:
                 card.restore_after_resolution_error(exc)
                 log_ui_navigation(
@@ -39690,9 +39669,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 QTimer.singleShot(0, first_input.setFocus)
         else:
             self.add_system_toast(
-                "后台对话发来了输入请求",
+                "后台对话正在等待你的输入",
                 "info",
                 session_id=state.session_id,
+                auto_close_ms=0,
             )
         return card
 
@@ -45495,7 +45475,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
     def open_deliverable_from_chat(self, path, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         workspace_dir = self._workspace_dir_for_state(state)
-        normalized = normalize_workspace_file(path, workspace_dir)
+        normalized = normalize_workspace_file(path, workspace_dir, allow_outside_workspace=True)
         if not normalized:
             log_ui_navigation(
                 "chat_deliverable_open_rejected",
@@ -45503,7 +45483,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
                 extension=os.path.splitext(str(path or ""))[1].lower(),
             )
             self.add_system_toast(
-                "文件不存在、格式不受支持，或已不在当前项目内。",
+                "文件不存在或格式不受支持，请检查完整路径。",
                 "warning",
                 session_id=session_id,
                 auto_close_ms=3600,
@@ -49322,6 +49302,12 @@ a {{ overflow-wrap: anywhere; }}
     def _start_daemon_stop_worker(self, session_id, run_id=""):
         if not self.daemon_client or not str(session_id or "").strip():
             return False
+        state = self.get_session(session_id)
+        if state is not None:
+            if run_id and str(getattr(state, "active_turn_request_id", "") or "") != run_id:
+                return False
+            state.stop_pending = True
+            state.stop_pending_run_id = run_id
         worker = DaemonStopWorker(
             self.daemon_client,
             session_id,
@@ -49341,8 +49327,6 @@ a {{ overflow-wrap: anywhere; }}
                     or str(getattr(state, "stop_pending_run_id", "")) == result_run_id
                 )
             )
-            # 停止结果只进入日志：点击停止时会话通知已是终态“已停止”，
-            # 守护进程是否确认释放资源都不再向用户追加提示。
             if result.get("status") == "ok":
                 log_sub_agent_runtime(
                     "daemon_stop_confirmed",
@@ -49354,6 +49338,7 @@ a {{ overflow-wrap: anywhere; }}
                 if pending_matches:
                     state.stop_pending = False
                     state.stop_pending_run_id = ""
+                    self._show_conversation_notice(state, "已停止", "neutral")
                     self.normalize_session_ui(state)
                 return
             error = str(result.get("error") or "未知错误")
@@ -49363,6 +49348,11 @@ a {{ overflow-wrap: anywhere; }}
             if pending_matches:
                 state.stop_pending = False
                 state.stop_pending_run_id = ""
+                self._show_conversation_notice(
+                    state, "尚未确认后台任务停止，已保留对话内容。", "warning",
+                    action_text="重试停止",
+                    action_callback=lambda: self._start_daemon_stop_worker(stopped_session_id, result_run_id),
+                )
                 self.normalize_session_ui(state)
 
         def cleanup():
@@ -49723,6 +49713,11 @@ a {{ overflow-wrap: anywhere; }}
             self._disconnect_worker_signals(llm_worker)
             if llm_worker.isRunning():
                 self._keep_detached_worker(llm_worker)
+        if not needs_daemon_stop:
+            self._stop_live_subagents(state, force=True)
+        for card in state.pending_interactions.values():
+            card.stop_waiting()
+        state.pending_interactions.clear()
 
         self.flush_session_content(state.session_id, final=False)
         self.flush_session_thinking(state.session_id)
@@ -49749,6 +49744,14 @@ a {{ overflow-wrap: anywhere; }}
             reason_text="本轮已中断",
             outcome="interrupted",
         )
+        if needs_daemon_stop:
+            self._show_conversation_notice(
+                state,
+                "正在停止任务…" if daemon_stop_started else "未能连接后台，尚未确认任务停止。",
+                "neutral" if daemon_stop_started else "warning",
+                action_text="" if daemon_stop_started else "重试停止",
+                action_callback=None if daemon_stop_started else lambda: self._start_daemon_stop_worker(state.session_id, stopped_run_id),
+            )
         self.save_chat_history(session_id=state.session_id)
         log_sub_agent_runtime(
             "ui_assistant_turn_interrupted",
@@ -49762,8 +49765,6 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
         self.normalize_session_ui(state)
-        if not needs_daemon_stop:
-            self._stop_live_subagents(state, force=True)
 
     def on_action_clicked(self):
         state = self.get_current_session()
@@ -52765,22 +52766,6 @@ a {{ overflow-wrap: anywhere; }}
             return
 
         card = state.tool_cards[tool_id]
-        if isinstance(meta, dict) and meta.get("silent_repair"):
-            state.tool_cards.pop(tool_id, None)
-            state.step_records = [
-                record
-                for record in state.step_records
-                if str(record.get("tool_id") or "") != str(tool_id)
-            ]
-            state.ui_timeline_events = [
-                event
-                for event in state.ui_timeline_events
-                if str(event.get("tool_call_id") or "") != str(tool_id)
-            ]
-            card.hide()
-            card.setParent(None)
-            self.refresh_step_list(state.session_id)
-            return
         card.set_result(result, result_obj=data.get("result_obj"))
         if not card.is_finished and (meta or {}).get("waiting"):
             card.args_preview_label.setText("AI 正在继续等待工具结果")
@@ -52792,6 +52777,14 @@ a {{ overflow-wrap: anywhere; }}
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
+        response = result_obj.get("interaction_response") if isinstance(result_obj, dict) else None
+        if isinstance(response, dict):
+            interaction = state.pending_interactions.pop(str(response.get("request_id") or ""), None)
+            if interaction is not None:
+                interaction.timeout_timer.stop()
+                state.chat_layout.removeWidget(interaction)
+                interaction.hide()
+                interaction.deleteLater()
         client_action = result_obj.get("client_action") if isinstance(result_obj, dict) else None
         if (
             isinstance(client_action, dict)

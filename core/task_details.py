@@ -30,13 +30,18 @@ def parsed_result(value):
 def tool_result_status(value):
     value = parsed_result(value)
     if not isinstance(value, dict):
+        if isinstance(value, str) and value.strip().lower().startswith(("error:", "error executing ")):
+            return "error"
         return "done"
     status = str(value.get("status") or "").lower()
     if value.get("background_tool") is True and status in {"running", "queued"}:
         return "running"
     if status == "partial_apply":
         return "partial"
-    if value.get("ok") is False or status in {"error", "failed", "unknown", "cancelled"}:
+    if value.get("ok") is False or status in {"error", "failed", "unknown", "cancelled", "denied", "invalid_tool_call"}:
+        return "error"
+    if (value.get("error") and value.get("ok") is not True
+            and status not in {"ok", "success", "succeeded", "completed", "complete"}):
         return "error"
     return "done"
 

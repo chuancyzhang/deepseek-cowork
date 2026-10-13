@@ -131,7 +131,7 @@ class TestMessagePersistenceProjection(unittest.TestCase):
                 ["u1", "u2"],
             )
 
-    def test_runtime_repair_round_never_enters_persistable_projection(self):
+    def test_failed_round_is_saved_and_rendered_without_changing_provider_projection(self):
         messages = [
             {
                 "id": "a-repair",
@@ -157,8 +157,18 @@ class TestMessagePersistenceProjection(unittest.TestCase):
 
         self.assertEqual(
             [item["id"] for item in filter_persistable_messages(messages)],
-            ["a-final"],
+            ["a-repair", "t-repair", "a-final"],
         )
+        from core.conversation_render import build_conversation_render_items
+        with tempfile.TemporaryDirectory() as directory:
+            storage = ChatStorage(os.path.join(directory, "history.sqlite"))
+            storage.save_conversation("failure", filter_persistable_messages(messages), title="Failure")
+            restored = storage.get_messages("failure")
+            items = build_conversation_render_items(restored)
+            self.assertEqual(len(items[0]["tool_calls"]), 1)
+            self.assertEqual(items[0]["tool_calls"][0]["result"], "failed")
+            provider_history, _ = project_provider_messages(restored)
+            self.assertEqual([item["id"] for item in provider_history], ["a-final"])
 
         current_run_projection, _excluded = project_provider_messages(
             messages,

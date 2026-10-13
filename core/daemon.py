@@ -629,6 +629,14 @@ class DaemonState:
                 if remaining_ms <= 0 or not candidate.wait(remaining_ms):
                     released = False
                     break
+                # The model worker can exit before a background tool finishes
+                # its process-tree cleanup. Resource release includes both.
+                manager = getattr(candidate, "tool_tasks", None)
+                for task in list(manager.tasks.values()) if manager is not None else []:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if not task.done.wait(remaining):
+                        released = False
+                        break
         _log_daemon(
             "stop_session handled "
             f"session_id={session_id} expected_run_id={expected_run_id or '-'} "
@@ -1791,15 +1799,17 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 
             def handle_interaction_request(payload):
-                if (payload or {}).get("metadata", {}).get("execution_permission"):
-                    authorization = worker.execution_authorization
-                    if (payload or {}).get("session_id") != session_id or (payload or {}).get("metadata", {}).get("run_id") != authorization.run_id:
+                if (payload or {}).get("session_id") != session_id:
+                    return
+                request_run_id = (payload or {}).get("metadata", {}).get("run_id")
+                if request_run_id:
+                    if request_run_id != worker.execution_authorization.run_id:
                         return
                 elif QThread.currentThread() != worker:
                     return
                 request_payload = dict(payload or {})
-                request_payload["session_id"] = session_id
                 send_stream({"type": "interaction_request", "data": request_payload})
+                _log_daemon(f"interaction dispatched session_id={session_id} run_id={request_id} request_id={request_payload.get('request_id')}")
 
             from core.workbench import workbench_bridge
             from core.workbench_transport import dispatch as dispatch_workbench

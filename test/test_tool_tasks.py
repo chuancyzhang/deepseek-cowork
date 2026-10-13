@@ -194,6 +194,77 @@ class ToolTasksTest(unittest.TestCase):
 
 
 class ToolTasksWorkerTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree cancellation")
+    def test_stop_terminates_real_command_descendants_and_retains_output(self):
+        import ctypes
+        import subprocess
+        import sys
+        from pathlib import Path
+        from core.process_utils import subprocess_kwargs_no_window
+        from test_command_tools import _load_command_tools_module
+
+        commands = _load_command_tools_module()
+        owner, handles, errors, processes = [], [], [], []
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory, "child.pid")
+            code = ("import subprocess,sys,time,pathlib; "
+                    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)']); "
+                    "print('partial output before stop',flush=True); "
+                    f"pathlib.Path({str(ready)!r}).write_text(str(child.pid)); time.sleep(20)")
+
+            def launch(*args, **kwargs):
+                process = subprocess.Popen([sys.executable, "-u", "-c", code],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, **subprocess_kwargs_no_window())
+                processes.append(process)
+                return process
+
+            def stop_after_started():
+                try:
+                    eventually(lambda: ready.exists() and ready.stat().st_size > 0)
+                    for pid in (processes[0].pid, int(ready.read_text())):
+                        handle = kernel32.OpenProcess(0x00100000, False, pid)
+                        if not handle:
+                            raise AssertionError("Cannot observe test process")
+                        handles.append(handle)
+                    owner[0].stop()
+                except Exception as exc:
+                    errors.append(exc)
+                    if owner:
+                        owner[0].stop()
+
+            stopper = threading.Thread(target=stop_after_started)
+            def on_ready(worker):
+                owner.append(worker)
+                stopper.start()
+            def streams(turn, messages):
+                yield self.call()
+            try:
+                with patch.object(commands, "run_in_sandbox", side_effect=launch):
+                    requests, final, _ = self.run_worker(streams,
+                        lambda name, args, context: commands.bash(directory, "test command", context),
+                        manager_wait=5, on_ready=on_ready)
+                stopper.join(3)
+                self.assertFalse(errors, errors)
+                self.assertEqual(len(requests), 1)
+                for handle in handles:
+                    self.assertEqual(kernel32.WaitForSingleObject(handle, 1000), 0)
+                task = next(iter(owner[0].tool_tasks.tasks.values()))
+                self.assertEqual(task.result["status"], "cancelled")
+                self.assertIn("partial output before stop", task.result["stdout"])
+            finally:
+                for handle in handles:
+                    kernel32.CloseHandle(handle)
+                for process in processes:
+                    if process.poll() is None:
+                        from core.process_utils import terminate_process_tree
+                        terminate_process_tree(process)
+                stopper.join(3)
+
     def run_worker(self, streams, execute, *, manager_wait=.02, on_ready=None, history=None, expect_error=False):
         from core.agent import LLMWorker
         from test_core import _DaemonConfigStub

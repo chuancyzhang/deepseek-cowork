@@ -53,26 +53,29 @@ def _coerce_local_path(path):
     return raw
 
 
-def normalize_workspace_file(path, workspace_dir):
-    candidate = os.path.abspath(os.path.normpath(_coerce_local_path(path)))
+def normalize_workspace_file(path, workspace_dir, *, allow_outside_workspace=False):
+    raw_path = _coerce_local_path(path)
+    candidate = os.path.abspath(os.path.normpath(raw_path))
     workspace = os.path.abspath(os.path.normpath(str(workspace_dir or "").strip()))
     if not candidate or not workspace or not os.path.isfile(candidate):
         return ""
-    try:
-        if os.path.commonpath([os.path.normcase(candidate), os.path.normcase(workspace)]) != os.path.normcase(workspace):
+    if not (allow_outside_workspace and os.path.isabs(raw_path)):
+        try:
+            if os.path.commonpath([os.path.normcase(candidate), os.path.normcase(workspace)]) != os.path.normcase(workspace):
+                return ""
+        except ValueError:
             return ""
-    except ValueError:
-        return ""
     if os.path.splitext(candidate)[1].lower() not in DELIVERABLE_TYPES:
         return ""
     return os.path.normpath(candidate)
 
 
-def iter_workspace_file_paths(text, workspace_dir):
+def iter_workspace_file_paths(text, workspace_dir, *, allow_outside_workspace=False):
     results = []
     seen = set()
     for match in _PATH_PATTERN.finditer(_mask_markdown_code(text)):
-        path = normalize_workspace_file(match.group("path"), workspace_dir)
+        path = normalize_workspace_file(match.group("path"), workspace_dir,
+                                        allow_outside_workspace=allow_outside_workspace)
         key = os.path.normcase(path)
         if path and key not in seen:
             results.append((match.start("path"), match.end("path"), path))
@@ -80,7 +83,7 @@ def iter_workspace_file_paths(text, workspace_dir):
     return results
 
 
-def linkify_workspace_paths_in_html(html_text, workspace_dir):
+def linkify_workspace_paths_in_html(html_text, workspace_dir, *, allow_outside_workspace=False):
     """Link supported paths in text nodes and local-file anchors."""
     from bs4 import BeautifulSoup, NavigableString
 
@@ -89,7 +92,8 @@ def linkify_workspace_paths_in_html(html_text, workspace_dir):
         href = str(anchor.get("href") or "").strip()
         if not href or re.match(r"^(?:https?|mailto|tel|cowork-file):", href, re.IGNORECASE):
             continue
-        path = normalize_workspace_file(href, workspace_dir)
+        path = normalize_workspace_file(href, workspace_dir,
+                                        allow_outside_workspace=allow_outside_workspace)
         if not path:
             continue
         anchor["href"] = "cowork-file:" + quote(path, safe="")
@@ -99,7 +103,8 @@ def linkify_workspace_paths_in_html(html_text, workspace_dir):
             continue
         if node.parent and node.parent.name in {"a", "pre", "script", "style"}:
             continue
-        matches = iter_workspace_file_paths(str(node), workspace_dir)
+        matches = iter_workspace_file_paths(str(node), workspace_dir,
+                                            allow_outside_workspace=allow_outside_workspace)
         if not matches:
             continue
         cursor = 0

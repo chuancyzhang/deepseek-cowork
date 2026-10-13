@@ -25,7 +25,7 @@ def is_auto_query_skill_context_message(message):
     )
 
 
-def _filter_ledger_messages(messages, *, include_runtime_repairs=False):
+def _filter_ledger_messages(messages, *, include_runtime_repairs=False, preserve_tool_history=False):
     """Filter UI artifacts while optionally retaining current-run repair context.
 
     UI projections and incomplete runtime checkpoints belong in the sidecar
@@ -46,6 +46,7 @@ def _filter_ledger_messages(messages, *, include_runtime_repairs=False):
             or (
                 meta.get("runtime_repair_only")
                 and not include_runtime_repairs
+                and not (preserve_tool_history and message.get("role") in {"assistant", "tool"})
             )
         ):
             continue
@@ -62,8 +63,12 @@ def _filter_ledger_messages(messages, *, include_runtime_repairs=False):
 
 
 def filter_persistable_messages(messages):
-    """Return only messages that may be committed to the SQLite ledger."""
-    return _filter_ledger_messages(messages, include_runtime_repairs=False)
+    """Keep observed tool rounds, including failures, in the display ledger.
+
+    Provider projection still excludes prior runtime repairs; saving a visible
+    failure must not silently change the model's request prefix.
+    """
+    return _filter_ledger_messages(messages, preserve_tool_history=True)
 
 
 def project_provider_messages(messages, *, include_runtime_repairs=False):

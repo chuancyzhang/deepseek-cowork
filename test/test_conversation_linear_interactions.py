@@ -318,9 +318,17 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         )
         self.assertFalse(card.findChildren(QComboBox))
         choices = card.findChildren(InteractionChoiceButton)
-        self.assertEqual(len(choices), 2)
-        choices[1].click()
+        self.assertEqual(len(choices), 1)
         self.assertTrue(card.question_controls[0]["input"].isEnabled())
+        self.assertEqual(card.question_controls[0]["input"].placeholderText(), "自定义")
+        choices[0].click()
+        card.question_controls[0]["input"].setText("我想先检查可用性")
+        self.assertFalse(choices[0].isChecked())
+        values = []
+        card.resolved.connect(values.append)
+        card._submit()
+        self.assertEqual(values[0]["priority"]["text"], "我想先检查可用性")
+        self.assertEqual(values[0]["priority"]["selected_options"], [])
         card.deleteLater()
 
     def test_skill_preview_constructs_with_product_action_bar(self):
@@ -3260,7 +3268,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertTrue(state.stop_pending)
             self.assertEqual(state.stop_pending_run_id, "request-stop-pending")
-            self.assertEqual(state.conversation_notice.label.text(), "已停止")
+            self.assertEqual(state.conversation_notice.label.text(), "正在停止任务…")
             self.assertTrue(window._session_is_busy(state))
         finally:
             state = window.get_current_session()
@@ -3270,7 +3278,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
-    def test_failed_daemon_stop_stays_quiet_and_unblocks_new_messages(self):
+    def test_failed_daemon_stop_exposes_retry_and_keeps_conversation(self):
         window = MainWindow()
         try:
             state = window.get_current_session()
@@ -3304,7 +3312,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             with patch("main.DaemonStopWorker", QuietFakeStopWorker):
                 window.stop_agent()
-            self.assertEqual(state.conversation_notice.label.text(), "已停止")
+            self.assertEqual(state.conversation_notice.label.text(), "正在停止任务…")
 
             self.app.processEvents()
             self.app.processEvents()
@@ -3312,8 +3320,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertFalse(state.stop_pending)
             self.assertEqual(state.stop_pending_run_id, "")
-            self.assertEqual(state.conversation_notice.label.text(), "已停止")
-            self.assertTrue(state.conversation_notice.action_button.isHidden())
+            self.assertIn("尚未确认后台任务停止", state.conversation_notice.label.text())
+            self.assertFalse(state.conversation_notice.action_button.isHidden())
+            self.assertEqual(state.conversation_notice.action_button.text(), "重试停止")
             self.assertFalse(window._session_is_busy(state))
         finally:
             state = window.get_current_session()

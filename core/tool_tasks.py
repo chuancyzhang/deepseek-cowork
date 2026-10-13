@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 TOOL_WAIT_SECONDS = 120.0
 INTERACTION_TOOLS = {"request_user_input", "request_user_approval"}
 _active_task = contextvars.ContextVar("cowork_active_tool_task", default=None)
+_active_run = contextvars.ContextVar("cowork_active_tool_run", default=None)
+
+
+def current_tool_run():
+    """The execution owner of nested tool work, independent of its thread."""
+    return _active_run.get()
 
 WAIT_TOOL_DEFINITION = {
     "type": "function",
@@ -163,6 +169,7 @@ class ToolTaskManager:
 
         def run():
             token = _active_task.set(task)
+            run_token = _active_run.set(self)
             try:
                 for dependency in dependencies:
                     while not dependency.done.wait(.05):
@@ -215,6 +222,7 @@ class ToolTaskManager:
                 self._log(task, "error" if task.error else task.state)
                 self.changed.set()
                 _active_task.reset(token)
+                _active_run.reset(run_token)
 
         threading.Thread(target=lambda: context.run(run), name="tool-" + task_id[:12], daemon=True).start()
         return task, not any(dependency.yielded or not dependency.done.is_set() for dependency in dependencies)

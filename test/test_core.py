@@ -3080,7 +3080,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_repeated_failed_tool_repair_exhaustion_is_silent_and_never_persistable(self):
+    def test_repeated_failed_tool_repair_keeps_visible_call_history(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
@@ -3155,8 +3155,10 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             persistable = filter_persistable_messages(
                 finished[0].get("generated_messages") or []
             )
-            self.assertFalse(any(message.get("tool_calls") for message in persistable))
-            self.assertFalse(any(message.get("role") == "tool" for message in persistable))
+            self.assertTrue(any(message.get("tool_calls") for message in persistable))
+            self.assertEqual(sum(message.get("role") == "tool" for message in persistable), 2)
+            self.assertFalse(any(message.get("role") == "system" and
+                (message.get("meta") or {}).get("runtime_repair_only") for message in persistable))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -3237,8 +3239,8 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             persistable = filter_persistable_messages(
                 first_finished[0].get("generated_messages") or []
             )
-            self.assertFalse(any(message.get("role") == "tool" for message in persistable))
-            self.assertFalse(any(message.get("tool_calls") for message in persistable))
+            self.assertTrue(any(message.get("role") == "tool" for message in persistable))
+            self.assertTrue(any(message.get("tool_calls") for message in persistable))
             unknown_record = first_worker.runtime_journal.find_tool_execution(
                 "unknown-tool-session",
                 name="read_file",

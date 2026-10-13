@@ -68,7 +68,13 @@ class TestLongContextUI(unittest.TestCase):
             dialog.resize(860, 600)
             panel = dialog.long_context_panel
             self.assertEqual(panel.target.currentData(), 300000)
-            self.assertEqual(panel.apply_button.text(), "启用")
+            self.assertEqual(panel.apply_button.text(), "保存设置")
+            self.assertFalse(panel.enabled.isChecked())
+            self.assertFalse(panel.target.isEnabled())
+            self.assertFalse(panel.apply_button.isEnabled())
+            self.capture("settings-disabled", dialog)
+            panel.enabled.click()
+            self.assertTrue(panel.target.isEnabled())
             panel.target.setCurrentIndex(1)
             self.assertTrue(panel.has_pending_input())
             self.assertFalse(dialog._settings_dirty)
@@ -77,25 +83,94 @@ class TestLongContextUI(unittest.TestCase):
             with patch("ui.long_context.ProductMessageDialog.exec_result", return_value="stay"):
                 dialog.nav_list.setCurrentRow(0)
             self.assertEqual(dialog.nav_list.currentRow(), current_row)
+            self.capture("settings-pending", dialog)
             panel.apply_button.click()
             self.assertEqual(ConfigManager().get("experimental_long_context"), {"enabled": True, "target_tokens": 1000000})
             self.assertFalse(panel.has_pending_input())
-            self.assertEqual(panel.apply_button.text(), "应用设置")
+            self.assertFalse(panel.apply_button.isEnabled())
+            self.assertIn("已启用 · 100 万", panel.status.text())
             self.capture("settings", dialog)
-            panel.disable_button.click()
+            # Changing capacity does not change the saved setting until Apply.
+            panel.target.setCurrentIndex(0)
+            self.assertEqual(ConfigManager().get("experimental_long_context")["target_tokens"], 1000000)
+            panel.reset_button.click()
+            self.assertEqual(panel.target.currentData(), 1000000)
+            panel.enabled.click()
+            self.assertFalse(panel.target.isEnabled())
+            self.assertTrue(ConfigManager().get("experimental_long_context")["enabled"])
+            panel.apply_button.click()
             self.assertFalse(ConfigManager().get("experimental_long_context")["enabled"])
+            self.assertEqual(ConfigManager().get("experimental_long_context")["target_tokens"], 1000000)
             request.assert_not_called()
 
     def test_failed_save_preserves_selection_and_saved_configuration(self):
         panel = self.widget(LongContextSettings(self.config))
+        panel.enabled.click()
         panel.target.setCurrentIndex(1)
         before = copy.deepcopy(self.config.get("experimental_long_context"))
-        with patch.object(self.config, "_write_config_or_raise", side_effect=OSError("disk full")):
-            self.assertFalse(panel.save(True))
+        with patch.object(self.config, "_write_config_or_raise", side_effect=OSError("disk full")), \
+             self.assertLogs("ui.long_context", level="INFO") as logs:
+            self.assertFalse(panel.save())
         self.assertEqual(self.config.get("experimental_long_context"), before)
         self.assertEqual(panel.target.currentData(), 1000000)
         self.assertIn("保存失败", panel.result.text())
-        self.assertEqual(panel.apply_button.text(), "启用")
+        self.assertTrue(panel.enabled.isChecked())
+        self.assertTrue(panel.apply_button.isEnabled())
+        self.assertIn("已关闭", panel.status.text())
+        self.assertIn("save_failed error_type=OSError", " ".join(logs.output))
+        panel.resize(380, 600)
+        self.capture("settings-save-failed", panel)
+        self.assertTrue(panel.save())
+        self.assertFalse(panel.has_pending_input())
+        self.assertEqual(ConfigManager().get("experimental_long_context"), {"enabled": True, "target_tokens": 1000000})
+
+    def test_leave_saves_actual_toggle_and_discard_restores_both_fields(self):
+        self.config.set_experimental_long_context({"enabled": True, "target_tokens": 300000})
+        panel = self.widget(LongContextSettings(self.config))
+        panel.target.setCurrentIndex(1)
+        panel.enabled.click()
+        with patch("ui.long_context.ProductMessageDialog.exec_result", return_value="save"):
+            self.assertTrue(panel.confirm_leave())
+        self.assertEqual(ConfigManager().get("experimental_long_context"), {"enabled": False, "target_tokens": 1000000})
+        panel.enabled.click()
+        panel.target.setCurrentIndex(0)
+        with patch("ui.long_context.ProductMessageDialog.exec_result", return_value="discard"):
+            self.assertTrue(panel.confirm_leave())
+        self.assertFalse(panel.enabled.isChecked())
+        self.assertFalse(panel.target.isEnabled())
+        self.assertEqual(panel.target.currentData(), 1000000)
+        self.assertFalse(panel.has_pending_input())
+        panel.enabled.click()
+        with patch("ui.long_context.ProductMessageDialog.exec_result", return_value="save"), \
+             patch.object(self.config, "_write_config_or_raise", side_effect=OSError("disk full")):
+            self.assertFalse(panel.confirm_leave())
+        self.assertTrue(panel.has_pending_input())
+        self.assertFalse(ConfigManager().get("experimental_long_context")["enabled"])
+
+    def test_small_settings_page_keyboard_and_controls_remain_reachable(self):
+        dialog = self.widget(SettingsDialog(self.config, initial_page_label="实验功能"))
+        # Routed settings pages remove the standalone dialog's minimum size.
+        dialog.setMinimumSize(0, 0)
+        dialog.resize(560, 620)
+        dialog.show()
+        panel = dialog.long_context_panel
+        self.app.processEvents()
+        self.assertEqual(dialog.width(), 560)
+        panel.enabled.setFocus()
+        QTest.keyClick(panel.enabled, Qt.Key_Space)
+        QTest.keyClick(panel.enabled, Qt.Key_Tab)
+        self.assertTrue(panel.target.hasFocus())
+        QTest.keyClick(panel.target, Qt.Key_Down)
+        QTest.keyClick(panel.target, Qt.Key_Tab)
+        self.assertTrue(panel.apply_button.hasFocus())
+        QTest.keyClick(panel.apply_button, Qt.Key_Space)
+        self.assertEqual(ConfigManager().get("experimental_long_context"), {"enabled": True, "target_tokens": 1000000})
+        self.app.processEvents()
+        self.assertLessEqual(panel.target.geometry().right(), panel.width())
+        self.assertLessEqual(panel.reset_button.geometry().right(), panel.width())
+        for label in (panel.status, panel.target_hint, panel.result):
+            self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+        self.capture("settings-small", dialog)
 
     def test_model_editor_needs_no_capacity_and_preserves_existing_metadata(self):
         dialog = self.widget(ModelEditDialog("openai", model={"id": "test", "model_name": "test"}))

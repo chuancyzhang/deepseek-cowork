@@ -48,7 +48,7 @@
 
 输出预留沿用各协议的请求字段：OpenAI 官方 Chat Completions 使用 `max_completion_tokens`，兼容服务使用 `max_tokens`，Responses 使用 `max_output_tokens`，Anthropic 使用 `max_tokens`。OpenAI 官方字段同时限制可见输出和 reasoning tokens，依据[官方 API 定义](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)及本地 SDK 核对；没有为兼容错误增加自动切换协议或重复请求。
 
-当前限制：容量是估算，未对所有模型逐一校准；没有计量规则或无法取得尺寸的图片不计入本地预算，文本仍正常统计和压缩，图片继续按原流程发送；其他未支持的附件类型仍明确报错。此轮未构建冻结发行包。
+当时限制：容量是估算，未对所有模型逐一校准；没有计量规则或无法取得尺寸的图片不计入本地预算，文本仍正常统计和压缩，图片继续按原流程发送。文件附件当时仍报错，已在下述 2026-10-13 修复。此轮未构建冻结发行包。
 
 ## 历史查询与图片组合回归（2026-10-11）
 
@@ -67,3 +67,18 @@
 回归覆盖：未填写容量的自定义模型在 300k／1m 下实际进入 Agent 请求流程；超出 300k 档位触发点的历史可正常压缩并保持完整保存；用量浮窗沿用所选档位且比例正确；编辑模型不再出现额外填写项。此项只调整预算来源及界面，不改变系统提示、工具定义、消息排列和既有窗口提交规则。
 
 `test_long_context*.py` 40 项及 `test_default_model_settings.py` 8 项通过。模型编辑与用量浮窗在 100%／150% 下各 2 项通过，并检查了实际截图：[模型编辑](images/long-context/model-editor.png)、[150% 模型编辑](images/long-context/model-editor-150.png)、[150% 用量浮窗](images/long-context/usage-150.png)。此轮使用离线 Provider 模拟，未额外发起真实 API 请求。
+
+## 文件附件续聊与设置交互（2026-10-13）
+
+根因：预算估算器拒绝 `input_file`，使原本可由 Provider 转成文件说明的 WAV、PDF 等附件在请求前报错。估算现在复用 Provider 已有的附件文本投影：小型文本文件计入内联正文，二进制、大文件与缺失文件计入既有说明；二进制文件不为估算而读取正文。实际 Provider 请求、系统提示、工具定义及顺序均未改动，窗口切换仍遵守既有提交与缓存规则。
+
+设置页改为“启用超长上下文 → 上下文长度 → 保存设置”。开关和长度共享保存边界，关闭时禁用长度选择；同时显示已保存状态与未保存更改。离开时保存用户实际选择，不再把保存等同于启用。保存失败保留开关和长度并允许重试，诊断日志包含开始、完成、失败阶段及错误类型，不记录附件内容。
+
+开发侧验证：
+
+- `test_long_context*.py`：45 项通过。新增覆盖 WAV、MP3、PDF、文本、大文件和缺失文件的预算，带附件历史续聊与换窗、实际 Responses 序列化、消息账本不变、工具只执行一次及窗口内前缀检查。
+- `test_context_images.py`：4 项通过；`test_deepseek_provider.py`：70 项通过；`test_anthropic_provider.py`：4 项通过。
+- `test_long_context_ui.py` 在 `QT_SCALE_FACTOR=1` 和 `1.5` 下各 9 项通过，覆盖启用、长度切换、关闭、撤销、离开确认、保存失败重试、重启持久化、键盘操作和主题预览撤销。小窗口模拟路由页面去除独立对话框最小尺寸的宿主行为，在 560 逻辑像素宽度下验证控件尺寸和文字换行。
+- `scripts/check_docs.py` 与 `git diff --check` 通过。
+
+开发检查截图：[关闭状态](images/long-context/settings-disabled.png)、[待保存选择](images/long-context/settings-pending.png)、[保存后](images/long-context/settings.png)、[150% 小窗口](images/long-context/settings-small-150.png)。截图与自动化检查不替代产品验收；按用户安排，最终操作体验及真实录音任务由用户验收。本轮未发起真实模型请求，未构建发行包。

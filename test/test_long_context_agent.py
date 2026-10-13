@@ -70,7 +70,7 @@ class ContextProvider:
 
 class TestLongContextAgent(unittest.TestCase):
     def run_agent(self, enabled, rounds=0, provider=None, tool_result=None,
-                  known_capacity=True, target_tokens=300000):
+                  known_capacity=True, target_tokens=300000, attachments=None, attachment_message_id="u1"):
         from main import MainWindow
         self.app = QApplication.instance() or QApplication([])
         profile = {"id": "test", "model_name": "test-model", "base_url": "https://example.test/v1",
@@ -83,6 +83,8 @@ class TestLongContextAgent(unittest.TestCase):
                    {"id": "old", "role": "assistant", "content": "older findings " * 8000},
                    {"id": "recent", "role": "assistant", "content": "Ready to continue."},
                    {"id": "u1", "role": "user", "content": "Continue the task."}]
+        if attachments:
+            next(m for m in initial if m["id"] == attachment_message_id)["content_parts"] = copy.deepcopy(attachments)
         provider, skills = provider or ContextProvider(rounds), ContextSkills(tool_result)
         events, results = [], []
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +131,9 @@ class TestLongContextAgent(unittest.TestCase):
                 self.assertNotIn("error", results[0], str([e for e in events if e.get("phase") == "failed"]))
                 self.assertTrue(queue.flush("s", 2000))
                 active = storage.get_context_window("s")
+                if attachments:
+                    saved = next(m for m in storage.get_messages("s") if m["id"] == attachment_message_id)
+                    self.assertEqual(saved["content_parts"], attachments)
                 return provider, skills, events, results[0], active
             finally:
                 queue.stop_worker(2000)
@@ -165,6 +170,36 @@ class TestLongContextAgent(unittest.TestCase):
         self.assertTrue(any(e.get("type") == "llm_usage" and e["usage"].get("purpose") == "context_checkpoint" for e in events))
         self.assertTrue(any(e.get("type") == "context_capacity" and e["capacity"].get("phase") == "finished" for e in events))
         self.assertFalse(any(m.get("meta", {}).get("kind") == "context_checkpoint" for m in result["generated_messages"]))
+
+    def test_file_attachments_allow_followup_and_rollover_with_unchanged_wire_content(self):
+        from core.llm.providers import OpenAIProvider
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "recording.wav")
+            with open(path, "wb") as handle:
+                handle.write(b"RIFF\x00\xffWAVE")
+            parts = [{"type": "input_file", "path": path, "name": "recording.wav"}]
+            for known_capacity, message_id in ((False, "u0"), (True, "u1")):
+                with self.subTest(rollover=known_capacity):
+                    provider, skills, events, result, active = self.run_agent(
+                        True, rounds=1, known_capacity=known_capacity,
+                        attachments=parts, attachment_message_id=message_id)
+                    self.assertEqual(len(provider.main_requests), 2)
+                    self.assertEqual(len(skills.calls), 1)
+                    self.assertIn("Task complete", result["content"])
+                    self.assertEqual(bool(active), known_capacity)
+                    self.assertTrue(all(e["ok"] for e in events if e.get("type") == "conversation_prefix_check"))
+                    for request in provider.main_requests:
+                        message = next(m for m in request["messages"] if m.get("id") == message_id)
+                        self.assertEqual(message["content_parts"], parts)
+                        encoder = OpenAIProvider.__new__(OpenAIProvider)
+                        encoder.supports_vision = False
+                        encoder.model_name = "gpt-6.1-sol"
+                        encoder.base_url = "https://example.test/v1"
+                        wire = encoder._prepare_responses_input([message])
+                        text = "\n".join(p.get("text", "") for item in wire for p in item.get("content", []))
+                        self.assertIn(f"Path: {path}", text)
+                        self.assertIn("not treated as plain text", text)
+                        self.assertNotIn("RIFF", text)
 
     def test_browser_image_result_reaches_next_model_request_with_context_enabled(self):
         from PIL import Image

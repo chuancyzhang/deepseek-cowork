@@ -57,6 +57,12 @@ def estimate_request(messages, tools, *, model_name="", image_stats=None):
                 kind = part.get("type")
                 if kind in {"text", "input_text", "output_text"}:
                     texts.append(str(part.get("text") or ""))
+                elif kind == "input_file" and attachment and message.get("role") == "user":
+                    # Count exactly the existing provider's file representation:
+                    # bounded text is inlined; binary/large/missing files have a
+                    # textual reference. Never read binary bytes or alter replay.
+                    from .llm.providers import _build_file_attachment_text
+                    texts.append(_build_file_attachment_text(part))
                 elif kind in {"input_image", "image_url", "image"}:
                     try:
                         # User attachments are sent by the existing adapter at

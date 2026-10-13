@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,7 +14,7 @@ from core.knowledge_library import KnowledgeService, KnowledgeStore, knowledge_c
 from core.message_persistence import filter_persistable_messages
 from core.conversation_render import _is_hidden_context_message
 from core.skill_manager import SkillManager
-from core.variable_store import WindowsDpapiProtector
+from core.variable_store import VariableStore, WindowsDpapiProtector
 from core.execution_authorization import ExecutionAuthorization
 from test_knowledge_library import TestProtector, WeKnoraFixture
 
@@ -64,26 +65,226 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertNotIn("secret-token", serialized)
         self.assertNotIn("secret-refresh", serialized)
 
-    def test_old_mcp_is_blocked_for_knowledge_run(self):
+    def test_library_context_does_not_disable_platform_skills_or_mcp_aliases(self):
         manager = self.manager()
-        manager.skill_records["mcp_weknora"] = {"spec": {"source_skill": "weknora"}}
-        self.assertTrue(manager._is_skill_allowed_by_scope("mcp_weknora", {}))
-        self.assertFalse(manager._is_skill_allowed_by_scope("mcp_weknora", {"knowledge_context": self.scope}))
-        self.assertFalse(manager._is_skill_allowed_by_scope("weknora", {"knowledge_context": self.scope}))
+        context = {"knowledge_context": self.scope}
+        for source in ("weknora", "tencent-docs", "lexiang", "lexiang-mcp-skill"):
+            with self.subTest(source=source):
+                manager.skill_records["custom-alias"] = {"spec": {"source_skill": source}}
+                self.assertTrue(manager._is_skill_allowed_by_scope(source, context))
+                self.assertTrue(manager._is_skill_allowed_by_scope("custom-alias", context))
+        for url in ("https://docs.qq.com/openapi/mcp", "https://mcp.lexiang-app.com/mcp"):
+            manager.skill_records["renamed-server"] = {"mcp_server": {"url": url}}
+            self.assertTrue(manager._is_skill_allowed_by_scope("renamed-server", context))
 
-    def test_cloud_skills_aliases_and_credentials_cannot_bypass_scope(self):
+    def test_independent_capabilities_keep_agent_and_credential_permissions(self):
         manager = self.manager()
         context = {"knowledge_context": self.scope, "app_variable_access": True}
-        for source in ("tencent-docs", "lexiang", "lexiang-mcp-skill"):
-            manager.skill_records["alias"] = {"spec": {"source_skill": source}}
-            self.assertFalse(manager._is_skill_allowed_by_scope(source, context))
-            self.assertFalse(manager._is_skill_allowed_by_scope("alias", context))
-        manager.skill_records["alias"] = {"mcp_server": {"url": "https://docs.qq.com/openapi/mcp"}}
-        self.assertFalse(manager._is_skill_allowed_by_scope("alias", context))
         manager.skill_records["tencent-docs"] = {"spec": {"name": "tencent-docs"}}
-        self.assertTrue(manager._is_skill_allowed_by_scope("knowledge-library", {**context, "allowed_skill_names": ["tencent-docs"]}))
-        result = manager._lookup_app_variable("LEXIANG_TOKEN", {"run_context": context})
-        self.assertEqual(result["status"], "denied")
+        manager.skill_records["alias"] = {"spec": {"source_skill": "tencent-docs"}}
+        limited = {**context, "allowed_skill_names": ["tencent-docs"]}
+        self.assertTrue(manager._is_skill_allowed_by_scope("tencent-docs", limited))
+        self.assertTrue(manager._is_skill_allowed_by_scope("alias", limited))
+        self.assertFalse(manager._is_skill_allowed_by_scope("weknora", limited))
+        self.assertFalse(manager._is_skill_allowed_by_scope("knowledge-library", limited))
+        limited["knowledge_context"] = {**self.scope, "refs": [self.service.reference(self.scope, "kb-a", "文档", "doc-a")]}
+        self.assertTrue(manager._is_skill_allowed_by_scope("knowledge-library", limited))
+        store = VariableStore(self.temp.name, TestProtector())
+        store.upsert("LEXIANG_TOKEN", "secret", "private-token")
+        store.upsert("TENCENT_DOCS_OUTPUT_FOLDER", "text", "reports")
+        manager.config_manager = SimpleNamespace(get_variable_store=lambda: store)
+        self.assertEqual(manager._lookup_app_variable("LEXIANG_TOKEN", {"run_context": context})["status"], "restricted")
+        self.assertEqual(manager._lookup_app_variable("TENCENT_DOCS_OUTPUT_FOLDER", {"run_context": context})["value"], "reports")
+
+    def mcp_manager(self, source, *, server_id="custom-docs", enabled=True):
+        manager = self.manager()
+        server = {"id": server_id, "name": server_id, "transport": "streamable_http", "enabled": enabled,
+                  "url": "https://docs.example.test/mcp", "source_skill": source,
+                  "headers": {"Authorization": "Bearer private-mcp-token"}}
+        manager.config_manager = SimpleNamespace(get_mcp_servers=lambda: [server], data_dir=self.temp.name)
+        with patch("core.skill_manager.mcp_package_available", return_value=True):
+            manager._load_mcp_servers(load_tools=False)
+        return manager, server
+
+    def test_mcp_discovery_and_native_read_write_are_independent_of_library_login(self):
+        from core.knowledge_sources import MultiSourceKnowledgeService, TencentDocsProvider, LexiangProvider
+        from core.mcp_client import build_mcp_tool_name
+        from test_knowledge_library import CloudMcpFixture
+        remote = CloudMcpFixture()
+        providers = {"weknora": self.service,
+                     "tencent-docs": TencentDocsProvider(self.service.store, remote, remote.call, remote.discover),
+                     "lexiang": LexiangProvider(self.service.store, remote, remote.call, remote.discover)}
+        facade = MultiSourceKnowledgeService(self.service.store, providers)
+        providers["tencent-docs"].start_authorization()
+        providers["tencent-docs"].finish_authorization(confirmed=True)
+        providers["lexiang"].connect("acme", "secret-token")
+        schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+        tools = [{"name": name, "input_schema": schema} for name in ("find_document", "create_document")]
+        for source, provider in providers.items():
+            ref = provider.reference(provider.snapshot(), "kb-a" if source == "weknora" else "space", "所选资料", "doc-a" if source == "weknora" else "doc")
+            for connected in (True, False):
+                if not connected:
+                    provider.logout()
+                with self.subTest(source=source, connected=connected):
+                    manager, server = self.mcp_manager(source)
+                    scope = facade.snapshot([ref], "session-a")
+                    context = {"run_context": {"mode": "execution", "knowledge_context": scope},
+                               "discovered_tool_names": set(),
+                               "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")}
+                    with (patch("core.skill_manager.mcp_package_available", return_value=True),
+                          patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": tools}),
+                          patch("core.connections.mcp.selected_connection", return_value=None),
+                          patch("core.skill_manager.call_mcp_tool", return_value={"status": "ok", "structured_content": {"document": "native-result"}}) as call,
+                          patch.object(provider, "tool", side_effect=AssertionError("Must not use the library adapter"))):
+                        result = manager.call_tool("tool_search", {"query": server["id"], "limit": 8}, context)
+                        for name in ("find_document", "create_document"):
+                            local = build_mcp_tool_name(server["id"], name)
+                            self.assertIn(local, result["discovered_tools"])
+                            self.assertTrue(manager.validate_tool_run_access(local, run_context=context["run_context"],
+                                            discovered_tool_names=context["discovered_tool_names"])["ok"])
+                            response = manager.call_tool(local, {"text": "任务内容"}, context)
+                            self.assertEqual(response["status"], "ok", response)
+                            self.assertEqual(call.call_args.args[:3], (server, name, {"text": "任务内容"}))
+                        # Selecting library inputs does not reorder/remove native MCP schemas.
+                        definitions = dict(run_mode="execution", discovered_tool_names=context["discovered_tool_names"])
+                        self.assertEqual(manager.get_tool_definitions(**definitions, run_context={}),
+                                         manager.get_tool_definitions(**definitions, run_context=context["run_context"]))
+                    content = knowledge_context_message(scope, "request")["content"]
+                    self.assertIn('"library_connected": ' + str(connected).lower(), content)
+                    self.assertIn("优先使用", content)
+                    self.assertNotIn("private-mcp-token", content)
+
+    def test_mcp_failure_is_visible_and_does_not_fallback_to_library(self):
+        from core.mcp_client import build_mcp_tool_name
+        manager, server = self.mcp_manager("weknora", server_id="renamed-connection")
+        context = {"run_context": {"mode": "execution", "knowledge_context": self.scope},
+                   "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")}
+        failure = {"status": "error", "error": "MCP authentication expired"}
+        with (patch("core.skill_manager.mcp_package_available", return_value=True),
+              patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": [{"name": "find_document"}]}),
+              patch("core.connections.mcp.selected_connection", return_value=None),
+              patch("core.skill_manager.call_mcp_tool", return_value=failure) as remote,
+              patch("core.knowledge_library.knowledge_script_call", side_effect=AssertionError("No fallback"))):
+            manager.call_tool("tool_search", {"query": server["id"]}, context)
+            self.assertEqual(manager.call_tool(build_mcp_tool_name(server["id"], "find_document"), {}, context), failure)
+            remote.assert_called_once()
+
+    def test_configured_capabilities_are_advertised_without_user_selection_or_library_login(self):
+        from core.mcp_client import build_mcp_skill_name
+        for source, url in (("tencent-docs", "https://docs.qq.com/openapi/mcp"),
+                            ("lexiang", "https://mcp.lexiang-app.com/mcp"),
+                            ("weknora", "https://intranet.example.test/mcp")):
+            with self.subTest(source=source):
+                manager, server = self.mcp_manager(source, server_id="arbitrary-name")
+                server["url"] = url
+                if source != "weknora":
+                    # Directly imported MCPs have no parent Skill metadata.
+                    server.pop("source_skill")
+                    with patch("core.skill_manager.mcp_package_available", return_value=True):
+                        manager._load_mcp_servers(load_tools=False)
+                scope = {"sources": {source: {"unavailable": True, "refs": []}}, "default_source": source, "refs": []}
+                worker = LLMWorker.__new__(LLMWorker)
+                worker.workspace_dir, worker.config_manager = self.temp.name, None
+                worker.skill_manager = manager
+                worker.request_id, worker.turn_id = "new-request", "new-turn"
+                worker.run_context = {"knowledge_context": scope, "selected_skill_names": []}
+                before = [{"id": "user", "role": "user", "content": "找一份文档"}]
+                current, generated = copy.deepcopy(before), []
+                worker._append_knowledge_context(current, generated)
+                self.assertEqual(current[:1], before)
+                self.assertEqual(len(generated), 1)
+                self.assertIn(build_mcp_skill_name(server["id"]), generated[0]["content"])
+                self.assertIn("用户无需再次点名", generated[0]["content"])
+                self.assertNotIn("private-mcp-token", generated[0]["content"])
+                self.assertTrue(_is_hidden_context_message(generated[0]))
+                prefix = worker._build_stable_system_prompt()
+                worker.run_context = {}
+                self.assertEqual(prefix, worker._build_stable_system_prompt())
+        # A manually configured intranet MCP need not expose platform metadata.
+        server.pop("source_skill")
+        with patch("core.skill_manager.mcp_package_available", return_value=True):
+            manager._load_mcp_servers(load_tools=False)
+        capabilities = manager.get_independent_knowledge_capabilities()
+        self.assertEqual(capabilities[0]["skill_name"], build_mcp_skill_name(server["id"]))
+        self.assertIsNone(capabilities[0]["source"])
+
+    def test_disabled_mcp_is_not_reenabled_by_library_context(self):
+        manager, server = self.mcp_manager("weknora", enabled=False)
+        context = {"run_context": {"mode": "execution", "knowledge_context": self.scope},
+                   "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")}
+        with patch("core.skill_manager.list_mcp_server_tools") as discover:
+            result = manager.call_tool("tool_search", {"query": server["id"]}, context)
+        discover.assert_not_called()
+        self.assertFalse(result["discovered_tools"])
+        self.assertEqual(manager.get_independent_knowledge_capabilities(context["run_context"]), [])
+
+    def test_platform_skill_script_uses_its_own_configuration_with_library_context(self):
+        from pathlib import Path
+        manager = self.manager()
+        root = Path(self.temp.name) / "ai_skills" / "tencent-docs"
+        root.mkdir()
+        (root / "SKILL.md").write_text("---\nname: tencent-docs\ndescription: 腾讯文档操作\n---\n执行文档操作。", encoding="utf-8")
+        (root / "entry.py").write_text("import os\nprint('configured' if os.environ.get('TENCENT_DOCS_TOKEN') == 'skill-private-token' else 'missing')", encoding="utf-8")
+        (root / "skill.json").write_text(json.dumps({
+            "version": 2, "name": "tencent-docs", "source_format": "agent_skill", "default_enabled": True,
+            "script_entries": [{"name": "create", "path": "entry.py", "runtime": "python"}],
+            "config_fields": [{"name": "token", "kind": "secret", "required": True, "env": "TENCENT_DOCS_TOKEN"}],
+        }), encoding="utf-8")
+        manager.load_skills()
+        # Incomplete setup is not advertised as a configured entry point.
+        self.assertEqual(manager.get_independent_knowledge_capabilities(), [])
+        manager.config_manager = SimpleNamespace(get_skill_config=lambda _name: {"token": "skill-private-token"})
+        context = {"run_context": {"mode": "execution", "knowledge_context": self.scope},
+                   "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")}
+        self.assertEqual(manager.get_independent_knowledge_capabilities(context["run_context"])[0]["skill_name"], "tencent-docs")
+        result = manager.call_tool("run_skill_script", {"skill_name": "tencent-docs", "script_name": "create"}, context)
+        self.assertTrue(json.loads(result)["ok"], result)
+        self.assertEqual(json.loads(result)["stdout"].strip(), "configured")
+        self.assertNotIn("skill-private-token", result)
+
+    def test_worker_continues_old_library_refusal_via_mcp_without_rewriting_history(self):
+        from core.mcp_client import build_mcp_tool_name
+        from test_agent_bootstrap import ProviderStub, tool_call
+        from test_plan_mode import _ConfigStub
+        from core.conversation_integrity import merge_messages_by_id
+        manager, server = self.mcp_manager("lexiang", server_id="independent-docs")
+        local_name = build_mcp_tool_name(server["id"], "find_document")
+        original = [{"id": "old-scope", "role": "user", "content": "仅允许通过资料库读取，不得调用其他 MCP。",
+                     "meta": {"hidden": True, "kind": "runtime_context", "source": "knowledge_submission"}},
+                    {"id": "old-answer", "role": "assistant", "content": "资料库未连接，无法使用。"},
+                    {"id": "new-question", "role": "user", "content": "现在继续找文档"}]
+        before = copy.deepcopy(original)
+        provider = ProviderStub([
+            [tool_call("tool_search", "discover", json.dumps({"query": server["id"]}))],
+            [tool_call(local_name, "read", '{"query":"文档"}')],
+            [{"type": "content", "content": "已通过独立 MCP 找到文档。"}],
+        ])
+        finished = []
+        with (patch("core.agent.SkillManager", return_value=manager),
+              patch("core.agent.LLMFactory.create_provider", return_value=provider),
+              patch("core.skill_manager.mcp_package_available", return_value=True),
+              patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": [{
+                  "name": "find_document", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}}]}),
+              patch("core.connections.mcp.selected_connection", return_value=None),
+              patch("core.skill_manager.call_mcp_tool", return_value={"status": "ok", "structured_content": {"title": "文档"}}) as remote,
+              patch("core.knowledge_library.knowledge_script_call", side_effect=AssertionError("No library route"))):
+            worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
+                               run_context={"mode": "execution"},
+                               execution_authorization=ExecutionAuthorization("session-a", "test", True, ""))
+            worker.finished_signal.connect(finished.append)
+            worker.run()
+        self.assertEqual(len(finished), 1)
+        self.assertNotIn("error", finished[0])
+        remote.assert_called_once()
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(original, before)
+        self.assertIn(local_name, {tool["function"]["name"] for tool in provider.requests[1]["tools"]})
+        generated = finished[0]["generated_messages"]
+        policy = next(message for message in generated if (message.get("meta") or {}).get("source") == "knowledge_submission")
+        self.assertIn("不构成禁用独立 Skill/MCP", policy["content"])
+        self.assertTrue(policy["id"])
+        self.assertEqual(merge_messages_by_id(original, generated)[:len(original)], before)
+        self.assertIsNone(knowledge_context_message(None, "next-request", original + generated))
 
     def test_multisource_context_is_append_only_without_identity_or_credentials(self):
         from core.knowledge_sources import MultiSourceKnowledgeService

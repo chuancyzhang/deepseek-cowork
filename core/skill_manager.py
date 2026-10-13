@@ -1396,8 +1396,6 @@ class SkillManager:
                 "message": "当前运行上下文不允许读取全局普通变量。",
             }
         exact_name = str(name or "").strip()
-        if run_context.get("knowledge_context") and any(marker in exact_name.lower() for marker in ("weknora", "tencent_docs", "lexiang")):
-            return {"status": "denied", "message": "资料来源凭据由宿主管理，请通过资料库入口访问本次任务范围。"}
         manager = self.config_manager
         if manager is None or not hasattr(manager, "get_variable_store"):
             return {"status": "unavailable", "message": "全局变量存储不可用。"}
@@ -3411,26 +3409,40 @@ class SkillManager:
         spec = record.get("spec") or {}
         return str(spec.get("source_skill") or (record.get("mcp_server") or {}).get("source_skill") or "").strip()
 
-    def _is_skill_allowed_by_scope(self, skill_name, run_context):
-        if (run_context or {}).get("knowledge_context"):
-            normalized_name = str(skill_name or "").strip()
-            record = self.skill_records.get(normalized_name) or {}
+    def get_independent_knowledge_capabilities(self, run_context=None):
+        """Expose configured entry points, without credentials or network probes."""
+        from .knowledge_sources import capability_source
+        capabilities = []
+        for name, record in self.skill_records.items():
+            if name not in self.loaded_skills_meta or name == "knowledge-library":
+                continue
+            if not self._is_skill_allowed_by_scope(name, run_context):
+                continue
+            source = capability_source(name, record)
             server = record.get("mcp_server") or {}
-            sources = {"weknora", "tencent-docs", "lexiang", "lexiang-mcp-skill", "lexiang-mcp"}
-            if normalized_name == "knowledge-library":
-                allowed = self._allowed_skill_names(run_context)
-                if not allowed or "knowledge-library" in allowed or sources.intersection(allowed) or (run_context["knowledge_context"].get("refs")):
-                    return True
-            from urllib.parse import urlsplit
-            host = (urlsplit(str(server.get("url") or "")).hostname or "").lower()
-            cloud_host = host in {"docs.qq.com", "mcp.lexiang-app.com"}
-            if (normalized_name in sources or self._source_skill_for_record(normalized_name) in sources
-                    or server.get("runtime_skill") in sources or cloud_host):
-                return False
+            # Custom MCPs may have arbitrary names, URLs and no platform
+            # metadata. Keep them discoverable; do not guess their platform.
+            if not source and not server:
+                continue
+            if server:
+                if not server.get("enabled", True):
+                    continue
+            elif not self.get_skill_config_status(name).get("complete"):
+                continue
+            capabilities.append({"source": source, "kind": "mcp" if server else "skill", "skill_name": name,
+                                 "name": str(server.get("name") or server.get("id") or record.get("meta", {}).get("display_name") or name)})
+        return capabilities
+
+    def _is_skill_allowed_by_scope(self, skill_name, run_context):
+        normalized_name = str(skill_name or "").strip()
+        if normalized_name == "knowledge-library" and ((run_context or {}).get("knowledge_context") or {}).get("refs"):
+            return True
+        # Library references constrain the library adapter's data access, not
+        # the availability of independently configured platform Skills or MCPs.
+        # Their own enabled state, agent scope and execution authorization apply.
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:
             return True
-        normalized_name = str(skill_name or "").strip()
         if normalized_name in allowed_skill_names:
             return True
         source_skill = self._source_skill_for_record(normalized_name)

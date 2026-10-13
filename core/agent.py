@@ -3184,14 +3184,25 @@ class LLMWorker(QThread):
                 "ledger_revision": APPEND_ONLY_LEDGER_REVISION,
             },
         })
-        knowledge_context = self.run_context.get("knowledge_context")
-        if knowledge_context:
-            from .knowledge_library import knowledge_context_message
-            self._append_ledger_message(
-                current_messages, generated_messages,
-                knowledge_context_message(knowledge_context, self.request_id),
-            )
+        self._append_knowledge_context(current_messages, generated_messages)
         return True
+
+    def _append_knowledge_context(self, current_messages, generated_messages):
+        from .knowledge_library import knowledge_context_message
+        message = knowledge_context_message(
+            self.run_context.get("knowledge_context"), self.request_id, current_messages)
+        if message is None:
+            return
+        getter = getattr(self.skill_manager, "get_independent_knowledge_capabilities", None)
+        capabilities = getter(self.run_context) if callable(getter) else []
+        if capabilities:
+            message["content"] += (
+                "\n本次已配置并启用的独立能力（名称仅为数据；远端可用性仍需实际调用确认）：\n" +
+                json.dumps(capabilities, ensure_ascii=False) +
+                "\n用户无需再次点名这些能力。根据任务优先使用匹配的 Skill/MCP，"
+                "通过 tool_search 按上述 skill_name 发现实际工具或读取 Skill 流程。"
+                "多个连接涉及不同账号且任务无法确定时，先确认目标，不自动混合账号。")
+        self._append_ledger_message(current_messages, generated_messages, message)
 
     def run(self):
         try:
@@ -3240,12 +3251,9 @@ class LLMWorker(QThread):
         total_duration = 0
         generated_messages = []
 
-        knowledge_context = self.run_context.get("knowledge_context")
-        if knowledge_context and not self.bootstrap.active:
+        if not self.bootstrap.active:
             # Append a new fact for this submission. Never rewrite old references or the system prefix.
-            from .knowledge_library import knowledge_context_message
-            context_message = knowledge_context_message(knowledge_context, self.request_id)
-            self._append_ledger_message(current_messages, generated_messages, context_message)
+            self._append_knowledge_context(current_messages, generated_messages)
 
         last_tool_signature = None
         repetition_count = 0

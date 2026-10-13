@@ -110,6 +110,9 @@ class DaemonState:
         self.sessions = {}
         self.active_workers = {}
         self.detached_workers = {}
+        self.update_preparing = False
+        self.update_requests = {}
+        self.update_errors = {}
         self.lock = threading.Lock()
         self.daemon_instance_id = uuid.uuid4().hex
         self.suspended = False
@@ -134,6 +137,39 @@ class DaemonState:
         self.last_activity = time.time()
         if self.suspended:
             self.suspended = False
+
+    def prepare_update_shutdown(self):
+        """Quiesce accepted requests, including sessions with no attached UI."""
+        deadline = time.monotonic() + 30
+        with self.lock:
+            self.update_preparing = True
+            self.update_errors.clear()
+            sessions = set(self.active_workers)
+            sessions.update(item.get("session_id") for item in self.detached_workers.values())
+            sessions.update(item[0] for item in self.update_requests.values())
+        try:
+            for session_id in sessions - {None, ""}:
+                result = self.stop_session(session_id, wait_for_release=True, release_timeout_ms=max(0, int((deadline-time.monotonic())*1000)))
+                if not result["released"]:
+                    raise RuntimeError("后台任务尚未完成停止和保存。")
+            while True:
+                with self.lock:
+                    pending = bool(self.update_requests)
+                if not pending:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("后台会话仍在保存，请稍后重试。")
+                time.sleep(0.05)
+            get_agent_manager_registry().stop_for_update(self.chat_storage.db_path, timeout=max(0, deadline-time.monotonic()))
+            if self.update_errors:
+                raise RuntimeError("后台内容保存失败：" + "; ".join(self.update_errors.values()))
+            _log_daemon("update_prepare_saved")
+            return {"status": "ok", "saved": True, "pid": os.getpid()}
+        except Exception as exc:
+            with self.lock:
+                self.update_preparing = False
+            _log_daemon(f"update_prepare_failed error={exc}")
+            return {"status": "error", "saved": False, "error": str(exc)}
 
     def ensure_runtime_run(self, session_id, run_id, turn_id, writer_owner, base_messages):
         existing = self.runtime_journal.get_run(session_id, run_id)
@@ -435,6 +471,39 @@ class DaemonState:
         if run_id and acknowledge:
             self.runtime_journal.acknowledge_commit(session_id, run_id, messages)
         return True
+
+    def preserve_update_fragments(self, session_id, run_id, turn_id, messages):
+        """Preserve stopped background output before stream acknowledgement prunes it.
+
+        Display anchors are excluded by the existing provider projection. They must
+        not fabricate a completed assistant message or change the request prefix.
+        """
+        fragments = {}
+        for event in self.runtime_journal.read_events(session_id, run_id):
+            payload = event.get("payload") or {}
+            kind = payload.get("type")
+            if kind not in {"content", "content_snapshot", "thinking"}:
+                continue
+            source = str(payload.get("source_message_id") or "")
+            fragment = fragments.setdefault(source, {"content": "", "reasoning_content": ""})
+            if kind == "content_snapshot":
+                fragment["content"] = str(payload.get("content") or "")
+            else:
+                key = "reasoning_content" if kind == "thinking" else "content"
+                fragment[key] += str(payload.get("delta") or "")
+        canonical_ids = {str(message.get("id") or "") for message in messages}
+        additions = []
+        for source, fragment in fragments.items():
+            if (source and source in canonical_ids) or not any(fragment.values()):
+                continue
+            identity = "update-partial-" + hashlib.sha256((run_id + ":" + source).encode()).hexdigest()[:24]
+            additions.append({"id": identity, "role": "assistant", **fragment, "created_at": int(time.time()),
+                              "meta": {"turn_id": str(turn_id), "request_id": run_id, "ui_turn_id": str(turn_id),
+                                       "ui_reply_kind": "interrupted", "context_visible_interruption": True,
+                                       "visible_interruption_outcome": "interrupted", "ui_visible_fragment": True,
+                                       "ui_display_anchor_only": True, "ui_source_message_id": source}})
+        messages[:] = merge_messages_by_id(messages, additions)
+        _log_daemon(f"update_partial_preserved session_id={session_id} run_id={run_id} fragments={len(additions)}")
     
     def set_active_worker(
         self,
@@ -452,6 +521,8 @@ class DaemonState:
         if not resolved_writer_owner:
             resolved_writer_owner = f"daemon:{os.getpid()}"
         with self.lock:
+            if getattr(self, "update_preparing", False):
+                return False
             if resolved_run_id:
                 run_record = self.runtime_journal.get_run(session_id, resolved_run_id)
                 if isinstance(run_record, dict) and (
@@ -1374,6 +1445,15 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                             pipeline.session_id, expected_worker=worker, expected_run_id=pipeline.run_id,
                         )
         finally:
+            if getattr(self, "_update_request_token", None):
+                state = self.server.state
+                with state.lock:
+                    error = getattr(self, "_update_save_error", "")
+                    if pipeline is not None and (pipeline.error or not getattr(self, "_stream_finalized", False)):
+                        error = str(pipeline.error or "后台回复尚未完成保存")
+                    if state.update_preparing and error:
+                        state.update_errors[self._update_request_token] = error
+                    state.update_requests.pop(self._update_request_token, None)
             super().finish()
 
     def handle(self):
@@ -1386,6 +1466,23 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             self._send({"status": "error", "error": "Invalid JSON"})
             return
         action = data.get("action")
+        if action in {"send_message", "send_message_stream", "subagent_control"}:
+            state = self.server.state
+            with state.lock:
+                if getattr(state, "update_preparing", False):
+                    self._send({"status": "error", "type": "error", "error": "应用正在准备更新，请更新完成后再试。"})
+                    return
+                if not hasattr(state, "update_requests"):
+                    state.update_requests = {}
+                self._update_request_token = uuid.uuid4().hex
+                state.update_requests[self._update_request_token] = (str(data.get("session_id") or ""), str(data.get("request_id") or ""))
+        if action == "prepare_update":
+            self._send(self.server.state.prepare_update_shutdown())
+            return
+        if action == "cancel_update":
+            self.server.state.update_preparing = False
+            self._send({"status": "ok"})
+            return
         if action == "subagent_control":
             try:
                 from core.subagent_control import dispatch_subagent
@@ -1559,6 +1656,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 writer_owner=str(data.get("writer_owner") or f"daemon:{os.getpid()}"),
             )
             self._send({"status": "ok", "session_id": session_id, "result": result})
+            self._update_save_error = str((result or {}).get("_history_commit_error") or (result or {}).get("_runtime_journal_warning") or "")
             return
         if action == "send_message_stream":
             session_id = data.get("session_id") or uuid.uuid4().hex
@@ -2027,6 +2125,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     messages,
                     source="daemon_stream_finalize",
                 )
+                if state.update_preparing and terminal_status == "interrupted" and not ui_owned_history:
+                    state.preserve_update_fragments(session_id, request_id, turn_id, messages)
             except Exception as exc:
                 postprocess_error = str(exc)
                 _log_daemon(
@@ -2110,6 +2210,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         f"operation=update_commit error={exc}"
                     )
             send_terminal_stream({"type": "final", "result": result})
+            self._update_save_error = str(commit_error or runtime_finalize_error or "")
             self._stream_finalized = True
             if daemon_commit_succeeded:
                 try:

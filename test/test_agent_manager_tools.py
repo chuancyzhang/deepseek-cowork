@@ -280,6 +280,27 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertEqual(messages[0]["role"], "user")
         self.assertEqual(messages[0]["content"], "task A")
 
+    def test_update_stop_preserves_partial_answer_and_pauses_queued_input(self):
+        from core.agent_manager import AgentManagerRegistry
+        self.factory.delay = 0.25
+        result = self.manager.spawn_agent(message="task A", name="update-worker")
+        record = self.manager._agents[result["agent_id"]]
+        record.draft_content = "已完成的部分回答"
+        self.manager.send_input(record.agent_id, "下一步", message_id="queued-update-input")
+        registry = AgentManagerRegistry()
+        registry._managers[(os.path.abspath(self.db_path), self.conversation_id)] = self.manager
+        registry.stop_for_update(self.db_path, timeout=2)
+        self.assertIsNone(record.worker)
+        self.assertTrue(record.paused)
+        self.assertEqual(record.status, "interrupted")
+        self.assertTrue(any(message.get("content") == "已完成的部分回答" for message in self.storage.get_agent_messages(record.agent_id)))
+        self.assertTrue(any(row["message_id"] == "queued-update-input" and row["state"] == "queued" for row in self.storage.agent_inbox(record.agent_id)))
+        restored = SessionAgentManager(self.conversation_id, chat_storage=self.storage, config_manager=self.config,
+                                       workspace_dir=self.temp_dir, worker_factory=self.factory)
+        restored.list_agent_summaries()
+        self.assertTrue(restored._agents[record.agent_id].paused)
+        self.assertIsNone(restored._agents[record.agent_id].worker)
+
     def test_child_authorization_is_inherited_outside_serialized_context(self):
         auth = ExecutionAuthorization(self.conversation_id, "parent-run", False, os.path.join(self.temp_dir, "artifacts"))
         observed = []

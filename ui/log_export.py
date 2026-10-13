@@ -37,6 +37,11 @@ class LogExportWorker(QThread):
                 if path.suffix.lower() == ".log" and path.name != "log_export.log"
                 and path.is_file() and not path.is_symlink()
             )
+            # Explicit update diagnostics only; never traverse staged files or backups.
+            updates = self.source_dir / "updates"
+            if updates.is_dir() and not updates.is_symlink():
+                files.extend(path for path in [updates / "app_update.log", *updates.glob("transactions/*/update*.log")]
+                             if path.is_file() and not any(part.is_symlink() for part in [path, *path.parents]))
             if not files:
                 raise ValueError("暂无可导出的日志。使用应用后可再次尝试。")
             target = Path(self.target).resolve()
@@ -71,7 +76,7 @@ class LogExportWorker(QThread):
                     source.seek(offset)
                     data = source.read(min(stat.st_size, LOG_TAIL_BYTES))
                 write(
-                    f"\n{'=' * 64}\n日志文件：{path.name}\n"
+                    f"\n{'=' * 64}\n日志文件：{path.relative_to(self.source_dir)}\n"
                     f"原始大小：{stat.st_size} 字节；读取起点：{offset} 字节\n"
                 )
                 if offset:

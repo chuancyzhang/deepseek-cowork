@@ -239,14 +239,9 @@ from core.process_utils import (
     subprocess_kwargs_no_window,
     terminate_process_tree,
 )
-from core.updater import (
-    GITHUB_RELEASES_URL,
-    create_windows_update_script,
-    launch_windows_update_script,
-    local_update_package_version,
-    prepare_local_update,
-    prepare_update,
-)
+from core.update_coordinator import UpdateCoordinator
+from ui.update_panel import UpdatePanel
+from ui.update_lifecycle import UpdateLifecycleMixin
 from core.runtime_components import (
     NODE_SOURCES,
     PYTHON_SOURCES,
@@ -665,7 +660,6 @@ MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
 FAVORITES_LOG_FILENAME = "favorites_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
 CHAT_RECOVERY_LOG_FILENAME = "chat_recovery.log"
-APP_UPDATE_LOG_FILENAME = "app_update.log"
 MODEL_SERVICE_LOG_FILENAME = "model_service.log"
 WINDOWS_APP_USER_MODEL_ID = "deepseek.cowork"
 STARTUP_STAGE_CLOCK = time.monotonic()
@@ -783,15 +777,6 @@ def log_memory_update(stage, **fields):
         )
     except Exception:
         pass
-
-
-def log_app_update(stage, **fields):
-    payload = {"stage": str(stage or "update")}
-    payload.update(fields or {})
-    append_background_process_log(
-        APP_UPDATE_LOG_FILENAME,
-        json.dumps(payload, ensure_ascii=False, default=str),
-    )
 
 
 def log_favorites_runtime(stage, **fields):
@@ -10297,72 +10282,6 @@ class SourceTestWorker(QThread):
             self.finished_signal.emit({"ok": False, "kind": self.kind, "error": str(exc)})
 
 
-class AppUpdateWorker(QThread):
-    progress_signal = Signal(str, int)
-    finished_signal = Signal(dict)
-
-    def __init__(self, install_enabled=False, check_only=False, local_zip_path="", parent=None):
-        super().__init__(parent)
-        self.install_enabled = install_enabled
-        self.check_only = check_only
-        self.local_zip_path = os.path.abspath(str(local_zip_path or "")) if local_zip_path else ""
-
-    def run(self):
-        update_source = "local" if self.local_zip_path else "online"
-        package_name = os.path.basename(self.local_zip_path) if self.local_zip_path else ""
-        try:
-            def emit_progress(message, percent=None):
-                self.progress_signal.emit(str(message or ""), int(percent if percent is not None else -1))
-
-            if self.local_zip_path:
-                log_app_update(
-                    "local_validation_start",
-                    package=package_name,
-                    size=os.path.getsize(self.local_zip_path) if os.path.isfile(self.local_zip_path) else 0,
-                    current_version=APP_VERSION,
-                )
-                result = prepare_local_update(
-                    self.local_zip_path,
-                    current_version=APP_VERSION,
-                    install_dir=get_base_dir() if self.install_enabled else None,
-                    progress_callback=emit_progress,
-                )
-                summary = result.get("change_summary") or {}
-                log_app_update(
-                    "local_validation_finish",
-                    package=package_name,
-                    version=(result.get("release") or {}).get("tag_name") or "",
-                    added=int(summary.get("added") or 0),
-                    modified=int(summary.get("modified") or 0),
-                    deleted=int(summary.get("deleted") or 0),
-                )
-            else:
-                result = prepare_update(
-                    current_version=APP_VERSION,
-                    download=self.install_enabled and not self.check_only,
-                    progress_callback=emit_progress,
-                    install_dir=get_base_dir() if self.install_enabled and not self.check_only else None,
-                )
-            result["install_enabled"] = self.install_enabled
-            result["check_only"] = self.check_only
-            result.setdefault("update_source", update_source)
-            self.finished_signal.emit(result)
-        except Exception as exc:
-            if update_source == "local":
-                log_app_update(
-                    "local_validation_error",
-                    package=package_name,
-                    error_type=type(exc).__name__,
-                )
-            self.finished_signal.emit({
-                "error": str(exc),
-                "install_enabled": self.install_enabled,
-                "check_only": self.check_only,
-                "update_source": update_source,
-                "package_name": package_name,
-            })
-
-
 class SessionHistoryLoadWorker(QThread):
     finished_signal = Signal(dict)
 
@@ -12155,90 +12074,23 @@ class SettingsDialog(QDialog):
             self.handle_component_task_state(self.component_task_manager.snapshot())
 
         update_page, update_layout = make_scroll_page(
-            "应用更新",
-            "在线检查 GitHub Releases，或选择已经下载好的官方压缩包离线更新。",
+            "应用更新", "获取最新改进，也可以使用已经下载好的安装包。",
         )
-        update_group, update_group_layout = build_settings_surface(
-            "更新方式",
-            "Windows 打包版可以在线下载或从本地压缩包更新；源码运行模式只负责在线检查版本。",
-            radius=20,
-            show_subtitle=False,
-        )
-        update_group_layout.setSpacing(12)
-
-        self.update_current_label = QLabel()
-        self.refresh_current_version_label()
-        self.update_current_label.setStyleSheet(apple_settings_section_title_style())
-        self.update_available_banner = QLabel()
-        self.update_available_banner.setWordWrap(True)
-        self.update_available_banner.setStyleSheet(
-            f"""
-            QLabel {{
-                color: {DesignTokens.primary};
-                background: {DesignTokens.primary_soft};
-                border: 1px solid {DesignTokens.border_settings_summary};
-                border-radius: 12px;
-                padding: 10px 12px;
-                font-weight: 600;
-            }}
-            """
-        )
-        self.update_available_banner.setVisible(False)
-        self.update_latest_label = QLabel("最新版本：尚未检查")
-        self.update_latest_label.setStyleSheet(apple_settings_inline_note_style())
-        self.update_status_label = QLabel("可以检查 GitHub Releases，或选择已经下载好的官方压缩包进行离线更新。")
-        self.update_status_label.setWordWrap(True)
-        self.update_status_label.setStyleSheet(apple_settings_inline_note_style())
-        self.local_update_hint_label = QLabel(
-            "本地更新仅接受版本高于当前版本、名称为 deepseek-cowork-vX.Y.Z.zip 的可信官方安装包。"
-        )
-        self.local_update_hint_label.setWordWrap(True)
-        self.local_update_hint_label.setStyleSheet(apple_settings_inline_note_style())
-        self.update_notes_label = QLabel("更新日志：尚未检查")
-        self.update_notes_label.setWordWrap(True)
-        self.update_notes_label.setStyleSheet(apple_settings_inline_note_style())
-        self.update_log_edit = QTextEdit()
-        self.update_log_edit.setReadOnly(True)
-        self.update_log_edit.setFixedHeight(96)
-        self.update_log_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=10))
-        self.update_log_edit.setPlaceholderText("更新过程会显示在这里。")
-        self.update_progress = QProgressBar()
-        self.update_progress.setRange(0, 100)
-        self.update_progress.setValue(0)
-        self.update_progress.setVisible(False)
-        self.update_btn = QPushButton("检查并更新")
-        self.update_btn.setObjectName("PrimaryBtn")
-        self.update_btn.setIcon(qta.icon('fa5s.download', color='white'))
-        self.update_btn.clicked.connect(self.start_app_update)
-        self.local_update_btn = QPushButton("选择本地安装包")
-        self.local_update_btn.setObjectName("SecondaryBtn")
-        self.local_update_btn.clicked.connect(self.start_local_app_update)
-        local_install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        self.local_update_btn.setEnabled(local_install_enabled)
-        if not local_install_enabled:
-            self.local_update_btn.setToolTip("本地安装仅适用于 Windows 打包版。")
-            self.local_update_hint_label.setText(
-                "当前为源码运行模式，本地安装不可用；可以在线检查版本并手动处理源码更新。"
-            )
-
-        update_button_bar = QHBoxLayout()
-        update_button_bar.addWidget(self.update_btn)
-        update_button_bar.addWidget(self.local_update_btn)
-        update_button_bar.addStretch()
-        update_group_layout.addWidget(self.update_available_banner)
-        update_group_layout.addWidget(self.update_current_label)
-        update_group_layout.addWidget(self.update_latest_label)
-        update_group_layout.addWidget(self.update_status_label)
-        update_group_layout.addWidget(self.local_update_hint_label)
-        update_group_layout.addWidget(self.update_notes_label)
-        update_group_layout.addWidget(self.update_log_edit)
-        update_group_layout.addWidget(self.update_progress)
-        update_group_layout.addLayout(update_button_bar)
-        update_layout.addWidget(update_group)
+        coordinator = getattr(self._main, "update_coordinator", None)
+        if coordinator is None:
+            coordinator = UpdateCoordinator(get_base_dir(), bool(getattr(sys, "frozen", False) and platform.system() == "Windows"), parent=QApplication.instance())
+        self.update_panel = UpdatePanel(coordinator, self)
+        update_layout.addWidget(self.update_panel)
         update_layout.addStretch()
-        self.app_update_worker = None
-        self._pending_local_update_path = ""
-        self._automatic_update_check_started = False
+        self.update_current_label = self.update_panel.current
+        self.update_status_label = self.update_panel.status
+        self.update_latest_label = self.update_panel.version
+        self.update_notes_label = self.update_panel.notes
+        self.update_log_edit = self.update_panel.details
+        self.update_progress = self.update_panel.progress
+        self.update_btn = self.update_panel.primary
+        self.local_update_btn = self.update_panel.local
+        self.local_update_hint_label = self.update_panel.hint
 
         model_layout.addWidget(self.model_channel_manager)
         model_layout.addStretch()
@@ -13013,360 +12865,6 @@ class SettingsDialog(QDialog):
     def showEvent(self, event):
         self.refresh_current_version_label()
         super().showEvent(event)
-        if self.domain == "settings" and not self._automatic_update_check_started:
-            self._automatic_update_check_started = True
-            self.start_app_update(check_only=True)
-
-    def start_app_update(self, checked=False, check_only=False):
-        if self.app_update_worker and self.app_update_worker.isRunning():
-            return
-        self.refresh_current_version_label()
-        install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        self.update_btn.setEnabled(False)
-        self.local_update_btn.setEnabled(install_enabled and bool(check_only))
-        if not check_only:
-            self.update_btn.setText("正在检查...")
-        self.update_status_label.setText("正在连接 GitHub Releases...")
-        if not check_only:
-            self.update_log_edit.clear()
-            self.append_app_update_log("开始检查更新。")
-        self.update_progress.setValue(0)
-        self.update_progress.setVisible(install_enabled and not check_only)
-        self.app_update_worker = AppUpdateWorker(
-            install_enabled=install_enabled,
-            check_only=check_only,
-            parent=self,
-        )
-        self.app_update_worker.progress_signal.connect(self.handle_app_update_progress)
-        self.app_update_worker.finished_signal.connect(self.handle_app_update_finished)
-        self.app_update_worker.finished.connect(self.app_update_worker.deleteLater)
-        self.app_update_worker.start()
-
-    def start_local_app_update(self, checked=False):
-        install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        if not install_enabled:
-            QMessageBox.warning(self, "本地更新不可用", "本地安装仅适用于 Windows 打包版。")
-            return
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            "选择本地更新安装包",
-            "",
-            "DeepSeek Cowork 安装包 (deepseek-cowork-v*.zip);;ZIP 文件 (*.zip)",
-        )
-        if not path:
-            return
-        path = os.path.abspath(path)
-        package_name = os.path.basename(path)
-        try:
-            version = local_update_package_version(path)
-            package_size = os.path.getsize(path)
-        except Exception as exc:
-            message = str(exc)
-            self.update_status_label.setText(f"本地安装包不可用：{message}")
-            self.append_app_update_log(f"本地安装包不可用：{message}")
-            log_app_update(
-                "local_selected_error",
-                package=package_name,
-                error_type=type(exc).__name__,
-            )
-            QMessageBox.warning(self, "本地安装包不可用", message)
-            return
-
-        self._pending_local_update_path = path
-        self.update_latest_label.setText(f"本地版本：{version}")
-        self.update_notes_label.setText("更新日志：本地安装包未携带更新日志。")
-        self.update_available_banner.setText(
-            f"已选择本地版本 {version}，验证通过后可以安装。"
-        )
-        self.update_available_banner.setVisible(True)
-        self.append_app_update_log(
-            f"已选择本地安装包：{package_name}（{format_file_size(package_size)}）。"
-        )
-        log_app_update(
-            "local_selected",
-            package=package_name,
-            version=version,
-            size=package_size,
-        )
-        worker = self.app_update_worker
-        if worker and worker.isRunning():
-            if worker.check_only:
-                self.local_update_btn.setEnabled(False)
-                self.update_status_label.setText("本地安装包已选择，将在当前在线检查结束后立即验证。")
-                self.append_app_update_log("等待当前在线检查结束后验证本地安装包。")
-                log_app_update("local_queued", package=package_name, version=version)
-                return
-            self._pending_local_update_path = ""
-            QMessageBox.warning(self, "应用更新", "当前更新任务正在运行，请等待任务结束后再选择本地安装包。")
-            return
-        self._begin_local_app_update(path)
-
-    def _begin_local_app_update(self, path):
-        install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        if not install_enabled:
-            self._pending_local_update_path = ""
-            self.local_update_btn.setEnabled(False)
-            self.update_status_label.setText("本地安装仅适用于 Windows 打包版。")
-            return
-        if self.app_update_worker and self.app_update_worker.isRunning():
-            raise RuntimeError("无法启动本地更新：已有更新任务正在运行。")
-        self._pending_local_update_path = ""
-        self.refresh_current_version_label()
-        self.update_btn.setEnabled(False)
-        self.local_update_btn.setEnabled(False)
-        self.update_btn.setText("正在验证...")
-        self.update_status_label.setText("正在验证本地安装包...")
-        self.update_log_edit.clear()
-        self.append_app_update_log(f"开始验证本地安装包：{os.path.basename(path)}。")
-        self.update_progress.setRange(0, 100)
-        self.update_progress.setValue(0)
-        self.update_progress.setVisible(True)
-        self.app_update_worker = AppUpdateWorker(
-            install_enabled=True,
-            check_only=False,
-            local_zip_path=path,
-            parent=self,
-        )
-        self.app_update_worker.progress_signal.connect(self.handle_app_update_progress)
-        self.app_update_worker.finished_signal.connect(self.handle_app_update_finished)
-        self.app_update_worker.finished.connect(self.app_update_worker.deleteLater)
-        self.app_update_worker.start()
-
-    def handle_app_update_progress(self, message, percent):
-        if message:
-            self.update_status_label.setText(message)
-            self.append_app_update_log(message)
-        if percent >= 0:
-            self.update_progress.setVisible(True)
-            self.update_progress.setValue(max(0, min(100, percent)))
-
-    def append_app_update_log(self, message):
-        if not message:
-            return
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.update_log_edit.append(f"[{timestamp}] {message}")
-
-    def choose_app_update_install_mode(self, latest_version, zip_path):
-        package_line = f"\n安装包位置：{zip_path}" if zip_path else ""
-        result = ProductMessageDialog(
-            "安装更新",
-            f"新版本 {latest_version} 已准备好。{package_line}\n"
-            "主程序将关闭，独立更新器会安装更新并自动重启。",
-            "confirm",
-            [
-                ("前台安装并重启", "foreground", "primary", True),
-                ("后台安装并重启", "background", "secondary", False),
-                ("取消", "cancel", "secondary", False),
-            ],
-            parent=self,
-        ).exec_result("cancel")
-        if result == "foreground":
-            return "foreground"
-        if result == "background":
-            return "background"
-        return "cancel"
-
-    def handle_app_update_finished(self, result):
-        worker = self.app_update_worker
-        worker_check_only = bool(getattr(worker, "check_only", False))
-        self.refresh_current_version_label()
-        self.update_btn.setEnabled(True)
-        self.update_btn.setText("检查并更新")
-        self.app_update_worker = None
-        install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        self.local_update_btn.setEnabled(install_enabled)
-        check_only = bool(
-            worker_check_only
-            or (isinstance(result, dict) and result.get("check_only"))
-        )
-        if check_only and self._pending_local_update_path:
-            pending_path = self._pending_local_update_path
-            self.update_status_label.setText("在线检查已结束，正在开始验证本地安装包...")
-            self.append_app_update_log("在线检查已结束，开始处理排队的本地安装包。")
-            log_app_update(
-                "local_dequeued",
-                package=os.path.basename(pending_path),
-            )
-            self._begin_local_app_update(pending_path)
-            return
-        if not isinstance(result, dict):
-            self.update_status_label.setText("检查更新失败：返回结果无效。")
-            self.append_app_update_log("检查更新失败：返回结果无效。")
-            return
-        update_source = str(result.get("update_source") or "online")
-        is_local_update = update_source == "local"
-        if result.get("error"):
-            message = result.get("error") or "未知错误"
-            action_label = "本地安装包验证" if is_local_update else "检查更新"
-            self.update_status_label.setText(f"{action_label}失败：{message}")
-            if not check_only:
-                self.append_app_update_log(f"{action_label}失败：{message}")
-                QMessageBox.warning(self, f"{action_label}失败", message)
-            return
-
-        release = result.get("release") or {}
-        latest_version = release.get("tag_name") or release.get("name") or "未知"
-        self.update_latest_label.setText(
-            f"本地版本：{latest_version}" if is_local_update else f"最新版本：{latest_version}"
-        )
-        notes = (release.get("body") or "").strip()
-        if notes:
-            self.update_notes_label.setTextFormat(Qt.MarkdownText)
-            self.update_notes_label.setText(notes)
-        elif is_local_update:
-            self.update_notes_label.setText("更新日志：本地安装包未携带更新日志。")
-        else:
-            self.update_notes_label.setText("更新日志：该 Release 未填写说明。")
-
-        if not result.get("update_available"):
-            self.update_available_banner.setVisible(False)
-            self.update_nav_item.setText("更新与关于") if self.update_nav_item else None
-            self.update_progress.setVisible(False)
-            self.update_status_label.setText("当前已是最新版本。")
-            if not check_only:
-                self.append_app_update_log("当前已是最新版本。")
-                QMessageBox.information(self, "应用更新", "当前已是最新版本。")
-            return
-
-        html_url = release.get("html_url") or GITHUB_RELEASES_URL
-        if is_local_update:
-            self.update_available_banner.setText(f"本地版本 {latest_version} 已通过验证，可以安装。")
-        else:
-            self.update_available_banner.setText(
-                f"发现新版本 {latest_version}，可以更新。点击下方“立即更新”开始下载。"
-            )
-        self.update_available_banner.setVisible(True)
-        self.update_nav_item.setText("更新与关于  •") if self.update_nav_item else None
-        self.update_btn.setText("检查并更新" if is_local_update else "立即更新")
-        if check_only:
-            self.update_progress.setVisible(False)
-            self.update_status_label.setText(
-                f"新版本 {latest_version} 已发布，当前版本为 {APP_VERSION}。"
-            )
-            return
-
-        if not result.get("install_enabled"):
-            self.update_progress.setVisible(False)
-            self.update_status_label.setText("发现新版本。源码运行模式不会自动替换目录，可打开 Releases 页面手动下载。")
-            self.append_app_update_log("源码运行模式只检查版本，不执行自动安装。")
-            reply = QMessageBox.question(
-                self,
-                "发现新版本",
-                f"发现新版本 {latest_version}。\n当前处于源码运行模式，不能自动安装。是否打开 GitHub Releases 页面？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl(html_url))
-            return
-
-        staged_app_dir = result.get("staged_app_dir")
-        if not staged_app_dir:
-            self.update_status_label.setText("更新包已检查，但没有准备好安装目录。")
-            self.append_app_update_log("更新包已检查，但没有准备好安装目录。")
-            QMessageBox.warning(self, "应用更新", "更新包已检查，但没有准备好安装目录。")
-            return
-
-        self.update_progress.setValue(100)
-        zip_path = result.get("zip_path") or ""
-        change_summary = result.get("change_summary") or {}
-        change_count = (
-            int(change_summary.get("added") or 0)
-            + int(change_summary.get("modified") or 0)
-            + int(change_summary.get("deleted") or 0)
-        )
-        write_mb = int(change_summary.get("write_bytes") or 0) / (1024 * 1024)
-        self.update_status_label.setText(
-            f"新版本 {latest_version} 已准备完成，将差异更新 {change_count} 个文件。"
-        )
-        self.append_app_update_log(
-            "本地安装包解压和结构校验完成。"
-            if is_local_update
-            else "完整安装包下载、解压和结构校验完成。"
-        )
-        self.append_app_update_log(
-            "本地文件比较："
-            f"新增 {int(change_summary.get('added') or 0)}，"
-            f"修改 {int(change_summary.get('modified') or 0)}，"
-            f"删除 {int(change_summary.get('deleted') or 0)}，"
-            f"未变化 {int(change_summary.get('unchanged') or 0)}；"
-            f"实际写入约 {write_mb:.1f} MB。"
-        )
-        if zip_path:
-            self.append_app_update_log(f"安装包位置：{zip_path}")
-        install_mode = self.choose_app_update_install_mode(latest_version, zip_path)
-        package_name = str((result.get("asset") or {}).get("name") or os.path.basename(zip_path))
-        log_app_update(
-            "install_choice",
-            source=update_source,
-            package=package_name,
-            version=latest_version,
-            mode=install_mode,
-        )
-        if install_mode == "cancel":
-            self.update_status_label.setText(
-                "本地安装包已验证，尚未安装；可以重新选择安装包。"
-                if is_local_update
-                else "更新已下载，尚未安装。再次点击可重新检查。"
-            )
-            self.append_app_update_log("用户取消安装；本次安装包已保留，历史更新痕迹已清理。")
-            return
-        background_install = install_mode == "background"
-        try:
-            if background_install:
-                self.append_app_update_log("正在启动独立更新器，安装将在后台进行。")
-            else:
-                self.append_app_update_log("正在启动独立更新进度窗口，可在窗口中最小化。")
-            log_app_update(
-                "installer_launch_start",
-                source=update_source,
-                package=package_name,
-                version=latest_version,
-                mode=install_mode,
-            )
-            launch_log_path = os.path.join(result.get("updates_dir") or get_app_data_dir(), "update-launch.log")
-            self.append_app_update_log(f"更新器启动日志：{launch_log_path}")
-            extra_wait_pids = []
-            if getattr(self._main, "daemon_process", None) and self._main.daemon_process.poll() is None:
-                extra_wait_pids.append(self._main.daemon_process.pid)
-                self.append_app_update_log(f"更新器将等待守护进程退出：PID {self._main.daemon_process.pid}")
-            if getattr(self._main, "gateway_process", None) and self._main.gateway_process.poll() is None:
-                extra_wait_pids.append(self._main.gateway_process.pid)
-                self.append_app_update_log(f"更新器将等待企业消息网关退出：PID {self._main.gateway_process.pid}")
-            script_path = create_windows_update_script(
-                install_dir=get_base_dir(),
-                staged_app_dir=staged_app_dir,
-                change_plan_path=result.get("change_plan_path"),
-                current_pid=os.getpid(),
-                exe_name=os.path.basename(sys.executable) or "deepseek-cowork.exe",
-                target_dir=result.get("updates_dir"),
-                extra_wait_pids=extra_wait_pids,
-                background_install=background_install,
-            )
-            launch_windows_update_script(script_path)
-            log_app_update(
-                "installer_launch_finish",
-                source=update_source,
-                package=package_name,
-                version=latest_version,
-                mode=install_mode,
-            )
-            if hasattr(self._main, "quit_app"):
-                self._main.quit_app()
-            else:
-                QApplication.quit()
-        except Exception as exc:
-            log_app_update(
-                "installer_launch_error",
-                source=update_source,
-                package=package_name,
-                version=latest_version,
-                mode=install_mode,
-                error_type=type(exc).__name__,
-            )
-            self.update_status_label.setText(f"启动更新安装失败：{exc}")
-            self.append_app_update_log(f"启动更新安装失败：{exc}")
-            QMessageBox.warning(self, "应用更新", f"启动更新安装失败：{exc}")
 
     def _build_im_gateway_experience(self, im_layout, im_cfg):
         providers = (im_cfg or {}).get("providers") or {}
@@ -28702,7 +28200,7 @@ class ThemePreviewSafetyBar(QFrame):
         self.setVisible(True)
 
 
-class MainWindow(ConversationActionsMixin, QMainWindow):
+class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
     skill_catalog_changed_ui_signal = Signal(object, object)
 
@@ -28722,6 +28220,10 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
     def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
         self.config_manager = config_manager or ConfigManager()
+        self._update_preparing = False
+        self.update_coordinator = UpdateCoordinator(get_base_dir(), bool(getattr(sys, "frozen", False) and platform.system() == "Windows"), parent=self)
+        self.update_coordinator.installation_ready.connect(self.begin_update_install)
+
         self._model_onboarding_shown = False
         self._model_onboarding_dialog = None
         self.theme_manager = theme_manager or getattr(QApplication.instance(), "theme_manager", None)
@@ -30908,6 +30410,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         log_startup_stage("startup_workspace_ready", has_workspace=bool(self.workspace_dir))
         self.refresh_history_list()
         log_startup_stage("startup_history_ready")
+        self.acknowledge_update_startup()
+        QTimer.singleShot(10000, self.update_coordinator.start_automatic)
         QTimer.singleShot(0, self._show_model_onboarding_if_needed)
 
     def _show_model_onboarding_if_needed(self):
@@ -36965,6 +36469,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         self.queue_daemon_connection(allow_start=True, retries=retries)
 
     def queue_daemon_connection(self, allow_start=False, retries=0):
+        if getattr(self, "_update_preparing", False):
+            return
         self._pending_daemon_connect_allow_start = bool(
             getattr(self, "_pending_daemon_connect_allow_start", False) or allow_start
         )
@@ -37592,6 +37098,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
         return True
 
     def check_favorite_schedules(self):
+        if getattr(self, "_update_preparing", False):
+            return
         self._sync_favorite_delivery_history()
         favorites = self.config_manager.get_favorites()
         if not favorites:
@@ -37731,6 +37239,8 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             self.daemon_process = None
 
     def start_gateway_process(self):
+        if getattr(self, "_update_preparing", False):
+            return
         try:
             if getattr(self, "gateway_starting", False):
                 return True
@@ -37907,6 +37417,14 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        if getattr(self, "_update_preparing", False):
+            self.add_system_toast("正在准备安装更新，请稍候。", "info")
+            return
+        if self.update_coordinator.worker is not None:
+            self.update_coordinator.cancel()
+            QTimer.singleShot(100, self.quit_app)
+            return
+
         if any(getattr(state, "branch_in_progress", False) for state in self.sessions.values()):
             self.add_system_toast("分支文件仍在准备，请完成后再退出。", "info")
             return
@@ -38070,6 +37588,17 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if getattr(self, "_update_exit_committed", False):
+            event.accept()
+            return
+        if getattr(self, "_update_preparing", False):
+            event.ignore()
+            return
+        if not self.tray_icon and self.update_coordinator.worker is not None:
+            event.ignore()
+            self.update_coordinator.cancel()
+            QTimer.singleShot(100, self.close)
+            return
         if any(getattr(state, "branch_in_progress", False) for state in getattr(self, "sessions", {}).values()):
             self.add_system_toast("分支文件仍在准备，请完成后再退出。", "info")
             event.ignore()
@@ -39459,6 +38988,11 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             conversation_meta.get("selected_skill_names")
         )
         state.knowledge_refs = copy.deepcopy(conversation_meta.get("knowledge_refs") or [])
+        update_draft = conversation_meta.get("update_composer") or {}
+        if update_draft and not state.composer_draft:
+            state.composer_draft = str(update_draft.get("text") or "")
+            state.prompt_files = list(update_draft.get("files") or [])
+
         if not state.composer_draft and not state.conversation_refs:
             state.conversation_refs = copy.deepcopy(conversation_meta.get("composer_conversation_refs") or [])
             if state.conversation_refs:
@@ -43470,6 +43004,7 @@ class MainWindow(ConversationActionsMixin, QMainWindow):
             meta["last_deepseek_billing"] = last_deepseek_billing
         else:
             meta.pop("last_deepseek_billing", None)
+        meta.pop("update_composer", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta["knowledge_refs"] = copy.deepcopy(getattr(state, "knowledge_refs", []))
@@ -51560,6 +51095,9 @@ a {{ overflow-wrap: anywhere; }}
         conversation_refs=None,
         history_source_message=None,
     ):
+        if getattr(self, "_update_preparing", False):
+            self.add_system_toast("正在准备更新，输入内容已保留。", "info")
+            return False
         if getattr(self, "skillhub_update_in_progress", False):
             self.add_system_toast("技能正在更新，请完成后再发送；输入内容已保留。", "info")
             return False
@@ -53552,6 +53090,8 @@ a {{ overflow-wrap: anywhere; }}
             state.conversation_notice = None
 
     def _reconnect_daemon_stream(self, session_id, run_id):
+        if getattr(self, "_update_preparing", False):
+            return
         state = self.get_session(session_id)
         if not state or str(state.active_turn_request_id or "") != str(run_id):
             return

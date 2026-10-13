@@ -959,6 +959,30 @@ class AgentManagerRegistry:
             managers = [m for (path, _), m in self._managers.items() if path == os.path.abspath(db_path)]
         return sum(record.worker is not None for manager in managers for record in list(manager._agents.values()))
 
+    def stop_for_update(self, db_path, timeout=30):
+        """Pause child queues, drain accepted output, and require durable terminal state."""
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            managers = [m for (path, _), m in self._managers.items() if path == os.path.abspath(db_path)]
+        targets = []
+        for manager in managers:
+            with manager._condition:
+                records = [record for record in manager._agents.values()
+                           if record.worker is not None or (record.status not in {"closed", "killed"}
+                               and (record.status in AGENT_LIVE_STATUSES or record.pending_inputs))]
+                for record in records:
+                    manager.interrupt_agent(record.agent_id, record.run_id)
+                targets.append((manager, records))
+        for manager, records in targets:
+            with manager._condition:
+                while any(record.worker is not None for record in records):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("子任务仍在保存或停止，请稍后重试更新。")
+                    manager._condition.wait(remaining)
+                if any(record.storage_error for record in records):
+                    raise RuntimeError("子任务内容保存失败，尚未开始安装。")
+
     def get_session_manager(
         self,
         conversation_id,

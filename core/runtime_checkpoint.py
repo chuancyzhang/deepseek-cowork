@@ -38,6 +38,11 @@ class RuntimeCheckpointWorker(QThread):
         self._failures = {}
         self._stop_requested = False
         self._merged = {}
+        self._writing = False
+
+    def drain_status(self):
+        with self._condition:
+            return not self._pending and not self._writing, bool(self._failures)
 
     def enqueue(self, request):
         with self._condition:
@@ -70,6 +75,7 @@ class RuntimeCheckpointWorker(QThread):
                         return
                     self._condition.wait()
                 _, request = self._pending.popitem(last=False)
+                self._writing = True
                 stale = self._instances.get((request.session_id, request.run_id)) != request.instance_id
                 merged = self._merged.pop(request.key, 0)
             started = time.monotonic()
@@ -108,3 +114,6 @@ class RuntimeCheckpointWorker(QThread):
                 "merged": merged, "outcome": outcome,
             })
             self.completed.emit(request, outcome, error)
+            with self._condition:
+                self._writing = False
+                self._condition.notify_all()

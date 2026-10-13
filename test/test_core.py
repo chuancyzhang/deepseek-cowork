@@ -25,6 +25,7 @@ from core import env_utils
 from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION, WORKFLOW_MODE_OFFICE_HTML_FIRST
 from core.agent import LLMWorker
+from core.execution_authorization import ExecutionAuthorization
 from core import daemon as daemon_module
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.mcp_client import (
@@ -4697,6 +4698,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         from PySide6.QtCore import QThread, Signal
 
         class _SlowStreamWorker(QThread):
+            agent_manager = None
             thinking_signal = Signal(str)
             content_signal = Signal(str)
             tool_call_signal = Signal(dict)
@@ -4708,6 +4710,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
                 self.stopped = False
 
             def stop(self):
@@ -4752,6 +4755,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         from core.execution_authorization import ExecutionAuthorization
 
         class _UiOwnedWorker(QThread):
+            agent_manager = None
             thinking_signal = Signal(str)
             content_signal = Signal(str)
             tool_call_signal = Signal(dict)
@@ -4806,10 +4810,61 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         run = runs[0]
         self.assertEqual(run.get("status"), "completed")
 
+    def test_update_shutdown_saves_unopened_stream_partial_and_rejects_new_work(self):
+        from PySide6.QtCore import QThread, Signal
+        received = threading.Event()
+        class _UpdateWorker(QThread):
+            agent_manager = None
+            thinking_signal = Signal(str)
+            content_signal = Signal(str)
+            tool_call_signal = Signal(dict)
+            tool_result_signal = Signal(dict)
+            observability_signal = Signal(dict)
+            agent_state_signal = Signal(dict)
+            output_signal = Signal(str)
+            finished_signal = Signal(object)
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
+                self.stopped = threading.Event()
+            def stop(self):
+                self.stopped.set()
+            def run(self):
+                self.content_signal.emit("已完成的后台部分回答")
+                self.stopped.wait(5)
+                self.finished_signal.emit({"error": "stopped", "content": "已完成的后台部分回答"})
+        chunks = []
+        def consume():
+            for chunk in self.client.send_message_stream("update-unopened", "hello", workspace_dir=self.temp_dir):
+                chunks.append(chunk)
+                if chunk.get("type") == "content":
+                    received.set()
+        with patch("core.daemon.LLMWorker", _UpdateWorker):
+            reader = threading.Thread(target=consume)
+            reader.start()
+            self.assertTrue(received.wait(5))
+            saved = self.client._request({"action": "prepare_update"}, timeout=10)
+            reader.join(5)
+            self.assertFalse(reader.is_alive())
+            self.assertTrue(saved["saved"], saved)
+            blocked = list(self.client.send_message_stream("new-during-update", "blocked", workspace_dir=self.temp_dir))
+        self.assertTrue(any(chunk.get("type") == "error" for chunk in blocked))
+        runs = self.state.runtime_journal.list_runs("update-unopened")
+        self.assertEqual(runs[0]["status"], "interrupted")
+        saved_messages = self.state.chat_storage.get_messages("update-unopened")
+        self.assertIn("已完成的后台部分回答", json.dumps(saved_messages, ensure_ascii=False))
+        from core.message_persistence import project_provider_messages
+        projected, _ = project_provider_messages(saved_messages)
+        self.assertEqual([message["content"] for message in projected], ["hello"])
+        self.assertFalse(self.state.runtime_journal.load_manifest("update-unopened").get("active_run_id"))
+        self.assertFalse(self.state.update_requests)
+        self.assertEqual(self.client._request({"action": "cancel_update"})["status"], "ok")
+
     def test_terminal_journal_failure_keeps_provider_success_and_clears_worker(self):
         from PySide6.QtCore import QThread, Signal
 
         class _SuccessfulWorker(QThread):
+            agent_manager = None
             thinking_signal = Signal(str)
             content_signal = Signal(str)
             tool_call_signal = Signal(dict)
@@ -4821,6 +4876,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
             def run(self):
                 self.finished_signal.emit({"content": "durable visible answer"})
@@ -4864,6 +4920,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         from PySide6.QtCore import QThread, Signal
 
         class _SuccessfulWorker(QThread):
+            agent_manager = None
             thinking_signal = Signal(str)
             content_signal = Signal(str)
             tool_call_signal = Signal(dict)
@@ -4875,6 +4932,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
             def run(self):
                 self.finished_signal.emit({"content": "visible answer"})
@@ -4912,6 +4970,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         workers = []
 
         class _DisconnectWorker(QThread):
+            agent_manager = None
             thinking_signal = Signal(str)
             content_signal = Signal(str)
             tool_call_signal = Signal(dict)
@@ -4923,6 +4982,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
                 self.stopped = False
                 workers.append(self)
 

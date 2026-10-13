@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -199,14 +200,14 @@ class TestUpdater(unittest.TestCase):
             )
 
         self.assertTrue(os.path.isfile(zip_path))
-        self.assertFalse(os.path.exists(old_zip))
+        self.assertTrue(os.path.exists(old_zip))
 
-    def test_prepare_local_update_rejects_same_or_older_version(self):
+    def test_prepare_local_update_rejects_older_version(self):
         install_dir = self._write_local_install_dir()
-        for version in ("5.1.6", "5.1.5"):
+        for version in ("5.1.5",):
             zip_path = os.path.join(self.temp_dir, f"deepseek-cowork-v{version}.zip")
             self._write_local_update_package(zip_path)
-            with self.subTest(version=version), self.assertRaisesRegex(UpdaterError, "不高于当前版本"):
+            with self.subTest(version=version), self.assertRaisesRegex(UpdaterError, "低于当前版本"):
                 prepare_local_update(
                     zip_path,
                     current_version="5.1.6",
@@ -259,8 +260,8 @@ class TestUpdater(unittest.TestCase):
             "size": 4,
         }
         zip_path = expected_asset_path(asset, target_dir=self.temp_dir)
-        with open(zip_path, "wb") as handle:
-            handle.write(b"1234")
+        self._write_local_update_package(zip_path)
+        asset["size"] = os.path.getsize(zip_path)
         progress = []
 
         with patch("core.updater.requests.get") as mocked_get:
@@ -286,15 +287,15 @@ class TestUpdater(unittest.TestCase):
 
         removed = cleanup_update_artifacts(target_dir=self.temp_dir, keep_paths=[keep_zip])
 
-        self.assertGreaterEqual(removed, 8)
+        self.assertEqual(removed, 2)
         self.assertTrue(os.path.exists(keep_zip))
         self.assertTrue(os.path.exists(unrelated))
         self.assertFalse(os.path.exists(old_zip))
         self.assertFalse(os.path.exists(temp_download))
-        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
-        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "backup-20260615-120000")))
-        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "apply-update-20260615-120000.ps1")))
-        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "update.log")))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "backup-20260615-120000")))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "apply-update-20260615-120000.ps1")))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "update.log")))
 
     def test_prepare_update_cleans_artifacts_before_download_and_staging(self):
         release = {
@@ -324,7 +325,7 @@ class TestUpdater(unittest.TestCase):
             result = prepare_update(current_version="4.7.2", download=True)
 
         self.assertFalse(os.path.exists(old_zip))
-        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
+        self.assertTrue(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
         mocked_download.assert_called_once()
         mocked_extract.assert_called_once_with(expected_zip, target_dir=self.temp_dir, progress_callback=None)
         self.assertEqual(result["zip_path"], expected_zip)
@@ -366,89 +367,27 @@ class TestUpdater(unittest.TestCase):
         plan = build_update_plan(install_dir, staged_dir)
         return write_update_plan(plan, target_dir=self.temp_dir)
 
-    def test_create_windows_update_script_generates_observable_gui_and_fallback(self):
-        install_dir = os.path.join(self.temp_dir, "install")
-        staged_dir = os.path.join(self.temp_dir, "staged")
-        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
-        os.makedirs(install_dir, exist_ok=True)
-        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
-            handle.write("")
-
+    def test_installer_transaction_contains_config_and_no_cmd_fallback(self):
+        staged = os.path.join(self.temp_dir, "staged")
+        install = self._write_local_install_dir()
+        os.makedirs(os.path.join(staged, INTERNAL_DIR_NAME))
+        with open(os.path.join(staged, APP_EXE_NAME), "w") as handle:
+            handle.write("new")
         with patch("core.updater.sys.platform", "win32"):
-            plan_path = self._create_change_plan(install_dir, staged_dir)
-            script_path = create_windows_update_script(
-                install_dir=install_dir,
-                staged_app_dir=staged_dir,
-                change_plan_path=plan_path,
-                current_pid=12345,
-                extra_wait_pids=[23456],
-                target_dir=self.temp_dir,
-            )
+            script = create_windows_update_script(install, staged, self._create_change_plan(install, staged), target_dir=self.temp_dir)
+        with open(os.path.join(os.path.dirname(script), "config.json"), encoding="utf-8") as handle:
+            config = json.load(handle)
+        self.assertEqual(config["install_dir"], install)
+        self.assertFalse(os.path.exists(os.path.splitext(script)[0] + ".cmd"))
 
-        fallback_path = os.path.splitext(script_path)[0] + ".cmd"
-        self.assertTrue(script_path.endswith(".ps1"))
-        self.assertTrue(os.path.exists(script_path))
-        self.assertTrue(os.path.exists(fallback_path))
-        with open(script_path, "rb") as handle:
-            self.assertEqual(handle.read(3), b"\xef\xbb\xbf")
-        with open(script_path, "r", encoding="utf-8-sig") as handle:
-            ps_content = handle.read()
-        with open(fallback_path, "r", encoding="utf-8") as handle:
-            cmd_content = handle.read()
-
-        self.assertIn("System.Windows.Forms", ps_content)
-        self.assertIn("DeepSeek Cowork Update", ps_content)
-        self.assertIn("ProgressBar", ps_content)
-        self.assertIn("$form.MinimizeBox = $true", ps_content)
-        self.assertIn("$form.TopMost = $false", ps_content)
-        self.assertIn("$form.WindowState = 'Normal'", ps_content)
-        self.assertIn("$PidsToWait = @(12345, 23456)", ps_content)
-        self.assertIn("ConvertFrom-Json", ps_content)
-        self.assertIn("Get-FileHash", ps_content)
-        self.assertIn("Attempting differential rollback", ps_content)
-        self.assertNotIn("robocopy", ps_content.lower())
-        self.assertNotIn("/MIR", ps_content)
-        self.assertIn("10", ps_content)
-        self.assertIn("25", ps_content)
-        self.assertIn("55", ps_content)
-        self.assertIn("70", ps_content)
-        self.assertIn("82", ps_content)
-        self.assertIn("86", ps_content)
-        self.assertIn("90", ps_content)
-        self.assertIn("100", ps_content)
-        self.assertIn("user_data", ps_content)
-        self.assertIn("update.log", ps_content)
-        self.assertIn("-WindowStyle Hidden", ps_content)
-        self.assertIn("powershell.exe", cmd_content)
-        self.assertIn(os.path.basename(script_path), cmd_content)
-
-    def test_create_windows_update_script_can_start_minimized_for_background_install(self):
-        install_dir = os.path.join(self.temp_dir, "install")
-        staged_dir = os.path.join(self.temp_dir, "staged")
-        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
-        os.makedirs(install_dir, exist_ok=True)
-        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
-            handle.write("")
-
-        with patch("core.updater.sys.platform", "win32"):
-            plan_path = self._create_change_plan(install_dir, staged_dir)
-            script_path = create_windows_update_script(
-                install_dir=install_dir,
-                staged_app_dir=staged_dir,
-                change_plan_path=plan_path,
-                current_pid=12345,
-                target_dir=self.temp_dir,
-                background_install=True,
-            )
-
-        with open(script_path, "r", encoding="utf-8-sig") as handle:
-            ps_content = handle.read()
-
-        self.assertIn("$RunInBackground = $true", ps_content)
-        self.assertIn("$form.WindowState = 'Minimized'", ps_content)
-        self.assertIn("$form.WindowState = 'Normal'", ps_content)
-        self.assertIn("$form.Activate()", ps_content)
-
+    def test_local_same_version_reinstall_preserves_user_data(self):
+        package = os.path.join(self.temp_dir, "deepseek-cowork-v5.1.6.zip")
+        self._write_local_update_package(package)
+        with patch("core.updater.updates_dir", return_value=self.temp_dir):
+            result = prepare_local_update(package, current_version="5.1.6", install_dir=self._write_local_install_dir())
+        self.assertTrue(result["update_available"])
+        for group in ("added", "modified", "deleted"):
+            self.assertFalse(any(item["path"].startswith("user_data/") for item in result["change_plan"][group]))
 
     def test_create_windows_update_script_rejects_non_windows(self):
         staged_dir = os.path.join(self.temp_dir, "staged")
@@ -471,7 +410,7 @@ class TestUpdater(unittest.TestCase):
             handle.write("")
 
         with patch("core.updater.sys.platform", "win32"), \
-             patch("core.updater.subprocess.Popen") as popen:
+             patch("core.updater.popen_external_program") as popen:
             launch_windows_update_script(script_path)
 
         args = popen.call_args.args[0]
@@ -489,28 +428,6 @@ class TestUpdater(unittest.TestCase):
         self.assertIsNotNone(kwargs.get("stdout"))
         self.assertIsNotNone(kwargs.get("stderr"))
 
-    def test_create_windows_update_script_hides_relaunch_window(self):
-        install_dir = os.path.join(self.temp_dir, "install")
-        staged_dir = os.path.join(self.temp_dir, "staged")
-        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
-        os.makedirs(install_dir, exist_ok=True)
-        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
-            handle.write("")
-
-        with patch("core.updater.sys.platform", "win32"):
-            plan_path = self._create_change_plan(install_dir, staged_dir)
-            script_path = create_windows_update_script(
-                install_dir=install_dir,
-                staged_app_dir=staged_dir,
-                change_plan_path=plan_path,
-                current_pid=12345,
-                target_dir=self.temp_dir,
-            )
-
-        with open(script_path, "r", encoding="utf-8-sig") as handle:
-            ps_content = handle.read()
-
-        self.assertIn("-WindowStyle Hidden", ps_content)
 
 
 if __name__ == "__main__":

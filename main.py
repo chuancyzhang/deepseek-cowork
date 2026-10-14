@@ -31868,10 +31868,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         state.auto_loading_history = True
         state.history_page_loading = True
         state.history_page_queue = list(spans_to_load)
-        state.history_page_insert_index = 0
         state.history_page_anchor_widget = anchor_widget
         state.history_page_anchor_offset = anchor_offset
         state.displayed_render_count += len(spans_to_load)
+        log_ui_navigation(
+            "history_page_start", session_id=state.session_id, source="question_navigator",
+            span_start=int(spans_to_load[0]["start"]), span_end=int(spans_to_load[-1]["end"]),
+            span_count=len(spans_to_load), total=len(spans), displayed=state.displayed_render_count,
+        )
         QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
 
     def sync_context_drawer_layout(self):
@@ -41355,12 +41359,16 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         state.history_page_loading = True
         state.history_page_token = int(getattr(state, "history_load_token", 0) or 0)
         state.history_page_queue = spans_to_load
-        state.history_page_insert_index = 0
         state.history_page_old_max = vbar.maximum()
         state.history_page_old_value = vbar.value()
         state.history_page_anchor_widget = anchor_widget
         state.history_page_anchor_offset = anchor_offset
         state.displayed_render_count += len(spans_to_load)
+        log_ui_navigation(
+            "history_page_start", session_id=state.session_id, source="scroll",
+            span_start=int(spans_to_load[0]["start"]), span_end=int(spans_to_load[-1]["end"]),
+            span_count=len(spans_to_load), total=total, displayed=state.displayed_render_count,
+        )
         QTimer.singleShot(
             0,
             lambda sid=state.session_id, token=state.history_page_token:
@@ -41376,16 +41384,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
             return
         queue = getattr(state, "history_page_queue", [])
         if queue:
-            span = queue.pop(0)
+            # Prepend the nearest missing span first. A partial page then remains
+            # a continuous suffix, so the existing count rollback stays correct.
+            span = queue.pop()
             try:
-                inserted = int(
-                    self._render_session_history_spans(
-                        state,
-                        [span],
-                        insert_index=int(getattr(state, "history_page_insert_index", 0) or 0),
-                    ) or 0
-                )
-                state.history_page_insert_index += inserted
+                self._render_session_history_spans(state, [span], insert_index=0)
                 bar = state.chat_scroll.verticalScrollBar()
                 anchor_widget = getattr(state, "history_page_anchor_widget", None)
                 if anchor_widget is not None and _qt_object_alive(anchor_widget):
@@ -41408,7 +41411,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
                     f"历史消息加载失败：{exc}",
                     "error",
                 )
-                log_ui_navigation("history_load_error", session_id=session_id, phase="page", error=str(exc))
+                log_ui_navigation(
+                    "history_load_error", session_id=session_id, phase="page", error=str(exc),
+                    span_start=int(span["start"]), span_end=int(span["end"]),
+                    unrendered=unrendered, total=len(state.render_items),
+                    displayed=state.displayed_render_count,
+                )
                 jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
                 if jump_target:
                     self._question_jump_error(state, jump_target, f"加载目标提问失败：{exc}")
@@ -41421,6 +41429,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
             return
         state.auto_loading_history = False
         state.history_page_loading = False
+        log_ui_navigation(
+            "history_page_done", session_id=session_id,
+            total=len(state.render_items), displayed=state.displayed_render_count,
+        )
         self.queue_session_bubble_virtualization(session_id)
         jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
         if jump_target:
@@ -50235,6 +50247,9 @@ a {{ overflow-wrap: anywhere; }}
         if not isinstance(previous_group, AssistantTurnGroup):
             previous_group = None
         previous_group_id = str(getattr(bubble, "ui_turn_group_id", "")) if bubble is not None else ""
+        # The visible stages can introduce a span before guidance is appended.
+        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
+        previous_render_total = len(getattr(state, "render_items", []) or [])
         self._append_visible_assistant_stages(
             state,
             turn_id=getattr(state, "active_turn_id", ""),
@@ -50273,6 +50288,9 @@ a {{ overflow-wrap: anywhere; }}
             conversation_id=state.session_id,
         )
         self._rebuild_session_render_spans(state)
+        self._sync_displayed_render_count_after_live_append(
+            state, previous_render_count, previous_render_total,
+        )
         # Switch the routing boundary before any widget work can process
         # queued signals; a re-entrant delta must never return to the old group.
         state.active_agent_turn_group = None
@@ -50298,6 +50316,10 @@ a {{ overflow-wrap: anywhere; }}
             previous_group_id=previous_group_id,
             next_group_id=str(getattr(state.active_agent_turn_group, "group_id", "")),
             message_id=message_id,
+            previous_render_total=previous_render_total,
+            previous_displayed_render_count=previous_render_count,
+            render_total=len(state.render_items),
+            displayed_render_count=state.displayed_render_count,
             previous_stage_count=(
                 len(previous_group.stage_bubbles)
                 if previous_group is not None

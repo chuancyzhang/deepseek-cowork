@@ -156,6 +156,7 @@ Desktop.ini
 # Local runtime bundles (fetched by scripts/fetch_runtimes.ps1)
 node_env/
 git_bash_env/
+ripgrep_env/
 .runtime_downloads/
 /resources/browser_skill/artifacts/*.zip
 

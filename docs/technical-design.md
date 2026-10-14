@@ -538,6 +538,17 @@ WeKnora、腾讯文档和乐享通过宿主资料库能力访问。仅在已选�
 开发态资源从项目根目录读取；PyInstaller onedir 冻结态从 `sys._MEIPASS`
 （发行目录 `_internal`）读取随包只读资源，EXE 同级目录不作为资源根。
 
+`ripgrep_env` 随包提供固定的 ripgrep 15.1.0 Windows x64 MSVC 可执行文件及原始
+`COPYING`、`LICENSE-MIT`、`UNLICENSE`。运行时注册为 `rg`，在命令子进程的 `PATH`
+中优先于系统工具；冻结态不依赖外部 rg 安装。诊断快照包含 rg 路径、版本及缺失原因，
+现有模型上下文投影仍只读取 Python、Node.js、Bash，不改变提示词前缀或 Tool Schema。
+
+运行时准备脚本仅修改新解压 PortableGit 的 `etc/gitconfig`，设置
+`credential.helper=manager`；构建和发行审计拒绝缺失或仍使用选择器的默认配置。
+Git Credential Manager 的图形认证依赖（包括 `libSkiaSharp.dll`）保留，账号授权
+保持交互能力。不批量改写用户全局、仓库配置或凭据库；升级后按既有顺序优先解析
+新包中的 Git，旧缓存不覆盖随包版本。
+
 Skill `impl.py` 是动态数据文件，不进入静态 import graph。构建 spec 扫描
 `skills/` 与 `ai_skills/` 的直接 `core.*` 导入，加入 `Analysis.hiddenimports`；
 读取、解析或核心工作区模块缺失时直接中止构建，防止“源码可用、冻结包 Tool

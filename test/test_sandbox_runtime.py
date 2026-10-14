@@ -10,9 +10,84 @@ from core import sandbox_runtime
 
 
 class TestSandboxRuntime(unittest.TestCase):
+    def test_rg_resolution_supports_source_and_frozen_layout_and_beats_host_path(self):
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen), tempfile.TemporaryDirectory() as temp_dir:
+                bundle = os.path.join(temp_dir, "_internal" if frozen else "", "ripgrep_env", "rg.exe")
+                host = os.path.join(temp_dir, "host", "rg.exe")
+                for path in (bundle, host):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "wb") as handle:
+                        handle.write(b"fixture")
+                with patch.dict(os.environ, {"PATH": os.path.dirname(host)}, clear=True), \
+                     patch.object(sandbox_runtime, "get_base_dir", return_value=temp_dir), \
+                     patch.object(sandbox_runtime, "get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
+                     patch.object(sandbox_runtime.sys, "frozen", frozen, create=True):
+                    resolved, diagnostics = sandbox_runtime._resolve_rg()
+                self.assertEqual(resolved, os.path.normpath(bundle))
+                self.assertFalse(diagnostics["error"])
+
+    def test_frozen_rg_does_not_silently_resolve_host_installation(self):
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch.object(sandbox_runtime, "get_base_dir", return_value=temp_dir), \
+             patch.object(sandbox_runtime, "get_app_data_dir", return_value=temp_dir), \
+             patch.object(sandbox_runtime.sys, "frozen", True, create=True), \
+             patch.object(sandbox_runtime.shutil, "which", return_value="host-rg") as which:
+            resolved, diagnostics = sandbox_runtime._resolve_rg()
+        self.assertEqual(resolved, "")
+        self.assertIn("missing", diagnostics["error"])
+        which.assert_not_called()
+
+    def test_frozen_git_prefers_new_bundle_over_valid_legacy_selector_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = os.path.join(temp_dir, "data")
+            bundle = os.path.join(temp_dir, "_internal", "git_bash_env")
+            legacy = os.path.join(data_dir, "runtime_sandbox", "v1", "runtimes", "git_bash")
+            for root, helper in ((bundle, "manager"), (legacy, "helper-selector")):
+                os.makedirs(os.path.join(root, "bin"))
+                os.makedirs(os.path.join(root, "etc"))
+                with open(os.path.join(root, "bin", "bash.exe"), "wb") as handle:
+                    handle.write(b"fixture")
+                with open(os.path.join(root, "etc", "gitconfig"), "w") as handle:
+                    handle.write(f"[credential]\nhelper = {helper}\n")
+            with open(os.path.join(legacy, ".cowork_runtime_source"), "w") as handle:
+                handle.write("old-bundle")
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch.object(sandbox_runtime, "get_base_dir", return_value=temp_dir), \
+                 patch.object(sandbox_runtime, "get_app_data_dir", return_value=data_dir), \
+                 patch.object(sandbox_runtime.sys, "frozen", True, create=True):
+                resolved, _ = sandbox_runtime._resolve_bash()
+            self.assertEqual(resolved, os.path.join(bundle, "bin", "bash.exe"))
+
+    def test_sandbox_path_contains_rg_before_host_tools_and_preserves_authentication(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundled = os.path.join(temp_dir, "ripgrep_env")
+            host = os.path.join(temp_dir, "host")
+            os.makedirs(bundled)
+            runtime = {"root": temp_dir, "rg": os.path.join(bundled, "rg.exe")}
+            with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
+                 patch.object(sandbox_runtime, "_toolkit_python_paths", return_value=[]), \
+                 patch.dict(os.environ, {"PATH": host}, clear=True):
+                env = sandbox_runtime.build_sandbox_env()
+            self.assertLess(env["PATH"].split(os.pathsep).index(bundled), env["PATH"].split(os.pathsep).index(host))
+            for name in ("GCM_INTERACTIVE", "GCM_GUI_PROMPT", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+                self.assertNotIn(name, env)
+
+    def test_runtime_snapshot_reports_rg_path_version_and_diagnostics(self):
+        runtime = {"root": "sandbox", "rg": "bundled-rg", "rg_diagnostics": {"error": ""}}
+        with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
+             patch.object(sandbox_runtime, "_run_version", side_effect=lambda exe, _args: "ripgrep 15.1.0" if exe else ""):
+            snapshot = sandbox_runtime.get_runtime_snapshot()
+        self.assertEqual(snapshot["rg"]["path"], "bundled-rg")
+        self.assertEqual(snapshot["rg"]["version"], "ripgrep 15.1.0")
+        self.assertTrue(snapshot["rg"]["available"])
+        self.assertFalse(snapshot["rg"]["diagnostics"]["error"])
+
     def test_skill_script_abort_terminates_process_tree(self):
         process = MagicMock()
         process.poll.return_value = None
+        process.communicate.return_value = (b"partial output", b"")
         command = ["python", "demo.py"]
         with patch.object(
             sandbox_runtime,
@@ -22,19 +97,17 @@ class TestSandboxRuntime(unittest.TestCase):
             sandbox_runtime,
             "run_in_sandbox",
             return_value=process,
-        ), patch.object(
-            sandbox_runtime,
-            "terminate_process_tree",
-        ) as terminate:
+        ), patch("core.tool_cancellation.terminate_process_tree", return_value=True) as terminate:
             result = sandbox_runtime.run_skill_script_in_sandbox(
                 "demo",
                 "demo.py",
                 "python",
-                abort_check=lambda: True,
+                abort_check=MagicMock(side_effect=[False, True]),
             )
 
         self.assertTrue(result["aborted"])
         self.assertFalse(result["ok"])
+        self.assertEqual(result["stdout"], "partial output")
         terminate.assert_called_once_with(process)
 
     def tearDown(self):

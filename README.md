@@ -97,6 +97,13 @@ Treat the report from the current build as authoritative for size and contents.
 
 Execution permissions and the manual product acceptance checklist are documented in [God Mode](docs/GOD_MODE.md) (Chinese). Turning God Mode off preserves tool discovery and reasoning, while requiring per-action approval for changes outside the current run's artifact directory and for opaque code execution.
 
+The Windows bundle includes ripgrep 15.1.0 (`rg`) for command-line file searches.
+Its bundled Git defaults to Git Credential Manager (`manager`), without a credential
+helper selection dialog. Account sign-in, password/token prompts and browser
+authorization remain available. Run `scripts/fetch_runtimes.ps1` before building;
+it verifies the pinned runtime and licenses and configures only the extracted Git,
+without changing the build machine's global or repository configuration.
+
 ## License
 
 Apache-2.0

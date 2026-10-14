@@ -8,6 +8,8 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
+from scripts import bundled_runtime_checks
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "scripts" / "package_release.py"
@@ -38,17 +40,31 @@ class PackageReleaseTests(unittest.TestCase):
         self.hash_patch.start()
         self.wecom_hash_patch = patch.object(package_release, "WECOM_CLI_SHA256", hashlib.sha256(self.WECOM_FIXTURE).hexdigest().upper())
         self.wecom_hash_patch.start()
+        self.rg_fixtures = {name: f"ripgrep:{name}".encode() for name in bundled_runtime_checks.RIPGREP_FILE_HASHES}
+        self.rg_hash_patch = patch.dict(bundled_runtime_checks.RIPGREP_FILE_HASHES, {
+            name: hashlib.sha256(data).hexdigest().upper() for name, data in self.rg_fixtures.items()
+        })
+        self.rg_hash_patch.start()
+        self.git_config_patch = patch.object(
+            bundled_runtime_checks, "_git_config_values",
+            side_effect=lambda _root, key: ["manager"] if key == "credential.helper" else [],
+        )
+        self.git_config_patch.start()
 
     def tearDown(self):
         self.hash_patch.stop()
         self.wecom_hash_patch.stop()
+        self.rg_hash_patch.stop()
+        self.git_config_patch.stop()
 
     def _create_minimal_dist(self, root):
         dist = Path(root) / "deepseek-cowork"
         for relative in package_release.REQUIRED_PATHS:
             path = dist / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
-            if relative.endswith("wecom_cli/bundle.json"):
+            if relative.startswith("_internal/ripgrep_env/"):
+                path.write_bytes(self.rg_fixtures[path.name])
+            elif relative.endswith("wecom_cli/bundle.json"):
                 manifest = json.loads((ROOT / "resources/wecom_cli/bundle.json").read_text(encoding="utf-8"))
                 manifest["executable_sha256"] = package_release.WECOM_CLI_SHA256
                 path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -112,6 +128,44 @@ class PackageReleaseTests(unittest.TestCase):
                 report["browser_skill_assets"]["cli"]["sha256"],
                 self.fixture_hashes[package_release.BROWSER_SKILL_CLI_ARCHIVE],
             )
+            self.assertEqual(report["git_runtime"]["credential_helper"], "manager")
+            self.assertEqual(report["ripgrep_runtime"]["version"], "15.1.0")
+
+    def test_audit_rejects_missing_or_changed_ripgrep_and_licenses(self):
+        for name in self.rg_fixtures:
+            for missing in (False, True):
+                with self.subTest(name=name, missing=missing), tempfile.TemporaryDirectory() as temp_dir:
+                    dist = self._create_minimal_dist(temp_dir)
+                    target = dist / "_internal/ripgrep_env" / name
+                    if missing:
+                        target.unlink()
+                    else:
+                        target.write_bytes(b"wrong-version-or-corrupt")
+                    with self.assertRaises(package_release.PackageAuditError):
+                        package_release.audit_distribution(dist, max_dist_mb=1)
+
+    def test_audit_rejects_selector_even_when_manager_is_also_configured(self):
+        for helpers in (["helper-selector"], ["helper-selector", "manager"], []):
+            with self.subTest(helpers=helpers), tempfile.TemporaryDirectory() as temp_dir:
+                dist = self._create_minimal_dist(temp_dir)
+                with patch.object(bundled_runtime_checks, "_git_config_values", return_value=helpers):
+                    with self.assertRaisesRegex(package_release.PackageAuditError, "credential.helper=manager"):
+                        package_release.audit_distribution(dist, max_dist_mb=1)
+
+    def test_audit_rejects_disabled_authentication_and_missing_gui_dependency(self):
+        for key in ("credential.interactive", "credential.guiPrompt"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temp_dir:
+                dist = self._create_minimal_dist(temp_dir)
+                with patch.object(bundled_runtime_checks, "_git_config_values", side_effect=lambda _root, name: (
+                    ["manager"] if name == "credential.helper" else ["false"] if name == key else []
+                )):
+                    with self.assertRaisesRegex(package_release.PackageAuditError, "disables account authorization"):
+                        package_release.audit_distribution(dist, max_dist_mb=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist = self._create_minimal_dist(temp_dir)
+            (dist / "_internal/git_bash_env/mingw64/bin/libSkiaSharp.dll").unlink()
+            with self.assertRaisesRegex(package_release.PackageAuditError, "libSkiaSharp"):
+                package_release.audit_distribution(dist, max_dist_mb=1)
 
     def test_audit_rejects_tampered_browser_skill_artifacts(self):
         for archive_name in (

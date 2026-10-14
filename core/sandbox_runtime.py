@@ -376,6 +376,19 @@ def _resolve_bash():
     }
 
 
+def _resolve_rg():
+    candidates = [os.getenv("COWORK_RG_EXE")]
+    candidates.extend(_runtime_file_candidates("ripgrep", ["rg.exe", "rg", os.path.join("bin", "rg")]))
+    if not _is_frozen():
+        candidates.append(shutil.which("rg"))
+    candidates = _dedupe_paths(candidates)
+    executable = _candidate_existing_file(candidates)
+    return executable, {
+        "searched_paths": candidates,
+        "error": "" if executable else "ripgrep runtime is missing; run scripts/fetch_runtimes.ps1 or reinstall the complete application.",
+    }
+
+
 def _bash_runtime_root(bash_exe):
     exe_dir = os.path.dirname(_norm(bash_exe))
     parent_dir = os.path.dirname(exe_dir)
@@ -407,6 +420,7 @@ def ensure_sandbox_runtime():
     npm_exe = _resolve_npm()
     npx_exe = _resolve_npx()
     bash_exe, bash_diagnostics = _resolve_bash()
+    rg_exe, rg_diagnostics = _resolve_rg()
     _RUNTIME_CACHE = {
         "root": _sandbox_root(),
         "python": python_exe,
@@ -417,6 +431,8 @@ def ensure_sandbox_runtime():
         "npx": npx_exe,
         "bash": bash_exe,
         "bash_diagnostics": bash_diagnostics,
+        "rg": rg_exe,
+        "rg_diagnostics": rg_diagnostics,
     }
     return _RUNTIME_CACHE
 
@@ -429,7 +445,7 @@ def get_runtime_executable(name):
 
 def _runtime_path_dirs(runtime):
     dirs = []
-    for key in ("python", "node", "npm", "npx", "bash"):
+    for key in ("python", "node", "npm", "npx", "bash", "rg"):
         exe = runtime.get(key)
         if exe:
             dirs.append(os.path.dirname(exe))
@@ -779,6 +795,13 @@ def get_runtime_snapshot():
             "version": _run_version(runtime.get("bash"), ["--version"]),
             "source": "sandbox" if _is_frozen() else "development",
             "diagnostics": runtime.get("bash_diagnostics", {}),
+        },
+        "rg": {
+            "path": runtime.get("rg", ""),
+            "available": bool(runtime.get("rg")),
+            "version": _run_version(runtime.get("rg"), ["--version"]),
+            "source": "sandbox" if _is_frozen() else "development",
+            "diagnostics": runtime.get("rg_diagnostics", {}),
         },
     }
 

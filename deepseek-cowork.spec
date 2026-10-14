@@ -15,6 +15,10 @@ block_cipher = None
 
 _spec_arg = next((arg for arg in sys.argv[1:] if str(arg).lower().endswith(".spec")), None)
 SPEC_DIR = os.path.dirname(os.path.abspath(_spec_arg)) if _spec_arg else os.getcwd()
+sys.path.insert(0, SPEC_DIR)
+from scripts.bundled_runtime_checks import (
+    GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
+)
 ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
 BROWSER_SKILL_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "browser_skill")
 BROWSER_SKILL_BUILD_ARTIFACTS = {
@@ -661,8 +665,6 @@ GIT_BASH_SLIM_EXCLUDES = [
     "usr/bin/xxd.exe",
     "mingw64/bin/git-lfs*",
     "mingw64/libexec/git-core/git-lfs*",
-    "mingw64/bin/libSkiaSharp.dll",
-    "mingw64/libexec/git-core/libSkiaSharp.dll",
 ]
 
 
@@ -672,9 +674,19 @@ git_bash_env = _collect_required_runtime_env(
     "git_bash_env",
     "git_bash_env",
     "Git Bash",
-    required_files=[os.path.join("bin", "bash.exe")],
+    required_files=list(GIT_REQUIRED_FILES),
     exclude_globs=GIT_BASH_SLIM_EXCLUDES if RUNTIME_SLIM else [],
 )
+if git_bash_env:
+    git_bundle_root = os.environ.get("COWORK_GIT_BASH_DIR") or os.path.join(SPEC_DIR, "git_bash_env")
+    print(f"[Packaging] Git authentication: {validate_git_bundle(git_bundle_root)}")
+
+ripgrep_root = os.environ.get("COWORK_RIPGREP_DIR") or os.path.join(SPEC_DIR, "ripgrep_env")
+print(f"[Packaging] ripgrep: {validate_ripgrep_bundle(ripgrep_root)}")
+ripgrep_env = [
+    (f"ripgrep_env/{name}", os.path.join(ripgrep_root, name), "DATA")
+    for name in RIPGREP_FILE_HASHES
+]
 
 
 def _collect_minimal_pyside6():
@@ -888,6 +900,7 @@ print(f"Bundled minimal python env entries: {len(python_env)}")
 print(f"Runtime slim mode: {'ON' if RUNTIME_SLIM else 'OFF'}")
 print(f"Bundled node env entries: {len(node_env)}")
 print(f"Bundled git bash env entries: {len(git_bash_env)}")
+print(f"Bundled ripgrep env entries: {len(ripgrep_env)}")
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -912,7 +925,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
-    a.datas + python_env + node_env + git_bash_env,
+    a.datas + python_env + node_env + git_bash_env + ripgrep_env,
     strip=False,
     upx=True,
     upx_exclude=[],

@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -19,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.app_version import APP_VERSION  # noqa: E402
+from scripts.bundled_runtime_checks import (  # noqa: E402
+    GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
+)
 
 
 ARCHIVE_ROOT = "deepseek-cowork"
@@ -75,7 +79,8 @@ REQUIRED_PATHS = (
     "_internal/python_env/Lib/site-packages/PIL/__init__.py",
     "_internal/python_env/Lib/site-packages/pypdf/__init__.py",
     "_internal/python_env/Lib/site-packages/reportlab/__init__.py",
-    "_internal/git_bash_env/bin/bash.exe",
+    *(f"_internal/git_bash_env/{name}" for name in GIT_REQUIRED_FILES),
+    *(f"_internal/ripgrep_env/{name}" for name in RIPGREP_FILE_HASHES),
     "_internal/PySide6/Qt6WebEngineCore.dll",
     "_internal/PySide6/QtWebEngineCore.pyd",
     "_internal/PySide6/QtWebEngineWidgets.pyd",
@@ -359,6 +364,11 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
     editor_assets = _audit_editor_assets(dist_dir, files)
     browser_skill_assets = _audit_browser_skill_assets(dist_dir)
     wecom_cli_assets = _audit_wecom_cli_assets(dist_dir)
+    try:
+        git_runtime = validate_git_bundle(dist_dir / "_internal/git_bash_env")
+        ripgrep_runtime = validate_ripgrep_bundle(dist_dir / "_internal/ripgrep_env")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise PackageAuditError(str(exc)) from exc
     components: dict[str, dict[str, int]] = {}
     total_bytes = 0
     for relative in files:
@@ -398,6 +408,8 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
         "editor_assets": editor_assets,
         "browser_skill_assets": browser_skill_assets,
         "wecom_cli_assets": wecom_cli_assets,
+        "git_runtime": git_runtime,
+        "ripgrep_runtime": ripgrep_runtime,
     }
 
 

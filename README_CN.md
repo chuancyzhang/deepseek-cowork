@@ -76,6 +76,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 发行包使用固定运行时、离线编辑器资源和打包审计；最终体积与组件清单以本次构建生成的报告为准。
 
+发行包内置 ripgrep 15.1.0（`rg`），命令工具可直接搜索文件，无需额外安装。
+自带 Git 默认使用 Git Credential Manager（`manager`），不再要求选择凭据助手；
+需要登录时仍会显示账号、密码、令牌或浏览器授权流程。
+
+构建前必须执行上述运行时准备脚本：它校验 `rg` 的官方归档、可执行文件及许可证，
+并只将下载的 PortableGit 默认助手设为 `manager`。不会修改构建机器的全局或仓库级
+Git 配置。缺失运行时、校验不符或仍配置 `helper-selector` 时，构建和发行审计会失败。
+
 ## 文档
 
 - [设置与能力管理](docs/unified-management.md)：能力、项目与设置的入口和保存边界

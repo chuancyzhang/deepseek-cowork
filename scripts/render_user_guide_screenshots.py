@@ -569,11 +569,27 @@ def render_browser_skill_setup(window, app):
         if edge_index < 0:
             raise RuntimeError("Edge choice was not rendered in BrowserSkill setup.")
         detail.browser_choice_combo.setCurrentIndex(edge_index)
+        service_failure = os.environ.get("COWORK_BROWSER_SERVICE_FAILURE") == "1"
+        if service_failure:
+            detail.browser_component_status.update({
+                "state": "service_unavailable", "needs_repair": False,
+                "diagnostics": {"service": {
+                    "ready": False, "code": "browser_service_start_failed",
+                    "detail": "本机服务未能建立连接。请重新检查；已安装的扩展和文件均已保留。",
+                }},
+            })
+            detail._render_browser_automation_setup()
         window.resize(1120, 720)
         window.show()
         process_events(220)
         scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
         tone = "dark" if dark else "light"
+        if service_failure:
+            save_widget(window, f"browser-service-failure-{tone}-{scale_label}x.png", 120)
+            detail.browser_diagnostics_btn.click()
+            window.resize(960, 640)
+            save_widget(window, f"browser-service-details-small-{tone}-{scale_label}x.png", 120)
+            return
         save_widget(
             window,
             f"browser-skill-offline-{tone}-{scale_label}x.png",

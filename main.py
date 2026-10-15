@@ -3736,6 +3736,8 @@ class CapabilityWorkbenchDialog(QDialog):
         )
         self.browser_setup_primary_btn.setStyleSheet(product_button_style("primary"))
         self.browser_setup_secondary_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_diagnostics_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_diagnostics_text.setStyleSheet(product_code_style("QPlainTextEdit#BrowserAutomationDiagnostics"))
         self.browser_extension_controls.setStyleSheet(product_surface_style("subtle"))
         self.browser_choice_combo.setStyleSheet(product_field_style())
         self.browser_offline_btn.setStyleSheet(
@@ -3804,6 +3806,23 @@ class CapabilityWorkbenchDialog(QDialog):
         section_layout.addWidget(self.browser_setup_description)
         section_layout.addWidget(self.browser_setup_status)
         section_layout.addWidget(self.browser_setup_progress)
+
+        self.browser_diagnostics_btn = QPushButton("诊断详情")
+        self.browser_diagnostics_btn.setObjectName("BrowserAutomationDiagnosticsAction")
+        self.browser_diagnostics_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_diagnostics_btn.setCheckable(True)
+        self.browser_diagnostics_text = QPlainTextEdit()
+        self.browser_diagnostics_text.setObjectName("BrowserAutomationDiagnostics")
+        self.browser_diagnostics_text.setReadOnly(True)
+        self.browser_diagnostics_text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.browser_diagnostics_text.setMinimumHeight(120)
+        self.browser_diagnostics_text.setMaximumHeight(200)
+        self.browser_diagnostics_text.setStyleSheet(product_code_style("QPlainTextEdit#BrowserAutomationDiagnostics"))
+        self.browser_diagnostics_btn.toggled.connect(self.browser_diagnostics_text.setVisible)
+        self.browser_diagnostics_btn.hide()
+        self.browser_diagnostics_text.hide()
+        section_layout.addWidget(self.browser_diagnostics_btn, 0, Qt.AlignLeft)
+        section_layout.addWidget(self.browser_diagnostics_text)
 
         self.browser_extension_controls = QFrame()
         self.browser_extension_controls.setObjectName("BrowserExtensionControls")
@@ -4041,6 +4060,8 @@ class CapabilityWorkbenchDialog(QDialog):
         task = dict(self.browser_component_task or {})
         self.browser_setup_progress.hide()
         self.browser_extension_controls.hide()
+        self.browser_diagnostics_btn.hide()
+        self.browser_diagnostics_text.hide()
         self._set_browser_setup_actions()
 
         if manager is None:
@@ -4077,7 +4098,7 @@ class CapabilityWorkbenchDialog(QDialog):
                     else "正在校验并安装随 Cowork 提供的 CLI…"
                 ),
             }.get(action, "正在处理，请稍候…")
-            self.browser_setup_description.setText(task_message)
+            self.browser_setup_description.setText(str(task.get("message") or task_message))
             self.browser_setup_progress.setRange(
                 (0 if progress else 0),
                 (100 if progress else 0),
@@ -4087,6 +4108,14 @@ class CapabilityWorkbenchDialog(QDialog):
             self.browser_setup_progress.show()
             self._set_browser_setup_status()
             return
+
+        diagnostics = status.get("diagnostics") or {}
+        if diagnostics and not status.get("ready"):
+            self.browser_diagnostics_text.setPlainText(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+            self.browser_diagnostics_btn.show()
+            self.browser_diagnostics_text.setVisible(self.browser_diagnostics_btn.isChecked())
+        else:
+            self.browser_diagnostics_btn.setChecked(False)
 
         if self.browser_setup_error:
             self._set_browser_setup_status(self.browser_setup_error, "error")
@@ -4118,6 +4147,16 @@ class CapabilityWorkbenchDialog(QDialog):
                     "CLI 已随 Cowork 提供，将从本机校验并安装，不会在运行时访问 GitHub。"
                 )
                 self._set_browser_setup_actions("开始设置", "install")
+            return
+
+        if status.get("state") in {"service_unavailable", "cli_daemon_failed"} and not status.get("needs_update"):
+            self.browser_setup_title.setText("本机浏览器服务尚未就绪")
+            self.browser_setup_description.setText(
+                "已安装的扩展会在本机服务启动后连接。点击下方按钮启动服务并重新检查，"
+                "无需重复安装扩展。"
+            )
+            self._set_browser_setup_status("本机服务未就绪，尚不能连接浏览器。", "error")
+            self._set_browser_setup_actions("启动服务并检查", "check")
             return
 
         if status.get("needs_update") or status.get("needs_repair"):
@@ -9963,7 +10002,7 @@ class RuntimeComponentWorker(QThread):
                         "期间会短暂打开 Agent Window…",
                         20,
                     )
-                    result = browser_skill_status(run_diagnostics=True)
+                    result = browser_skill_status(run_diagnostics=True, progress_callback=progress)
                     if not result.get("ready"):
                         self.finished_signal.emit({
                             "ok": False,

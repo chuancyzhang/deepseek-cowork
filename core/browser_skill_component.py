@@ -43,6 +43,7 @@ BROWSER_SKILL_EXTENSION_URL = (
 BROWSER_SKILL_MARKER_SCHEMA = 2
 BROWSER_SKILL_BUNDLE_SCHEMA = 1
 BROWSER_SKILL_PROBE_TIMEOUT_SECONDS = 45
+BROWSER_SKILL_SERVICE_START_TIMEOUT_SECONDS = 15
 
 _LOG_LOCK = threading.RLock()
 
@@ -69,6 +70,9 @@ def _browser_process_options():
     os.makedirs(root, exist_ok=True)
     env = os.environ.copy()
     env["BSK_AUTO_UPDATE"] = "off"
+    # Cowork owns service startup explicitly. CLI commands must never attempt
+    # to escape their host's Windows Job Object or restart a lost session.
+    env["BSK_AUTO_START"] = "0"
     return {"cwd": root, "env": env, **subprocess_kwargs_no_window()}
 
 
@@ -447,7 +451,9 @@ def _parse_version(text):
     return match.group(1) if match else ""
 
 
-def _run_bsk_executable(executable, args, timeout=20):
+def _run_bsk_executable(executable, args, timeout=20, *, env_overrides=None):
+    options = _browser_process_options()
+    options["env"].update(env_overrides or {})
     process = popen_external_program(
         [executable, *list(args or [])],
         stdout=subprocess.PIPE,
@@ -455,7 +461,7 @@ def _run_bsk_executable(executable, args, timeout=20):
         text=True,
         encoding="utf-8",
         errors="replace",
-        **_browser_process_options(),
+        **options,
     )
     timeout = max(1, int(timeout or 20))
     try:
@@ -478,6 +484,146 @@ def _run_bsk_executable(executable, args, timeout=20):
 
 def _run_bsk(args, timeout=20):
     return _run_bsk_executable(browser_skill_executable(), args, timeout)
+
+
+def _probe_browser_skill_service(timeout=3):
+    result = _run_bsk_executable(
+        browser_skill_executable(), ["--json", "--quiet", "status"], timeout=timeout,
+        # Service health must not wait five seconds for an extension connection.
+        # Keep normal doctor/browser commands' connection grace period intact.
+        env_overrides={"BSK_BROWSER_WAIT_MS": "0"},
+    )
+    payload = _parse_json_output(result["stdout"], result["stderr"])
+    if result["returncode"] == 0 and isinstance(payload, dict) and isinstance(payload.get("pid"), int):
+        return {"state": "ready", "pid": payload["pid"], "port": payload.get("ws_port")}
+    detail = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+    detail = detail or result["stderr"] or result["stdout"] or "服务状态不可识别。"
+    # Only this explicit result establishes an absent IPC listener. Permission,
+    # protocol and probe errors must not trigger a second daemon.
+    missing = result["returncode"] == 2 and "automatic daemon startup is disabled" in detail.lower()
+    return {"state": "missing" if missing else "failed", "detail": detail}
+
+
+def _ensure_browser_skill_service(abort_check=None, *, timeout_seconds=BROWSER_SKILL_SERVICE_START_TIMEOUT_SECONDS, port=None):
+    """Start one supervised foreground daemon and verify it over a separate IPC client.
+
+    The daemon outlives individual tool subprocesses. Existing daemons are reused;
+    we neither detach from the host job nor restart a failed browser operation.
+    """
+    started = time.monotonic()
+    deadline = started + max(1, timeout_seconds)
+    process = None
+    lock = None
+    log_path = ""
+    ready = False
+    code = "browser_service_probe_failed"
+
+    def check_cancelled():
+        if abort_check and abort_check():
+            raise InterruptedError("浏览器服务准备已停止。")
+
+    def probe():
+        check_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            raise TimeoutError("等待浏览器服务启动超时。")
+        return _probe_browser_skill_service(timeout=max(1, int(min(3, remaining))))
+
+    def success(state, reused):
+        return {"ready": True, "mode": "existing" if reused else "host_managed",
+                "pid": state["pid"], "port": state.get("port"),
+                "elapsed_ms": int((time.monotonic() - started) * 1000)}
+
+    try:
+        state = probe()
+        if state["state"] == "ready":
+            return success(state, True)
+        if state["state"] != "missing":
+            raise RuntimeError(state["detail"])
+        options = _browser_process_options()
+        home = options["env"].get("BSK_HOME") or os.path.expanduser("~/.bsk")
+        home = os.path.normcase(os.path.realpath(os.path.join(options["cwd"], home)))
+        key = hashlib.sha256(home.encode("utf-8")).hexdigest()[:16]
+        lock_path = os.path.join(options["cwd"], f"service-start-{key}.lock")
+        code = "browser_service_start_timeout"
+        while lock is None:
+            check_cancelled()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("另一个窗口正在启动浏览器服务，请稍后再次检查。")
+            lock = acquire_process_singleton(lock_path)
+            if lock is None:
+                time.sleep(.1)
+        state = probe()
+        if state["state"] == "ready":
+            return success(state, True)
+        if state["state"] != "missing":
+            raise RuntimeError(state["detail"])
+        code = "browser_service_start_failed"
+        log_path = os.path.join(options["cwd"], f"service-start-{key}.log")
+        command = [browser_skill_executable(), "daemon", "start", "--foreground"]
+        if port is not None:  # Isolated runtime tests use an unused high port.
+            command.extend(["--port", str(port)])
+        check_cancelled()
+        log_browser_skill_event("service_start", mode="host_managed")
+        with open(log_path, "wb") as output:
+            process = popen_external_program(
+                command, stdin=subprocess.DEVNULL, stdout=output, stderr=output, **options,
+            )
+        while True:
+            check_cancelled()
+            if process.poll() is not None and process.returncode != 0:
+                raise RuntimeError(f"浏览器服务启动进程退出，退出码 {process.returncode}。")
+            state = probe()
+            if state["state"] == "ready":
+                ready = True
+                result = success(state, state["pid"] != process.pid)
+                log_browser_skill_event("service_ready", **result)
+                # Reap our own child without tying its lifetime to one CLI call.
+                # Do not stop the shared daemon when a UI window is closed.
+                report_exit = log_browser_skill_event
+                def observe_exit():
+                    exit_code = process.wait()
+                    report_exit("service_exit", pid=process.pid, exit_code=exit_code)
+                threading.Thread(target=observe_exit, daemon=True, name="BrowserSkillService").start()
+                return result
+            if state["state"] != "missing":
+                raise RuntimeError(state["detail"])
+            if process.poll() is not None:
+                raise RuntimeError("启动命令已退出，但浏览器服务仍不可用。")
+            time.sleep(.1)
+    except Exception as exc:
+        if isinstance(exc, InterruptedError):
+            code = "aborted"
+        elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+            code = "browser_service_start_timeout"
+        detail = str(exc)
+        if log_path:
+            try:
+                with open(log_path, "rb") as output:
+                    output.seek(0, os.SEEK_END)
+                    output.seek(max(0, output.tell() - 4096))
+                    detail += "\n" + output.read().decode("utf-8", errors="replace").strip()
+            except OSError:
+                pass
+        result = {"ready": False, "code": code, "detail": detail, "log_path": log_path,
+                  "elapsed_ms": int((time.monotonic() - started) * 1000)}
+        log_browser_skill_event("service_start_failed", code=code, elapsed_ms=result["elapsed_ms"], error=detail)
+        return result
+    finally:
+        # On failure, only terminate the process this attempt created. A later
+        # explicit check can retry; never leave an unverified late startup.
+        try:
+            if process is not None and not ready:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+        finally:
+            if lock is not None:
+                lock.release()
 
 
 def _wait_process_while_monitoring(process, timeout_seconds, abort_check=None):
@@ -849,7 +995,7 @@ def browser_skill_execution_probe(timeout_seconds=BROWSER_SKILL_PROBE_TIMEOUT_SE
             )
 
 
-def browser_skill_status(run_diagnostics=False):
+def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_check=None):
     root = browser_skill_root()
     executable = browser_skill_executable()
     marker = _read_marker()
@@ -955,6 +1101,7 @@ def browser_skill_status(run_diagnostics=False):
             "extension_disconnected",
             "extension_incompatible",
             "cli_daemon_failed",
+            "service_unavailable",
             "execution_unresponsive",
             "check_failed",
         }:
@@ -965,12 +1112,16 @@ def browser_skill_status(run_diagnostics=False):
                     "extension_incompatible",
                 },
                 "ready": bool(cached.get("ready")),
-                "health_error": cached.get("health_error") or "",
+                "health_error": (
+                    "本机浏览器服务尚未就绪，请启动服务并重新检查连接。"
+                    if cached_state in {"cli_daemon_failed", "service_unavailable"}
+                    else cached.get("health_error") or ""
+                ),
                 "state": cached_state,
                 "state_text": cached.get("state_text") or "检查完成",
                 "diagnostics": cached.get("diagnostics") or {},
                 "protocol_incompatible": cached_state == "extension_incompatible",
-                "needs_repair": cached_state == "cli_daemon_failed",
+                "needs_repair": False,
             })
             return result
         result.update({
@@ -980,6 +1131,20 @@ def browser_skill_status(run_diagnostics=False):
         })
         return result
 
+    if progress_callback:
+        progress_callback("正在启动并验证本机浏览器服务…", 25)
+    service = _ensure_browser_skill_service(abort_check)
+    if not service.get("ready"):
+        result.update({
+            "state": "service_unavailable", "state_text": "本机浏览器服务未启动",
+            "health_error": ("浏览器服务准备已停止。" if service.get("code") == "aborted" else
+                             "本机浏览器服务启动失败，扩展安装已保留。请查看诊断详情后重新检查。"),
+            "diagnostics": {"service": service},
+        })
+        _write_diagnostics_cache(result)
+        return result
+    if progress_callback:
+        progress_callback("本机服务已启动，正在检查 Chrome 或 Edge 扩展连接…", 50)
     log_browser_skill_event("doctor_start", executable=executable)
     try:
         doctor = _run_bsk(["--json", "--quiet", "doctor"], timeout=30)
@@ -1006,6 +1171,7 @@ def browser_skill_status(run_diagnostics=False):
     combined = "\n".join([doctor["stdout"], doctor["stderr"]]).strip()
     classification = _classify_doctor_result(payload, combined)
     result["diagnostics"] = {
+        "service": service,
         "returncode": doctor["returncode"],
         "payload": payload,
         "stdout": doctor["stdout"],
@@ -1020,8 +1186,8 @@ def browser_skill_status(run_diagnostics=False):
 
     if classification["kind"] == "cli_daemon_failed":
         result.update({
-            "needs_repair": True,
-            "health_error": classification["detail"] or "BrowserSkill CLI 或 daemon 检查失败。",
+            "needs_repair": False,
+            "health_error": "本机浏览器服务检查未通过，请查看诊断详情后重新检查。",
             "state": "cli_daemon_failed",
             "state_text": "CLI 或后台服务故障",
         })
@@ -1041,6 +1207,8 @@ def browser_skill_status(run_diagnostics=False):
             "state_text": "浏览器扩展需要更新",
         })
     elif classification["kind"] == "connected":
+        if progress_callback:
+            progress_callback("扩展已连接，正在验证网页操作；期间会短暂打开 Agent 窗口…", 75)
         probe = browser_skill_execution_probe()
         result["diagnostics"]["probe"] = probe
         if probe.get("ok"):
@@ -1420,6 +1588,9 @@ def _stop_session_after_interruption(session_id):
 def _require_idle_browser_sessions():
     sessions = _run_bsk(["--json", "--quiet", "session", "list"], timeout=12)
     payload = _parse_json_output(sessions["stdout"], sessions["stderr"])
+    if (sessions["returncode"] == 2 and isinstance(payload, dict)
+            and "automatic daemon startup is disabled" in str(payload.get("message") or "").lower()):
+        return  # A verified absent IPC listener cannot have active sessions.
     if sessions["returncode"] != 0 or not isinstance(payload, list):
         raise RuntimeError("无法确认浏览器会话状态，尚未更新组件；请在浏览器自动化设置中检查连接后重试。")
     if payload:
@@ -1473,7 +1644,14 @@ def _prepare_bundled_browser_upgrade(status, abort_check=None):
 
 
 def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
+    command_args = [str(item) for item in (args or [])]
     status = _prepare_bundled_browser_upgrade(browser_skill_status(run_diagnostics=False), abort_check)
+    starting_session = command_args[:2] == ["session", "start"]
+    if (starting_session and not status.get("ready") and status.get("installed")
+            and not status.get("needs_update") and not status.get("needs_repair")):
+        # Recover stale offline/service diagnostics at the task boundary only.
+        # Never silently recreate a daemon for a continuing browser session.
+        status = browser_skill_status(run_diagnostics=True, abort_check=abort_check)
     if not status.get("ready"):
         return {
             "status": "incomplete",
@@ -1487,7 +1665,14 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             },
             "component": status,
         }
-    command_args = [str(item) for item in (args or [])]
+    if starting_session:
+        service = _ensure_browser_skill_service(abort_check)
+        if not service.get("ready"):
+            return {"status": "incomplete", "error": {
+                "code": service.get("code"),
+                "message": "本机浏览器服务尚未就绪，请在浏览器自动化设置中启动服务并检查连接。",
+                "detail": service.get("detail"),
+            }}
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 1800))
     started = time.monotonic()
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(

@@ -35,6 +35,11 @@ def _extension_archive_bytes(version=None):
 
 
 class BrowserSkillComponentTests(unittest.TestCase):
+    def setUp(self):
+        service = patch.object(browser_skill_component, "_ensure_browser_skill_service", return_value={"ready": True, "pid": 42})
+        service.start()
+        self.addCleanup(service.stop)
+
     def test_bundled_upgrade_waits_for_active_sessions_and_never_downgrades(self):
         status = {"version": "0.1.8", "needs_update": True, "ready": False}
         with tempfile.TemporaryDirectory() as root, patch.object(browser_skill_component, "browser_skill_root", return_value=os.path.join(root, "component")), \
@@ -92,6 +97,27 @@ class BrowserSkillComponentTests(unittest.TestCase):
             self.assertEqual(options["cwd"], os.path.join(root, "DeepSeekCowork", "browser-automation", "runtime"))
             self.assertTrue(os.path.isdir(options["cwd"]))
             self.assertEqual(options["env"]["BSK_AUTO_UPDATE"], "off")
+            self.assertEqual(options["env"]["BSK_AUTO_START"], "0")
+
+    def test_service_failure_is_cached_without_requesting_reinstallation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self._installed_component(temp_dir)
+            with patch.object(browser_skill_component, "browser_skill_root", return_value=root), \
+                    patch.object(browser_skill_component, "_run_bsk", return_value={
+                        "returncode": 0, "stdout": f"bsk {browser_skill_component.BROWSER_SKILL_VERSION}", "stderr": "",
+                    }) as run, \
+                    patch.object(browser_skill_component, "_ensure_browser_skill_service", return_value={
+                        "ready": False, "code": "browser_service_start_failed", "detail": "IPC access denied",
+                    }):
+                status = browser_skill_component.browser_skill_status(run_diagnostics=True)
+                self.assertEqual(status["state"], "service_unavailable")
+                self.assertFalse(status["needs_repair"])
+                self.assertFalse(status["ready"])
+                self.assertEqual(run.call_count, 1)  # version only; no doctor after service failure
+                cached = browser_skill_component.browser_skill_status()
+                self.assertEqual(cached["state"], "service_unavailable")
+                self.assertFalse(cached["needs_repair"])
+                self.assertEqual(cached["diagnostics"]["service"]["detail"], "IPC access denied")
 
     def _write_artifact(self, temp_dir, content, name="artifact.zip"):
         path = os.path.join(temp_dir, name)

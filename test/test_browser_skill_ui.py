@@ -76,6 +76,32 @@ class BrowserSkillUiTests(unittest.TestCase):
             },
         }
 
+    def test_service_failure_rechecks_without_reinstall_and_keeps_diagnostics(self):
+        manager = _FakeComponentManager({
+            "known": True, "installed": True, "ready": False,
+            "state": "service_unavailable", "needs_repair": False,
+            "diagnostics": {"service": {"detail": "IPC access denied", "ready": False}},
+        })
+        parent = QWidget()
+        parent.component_task_manager = manager
+        page = CapabilityWorkbenchDialog(self._browser_skill(), MagicMock(), MagicMock(), parent, simple_mode=True)
+        try:
+            self.assertEqual(page.browser_setup_primary_btn.text(), "启动服务并检查")
+            self.assertTrue(page.browser_diagnostics_text.isHidden())
+            page.browser_diagnostics_btn.click()
+            self.assertFalse(page.browser_diagnostics_text.isHidden())
+            self.assertIn("IPC access denied", page.browser_diagnostics_text.toPlainText())
+            self.assertTrue(page.browser_diagnostics_text.isReadOnly())
+            page.browser_setup_primary_btn.click()
+            self.assertIn(("check", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
+            self.assertNotIn(("repair", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
+            page.browser_component_task = {"action": "check", "message": "正在启动并验证本机浏览器服务…", "progress": 25}
+            page._render_browser_automation_setup()
+            self.assertEqual(page.browser_setup_description.text(), "正在启动并验证本机浏览器服务…")
+        finally:
+            page.deleteLater()
+            parent.deleteLater()
+
     def test_advanced_enable_routes_to_capability_setup_instead_of_settings(self):
         window = MainWindow.__new__(MainWindow)
         window.current_product_route = MainWindow.PAGE_CAPABILITIES

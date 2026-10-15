@@ -79,20 +79,25 @@ def normalize_workspace_file(path, workspace_dir, *, allow_outside_workspace=Fal
     return os.path.normpath(candidate)
 
 
-def iter_workspace_file_paths(text, workspace_dir, *, allow_outside_workspace=False):
-    results = []
-    seen = set()
+def iter_local_file_references(text):
+    """Raw references in display order, including missing files for diagnostics."""
     masked = _mask_markdown_code(text)
     matches = sorted(
         [*_PATH_PATTERN.finditer(masked), *_MARKDOWN_LINK_PATTERN.finditer(masked)],
         key=lambda match: match.start("path"),
     )
-    for match in matches:
-        path = normalize_workspace_file(match.group("path"), workspace_dir,
+    return [(match.start("path"), match.end("path"), match.group("path")) for match in matches]
+
+
+def iter_workspace_file_paths(text, workspace_dir, *, allow_outside_workspace=False):
+    results = []
+    seen = set()
+    for start, end, reference in iter_local_file_references(text):
+        path = normalize_workspace_file(reference, workspace_dir,
                                         allow_outside_workspace=allow_outside_workspace)
         key = os.path.normcase(path)
         if path and key not in seen:
-            results.append((match.start("path"), match.end("path"), path))
+            results.append((start, end, path))
             seen.add(key)
     return results
 

@@ -91,29 +91,14 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
         self.assertEqual(meta["grill_round_count"], 4)
         self.assertEqual(meta["grill_cycle_count"], 2)
 
-    def test_grill_submit_conflicts_preserve_input_before_any_runtime_start(self):
+    def test_grill_dedicated_workflow_conflict_preserves_input_before_runtime_start(self):
         state = _State()
         state.grill_mode_state = GRILL_MODE_ARMED
         window = MainWindow.__new__(MainWindow)
         window.current_session_id = state.session_id
         window._session_is_busy = lambda _state: False
-        window._extract_agent_mentions = lambda _text: ([{"id": "agent-a"}], "执行任务")
-        window.add_system_toast = MagicMock()
-
-        submitted = MainWindow._submit_session_request(
-            window,
-            state,
-            "@Agent 执行任务",
-            [],
-        )
-
-        self.assertFalse(submitted)
-        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
-        toast_text = window.add_system_toast.call_args.args[0]
-        self.assertIn("输入和附件已保留", toast_text)
-
         window._extract_agent_mentions = lambda _text: ([], "")
-        window.add_system_toast.reset_mock()
+        window._show_conversation_notice = MagicMock()
         submitted = MainWindow._submit_session_request(
             window,
             state,
@@ -123,7 +108,7 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
         )
         self.assertFalse(submitted)
         self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
-        self.assertIn("输入和附件已保留", window.add_system_toast.call_args.args[0])
+        self.assertIn("输入和附件已保留", window._show_conversation_notice.call_args.args[1])
 
     def _window(self, base_dir):
         window = MainWindow.__new__(MainWindow)

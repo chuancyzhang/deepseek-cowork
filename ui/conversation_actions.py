@@ -43,15 +43,16 @@ def reference_button(text, parent=None):
 class ConversationMentionPopover(ProductPopover):
     selected = Signal(str, object)
 
-    def __init__(self, conversations, profiles, workspace, parent):
+    def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False):
         super().__init__(parent, width=420)
         self.conversations = conversations
         self.profiles = profiles
         self.workspace = workspace
         layout = QVBoxLayout(self)
-        self.kind = "会话"
-        self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "召唤智能体")], current=self.kind)
+        self.kind = "智能体" if agents_only else "会话"
+        self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
         layout.addWidget(self.tabs)
+        self.tabs.setVisible(not agents_only)
         self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -69,7 +70,7 @@ class ConversationMentionPopover(ProductPopover):
         self.items.itemActivated.connect(self.choose)
         self.search.returnPressed.connect(lambda: self.choose(self.items.currentItem()))
         bind_theme(self, self.refresh_picker_theme, surface="composer")
-        self.refresh_items()
+        self.change_kind(self.kind)
 
     def refresh_picker_theme(self, _=None):
         self.search.setStyleSheet(f"QLineEdit {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; padding: 6px; }}")
@@ -79,9 +80,9 @@ class ConversationMentionPopover(ProductPopover):
 
     def change_kind(self, kind):
         self.kind = kind
-        self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索智能体名称或描述")
-        self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "选择智能体参与执行当前任务")
-        self.empty.setText("没有匹配的" + kind)
+        self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索专家名称或用途")
+        self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "选择后，本会话后续消息继续使用这位专家")
+        self.empty.setText("没有匹配的" + ("会话" if kind == "会话" else "专家"))
         self.refresh_items()
 
     def refresh_items(self):
@@ -102,6 +103,8 @@ class ConversationMentionPopover(ProductPopover):
                 if query and query not in (title + " " + project + " " + str(record.get("description") or "")).casefold():
                     continue
                 subtitle = record.get("description") or ""
+                if kind != "会话" and record.get("builtin"):
+                    title += " · 内置"
                 if kind == "会话":
                     updated = datetime.fromtimestamp(record.get("updated_at") or 0).strftime("%m-%d %H:%M")
                     subtitle = f"{project} · {updated}" + (" · 已归档" if meta.get("archived") or record.get("status") == "archived" else "")
@@ -168,13 +171,15 @@ class ConversationActionsMixin:
             current = self.input_field.toPlainText()
             if current != text:
                 return
+            if kind == "智能体" and not self.select_conversation_agent(record, state.session_id):
+                return
             selection = self.input_field.textCursor()
             selection.setPosition(position - 1)
             selection.setPosition(position, QTextCursor.KeepAnchor)
             selection.removeSelectedText()
             self.input_field.setTextCursor(selection)
             if kind == "智能体":
-                self._insert_agent_mention(record)
+                self._save_reference_draft(state)
             else:
                 refs = getattr(state, "conversation_refs", [])
                 if not any(ref["session_id"] == record["id"] for ref in refs):

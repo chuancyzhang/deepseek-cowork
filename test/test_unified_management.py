@@ -39,12 +39,12 @@ class UnifiedManagementTests(unittest.TestCase):
     def test_domains_have_one_destination_per_feature(self):
         settings = self.page()
         self.assertNotIn("记忆", settings._page_labels)
-        self.assertNotIn("智能体", settings._page_labels)
+        self.assertNotIn("专家", settings._page_labels)
         self.assertIn("回答偏好", settings._page_labels)
         self.assertTrue(settings.discard_settings_btn.isHidden())
         with patch.object(settings, "_restore_configuration_editors", side_effect=AssertionError("unchanged restore")):
             settings.discard_page_changes()
-        self.assertEqual(self.page("capabilities")._page_labels, ["MCP 服务", "智能体"])
+        self.assertEqual(self.page("capabilities")._page_labels, ["MCP 服务", "专家"])
         self.assertEqual(self.page("projects")._page_labels, ["项目", "对话", "记忆", "归档"])
 
     def test_save_workspace_preserves_external_model_and_agent_changes(self):
@@ -94,7 +94,7 @@ class UnifiedManagementTests(unittest.TestCase):
         self.assertEqual(manager.get_profiles(), [])
         with patch("main.ProductMessageDialog.exec_result", side_effect=AssertionError("untouched prompt")):
             self.assertTrue(manager.leave_profile_editor())
-        self.assertEqual(manager.profiles, [])
+        self.assertTrue(all(profile.get("builtin") for profile in manager.profiles))
         manager.add_profile()
         manager.name_input.setText("中文角色")
         self.assertTrue(page._settings_dirty)
@@ -106,6 +106,7 @@ class UnifiedManagementTests(unittest.TestCase):
     def test_agent_edit_retains_unavailable_capability(self):
         manager = AgentProfileManager([{"id": "a", "name": "角色", "skill_names": ["missing"]}], lambda: [{"name": "available", "description": "可用技能"}])
         self.addCleanup(manager.deleteLater)
+        manager.profile_list.setCurrentRow(next(i for i, profile in enumerate(manager.profiles) if profile["id"] == "a"))
         manager.name_input.setText("新名称")
         self.assertEqual(manager.get_profiles()[0]["skill_names"], ["missing"])
 

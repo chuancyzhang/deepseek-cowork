@@ -93,6 +93,8 @@ from core.chat_storage import ChatStorage
 from core.theme_package import CONTENT_DEFAULTS
 from core.conversation_actions import append_reference_context, branch_display_text
 from ui.conversation_actions import ConversationActionsMixin, reference_button
+from ui.conversation_agents import ConversationAgentsMixin, agent_identity_label
+from core.conversation_agents import builtin_agent_profiles, extract_agent_mentions, normalize_agent_selection, message_agent_identity
 from core.sidebar_projects import visible_sidebar_projects
 from core.chat_save_queue import (
     ChatSaveRequest,
@@ -7059,6 +7061,7 @@ class AgentProfileManager(QWidget):
         super().__init__(parent)
         self.skill_provider = skill_provider
         self.profiles = json.loads(json.dumps(profiles or [], ensure_ascii=False))
+        self.profiles = builtin_agent_profiles(self.profiles) + self.profiles
         self._current_index = -1
         self._loading_profile = False
         self.editing_profile = False
@@ -7073,13 +7076,13 @@ class AgentProfileManager(QWidget):
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(4)
-        title = QLabel("我的智能体")
+        title = QLabel("可用专家")
         title.setStyleSheet(apple_settings_section_title_style())
         title_box.addWidget(title)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
 
-        add_btn = QPushButton("新增智能体")
+        add_btn = QPushButton("新增专家")
         add_btn.setObjectName("PrimaryBtn")
         add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         add_btn.clicked.connect(self.add_profile)
@@ -7092,6 +7095,7 @@ class AgentProfileManager(QWidget):
         toolbar.addWidget(copy_btn)
 
         delete_btn = QPushButton("删除")
+        self.delete_profile_btn = delete_btn
         delete_btn.setObjectName("SecondaryBtn")
         delete_btn.setIcon(qta.icon("fa5s.trash", color=DesignTokens.text_secondary))
         delete_btn.clicked.connect(self.delete_profile)
@@ -7103,10 +7107,10 @@ class AgentProfileManager(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(14)
         self.profile_search = QLineEdit()
-        self.profile_search.setPlaceholderText("搜索智能体名称或用途")
+        self.profile_search.setPlaceholderText("搜索专家名称或用途")
         self.profile_search.textChanged.connect(self._filter_profiles)
         layout.addWidget(self.profile_search)
-        self.profile_back = QPushButton("← 返回智能体列表")
+        self.profile_back = QPushButton("← 返回专家列表")
         self.profile_back.setStyleSheet(product_button_style("secondary"))
         self.profile_back.setMinimumHeight(36)
         self.profile_back.clicked.connect(self.leave_profile_editor)
@@ -7117,7 +7121,7 @@ class AgentProfileManager(QWidget):
         self.profile_list = QListWidget()
         self.profile_list.setMinimumWidth(0)
         self.profile_list.itemActivated.connect(lambda *_: self.open_profile_editor())
-        self.profile_list.setToolTip("双击或按 Enter 编辑智能体；在对话中选择智能体即可使用")
+        self.profile_list.setToolTip("双击或按 Enter 查看或编辑专家；内置专家可复制后定制")
         self.profile_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.profile_list.currentRowChanged.connect(self._on_profile_changed)
         body.addWidget(self.profile_list)
@@ -7129,14 +7133,18 @@ class AgentProfileManager(QWidget):
         editor_layout.setContentsMargins(18, 18, 18, 18)
         editor_layout.setSpacing(14)
         body.addWidget(editor_card, 1)
-        self.profile_empty = QLabel("还没有智能体。点击“新增智能体”，保存可重复使用的工作角色。")
+        self.builtin_profile_note = QLabel("内置专家由应用维护，可直接使用；点击“复制”可创建自己的版本。")
+        self.builtin_profile_note.setWordWrap(True)
+        self.builtin_profile_note.setStyleSheet(apple_caption_style())
+        editor_layout.addWidget(self.builtin_profile_note)
+        self.profile_empty = QLabel("还没有专家。点击“新增专家”，保存可重复使用的工作角色。")
         self.profile_empty.setWordWrap(True)
         body.addWidget(self.profile_empty, 1)
 
         form = QFormLayout()
         form.setSpacing(12)
         configure_responsive_form_layout(form)
-        self.enabled_check = QCheckBox("启用这个智能体")
+        self.enabled_check = QCheckBox("启用这个专家")
         self.enabled_check.toggled.connect(self._sync_current_profile_from_fields)
         form.addRow(build_form_row_label("状态"), self.enabled_check)
 
@@ -7156,7 +7164,7 @@ class AgentProfileManager(QWidget):
         editor_layout.addWidget(prompt_label)
         self.system_prompt_edit = QTextEdit()
         self.system_prompt_edit.setFixedHeight(150)
-        self.system_prompt_edit.setPlaceholderText("定义这个智能体的角色、输出风格、判断标准和工作边界")
+        self.system_prompt_edit.setPlaceholderText("定义这个专家的角色、输出风格、判断标准和工作边界")
         self.system_prompt_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=10))
         self.system_prompt_edit.textChanged.connect(self._sync_current_profile_from_fields)
         editor_layout.addWidget(self.system_prompt_edit)
@@ -7169,7 +7177,7 @@ class AgentProfileManager(QWidget):
         self.skill_list.itemChanged.connect(lambda _item: self._sync_current_profile_from_fields())
         editor_layout.addWidget(self.skill_list, 1)
 
-        helper = QLabel("勾选后，这个智能体只会使用这些已启用的能力，让会话更稳定，也更容易控制边界。")
+        helper = QLabel("勾选后，这个专家只会使用这些已启用的能力，让会话更稳定，也更容易控制边界。")
         helper.setWordWrap(True)
         helper.setStyleSheet(apple_settings_inline_note_style())
         editor_layout.addWidget(helper)
@@ -7270,10 +7278,15 @@ class AgentProfileManager(QWidget):
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
         for profile in self.profiles:
-            name = str(profile.get("name") or "未命名智能体").strip()
+            name = str(profile.get("name") or "未命名专家").strip()
             enabled = bool(profile.get("enabled", True))
             label = name if enabled else f"{name} (已停用)"
-            item = QListWidgetItem(f"{label}\n{profile.get('description') or '尚未填写用途'} · 已选 {len(profile.get('skill_names') or [])} 项能力")
+            if profile.get("builtin"):
+                label += " · 内置"
+            description = profile.get('description') or '尚未填写用途'
+            if not profile.get("builtin"):
+                description += f" · 已选 {len(profile.get('skill_names') or [])} 项能力"
+            item = QListWidgetItem(f"{label}\n{description}")
             item.setSizeHint(QSize(0, 70))
             item.setData(Qt.UserRole, profile.get("id"))
             item.setToolTip(profile.get("description") or "")
@@ -7286,6 +7299,15 @@ class AgentProfileManager(QWidget):
             self.profile_editor.setVisible(index >= 0 and self.editing_profile)
             self.profile_empty.setVisible(index < 0)
             profile = self.profiles[index] if 0 <= index < len(self.profiles) else {}
+            builtin = bool(profile.get("builtin"))
+            self.builtin_profile_note.setVisible(builtin)
+            self.delete_profile_btn.setEnabled(bool(profile) and not builtin)
+            self.enabled_check.setEnabled(not builtin)
+            self.name_input.setReadOnly(builtin)
+            self.description_input.setReadOnly(builtin)
+            self.system_prompt_edit.setReadOnly(builtin)
+            self.skill_list.setEnabled(not builtin)
+            self.profile_back.setToolTip("内置专家由应用维护，可复制后定制" if builtin else "返回专家列表")
             self.enabled_check.setChecked(bool(profile.get("enabled", True)))
             self.name_input.setText(str(profile.get("name") or ""))
             self.description_input.setText(str(profile.get("description") or ""))
@@ -7315,9 +7337,11 @@ class AgentProfileManager(QWidget):
         if index < 0 or index >= len(self.profiles):
             return
         profile = self.profiles[index]
+        if profile.get("builtin"):
+            return
         updated = {
             "enabled": self.enabled_check.isChecked(),
-            "name": self.name_input.text().strip() or "未命名智能体",
+            "name": self.name_input.text().strip() or "未命名专家",
             "description": self.description_input.text().strip(),
             "system_prompt": self.system_prompt_edit.toPlainText().strip(),
             "skill_names": self._selected_skill_names_from_widgets(),
@@ -7345,7 +7369,7 @@ class AgentProfileManager(QWidget):
         now = int(time.time())
         profile = {
             "id": f"agent-{uuid.uuid4().hex[:8]}",
-            "name": "新智能体",
+            "name": "新专家",
             "description": "",
             "system_prompt": "",
             "skill_names": [],
@@ -7365,9 +7389,11 @@ class AgentProfileManager(QWidget):
         if index < 0 or index >= len(self.profiles):
             return
         source = json.loads(json.dumps(self.profiles[index], ensure_ascii=False))
+        for key in ("builtin", "image_only_task", "default_output_filename", "auto_preview_extensions"):
+            source.pop(key, None)
         now = int(time.time())
         source["id"] = f"agent-{uuid.uuid4().hex[:8]}"
-        source["name"] = f"{source.get('name') or '智能体'} 副本"
+        source["name"] = f"{source.get('name') or '专家'} 副本"
         source["created_at"] = now
         source["updated_at"] = now
         self.profiles.insert(index + 1, source)
@@ -7378,12 +7404,12 @@ class AgentProfileManager(QWidget):
 
     def delete_profile(self):
         index = self.profile_list.currentRow()
-        if index < 0 or index >= len(self.profiles):
+        if index < 0 or index >= len(self.profiles) or self.profiles[index].get("builtin"):
             return
         reply = QMessageBox.question(
             self,
-            "删除智能体",
-            "确定删除这个智能体模板吗？",
+            "删除专家",
+            "确定删除这个专家模板吗？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -7408,7 +7434,7 @@ class AgentProfileManager(QWidget):
     def get_profiles(self):
         profiles = []
         for profile in self.profiles:
-            if self._is_untouched_draft(profile):
+            if profile.get("builtin") or self._is_untouched_draft(profile):
                 continue
             name = str(profile.get("name") or "").strip()
             if not name:
@@ -11532,7 +11558,7 @@ class SettingsDialog(QDialog):
         def add_settings_page(label, icon_name, page):
             allowed = {
                 "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "更新与关于"},
-                "capabilities": {"MCP 服务", "智能体"},
+                "capabilities": {"MCP 服务", "专家"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
             page.setParent(self.content_stack)
@@ -11576,7 +11602,7 @@ class SettingsDialog(QDialog):
         appearance_layout.addWidget(self.theme_settings_panel)
 
         agent_page, agent_layout = make_scroll_page(
-            "智能体",
+            "专家",
             "把重复出现的工作角色预设下来，后续在会话里可以直接复用。",
         )
         skill_provider = (
@@ -11609,7 +11635,7 @@ class SettingsDialog(QDialog):
 
         personality_group, personality_layout = build_settings_surface(
             "回答个性与偏好",
-            "描述 AI 如何与你相处、表达和做判断；具体智能体角色会叠加在这层偏好之上。",
+            "描述 AI 如何与你相处、表达和做判断；具体专家角色会叠加在这层偏好之上。",
             radius=8,
             show_subtitle=True,
         )
@@ -12138,7 +12164,7 @@ class SettingsDialog(QDialog):
             self.account_connections_page = AccountConnectionsPage(config_manager=self.config_manager)
             add_settings_page("账号与连接", "fa5s.user-circle", self.account_connections_page)
         add_settings_page("MCP 服务", "fa5s.plug", mcp_page)
-        add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
+        add_settings_page("专家", "fa5s.user-astronaut", agent_page)
         add_settings_page("记忆", "fa5s.brain", memory_page)
         add_settings_page("工作区与存储", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
@@ -12323,6 +12349,7 @@ class SettingsDialog(QDialog):
             from core.data_security import read_config
             self.data_security_panel.set_value(read_config(self.config_manager))
             self.agent_profile_manager.profiles = json.loads(json.dumps(config["agent_profiles"]))
+            self.agent_profile_manager.profiles = builtin_agent_profiles(self.agent_profile_manager.profiles) + self.agent_profile_manager.profiles
             self.agent_profile_manager._current_index = -1
             self.agent_profile_manager._refresh_profile_list()
             self.agent_profile_manager.profile_list.setCurrentRow(0)
@@ -12539,6 +12566,7 @@ class SettingsDialog(QDialog):
         event.accept()
 
     def select_initial_page(self, initial_page_label):
+        initial_page_label = "专家" if initial_page_label == "智能体" else initial_page_label
         initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于"}.get(initial_page_label, initial_page_label)
         if not initial_page_label:
             self.nav_list.setCurrentRow(0)
@@ -14751,7 +14779,7 @@ class SkillsCenterDialog(QDialog):
         apply_product_dialog(self, "SkillsCenterDialog")
 
         root = QVBoxLayout(self)
-        self.section_control = ProductSegmentedControl([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "智能体")], current="skills")
+        self.section_control = ProductSegmentedControl([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "专家")], current="skills")
         self.section_control.currentChanged.connect(self.select_section)
         root.addWidget(self.section_control, 0, Qt.AlignLeft)
         self.section_stack = QStackedWidget()
@@ -14877,7 +14905,7 @@ class SkillsCenterDialog(QDialog):
             QTimer.singleShot(0, self._probe_browser_component_status)
 
     def select_section(self, section):
-        section = {"MCP": "mcp", "MCP 服务": "mcp", "智能体": "agents"}.get(section, section)
+        section = {"MCP": "mcp", "MCP 服务": "mcp", "专家": "agents"}.get(section, section)
         if self.management_page and not self.management_page._confirm_discard_settings():
             self.section_control.set_current(self.current_section)
             return False
@@ -14895,7 +14923,7 @@ class SkillsCenterDialog(QDialog):
                 self.management_page.settings_search.hide()
                 self.management_page.settings_title.hide()
                 self.section_stack.addWidget(self.management_page)
-            self.management_page.select_initial_page("MCP 服务" if section == "mcp" else "智能体")
+            self.management_page.select_initial_page("MCP 服务" if section == "mcp" else "专家")
             self.section_stack.setCurrentWidget(self.management_page)
         self.current_section = section
         self.section_control.set_current(section)
@@ -20562,7 +20590,7 @@ class AgentModuleDialog(QDialog):
         self.agent_profiles = list(agent_profiles or [])
         self.selected_builtin = ""
         self.selected_profile = None
-        self.setWindowTitle("智能体")
+        self.setWindowTitle("专家")
         self.setModal(True)
         self.resize(640, 560)
         apply_product_dialog(self, "AgentModuleDialog")
@@ -20578,26 +20606,26 @@ class AgentModuleDialog(QDialog):
         header.addWidget(icon, 0, Qt.AlignTop)
         title_box = QVBoxLayout()
         title_box.setSpacing(4)
-        title = QLabel("智能体")
+        title = QLabel("专家")
         title.setStyleSheet(f"font-size: 20px; font-weight: 600; color: {DesignTokens.text_primary};")
-        desc = QLabel("选择内置智能体或把自定义智能体加入当前输入。")
+        desc = QLabel("选择本会话持续使用的专家。")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
         title_box.addWidget(title)
         title_box.addWidget(desc)
         header.addLayout(title_box, 1)
-        manage_btn = QPushButton("管理智能体")
+        manage_btn = QPushButton("管理专家")
         manage_btn.setObjectName("SecondaryBtn")
         manage_btn.clicked.connect(self._open_agent_settings)
         header.addWidget(manage_btn, 0, Qt.AlignTop)
         layout.addLayout(header)
 
-        builtin_title = QLabel("内置智能体")
+        builtin_title = QLabel("内置专家")
         builtin_title.setStyleSheet(apple_settings_section_title_style())
         layout.addWidget(builtin_title)
         layout.addWidget(self._create_ppt_agent_card())
 
-        custom_title = QLabel("自定义智能体")
+        custom_title = QLabel("自定义专家")
         custom_title.setStyleSheet(apple_settings_section_title_style())
         layout.addWidget(custom_title)
         layout.addWidget(self._create_custom_agent_list(), 1)
@@ -20659,13 +20687,13 @@ class AgentModuleDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         if not self.agent_profiles:
-            empty = QLabel("暂无可用自定义智能体。可在设置里创建，也可以先使用内置 PPT 助手。")
+            empty = QLabel("暂无可用自定义专家。可在设置里创建，也可以先使用内置 PPT 助手。")
             empty.setWordWrap(True)
             empty.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
             layout.addWidget(empty)
             return container
         for profile in self.agent_profiles:
-            button = QPushButton(str(profile.get("name") or "智能体"))
+            button = QPushButton(str(profile.get("name") or "专家"))
             button.setCursor(Qt.PointingHandCursor)
             button.setMinimumHeight(42)
             button.setStyleSheet(apple_button_style("ghost", radius=14, align="left"))
@@ -20681,7 +20709,7 @@ class AgentModuleDialog(QDialog):
         parent = self.parent()
         self.reject()
         if parent is not None and hasattr(parent, "open_settings"):
-            parent.open_settings("智能体")
+            parent.open_settings("专家")
 
     def _select_ppt_agent(self):
         self.selected_builtin = "ppt_agent"
@@ -22260,6 +22288,8 @@ class AssistantTurnGroup(QFrame):
         self.group_layout.setContentsMargins(0, 0, 0, 0)
         self.group_layout.setSpacing(0)
         self.group_layout.setAlignment(Qt.AlignTop)
+        self.agent_name_label = agent_identity_label(None, self)
+        self.group_layout.addWidget(self.agent_name_label)
         self.process_disclosure = QPushButton(self)
         self.process_disclosure.setObjectName("HistoricalProcessDisclosure")
         self.process_disclosure.setCheckable(True)
@@ -22288,6 +22318,11 @@ class AssistantTurnGroup(QFrame):
                 line.setStyleSheet(
                     f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.chat_border}; border: none; }}"
                 )
+
+    def set_agent_identity(self, identity):
+        name = str((identity or {}).get("name") or "")
+        self.agent_name_label.setText(name)
+        self.agent_name_label.setVisible(bool(name))
 
     def add_stage(self, bubble, stage_id=None):
         if bubble is None:
@@ -22545,7 +22580,7 @@ class SummonedAgentProcessBlock(QFrame):
     def __init__(self, agent_id, agent_name, group_id="", parent=None):
         super().__init__(parent)
         self.agent_id = str(agent_id or "")
-        self.agent_name = str(agent_name or "智能体").strip() or "智能体"
+        self.agent_name = str(agent_name or "专家").strip() or "专家"
         self.status = "pending"
         self.setObjectName("SummonedAgentProcessBlock")
         self.setFrameShape(QFrame.NoFrame)
@@ -25854,6 +25889,11 @@ class SessionState:
         self.grill_cycle_count = 0
         self.grill_execution_confirmed = False
         self.selected_skill_names = []
+        self.conversation_agent = None
+        self.active_turn_agent = None
+        self.active_turn_agent_profile = None
+        self.agent_preview_runs = set()
+        self.pending_agent_preview = None
         self.knowledge_refs = []
         self.selected_model_id = ""
         self.workflow_mode = ""
@@ -27511,7 +27551,7 @@ class MemoryCenterDialog(QDialog):
         layout.setSpacing(14)
         title = QLabel("记忆")
         title.setStyleSheet(apple_section_title_style(20))
-        subtitle = QLabel("管理全局与当前工作区的长期摘要，以及所有智能体共享的性格底色。")
+        subtitle = QLabel("管理全局与当前工作区的长期摘要，以及所有专家共享的性格底色。")
         subtitle.setStyleSheet(apple_caption_style())
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -27557,7 +27597,7 @@ class MemoryCenterDialog(QDialog):
         soul_page = QWidget()
         soul_layout = QVBoxLayout(soul_page)
         soul_layout.setContentsMargins(12, 16, 12, 12)
-        soul_hint = QLabel("描述 AI 是怎样的性格、如何与你相处以及表达偏好。具体智能体角色会叠加在这层性格之上。")
+        soul_hint = QLabel("描述 AI 是怎样的性格、如何与你相处以及表达偏好。具体专家角色会叠加在这层性格之上。")
         soul_hint.setWordWrap(True)
         soul_hint.setStyleSheet(apple_caption_style())
         soul_layout.addWidget(soul_hint)
@@ -28200,7 +28240,7 @@ class ThemePreviewSafetyBar(QFrame):
         self.setVisible(True)
 
 
-class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
+class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAgentsMixin, QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
     skill_catalog_changed_ui_signal = Signal(object, object)
 
@@ -29749,12 +29789,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self.grill_mode_badge.clicked.connect(self.toggle_grill_mode)
         self.grill_mode_badge.closeClicked.connect(self.toggle_grill_mode)
 
-        self.agent_picker_btn = QPushButton(" Agent")
+        self.agent_picker_btn = SessionContextChip("专家")
+        self.agent_picker_btn.setMenuIndicatorVisible(False)
         self.agent_picker_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
-        self.agent_picker_btn.setToolTip("为当前输入添加智能体")
-        self.agent_picker_btn.setCursor(Qt.PointingHandCursor)
-        self.agent_picker_btn.setFixedHeight(30)
-        self.agent_picker_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.agent_picker_btn.setToolTip("选择本会话使用的专家")
+        self.agent_picker_btn.setCloseToolTip("关闭专家，后续消息使用普通助手")
+        self.agent_picker_btn.closeClicked.connect(lambda: self.select_conversation_agent())
         self.agent_picker_btn.clicked.connect(self.show_agent_picker)
 
         self.model_select_btn = QToolButton()
@@ -29866,21 +29906,31 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self.prompt_context_group = QWidget(self.prompt_toolbar_container)
         self.prompt_context_group.setObjectName("ComposerContextToolbar")
         self.prompt_context_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        prompt_context_layout = QHBoxLayout(self.prompt_context_group)
+        prompt_context_layout = QBoxLayout(QBoxLayout.LeftToRight, self.prompt_context_group)
+        self.prompt_context_layout = prompt_context_layout
         prompt_context_layout.setContentsMargins(0, 0, 0, 0)
         prompt_context_layout.setSpacing(8)
-        prompt_context_layout.addWidget(self.tool_menu_btn)
-        prompt_context_layout.addWidget(self.agent_picker_btn)
-        prompt_context_layout.addWidget(self.selected_skills_badge)
+        primary_context_layout = QHBoxLayout()
+        primary_context_layout.setContentsMargins(0, 0, 0, 0)
+        primary_context_layout.setSpacing(8)
+        primary_context_layout.addWidget(self.tool_menu_btn)
+        primary_context_layout.addWidget(self.agent_picker_btn)
+        primary_context_layout.addStretch(1)
+        prompt_context_layout.addLayout(primary_context_layout)
+        secondary_context_layout = QHBoxLayout()
+        secondary_context_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_context_layout.setSpacing(8)
+        secondary_context_layout.addWidget(self.selected_skills_badge)
         self.knowledge_refs_button = QPushButton("资料引用")
         self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
         self.knowledge_refs_button.clicked.connect(self.edit_knowledge_references)
         self.knowledge_refs_button.hide()
-        prompt_context_layout.addWidget(self.knowledge_refs_button)
-        prompt_context_layout.addWidget(self.grill_mode_badge)
-        prompt_context_layout.addWidget(self.project_selector_btn)
-        prompt_context_layout.addWidget(self.loop_hint)
-        prompt_context_layout.addStretch(1)
+        secondary_context_layout.addWidget(self.knowledge_refs_button)
+        secondary_context_layout.addWidget(self.grill_mode_badge)
+        secondary_context_layout.addWidget(self.project_selector_btn)
+        secondary_context_layout.addWidget(self.loop_hint)
+        secondary_context_layout.addStretch(1)
+        prompt_context_layout.addLayout(secondary_context_layout, 1)
 
         self.prompt_action_group = QWidget(self.prompt_toolbar_container)
         self.prompt_action_group.setObjectName("ComposerActionToolbar")
@@ -30017,6 +30067,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         log_startup_stage("main_window_init_complete")
 
     def _apply_composer_toolbar_layout(self, compact):
+        self.prompt_context_layout.setDirection(
+            QBoxLayout.TopToBottom if self.input_card.width() < 420 else QBoxLayout.LeftToRight
+        )
         mode = "compact" if compact else "wide"
         if self._composer_toolbar_mode == mode:
             return
@@ -30255,9 +30308,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self.agent_picker_btn.setIcon(
             qta.icon("fa5s.user-astronaut", color=DesignTokens.icon_secondary)
         )
-        self.agent_picker_btn.setStyleSheet(
-            apple_button_style("ghost", radius=DesignTokens.radius_sm)
-        )
+        self.agent_picker_btn.refresh_theme()
         model_style = (
             f"QToolButton {{ border: 1px solid transparent; background: transparent; "
             f"color: {DesignTokens.composer_text_muted}; "
@@ -31585,6 +31636,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self.conversation_column.setFixedWidth(conversation_width)
         self.session_tabs.setFixedWidth(conversation_width)
         self.input_card.setFixedWidth(conversation_width)
+        self._fit_conversation_agent_chip()
         self._apply_composer_toolbar_layout(
             compact=conversation_width < DesignTokens.conversation_min_width
         )
@@ -32157,7 +32209,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
     def _prompt_tool_menu_entries(self):
         return [
             ("add_files", "添加文件"),
-            ("add_agent", "添加智能体"),
+            ("add_agent", "添加专家"),
             ("select_skills", "指定能力"),
             ("grill_mode", "拷问模式"),
         ]
@@ -37682,6 +37734,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self.refresh_context_badges(session_id)
         self.refresh_selected_skill_controls(session_id)
         self.refresh_grill_mode_controls(session_id)
+        self.refresh_conversation_agent_controls(session_id)
         self.refresh_model_selector()
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
@@ -37771,6 +37824,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
         self.refresh_grill_mode_controls(state.session_id)
+        self.refresh_conversation_agent_controls(state.session_id)
         self.refresh_project_selector(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -38068,6 +38122,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         state.grill_cycle_count = 0
         state.grill_execution_confirmed = False
         state.selected_skill_names = []
+        state.conversation_agent = None
+        state.active_turn_agent = None
+        state.active_turn_agent_profile = None
+        state.agent_preview_runs = set()
+        state.pending_agent_preview = None
         state.selected_model_id = ""
         state.knowledge_refs = []
         state.workflow_mode = ""
@@ -38266,6 +38325,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
             or message.get("tool_calls")
         )
         summary = HistoricalAssistantSummary(process_stage_count, tool_count)
+        identity = message_agent_identity(state.messages, final_message or next(iter(assistant_messages), {}))
+        if identity:
+            summary.layout().insertWidget(0, agent_identity_label(identity, summary))
         summary.span_start = int(start)
         summary.span_end = int(end)
         summary.message_ids = [str(message.get("id") or "") for message in messages if message.get("id")]
@@ -38992,6 +39054,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         state.selected_skill_names = normalize_selected_skill_names(
             conversation_meta.get("selected_skill_names")
         )
+        state.conversation_agent = normalize_agent_selection(conversation_meta.get("conversation_agent"))
+        source = next((m for m in reversed(state.messages) if m.get("role") == "user"
+                       and "conversation_agent" in (m.get("meta") or {})
+                       and not (m.get("meta") or {}).get("same_turn_guidance")), {})
+        state.active_turn_agent = normalize_agent_selection((source.get("meta") or {}).get("conversation_agent"))
+        state.active_turn_agent_profile = copy.deepcopy((source.get("meta") or {}).get("conversation_agent_profile"))
         state.knowledge_refs = copy.deepcopy(conversation_meta.get("knowledge_refs") or [])
         update_draft = conversation_meta.get("update_composer") or {}
         if update_draft and not state.composer_draft:
@@ -41997,6 +42065,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
                     "retry_of_run_id": run_id,
                     "retry_of_user_message_id": original_message_id,
                     "conversation_refs": copy.deepcopy((original_message.get("meta") or {}).get("conversation_refs") or []),
+                    "conversation_agent": copy.deepcopy((original_message.get("meta") or {}).get("conversation_agent")),
+                    "conversation_agent_profile": copy.deepcopy((original_message.get("meta") or {}).get("conversation_agent_profile")),
                     "display_content": "重试上一轮未完成的请求",
                     "ppt_task_id": retry_task_id,
                     "ppt_agent_internal_stage": retry_internal_stage,
@@ -42351,6 +42421,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
                             group_id = current_group_id
                     if current_group is None or group_id != current_group_id:
                         current_group = create_group(group_id)
+                        current_group.set_agent_identity(message_agent_identity(state.messages, message))
                         current_group_id = group_id
                     if not stage_id:
                         stage_id = f"{group_id}:stage-{len(current_group.stage_bubbles) + 1}"
@@ -43020,6 +43091,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         meta.pop("update_composer", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
+        selection = normalize_agent_selection(getattr(state, "conversation_agent", None))
+        if selection is not None:
+            meta["conversation_agent"] = selection
+        else:
+            meta.pop("conversation_agent", None)
         meta["knowledge_refs"] = copy.deepcopy(getattr(state, "knowledge_refs", []))
         refs = copy.deepcopy(getattr(state, "conversation_refs", []))
         if refs:
@@ -43076,7 +43152,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
             getattr(state, "persisted_conversation_meta", {}) or {}
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and not getattr(state, "knowledge_refs", []) and not getattr(state, "conversation_refs", []) and not self._session_base_meta(state).get("composer_conversation_refs"):
+        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and getattr(state, "conversation_agent", None) is None and not getattr(state, "knowledge_refs", []) and not getattr(state, "conversation_refs", []) and not self._session_base_meta(state).get("composer_conversation_refs"):
             return None
         title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
@@ -43451,6 +43527,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
                 kind="chat_save",
                 revision=revision,
             )
+            self._flush_agent_preview_after_save(state, revision)
             pending_bubble = getattr(state, "last_agent_bubble", None)
             pending_revision = int(
                 getattr(pending_bubble, "_pending_chat_save_revision", 0) or 0
@@ -46561,7 +46638,7 @@ a {{ overflow-wrap: anywhere; }}
             settings_page.select_initial_page("记忆")
             self.main_page_stack.setCurrentWidget(settings_page)
         self.workspace_title_label.setText("项目与对话")
-        self.workspace_subtitle_label.setText("管理模型、工作区、智能体、记忆与系统偏好。")
+        self.workspace_subtitle_label.setText("管理模型、工作区、专家、记忆与系统偏好。")
 
     def _show_memory_update_surface(self):
         dialog = getattr(self, "memory_update_dialog", None)
@@ -46853,7 +46930,7 @@ a {{ overflow-wrap: anywhere; }}
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
-            self.PAGE_CAPABILITIES: ("能力", "技能、MCP 服务与智能体。"),
+            self.PAGE_CAPABILITIES: ("能力", "技能、MCP 服务与专家。"),
             self.PAGE_PROJECTS: ("项目与对话", "管理项目、历史、记忆和归档。"),
             self.PAGE_FAVORITES: ("常用", "保存经常重复的任务，下次直接开始或按时自动运行。"),
             self.PAGE_KNOWLEDGE: ("资料库", "使用已有知识完成工作，再将有价值的产物保存回来。"),
@@ -46938,13 +47015,14 @@ a {{ overflow-wrap: anywhere; }}
             self.add_system_toast("权限保存失败，已保留原设置。请重试。", "error")
 
     def open_settings(self, initial_page_label=None, target_component=None):
+        initial_page_label = "专家" if initial_page_label == "智能体" else initial_page_label
         if initial_page_label == "权限":
             if self.show_product_page(self.PAGE_CONVERSATION):
                 self.composer_permission.setFocus()
             return True
         if initial_page_label in {"个性与记忆", "记忆", "归档"}:
             return self.open_project_management("归档" if initial_page_label == "归档" else "记忆")
-        if initial_page_label in {"MCP", "MCP 服务", "智能体"}:
+        if initial_page_label in {"MCP", "MCP 服务", "专家"}:
             return self.open_skills_center() and self.product_pages[self.PAGE_CAPABILITIES].select_section(initial_page_label)
         opened = self.show_product_page(self.PAGE_SETTINGS, section=initial_page_label)
         if not opened or not target_component:
@@ -47041,25 +47119,11 @@ a {{ overflow-wrap: anywhere; }}
             ]
             profiles.append(normalized)
         profiles.sort(key=lambda item: str(item.get("name") or "").lower())
-        return profiles
+        return builtin_agent_profiles(self.config_manager.get_agent_profiles()) + profiles
 
     def _insert_agent_mention(self, profile):
-        if not profile or not hasattr(self, "input_field"):
-            return
-        cursor = self.input_field.textCursor()
-        mention = f"@{profile.get('name') or ''}".strip()
-        if not mention or mention == "@":
-            return
-        prefix = ""
-        suffix = " "
-        if cursor.position() > 0:
-            cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, 1)
-            previous_char = cursor.selectedText()
-            cursor.clearSelection()
-            if previous_char and not previous_char.isspace():
-                prefix = " "
-        cursor.insertText(prefix + mention + suffix)
-        self.input_field.setFocus()
+        # Legacy callers now select the same conversation-scoped role.
+        return self.select_conversation_agent(profile)
 
     def show_agent_mention_menu(self):
         profiles = self._available_agent_profiles()
@@ -47069,7 +47133,7 @@ a {{ overflow-wrap: anywhere; }}
         for profile in profiles:
             skill_count = len(profile.get("skill_names") or [])
             subtitle = profile.get("description") or (f"{skill_count} 个能力" if skill_count else "未限制能力")
-            action = QAction(profile.get("name") or "智能体", self)
+            action = QAction(profile.get("name") or "专家", self)
             action.setToolTip(subtitle)
             action.triggered.connect(lambda checked=False, item=profile: self._insert_agent_mention(item))
             menu.addAction(action)
@@ -47078,48 +47142,21 @@ a {{ overflow-wrap: anywhere; }}
         menu.exec(global_pos)
 
     def show_agent_picker(self):
-        menu = create_styled_menu(self)
-        ppt_action = QAction(
-            qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary),
-            "PPT 助手",
-            self,
-        )
-        ppt_action.setToolTip("从主题、资料或模板生成演示文稿")
-        ppt_action.triggered.connect(self.open_ppt_agent_mode)
-        menu.addAction(ppt_action)
-        profiles = self._available_agent_profiles()
-        if profiles:
-            menu.addSeparator()
-            for profile in profiles:
-                action = QAction(
-                    qta.icon("fa5s.user-astronaut", color=DesignTokens.text_secondary),
-                    str(profile.get("name") or "智能体"),
-                    self,
-                )
-                action.setToolTip(str(profile.get("description") or ""))
-                action.triggered.connect(lambda checked=False, item=profile: self._insert_agent_mention(item))
-                menu.addAction(action)
-        menu.addSeparator()
-        manage = QAction("管理智能体…", self)
-        manage.triggered.connect(lambda: self.open_settings("智能体"))
-        menu.addAction(manage)
-        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
-        anchor = getattr(self, "agent_picker_btn", self.input_field)
-        menu.exec(anchor.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+        self.show_conversation_agent_picker()
 
     def _populate_agent_menu(self, menu):
         profiles = self._available_agent_profiles()
         if not profiles:
-            empty_action = QAction("暂无可用智能体", self)
+            empty_action = QAction("暂无可用专家", self)
             empty_action.setEnabled(False)
             menu.addAction(empty_action)
             settings_action = QAction("打开设置", self)
-            settings_action.triggered.connect(lambda: self.open_settings("智能体"))
+            settings_action.triggered.connect(lambda: self.open_settings("专家"))
             menu.addAction(settings_action)
             return
         for profile in profiles:
             skill_count = len(profile.get("skill_names") or [])
-            label = profile.get("name") or "智能体"
+            label = profile.get("name") or "专家"
             if skill_count:
                 label = f"{label} ({skill_count})"
             action = QAction(label, self)
@@ -47128,31 +47165,7 @@ a {{ overflow-wrap: anywhere; }}
             menu.addAction(action)
 
     def _extract_agent_mentions(self, text):
-        source = str(text or "")
-        profiles = self._available_agent_profiles()
-        if not source or not profiles:
-            return [], source
-        mentions = []
-        consumed = set()
-        cleaned = source
-        sorted_profiles = sorted(
-            profiles,
-            key=lambda item: len(str(item.get("name") or "")),
-            reverse=True,
-        )
-        for profile in sorted_profiles:
-            name = str(profile.get("name") or "").strip()
-            if not name:
-                continue
-            pattern = re.compile(rf"@{re.escape(name)}(?=$|[\s,，.。!！?？:：;；])")
-            if not pattern.search(cleaned):
-                continue
-            if profile.get("id") not in consumed:
-                mentions.append(profile)
-                consumed.add(profile.get("id"))
-            cleaned = pattern.sub("", cleaned)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-        return mentions, cleaned
+        return extract_agent_mentions(text, self._available_agent_profiles())
 
     def _selected_skill_display_names(self, selected_skill_names):
         selected = normalize_selected_skill_names(selected_skill_names)
@@ -49409,6 +49422,11 @@ a {{ overflow-wrap: anywhere; }}
             template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
         effective_workspace_dir = self._ensure_session_workspace(state)
         effective_model_id = str(task_model_id or self._model_id_for_state(state) or "").strip()
+        agent_context = self._conversation_agent_run_context(state, effective_workspace_dir)
+        agent_profile = getattr(state, "active_turn_agent_profile", None) or {}
+        if agent_profile.get("skill_names"):
+            effective_skill_names = normalize_selected_skill_names(effective_skill_names + agent_profile["skill_names"])
+            agent_context["allowed_skill_names"] = effective_skill_names
         from core.long_context import desktop_policy
         context_policy = desktop_policy(self.config_manager, excluded=bool(
             getattr(state, "favorite_run_id", "") or ppt_agent_internal_stage
@@ -49417,6 +49435,7 @@ a {{ overflow-wrap: anywhere; }}
         return normalize_run_context(
             {
                 "mode": mode,
+                **agent_context,
                 "clarify_mode_state": normalize_clarify_phase(
                     getattr(state, "clarify_mode_state", CLARIFY_MODE_EXPLORING),
                     default=CLARIFY_MODE_EXPLORING,
@@ -49524,7 +49543,7 @@ a {{ overflow-wrap: anywhere; }}
         )
 
     def _build_summoned_agent_name(self, profile):
-        base_name = str(profile.get("name") or "智能体").strip() or "智能体"
+        base_name = str(profile.get("name") or "专家").strip() or "专家"
         return f"{base_name}-{uuid.uuid4().hex[:4]}"
 
     def _create_summoned_agent_process(
@@ -49538,7 +49557,7 @@ a {{ overflow-wrap: anywhere; }}
             return None
         agent_id = str(descriptor.get("agent_id") or descriptor.get("id") or "").strip()
         if not agent_id:
-            raise ValueError("创建智能体过程块需要 agent_id。")
+            raise ValueError("创建专家过程块需要 agent_id。")
         existing = (getattr(state, "summoned_agent_projections", {}) or {}).get(agent_id)
         if existing and _qt_object_alive(existing.get("block")):
             return existing
@@ -49546,8 +49565,8 @@ a {{ overflow-wrap: anywhere; }}
             descriptor.get("agent_profile_name")
             or descriptor.get("agent_name")
             or descriptor.get("name")
-            or "智能体"
-        ).strip() or "智能体"
+            or "专家"
+        ).strip() or "专家"
         block_parent = state.chat_layout.parentWidget() if hasattr(state.chat_layout, "parentWidget") else None
         block = SummonedAgentProcessBlock(
             agent_id,
@@ -49784,7 +49803,7 @@ a {{ overflow-wrap: anywhere; }}
                     {
                         "agent_id": agent_id,
                         "status": "failed_recovered",
-                        "error": f"智能体过程恢复失败：{exc}",
+                        "error": f"专家过程恢复失败：{exc}",
                     },
                 )
                 log_sub_agent_runtime(
@@ -49854,7 +49873,7 @@ a {{ overflow-wrap: anywhere; }}
                 error=str(exc),
                 traceback=traceback.format_exc(),
             )
-            QMessageBox.warning(self, "智能体召唤失败", f"无法初始化子智能体运行时：{exc}")
+            QMessageBox.warning(self, "专家召唤失败", f"无法初始化子专家运行时：{exc}")
             return False
 
         started_profiles = []
@@ -49912,7 +49931,7 @@ a {{ overflow-wrap: anywhere; }}
                     "agent_id": (result or {}).get("agent_id") if isinstance(result, dict) else "",
                     "agent_name": agent_name,
                     "agent_profile_id": profile.get("id") or "",
-                    "agent_profile_name": profile.get("name") or "智能体",
+                    "agent_profile_name": profile.get("name") or "专家",
                     "summon_source": summon_source,
                     "status": (result or {}).get("status") if isinstance(result, dict) else "pending",
                 }
@@ -49931,7 +49950,7 @@ a {{ overflow-wrap: anywhere; }}
                 )
                 self._show_conversation_notice(
                     state,
-                    f"智能体启动失败：{profile.get('name') or '未命名智能体'} - {exc}",
+                    f"专家启动失败：{profile.get('name') or '未命名专家'} - {exc}",
                     "error",
                 )
 
@@ -49978,7 +49997,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         content = str(data.get("content") or "").strip()
         error = str(data.get("error") or "").strip()
-        profile_name = str(data.get("agent_profile_name") or data.get("agent_name") or "智能体").strip()
+        profile_name = str(data.get("agent_profile_name") or data.get("agent_name") or "专家").strip()
         status = str(data.get("status") or "").strip()
         if status == "completed":
             text = f"[{profile_name}] {content or '已完成。'}"
@@ -50137,6 +50156,7 @@ a {{ overflow-wrap: anywhere; }}
         group = None if create_group else getattr(state, "active_agent_turn_group", None)
         if group is None:
             group = AssistantTurnGroup(self._next_agent_turn_group_id(state))
+            group.set_agent_identity(getattr(state, "active_turn_agent", None))
             state.active_agent_turn_group = group
             state.live_agent_turn_groups.append(group)
             office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -50151,6 +50171,8 @@ a {{ overflow-wrap: anywhere; }}
                 group_id=group.group_id,
             )
         group.add_stage(bubble)
+        if (getattr(state, "active_turn_agent_profile", None) or {}).get("auto_preview_extensions"):
+            bubble._notify_deliverable_changes = False
         bubble.ui_source_message_id = str(getattr(state, "active_source_message_id", "") or "")
         state.temp_thinking_bubble = bubble
         state.last_agent_bubble = bubble
@@ -51187,6 +51209,9 @@ a {{ overflow-wrap: anywhere; }}
             return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._session_is_busy(state):
+            if self._extract_agent_mentions(raw_user_text)[0]:
+                self._show_conversation_notice(state, "当前任务结束或停止后可切换专家；输入和附件已保留。", "info")
+                return False
             log_chat_runtime_debug(
                 "submit_session_busy",
                 session_id=state.session_id,
@@ -51205,12 +51230,32 @@ a {{ overflow-wrap: anywhere; }}
             log_chat_runtime_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
+        if len(mentioned_profiles) > 1:
+            self._show_conversation_notice(state, "每个会话一次使用一位专家，请选择其中一位；输入和附件已保留。", "info")
+            return False
+        if mentioned_profiles:
+            if not self.select_conversation_agent(mentioned_profiles[0], state.session_id):
+                return False
+            raw_user_text = delegated_text
+        dedicated_agent_workflow = self._is_office_workflow_context(normalize_workflow_mode(workflow_mode)) or ppt_agent_mode
+        try:
+            turn_agent, turn_agent_profile = self._resolve_conversation_agent(
+                state, history_source_message or (
+                    {"meta": user_message_meta} if (user_message_meta or {}).get("retry_of_user_message_id") else None
+                ), dedicated_workflow=dedicated_agent_workflow)
+        except ValueError as exc:
+            self._show_conversation_notice(state, str(exc), "warning")
+            log_chat_runtime_debug("conversation_agent_unavailable", session_id=state.session_id)
+            return False
+        if not str(raw_user_text or "").strip() and not prompt_files:
+            self._show_conversation_notice(state, "请添加参考图片或输入要完成的任务。", "info")
+            return False
+        if not str(raw_user_text or "").strip() and (turn_agent_profile or {}).get("image_only_task") and any(self._is_supported_image_attachment(path) for path in prompt_files):
+            raw_user_text = turn_agent_profile["image_only_task"]
         grill_armed = normalize_grill_mode_state(
             getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
         ) == GRILL_MODE_ARMED
         grill_conflicts = []
-        if mentioned_profiles:
-            grill_conflicts.append("显式 @Agent")
         if self._is_office_workflow_context(normalize_workflow_mode(workflow_mode)) or ppt_agent_mode:
             grill_conflicts.append("PPT/办公稿专用流程")
         if grill_armed and grill_conflicts:
@@ -51253,15 +51298,6 @@ a {{ overflow-wrap: anywhere; }}
             return False
         supports_vision = bool(effective_model_profile.get("supports_vision", False))
         if not self._ensure_vision_attachment_support(state, prompt_files, model_profile=effective_model_profile):
-            return False
-        if mentioned_profiles and not delegated_text:
-            log_chat_runtime_debug(
-                "submit_session_agent_mention_without_task",
-                session_id=state.session_id,
-                mentioned_count=len(mentioned_profiles),
-            )
-            if state.session_id == self.current_session_id:
-                QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
         keep_audio_local = (
             SPEECH_TO_TEXT_SKILL_ID
@@ -51333,15 +51369,6 @@ a {{ overflow-wrap: anywhere; }}
             user_message_id=user_message_id,
             request_id=submit_request_id,
         )
-        delegated_payload = self._build_user_message_payload(
-            delegated_text,
-            prompt_files,
-            supports_vision=supports_vision,
-            keep_audio_local=keep_audio_local,
-            audio_transcription_backend=transcription_config["backend"],
-            conversation_refs=conversation_refs,
-            branch_file_map=(getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map"),
-        ).get("content") or delegated_text
         if check_duplicates:
             # Compatibility flag retained for existing callers.  Idempotency
             # is enforced by the generated message_id/turn_id/request_id and
@@ -51484,6 +51511,11 @@ a {{ overflow-wrap: anywhere; }}
             message_meta.update(user_message_meta)
         message_meta["turn_id"] = str(next_turn_id)
         message_meta["request_id"] = submit_request_id
+        message_meta["conversation_agent"] = copy.deepcopy(turn_agent)
+        if turn_agent_profile:
+            message_meta["conversation_agent_profile"] = copy.deepcopy(turn_agent_profile)
+        else:
+            message_meta.pop("conversation_agent_profile", None)
         if existing_message_payload:
             message_meta["deferred_guidance_consumed"] = True
         existing_sequences = []
@@ -51797,6 +51829,11 @@ a {{ overflow-wrap: anywhere; }}
         state.daemon_reconnect_attempts = 0
         state.daemon_transport_state = ""
         state.active_turn_user_message_id = user_message_id
+        state.active_turn_agent = copy.deepcopy(turn_agent)
+        state.active_turn_agent_profile = copy.deepcopy(turn_agent_profile)
+        log_chat_runtime_debug("conversation_agent_started", session_id=state.session_id,
+                               run_id=submit_request_id, agent_id=(turn_agent or {}).get("id", ""),
+                               attachment_count=len(prompt_files))
         state.active_history_writer_owner = history_writer_owner
         if is_first_submit:
             state.first_submit_diagnostic_turn_id = state.active_turn_id
@@ -51881,16 +51918,6 @@ a {{ overflow-wrap: anywhere; }}
                 ),
             )
             self.refresh_grill_mode_controls(state.session_id)
-        if mentioned_profiles:
-            if is_first_submit:
-                log_ui_navigation(
-                    "first_submit_run",
-                    session_id=state.session_id,
-                    turn_id=current_turn_id,
-                    runtime="agent_profiles",
-                )
-                self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
-            return True
         if ppt_agent_mode:
             ok, _skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
             if not ok:
@@ -54209,6 +54236,7 @@ a {{ overflow-wrap: anywhere; }}
                 key = stage_by_source.get(str(message.get("id") or ""), ("", ""))
                 meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
                 meta.update({
+                    "ui_conversation_agent": copy.deepcopy(getattr(state, "active_turn_agent", None)),
                     "ui_turn_id": str(getattr(state, "active_turn_id", "")),
                     "ui_turn_group_id": key[0],
                     "ui_stage_id": key[1],
@@ -54332,6 +54360,7 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_turn_group_id": group_id,
                     "ui_stage_id": stage_id,
                     "ui_reply_kind": "final",
+                    "ui_conversation_agent": copy.deepcopy(getattr(state, "active_turn_agent", None)),
                 },
             }
             previous_count = len(state.messages)
@@ -54665,7 +54694,9 @@ a {{ overflow-wrap: anywhere; }}
             self._connect_chat_bubble_actions(bubble, state)
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
             office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
-            if office_card is not None:
+            if getattr(state, "active_turn_agent", None):
+                self._attach_live_agent_stage(state, bubble)
+            elif office_card is not None:
                 office_card.add_process_widget(bubble)
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
@@ -55326,6 +55357,13 @@ a {{ overflow-wrap: anywhere; }}
         )
         self.set_session_phase("Completed", state.session_id)
         self.set_session_status("completed", state.session_id, save=True)
+        if not missing_final_content and not grill_read_only_active:
+            profile = copy.deepcopy(getattr(state, "active_turn_agent_profile", None))
+            if terminal_save_confirmed:
+                self._complete_conversation_agent(state, content, run_id, profile)
+            elif (profile or {}).get("auto_preview_extensions"):
+                state.pending_agent_preview = {"revision": commit_revision, "content": content,
+                                               "run_id": run_id, "profile": profile}
         if is_first_submit_turn:
             log_ui_navigation(
                 "first_submit_finish",

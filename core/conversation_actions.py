@@ -158,7 +158,7 @@ def clone_branch(messages, source_meta, target_id, source_id, source_title, mess
         item["id"] = ids[old_id]
         item["meta"] = remap_meta(item.get("meta") or {})
         item["meta"]["original_message_id"] = old_id
-    meta = {key: copy.deepcopy(source_meta[key]) for key in ("selected_model_id", "selected_skill_names", "knowledge_refs") if key in source_meta}
+    meta = {key: copy.deepcopy(source_meta[key]) for key in ("selected_model_id", "selected_skill_names", "knowledge_refs", "conversation_agent") if key in source_meta}
     retained = set(ids)
     retained_groups = {
         str((item.get("meta") or {}).get(key) or "")

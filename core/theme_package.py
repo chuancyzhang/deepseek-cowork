@@ -110,7 +110,7 @@ CONTENT_DEFAULTS = {
         "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"
         "先预览，确认后再保存。"
     ),
-    "composer.placeholder": "描述任务，输入 @ 引用会话或召唤智能体",
+    "composer.placeholder": "描述任务，输入 @ 引用会话或选择专家",
 }
 
 LEGACY_HOME_CARD_COMPONENT_ALIASES = {

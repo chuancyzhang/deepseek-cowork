@@ -49,16 +49,20 @@ class ContextProvider:
     def __init__(self, rounds):
         self.rounds = rounds
         self.main_requests, self.summary_requests = [], []
+        self.main_request_options, self.summary_request_options = [], []
 
     def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
+        output_options = {key: value for key, value in request_context.items() if key == "max_output_tokens"}
         if request_context.get("tools_disabled"):
             self.summary_requests.append(copy.deepcopy(messages))
+            self.summary_request_options.append(output_options)
             assert tools == []
             yield {"type": "content", "content": json.dumps(checkpoint(["u0"], goal="Finish without sending email"))}
             yield {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}}
             return
         index = len(self.main_requests)
         self.main_requests.append(copy.deepcopy({"messages": messages, "tools": tools}))
+        self.main_request_options.append(output_options)
         if index < self.rounds:
             yield {"type": "content", "content": f"Step {index}: " + "inspected evidence " * 500}
             yield {"type": "tool_call", "index": 0, "id": f"call-{index}", "function": {
@@ -70,7 +74,8 @@ class ContextProvider:
 
 class TestLongContextAgent(unittest.TestCase):
     def run_agent(self, enabled, rounds=0, provider=None, tool_result=None,
-                  known_capacity=True, target_tokens=300000, attachments=None, attachment_message_id="u1"):
+                  known_capacity=True, target_tokens=300000, attachments=None, attachment_message_id="u1",
+                  profile_overrides=None):
         from main import MainWindow
         self.app = QApplication.instance() or QApplication([])
         profile = {"id": "test", "model_name": "test-model", "base_url": "https://example.test/v1",
@@ -79,6 +84,7 @@ class TestLongContextAgent(unittest.TestCase):
         if not known_capacity:
             profile.pop("context_window_tokens")
             profile.pop("max_output_tokens")
+        profile.update(profile_overrides or {})
         initial = [{"id": "u0", "role": "user", "content": "Finish without sending email."},
                    {"id": "old", "role": "assistant", "content": "older findings " * 8000},
                    {"id": "recent", "role": "assistant", "content": "Ready to continue."},
@@ -170,6 +176,57 @@ class TestLongContextAgent(unittest.TestCase):
         self.assertTrue(any(e.get("type") == "llm_usage" and e["usage"].get("purpose") == "context_checkpoint" for e in events))
         self.assertTrue(any(e.get("type") == "context_capacity" and e["capacity"].get("phase") == "finished" for e in events))
         self.assertFalse(any(m.get("meta", {}).get("kind") == "context_checkpoint" for m in result["generated_messages"]))
+
+    def test_default_reserve_does_not_limit_generation_before_or_after_rollover(self):
+        for known_capacity in (True, False):
+            with self.subTest(known_capacity=known_capacity):
+                provider, skills, events, result, active = self.run_agent(
+                    True, rounds=2, known_capacity=known_capacity, profile_overrides={"max_output_tokens": None})
+                self.assertEqual(provider.main_request_options, [{}, {}, {}])
+                self.assertEqual(bool(provider.summary_requests), known_capacity)
+                self.assertTrue(all(options == {"max_output_tokens": 8192} for options in provider.summary_request_options))
+                self.assertTrue(all(e["ok"] for e in events if e.get("type") == "conversation_prefix_check"))
+                self.assertEqual(len(skills.calls), 2)
+                self.assertIn("Task complete", result["content"])
+
+    def test_long_response_reaches_agent_through_actual_provider_without_default_wire_limit(self):
+        import test_deepseek_provider as helpers
+        output = "完整页面内容。" * 2000 + "页面结束。"
+        for protocol in ("chat_completions", "responses"):
+            for limit in (None, 32768):
+                with self.subTest(protocol=protocol, limit=limit):
+                    provider, client = helpers.TestOpenAIProviderDeepSeek._build_provider(self,
+                        base_url="https://openrouter.ai/api/v1", model_name="z-ai/glm-5.3-flash",
+                        api_protocol=protocol, reasoning_effort="max")
+                    if protocol == "chat_completions":
+                        create = client.chat.completions.create
+                        create.return_value = [SimpleNamespace(id="response", usage=None, choices=[SimpleNamespace(
+                            index=0, finish_reason=None, delta=SimpleNamespace(content=output,
+                                reasoning_content=None, tool_calls=None))]),
+                            SimpleNamespace(id="response", usage={"prompt_tokens": 12081, "completion_tokens": 12000,
+                                "total_tokens": 24081}, choices=[SimpleNamespace(index=0, finish_reason="stop",
+                                    delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=None))])]
+                        limit_key = "max_tokens"
+                    else:
+                        create = client.responses.create
+                        create.return_value = [SimpleNamespace(type="response.output_text.delta", delta=output),
+                            SimpleNamespace(type="response.completed", response=SimpleNamespace(id="response", status="completed",
+                                output=[{"type": "message", "id": "reply", "role": "assistant", "status": "completed",
+                                         "content": [{"type": "output_text", "text": output}]}],
+                                usage={"input_tokens": 12081, "output_tokens": 12000, "total_tokens": 24081}))]
+                        limit_key = "max_output_tokens"
+                    _, _, events, result, _ = self.run_agent(True, provider=provider, known_capacity=False,
+                        profile_overrides={"model_name": provider.model_name, "base_url": provider.base_url,
+                                           "api_protocol": protocol, "max_output_tokens": limit})
+                    create.assert_called_once()
+                    params = create.call_args.kwargs
+                    if limit is None:
+                        self.assertFalse({"max_tokens", "max_completion_tokens", "max_output_tokens"} & params.keys())
+                    else:
+                        self.assertEqual(params[limit_key], limit)
+                    self.assertEqual(result["content"], output)
+                    self.assertTrue(any(e.get("type") == "llm_usage" and e["usage"]["output_tokens"] == 12000 for e in events))
+                    self.assertTrue(all(e["ok"] for e in events if e.get("type") == "conversation_prefix_check"))
 
     def test_file_attachments_allow_followup_and_rollover_with_unchanged_wire_content(self):
         from core.llm.providers import OpenAIProvider

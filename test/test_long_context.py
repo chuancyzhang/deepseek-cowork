@@ -394,6 +394,26 @@ class TestContextManager(ContextFixture):
 
 
 class TestContextBudget(unittest.TestCase):
+    def test_output_reserve_is_not_a_generation_limit(self):
+        policy = normalize_policy({"enabled": True})
+        for capacity in (None, 128000):
+            with self.subTest(capacity=capacity):
+                budget = ContextBudget.from_profile({"context_window_tokens": capacity}, policy)
+                self.assertEqual(budget.output_tokens, 8192)
+                self.assertEqual(budget.output_request_options(), {})
+                self.assertEqual(budget.output_request_options(checkpoint=True), {"max_output_tokens": 8192})
+                self.assertIsNone(budget.snapshot(100)["output_limit_tokens"])
+
+    def test_explicit_limit_is_preserved_and_checkpoint_stays_bounded(self):
+        for limit in (4096, 32768):
+            with self.subTest(limit=limit):
+                budget = ContextBudget.from_profile({"context_window_tokens": 128000, "max_output_tokens": limit},
+                                                    normalize_policy({"enabled": True}))
+                self.assertEqual(budget.output_tokens, limit)
+                self.assertEqual(budget.output_request_options(), {"max_output_tokens": limit})
+                self.assertEqual(budget.output_request_options(checkpoint=True), {"max_output_tokens": min(limit, 8192)})
+                self.assertEqual(budget.snapshot(100)["output_limit_tokens"], limit)
+
     def test_default_policy_and_capacity_limits(self):
         self.assertEqual(normalize_policy(None), {"enabled": False, "target_tokens": 300000})
         self.assertEqual(normalize_policy({"enabled": True, "target_tokens": 1})["target_tokens"], 300000)

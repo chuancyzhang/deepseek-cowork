@@ -55,9 +55,10 @@ class TestContextProviderContract(unittest.TestCase):
 
     def test_checkpoint_stream_setup_error_records_failed_attempt(self):
         from core.agent import LLMWorker
+        from core.long_context import ContextBudget, normalize_policy
         records = []
         worker = SimpleNamespace(request_id="r", is_stopped=False,
-            context_window_manager=SimpleNamespace(budget=SimpleNamespace(output_tokens=8192)),
+            context_window_manager=SimpleNamespace(budget=ContextBudget.from_profile({}, normalize_policy({"enabled": True}))),
             _record_provider_attempt=lambda identity, value: records.append((identity, value)),
             observability_signal=SimpleNamespace(emit=lambda event: None),
             _provider_chat_stream=Mock(side_effect=RuntimeError("setup failed")),

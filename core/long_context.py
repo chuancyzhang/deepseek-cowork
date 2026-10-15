@@ -12,7 +12,9 @@ from .context_images import ImageBudgetUnavailable, image_token_budget
 
 TARGETS = (300_000, 1_000_000)
 DEFAULT_POLICY = {"enabled": False, "target_tokens": TARGETS[0]}
+DEFAULT_OUTPUT_RESERVE_TOKENS = 8192
 MAX_CHECKPOINT_TOKENS = 4096
+MAX_CHECKPOINT_OUTPUT_TOKENS = 8192
 HISTORY_TOOL_NAMES = frozenset({"history_search", "history_read"})
 
 
@@ -101,6 +103,14 @@ class ContextBudget:
     model_tokens: int | None
     output_tokens: int
     safety_tokens: int
+    output_limit_tokens: int | None = None
+
+    def output_request_options(self, *, checkpoint=False):
+        """Only explicit generation limits reach the provider, never the reserve."""
+        limit = self.output_limit_tokens
+        if checkpoint:
+            limit = min(limit or MAX_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS)
+        return {"max_output_tokens": limit} if limit is not None else {}
 
     @property
     def effective_tokens(self):
@@ -129,11 +139,13 @@ class ContextBudget:
             # Keep unknown service capacity unknown, rather than inventing a
             # model limit or making users configure one before their first run.
             capacity = None
-        output = profile.get("max_output_tokens") or 8192
+        output_limit = profile.get("max_output_tokens") or None
+        output = output_limit or DEFAULT_OUTPUT_RESERVE_TOKENS
         if type(output) is not int or output < 1:
             raise ContextError("模型输出预留必须为正整数。")
         result = cls(policy["target_tokens"], capacity, output,
-                     max(2048, capacity // 20) if capacity is not None else 0)
+                     max(2048, capacity // 20) if capacity is not None else 0,
+                     output_limit)
         if result.effective_tokens <= MAX_CHECKPOINT_TOKENS + 4096:
             raise ContextError("当前模型可用上下文太小，无法同时保留任务状态和下一次回答。")
         return result
@@ -142,6 +154,7 @@ class ContextBudget:
         return {"status": status, "used_tokens": used, "target_tokens": self.target_tokens,
                 "effective_tokens": self.effective_tokens, "trigger_tokens": self.trigger_tokens,
                 "model_tokens": self.model_tokens, "output_tokens": self.output_tokens,
+                "output_limit_tokens": self.output_limit_tokens,
                 "budget_source": "model_capacity" if self.model_tokens is not None else "target_setting",
                 "window_id": window_id, "phase": phase, "estimated": True}
 

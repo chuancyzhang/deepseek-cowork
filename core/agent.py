@@ -2427,7 +2427,7 @@ class LLMWorker(QThread):
                     "abort_check": lambda: self.is_stopped, "register_stream": self._register_provider_stream,
                     "release_stream": self._release_provider_stream,
                     "tools_disabled": True,
-                    "max_output_tokens": self.context_window_manager.budget.output_tokens})
+                    **self.context_window_manager.budget.output_request_options(checkpoint=True)})
             for chunk in stream:
                 if self.is_stopped:
                     raise ContextCancelled("已停止压缩上下文。")
@@ -3524,7 +3524,7 @@ class LLMWorker(QThread):
                                 "release_stream": self._release_provider_stream,
                                 "capture_request": lambda protocol, params, aid=attempt_id:
                                     self._capture_request_snapshot(protocol, params, aid),
-                                **({"max_output_tokens": self.context_window_manager.budget.output_tokens}
+                                **(self.context_window_manager.budget.output_request_options()
                                    if self.context_window_manager is not None else {}),
                             },
                         )

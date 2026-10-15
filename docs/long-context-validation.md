@@ -46,7 +46,7 @@
 
 窗口与检查点使用专用表，历史代次使用独立列，普通会话 metadata 保存不能覆盖窗口指针。检查点请求不携带函数工具、原生搜索或图片生成工具；具有独立请求 ID、用量和诊断状态。正常请求和整理请求共用 Provider 的取消、网络重试及数据安全处理。
 
-输出预留沿用各协议的请求字段：OpenAI 官方 Chat Completions 使用 `max_completion_tokens`，兼容服务使用 `max_tokens`，Responses 使用 `max_output_tokens`，Anthropic 使用 `max_tokens`。OpenAI 官方字段同时限制可见输出和 reasoning tokens，依据[官方 API 定义](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)及本地 SDK 核对；没有为兼容错误增加自动切换协议或重复请求。
+初版曾将输出预留直接用于各协议的请求上限，已在下述 2026-10-15 修复。明确配置的上限仍按协议映射：OpenAI 官方 Chat Completions 使用 `max_completion_tokens`，兼容服务使用 `max_tokens`，Responses 使用 `max_output_tokens`，Anthropic 使用 `max_tokens`。OpenAI 官方字段同时限制可见输出和 reasoning tokens，依据[官方 API 定义](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)及本地 SDK 核对；没有为兼容错误增加自动切换协议或重复请求。
 
 当时限制：容量是估算，未对所有模型逐一校准；没有计量规则或无法取得尺寸的图片不计入本地预算，文本仍正常统计和压缩，图片继续按原流程发送。文件附件当时仍报错，已在下述 2026-10-13 修复。此轮未构建冻结发行包。
 
@@ -82,3 +82,15 @@
 - `scripts/check_docs.py` 与 `git diff --check` 通过。
 
 开发检查截图：[关闭状态](images/long-context/settings-disabled.png)、[待保存选择](images/long-context/settings-pending.png)、[保存后](images/long-context/settings.png)、[150% 小窗口](images/long-context/settings-small-150.png)。截图与自动化检查不替代产品验收；按用户安排，最终操作体验及真实录音任务由用户验收。本轮未发起真实模型请求，未构建发行包。
+
+## 输出预留与生成上限分离（2026-10-15）
+
+真实运行诊断发现：开启超长上下文、未配置模型输出上限时，默认 8192 输出预留被写成 OpenRouter Chat 请求的 `max_tokens=8192`。GLM 在 `max` 思考强度下输出恰好 8192 tokens 后返回 `finish_reason=length`；手动重试沿用同样参数，再次截断。
+
+修复后 `ContextBudget.output_tokens` 只表示容量预留，新增可选 `output_limit_tokens` 表示明确配置的生成上限，并随上下文诊断快照记录。普通请求只传递明确上限；未配置时，Chat／Responses 不发送输出限制参数。Anthropic 的必填 `max_tokens` 继续使用 Provider 原有值。检查点单独限制为最多 8192 tokens，若明确配置更小上限则遵从该值，其正文仍由原来的 4096-token 规则验证。
+
+`test_long_context*.py` 49 项通过，覆盖已知／未知模型容量、换窗前后、明确上限保留、摘要独立限制、窗口内消息前缀稳定及工具只执行一次。新增完整 Agent → 实际 Provider → SDK 参数构造回归，用受控流返回 12000 输出 tokens，验证两种协议均完整保留长回答，默认参数中不存在 `max_tokens`、`max_completion_tokens` 或 `max_output_tokens`；显式配置 32768 时正确发送。这是离线协议与运行链路验证，未发起真实付费模型请求。
+
+`test_deepseek_provider.py` 与 `test_anthropic_provider.py` 合计 74 项通过；相关 Python 语法检查、`scripts/check_docs.py` 和 `git diff --check` 通过。
+
+本次未改系统提示、工具定义与顺序、历史消息及窗口提交规则；无界续写和自动重放均未引入。界面布局未变化，沿用现有截图。

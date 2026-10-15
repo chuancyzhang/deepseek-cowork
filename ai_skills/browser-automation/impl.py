@@ -3,6 +3,7 @@ import json
 import os
 import re
 import urllib.parse
+import uuid
 
 
 from core.browser_skill_component import (
@@ -11,6 +12,7 @@ from core.browser_skill_component import (
     run_browser_skill_cli,
 )
 from core.env_utils import get_app_data_dir
+from core.tool_images import ToolImageError, persist_tool_image
 
 
 _ALLOWED_COMMANDS = {
@@ -42,10 +44,6 @@ _SENSITIVE_EVALUATE_RE = re.compile(
 )
 
 
-def _json(payload):
-    return json.dumps(payload, ensure_ascii=False)
-
-
 def _workspace_root(workspace_dir, context):
     if workspace_dir:
         return os.path.abspath(workspace_dir)
@@ -60,7 +58,9 @@ def _workspace_root(workspace_dir, context):
 
 def _is_within(path, root):
     try:
-        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+        path = os.path.normcase(os.path.realpath(path))
+        root = os.path.normcase(os.path.realpath(root))
+        return os.path.commonpath([path, root]) == root
     except (OSError, ValueError):
         return False
 
@@ -111,11 +111,21 @@ def _normalize_args(args, workspace_root):
     if command == "navigate" and len(normalized) >= 2:
         _validated_file_url(normalized[1], workspace_root)
     if command == "screenshot":
-        for index, item in enumerate(normalized):
-            if item == "--out":
-                if index + 1 >= len(normalized):
-                    raise ValueError("--out requires a path")
-                normalized[index + 1] = _validate_output_path(normalized[index + 1], workspace_root)
+        # Own the output path: never infer image access from arbitrary paths in
+        # CLI JSON, and do not leave the CLI's default shared temp file behind.
+        outputs = [i for i, item in enumerate(normalized) if item == "--out" or item.startswith("--out=")]
+        if len(outputs) > 1:
+            raise ValueError("screenshot accepts only one --out path")
+        if outputs:
+            index = outputs[0]
+            if normalized[index].startswith("--out="):
+                normalized[index:index + 1] = ["--out", normalized[index].split("=", 1)[1]]
+            if index + 1 >= len(normalized) or not normalized[index + 1] or normalized[index + 1].startswith("--"):
+                raise ValueError("--out requires a path")
+            normalized[index + 1] = _validate_output_path(normalized[index + 1], workspace_root)
+        else:
+            output = os.path.join(get_app_data_dir(), "browser-automation", "screenshots", uuid.uuid4().hex + ".png")
+            normalized.extend(["--out", _validate_output_path(output, workspace_root)])
     if command == "evaluate":
         expression = " ".join(normalized[1:])
         if _SENSITIVE_EVALUATE_RE.search(expression):
@@ -125,13 +135,51 @@ def _normalize_args(args, workspace_root):
     return normalized
 
 
+def _attach_screenshot(result, output_path, context, abort_state):
+    session_id = context.get("session_id") or ""
+    call_id = context.get("tool_call_id") or ""
+    log_browser_skill_event("screenshot_image_start", session_id=session_id, call_id=call_id)
+    try:
+        if abort_state["aborted"]:
+            raise ToolImageError("cancelled", "操作已停止，截图文件已保留。")
+        if context.get("model_api_protocol") not in {"responses", "chat_completions"}:
+            raise ToolImageError("unsupported_protocol", "截图看图支持 Responses 和 Chat Completions 协议。")
+        if not context.get("model_supports_vision"):
+            raise ToolImageError("vision_not_supported", "当前模型未启用图片输入，请切换到支持图片的模型；只保存截图可设置 include_image=false。")
+        config = context.get("config_manager")
+        if not session_id or config is None or not (history_dir := config.get_chat_history_dir()):
+            raise ToolImageError("session_unavailable", "当前会话的图片存储上下文不可用，无法保存可重放的图片结果。")
+        part = persist_tool_image(output_path, history_dir, session_id)
+    except Exception as exc:
+        code = getattr(exc, "code", "image_read_failed")
+        log_browser_skill_event("screenshot_image_failed", session_id=session_id, call_id=call_id, code=code)
+        result.update({
+            "status": "cancelled" if code == "cancelled" else "incomplete",
+            "screenshot_status": "completed",
+            "image_status": "cancelled" if code == "cancelled" else "failed",
+            "error": {"code": code, "message": f"截图命令已完成，但图片未能提供给模型：{exc} 已生成的文件和原始结果已保留。"},
+        })
+        return
+    result.update({
+        "image_status": "ready",
+        "content": "截图已保存，图片随本次工具结果提供给模型，无需再调用 view_image。",
+        "content_parts": [part],
+    })
+    log_browser_skill_event("screenshot_image_ready", session_id=session_id, call_id=call_id,
+                           mime_type=part["mime_type"], size_bytes=part["size_bytes"])
+
+
 def browser_skill_cli(
     args,
     timeout_seconds=120,
     workspace_dir=None,
     _context=None,
+    include_image=True,
 ):
     try:
+        if not isinstance(include_image, bool):
+            raise ValueError("include_image must be a boolean")
+        context = _context if isinstance(_context, dict) else {}
         workspace_root = _workspace_root(workspace_dir, _context)
         normalized = _normalize_args(args, workspace_root)
         abort_state = _init_abort_state(_context)
@@ -146,17 +194,27 @@ def browser_skill_cli(
             abort_check=lambda: bool(abort_state["aborted"]),
         )
         if result.get("status") == "completed":
-            log_browser_skill_event("finish", command=normalized[0])
-        return _json(result)
+            if command == "screenshot":
+                output_path = normalized[normalized.index("--out") + 1]
+                result["artifacts"] = [{"type": "screenshot", "path": output_path}]
+                if include_image:
+                    _attach_screenshot(result, output_path, context, abort_state)
+                else:
+                    result["image_status"] = "not_requested"
+                    result["content"] = "截图已保存为文件；本次未向模型提供图片内容。"
+            if result.get("status") == "completed":
+                log_browser_skill_event("finish", command=normalized[0])
+        # Keep structured image parts visible to the Agent's shared result pipeline.
+        return result
     except Exception as exc:
         log_browser_skill_event("error", operation="tool", error=str(exc))
-        return _json({
+        return {
             "status": "incomplete",
             "error": {
                 "code": "browser_skill_invalid_request",
                 "message": str(exc),
             },
-        })
+        }
 
 
 TOOL_EXPORTS = [
@@ -165,7 +223,9 @@ TOOL_EXPORTS = [
         "handler": browser_skill_cli,
         "description": (
             "Run one Tencent BrowserSkill bsk command with structured arguments. "
-            "Use session start/stop and pass the returned session id to every browser command."
+            "Use session start/stop and pass the returned session id to every browser command. "
+            "Screenshot commands return the actual image to vision-capable models by default, "
+            "without a separate view_image call."
         ),
         "parameters": {
             "type": "object",
@@ -188,6 +248,10 @@ TOOL_EXPORTS = [
                     "minimum": 1,
                     "maximum": 1800,
                     "description": "Command timeout in seconds.",
+                },
+                "include_image": {
+                    "type": "boolean",
+                    "description": "For screenshot only: return the actual image to the model (default true). Set false to save the file only. Other commands are unaffected.",
                 },
             },
             "required": ["args"],

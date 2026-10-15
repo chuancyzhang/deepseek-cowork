@@ -7,7 +7,7 @@ source_type: bundled_plugin
 default_enabled: false
 metadata:
   author: deepseek-cowork team
-  version: "3.0.0"
+  version: "3.1.0"
   upstream: "Tencent/BrowserSkill"
   upstream_cli: "0.3.3"
   upstream_extension: "0.3.3"
@@ -45,6 +45,26 @@ returns borrowed user tabs.
 Use `get-html` only when the snapshot cannot expose required markup or metadata.
 Use `screenshot` only for visual layout, canvas, images, or styling that cannot be
 understood from the snapshot.
+
+## Screenshots and visual feedback
+
+`screenshot` returns the actual image to the current model by default in the same
+tool result. No separate `view_image` call or enabled view-image skill is needed.
+Choose when to look: ordinary navigation, clicks and form actions do not attach
+images automatically. Continue browser actions after inspecting the screenshot.
+
+- Example: `browser_skill_cli(args=["screenshot", "--session", "abcd"])`.
+- Use `--full-page` for the whole page or `--ref @eN` for an observed element.
+- Omit `--out` to let Cowork choose a unique managed path, or provide a workspace
+  output path when the screenshot is a deliverable.
+- Set the tool parameter `include_image=false` to save a screenshot without
+  sending its image content to the model. This parameter only affects screenshot.
+- Direct image feedback requires a vision-capable Responses or Chat Completions
+  model. Cowork stores an immutable snapshot in the current conversation so later
+  file changes do not change what the model saw.
+- If `screenshot_status=completed` but `image_status=failed`, the screenshot command
+  completed but image delivery failed. Inspect the error and retained file; do not
+  claim to have seen the image or repeat preceding browser actions.
 
 ## User tabs and human handoff
 

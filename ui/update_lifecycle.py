@@ -16,6 +16,8 @@ from core.update_coordinator import atomic_json, update_log
 from core.updater import create_windows_update_script, launch_windows_update_script
 from ui.primitives import ProductMessageDialog
 
+INSTALLER_STARTUP_WAIT_SECONDS = 180
+
 
 class UpdateCall(QThread):
     def __init__(self, call, parent):
@@ -101,13 +103,26 @@ class UpdateLifecycleMixin:
                 version=self._update_result["release"]["tag_name"])
             self._update_transaction = os.path.dirname(script)
             self._update_installer_process = launch_windows_update_script(script)
-            self._update_deadline = time.monotonic() + 30
-            QTimer.singleShot(100, self._await_update_installer)
+            self._update_deadline = time.monotonic() + INSTALLER_STARTUP_WAIT_SECONDS
+            self.update_coordinator.publish(
+                can_cancel_install=True,
+                message="正在等待安装程序启动；若安全软件弹出确认，请允许本次安装。应用和任务暂时保持运行。",
+            )
+            update_log(self.update_coordinator.root, "installer_wait_start", transaction=os.path.basename(self._update_transaction), wait_seconds=INSTALLER_STARTUP_WAIT_SECONDS)
+            self._schedule_update_installer_check()
         except Exception as exc:
             self._abort_update(f"无法启动安装程序：{exc}")
 
-    def _await_update_installer(self):
-        if not self._update_preparing:
+    def _schedule_update_installer_check(self):
+        transaction = self._update_transaction
+        QTimer.singleShot(250, lambda: self._await_update_installer(transaction))
+
+    def _cancel_update_startup(self):
+        if self._update_preparing and self.update_coordinator.state.get("can_cancel_install"):
+            self._abort_update("已取消本次安装，应用和任务保持运行；安装包已保留，可再次安装。")
+
+    def _await_update_installer(self, transaction=None):
+        if not self._update_preparing or (transaction is not None and transaction != self._update_transaction):
             return
         root = self._update_transaction
         if os.path.isfile(os.path.join(root, "abort.json")) or self._update_installer_process.poll() is not None:
@@ -122,15 +137,30 @@ class UpdateLifecycleMixin:
             if ready.get("id") != os.path.basename(root):
                 self._abort_update("安装程序确认信息不匹配。")
                 return
+            update_log(self.update_coordinator.root, "installer_ready", transaction=os.path.basename(root))
             self._quiesce_for_update()
         elif time.monotonic() > self._update_deadline:
-            self._abort_update("安装程序启动超时，应用尚未退出。可查看更新详情后重试。")
+            update_log(self.update_coordinator.root, "installer_wait_slow", transaction=os.path.basename(root))
+            choice = ProductMessageDialog(
+                "安装程序尚未就绪",
+                "应用尚未退出，安装包已保留。若 360 等安全软件正在询问，请允许本次安装；允许后可以继续等待。若已拒绝或没有响应，可以取消后重新安装。",
+                "confirm",
+                [("继续等待 3 分钟", "wait", "primary", True), ("取消本次安装", "cancel", "secondary", False)],
+                parent=self,
+            ).exec_result("cancel")
+            if not self._update_preparing or self._update_transaction != root:
+                return
+            if choice == "wait":
+                self._update_deadline = time.monotonic() + INSTALLER_STARTUP_WAIT_SECONDS
+                self._schedule_update_installer_check()
+            else:
+                self._abort_update("已取消等待安装程序，应用尚未退出；安装包已保留。允许安全软件放行后可再次安装。")
         else:
-            QTimer.singleShot(100, self._await_update_installer)
+            self._schedule_update_installer_check()
 
     def _quiesce_for_update(self):
         try:
-            self.update_coordinator.publish(message="正在保存内容并停止任务…")
+            self.update_coordinator.publish(message="正在保存内容并停止任务…", can_cancel_install=False)
             self.sync_current_session_state()
             for name in ("daemon_timer", "favorites_timer"):
                 timer = getattr(self, name, None)

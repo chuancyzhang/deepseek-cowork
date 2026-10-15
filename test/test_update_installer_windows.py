@@ -52,6 +52,16 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual((self.install / "_internal" / "data.txt").read_text(), "old")
         self.assertFalse((self.install / "_internal" / "added.txt").exists())
 
+    def test_delayed_launch_after_cancel_exits_without_ready_or_file_mutation(self):
+        script = self.prepare()
+        (script.parent / "abort.json").write_text(json.dumps({"id": script.parent.name}))
+        result = subprocess.run([self.ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", str(script), "-Headless"],
+                                capture_output=True, timeout=20, **subprocess_kwargs_no_window())
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertFalse((script.parent / "ready.json").exists())
+        self.assertEqual((self.install / "_internal" / "data.txt").read_text(), "old")
+        self.assertFalse((self.install / "_internal" / "added.txt").exists())
+
     def test_actual_copy_preserves_data_and_reports_relaunch_failure(self):
         script = self.prepare()
         result = self.execute(script)

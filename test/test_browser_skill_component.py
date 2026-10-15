@@ -35,6 +35,64 @@ def _extension_archive_bytes(version=None):
 
 
 class BrowserSkillComponentTests(unittest.TestCase):
+    def test_bundled_upgrade_waits_for_active_sessions_and_never_downgrades(self):
+        status = {"version": "0.1.8", "needs_update": True, "ready": False}
+        with tempfile.TemporaryDirectory() as root, patch.object(browser_skill_component, "browser_skill_root", return_value=os.path.join(root, "component")), \
+                patch.object(browser_skill_component, "browser_skill_status", return_value=status), \
+                patch.object(browser_skill_component, "_read_marker", return_value={"source": "bundled"}), \
+                patch.object(browser_skill_component, "_run_bsk", return_value={"returncode": 0, "stdout": '[{"session_id":"busy"}]', "stderr": ""}) as run, \
+                patch.object(browser_skill_component, "install_browser_skill") as install, \
+                patch.object(browser_skill_component, "log_browser_skill_event"):
+            result = browser_skill_component._prepare_bundled_browser_upgrade(status)
+            self.assertIn("仍在运行", result["health_error"])
+            install.assert_not_called()
+            run.reset_mock()
+            newer = {**status, "version": "99.0.0"}
+            self.assertEqual(browser_skill_component._prepare_bundled_browser_upgrade(newer), newer)
+            run.assert_not_called()
+
+    def test_first_use_upgrades_existing_cli_and_prepared_extension_then_rechecks(self):
+        status = {"version": "0.1.8", "needs_update": True, "ready": False,
+                  "extension_path": "prepared", "extension_prepared": False, "extension_prepared_version": "0.1.4"}
+        ready = {"version": browser_skill_component.BROWSER_SKILL_VERSION, "ready": True}
+        with tempfile.TemporaryDirectory() as root, patch.object(browser_skill_component, "browser_skill_root", return_value=os.path.join(root, "component")), \
+                patch.object(browser_skill_component, "browser_skill_status", side_effect=[status, ready]) as check, \
+                patch.object(browser_skill_component, "_read_marker", return_value={"source": "bundled"}), \
+                patch.object(browser_skill_component, "_run_bsk", return_value={"returncode": 0, "stdout": '[]', "stderr": ""}), \
+                patch.object(browser_skill_component, "install_browser_skill") as install, \
+                patch.object(browser_skill_component, "prepare_browser_skill_extension") as extension, \
+                patch.object(browser_skill_component, "log_browser_skill_event"):
+            self.assertEqual(browser_skill_component._prepare_bundled_browser_upgrade(status), ready)
+            install.assert_called_once()
+            self.assertTrue(install.call_args.kwargs["require_idle"])
+            extension.assert_called_once()
+            check.assert_called_with(run_diagnostics=True)
+
+    def test_upgrade_cancellation_and_concurrent_upgrade_do_not_use_stale_ready_state(self):
+        status = {"version": browser_skill_component.BROWSER_SKILL_VERSION, "ready": True,
+                  "extension_path": "old", "extension_prepared_version": "0.1.4"}
+        with patch.object(browser_skill_component, "acquire_process_singleton", return_value=None):
+            result = browser_skill_component._prepare_bundled_browser_upgrade(status)
+        self.assertFalse(result["ready"])
+        with tempfile.TemporaryDirectory() as root, patch.object(browser_skill_component, "browser_skill_root", return_value=os.path.join(root, "component")), \
+                patch.object(browser_skill_component, "_run_bsk") as run, \
+                patch.object(browser_skill_component, "log_browser_skill_event"):
+            result = browser_skill_component._prepare_bundled_browser_upgrade(status, abort_check=lambda: True)
+            self.assertFalse(result["ready"])
+            self.assertIn("已停止", result["health_error"])
+            run.assert_not_called()
+
+    def test_bsk_launch_uses_stable_working_directory_and_disables_self_update(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"LOCALAPPDATA": root}), \
+                patch.object(browser_skill_component, "popen_external_program") as launch:
+            launch.return_value.communicate.return_value = ("bsk 0.3.3", "")
+            launch.return_value.returncode = 0
+            browser_skill_component._run_bsk_executable("bsk.exe", ["--version"])
+            options = launch.call_args.kwargs
+            self.assertEqual(options["cwd"], os.path.join(root, "DeepSeekCowork", "browser-automation", "runtime"))
+            self.assertTrue(os.path.isdir(options["cwd"]))
+            self.assertEqual(options["env"]["BSK_AUTO_UPDATE"], "off")
+
     def _write_artifact(self, temp_dir, content, name="artifact.zip"):
         path = os.path.join(temp_dir, name)
         with open(path, "wb") as handle:

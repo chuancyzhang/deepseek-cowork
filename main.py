@@ -28223,6 +28223,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, QMainWindow):
         self._update_preparing = False
         self.update_coordinator = UpdateCoordinator(get_base_dir(), bool(getattr(sys, "frozen", False) and platform.system() == "Windows"), parent=self)
         self.update_coordinator.installation_ready.connect(self.begin_update_install)
+        self.update_coordinator.installation_cancel_requested.connect(self._cancel_update_startup)
 
         self._model_onboarding_shown = False
         self._model_onboarding_dialog = None

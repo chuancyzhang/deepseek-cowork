@@ -24,6 +24,10 @@ def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_nam
 
 INSTALLER_SCRIPT = r'''param([switch]$Headless, [switch]$Recover, [string]$PreviewImage, [double]$PreviewScale=1)
 $ErrorActionPreference = 'Stop'
+$root = $PSScriptRoot
+# A delayed security approval must not revive a cancelled transaction or take
+# the installation mutex away from the user's subsequent attempt.
+if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $root = $PSScriptRoot
@@ -42,6 +46,7 @@ $script:outcome = 'waiting'
 $keyHash=[Security.Cryptography.SHA256]::Create()
 $key=[BitConverter]::ToString($keyHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($install.ToLowerInvariant()))).Replace('-','')
 $keyHash.Dispose()
+if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
 $mutex=New-Object Threading.Mutex($false, ('Local\CoworkUpdate'+$key))
 try { $acquired=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true }
 if(-not $acquired) { throw '另一个安装程序正在处理此应用，请等待其完成。' }
@@ -399,6 +404,7 @@ if($PreviewImage) {
 }
 
 try {
+ if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
  # Capture root identities before the application exits. PID reuse cannot expand ownership.
  foreach($id in $cfg.wait_pids) {
   $p=Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue

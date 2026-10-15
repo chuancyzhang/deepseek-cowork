@@ -387,6 +387,32 @@ class TestDeliverableScanning(unittest.TestCase):
             )
             bubble.close()
 
+    def test_agent_bubble_opens_relative_html_link_and_lists_file(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "index.html")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("<h1>交付页面</h1>")
+            bubble = ChatBubble("Agent", "", workspace_dir=workspace)
+            activated = []
+            bubble.deliverablePathActivated.connect(activated.append)
+            bubble.set_main_content("已完成 HTML 复现：[打开页面](index.html)。", final=True)
+            bubble.resize(620, 250)
+            bubble.show()
+            app.processEvents()
+            self.assertEqual(bubble._deliverable_paths, [path])
+            self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
+            self.assertIn("cowork-file:", bubble.content_rich_edit.toHtml())
+            cursor = bubble.content_rich_edit.document().find("打开页面")
+            self.assertFalse(cursor.isNull())
+            cursor.setPosition(cursor.selectionStart() + 1)
+            QTest.mouseClick(bubble.content_rich_edit.viewport(), Qt.LeftButton,
+                             pos=bubble.content_rich_edit.cursorRect(cursor).center())
+            self.assertEqual(activated, [path])
+            bubble.close()
+            bubble.deleteLater()
+            app.processEvents()
+
     def test_agent_bubble_dispatches_only_file_and_web_links(self):
         app = QApplication.instance() or QApplication([])
         bubble = ChatBubble("Agent", "")

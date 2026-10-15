@@ -13,10 +13,10 @@ def view_image(path, detail="auto", workspace_dir=None, _context=None):
     call_id = context.get("tool_call_id") or ""
     logger.info("view_image_start session_id=%s call_id=%s", session_id, call_id)
     try:
-        if context.get("model_api_protocol") != "responses":
-            raise ToolImageError("unsupported_protocol", "view_image 需要使用 Responses 协议的模型。")
+        if context.get("model_api_protocol") not in {"responses", "chat_completions"}:
+            raise ToolImageError("unsupported_protocol", "view_image 支持 Responses 和 Chat Completions 协议。")
         if not context.get("model_supports_vision"):
-            raise ToolImageError("vision_not_supported", "当前模型未启用图片输入能力，请选择支持图片输入的 Responses 模型。")
+            raise ToolImageError("vision_not_supported", "当前模型未启用图片输入能力，请选择支持图片输入的模型。")
         config = context.get("config_manager")
         if not session_id or config is None:
             raise ToolImageError("session_unavailable", "缺少当前会话的图片存储上下文，无法保存可重放的图片结果。")
@@ -44,7 +44,7 @@ TOOL_EXPORTS = [
     {
         "name": "view_image",
         "handler": view_image,
-        "description": "View a local image from the workspace or current conversation attachments. Returns the actual image to the model as multimodal tool output. Requires a vision-capable Responses model; supports PNG, JPEG, WEBP and static GIF up to 20 MiB.",
+        "description": "View a local image from the workspace or current conversation attachments. Returns the actual image to the model with its tool result. Requires a vision-capable Responses or Chat Completions model; supports PNG, JPEG, WEBP and static GIF up to 20 MiB.",
         "parameters": {
             "type": "object",
             "properties": {

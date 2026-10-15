@@ -26,6 +26,10 @@ _PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MARKDOWN_CODE_PATTERN = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+_MARKDOWN_LINK_PATTERN = re.compile(
+    r'(?<!!)\[[^\]\r\n]*\]\(\s*(?P<path><[^>\r\n]+>|[^\s()]+)'
+    r'(?:\s+[\"\'][^\r\n]*?[\"\'])?\s*\)'
+)
 
 
 def _mask_markdown_code(text):
@@ -55,8 +59,13 @@ def _coerce_local_path(path):
 
 def normalize_workspace_file(path, workspace_dir, *, allow_outside_workspace=False):
     raw_path = _coerce_local_path(path)
-    candidate = os.path.abspath(os.path.normpath(raw_path))
-    workspace = os.path.abspath(os.path.normpath(str(workspace_dir or "").strip()))
+    workspace = str(workspace_dir or "").strip()
+    if not raw_path or not workspace:
+        return ""
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", raw_path) and not re.match(r"^[A-Za-z]:[\\/]", raw_path):
+        return ""
+    workspace = os.path.realpath(os.path.abspath(workspace))
+    candidate = os.path.realpath(os.path.join(workspace, raw_path))
     if not candidate or not workspace or not os.path.isfile(candidate):
         return ""
     if not (allow_outside_workspace and os.path.isabs(raw_path)):
@@ -73,7 +82,12 @@ def normalize_workspace_file(path, workspace_dir, *, allow_outside_workspace=Fal
 def iter_workspace_file_paths(text, workspace_dir, *, allow_outside_workspace=False):
     results = []
     seen = set()
-    for match in _PATH_PATTERN.finditer(_mask_markdown_code(text)):
+    masked = _mask_markdown_code(text)
+    matches = sorted(
+        [*_PATH_PATTERN.finditer(masked), *_MARKDOWN_LINK_PATTERN.finditer(masked)],
+        key=lambda match: match.start("path"),
+    )
+    for match in matches:
         path = normalize_workspace_file(match.group("path"), workspace_dir,
                                         allow_outside_workspace=allow_outside_workspace)
         key = os.path.normcase(path)

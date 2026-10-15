@@ -15,6 +15,21 @@ from core.deliverable_preview import (
 
 
 class TestDeliverablePreviewHelpers(unittest.TestCase):
+    def test_relative_markdown_link_resolves_against_own_workspace(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            for root in (first, second):
+                with open(os.path.join(root, "index.html"), "w") as handle:
+                    handle.write("<p>local</p>")
+            text = "完成：[打开页面](index.html)。\n```\n[示例](missing.html)\n```"
+            for root in (first, second):
+                expected = os.path.join(root, "index.html")
+                self.assertEqual([m[2] for m in iter_workspace_file_paths(text, root)], [expected])
+                rendered = linkify_workspace_paths_in_html('<a href="index.html">打开页面</a>', root)
+                self.assertIn("cowork-file:" + quote(expected, safe=""), rendered)
+            self.assertEqual(normalize_workspace_file("index.html", ""), "")
+            self.assertEqual(normalize_workspace_file(os.path.relpath(os.path.join(second, "index.html"), first), first, allow_outside_workspace=True), "")
+            self.assertEqual(iter_workspace_file_paths("[remote](https://example.com/index.html)", first), [])
+
     def _markdown_href(self, path, encode=False):
         href = os.path.normpath(path).replace("\\", "/")
         if len(href) >= 3 and href[1:3] == ":/":

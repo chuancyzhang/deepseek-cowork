@@ -468,7 +468,7 @@ Agent Loop 前拦截；发送、重试、部分成功、未知结果和手动重
 
 ### 9.3 外部组件进程隔离
 
-BrowserSkill CLI 0.1.8 与 Chrome/Edge 扩展 0.1.4 作为固定 SHA-256 的原始 ZIP
+BrowserSkill CLI 0.3.3 与 Chrome/Edge 扩展 0.3.3 作为固定 SHA-256 的原始 ZIP
 进入只读资源目录。运行时不访问 GitHub：CLI 经哈希校验、安全解压、版本探测和
 原子替换安装到应用数据目录；扩展只在用户选择离线入口后解压到跨 Cowork 更新
 保持不变的稳定路径。扩展加载仍由用户在 Chrome/Edge 扩展页确认，不使用 CRX、

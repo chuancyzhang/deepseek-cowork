@@ -180,6 +180,7 @@ class UpdateWorker(QThread):
 class UpdateCoordinator(QObject):
     changed = Signal(object)
     installation_ready = Signal(object)
+    installation_cancel_requested = Signal()
 
     def __init__(self, install_dir, install_enabled, current_version=APP_VERSION, root=None, parent=None):
         super().__init__(parent)
@@ -261,6 +262,10 @@ class UpdateCoordinator(QObject):
             self._start("local", os.path.abspath(path))
 
     def cancel(self):
+        if self.state.get("phase") == "installing":
+            if self.state.get("can_cancel_install"):
+                self.installation_cancel_requested.emit()
+            return
         self.install_requested = False
         self.pending = None
         if self.worker:
@@ -305,4 +310,4 @@ class UpdateCoordinator(QObject):
 
     def install_aborted(self, message="更新已准备好，尚未安装"):
         self.install_requested = False
-        self.publish(phase="ready", message=message, percent=-1)
+        self.publish(phase="ready", message=message, percent=-1, can_cancel_install=False)

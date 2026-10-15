@@ -17,20 +17,21 @@ except ImportError:  # pragma: no cover - non-Windows
     winreg = None
 
 from .env_utils import get_app_data_dir, get_resource_dir
-from .process_utils import popen_external_program, subprocess_kwargs_no_window
+from .process_utils import popen_external_program, subprocess_kwargs_no_window, acquire_process_singleton
+from .app_version import compare_versions
 
 
 BROWSER_SKILL_COMPONENT_ID = "browser-skill"
-BROWSER_SKILL_VERSION = "0.1.8"
-BROWSER_SKILL_ARCHIVE = "bsk-v0.1.8-x86_64-pc-windows-msvc.zip"
-BROWSER_SKILL_SHA256 = "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13"
+BROWSER_SKILL_VERSION = "0.3.3"
+BROWSER_SKILL_ARCHIVE = "bsk-v0.3.3-x86_64-pc-windows-msvc.zip"
+BROWSER_SKILL_SHA256 = "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02"
 BROWSER_SKILL_DOWNLOAD_URL = (
     "https://github.com/Tencent/BrowserSkill/releases/download/"
     f"cli-v{BROWSER_SKILL_VERSION}/{BROWSER_SKILL_ARCHIVE}"
 )
-BROWSER_SKILL_EXTENSION_VERSION = "0.1.4"
-BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.1.4-chrome.zip"
-BROWSER_SKILL_EXTENSION_SHA256 = "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E"
+BROWSER_SKILL_EXTENSION_VERSION = "0.3.3"
+BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.3.3-chrome.zip"
+BROWSER_SKILL_EXTENSION_SHA256 = "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA"
 BROWSER_SKILL_EXTENSION_DOWNLOAD_URL = (
     "https://github.com/Tencent/BrowserSkill/releases/download/"
     f"ext-v{BROWSER_SKILL_EXTENSION_VERSION}/{BROWSER_SKILL_EXTENSION_ARCHIVE}"
@@ -58,6 +59,17 @@ def browser_skill_root():
 
 def browser_skill_executable():
     return os.path.join(browser_skill_root(), "bsk.exe")
+
+
+def _browser_process_options():
+    # A detached daemon inherits cwd. Never let it pin a versioned app folder.
+    # get_app_data_dir can be inside the installation in portable mode.
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+    root = os.path.join(base, "DeepSeekCowork", "browser-automation", "runtime")
+    os.makedirs(root, exist_ok=True)
+    env = os.environ.copy()
+    env["BSK_AUTO_UPDATE"] = "off"
+    return {"cwd": root, "env": env, **subprocess_kwargs_no_window()}
 
 
 def browser_skill_bundle_root():
@@ -443,7 +455,7 @@ def _run_bsk_executable(executable, args, timeout=20):
         text=True,
         encoding="utf-8",
         errors="replace",
-        **subprocess_kwargs_no_window(),
+        **_browser_process_options(),
     )
     timeout = max(1, int(timeout or 20))
     try:
@@ -1157,7 +1169,7 @@ def _stop_managed_daemon():
     return payload
 
 
-def install_browser_skill(progress_callback=None):
+def install_browser_skill(progress_callback=None, *, require_idle=False):
     components_root = os.path.dirname(browser_skill_root())
     os.makedirs(components_root, exist_ok=True)
     staged_root = tempfile.mkdtemp(prefix=".browser-skill-", dir=components_root)
@@ -1226,6 +1238,8 @@ def install_browser_skill(progress_callback=None):
             progress_callback("正在原子更新 Tencent BrowserSkill…", 90)
         target_root = browser_skill_root()
         if os.path.isdir(target_root):
+            if require_idle:
+                _require_idle_browser_sessions()
             _stop_managed_daemon()
         _replace_component_root(install_root, target_root)
         if progress_callback:
@@ -1403,8 +1417,63 @@ def _stop_session_after_interruption(session_id):
     return result
 
 
+def _require_idle_browser_sessions():
+    sessions = _run_bsk(["--json", "--quiet", "session", "list"], timeout=12)
+    payload = _parse_json_output(sessions["stdout"], sessions["stderr"])
+    if sessions["returncode"] != 0 or not isinstance(payload, list):
+        raise RuntimeError("无法确认浏览器会话状态，尚未更新组件；请在浏览器自动化设置中检查连接后重试。")
+    if payload:
+        raise RuntimeError("浏览器任务仍在运行，尚未更新组件；结束浏览器会话后再次使用即可更新。")
+
+
+def _prepare_bundled_browser_upgrade(status, abort_check=None):
+    """Update an existing managed installation on first use of a newer app."""
+    def extension_outdated(value):
+        return bool(value.get("extension_path") and value.get("extension_prepared_version")
+                    and compare_versions(value["extension_prepared_version"], BROWSER_SKILL_EXTENSION_VERSION) < 0)
+
+    if not status.get("needs_update") and not extension_outdated(status):
+        return status
+    if not status.get("version") or compare_versions(status["version"], BROWSER_SKILL_VERSION) > 0:
+        return status  # An older app must not downgrade a newer installation.
+    root = os.path.dirname(browser_skill_root())
+    lock = acquire_process_singleton(os.path.join(root, "browser-skill-upgrade.lock"))
+    if lock is None:
+        return {**status, "ready": False, "health_error": "浏览器组件正在更新，请稍后重试。"}
+    try:
+        def check_cancelled(*_args):
+            if abort_check and abort_check():
+                raise RuntimeError("浏览器组件准备已停止；再次使用时可继续更新。")
+
+        check_cancelled()
+        status = browser_skill_status(run_diagnostics=False)
+        if not status.get("needs_update") and not extension_outdated(status):
+            return status
+        if compare_versions(status.get("version"), BROWSER_SKILL_VERSION) > 0:
+            return status
+        # Never replace an unmanaged executable or interrupt live browser tasks.
+        if _read_marker().get("source") != "bundled":
+            raise RuntimeError("现有浏览器组件不是随包安装，请在浏览器自动化设置中手动修复。")
+        _require_idle_browser_sessions()
+        check_cancelled()
+        log_browser_skill_event("bundled_upgrade_start", previous=status.get("version"), version=BROWSER_SKILL_VERSION)
+        if status.get("needs_update"):
+            install_browser_skill(check_cancelled, require_idle=True)
+        if extension_outdated(status):
+            prepare_browser_skill_extension(check_cancelled)
+        check_cancelled()
+        result = browser_skill_status(run_diagnostics=True)
+        log_browser_skill_event("bundled_upgrade_finish", version=BROWSER_SKILL_VERSION, ready=result.get("ready"), state=result.get("state"))
+        return result
+    except Exception as exc:
+        log_browser_skill_event("bundled_upgrade_failed", error=str(exc), version=BROWSER_SKILL_VERSION)
+        return {**status, "ready": False, "health_error": str(exc)}
+    finally:
+        lock.release()
+
+
 def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
-    status = browser_skill_status(run_diagnostics=False)
+    status = _prepare_bundled_browser_upgrade(browser_skill_status(run_diagnostics=False), abort_check)
     if not status.get("ready"):
         return {
             "status": "incomplete",
@@ -1429,7 +1498,7 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             stdin=subprocess.DEVNULL,
             stdout=stdout_file,
             stderr=stderr_file,
-            **subprocess_kwargs_no_window(),
+            **_browser_process_options(),
         )
         log_browser_skill_event(
             "command",

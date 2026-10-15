@@ -20,7 +20,7 @@ from .deepseek import (
 from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
 from .chat_completions_stream import iter_chat_completions_events
 from core.conversation_integrity import ensure_tool_call_sequence
-from core.tool_images import build_responses_tool_output
+from core.tool_images import build_responses_tool_output, build_chat_tool_image_message
 from core.data_security import project_provider_request
 from core.request_snapshot import capture_provider_request
 
@@ -1461,6 +1461,21 @@ class OpenAIProvider(LLMProvider):
         """
 
         clean = self._prepare_messages(messages)
+        # Chat tool messages cannot contain images. Keep the complete tool-result
+        # batch contiguous, then append its images only in this wire projection.
+        with_images = []
+        pending_images = []
+        for source, message in zip(messages, clean):
+            if source.get("role") != "tool":
+                with_images.extend(pending_images)
+                pending_images = []
+            with_images.append(message)
+            if source.get("role") == "tool" and source.get("content_parts"):
+                pending_images.append(build_chat_tool_image_message(
+                    source["content_parts"], supports_vision=self.supports_vision,
+                    tool_call_id=source.get("tool_call_id") or "",
+                ))
+        clean = with_images + pending_images
         if not is_official_deepseek_api(self.base_url):
             return clean, 0
 

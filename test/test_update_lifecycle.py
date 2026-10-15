@@ -71,6 +71,43 @@ class UpdateLifecycleTests(unittest.TestCase):
         self.host.sessions[identity] = state
         return state
 
+    def test_delayed_ready_is_accepted_after_original_thirty_second_limit(self):
+        host = self.host
+        host._update_deadline = time.monotonic() + 120
+        host._quiesce_for_update = MagicMock()
+        with patch("ui.update_lifecycle.QTimer.singleShot"):
+            host._await_update_installer()
+        host._quiesce_for_update.assert_not_called()
+        Path(host._update_transaction, "ready.json").write_text(json.dumps({"id": "transaction"}))
+        host._await_update_installer()
+        host._quiesce_for_update.assert_called_once()
+
+    def test_expired_wait_can_be_extended_without_aborting_or_stopping_tasks(self):
+        host = self.host
+        host._update_deadline = 0
+        with patch("ui.update_lifecycle.ProductMessageDialog") as dialog, patch("ui.update_lifecycle.QTimer.singleShot"):
+            dialog.return_value.exec_result.return_value = "wait"
+            host._await_update_installer()
+        self.assertTrue(host._update_preparing)
+        self.assertFalse(Path(host._update_transaction, "abort.json").exists())
+        self.assertGreater(host._update_deadline, time.monotonic() + 170)
+        host.chat_save_worker.stop_worker.assert_not_called()
+
+    def test_cancel_wait_and_old_timer_cannot_resume_a_new_transaction(self):
+        host = self.host
+        host.update_coordinator.publish(phase="installing", can_cancel_install=True)
+        host.update_coordinator.installation_cancel_requested.connect(host._cancel_update_startup)
+        old = host._update_transaction
+        host.update_coordinator.cancel()
+        self.assertTrue(Path(old, "abort.json").exists())
+        self.assertFalse(host._update_preparing)
+        host._update_preparing = True
+        host._update_transaction = str(self.root / "second")
+        host._quiesce_for_update = MagicMock()
+        host._await_update_installer(old)
+        host._quiesce_for_update.assert_not_called()
+
+
     def test_busy_confirmation_cancel_does_not_start_installer_or_stop_tasks(self):
         host = self.host
         self.state("background")

@@ -185,7 +185,7 @@ def build_responses_tool_output(content, content_parts, *, supports_vision, tool
             if part.get("type") != "input_image":
                 raise ToolImageError("unsupported_content_part", "工具多模态结果包含不支持的内容类型。")
             if not supports_vision:
-                raise ToolImageError("vision_not_supported", "历史工具结果包含图片，请切换到支持图片输入的 Responses 模型后继续。")
+                raise ToolImageError("vision_not_supported", "历史工具结果包含图片，请切换到支持图片输入的模型后继续。")
             mime_type = str(part.get("mime_type") or "")
             if mime_type not in {value[0] for value in SUPPORTED_IMAGE_FORMATS.values()}:
                 raise ToolImageError("unsupported_format", "工具图片缺少有效的图片格式。")
@@ -218,3 +218,20 @@ def build_responses_tool_output(content, content_parts, *, supports_vision, tool
             tool_call_id, image_count, image_bytes,
         )
     return output
+
+
+def build_chat_tool_image_message(content_parts, *, supports_vision, tool_call_id):
+    """Project a verified snapshot into Chat's user-only image content format."""
+    output = build_responses_tool_output(
+        f"Images from tool result (tool_call_id={tool_call_id}):",
+        content_parts, supports_vision=supports_vision, tool_call_id=tool_call_id,
+    )
+    content = []
+    for part in output:
+        if part["type"] == "input_text":
+            content.append({"type": "text", "text": part["text"]})
+        else:
+            content.append({"type": "image_url", "image_url": {
+                "url": part["image_url"], "detail": part["detail"],
+            }})
+    return {"role": "user", "content": content}

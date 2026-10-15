@@ -3,15 +3,15 @@
   "component_id": "browser-skill",
   "license": "LICENSE.txt",
   "cli": {
-    "version": "0.1.8",
-    "archive": "bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
-    "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.1.8/bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
-    "sha256": "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13"
+    "version": "0.3.3",
+    "archive": "bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.3.3/bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
+    "sha256": "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02"
   },
   "extension": {
-    "version": "0.1.4",
-    "archive": "browser-skill-extension-v0.1.4-chrome.zip",
-    "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.1.4/browser-skill-extension-v0.1.4-chrome.zip",
-    "sha256": "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E"
+    "version": "0.3.3",
+    "archive": "browser-skill-extension-v0.3.3-chrome.zip",
+    "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.3.3/browser-skill-extension-v0.3.3-chrome.zip",
+    "sha256": "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA"
   }
 }

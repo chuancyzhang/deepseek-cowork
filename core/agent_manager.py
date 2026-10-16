@@ -959,9 +959,8 @@ class AgentManagerRegistry:
             managers = [m for (path, _), m in self._managers.items() if path == os.path.abspath(db_path)]
         return sum(record.worker is not None for manager in managers for record in list(manager._agents.values()))
 
-    def stop_for_update(self, db_path, timeout=30):
-        """Pause child queues, drain accepted output, and require durable terminal state."""
-        deadline = time.monotonic() + timeout
+    def request_stop(self, db_path):
+        """Pause local child queues and request cancellation without joining."""
         with self._lock:
             managers = [m for (path, _), m in self._managers.items() if path == os.path.abspath(db_path)]
         targets = []
@@ -973,6 +972,12 @@ class AgentManagerRegistry:
                 for record in records:
                     manager.interrupt_agent(record.agent_id, record.run_id)
                 targets.append((manager, records))
+        return targets
+
+    def stop_for_update(self, db_path, timeout=30):
+        """Pause child queues, drain accepted output, and require durable terminal state."""
+        deadline = time.monotonic() + timeout
+        targets = self.request_stop(db_path)
         for manager, records in targets:
             with manager._condition:
                 while any(record.worker is not None for record in records):

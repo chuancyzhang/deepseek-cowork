@@ -1,4 +1,4 @@
-"""Update-specific quiesce/save/exit handshake. Ordinary application exit is unchanged."""
+"""Update-specific quiesce/save/exit handshake, separate from ordinary exit."""
 import json
 import os
 import sys
@@ -15,6 +15,7 @@ from core.theme_service import resolve_theme
 from core.update_coordinator import atomic_json, update_log
 from core.updater import create_windows_update_script, launch_windows_update_script
 from ui.primitives import ProductMessageDialog
+from ui.worker_lifecycle import pending_ui_workers, pause_ui_work_timers, ui_worker_snapshot
 
 INSTALLER_STARTUP_WAIT_SECONDS = 180
 
@@ -49,7 +50,7 @@ class UpdateLifecycleMixin:
         worker.start()
 
     def begin_update_install(self, result):
-        if getattr(self, "_update_preparing", False):
+        if getattr(self, "_update_preparing", False) or getattr(self, "_checkpoint_shutdown_pending", False):
             return
         if any(getattr(state, "branch_in_progress", False) for state in self.sessions.values()) or any(w.isRunning() for w in getattr(self, "skillhub_workers", [])):
             self.update_coordinator.install_aborted("文件操作尚未完成，请稍后再更新；安装包已保留。")
@@ -160,13 +161,14 @@ class UpdateLifecycleMixin:
 
     def _quiesce_for_update(self):
         try:
+            self._update_quiescing = True
+            self._shutdown_wait_workers = ui_worker_snapshot(self)
             self.update_coordinator.publish(message="正在保存内容并停止任务…", can_cancel_install=False)
             self.sync_current_session_state()
-            for name in ("daemon_timer", "favorites_timer"):
-                timer = getattr(self, name, None)
-                if timer and timer.isActive():
-                    self._update_paused_timers.append(timer)
-                    timer.stop()
+            self.setEnabled(False)
+            if self.runtime_checkpoint_worker is not None:
+                self.runtime_checkpoint_worker.retry_failed()
+            self._update_paused_timers.extend(pause_ui_work_timers(self))
             for state in list(self.sessions.values()):
                 self._flush_ui_stream_buffers(state)
                 worker = getattr(state, "llm_worker", None)
@@ -201,7 +203,7 @@ class UpdateLifecycleMixin:
         try:
             if os.path.isfile(os.path.join(self._update_transaction, "abort.json")) or self._update_installer_process.poll() is not None:
                 raise RuntimeError("安装程序已关闭；内容已保留，尚未安装。")
-            running = any(worker and worker.isRunning() for state in self.sessions.values() for worker in (getattr(state, "llm_worker", None), getattr(state, "daemon_worker", None)))
+            running = pending_ui_workers(self)
             if running:
                 if time.monotonic() > self._update_deadline:
                     raise RuntimeError("任务仍在停止和保存，尚未关闭应用，请稍后重试。")
@@ -249,6 +251,8 @@ class UpdateLifecycleMixin:
 
     def _commit_update_exit(self):
         # Nothing may kill the parent before all persistence acknowledgements above.
+        if pending_ui_workers(self):
+            raise RuntimeError("后台操作尚未完成，尚未开始安装。")
         root = self._update_transaction
         update_log(self.update_coordinator.root, "saved_for_update", transaction=os.path.basename(root), update_id=getattr(self, "_update_result", {}).get("update_id"))
         if self._update_daemon_status:
@@ -261,16 +265,20 @@ class UpdateLifecycleMixin:
             raise RuntimeError("安装程序已关闭，应用保持打开；尚未替换文件。")
         atomic_json(os.path.join(root, "commit.json"), {"id": os.path.basename(root), "saved": True})
         self._update_exit_committed = True
+        # Writers stay usable through all abortable steps. After commit, keep
+        # the event loop alive until their actual native threads have returned.
+        for worker in (getattr(self, "runtime_checkpoint_worker", None), getattr(self, "chat_save_worker", None)):
+            if worker is not None:
+                worker.request_stop()
+        QTimer.singleShot(0, self._finish_update_exit)
+
+    def _finish_update_exit(self):
+        if not getattr(self, "_update_exit_committed", False):
+            return
+        if pending_ui_workers(self, include_writers=True):
+            QTimer.singleShot(100, self._finish_update_exit)
+            return
         try:
-            # Keep writers alive through every abortable step. Persistence was drained
-            # above; after commit only bounded teardown remains, never an abort/restart.
-            checkpoint = getattr(self, "runtime_checkpoint_worker", None)
-            if checkpoint:
-                checkpoint.request_stop()
-                checkpoint.wait(3000)
-            worker = getattr(self, "chat_save_worker", None)
-            if worker:
-                worker.stop_worker(timeout_ms=3000)
             self._dispose_application_event_filters()
             self.skill_catalog_service.stop_watching()
             if self.tray_icon:
@@ -292,6 +300,9 @@ class UpdateLifecycleMixin:
                 if process and process.poll() is None:
                     process.terminate()
         self._update_preparing = False
+        if getattr(self, "_update_quiescing", False):
+            self.setEnabled(True)
+            self._update_quiescing = False
         for timer in getattr(self, "_update_paused_timers", []):
             timer.start()
         self._update_paused_timers = []

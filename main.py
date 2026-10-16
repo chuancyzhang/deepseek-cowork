@@ -110,7 +110,7 @@ from core.chat_save_queue import (
     classify_chat_save_error,
 )
 from core.chat_recovery_journal import ChatRecoveryJournal
-from core.runtime_journal import RuntimeJournal
+from core.runtime_journal import RuntimeJournal, RUN_NONTERMINAL_STATUSES
 from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
 from core.conversation_render import (
     _is_hidden_context_message,
@@ -244,6 +244,7 @@ from core.process_utils import (
 from core.update_coordinator import UpdateCoordinator
 from ui.update_panel import UpdatePanel
 from ui.update_lifecycle import UpdateLifecycleMixin
+from ui.worker_lifecycle import pending_ui_workers, pause_ui_work_timers, ui_worker_snapshot, ui_work_stopping
 from core.runtime_components import (
     NODE_SOURCES,
     PYTHON_SOURCES,
@@ -1152,18 +1153,44 @@ def log_model_service_event(stage, **fields):
 
 
 _NATIVE_CRASH_LOG_HANDLE = None
+_QT_MESSAGE_HANDLER = None
 
 
 def install_native_crash_logging():
-    global _NATIVE_CRASH_LOG_HANDLE
+    global _NATIVE_CRASH_LOG_HANDLE, _QT_MESSAGE_HANDLER
     if _NATIVE_CRASH_LOG_HANDLE is not None:
         return
     try:
         path = os.path.join(get_app_data_dir(), NATIVE_CRASH_LOG_FILENAME)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         _NATIVE_CRASH_LOG_HANDLE = open(path, "a", encoding="utf-8", buffering=1)
-        _NATIVE_CRASH_LOG_HANDLE.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] process_start pid={os.getpid()}\n")
+        import PySide6
+        import shiboken6
+        from PySide6.QtCore import QtMsgType, qFormatLogMessage, qInstallMessageHandler, qVersion
+        _NATIVE_CRASH_LOG_HANDLE.write(
+            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] process_start pid={os.getpid()} "
+            f"app={APP_VERSION} python={platform.python_version()} pyside={PySide6.__version__} "
+            f"shiboken={shiboken6.__version__} qt={qVersion()} frozen={bool(getattr(sys, 'frozen', False))}\n"
+        )
         faulthandler.enable(file=_NATIVE_CRASH_LOG_HANDLE, all_threads=True)
+        def qt_message_handler(kind, context, message):
+            if kind == QtMsgType.QtFatalMsg:
+                try:
+                    _NATIVE_CRASH_LOG_HANDLE.write(f"qt_fatal: {qFormatLogMessage(kind, context, message)}\n")
+                    _NATIVE_CRASH_LOG_HANDLE.flush()
+                except Exception:
+                    pass
+            if previous_handler is not None:
+                previous_handler(kind, context, message)
+            elif sys.stderr is not None:
+                try:
+                    sys.stderr.write(qFormatLogMessage(kind, context, message) + "\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+        _QT_MESSAGE_HANDLER = qt_message_handler
+        previous_handler = None
+        previous_handler = qInstallMessageHandler(qt_message_handler)
     except Exception as exc:
         _NATIVE_CRASH_LOG_HANDLE = None
         append_background_process_log(UI_ERROR_LOG_FILENAME, f"native_crash_logging_failed={exc}")
@@ -2541,14 +2568,14 @@ def deliverable_preview_settle_script():
 
 
 class DeliverableScanWorker(QThread):
-    completed = Signal(object, int)
-    failed = Signal(str, int)
-
     def __init__(self, workspace_dir, records, generation, parent=None):
         super().__init__(parent)
         self.workspace_dir = workspace_dir
         self.records = list(records or [])
         self.generation = int(generation)
+        self.items = []
+        self.error = ""
+        self.render_current = False
 
     def run(self):
         try:
@@ -2580,9 +2607,9 @@ class DeliverableScanWorker(QThread):
                     "conversation_id": record.get("conversation_id"),
                 })
             items.sort(key=lambda item: (item.get("mtime") or 0, item.get("relative_path") or ""), reverse=True)
-            self.completed.emit(items, self.generation)
+            self.items = items
         except Exception as exc:
-            self.failed.emit(str(exc), self.generation)
+            self.error = str(exc)
 
 
 class SkillManagerLoadWorker(QThread):
@@ -19098,8 +19125,6 @@ class DaemonGuidanceMutationWorker(QThread):
 
 
 class DaemonConnectWorker(QThread):
-    finished_signal = Signal(dict)
-
     def __init__(
         self,
         host,
@@ -19117,6 +19142,7 @@ class DaemonConnectWorker(QThread):
         self.allow_start = bool(allow_start)
         self.retries = max(0, int(retries or 0))
         self.timeout = timeout
+        self.result = {"connected": False, "process": None}
 
     def _signature_matches(self, payload):
         if not isinstance(payload, dict):
@@ -19125,7 +19151,13 @@ class DaemonConnectWorker(QThread):
         return bool(remote and self.runtime_signature and remote == self.runtime_signature)
 
     def run(self):
-        payload = {"connected": False, "process": None}
+        try:
+            self._connect_daemon()
+        except Exception as exc:
+            self.result["error"] = str(exc)
+
+    def _connect_daemon(self):
+        payload = self.result
         client = DaemonClient(self.host, self.port, timeout=self.timeout)
         ping_payload = client.ping()
         connected = bool(ping_payload)
@@ -19167,12 +19199,9 @@ class DaemonConnectWorker(QThread):
                     connected = True
                     break
         payload["connected"] = connected
-        self.finished_signal.emit(payload)
 
 
 class DaemonStatusWorker(QThread):
-    finished_signal = Signal(dict)
-
     def __init__(
         self,
         host,
@@ -19186,6 +19215,7 @@ class DaemonStatusWorker(QThread):
         self.port = port
         self.runtime_signature = str(runtime_signature or "").strip()
         self.timeout = timeout
+        self.result = {"connected": False, "status_text": "守护进程未连接"}
 
     def _signature_matches(self, payload):
         if not isinstance(payload, dict):
@@ -19194,7 +19224,13 @@ class DaemonStatusWorker(QThread):
         return bool(remote and self.runtime_signature and remote == self.runtime_signature)
 
     def run(self):
-        payload = {"connected": False, "status_text": "守护进程未连接"}
+        try:
+            self._query_status()
+        except Exception as exc:
+            self.result.update(error=str(exc), status_text=f"查询守护进程状态失败：{exc}")
+
+    def _query_status(self):
+        payload = self.result
         client = DaemonClient(self.host, self.port, timeout=self.timeout)
         ping_payload = client.ping()
         connected = bool(ping_payload)
@@ -19216,7 +19252,6 @@ class DaemonStatusWorker(QThread):
             else:
                 connected = False
         payload["connected"] = connected
-        self.finished_signal.emit(payload)
 
 class HistoryTitleButton(QLabel):
     clicked = Signal()
@@ -30502,7 +30537,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.refresh_history_list()
         log_startup_stage("startup_history_ready")
         self.acknowledge_update_startup()
-        QTimer.singleShot(10000, self.update_coordinator.start_automatic)
+        QTimer.singleShot(10000, lambda: None if ui_work_stopping(self) else self.update_coordinator.start_automatic())
         QTimer.singleShot(0, self._show_model_onboarding_if_needed)
 
     def _show_model_onboarding_if_needed(self):
@@ -36096,6 +36131,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                     app._queue_ui_error_toast()
 
         buffer = StreamEventBuffer(self, report=report)
+        buffer.worker = worker
         worker._ui_stream_buffer = buffer
         buffers = getattr(state, "ui_stream_buffers", None)
         if buffers is None:
@@ -36138,6 +36174,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if buffer in buffers:
             buffers.remove(buffer)
         worker._ui_stream_buffer = None
+        buffer.worker = None
         try:
             buffer.close(discard_terminal=discard_terminal)
         finally:
@@ -36177,6 +36214,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             worker.finished.connect(on_native_finished, Qt.QueuedConnection)
 
     def _handle_native_run_worker_finished(self, session_id, turn_id, request_id, kind, worker):
+        if (getattr(self, "_checkpoint_shutdown_pending", False) and kind == "daemon"
+                and session_id in getattr(self, "_shutdown_preserved_sessions", ())
+                and getattr(worker, "_aborted", False)):
+            # Detaching the UI is intentional; the daemon still owns this run.
+            return
         state = self.get_session(session_id)
         if not state or not self._event_matches_active_run(state, turn_id, request_id):
             return
@@ -36474,6 +36516,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=False)
 
     def start_background_services(self):
+        if ui_work_stopping(self):
+            return
         if self._background_services_started:
             return
         self._background_services_started = True
@@ -36502,6 +36546,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         QTimer.singleShot(max(int(delay_ms or 0), 0), callback)
 
     def start_background_skill_load(self, force=False):
+        if ui_work_stopping(self):
+            return
         if self.skill_manager_loading:
             return
         if self.skill_manager_ready and not force:
@@ -36531,7 +36577,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if manager is not None:
                 self.skill_manager = manager
                 self.skill_manager_ready = True
-                self.skill_catalog_service.start_watching()
+                if not ui_work_stopping(self):
+                    self.skill_catalog_service.start_watching()
             log_startup_stage(
                 "skill_load_done",
                 ok=True,
@@ -36554,6 +36601,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.refresh_context_badges()
 
     def _start_background_daemon_prewarm(self):
+        if ui_work_stopping(self):
+            return
         self.setup_daemon_client(retries=6)
 
     def setup_daemon_client(self, retries=6):
@@ -36565,7 +36614,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.queue_daemon_connection(allow_start=True, retries=retries)
 
     def queue_daemon_connection(self, allow_start=False, retries=0):
-        if getattr(self, "_update_preparing", False):
+        if getattr(self, "_update_preparing", False) or ui_work_stopping(self):
             return
         self._pending_daemon_connect_allow_start = bool(
             getattr(self, "_pending_daemon_connect_allow_start", False) or allow_start
@@ -36577,8 +36626,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self._drain_daemon_connection_queue()
 
     def _drain_daemon_connection_queue(self):
+        if ui_work_stopping(self) or getattr(self, "_update_preparing", False):
+            return
         worker = getattr(self, "daemon_connect_worker", None)
-        if worker and worker.isRunning():
+        if worker is not None:
             self.daemon_bootstrapping = bool(
                 getattr(self, "_pending_daemon_connect_allow_start", False) or getattr(worker, "allow_start", False)
             )
@@ -36603,6 +36654,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             can_start = False
         self.daemon_bootstrapping = bool(allow_start)
         self.refresh_context_badges()
+        log_ui_navigation("daemon_connect_start", retries=retries, allow_start=can_start)
         worker = DaemonConnectWorker(
             self.daemon_host,
             self.daemon_port,
@@ -36613,9 +36665,20 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             parent=self,
         )
         self.daemon_connect_worker = worker
-        worker.finished_signal.connect(self.handle_daemon_connect_finished, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(self._finish_daemon_connection, Qt.QueuedConnection)
         worker.start()
+
+    @Slot()
+    def _finish_daemon_connection(self):
+        worker = self.sender()
+        if worker is not getattr(self, "daemon_connect_worker", None):
+            return
+        try:
+            self.handle_daemon_connect_finished(worker.result)
+        finally:
+            self.daemon_connect_worker = None
+            worker.deleteLater()
+            self._drain_daemon_connection_queue()
 
     def handle_daemon_connect_finished(self, payload):
         payload = payload if isinstance(payload, dict) else {}
@@ -36623,7 +36686,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if process is not None:
             self.daemon_process = process
         self.daemon_available = bool(payload.get("connected"))
-        self.daemon_connect_worker = None
         log_ui_navigation(
             "daemon_connect_finished",
             connected=self.daemon_available,
@@ -36657,12 +36719,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
         else:
             self._daemon_signature_mismatch_notified = False
-            if self.daemon_available:
+            if self.daemon_available and not ui_work_stopping(self):
                 for state in list(self.sessions.values()):
                     self.attach_active_daemon_run_if_needed(state)
-        self._drain_daemon_connection_queue()
 
     def start_daemon_monitor(self):
+        if ui_work_stopping(self):
+            return
         if self.daemon_timer:
             return
         self.daemon_timer = QTimer(self)
@@ -36671,6 +36734,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.daemon_timer.start()
 
     def ensure_daemon_connection(self):
+        if ui_work_stopping(self):
+            return
         self.recover_runtime_pending_commits()
         self.queue_daemon_connection(allow_start=True, retries=0)
 
@@ -36716,6 +36781,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return recovered
 
     def start_favorites_scheduler(self):
+        if ui_work_stopping(self):
+            return
         if self.favorites_timer:
             return
         self.favorites_timer = QTimer(self)
@@ -37018,6 +37085,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return origin
 
     def launch_favorite(self, favorite_id, source="ui"):
+        if ui_work_stopping(self):
+            return False
         favorite = self.config_manager.get_favorite(favorite_id)
         if not favorite:
             self.add_system_toast("未找到这个常用项", "error")
@@ -37194,7 +37263,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return True
 
     def check_favorite_schedules(self):
-        if getattr(self, "_update_preparing", False):
+        if getattr(self, "_update_preparing", False) or ui_work_stopping(self):
             return
         self._sync_favorite_delivery_history()
         favorites = self.config_manager.get_favorites()
@@ -37335,7 +37404,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.daemon_process = None
 
     def start_gateway_process(self):
-        if getattr(self, "_update_preparing", False):
+        if getattr(self, "_update_preparing", False) or ui_work_stopping(self):
             return
         try:
             if getattr(self, "gateway_starting", False):
@@ -37460,8 +37529,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return "守护进程未连接"
 
     def show_tray_status(self):
+        if ui_work_stopping(self):
+            return
         connect_worker = getattr(self, "daemon_connect_worker", None)
-        if connect_worker and connect_worker.isRunning():
+        if connect_worker is not None:
             status = "守护进程连接中"
             if self.tray_icon:
                 self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
@@ -37477,13 +37548,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 QMessageBox.information(self, "状态", status)
             return
         worker = getattr(self, "daemon_status_worker", None)
-        if worker and worker.isRunning():
+        if worker is not None:
             status = "守护进程状态查询中"
             if self.tray_icon:
                 self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
             else:
                 QMessageBox.information(self, "状态", status)
             return
+        log_ui_navigation("daemon_status_start")
         worker = DaemonStatusWorker(
             self.daemon_host,
             self.daemon_port,
@@ -37492,8 +37564,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             parent=self,
         )
         self.daemon_status_worker = worker
-        worker.finished_signal.connect(self.handle_daemon_status_finished, Qt.QueuedConnection)
-        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(self._finish_daemon_status, Qt.QueuedConnection)
         worker.start()
         status = "正在刷新守护进程状态"
         if self.tray_icon:
@@ -37501,11 +37572,24 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         else:
             QMessageBox.information(self, "状态", status)
 
+    @Slot()
+    def _finish_daemon_status(self):
+        worker = self.sender()
+        if worker is not getattr(self, "daemon_status_worker", None):
+            return
+        try:
+            self.handle_daemon_status_finished(worker.result)
+        finally:
+            self.daemon_status_worker = None
+            worker.deleteLater()
+
     def handle_daemon_status_finished(self, payload):
         payload = payload if isinstance(payload, dict) else {}
         self.daemon_available = bool(payload.get("connected"))
-        self.daemon_status_worker = None
+        log_ui_navigation("daemon_status_finished", connected=self.daemon_available, error=payload.get("error", ""))
         self.refresh_context_badges()
+        if ui_work_stopping(self):
+            return
         status = str(payload.get("status_text") or self.get_daemon_status_text()).strip() or "守护进程状态未知"
         if self.tray_icon:
             self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
@@ -37513,6 +37597,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        if getattr(self, "_checkpoint_shutdown_pending", False):
+            return
         if getattr(self, "_update_preparing", False):
             self.add_system_toast("正在准备安装更新，请稍候。", "info")
             return
@@ -37529,7 +37615,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
-        self._dispose_application_event_filters()
         self._shutdown_workers_async(self._finish_quit_app)
 
     def _finish_quit_app(self, preserved_daemon_runs):
@@ -37546,21 +37631,105 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if getattr(self, "_checkpoint_shutdown_pending", False):
             return
         self._checkpoint_shutdown_pending = True
-        # A delivered final may still be waiting for its checkpoint callback.
-        # Materialize it before shutting down the canonical history save worker.
-        for state in list(self.sessions.values()):
-            self._flush_ui_stream_buffers(state)
-        callbacks = list(self._checkpoint_continuations.values())
-        self._checkpoint_continuations.clear()
-        for callback in callbacks:
-            callback()
-        preserved = self.shutdown_workers(preserve_daemon_runs=True)
-        worker = getattr(self, "runtime_checkpoint_worker", None)
-        if worker is None or not worker.isRunning():
-            continuation(preserved)
+        self._shutdown_continuation = continuation
+        self._shutdown_saves_queued = False
+        self._shutdown_started_at = time.monotonic()
+        self._shutdown_wait_notified = False
+        self._shutdown_paused_timers = pause_ui_work_timers(self)
+        self._shutdown_preserved_sessions = set()
+        try:
+            self.sync_current_session_state()
+            self.setEnabled(False)
+            if self.runtime_checkpoint_worker is not None:
+                self.runtime_checkpoint_worker.retry_failed()
+            self._shutdown_preserved_daemon_runs = self.shutdown_workers(preserve_daemon_runs=True)
+        except Exception as exc:
+            self._abort_worker_shutdown(exc)
             return
-        worker.finished.connect(lambda: continuation(preserved))
-        worker.request_stop()
+        log_ui_navigation("shutdown_start", preserved_daemon_runs=self._shutdown_preserved_daemon_runs)
+        QTimer.singleShot(0, self._await_shutdown_workers)
+
+    def _wait_for_shutdown(self, callback, phase, workers=()):
+        if not self._shutdown_wait_notified and time.monotonic() - self._shutdown_started_at >= 5:
+            self._shutdown_wait_notified = True
+            log_ui_navigation("shutdown_wait", phase=phase, workers=[type(w).__name__ for w in workers])
+            self.add_system_toast("正在等待后台操作和内容保存完成，完成后会自动退出。", "info", auto_close_ms=8000)
+        QTimer.singleShot(100, callback)
+
+    def _await_shutdown_workers(self):
+        if not getattr(self, "_checkpoint_shutdown_pending", False):
+            return
+        try:
+            pending = pending_ui_workers(self)
+            if pending or get_agent_manager_registry().active_count(self.chat_storage.db_path):
+                self._wait_for_shutdown(self._await_shutdown_workers, "workers", pending)
+                return
+            for state in list(self.sessions.values()):
+                self._flush_ui_stream_buffers(state)
+            if self._checkpoint_continuations:
+                self._wait_for_shutdown(self._await_shutdown_workers, "checkpoint_callbacks")
+                return
+            if not self._shutdown_saves_queued:
+                for state in list(self.sessions.values()):
+                    self.flush_session_content(state.session_id, final=False)
+                    self.flush_session_thinking(state.session_id)
+                    run_id = getattr(state, "active_turn_request_id", "")
+                    run = self.runtime_journal.get_run(state.session_id, run_id) if run_id else None
+                    if run and run.get("status") in RUN_NONTERMINAL_STATUSES:
+                        boundary = "exit" if state.session_id in self._shutdown_preserved_sessions else "exit_local"
+                        if not self._queue_runtime_checkpoint(state, boundary=boundary):
+                            raise RuntimeError("运行恢复记录未进入保存队列。")
+                    if not self.save_chat_history(state.session_id):
+                        raise RuntimeError("会话内容未进入保存队列。")
+                self._shutdown_saves_queued = True
+                # Let already posted completion callbacks run before sealing writers.
+                QTimer.singleShot(0, self._await_shutdown_workers)
+                return
+            for worker in (self.runtime_checkpoint_worker, self.chat_save_worker):
+                if worker is None:
+                    continue
+                drained, failed = worker.drain_status()
+                if failed:
+                    raise RuntimeError("内容保存失败，请查看会话中的错误提示后再次退出。")
+                if not drained:
+                    self._wait_for_shutdown(self._await_shutdown_workers, "persistence")
+                    return
+            for worker in (self.runtime_checkpoint_worker, self.chat_save_worker):
+                if worker is not None:
+                    worker.request_stop()
+            QTimer.singleShot(0, self._finish_shutdown_workers)
+        except Exception as exc:
+            self._abort_worker_shutdown(exc)
+
+    def _abort_worker_shutdown(self, error):
+        self._checkpoint_shutdown_pending = False
+        self._shutdown_continuation = None
+        self.setEnabled(True)
+        for timer in self._shutdown_paused_timers:
+            timer.start()
+        log_ui_navigation("shutdown_failed", error=str(error))
+        self.add_system_toast(f"应用尚未退出，内容已保留。{error}", "error", auto_close_ms=8000)
+        for session_id in self._shutdown_preserved_sessions:
+            state = self.get_session(session_id)
+            if state and state.daemon_running:
+                self._reconnect_daemon_stream(session_id, state.active_turn_request_id)
+
+    def _finish_shutdown_workers(self):
+        if not getattr(self, "_checkpoint_shutdown_pending", False):
+            return
+        pending = pending_ui_workers(self, include_writers=True)
+        if pending:
+            self._wait_for_shutdown(self._finish_shutdown_workers, "thread_exit", pending)
+            return
+        continuation = self._shutdown_continuation
+        if continuation is None:
+            return
+        self._shutdown_continuation = None
+        self.skill_catalog_service.stop_watching()
+        self._dispose_application_event_filters()
+        self._shutdown_wait_workers = []
+        log_ui_navigation("shutdown_finished", preserved_daemon_runs=self._shutdown_preserved_daemon_runs)
+        continuation(self._shutdown_preserved_daemon_runs)
 
     def _dispose_application_event_filters(self):
         browser = getattr(self, "browser_workbench", None)
@@ -37593,70 +37762,29 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.daemon_process = None
 
     def shutdown_workers(self, preserve_daemon_runs=False):
-        for worker in list(getattr(self, "skillhub_workers", [])):
-            worker.wait()
-        preserved_daemon_runs = False
-        if not self.flush_pending_chat_saves(timeout_ms=3000):
-            self.append_log("会话保存队列在关闭前未能完全 flush，应用将继续退出。")
-        deliverable_scan_worker = getattr(self, "deliverable_scan_worker", None)
-        if deliverable_scan_worker is not None and deliverable_scan_worker.isRunning():
-            deliverable_scan_worker.wait(3000)
-        self.deliverable_scan_worker = None
-        if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
-            self.daemon_connect_worker.wait(1000)
-        self.daemon_connect_worker = None
-        if self.daemon_status_worker and self.daemon_status_worker.isRunning():
-            self.daemon_status_worker.wait(1000)
-        self.daemon_status_worker = None
-        for stop_worker in list(getattr(self, "_daemon_stop_workers", set())):
-            if stop_worker.isRunning():
-                stop_worker.wait(3500)
+        # Retain parentless session workers even if their result callback clears
+        # the session reference before their native thread has returned.
+        self._shutdown_wait_workers = ui_worker_snapshot(self)
+        self._shutdown_preserved_sessions = set()
+        get_agent_manager_registry().request_stop(self.chat_storage.db_path)
         for session_id, state in list(self.sessions.items()):
-            for guidance_worker in list(getattr(state, "guidance_workers", []) or []):
-                try:
-                    guidance_worker.wait(500)
-                except Exception:
-                    pass
-            state.guidance_workers = []
+            self._flush_ui_stream_buffers(state)
             preserve_session_run = bool(preserve_daemon_runs and state.daemon_running)
             if preserve_session_run:
-                preserved_daemon_runs = True
-            if not preserve_session_run:
-                self._stop_live_subagents(state, force=True)
+                self._shutdown_preserved_sessions.add(session_id)
             if self.daemon_client and state.daemon_running and state.session_id and not preserve_session_run:
                 try:
                     self.daemon_client.stop_session(state.session_id)
                 except Exception:
                     pass
             if state.daemon_worker and state.daemon_worker.isRunning():
-                self._disconnect_worker_signals(state.daemon_worker)
                 if preserve_session_run:
                     state.daemon_worker.detach()
                 else:
                     state.daemon_worker.abort()
-                state.daemon_worker.wait(1000)
             if state.llm_worker and state.llm_worker.isRunning():
-                self._disconnect_worker_signals(state.llm_worker)
                 state.llm_worker.stop()
-                state.llm_worker.wait(1000)
-            # Finished threads can still have undelivered GUI data. Seal those
-            # buffers too, before dropping the session's worker identities.
-            for worker in (state.daemon_worker, state.llm_worker):
-                if worker is not None:
-                    self._retire_ui_stream_buffer(state, worker, discard_terminal=True)
-            self.flush_session_content(state.session_id, final=False)
-            self.flush_session_thinking(state.session_id)
-            self._queue_runtime_checkpoint(state, boundary="exit" if preserve_session_run else "exit_local")
-            state.daemon_running = False
-            state.daemon_worker = None
-            state.llm_worker = None
-        if self.daemon_timer:
-            self.daemon_timer.stop()
-        if getattr(self, "chat_save_worker", None):
-            if not self.chat_save_worker.stop_worker(timeout_ms=3000):
-                self.append_log("会话保存线程未在超时内退出。")
-            self.chat_save_worker = None
-        return preserved_daemon_runs
+        return bool(self._shutdown_preserved_sessions)
 
     def _terminate_process(self, proc):
         if not proc:
@@ -37702,6 +37830,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if getattr(self, "_checkpoint_close_ready", False):
             event.accept()
             return
+        if getattr(self, "_checkpoint_shutdown_pending", False):
+            event.ignore()
+            return
         if any(worker.isRunning() for worker in getattr(self, "skillhub_workers", [])):
             self.add_system_toast("SkillHub 操作仍在进行，请完成后再退出。", "info")
             event.ignore()
@@ -37714,8 +37845,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if not self.confirm_leave_deliverable_edit("退出应用"):
                 event.ignore()
                 return
-            self._dispose_application_event_filters()
-            self.skill_catalog_service.stop_watching()
             event.ignore()
             self._shutdown_workers_async(self._finish_window_close)
 
@@ -38940,6 +39069,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.queue_session_history_load(session_id)
 
     def queue_session_history_load(self, session_id):
+        if ui_work_stopping(self):
+            return
         session_id = str(session_id or "").strip()
         state = self.get_session(session_id)
         if not state:
@@ -43637,6 +43768,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return self.open_settings("个性与记忆")
 
     def start_memory_update(self, scope="global", workspace_dir=""):
+        if ui_work_stopping(self):
+            return
         scope = "workspace" if scope == "workspace" else "global"
         workspace_dir = self._normalize_project_path(workspace_dir) if scope == "workspace" else ""
         log_memory_update("submit", scope=scope, workspace_dir=workspace_dir)
@@ -44943,14 +45076,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
 
     def refresh_deliverables(self, render_current=False):
-        if not hasattr(self, "deliverables_list"):
+        if not hasattr(self, "deliverables_list") or ui_work_stopping(self):
             return
         self.deliverable_scan_generation = int(getattr(self, "deliverable_scan_generation", 0)) + 1
         self.deliverable_scan_pending_render = bool(
             getattr(self, "deliverable_scan_pending_render", False) or render_current
         )
         worker = getattr(self, "deliverable_scan_worker", None)
-        if worker is not None and worker.isRunning():
+        if worker is not None:
             return
         self._start_deliverable_scan(
             self.deliverable_scan_generation,
@@ -44958,6 +45091,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
 
     def _start_deliverable_scan(self, generation, render_current=False):
+        if ui_work_stopping(self):
+            return
         workspace_dir = getattr(self, "workspace_dir", None)
         self.deliverable_scan_pending_render = False
         if not workspace_dir or not os.path.isdir(workspace_dir):
@@ -44965,15 +45100,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         self._sync_file_browser_empty_state(loading=True)
         records = self.chat_storage.list_deliverables(workspace_dir, prune_missing=True)
+        log_ui_navigation("deliverable_scan_start", generation=generation, records=len(records))
         worker = DeliverableScanWorker(workspace_dir, records, generation, self)
+        worker.render_current = render_current
         self.deliverable_scan_worker = worker
-        worker.completed.connect(
-            lambda items, completed_generation: self._handle_deliverable_scan_completed(
-                items, completed_generation, render_current
-            )
-        )
-        worker.failed.connect(self._handle_deliverable_scan_failed)
-        worker.finished.connect(lambda: self._finish_deliverable_scan(worker))
+        worker.finished.connect(self._finish_deliverable_scan, Qt.QueuedConnection)
         worker.start()
 
     def _handle_deliverable_scan_completed(self, items, generation, render_current=False):
@@ -44992,15 +45123,25 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self._sync_file_browser_empty_state(error=f"扫描交付物失败：{error}")
         self.add_system_toast("扫描交付物失败，请检查工作区是否可访问。", "error", auto_close_ms=6000)
 
-    def _finish_deliverable_scan(self, worker):
-        if getattr(self, "deliverable_scan_worker", None) is worker:
+    @Slot()
+    def _finish_deliverable_scan(self):
+        worker = self.sender()
+        if worker is not getattr(self, "deliverable_scan_worker", None):
+            return
+        try:
+            log_ui_navigation("deliverable_scan_finished", generation=worker.generation, error=worker.error)
+            if worker.error:
+                self._handle_deliverable_scan_failed(worker.error, worker.generation)
+            else:
+                self._handle_deliverable_scan_completed(worker.items, worker.generation, worker.render_current)
+        finally:
             self.deliverable_scan_worker = None
-        worker.deleteLater()
-        if int(getattr(self, "deliverable_scan_generation", 0)) != int(worker.generation):
-            self._start_deliverable_scan(
-                self.deliverable_scan_generation,
-                self.deliverable_scan_pending_render,
-            )
+            worker.deleteLater()
+            if not ui_work_stopping(self) and self.deliverable_scan_generation != worker.generation:
+                self._start_deliverable_scan(
+                    self.deliverable_scan_generation,
+                    self.deliverable_scan_pending_render,
+                )
 
     def _apply_deliverable_items(self, items, render_current=False):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
@@ -45310,6 +45451,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.add_system_toast(message, "success", auto_close_ms=2400)
 
     def select_deliverable(self, path, render_html=True):
+        if ui_work_stopping(self):
+            return
         raw_path = str(path or "").strip()
         path = os.path.normpath(raw_path) if raw_path else ""
         if not path:
@@ -48043,6 +48186,8 @@ a {{ overflow-wrap: anywhere; }}
         return card
 
     def start_conversation_skill_flow(self, source_message_id="", session_id=None):
+        if ui_work_stopping(self):
+            return
         target_session_id = str(session_id or self.current_session_id or "")
         log_conversation_skill_capture("flow_clicked", session_id=target_session_id, source_message_id=source_message_id)
         if self.conversation_skill_worker and self.conversation_skill_worker.isRunning():
@@ -51018,6 +51163,8 @@ a {{ overflow-wrap: anywhere; }}
         state.pending_guidance_messages = []
 
     def _start_deferred_guidance_if_idle(self, state):
+        if ui_work_stopping(self) or getattr(self, "_update_preparing", False):
+            return False
         if not state or self._session_is_busy(state):
             return False
         rejected_events = {
@@ -51179,6 +51326,9 @@ a {{ overflow-wrap: anywhere; }}
         conversation_refs=None,
         history_source_message=None,
     ):
+        if getattr(self, "_checkpoint_shutdown_pending", False):
+            self.add_system_toast("正在关闭应用，输入内容已保留。", "info")
+            return False
         if getattr(self, "_update_preparing", False):
             self.add_system_toast("正在准备更新，输入内容已保留。", "info")
             return False
@@ -53179,7 +53329,7 @@ a {{ overflow-wrap: anywhere; }}
             state.conversation_notice = None
 
     def _reconnect_daemon_stream(self, session_id, run_id):
-        if getattr(self, "_update_preparing", False):
+        if getattr(self, "_update_preparing", False) or ui_work_stopping(self):
             return
         state = self.get_session(session_id)
         if not state or str(state.active_turn_request_id or "") != str(run_id):
@@ -53211,6 +53361,8 @@ a {{ overflow-wrap: anywhere; }}
         state.daemon_worker.start()
 
     def attach_active_daemon_run_if_needed(self, state):
+        if ui_work_stopping(self):
+            return False
         if not state or self._session_has_current_execution(state):
             return False
         try:
@@ -53776,6 +53928,8 @@ a {{ overflow-wrap: anywhere; }}
         return True
 
     def retry_skill_dependencies(self, skill_name):
+        if ui_work_stopping(self):
+            return False
         record = (getattr(self.skill_manager, "skill_records", {}) or {}).get(str(skill_name or ""))
         if not record:
             self.add_system_toast(f"未找到能力：{skill_name}", "error")

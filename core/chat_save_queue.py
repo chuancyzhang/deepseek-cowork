@@ -130,6 +130,8 @@ class ChatSaveWorker(QThread):
         revision = max(0, int(request.revision or 0))
         signature = self._request_signature(request)
         with self._condition:
+            if self._stop_requested:
+                return False
             highest_revision_value = self._highest_revision.get(request.session_id)
             highest_revision = (
                 int(highest_revision_value)
@@ -224,14 +226,26 @@ class ChatSaveWorker(QThread):
                 else:
                     self._condition.wait()
 
-    def stop_worker(self, timeout_ms=3000):
-        flushed = self.flush(timeout_ms=timeout_ms)
+    def drain_status(self):
+        with self._condition:
+            idle = not self._pending and not self._inflight and not self._context_pending
+            blocked = any(revision >= self._highest_revision.get(session_id, 0)
+                          for session_id, revision in self._blocked_revision.items())
+            return idle, blocked or bool(self._failure_counts)
+
+    def request_stop(self):
+        """Drain accepted writes before exiting, without blocking the GUI."""
         with self._condition:
             self._stop_requested = True
-            if not flushed:
-                self._pending.clear()
-                self._context_pending.clear()
+            for request in self._pending.values():
+                request.ready_at = time.monotonic()
             self._condition.notify_all()
+
+    def stop_worker(self, timeout_ms=3000):
+        # A timeout must leave the writer and its pending data available.
+        if not self.flush(timeout_ms=timeout_ms):
+            return False
+        self.request_stop()
         return self.wait(max(0, int(timeout_ms or 0)))
 
     def _next_request_locked(self):

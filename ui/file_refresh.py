@@ -3,6 +3,7 @@ import logging
 import os
 from PySide6.QtCore import QTimer
 from core.deliverable_editing import sha256_file
+from ui.worker_lifecycle import ui_work_stopping
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ def html_resources(path):
 
 
 def schedule_file_refresh(window):
+    if ui_work_stopping(window):
+        return
     timer = getattr(window, "browser_file_refresh_timer", None)
     if timer is None:
         timer = QTimer(window)
@@ -42,6 +45,8 @@ def schedule_file_refresh(window):
 
 
 def refresh_file(window):
+    if ui_work_stopping(window):
+        return
     browser = getattr(window, "browser_workbench", None)
     path = getattr(window, "current_deliverable_path", "")
     if not path or (browser and (browser.closed or not browser.file_active())):

@@ -67,6 +67,17 @@ class RuntimeCheckpointWorker(QThread):
             self._stop_requested = True
             self._condition.notify_all()
 
+    def retry_failed(self):
+        """Retry retained snapshots only on an explicit save/exit attempt."""
+        with self._condition:
+            if self._stop_requested:
+                return
+            for request, _error in self._failures.values():
+                if self._revisions.get(request.key) == request.revision:
+                    self._pending[(*request.key, request.revision)] = request
+            self._failures.clear()
+            self._condition.notify_all()
+
     def run(self):
         while True:
             with self._condition:

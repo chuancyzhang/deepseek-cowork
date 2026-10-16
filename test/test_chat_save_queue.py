@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 import gc
+import threading
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -25,6 +26,33 @@ from core.chat_storage import ChatStorage, ConversationWriteConflict
 
 
 class TestChatSaveQueue(unittest.TestCase):
+    def test_stop_timeout_retains_pending_data_and_writer_can_finish(self):
+        entered, release = threading.Event(), threading.Event()
+        actual_save = ChatStorage.save_conversation_safely
+        def delayed_save(storage, *args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return actual_save(storage, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as root:
+            storage = ChatStorage(os.path.join(root, "chat.db"))
+            worker = ChatSaveWorker(storage.db_path, debounce_ms=0)
+            with patch.object(ChatStorage, "save_conversation_safely", delayed_save):
+                worker.start()
+                try:
+                    messages = [{"id": "u1", "role": "user", "content": "first"}]
+                    worker.enqueue(ChatSaveRequest("s", messages, "t", "draft", {}, 0, 1))
+                    self.assertTrue(entered.wait(2))
+                    worker.enqueue(ChatSaveRequest("s", messages + [{"id": "a1", "role": "assistant", "content": "latest"}], "t", "draft", {}, 0, 2))
+                    self.assertFalse(worker.stop_worker(timeout_ms=10))
+                    self.assertTrue(worker.isRunning())
+                    self.assertFalse(worker._stop_requested)
+                    release.set()
+                    self.assertTrue(worker.wait_for_revision("s", 2, 2000))
+                    self.assertEqual(storage.get_messages("s")[-1]["content"], "latest")
+                finally:
+                    release.set()
+                    self.assertTrue(worker.stop_worker(timeout_ms=3000))
+
     def test_save_error_classifier_uses_typed_error_codes(self):
         busy = sqlite3.OperationalError("busy")
         busy.sqlite_errorcode = sqlite3.SQLITE_BUSY

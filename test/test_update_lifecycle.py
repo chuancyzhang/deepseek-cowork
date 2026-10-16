@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QThread, QTimer
 from PySide6.QtWidgets import QApplication
 from core.chat_storage import ChatStorage
 from core.runtime_journal import RuntimeJournal
@@ -59,6 +59,7 @@ class UpdateLifecycleTests(unittest.TestCase):
         host.flush_pending_chat_saves = MagicMock(return_value=True)
         host._compose_session_meta = lambda state: {"test": state.session_id}
         host.stop_gateway_process = MagicMock()
+        host.setEnabled = MagicMock()
 
     def tearDown(self):
         self.host.deleteLater()
@@ -164,8 +165,62 @@ class UpdateLifecycleTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 host._commit_update_exit()
         host.chat_save_worker.stop_worker.assert_not_called()
+        host.chat_save_worker.request_stop.assert_not_called()
         host.runtime_checkpoint_worker.request_stop.assert_not_called()
         quit_app.assert_not_called()
+
+    def test_commit_waits_for_native_writer_exit_before_disposing_ui(self):
+        class SlowWriter(QThread):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.release = threading.Event()
+                self.stopping = False
+
+            def request_stop(self):
+                self.stopping = True
+
+            def run(self):
+                self.release.wait(10)
+
+        host = self.host
+        host.chat_save_worker = SlowWriter(host)
+        host.chat_save_worker.start()
+        host._dispose_application_event_filters = MagicMock()
+        host.skill_catalog_service = MagicMock()
+        host.tray_icon = None
+        with patch("ui.update_lifecycle.QApplication.quit") as quit_app:
+            try:
+                host._commit_update_exit()
+                self.assertTrue(Path(host._update_transaction, "commit.json").exists())
+                self.assertTrue(host.chat_save_worker.stopping)
+                ticks = []
+                QTimer.singleShot(0, lambda: ticks.append(True))
+                self.app.processEvents()
+                self.assertTrue(ticks)
+                quit_app.assert_not_called()
+                host._dispose_application_event_filters.assert_not_called()
+                host.chat_save_worker.release.set()
+                deadline = time.monotonic() + 3
+                while not quit_app.called and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.005)
+                quit_app.assert_called_once()
+                host._dispose_application_event_filters.assert_called_once()
+            finally:
+                host.chat_save_worker.release.set()
+                self.assertTrue(host.chat_save_worker.wait(3000))
+
+    def test_abort_quiesce_restores_operations_and_timers(self):
+        host = self.host
+        host._update_quiescing = True
+        timer = QTimer(host)
+        timer.setInterval(1000)
+        host._update_paused_timers = [timer]
+        host._abort_update("save failed")
+        self.assertFalse(host._update_quiescing)
+        host.setEnabled.assert_called_once_with(True)
+        self.assertTrue(timer.isActive())
+        host.chat_save_worker.request_stop.assert_not_called()
 
     def test_runtime_save_failure_prevents_exit(self):
         host = self.host

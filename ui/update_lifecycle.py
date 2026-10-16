@@ -288,6 +288,7 @@ class UpdateLifecycleMixin:
         finally:
             # Once committed, no exception is allowed to revive an application
             # whose files the independent installer is permitted to replace.
+            self._checkpoint_close_ready = True
             QApplication.quit()
 
     def _abort_update(self, message, notify=True):

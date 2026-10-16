@@ -37647,6 +37647,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.stop_gateway_process()
         if self.tray_icon:
             self.tray_icon.hide()
+        # QApplication.quit() still delivers closeEvent; saving is complete now.
+        self._checkpoint_close_ready = True
         QApplication.quit()
 
     def _shutdown_workers_async(self, continuation):
@@ -37834,7 +37836,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             pass
 
     def closeEvent(self, event):
-        if getattr(self, "_update_exit_committed", False):
+        if getattr(self, "_checkpoint_close_ready", False):
+            log_ui_navigation("window_close_accepted")
             event.accept()
             return
         if getattr(self, "_update_preparing", False):
@@ -37848,9 +37851,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if any(getattr(state, "branch_in_progress", False) for state in getattr(self, "sessions", {}).values()):
             self.add_system_toast("分支文件仍在准备，请完成后再退出。", "info")
             event.ignore()
-            return
-        if getattr(self, "_checkpoint_close_ready", False):
-            event.accept()
             return
         if getattr(self, "_checkpoint_shutdown_pending", False):
             event.ignore()

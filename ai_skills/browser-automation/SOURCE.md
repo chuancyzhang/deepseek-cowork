@@ -8,6 +8,6 @@
 - Bundled artifact manifest: `resources/browser_skill/bundle.json`
 - License: MIT
 
-Cowork keeps the upstream session, Agent Window, snapshot, tab borrowing, human
+Cowork keeps the upstream session, Agent Window, observe/snapshot, tab borrowing, human
 handoff, and safety model while routing commands through the parameterized
 `browser_skill_cli` tool instead of a general-purpose shell.

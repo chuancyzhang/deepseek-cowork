@@ -3287,7 +3287,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_uncommitted_sidecar_tool_result_is_reused_after_crash_window(self):
+    def test_same_execution_sidecar_result_is_reused_after_crash_window(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
@@ -3343,20 +3343,6 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
         provider = _ProviderStub()
         finished = []
         try:
-            RuntimeJournal(temp_dir).record_tool(
-                "tool-reuse-session",
-                "old-execution",
-                {
-                    "run_id": "old-run",
-                    "name": "read_file",
-                    "args": {},
-                    "args_hash": RuntimeJournal.checksum({}),
-                    "status": "succeeded",
-                    "committed": False,
-                    "result_obj": {"status": "ok", "content": "recovered result"},
-                    "result_text": '{"status":"ok","content":"recovered result"}',
-                },
-            )
             with (
                 patch("core.agent.SkillManager", return_value=manager),
                 patch("core.agent.LLMFactory.create_provider", return_value=provider),
@@ -3370,6 +3356,16 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-reuse",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
+                execution_id, args_hash = worker._tool_execution_identity(
+                    types.SimpleNamespace(id="call-recovered"), {}, 1,
+                )
+                worker.runtime_journal.record_tool("tool-reuse-session", execution_id, {
+                    "run_id": "run-reuse", "tool_call_id": "call-recovered",
+                    "name": "read_file", "args": {}, "args_hash": args_hash,
+                    "status": "succeeded", "committed": False,
+                    "result_obj": {"status": "ok", "content": "recovered result"},
+                    "result_text": '{"status":"ok","content":"recovered result"}',
+                })
                 worker.finished_signal.connect(finished.append)
                 worker.run()
 

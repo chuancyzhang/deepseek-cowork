@@ -7,7 +7,7 @@ source_type: bundled_plugin
 default_enabled: false
 metadata:
   author: deepseek-cowork team
-  version: "3.1.0"
+  version: "3.1.1"
   upstream: "Tencent/BrowserSkill"
   upstream_cli: "0.3.3"
   upstream_extension: "0.3.3"
@@ -36,11 +36,25 @@ returns borrowed user tabs.
 
 ## Interaction loop
 
-1. Navigate or create/select the target tab.
-2. Run `snapshot` first to obtain the accessibility tree and `@eN` refs.
-3. Prefer fresh refs over CSS selectors.
+1. Navigate or create/select the target tab. Keep its returned tab id and session id.
+2. Run `["observe", "--session", "<id>", "--tab-id", "<tab-id>"]` to obtain the
+   current page and `@eN` refs. `snapshot` is also supported for accessibility snapshots.
+3. Use refs from the latest observation of that same tab and session. Do not infer
+   a URL or CSS selector from a navigation label; use the observed target.
 4. Click, fill, select, or press the smallest required action.
-5. Snapshot again after navigation or DOM changes because refs become stale.
+5. Observe again after navigation or DOM changes, then verify the result before
+   acting. A new observation is required even when its arguments are unchanged.
+
+If a ref is unknown or stale, run `observe` for that tab and retry the intended
+action once with a newly returned ref. If it still fails, inspect the current
+page and report the obstacle instead of looping. Use current refs before
+continuing an observation with `--cursor`.
+
+Use only supported command options. If uncertain, call `["<command>", "--help"]`
+through this tool before executing. `snapshot --live` does not exist in CLI 0.3.3.
+After a navigation timeout, inspect the reported final URL and observe the page
+before deciding whether another navigation is needed; a timeout does not prove
+that navigation had no effect.
 
 Use `get-html` only when the snapshot cannot expose required markup or metadata.
 Use `screenshot` only for visual layout, canvas, images, or styling that cannot be
@@ -86,7 +100,8 @@ images automatically. Continue browser actions after inspecting the screenshot.
 
 ## Errors
 
-- Exit code 1: fix arguments or refresh stale refs with a new snapshot.
+- Exit code 1: check command help for argument errors; refresh unknown/stale refs
+  with `observe` on the same tab and session as described above.
 - Exit code 2: run `doctor`; the daemon or extension transport is unavailable.
 - Exit code 3: browser execution failed; confirm the tab is still open.
 - Exit code 4: command timeout; increase the timeout only when justified.

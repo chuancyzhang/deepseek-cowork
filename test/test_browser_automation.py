@@ -96,6 +96,17 @@ class BrowserAutomationUnitTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["timeout_seconds"], 33)
 
+    def test_observe_and_command_help_reach_the_managed_cli(self):
+        for args in (["observe", "--session", "abcd", "--tab-id", "42"],
+                     ["observe", "--session", "abcd", "--cursor", "next"],
+                     ["observe", "--help"], ["snapshot", "--help"]):
+            with self.subTest(args=args), patch.object(self.module, "run_browser_skill_cli", return_value={
+                "status": "completed", "result": {"text": "current page"},
+            }) as run:
+                result = self.module.browser_skill_cli(args)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(run.call_args.args[0], args)
+
 
 class BrowserScreenshotTests(unittest.TestCase):
     def setUp(self):

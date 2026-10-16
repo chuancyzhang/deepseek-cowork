@@ -25,6 +25,7 @@ _ALLOWED_COMMANDS = {
     "navigate",
     "navigate-back",
     "navigate-forward",
+    "observe",
     "press",
     "reload",
     "request-help",

@@ -4196,18 +4196,11 @@ class LLMWorker(QThread):
                                 if self.runtime_journal and self.session_id
                                 else None
                             )
-                            if (
-                                not existing_execution
-                                and self.runtime_journal
-                                and self.session_id
-                            ):
-                                existing_execution = self.runtime_journal.find_tool_execution(
-                                    self.session_id,
-                                    name=prepared_name,
-                                    args_hash=args_hash,
-                                    statuses={"succeeded"},
-                                    committed=False,
-                                )
+                            # Only the same logical execution may reuse a success.
+                            # A new call with identical arguments must observe or
+                            # act on current state, even before the chat is saved.
+                            # Recovery delivers prior results under their original
+                            # identities; argument equality is not replay identity.
                             equivalent_unknown = None
                             if self.runtime_journal and self.session_id and not policy["safe_retry"]:
                                 equivalent_unknown = self.runtime_journal.find_tool_execution(
@@ -4344,6 +4337,8 @@ class LLMWorker(QThread):
                                     "id": tool.id,
                                     "name": name,
                                     "args": args,
+                                    "execution_id": execution_id,
+                                    "run_id": self.request_id or self.turn_id or self.session_id,
                                     "timestamp": time.time(),
                                 })
 
@@ -4519,6 +4514,8 @@ class LLMWorker(QThread):
                                         "type": "tool_result_reused",
                                         "id": tool.id,
                                         "execution_id": execution_id,
+                                        "reuse_reason": "same_logical_execution",
+                                        "run_id": self.request_id or self.turn_id or self.session_id,
                                         "name": name,
                                         "timestamp": time.time(),
                                     })

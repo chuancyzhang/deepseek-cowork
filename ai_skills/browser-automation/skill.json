@@ -30,7 +30,7 @@
   ],
   "workflow": [
     "Start a bsk session and pass its id to every browser command.",
-    "Use snapshot first, then act through fresh element refs and verify the result.",
+    "Use observe for the current tab, act through fresh element refs, and observe again after page changes to verify the result.",
     "Always stop the session in a finally-style path so borrowed tabs are returned."
   ]
 }

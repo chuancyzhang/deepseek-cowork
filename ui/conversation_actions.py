@@ -43,11 +43,12 @@ def reference_button(text, parent=None):
 class ConversationMentionPopover(ProductPopover):
     selected = Signal(str, object)
 
-    def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False):
+    def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False, selected_agent_id=None):
         super().__init__(parent, width=420)
         self.conversations = conversations
         self.profiles = profiles
         self.workspace = workspace
+        self.selected_agent_id = selected_agent_id
         layout = QVBoxLayout(self)
         self.kind = "智能体" if agents_only else "会话"
         self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
@@ -105,6 +106,8 @@ class ConversationMentionPopover(ProductPopover):
                 subtitle = record.get("description") or ""
                 if kind != "会话" and record.get("builtin"):
                     title += " · 内置"
+                if kind == "智能体" and self.selected_agent_id and record.get("id") == self.selected_agent_id:
+                    title = "✓ 已选择 · " + title
                 if kind == "会话":
                     updated = datetime.fromtimestamp(record.get("updated_at") or 0).strftime("%m-%d %H:%M")
                     subtitle = f"{project} · {updated}" + (" · 已归档" if meta.get("archived") or record.get("status") == "archived" else "")
@@ -162,7 +165,9 @@ class ConversationActionsMixin:
         if position < 1 or text[position - 1:position] != "@" or (position > 1 and not text[position - 2].isspace()):
             return
         records = [row for row in self.chat_storage.list_conversation_summaries() if row["id"] != state.session_id]
-        popover = ConversationMentionPopover(records, self._available_agent_profiles(), self._workspace_dir_for_state(state), self)
+        popover = ConversationMentionPopover(
+            records, self._available_agent_profiles(), self._workspace_dir_for_state(state), self,
+            selected_agent_id=(getattr(state, "conversation_agent", None) or {}).get("id"))
         self.conversation_mention_popover = popover
 
         def selected(kind, record):

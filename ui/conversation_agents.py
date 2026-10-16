@@ -86,7 +86,9 @@ class ConversationAgentsMixin:
         state = self.get_current_session()
         if not state or self._session_is_busy(state):
             return
-        popover = ConversationMentionPopover([], self._available_agent_profiles(), "", self, agents_only=True)
+        popover = ConversationMentionPopover(
+            [], self._available_agent_profiles(), "", self, agents_only=True,
+            selected_agent_id=(getattr(state, "conversation_agent", None) or {}).get("id"))
         self.conversation_agent_popover = popover
         popover.selected.connect(lambda _kind, profile: self.select_conversation_agent(profile, state.session_id))
         footer = QHBoxLayout()

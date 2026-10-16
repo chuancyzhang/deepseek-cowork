@@ -21,6 +21,10 @@ allowed-tools: [browser_skill_cli]
 Use `browser_skill_cli` to invoke Tencent BrowserSkill's `bsk` CLI. The plugin requires
 the application-managed CLI and the BrowserSkill Chrome/Edge extension. If the tool
 reports `browser_skill_not_ready`, direct the user to **AI 能力商城 → 浏览器自动化**.
+This backend is available only when **设置 → 实验功能 → 内置浏览器自动化** is off.
+Do not switch backends or invoke a CLI through other tools to bypass the current
+run's backend selection. A pending switch blocks new browser tasks until existing
+tasks release their sessions.
 
 ## Mandatory lifecycle
 
@@ -33,6 +37,9 @@ Every task must use one BrowserSkill session and stop it even when a command fai
 
 Do not rely on the idle timeout. Stopping the session closes the Agent Window and
 returns borrowed user tabs.
+Only use session IDs created in this run. Cowork owns the recoverable start token
+and performs final cleanup; do not supply `--request-id`, manage start requests,
+list global sessions, or stop all sessions. Never restart the shared daemon.
 
 ## Interaction loop
 

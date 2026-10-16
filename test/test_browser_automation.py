@@ -26,6 +26,9 @@ def _load_module():
 
 
 class BrowserAutomationUnitTests(unittest.TestCase):
+    def setUp(self):
+        from browser_test_context import authorize_browser_fixture
+        authorize_browser_fixture(self)
     @classmethod
     def setUpClass(cls):
         cls.module = _load_module()
@@ -110,6 +113,8 @@ class BrowserAutomationUnitTests(unittest.TestCase):
 
 class BrowserScreenshotTests(unittest.TestCase):
     def setUp(self):
+        from browser_test_context import authorize_browser_fixture
+        self.authorization = authorize_browser_fixture(self)
         self.module = _load_module()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -190,6 +195,13 @@ class BrowserScreenshotTests(unittest.TestCase):
 
         def execute(skills, name, args, context=None):
             skills.calls.append((name, copy.deepcopy(args)))
+            # This test exercises the image pipeline after an owned session exists.
+            from core.execution_authorization import current_authorization
+            auth = current_authorization(context)
+            coordinator = auth._browser_state["coordinator"]
+            coordinator.acquire(auth.session_id, auth.run_id, auth._browser_state["snapshot"], "external")
+            coordinator.track_session(auth.session_id, auth.run_id, "abcd")
+            coordinator.complete_call(auth.session_id, auth.run_id)
             return owner.module.browser_skill_cli(**args, workspace_dir=str(owner.workspace), _context=context)
 
         def stream(provider, messages, **kwargs):
@@ -202,6 +214,7 @@ class BrowserScreenshotTests(unittest.TestCase):
                 patch.object(SkillStub, "call_tool", execute), \
                 patch.object(ProviderStub, "supports_vision", True, create=True), \
                 patch.object(ProviderStub, "chat_stream", stream), \
+                patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}), \
                 patch.object(self.module, "run_browser_skill_cli", side_effect=self.capture):
             requests, result, events, calls, _, _ = TestAgentBootstrap().run_worker(
                 [[tool_call("browser_skill_cli", arguments=json.dumps({"args": ["screenshot", "--session", "abcd"]}))],

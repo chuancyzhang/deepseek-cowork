@@ -341,7 +341,7 @@ class BrowserPane(ControlledPane):
             raise WorkbenchError("stale_page", "页面已变化，请先重新观察。")
         args["dom_version"] = expected[len(prefix):]
         action = args.get("action")
-        native = action in {"key", "click_at"}
+        native = action in {"key", "click_at", "click"}
         def done(value):
             try:
                 value = json.loads(value) if isinstance(value, str) and value else value
@@ -356,14 +356,15 @@ class BrowserPane(ControlledPane):
                     self.agent_input = True
                     target = self.view.focusProxy() or self.view
                     temporary_focus = not target.hasFocus()
-                    if temporary_focus:
-                        # Chromium needs input focus even for a background page.
-                        # Deliver it locally without activating a window or moving
-                        # QApplication's focus away from the user's editor.
-                        QApplication.sendEvent(target, QFocusEvent(QEvent.FocusIn, Qt.OtherFocusReason))
+                    # Native clicks may leave Qt and Chromium focus flags out of
+                    # sync after restoring background focus. Always notify the
+                    # renderer locally; do not activate the application window.
+                    QApplication.sendEvent(target, QFocusEvent(QEvent.FocusIn, Qt.OtherFocusReason))
                     try:
-                        if action == "click_at":
-                            x, y = int(args.get("x", -1)), int(args.get("y", -1))
+                        if action in {"click_at", "click"}:
+                            coordinates = value if action == "click" else args
+                            zoom = self.view.zoomFactor()
+                            x, y = round(float(coordinates.get("x", -1)) * zoom), round(float(coordinates.get("y", -1)) * zoom)
                             if not self.view.rect().contains(QPoint(x, y)):
                                 raise WorkbenchError("invalid_coordinate", "坐标不在当前网页视口中，请重新截图。")
                             QTest.mouseClick(target, Qt.LeftButton, pos=QPoint(x, y))
@@ -381,6 +382,19 @@ class BrowserPane(ControlledPane):
                         self.agent_input = False
                         self.page.runJavaScript("window.coworkNativeAction=false", 1)
                     self.tab.page_revision += 1
+                    value = {"ok": True, "status": "dispatched", "verification": "请重新观察页面确认操作结果，勿盲目重复执行。"}
+                if action == "fill" and value.get("ok"):
+                    def verify():
+                        def checked(outcome):
+                            try:
+                                request.check()
+                                self.store.check_control(self.tab.session_id, self.tab.id, request.revision)
+                                callback(json.loads(outcome) if outcome else {"ok": False, "status": "fill_not_verified"})
+                            except Exception as exc:
+                                request.fail(exc)
+                        self.page.runJavaScript("JSON.stringify(window.coworkVerifyFill && window.coworkVerifyFill(" + json.dumps(args, ensure_ascii=False) + "))", 1, checked)
+                    QTimer.singleShot(80, verify)
+                    return
                 callback(value)
             except Exception as exc:
                 if native:
@@ -400,7 +414,10 @@ class BrowserPane(ControlledPane):
                     raise WorkbenchError("stale_page", "页面已变化，请重新观察。")
                 request.started = True
                 if native:
-                    self.page.runJavaScript("window.coworkNativeAction=true; JSON.stringify({ok:true})", 1, done)
+                    if action == "click":
+                        self.page.runJavaScript("JSON.stringify(window.coworkAct(" + json.dumps(dict(args, action="prepare_click")) + "))", 1, done)
+                    else:
+                        self.page.runJavaScript("window.coworkNativeAction=true; JSON.stringify({ok:true})", 1, done)
                 else:
                     self.page.runJavaScript("JSON.stringify(window.coworkAct(" + json.dumps(args, ensure_ascii=False) + "))", 1, done)
             except Exception as exc:

@@ -698,6 +698,8 @@ class LLMWorker(QThread):
             inherited_authorization if type(inherited_authorization) is ExecutionAuthorization
             else ExecutionAuthorization.start(config_manager, self.session_id, self.request_id or self.turn_id, workspace_dir)
         )
+        from core.browser_backend import bind_run
+        self.run_context["browser_backend"] = bind_run(config_manager, self.execution_authorization, worker=True)
         self.bootstrap = BootstrapSession()
         self._authorization_events = {}
         
@@ -739,6 +741,7 @@ class LLMWorker(QThread):
             # Compatibility path for direct unit construction; production request paths pass a catalog.
             self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
         self.discovered_tool_names = set()
+        self.skill_manager.browser_run_context = self.run_context
         self.tools = []
         self.tool_tasks = None
         self._refresh_tool_definitions()
@@ -797,6 +800,7 @@ class LLMWorker(QThread):
             return
         event, snapshot = pending
         self.skill_manager.apply_snapshot(snapshot)
+        self.skill_manager.browser_run_context = self.run_context
         self._refresh_tool_definitions()
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
         if isinstance(current_messages, list):
@@ -812,7 +816,11 @@ class LLMWorker(QThread):
         self.step_signal.emit(f"能力目录已更新：{names or 'Skill'}")
 
     def _selected_skill_names(self):
-        return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
+        from core.browser_backend import INTERNAL
+        selected = normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
+        if self.run_context.get("browser_backend", {}).get("backend") == INTERNAL:
+            selected = [name for name in selected if name != "browser-automation"]
+        return selected
 
     def _allowed_skill_names(self):
         return normalize_selected_skill_names(self.run_context.get("allowed_skill_names"))
@@ -1938,6 +1946,16 @@ class LLMWorker(QThread):
             )
 
         capability_lines = []
+        if self.run_context.get("browser_backend", {}).get("backend") == "internal":
+            capability_lines.append(
+                "本轮浏览器：内置网页工具（实验功能）。网页任务只使用已暴露的 browser_* 工具；"
+                "外部 BrowserSkill 已禁用，不得通过 CLI 或其他工具绕过。先列出当前聊天标签，"
+                "观察取得元素和 page_version 后操作，每次有意义的页面变化后重新观察并验证结果。"
+                "用户接管后等待交还，不另开标签绕过；结果未知时不重放。没有桌面宿主时说明不可用。")
+        else:
+            capability_lines.append(
+                "本轮浏览器：外部 BrowserSkill。网页任务使用 browser_skill_cli（未暴露时通过 tool_search 发现）；"
+                "内置网页自动化已关闭。连接未就绪时提示设置，不得自行切换后端或通过其他工具绕过。")
         if available_tool_names:
             tool_lines = []
             chunk_size = 12
@@ -3210,6 +3228,12 @@ class LLMWorker(QThread):
         finally:
             self._close_tool_tasks()
             self._close_data_security()
+            try:
+                from core.browser_backend import finish_run
+                finish_run(self.execution_authorization)
+            except Exception as exc:
+                self.observability_signal.emit({"type": "browser_cleanup_error", "error": str(exc),
+                                               "run_id": self.execution_authorization.run_id})
 
     def _run_main(self):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is

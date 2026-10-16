@@ -53,6 +53,7 @@ class ExecutionAuthorization:
     _cancelled: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _connection_routes: dict = field(default_factory=dict, repr=False, compare=False)
     _connection_route_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    _browser_state: dict = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def start(cls, config, session_id, run_id="", workspace_dir=None):
@@ -81,6 +82,8 @@ class ExecutionAuthorization:
         with self._connection_route_lock:
             if self._connection_routes:
                 snapshot["connection_routes"] = dict(self._connection_routes)
+        if self._browser_state:
+            snapshot["browser_backend"] = dict(self._browser_state["snapshot"])
         return snapshot
 
     def connection_route(self, capability, selected):
@@ -115,6 +118,13 @@ def authorization_from_host_snapshot(payload, *, session_id, run_id):
     authorization._connection_routes.update(routes)
     if payload["cancelled"]:
         authorization.cancel()
+    browser = payload.get("browser_backend")
+    if browser is not None:
+        if (not isinstance(browser, dict) or browser.get("backend") not in {"internal", "external"}
+                or type(browser.get("generation")) is not int):
+            raise ValueError("后台浏览器后端身份无效。")
+        from .browser_backend import bind_run
+        bind_run(None, authorization, snapshot=browser)
     return authorization
 
 

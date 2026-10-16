@@ -200,7 +200,7 @@ class BrowserSkillUiTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(page.browser_offline_btn.text(), "离线安装扩展")
             self.assertEqual(page.browser_store_btn.text(), "Chrome Web Store")
-            self.assertEqual(page.browser_setup_secondary_btn.text(), "检查并开启")
+            self.assertEqual(page.browser_setup_secondary_btn.text(), "检查连接")
             self.assertFalse(page.browser_offline_btn.isEnabled())
 
             page.browser_choice_combo.setCurrentIndex(1)
@@ -220,7 +220,7 @@ class BrowserSkillUiTests(unittest.TestCase):
                 BROWSER_SKILL_EXTENSION_URL,
             )
             self.app.processEvents()
-            self.assertEqual(page.browser_setup_primary_btn.text(), "检查并开启")
+            self.assertEqual(page.browser_setup_primary_btn.text(), "检查连接")
             page.browser_setup_primary_btn.click()
             self.assertIn(("check", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
         finally:
@@ -299,7 +299,7 @@ class BrowserSkillUiTests(unittest.TestCase):
             launch.assert_called_once_with("edge")
             reveal.assert_called_once_with(r"C:\AppData\BrowserSkill\extension")
             self.assertFalse(page.browser_extension_guidance.isHidden())
-            self.assertEqual(page.browser_setup_primary_btn.text(), "检查并开启")
+            self.assertEqual(page.browser_setup_primary_btn.text(), "检查连接")
         finally:
             page.deleteLater()
             parent.deleteLater()
@@ -361,7 +361,13 @@ class BrowserSkillUiTests(unittest.TestCase):
         skill_manager = MagicMock()
         skill_manager.get_all_skills.return_value = [self._browser_skill(enabled=True)]
         skill_manager.is_skill_editable.return_value = False
-        page = SkillsCenterDialog(skill_manager, MagicMock(), parent)
+        from browser_test_context import browser_config
+        import tempfile
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        config = MagicMock()
+        config.config_path = browser_config(temporary.name).config_path
+        page = SkillsCenterDialog(skill_manager, config, parent)
         try:
             self.app.processEvents()
             settings = [
@@ -369,7 +375,8 @@ class BrowserSkillUiTests(unittest.TestCase):
                 for button in page.findChildren(QPushButton)
                 if button.objectName() == "BrowserAutomationSettingsAction"
             ]
-            self.assertEqual([button.text() for button in settings], ["设置"])
+            self.assertEqual([button.text() for button in settings], ["连接设置"])
+            self.assertFalse(page.findChildren(QPushButton, "CapabilityDisableAction"))
             self.assertIn(("probe", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
         finally:
             page.deleteLater()

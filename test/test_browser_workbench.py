@@ -294,6 +294,55 @@ class WorkbenchFileUiTest(unittest.TestCase):
             self.assertEqual(self.window.browser_workbench.store.get(first, results[0]["tab"]["id"]).path, str(source))
             self.assertFalse(any(tab.kind == "file" for tab in self.window.browser_workbench.store.list(second)))
 
+    def test_browser_follow_pauses_on_manual_selection_and_releases_after_finish(self):
+        from browser_test_context import browser_config
+        from core.browser_backend import BrowserBackendCoordinator, bind_run, finish_run
+        with tempfile.TemporaryDirectory() as directory:
+            config = browser_config(directory)
+            BrowserBackendCoordinator(config).save(True)
+            auth = ExecutionAuthorization(self.window.current_session_id, "follow-run", True, "")
+            bind_run(config, auth, worker=True)
+            browser = self.window.browser_workbench
+            def call():
+                results = []
+                thread = threading.Thread(target=lambda: results.append(browser.bridge.call("open", {"kind": "web", "url": "about:blank"}, {"execution_authorization": auth})))
+                thread.start(); self.wait(lambda: bool(results)); thread.join(1)
+                self.assertTrue(results[0]["ok"], results)
+                return results[0]["tab"]["id"]
+            first = call()
+            self.assertEqual(browser.active_tab().id, first)
+            browser.new_tab()
+            manual = browser.active_tab().id
+            second = call()
+            self.assertEqual(browser.active_tab().id, manual)
+            browser.panes[first].take_over()
+            blocked = []
+            thread = threading.Thread(target=lambda: blocked.append(browser.bridge.call("open", {"kind": "web", "url": "about:blank"}, {"execution_authorization": auth})))
+            thread.start(); self.wait(lambda: bool(blocked)); thread.join(1)
+            self.assertEqual(blocked[0]["status"], "human_control")
+            browser.panes[first].give_back()
+            finish_run(auth)
+            browser.release_finished_runs()
+            self.assertEqual(browser.store.get(auth.session_id, first).owner, "available")
+            self.assertEqual(browser.store.get(auth.session_id, second).owner, "available")
+
+    def test_external_mode_hides_manual_web_tabs_and_rejects_closing_them(self):
+        from browser_test_context import browser_config
+        from core.browser_backend import bind_run
+        with tempfile.TemporaryDirectory() as directory:
+            config = browser_config(directory)
+            auth = ExecutionAuthorization(self.window.current_session_id, "external-run", True, "")
+            bind_run(config, auth, worker=True)
+            browser = self.window.browser_workbench
+            web = browser.open_web(auth.session_id, "about:blank")
+            results = []
+            thread = threading.Thread(target=lambda: results.append(browser.bridge.call("list", {}, {"execution_authorization": auth})))
+            thread.start(); self.wait(lambda: bool(results)); thread.join(1)
+            self.assertNotIn(web.id, [tab["id"] for tab in results[0]["tabs"]])
+            result = browser.bridge.call("close", {"tab_id": web.id}, {"execution_authorization": auth})
+            self.assertFalse(result["ok"])
+            self.assertIs(browser.store.get(auth.session_id, web.id), web)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3816,11 +3816,15 @@ class CapabilityWorkbenchDialog(QDialog):
             manager.component_task_finished.connect(self._handle_browser_component_finished)
 
         section, section_layout = build_settings_surface(
-            "开启浏览器自动化",
-            "准备和连接都在这里完成，不需要前往其他设置页。",
+            "外部 BrowserSkill 连接",
+            "准备扩展和连接；浏览器模式统一在设置的实验功能中选择。",
             radius=18,
         )
         section.setObjectName("BrowserAutomationSetup")
+        mode_link = QPushButton("浏览器模式设置…")
+        mode_link.setStyleSheet(product_button_style("secondary"))
+        mode_link.clicked.connect(lambda: self._open_browser_mode_settings())
+        section_layout.addWidget(mode_link, 0, Qt.AlignLeft)
         self.browser_setup_title = QLabel("")
         self.browser_setup_title.setStyleSheet(
             f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; "
@@ -4205,20 +4209,20 @@ class CapabilityWorkbenchDialog(QDialog):
 
         if status.get("ready"):
             if self.skill.get("enabled"):
-                self.browser_setup_title.setText("浏览器自动化已开启")
+                self.browser_setup_title.setText("外部 BrowserSkill 已就绪")
                 self.browser_setup_description.setText(
                     "Cowork 现在可以在独立窗口中读取和操作 Chrome 或 Edge 网页。"
                 )
                 self._set_browser_setup_actions(
-                    secondary_text="关闭能力",
-                    secondary_action="disable",
+                    secondary_text="浏览器模式设置",
+                    secondary_action="mode_settings",
                 )
             else:
                 self.browser_setup_title.setText("准备完成")
                 self.browser_setup_description.setText(
-                    "浏览器已经连接，现在可以开启这项能力。"
+                    "扩展连接已保留。内置模式生效时，AI 不使用外部 BrowserSkill。"
                 )
-                self._set_browser_setup_actions("开启能力", "enable")
+                self._set_browser_setup_actions("浏览器模式设置", "mode_settings")
             return
 
         self.browser_extension_controls.show()
@@ -4239,10 +4243,10 @@ class CapabilityWorkbenchDialog(QDialog):
                 "warning",
             )
         if self.browser_extension_page_opened:
-            self._set_browser_setup_actions("检查并开启", "check")
+            self._set_browser_setup_actions("检查连接", "check")
         else:
             self._set_browser_setup_actions(
-                secondary_text="检查并开启",
+                secondary_text="检查连接",
                 secondary_action="check",
             )
 
@@ -4389,14 +4393,8 @@ class CapabilityWorkbenchDialog(QDialog):
             return self._open_browser_extension_folder()
         if action == "copy_extension_path":
             return self._copy_browser_extension_path()
-        if action == "enable":
-            if not self.browser_component_status.get("ready"):
-                self.browser_setup_error = "浏览器尚未连接，请先完成检查。"
-                self._render_browser_automation_setup()
-                return False
-            return self._set_simple_enabled(True)
-        if action == "disable":
-            return self._set_simple_enabled(False)
+        if action in {"mode_settings", "enable", "disable"}:
+            return self._open_browser_mode_settings()
         return False
 
     def _handle_browser_component_status(self, component_id, status):
@@ -4447,7 +4445,12 @@ class CapabilityWorkbenchDialog(QDialog):
         self.browser_enable_after_check = False
         self._render_browser_automation_setup()
         if should_enable:
-            QTimer.singleShot(0, lambda: self._set_simple_enabled(True))
+            self.skill["enabled"] = self.config_manager.is_skill_enabled("browser-automation")
+
+    def _open_browser_mode_settings(self):
+        window = self._main
+        self.accept()
+        return window.open_settings("实验功能")
 
     def _build_simple_intro(self, root_layout):
         presentation = capability_presentation(self.skill)
@@ -4518,6 +4521,8 @@ class CapabilityWorkbenchDialog(QDialog):
 
     def _set_simple_enabled(self, enabled):
         name = self.skill_name
+        if name == "browser-automation":
+            return self._open_browser_mode_settings()
         if (
             enabled
             and self._has_authorization()
@@ -12267,6 +12272,9 @@ class SettingsDialog(QDialog):
         experiment_page, experiment_layout = make_scroll_page("实验功能", "按需启用，设置从下一轮任务生效。")
         self.long_context_panel = LongContextSettings(self.config_manager)
         experiment_layout.addWidget(self.long_context_panel)
+        from ui.browser_automation_settings import BrowserAutomationSettings
+        self.browser_automation_panel = BrowserAutomationSettings(self.config_manager)
+        experiment_layout.addWidget(self.browser_automation_panel)
         add_settings_page("实验功能", "fa5s.flask", experiment_page)
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
@@ -12289,6 +12297,7 @@ class SettingsDialog(QDialog):
                 return
             if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
                     or self.long_context_panel.has_pending_input()
+                    or self.browser_automation_panel.has_pending_input()
                     or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
                 if not self._confirm_discard_settings():
                     self.nav_list.blockSignals(True)
@@ -12610,6 +12619,8 @@ class SettingsDialog(QDialog):
             self.settings_dirty_label.setText("没有未保存的修改")
 
     def _confirm_discard_settings(self):
+        if hasattr(self, "browser_automation_panel") and not self.browser_automation_panel.confirm_leave():
+            return False
         if hasattr(self, "long_context_panel") and not self.long_context_panel.confirm_leave():
             return False
         if hasattr(self, "account_connections_page") and not self.account_connections_page.confirm_leave():
@@ -14325,7 +14336,13 @@ class AdvancedSkillsCenterDialog(QDialog):
         switch = AppleSwitch()
         switch.setChecked(enabled)
         managed_source_skill = str(skill.get("source_skill") or "").strip()
-        if managed_source_skill:
+        if skill.get("name") == "browser-automation":
+            switch.hide()
+            mode_link = QPushButton("浏览器模式设置")
+            mode_link.setStyleSheet(product_button_style("secondary"))
+            mode_link.clicked.connect(lambda: self.window().open_settings("实验功能"))
+            title_row.addWidget(mode_link)
+        elif managed_source_skill:
             switch.setEnabled(False)
             switch.setToolTip(f"由 {managed_source_skill} Skill 管理")
         elif skill_center_is_builtin(skill):
@@ -14520,7 +14537,13 @@ class AdvancedSkillsCenterDialog(QDialog):
         toggle.setObjectName("SkillEnableSwitch")
         toggle.setChecked(enabled)
         managed_source_skill = str(skill.get("source_skill") or "").strip()
-        if managed_source_skill:
+        if skill.get("name") == "browser-automation":
+            toggle.hide()
+            mode_link = QPushButton("浏览器模式设置")
+            mode_link.setStyleSheet(product_button_style("secondary"))
+            mode_link.clicked.connect(lambda: self.window().open_settings("实验功能"))
+            card_layout.addWidget(mode_link)
+        elif managed_source_skill:
             toggle.setEnabled(False)
             toggle.setCursor(Qt.ArrowCursor)
             toggle.setToolTip(f"由 {managed_source_skill} Skill 管理")
@@ -14538,6 +14561,8 @@ class AdvancedSkillsCenterDialog(QDialog):
         name = str(name or "").strip()
         enabled = bool(enabled)
         window = self.window()
+        if name == "browser-automation":
+            return window.open_settings("实验功能")
         skill = next(
             (
                 item
@@ -15704,44 +15729,28 @@ class SkillsCenterDialog(QDialog):
             return row
         is_browser_automation = name == "browser-automation"
         browser_ready = bool(self.browser_component_status.get("ready"))
-        browser_task = dict(self.browser_component_task or {}) if is_browser_automation else {}
-        if is_browser_automation and not browser_ready:
-            browser_task_text = {
-                "check": "正在检查浏览器连接…",
-                "probe": "正在确认浏览器状态…",
-                "repair": "正在修复浏览器自动化…",
-                "install": "正在准备浏览器自动化…",
-            }.get(str(browser_task.get("action") or ""), "正在处理…")
-            status = QLabel(
-                browser_task_text
-                if browser_task
-                else "还需完成一次简单设置"
-            )
+        if is_browser_automation:
+            from core.browser_backend import BrowserBackendCoordinator
+            state = BrowserBackendCoordinator(self.config_manager).snapshot()
+            label = "内置浏览器模式 · 外部能力停用" if state["backend"] == "internal" else "外部 BrowserSkill · " + ("已就绪" if browser_ready else "需要连接扩展")
+            if state["pending"]:
+                label += " · 等待任务结束后切换"
+            status = QLabel(label)
             status.setObjectName("CapabilityStateLabel")
-            status.setStyleSheet(
-                f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; "
-                f"color: {DesignTokens.warning_text};"
-            )
-            actions.addWidget(status)
-            actions.addStretch()
-            setup_btn = QPushButton("正在准备…" if browser_task else ("继续设置" if enabled else "开启"))
-            setup_btn.setObjectName("BrowserAutomationSetupAction")
-            setup_btn.setStyleSheet(product_button_style("primary"))
-            setup_btn.setEnabled(not browser_task)
-            setup_btn.clicked.connect(
-                lambda checked=False, value=dict(skill): self._open_detail(value)
-            )
-            actions.addWidget(setup_btn)
-            if enabled:
-                close_btn = QPushButton("关闭")
-                close_btn.setObjectName("CapabilityDisableAction")
-                close_btn.setAccessibleName(f"关闭{readable_skill_name(skill)}")
-                close_btn.setStyleSheet(product_button_style("ghost"))
-                close_btn.clicked.connect(
-                    lambda checked=False, value=dict(skill): self._toggle_skill(value, False)
-                )
-                actions.addWidget(close_btn)
-        elif enabled:
+            status.setStyleSheet(f"color:{DesignTokens.text_secondary};")
+            actions.addWidget(status, 1)
+            setup = QPushButton("连接设置")
+            setup.setObjectName("BrowserAutomationSettingsAction")
+            setup.setStyleSheet(product_button_style("secondary"))
+            setup.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
+            actions.addWidget(setup)
+            mode = QPushButton("浏览器模式")
+            mode.setStyleSheet(product_button_style("secondary"))
+            mode.clicked.connect(lambda: self.window().open_settings("实验功能"))
+            actions.addWidget(mode)
+            self._finish_capability_card(row, header, actions, skill, user_owned)
+            return row
+        if enabled:
             status = QLabel("✓ 已开启")
             status.setObjectName("CapabilityStateLabel")
             status.setStyleSheet(
@@ -15834,6 +15843,8 @@ class SkillsCenterDialog(QDialog):
         if capability_is_readonly_builtin(skill):
             return False
         name = str(skill.get("name") or "").strip()
+        if name == "browser-automation":
+            return self.window().open_settings("实验功能")
         if not name:
             return False
         if (
@@ -32217,6 +32228,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             is_popup=is_popup,
         )
         self.right_drawer_open = False
+        if reason == "manual" and hasattr(self, "browser_workbench"):
+            self.browser_workbench.pause_follow()
         self.right_sidebar.setVisible(False)
         self.sync_context_drawer_layout()
         self.update_context_rail_badges()
@@ -37622,6 +37635,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         if not self.confirm_leave_deliverable_edit("退出应用"):
             return
+        if not self._confirm_leave_product_page():
+            return
         self._shutdown_workers_async(self._finish_quit_app)
 
     def _finish_quit_app(self, preserved_daemon_runs):
@@ -37850,6 +37865,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
             if not self.confirm_leave_deliverable_edit("退出应用"):
+                event.ignore()
+                return
+            if not self._confirm_leave_product_page():
                 event.ignore()
                 return
             event.ignore()
@@ -46693,6 +46711,9 @@ a {{ overflow-wrap: anywhere; }}
         if self.current_product_route not in {self.PAGE_SETTINGS, self.PAGE_PROJECTS}:
             return True
         page = self.product_pages.get(self.current_product_route)
+        browser_panel = getattr(page, "browser_automation_panel", None)
+        if browser_panel is not None and not browser_panel.confirm_leave():
+            return False
         if page is not None and getattr(page, "_settings_dirty", False):
             if not page._confirm_discard_settings():
                 return False
@@ -47945,6 +47966,13 @@ a {{ overflow-wrap: anywhere; }}
             return True
 
         if action_id == "browser":
+            from core.browser_backend import BrowserBackendCoordinator
+            browser_state = BrowserBackendCoordinator(self.config_manager).snapshot()
+            if browser_state["pending"]:
+                return self._show_home_action_setup_required(state, action_id, "浏览器模式正在等待当前任务结束后切换，请稍后发送。可在设置 → 实验功能取消切换。", ["browser_switch_pending"])
+            if browser_state["backend"] == "internal":
+                self.add_system_toast("将使用内置浏览器完成网页任务，可在右侧查看与接管。", "success", session_id=state.session_id)
+                return True
             browser_skill = skill_records.get("browser-automation")
             missing_codes = []
             missing_messages = []

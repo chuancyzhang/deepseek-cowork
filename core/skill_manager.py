@@ -480,6 +480,9 @@ class SkillManager:
         }
 
     def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        if skill_name in {"browser-automation", "workbench"} and self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_OPTIONAL:
+            # Both are registered; per-run routing prevents hot-unloading active tools.
+            return True
         if self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_CORE_BUILTIN:
             return True
         identity = self._skill_identity(skill_path)
@@ -1451,6 +1454,13 @@ class SkillManager:
         )
         results = self._filter_results_by_allowed_skills(results, run_context)
         results = self._filter_artifact_delivery_tool_results(results, run_context)
+        from .browser_backend import tool_allowed, project_definition
+        backend = self._browser_backend(run_context)
+        results = [item for item in results if tool_allowed(item["name"], backend)]
+        for item in results:
+            definition = self._get_tool_definition(item["name"])
+            if definition:
+                item["description"] = project_definition(definition, backend)["function"]["description"]
         names = [item["name"] for item in results]
         if hasattr(discovered, "update"):
             discovered.update(names)
@@ -1516,6 +1526,14 @@ class SkillManager:
             return []
         matches = []
         for skill_name, record in self.skill_records.items():
+            if skill_name == "browser-automation" and self._browser_backend(run_context) != "external":
+                continue
+            if skill_name == "workbench" and self._browser_backend(run_context) == "external":
+                record = copy.deepcopy(record)
+                shared = self._shared_workbench_prompt()
+                record["body"] = record["search_text"] = shared
+                record["meta"]["description"] = record["spec"]["description"] = shared
+                record["tool_refs"] = [name for name in record.get("tool_refs", []) if name not in {"browser_observe", "browser_navigate", "browser_action"}]
             if record.get("source_kind") == TOOL_SOURCE_CORE_BUILTIN:
                 continue
             if not self._is_skill_allowed_by_scope(skill_name, run_context):
@@ -1811,12 +1829,18 @@ class SkillManager:
         return self.tool_registry.is_allowed(name, run_mode)
 
     def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        from .browser_backend import tool_allowed, INTERNAL_TOOLS
+        backend = self._browser_backend(run_context)
+        if not tool_allowed(name, backend):
+            return False
         if not self._is_artifact_delivery_tool_allowed(name, run_context):
             return False
         if name == "publish_artifacts":
             return True
         if not self._is_tool_allowed_by_skill_scope(name, run_context):
             return False
+        if backend == "internal" and name in INTERNAL_TOOLS:
+            return self.tool_registry.is_allowed(name, run_mode)
         return self.tool_registry.is_visible(name, run_mode, discovered_tool_names)
 
     def get_tool_record(self, name):
@@ -3345,8 +3369,14 @@ class SkillManager:
         return self.tool_to_skill_map.get(tool_name)
 
     def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=None, run_context=None):
+        from .browser_backend import INTERNAL_TOOLS, tool_allowed, project_definition
+        backend = self._browser_backend(run_context)
         if run_mode is None and discovered_tool_names is None and include_deferred is None and run_context is None:
-            return self.tool_definitions
+            return [project_definition(item, backend) for item in self.tool_definitions
+                    if tool_allowed((item.get("function") or {}).get("name"), backend)]
+        discovered_tool_names = set(discovered_tool_names or [])
+        if backend == "internal":
+            discovered_tool_names.update(INTERNAL_TOOLS)
         definitions = self.tool_registry.definitions(
             run_mode=run_mode,
             discovered_tool_names=discovered_tool_names,
@@ -3354,6 +3384,8 @@ class SkillManager:
         )
         definitions = self._filter_definitions_by_allowed_skills(definitions, run_context)
         definitions = self._filter_artifact_delivery_tool_definitions(definitions, run_context)
+        definitions = [project_definition(item, backend) for item in definitions
+                       if tool_allowed((item.get("function") or {}).get("name"), backend)]
         if self._is_artifact_delivery_tool_allowed("publish_artifacts", run_context):
             publish_definition = self._get_tool_definition("publish_artifacts")
             if publish_definition and not any(
@@ -3435,6 +3467,8 @@ class SkillManager:
 
     def _is_skill_allowed_by_scope(self, skill_name, run_context):
         normalized_name = str(skill_name or "").strip()
+        if normalized_name == "browser-automation" and self._browser_backend(run_context) != "external":
+            return False
         if normalized_name == "knowledge-library" and ((run_context or {}).get("knowledge_context") or {}).get("refs"):
             return True
         # Library references constrain the library adapter's data access, not
@@ -3511,7 +3545,7 @@ class SkillManager:
         run_mode = (run_context or {}).get("mode")
         if not self.tool_registry.is_allowed(resolved_name, run_mode):
             return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not allowed in the current mode."}
-        if not self.tool_registry.is_visible(resolved_name, run_mode, discovered_tool_names):
+        if not self.is_tool_visible(resolved_name, run_mode, discovered_tool_names, run_context):
             return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' has not been discovered for this run."}
         return {"ok": True, "name": resolved_name, "record": record, "error": ""}
 
@@ -3533,10 +3567,18 @@ class SkillManager:
         return record["meta"].get("display_name") or _humanize_skill_name(skill_name)
 
     def get_brief_skill_prompt(self, skill_name):
+        if skill_name == "browser-automation" and self._browser_backend() != "external":
+            return ""
+        if skill_name == "workbench" and self._browser_backend() == "external":
+            return self._shared_workbench_prompt()
         record = self.skill_records.get(skill_name) or {}
         return record.get("brief") or ""
 
     def materialize_experience_package(self, skill_name, include_references=False, include_entries=False):
+        if skill_name == "browser-automation" and self._browser_backend() != "external":
+            return ""
+        if skill_name == "workbench" and self._browser_backend() == "external":
+            return self._shared_workbench_prompt()
         record = self.skill_records.get(skill_name)
         if not record:
             return ""
@@ -3583,7 +3625,7 @@ class SkillManager:
             if skill_name in excluded:
                 continue
             record = self.skill_records.get(skill_name) or {}
-            blocks.append(record.get("brief") or "")
+            blocks.append(self.get_brief_skill_prompt(skill_name))
             if len(blocks) >= limit:
                 break
         return "\n\n".join([block for block in blocks if block])
@@ -3624,9 +3666,27 @@ class SkillManager:
         return matched
 
     def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
+        if skill_name == "browser-automation" and self._browser_backend() != "external":
+            return ""
+        if skill_name == "workbench" and self._browser_backend() == "external":
+            return self._shared_workbench_prompt()
         if not include_references and not include_entries:
             return self.skill_prompts_full.get(skill_name)
         return self.materialize_experience_package(skill_name, include_references=include_references, include_entries=include_entries)
+
+    def _browser_backend(self, run_context=None):
+        from .browser_backend import run_backend
+        pinned = getattr(self, "browser_run_context", None)
+        return run_backend(pinned or run_context, getattr(self, "config_manager", None))
+
+    @staticmethod
+    def _shared_workbench_prompt():
+        return ("# 文件与终端协作\n使用 browser_tabs 查看当前聊天的文件和终端标签及未保存状态；"
+                "browser_open 仅打开 file 或 terminal，browser_close 关闭这些标签。"
+                "不要覆盖未保存草稿。terminal_input 原样发送输入，执行需包含回车；"
+                "terminal_read 使用 cursor 增量读取，等待期间不要重复输入。"
+                "terminal_interrupt 发送 Ctrl+C；关闭终端会终止其进程。"
+                "用户接管后停止输入，交还后重新读取，不能重放旧命令。")
 
     def call_tool(self, name, args, context=None):
         from .execution_authorization import invoke, current_authorization
@@ -3637,6 +3697,10 @@ class SkillManager:
         effective_context = dict(context or {})
         effective_context["execution_authorization"] = current_authorization(effective_context)
         effective_context.setdefault("workspace_dir", self.workspace_dir)
+        from .browser_backend import tool_allowed, WEB_TOOLS
+        if resolved_name in WEB_TOOLS | {"browser_skill_cli"} and not tool_allowed(resolved_name, self._browser_backend(effective_context.get("run_context"))):
+            return {"ok": False, "status": "browser_backend_disabled", "executed": False,
+                    "error": "当前浏览器模式未启用此工具，请使用本轮提供的浏览器工具。"}
         # Private host arguments must never come from model JSON (including MCP kwargs).
         arguments = dict(args or {})
         if any(key in {"_context", "_server", "_remote_name", "execution_authorization", "authorization_started", "authorization_event", "connection_binding", "connection_broker", "connection_ref"} for key in arguments):

@@ -27,6 +27,7 @@ class BrowserWorkbench(QObject):
         super().__init__(window)
         self.window = window
         self.bridge = workbench_bridge()
+        self.bridge.host = self
         if not self.bridge.available:
             # A newly created desktop host starts with an empty runtime registry.
             from core.workbench import WorkbenchStore
@@ -47,6 +48,12 @@ class BrowserWorkbench(QObject):
         self.restoring = False
         self._signature = None
         self.downloads = []
+        self.browser_runs = {}
+        self.follow_runs = {}
+        self.release_timer = QTimer(self)
+        self.release_timer.setInterval(400)
+        self.release_timer.timeout.connect(self.release_finished_runs)
+        self.release_timer.start()
         header = window.file_header_controls.layout()
         self.add_button = button("+", "新标签页", self.new_tab)
         header.insertWidget(header.count() - 1, self.add_button)
@@ -153,6 +160,8 @@ class BrowserWorkbench(QObject):
     def remember_file(self, path, state):
         if not path or state is None:
             return False
+        if state.session_id == self.session_id():
+            self.pause_follow()
         previous = self.active_tab(state.session_id)
         if previous and previous.kind == "new":
             self.store.close(state.session_id, previous.id)
@@ -223,6 +232,7 @@ class BrowserWorkbench(QObject):
                 if not self.window.confirm_leave_deliverable_edit("切换标签"):
                     return False
                 self.capture_file_position()
+            self.pause_follow()
             self.show_tab(tab)
             return True
         except Exception as exc:
@@ -233,6 +243,7 @@ class BrowserWorkbench(QObject):
         if not self.window.confirm_leave_deliverable_edit("新建标签"):
             return
         self.capture_file_position()
+        self.pause_follow()
         tab = self.store.open(self.session_id(), "new", activate=True)
         self.show_tab(tab)
         self.start_address.clear()
@@ -249,6 +260,8 @@ class BrowserWorkbench(QObject):
         url = input_url(url).toString()
         if activate and not self.window.confirm_leave_deliverable_edit("打开网页"):
             raise WorkbenchError("cancelled", "已取消打开网页，编辑内容已保留。")
+        if activate:
+            self.pause_follow()
         previous = self.active_tab(session_id)
         tab = self.store.open(session_id, "web", url=url, title=url, activate=activate)
         try:
@@ -283,6 +296,7 @@ class BrowserWorkbench(QObject):
         try:
             if not self.window.confirm_leave_deliverable_edit("打开终端"):
                 return
+            self.pause_follow()
             tab = self.open_terminal(self.session_id(), shell)
             self.window.config_manager.set("browser_terminal_profile", shell)
             previous = self.active_tab()
@@ -403,7 +417,7 @@ class BrowserWorkbench(QObject):
                 "conflict": bool(editing and self.window.deliverable_edit_dirty and fingerprint != session.initial_fingerprint)}
 
     def handle_request(self, request):
-        if request.event.is_set():
+        if request.event.is_set() or self.bridge.host is not self:
             return
         try:
             request.check()
@@ -411,15 +425,24 @@ class BrowserWorkbench(QObject):
                 raise WorkbenchError("session_unavailable", "原聊天或桌面浏览器已关闭。")
             args = request.arguments
             action = request.action
+            auth = request.context.get("execution_authorization")
+            browser = getattr(auth, "_browser_state", {})
+            internal = browser.get("snapshot", {}).get("backend") == "internal"
             if action == "list":
-                result = [dict(tab.snapshot(), **(self.file_status(tab) if tab.kind == "file" else {})) for tab in self.store.list(request.session_id)]
-                request.finish({"ok": True, "tabs": result, "active_tab_id": self.store.active.get(request.session_id, "")})
+                result = [dict(tab.snapshot(), **(self.file_status(tab) if tab.kind == "file" else {})) for tab in self.store.list(request.session_id) if tab.kind != "web" or internal]
+                active = self.store.active.get(request.session_id, "")
+                request.finish({"ok": True, "tabs": result, "active_tab_id": active if any(t["id"] == active for t in result) else ""})
                 return
             if action == "open":
                 kind = args.get("kind")
+                if kind == "web":
+                    if not internal:
+                        raise WorkbenchError("browser_backend_changed", "本轮使用外部 BrowserSkill，内置网页工具不可用。")
+                    self.check_browser_handoff(request)
                 request.started = True
                 if kind == "web":
                     tab = self.open_web(request.session_id, args.get("url", ""))
+                    self.claim_browser(request, tab)
                 elif kind == "terminal":
                     tab = self.open_terminal(request.session_id, args.get("shell", ""), args.get("cwd", ""))
                 elif kind == "file":
@@ -436,6 +459,12 @@ class BrowserWorkbench(QObject):
                 request.finish({"ok": True, "tab": tab.snapshot()})
                 return
             tab = self.store.get(request.session_id, args.get("tab_id"))
+            if tab.kind == "web":
+                if not internal:
+                    raise WorkbenchError("browser_backend_changed", "本轮使用外部 BrowserSkill，内置网页工具不可用。")
+                self.check_browser_handoff(request)
+                self.store.check_control(request.session_id, tab.id, request.revision)
+                self.claim_browser(request, tab)
             pane = self.panes.get(tab.id)
             if action == "terminal_read":
                 if not isinstance(pane, TerminalPane):
@@ -481,16 +510,21 @@ class BrowserWorkbench(QObject):
             request.check()
             # Store images in the existing durable tool-image attachment pipeline.
             image = pane.view.grab()
+            if image.isNull():
+                raise WorkbenchError("image_unavailable", "网页截图尚未就绪。")
             if not image.isNull():
                 from core.tool_images import persist_tool_image
                 handle, path = tempfile.mkstemp(suffix=".png")
                 os.close(handle)
                 try:
-                    if image.save(path, "PNG"):
+                    if not image.save(path, "PNG"):
+                        raise WorkbenchError("image_save_failed", "网页截图未能保存。")
+                    else:
                         part = persist_tool_image(path, self.window.config_manager.get_chat_history_dir(), request.session_id)
                         result["screenshot"] = part
-                        if request.context.get("model_supports_vision") and request.context.get("model_api_protocol") == "responses":
+                        if request.context.get("model_supports_vision") and request.context.get("model_api_protocol") in {"responses", "chat_completions"}:
                             result["content_parts"] = [part]
+                            result["image_status"] = "ready"
                         else:
                             result["screenshot_note"] = "截图已保存；当前模型接口不支持工具图片输入，可依据页面元素和文字操作。"
                         result["screenshot_size"] = {"width": image.width(), "height": image.height(), "device_pixel_ratio": image.devicePixelRatio()}
@@ -498,7 +532,61 @@ class BrowserWorkbench(QObject):
                     os.unlink(path)
             request.finish(result)
         except Exception as exc:
-            request.fail(exc)
+            log.warning("browser.observation_image_failed session=%s run=%s error=%s", request.session_id, request.run_id, type(exc).__name__)
+            result.update(image_status="failed", screenshot_note="图片获取未完成，文字和元素结果已保留。请重新观察后再使用坐标操作。")
+            try:
+                request.check()
+                request.finish(result)
+            except Exception as cancelled:
+                request.fail(cancelled)
+
+    def pause_follow(self):
+        for key in self.follow_runs:
+            if key[0] == self.session_id():
+                self.follow_runs[key] = False
+
+    def claim_browser(self, request, tab):
+        key = (request.session_id, request.run_id)
+        if tab.owner_run_id and tab.owner_run_id != request.run_id and tab.owner == "agent":
+            raise WorkbenchError("browser_busy", "此网页仍由当前聊天的另一任务使用，请等待完成后重新观察。")
+        tab.owner_run_id = request.run_id
+        request.revision = self.store.set_owner(request.session_id, tab.id, "agent")
+        self.browser_runs[key] = request.context["execution_authorization"]
+        self.follow_runs.setdefault(key, True)
+        pane = self.panes.get(tab.id)
+        if pane:
+            pane.refresh_control()
+        if (request.session_id == self.session_id() and self.follow_runs[key]
+                and self.window.current_product_route == self.window.PAGE_CONVERSATION
+                and not getattr(self.window, "deliverable_edit_dirty", False) and self.active_tab() is not tab):
+            self.capture_file_position()
+            self.show_tab(tab)
+            self.window.show_context_drawer(self.window.RIGHT_TAB_FILES)
+
+    def check_browser_handoff(self, request):
+        if any(tab.kind == "web" and tab.owner == "human" and tab.owner_run_id == request.run_id
+               for tab in self.store.list(request.session_id)):
+            raise WorkbenchError("human_control", "你已接管本轮网页任务。交还 Agent 前暂停所有网页动作，不能另开标签绕过。")
+
+    def release_finished_runs(self):
+        for key, auth in list(self.browser_runs.items()):
+            state = auth._browser_state
+            try:
+                active = not auth._cancelled.is_set() and state["coordinator"].run_active(*key)
+            except Exception:
+                continue
+            if active:
+                continue
+            for tab in self.store.list(key[0]):
+                if tab.owner_run_id == key[1]:
+                    tab.owner_run_id = ""
+                    if tab.owner == "agent":
+                        self.store.set_owner(tab.session_id, tab.id, "available")
+                        pane = self.panes.get(tab.id)
+                        if pane:
+                            pane.refresh_control()
+            self.browser_runs.pop(key, None)
+            self.follow_runs.pop(key, None)
 
     def handle_download(self, item):
         pane = next((pane for pane in self.panes.values() if isinstance(pane, BrowserPane) and pane.page is item.page()), None)
@@ -592,7 +680,9 @@ class BrowserWorkbench(QObject):
         if self.closed:
             return
         self.closed = True
-        self.bridge.shutdown()
+        self.release_timer.stop()
+        if self.bridge.host is self:
+            self.bridge.shutdown()
         try:
             self.bridge.requested.disconnect(self.handle_request)
         except RuntimeError:

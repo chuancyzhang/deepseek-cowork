@@ -302,6 +302,7 @@ class ConfigManager:
             "deepseek_v4_context_window_tokens": 1000000,
             "context_budget_ratio": 0.8,
             "experimental_long_context": {"enabled": False, "target_tokens": 300000},
+            "experimental_browser_automation": {"enabled": False},
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],
@@ -1625,6 +1626,23 @@ class ConfigManager:
                 self.config[key] = previous
             raise
 
+    def _save_browser_backend_preference(self, value):
+        from .browser_backend import CONFIG_KEY, normalize_policy
+        previous = self.config.get(CONFIG_KEY)
+        self.config[CONFIG_KEY] = normalize_policy(value)
+        try:
+            self._write_config_or_raise()
+        except Exception:
+            if previous is None:
+                self.config.pop(CONFIG_KEY, None)
+            else:
+                self.config[CONFIG_KEY] = previous
+            raise
+
+    def set_experimental_browser_automation(self, value):
+        from .browser_backend import BrowserBackendCoordinator, normalize_policy
+        return BrowserBackendCoordinator(self).save(normalize_policy(value)["enabled"])
+
     def _set_config_value(self, key, value):
         if self.config.get(key) == value:
             return False
@@ -1639,6 +1657,9 @@ class ConfigManager:
         return self._set_config_value(key, value)
 
     def is_skill_enabled(self, skill_name, default_enabled=True):
+        if skill_name == "browser-automation":
+            from .browser_backend import BrowserBackendCoordinator, EXTERNAL
+            return BrowserBackendCoordinator(self).snapshot()["backend"] == EXTERNAL
         if skill_name in self.config.get("disabled_skills", []):
             return False
         if skill_name in self.config.get("enabled_skills", []):
@@ -1654,6 +1675,10 @@ class ConfigManager:
         self.set("data_security", validate_config(value))
 
     def set_skill_enabled(self, skill_name, enabled, *, persist_strict=False):
+        if skill_name == "browser-automation":
+            # Browser selection has one saved switch; legacy enable calls cannot
+            # overwrite it or create a second, contradictory preference.
+            return self.is_skill_enabled(skill_name)
         disabled = set(self.config.get("disabled_skills", []))
         enabled_skills = set(self.config.get("enabled_skills", []))
         if enabled:

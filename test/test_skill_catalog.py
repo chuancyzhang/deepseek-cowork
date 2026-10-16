@@ -137,6 +137,7 @@ class TestSkillCatalogService(unittest.TestCase):
         snapshot = SimpleNamespace(revision=2)
         worker = SimpleNamespace(
             skill_manager=runtime,
+            run_context={"browser_backend": {"backend": "external", "generation": 0}},
             _pending_skill_snapshot=None,
             _skill_snapshot_lock=threading.Lock(),
             _refresh_tool_definitions=MagicMock(),
@@ -148,6 +149,7 @@ class TestSkillCatalogService(unittest.TestCase):
         runtime.apply_snapshot.assert_not_called()
         LLMWorker._apply_pending_skill_snapshot(worker)
         runtime.apply_snapshot.assert_called_once_with(snapshot)
+        self.assertEqual(runtime.browser_run_context, worker.run_context)
         worker._refresh_tool_definitions.assert_called_once()
         worker.agent_state_signal.emit.assert_called_once()
 

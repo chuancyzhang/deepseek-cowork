@@ -231,6 +231,10 @@ def normalize_run_context(run_context):
     if isinstance(ctx.get("desktop_long_context"), dict):
         from .long_context import normalize_policy
         normalized["desktop_long_context"] = normalize_policy(ctx["desktop_long_context"])
+    if isinstance(ctx.get("browser_backend"), dict):
+        value = ctx["browser_backend"]
+        if value.get("backend") in {"internal", "external"} and type(value.get("generation")) is int:
+            normalized["browser_backend"] = {key: value[key] for key in ("backend", "generation")}
     return normalized
 
 

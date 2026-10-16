@@ -39,6 +39,7 @@ class WorkbenchTab:
     cwd: str = ""
     shell: str = ""
     owner: str = "available"
+    owner_run_id: str = ""
     control_revision: int = 0
     page_revision: int = 0
     status: str = "ready"
@@ -170,8 +171,49 @@ class WorkbenchBridge(QObject):
         self.pending: dict[str, WorkbenchRequest] = {}
         self.remote_routes = {}
         self._lock = threading.RLock()
+        self._serial = threading.Lock()
 
     def call(self, action, arguments, context, timeout=30):
+        # Serialize desktop actions, including asynchronous JavaScript callbacks.
+        from .execution_authorization import current_authorization
+        auth = current_authorization(context)
+        deadline = time.monotonic() + timeout
+        while not self._serial.acquire(timeout=.1):
+            if (auth and auth._cancelled.is_set()) or time.monotonic() >= deadline:
+                return {"ok": False, "status": "cancelled" if auth and auth._cancelled.is_set() else "timeout",
+                        "error": "等待浏览器操作期间已停止或超时，请观察实际状态后继续。", "executed": False}
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"ok": False, "status": "timeout", "error": "浏览器请求已过期，本次操作未执行。", "executed": False}
+            return self._guarded_call(action, arguments, context, remaining)
+        finally:
+            self._serial.release()
+
+    def _guarded_call(self, action, arguments, context, timeout):
+        from .browser_backend import browser_operation, INTERNAL
+        from .execution_authorization import current_authorization
+        arguments = dict(arguments or {})
+        auth = current_authorization(context)
+        browser = getattr(auth, "_browser_state", {})
+        internal = browser.get("snapshot", {}).get("backend") == INTERNAL
+        is_web = action in {"observe", "navigate", "browser_action"} or (action == "open" and arguments.get("kind") == "web")
+        if action == "list":
+            is_web = internal
+        if action == "close" and auth and self.available:
+            try:
+                is_web = self.store.get(auth.session_id, arguments.get("tab_id")).kind == "web"
+            except WorkbenchError:
+                pass  # The normal dispatcher returns the ownership error.
+        try:
+            if is_web:
+                with browser_operation(context, INTERNAL):
+                    return self._call(action, arguments, context, timeout)
+            return self._call(action, arguments, context, timeout)
+        except Exception as exc:
+            return {"ok": False, "status": getattr(exc, "code", "failed"), "error": str(exc), "executed": False}
+
+    def _call(self, action, arguments, context, timeout=30):
         from .execution_authorization import current_authorization, ExecutionAuthorization
         context = dict(context or {})
         authorization = current_authorization(context)

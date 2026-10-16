@@ -4,6 +4,7 @@ import os
 import re
 import urllib.parse
 import uuid
+import time
 
 
 from core.browser_skill_component import (
@@ -13,6 +14,7 @@ from core.browser_skill_component import (
 )
 from core.env_utils import get_app_data_dir
 from core.tool_images import ToolImageError, persist_tool_image
+from core.browser_backend import browser_operation, BrowserBackendError, EXTERNAL
 
 
 _ALLOWED_COMMANDS = {
@@ -170,6 +172,42 @@ def _attach_screenshot(result, output_path, context, abort_state):
                            mime_type=part["mime_type"], size_bytes=part["size_bytes"])
 
 
+def _run_owned_command(normalized, context, timeout_seconds, abort_state):
+    from core.browser_skill_component import _session_id_from_args
+    with browser_operation(context, EXTERNAL) as (coordinator, auth):
+        normalized = list(normalized)
+        help_only = "--help" in normalized or "-h" in normalized
+        if any(item.startswith("--session=") or item.startswith("--request-id") for item in normalized) or normalized.count("--session") > 1:
+            raise BrowserBackendError("invalid_session", "请只使用一次 --session 参数；会话创建标识由应用管理。")
+        if normalized[0] == "session" and not help_only and (len(normalized) < 2 or normalized[1] not in {"start", "stop"} or any(item.startswith("--all") for item in normalized)):
+            raise BrowserBackendError("invalid_session", "只允许创建或结束当前任务自己的会话，不能管理其他应用的会话。")
+        if normalized[:2] == ["session", "stop"] and not help_only and (len(normalized) < 3 or normalized[2].startswith("-") or "--session" in normalized):
+            raise BrowserBackendError("invalid_session", "结束会话请使用 session stop 后紧接本任务的会话 ID。")
+        external_id = _session_id_from_args(normalized)
+        if not external_id and not help_only and normalized[0] not in {"browsers", "doctor", "status", "session"}:
+            raise BrowserBackendError("invalid_session", "网页命令必须提供当前任务创建的 --session。")
+        if external_id and not coordinator.owns_session(auth.session_id, auth.run_id, external_id):
+            raise BrowserBackendError("browser_session_unavailable", "此 BrowserSkill 会话不属于当前任务，请先创建本任务的浏览器会话。")
+        request_token = ""
+        if normalized[:2] == ["session", "start"] and not help_only:
+            request_token = f"{int(time.time() * 1000) + 600000}:{uuid.uuid4()}"
+            coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token)
+            normalized.extend(["--request-id", request_token])
+        result = run_browser_skill_cli(normalized, timeout_seconds=timeout_seconds,
+                                       abort_check=lambda: bool(abort_state["aborted"]))
+        payload = result.get("result") or {}
+        if normalized[:2] == ["session", "start"] and isinstance(payload, dict) and payload.get("session_id"):
+            coordinator.track_session(auth.session_id, auth.run_id, str(payload["session_id"]))
+            if request_token:
+                coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token, stopped=True)
+        elif request_token and result.get("status") == "completed":
+            result.update(status="incomplete", error={"code": "session_result_unknown", "message": "未获得可确认的会话 ID，请勿重复创建。任务结束时会清理本次创建请求，可在实验功能中查看释放状态。"})
+        stopped = not help_only and normalized[:2] == ["session", "stop"] and result.get("status") == "completed"
+        if external_id and (stopped or (result.get("session_cleanup") or {}).get("stopped")):
+            coordinator.track_session(auth.session_id, auth.run_id, external_id, stopped=True)
+        return result
+
+
 def browser_skill_cli(
     args,
     timeout_seconds=120,
@@ -189,11 +227,7 @@ def browser_skill_cli(
             log_browser_skill_event("session_start")
         elif command == "session" and len(normalized) > 1 and normalized[1] == "stop":
             log_browser_skill_event("session_stop")
-        result = run_browser_skill_cli(
-            normalized,
-            timeout_seconds=timeout_seconds,
-            abort_check=lambda: bool(abort_state["aborted"]),
-        )
+        result = _run_owned_command(normalized, context, timeout_seconds, abort_state)
         if result.get("status") == "completed":
             if command == "screenshot":
                 output_path = normalized[normalized.index("--out") + 1]
@@ -212,7 +246,7 @@ def browser_skill_cli(
         return {
             "status": "incomplete",
             "error": {
-                "code": "browser_skill_invalid_request",
+                "code": getattr(exc, "code", "browser_skill_invalid_request"),
                 "message": str(exc),
             },
         }

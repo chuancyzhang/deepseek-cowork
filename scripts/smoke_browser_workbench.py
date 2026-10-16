@@ -119,15 +119,40 @@ def main():
         submitted = request("browser_action", page_version=observed.result["page_version"], action="click", element_id=save["id"])
         submitted.revision = tab.control_revision; pane.act(submitted, submitted.finish); wait(submitted.event.is_set)
         assert submitted.result["ok"], submitted.result
-        assert js(pane.page, "document.querySelector('output').textContent") == "Saved"
+        # Native input is dispatched asynchronously to Chromium. Confirm the
+        # effect without replaying the click while its event is still queued.
+        wait(lambda: js(pane.page, "document.querySelector('output').textContent") == "Saved", timeout=3)
+        assert js(pane.page, "document.querySelector('output').textContent") == "Saved", (
+            submitted.result, observed.result.get("viewport"), pane.view.size(), pane.view.devicePixelRatioF(),
+            js(pane.page, "JSON.stringify({scale:devicePixelRatio,rect:document.querySelector('button').getBoundingClientRect().toJSON(),active:document.activeElement.tagName})"))
         js(pane.page, "document.querySelector('input').focus();document.querySelector('input').setSelectionRange(4,4)")
         observed = request("observe"); pane.observe(observed, observed.finish); wait(observed.event.is_set)
         key = request("browser_action", page_version=observed.result["page_version"], action="key", key="Backspace")
         key.revision = tab.control_revision; pane.act(key, key.finish); wait(key.event.is_set)
         assert key.result["ok"], key.result
+        wait(lambda: js(pane.page, "document.querySelector('input').value") == "中文接", timeout=3)
         actual = js(pane.page, "document.querySelector('input').value")
         assert actual == "中文接", (actual, js(pane.page, "JSON.stringify({tag:document.activeElement.tagName,focus:document.hasFocus()})"))
         print("agent form submission and native key respect input ownership: PASS", flush=True)
+        js(pane.page, "document.querySelector('input').readOnly=true")
+        observed = request("observe"); pane.observe(observed, observed.finish); wait(observed.event.is_set)
+        name = next(el for el in observed.result["elements"] if el["name"] == "Name")
+        readonly = request("browser_action", page_version=observed.result["page_version"], action="fill", element_id=name["id"], text="must not write")
+        readonly.revision = tab.control_revision; pane.act(readonly, readonly.finish); wait(readonly.event.is_set)
+        assert readonly.result.get("status") == "unsupported", readonly.result
+        js(pane.page, "document.querySelector('input').readOnly=false;document.querySelector('input').oninput=event=>setTimeout(()=>event.target.value='',0)")
+        observed = request("observe"); pane.observe(observed, observed.finish); wait(observed.event.is_set)
+        name = next(el for el in observed.result["elements"] if el["name"] == "Name")
+        reset = request("browser_action", page_version=observed.result["page_version"], action="fill", element_id=name["id"], text="rejected by page")
+        reset.revision = tab.control_revision; pane.act(reset, reset.finish); wait(reset.event.is_set)
+        assert reset.result.get("status") == "fill_not_verified", reset.result
+        js(pane.page, "let overlay=document.createElement('div');overlay.style='position:fixed;inset:0;z-index:9999';document.body.append(overlay)")
+        observed = request("observe"); pane.observe(observed, observed.finish); wait(observed.event.is_set)
+        save = next(el for el in observed.result["elements"] if el["name"] == "Save")
+        covered = request("browser_action", page_version=observed.result["page_version"], action="click", element_id=save["id"])
+        covered.revision = tab.control_revision; pane.act(covered, covered.finish); wait(covered.event.is_set)
+        assert covered.result.get("status") == "element_obscured", covered.result
+        print("readonly/reverted fill/covered native target: PASS", flush=True)
         pane.take_over(); pane.give_back()
         pane.view.setUrl(QUrl(tab.url + "login"))
         wait(lambda: pane.document_ready and pane.tab.url.endswith('/login'))

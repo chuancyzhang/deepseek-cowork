@@ -393,7 +393,8 @@ class WorkerLifecycleTests(unittest.TestCase):
             finally:
                 main._NATIVE_CRASH_LOG_HANDLE.close()
         self.assertEqual(previous.call_count, 2)
-        text = (self.root / main.NATIVE_CRASH_LOG_FILENAME).read_text(encoding="utf-8")
+        from core.runtime_logs import log_path
+        text = log_path("native_crash", self.root).read_text(encoding="utf-8")
         self.assertIn("pyside=", text)
         self.assertIn("python=", text)
         self.assertIn("qt_fatal: QThread: Destroyed", text)

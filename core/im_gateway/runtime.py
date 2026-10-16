@@ -57,11 +57,8 @@ _CARD_CONTEXT_LOCK = threading.Lock()
 def _log_gateway(message):
     safe_message = _redact_log_text(message)
     try:
-        log_dir = get_app_data_dir()
-        log_path = os.path.join(log_dir, "im_gateway.log")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {safe_message}\n")
+        from core.runtime_logs import append_log
+        append_log("im_gateway", safe_message, get_app_data_dir())
     except Exception:
         try:
             print(f"[im_gateway] {safe_message}", file=sys.stderr)

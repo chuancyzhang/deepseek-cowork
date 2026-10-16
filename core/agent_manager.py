@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from core.chat_storage import AGENT_TERMINAL_STATUSES
 from core.env_utils import get_app_data_dir
 from core.process_utils import runtime_debug_logging_enabled
+from core.runtime_logs import append_log
 
 AGENT_MANAGEMENT_TOOLS = {
     "spawn_agent",
@@ -52,12 +53,7 @@ def _log_agent_runtime(event, **fields):
             "thread_id": threading.get_ident(),
         }
         payload.update({k: v for k, v in fields.items() if not any(x in k for x in ("preview", "content", "traceback"))})
-        log_dir = get_app_data_dir()
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "sub_agent_runtime.log")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(f"[{ts}] {json.dumps(payload, ensure_ascii=False, default=str)}\n")
+        append_log("sub_agent_runtime", json.dumps(payload, ensure_ascii=False, default=str), get_app_data_dir())
     except Exception:
         try:
             print(f"[sub-agent-runtime] {event} {fields}")

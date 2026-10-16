@@ -15,6 +15,7 @@ from core.theme import (
     get_tech_stylesheet,
 )
 from core.theme_service import ThemeRepository
+from core.runtime_logs import latest_source_path
 
 
 class ThemeTests(unittest.TestCase):
@@ -75,7 +76,7 @@ class ThemeTests(unittest.TestCase):
             self.assertEqual(errors, ["主题动态背景播放失败：background；decode error"])
             self.assertEqual(manager.last_failure["reason"], "runtime_theme")
             self.assertTrue(manager.last_failure["preview"])
-            with open(os.path.join(directory, "theme_debug.log"), encoding="utf-8") as stream:
+            with open(latest_source_path("theme_debug", directory), encoding="utf-8") as stream:
                 log = stream.read()
             self.assertIn("animation_error", log)
             self.assertIn('animation_frame_count=2', log)

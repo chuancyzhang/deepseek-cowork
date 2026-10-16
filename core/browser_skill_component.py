@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - non-Windows
 from .env_utils import get_app_data_dir, get_resource_dir
 from .process_utils import popen_external_program, subprocess_kwargs_no_window, acquire_process_singleton
 from .app_version import compare_versions
+from .runtime_logs import append_log, log_path as runtime_log_path
 
 
 BROWSER_SKILL_COMPONENT_ID = "browser-skill"
@@ -44,9 +45,6 @@ BROWSER_SKILL_MARKER_SCHEMA = 2
 BROWSER_SKILL_BUNDLE_SCHEMA = 1
 BROWSER_SKILL_PROBE_TIMEOUT_SECONDS = 45
 BROWSER_SKILL_SERVICE_START_TIMEOUT_SECONDS = 15
-
-_LOG_LOCK = threading.RLock()
-
 
 def browser_skill_root():
     return os.path.join(
@@ -129,9 +127,7 @@ def _write_diagnostics_cache(status):
 
 
 def _log_path():
-    path = os.path.join(get_app_data_dir(), "logs")
-    os.makedirs(path, exist_ok=True)
-    return os.path.join(path, "browser_skill_runtime.log")
+    return str(runtime_log_path("browser_skill_runtime", get_app_data_dir()))
 
 
 def log_browser_skill_event(stage, **fields):
@@ -145,9 +141,7 @@ def log_browser_skill_event(stage, **fields):
         },
     }
     line = json.dumps(payload, ensure_ascii=False, default=str)
-    with _LOG_LOCK:
-        with open(_log_path(), "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+    append_log("browser_skill_runtime", line, get_app_data_dir())
 
 
 def _read_marker():
@@ -559,13 +553,14 @@ def _ensure_browser_skill_service(abort_check=None, *, timeout_seconds=BROWSER_S
         if state["state"] != "missing":
             raise RuntimeError(state["detail"])
         code = "browser_service_start_failed"
-        log_path = os.path.join(options["cwd"], f"service-start-{key}.log")
+        log_path = str(runtime_log_path("browser_service", get_app_data_dir()))
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
         command = [browser_skill_executable(), "daemon", "start", "--foreground"]
         if port is not None:  # Isolated runtime tests use an unused high port.
             command.extend(["--port", str(port)])
         check_cancelled()
         log_browser_skill_event("service_start", mode="host_managed")
-        with open(log_path, "wb") as output:
+        with open(log_path, "ab") as output:
             process = popen_external_program(
                 command, stdin=subprocess.DEVNULL, stdout=output, stderr=output, **options,
             )

@@ -13,6 +13,7 @@ class BrowserServiceTests(unittest.TestCase):
     def setUp(self):
         stack = self.enterContext(ExitStack())
         root = stack.enter_context(tempfile.TemporaryDirectory())
+        stack.enter_context(patch.object(component, "get_app_data_dir", return_value=root))
         stack.enter_context(patch.object(component, "_browser_process_options", return_value={
             "cwd": root, "env": {"BSK_HOME": os.path.join(root, "home")},
         }))

@@ -107,15 +107,13 @@ _RGBA_COLOR_RE = re.compile(
 
 
 def append_theme_log(data_dir: str, event: str, **fields: Any) -> None:
-    os.makedirs(data_dir, exist_ok=True)
-    path = os.path.join(data_dir, "theme_debug.log")
-    parts = [time.strftime("%Y-%m-%d %H:%M:%S"), str(event or "theme_event")]
+    from core.runtime_logs import append_log
+    parts = [str(event or "theme_event")]
     parts.extend(
         f"{key}={json.dumps(value, ensure_ascii=False, default=str)}"
         for key, value in sorted(fields.items())
     )
-    with open(path, "a", encoding="utf-8") as stream:
-        stream.write(" ".join(parts) + "\n")
+    append_log("theme_debug", " ".join(parts), data_dir)
 
 
 def _json_copy(value: Any) -> Any:

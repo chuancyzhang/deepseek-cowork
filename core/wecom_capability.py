@@ -3,7 +3,6 @@ import json
 import os
 import platform
 import subprocess
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -23,7 +22,6 @@ WECOM_AUTH_PROVIDER_ID = "wecom_cli"
 WECOM_SKILL_ID = "wecom-unified"
 WECOM_CONNECTION_STATE_FILENAME = "cowork-connection-state.json"
 
-_LOG_LOCK = threading.RLock()
 _VERIFIED_BINARY = None
 
 
@@ -195,12 +193,9 @@ def log_wecom_event(stage, **fields):
         "stage": str(stage or "event"),
     }
     payload.update({key: value for key, value in fields.items() if key in allowed and value is not None})
-    log_dir = os.path.join(get_app_data_dir(), "logs")
-    os.makedirs(log_dir, exist_ok=True)
     line = json.dumps(payload, ensure_ascii=False, default=str)
-    with _LOG_LOCK:
-        with open(os.path.join(log_dir, "wecom_capability.log"), "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+    from core.runtime_logs import append_log
+    append_log("wecom_capability", line, get_app_data_dir())
 
 
 def start_wecom_cli(args, *, cwd, config_dir=None):

@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.im_gateway import runtime as im_gateway
+from core.runtime_logs import latest_source_path
 from core.im_gateway.wechat_ilink import (
     WeChatIlinkClient,
     WeChatIlinkError,
@@ -159,7 +160,7 @@ class IMGatewayRegistryTests(unittest.TestCase):
                 'Authorization: Bearer access-secret "bot_token": "wx-secret"'
             )
             with open(
-                os.path.join(temp_dir, "im_gateway.log"),
+                latest_source_path("im_gateway", temp_dir),
                 "r",
                 encoding="utf-8",
             ) as handle:

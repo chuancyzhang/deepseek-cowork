@@ -216,6 +216,13 @@ from ui.primitives import (
 )
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
+from core.runtime_logs import (
+    append_log as append_runtime_log,
+    log_path as runtime_log_path,
+    latest_source_path,
+    latest_gateway_error,
+    start_log_maintenance,
+)
 from ui.chat_log_export import ConversationExportController
 from core.request_snapshot import RequestSnapshotStore
 from core.task_details import redact_diagnostic, tool_result_status, tool_result_summary
@@ -699,12 +706,7 @@ def build_gateway_launch_command():
 
 def append_background_process_log(filename, message):
     try:
-        log_dir = get_app_data_dir()
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, filename)
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(f"[{timestamp}] {message}\n")
+        append_runtime_log(filename, message, get_app_data_dir())
     except Exception:
         pass
 
@@ -1043,12 +1045,7 @@ def log_sub_agent_runtime(event, **fields):
     try:
         payload = {"event": event}
         payload.update(fields or {})
-        log_dir = get_app_data_dir()
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "sub_agent_runtime.log")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(f"[{ts}] {json.dumps(payload, ensure_ascii=False, default=str)}\n")
+        append_runtime_log("sub_agent_runtime", json.dumps(payload, ensure_ascii=False, default=str), get_app_data_dir())
     except Exception:
         try:
             print(f"[sub-agent-runtime] {event} {fields}")
@@ -1057,7 +1054,7 @@ def log_sub_agent_runtime(event, **fields):
 
 
 def sub_agent_log_path():
-    return os.path.join(get_app_data_dir(), "sub_agent_runtime.log")
+    return latest_source_path("sub_agent_runtime", get_app_data_dir())
 
 
 def _qt_object_alive(obj):
@@ -1158,25 +1155,35 @@ _QT_MESSAGE_HANDLER = None
 
 def install_native_crash_logging():
     global _NATIVE_CRASH_LOG_HANDLE, _QT_MESSAGE_HANDLER
-    if _NATIVE_CRASH_LOG_HANDLE is not None:
-        return
+    new_handle = None
     try:
-        path = os.path.join(get_app_data_dir(), NATIVE_CRASH_LOG_FILENAME)
+        path = str(runtime_log_path(NATIVE_CRASH_LOG_FILENAME, get_app_data_dir()))
+        previous_handle = _NATIVE_CRASH_LOG_HANDLE
+        if previous_handle is not None and not previous_handle.closed and previous_handle.name == path:
+            return
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        _NATIVE_CRASH_LOG_HANDLE = open(path, "a", encoding="utf-8", buffering=1)
+        new_handle = open(path, "a", encoding="utf-8", buffering=1)
         import PySide6
         import shiboken6
         from PySide6.QtCore import QtMsgType, qFormatLogMessage, qInstallMessageHandler, qVersion
-        _NATIVE_CRASH_LOG_HANDLE.write(
-            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] process_start pid={os.getpid()} "
+        new_handle.write(
+            f"\n[{datetime.now().astimezone().isoformat(timespec='milliseconds')}] "
+            f"{'process_continue' if previous_handle else 'process_start'} pid={os.getpid()} "
             f"app={APP_VERSION} python={platform.python_version()} pyside={PySide6.__version__} "
             f"shiboken={shiboken6.__version__} qt={qVersion()} frozen={bool(getattr(sys, 'frozen', False))}\n"
         )
-        faulthandler.enable(file=_NATIVE_CRASH_LOG_HANDLE, all_threads=True)
+        # Rebind before closing yesterday's descriptor. A failed rollover keeps
+        # the existing crash destination alive.
+        faulthandler.enable(file=new_handle, all_threads=True)
+        _NATIVE_CRASH_LOG_HANDLE = new_handle
+        if previous_handle is not None:
+            previous_handle.close()
+        if _QT_MESSAGE_HANDLER is not None:
+            return
         def qt_message_handler(kind, context, message):
             if kind == QtMsgType.QtFatalMsg:
                 try:
-                    _NATIVE_CRASH_LOG_HANDLE.write(f"qt_fatal: {qFormatLogMessage(kind, context, message)}\n")
+                    _NATIVE_CRASH_LOG_HANDLE.write(f"[{datetime.now().astimezone().isoformat(timespec='milliseconds')}] qt_fatal: {qFormatLogMessage(kind, context, message)}\n")
                     _NATIVE_CRASH_LOG_HANDLE.flush()
                 except Exception:
                     pass
@@ -1192,7 +1199,8 @@ def install_native_crash_logging():
         previous_handler = None
         previous_handler = qInstallMessageHandler(qt_message_handler)
     except Exception as exc:
-        _NATIVE_CRASH_LOG_HANDLE = None
+        if new_handle is not None and new_handle is not _NATIVE_CRASH_LOG_HANDLE:
+            new_handle.close()
         append_background_process_log(UI_ERROR_LOG_FILENAME, f"native_crash_logging_failed={exc}")
 
 
@@ -3407,7 +3415,7 @@ class SafeApplication(QApplication):
                 self.main_window = None
             return
         try:
-            window.add_system_toast("程序遇到异常，详情已写入 ui_error.log", "error")
+            window.add_system_toast("程序遇到异常，可在设置 → 运行日志查看详情", "error")
         except Exception:
             print("Failed to show UI exception toast", file=sys.stderr)
 
@@ -11623,7 +11631,7 @@ class SettingsDialog(QDialog):
 
         def add_settings_page(label, icon_name, page):
             allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "更新与关于"},
+                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "运行日志", "更新与关于"},
                 "capabilities": {"MCP 服务", "专家"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
@@ -12189,10 +12197,20 @@ class SettingsDialog(QDialog):
         agent_layout.addWidget(self.agent_profile_manager)
         agent_layout.addStretch()
         workspace_layout.addWidget(storage_group)
-        log_group, log_layout = build_settings_surface("日志下载", show_subtitle=False)
-        log_layout.addWidget(LogExportPanel(get_app_data_dir(), append_background_process_log))
+        log_group, log_layout = build_settings_surface("运行日志", show_subtitle=False)
+        logs_link = QPushButton("查看与导出运行日志")
+        logs_link.setStyleSheet(product_button_style("secondary"))
+        logs_link.clicked.connect(lambda: self.select_initial_page("运行日志"))
+        log_layout.addWidget(logs_link, 0, Qt.AlignLeft)
         workspace_layout.addWidget(log_group)
         workspace_layout.addStretch()
+        logs_page = QWidget()
+        logs_layout = QVBoxLayout(logs_page)
+        logs_layout.setContentsMargins(6, 4, 6, 18)
+        logs_layout.setSpacing(16)
+        logs_layout.addWidget(build_settings_page_header("运行日志", "查看运行过程，导出日志以便排查问题。"))
+        self.runtime_logs_panel = LogExportPanel(get_app_data_dir(), append_background_process_log, logs_page)
+        logs_layout.addWidget(self.runtime_logs_panel, 1)
         if domain == "capabilities":
             old_mcp_page = mcp_page
             mcp_page = QWidget()
@@ -12233,6 +12251,7 @@ class SettingsDialog(QDialog):
         add_settings_page("专家", "fa5s.user-astronaut", agent_page)
         add_settings_page("记忆", "fa5s.brain", memory_page)
         add_settings_page("工作区与存储", "fa5s.folder-open", workspace_page)
+        add_settings_page("运行日志", "fa5s.file-alt", logs_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("变量与凭据", "fa5s.key", variable_page)
         from ui.data_security import create_data_security_panel
@@ -12252,7 +12271,7 @@ class SettingsDialog(QDialog):
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
             from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "更新与关于"]
+            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "运行日志", "更新与关于"]
             pages = dict(zip(self._page_labels, self._settings_pages))
             items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
             self.nav_combo.clear()
@@ -12288,7 +12307,7 @@ class SettingsDialog(QDialog):
             self.nav_combo.setCurrentIndex(row)
             self.nav_combo.blockSignals(False)
             if hasattr(self, "settings_action_bar"):
-                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "实验功能", "更新与关于"})
+                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "实验功能", "运行日志", "更新与关于"})
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
@@ -12483,6 +12502,8 @@ class SettingsDialog(QDialog):
             seen = set()
             for root in roots:
                 for widget in root.findChildren(widget_type):
+                    if getattr(self, "runtime_logs_panel", None) is not None and self.runtime_logs_panel.isAncestorOf(widget):
+                        continue
                     if id(widget) in seen:
                         continue
                     seen.add(id(widget))
@@ -12633,7 +12654,7 @@ class SettingsDialog(QDialog):
 
     def select_initial_page(self, initial_page_label):
         initial_page_label = "专家" if initial_page_label == "智能体" else initial_page_label
-        initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于"}.get(initial_page_label, initial_page_label)
+        initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于", "日志下载": "运行日志"}.get(initial_page_label, initial_page_label)
         if not initial_page_label:
             self.nav_list.setCurrentRow(0)
             return
@@ -13551,19 +13572,10 @@ class SettingsDialog(QDialog):
             )
 
     def _latest_im_gateway_error(self):
-        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-                lines = handle.readlines()[-60:]
+            return latest_gateway_error(get_app_data_dir())
         except Exception:
             return ""
-        markers = (" failed", " error=", " missing", " unavailable", "不可用", "未配置")
-        for line in reversed(lines):
-            text = line.strip()
-            lowered = text.lower()
-            if any(marker in lowered for marker in markers):
-                return text.split("] ", 1)[-1]
-        return ""
 
     def _verify_im_gateway_start(self, provider_name):
         running = bool(
@@ -13608,14 +13620,8 @@ class SettingsDialog(QDialog):
         self._refresh_im_provider_states()
 
     def _open_im_gateway_log(self):
-        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
-        try:
-            if not os.path.exists(log_path):
-                with open(log_path, "a", encoding="utf-8"):
-                    pass
-            os.startfile(log_path)
-        except Exception:
-            QMessageBox.information(self, "企业消息网关日志", log_path)
+        self.select_initial_page("运行日志")
+        self.runtime_logs_panel.set_source("im_gateway")
 
     def _save_im_gateway_config(self):
         """Enterprise-message settings are committed by their local action."""
@@ -37421,7 +37427,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 except Exception:
                     pass
                 self.gateway_log_file = None
-            log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
+            log_path = str(runtime_log_path("im_gateway_stderr", get_app_data_dir()))
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
             self.gateway_log_file = open(log_path, "a", encoding="utf-8")
             self.gateway_process = subprocess.Popen(
                 cmd,
@@ -55593,7 +55600,12 @@ if __name__ == "__main__":
         if not daemon_lock:
             append_background_process_log("daemon.log", f"daemon singleton lock busy; skip start for port={port}")
             sys.exit(0)
-        run_daemon(DEFAULT_HOST, port)
+        log_maintenance = start_log_maintenance(get_app_data_dir(), owned_lock_paths=[daemon_lock.lock_path],
+                                                rotate_crash=install_native_crash_logging)
+        try:
+            run_daemon(DEFAULT_HOST, port)
+        finally:
+            log_maintenance.stop()
         sys.exit(0)
     if "--im-gateway" in sys.argv:
         gateway_lock = acquire_process_singleton(
@@ -55603,7 +55615,12 @@ if __name__ == "__main__":
             append_background_process_log("im_gateway.log", "gateway singleton lock busy; skip start")
             sys.exit(0)
         from core.im_gateway import run as run_im_gateway
-        run_im_gateway()
+        log_maintenance = start_log_maintenance(get_app_data_dir(), owned_lock_paths=[gateway_lock.lock_path],
+                                                rotate_crash=install_native_crash_logging)
+        try:
+            run_im_gateway()
+        finally:
+            log_maintenance.stop()
         sys.exit(0)
     ui_server_name = build_ui_server_name()
     if notify_existing_ui(ui_server_name):
@@ -55615,6 +55632,8 @@ if __name__ == "__main__":
         if notify_existing_ui_with_retries(ui_server_name):
             sys.exit(0)
         sys.exit(0)
+    log_maintenance = start_log_maintenance(get_app_data_dir(), owned_lock_paths=[ui_runtime_lock.lock_path],
+                                            rotate_crash=install_native_crash_logging)
     if platform.system() == 'Windows':
         try:
             import ctypes
@@ -55628,6 +55647,7 @@ if __name__ == "__main__":
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = SafeApplication(sys.argv)
     app.ui_runtime_lock = ui_runtime_lock
+    app.aboutToQuit.connect(log_maintenance.stop)
     log_startup_stage("app_created")
     icon_path = resolve_app_icon_path()
     if icon_path:

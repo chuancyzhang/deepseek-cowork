@@ -15,6 +15,7 @@ from core.chat_storage import ChatStorage, ConversationWriteConflict
 from core.chat_save_queue import classify_chat_save_error
 from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir, get_base_dir
+from core.runtime_logs import append_log
 from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
 from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
@@ -60,11 +61,7 @@ def get_runtime_signature():
 
 def _log_daemon(message):
     try:
-        log_dir = get_app_data_dir()
-        log_path = os.path.join(log_dir, "daemon.log")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {message}\n")
+        append_log("daemon", message, get_app_data_dir())
     except Exception:
         try:
             print(f"[daemon] {message}")

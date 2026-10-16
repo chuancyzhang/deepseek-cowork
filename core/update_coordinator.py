@@ -1,7 +1,6 @@
 """Application-owned update preparation. No widget owns a download or retry timer."""
 import copy
 import json
-import logging
 import os
 import threading
 import time
@@ -13,6 +12,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from core.app_version import APP_VERSION, is_newer_version
 from core import updater as backend
+from core.runtime_logs import append_log
 
 RETRY_DELAYS = (15, 30, 60, 120)
 
@@ -38,13 +38,16 @@ def atomic_json(path, payload):
     os.replace(temporary, path)
 
 
+def update_log_directory(root):
+    # Production uses data_dir/updates; explicitly supplied test/cache roots
+    # remain isolated instead of writing to the current user's app data.
+    root = os.path.normpath(root)
+    return os.path.dirname(root) if os.path.basename(root) == "updates" else root
+
+
 def update_log(root, phase, **fields):
-    try:
-        os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, "app_update.log"), "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "phase": phase, **fields}, ensure_ascii=False) + "\n")
-    except OSError:
-        logging.getLogger(__name__).exception("Update diagnostic write failed: phase=%s root=%s", phase, root)
+    append_log("app_update", json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "phase": phase, **fields}, ensure_ascii=False), update_log_directory(root))
 
 
 def load_prepared(root, current_version):

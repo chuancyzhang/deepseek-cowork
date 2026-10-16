@@ -6,7 +6,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QProgressBar, QTextEdit, QFileDialog
 
 from core.app_version import APP_VERSION, compare_versions
-from core.update_coordinator import release_notes_text
+from core.update_coordinator import release_notes_text, update_log_directory
+from core.runtime_logs import log_path as runtime_log_path
 from core.theme import DesignTokens, bind_theme
 from ui.primitives import product_button_style
 
@@ -121,7 +122,8 @@ class UpdatePanel(QWidget):
         self.notes.setText(text if self.notes_expanded else "\n".join(lines[:6]))
         self.expand.setVisible(len(lines) > 6)
         self.expand.setText("收起" if self.notes_expanded else "展开阅读")
-        details = [state.get("error") or "", f"更新文件：{result.get('zip_path', '尚未下载')}", f"诊断记录：{os.path.join(self.coordinator.root, 'app_update.log')}"]
+        details = [state.get("error") or "", f"更新文件：{result.get('zip_path', '尚未下载')}",
+                   f"诊断记录：{runtime_log_path('app_update', update_log_directory(self.coordinator.root))}"]
         self.details.setPlainText("\n".join(line for line in details if line))
         # Keep all actions reachable at small window widths / high Windows scaling.
         self.actions.setDirection(QHBoxLayout.TopToBottom if self.width() < 600 else QHBoxLayout.LeftToRight)

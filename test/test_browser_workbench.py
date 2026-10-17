@@ -181,8 +181,9 @@ class WorkbenchFileUiTest(unittest.TestCase):
         self.window = MainWindow()
 
     def tearDown(self):
+        from ui_window_cleanup import close_test_window
         self.window._release_deliverable_edit_session(show_preview=False)
-        self.window.close(); self.window.deleteLater(); self.app.processEvents()
+        close_test_window(self.window)
 
     def wait(self, predicate):
         end = time.monotonic() + 5
@@ -218,6 +219,63 @@ class WorkbenchFileUiTest(unittest.TestCase):
             refresh_file(self.window)
             self.assertEqual(self.window.preview_text.toPlainText(), "updated")
             self.assertEqual(self.window.browser_workbench.active_tab().path, str(source))
+
+    def test_submission_context_tracks_file_draft_web_and_session_visibility(self):
+        browser = self.window.browser_workbench
+        first = self.window.current_session_id
+        web = browser.open_web(first, "about:blank")
+        self.wait(lambda: browser.panes[web.id].document_ready)
+        browser.activate(web.id)
+        self.window.right_drawer_open = True
+        self.window.right_drawer_tab = self.window.RIGHT_TAB_FILES
+        snapshot = self.window._workbench_submission_context(self.window.get_current_session())
+        self.assertEqual(snapshot["visible_tab_id"], web.id)
+        self.assertEqual(snapshot["tabs"][0]["url"], "about:blank")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "notes.txt"
+            source.write_text("saved", encoding="utf-8")
+            self.window.select_deliverable(str(source), render_html=True)
+            self.window.begin_deliverable_edit()
+            self.wait(lambda: self.window.deliverable_edit_state == "ready")
+            self.window.deliverable_text_editor.setPlainText("unsaved user draft")
+            snapshot = browser.submission_context(first)
+            self.assertEqual(snapshot["tabs"][0]["path"], str(source))
+            self.assertTrue(snapshot["tabs"][0]["unsaved"])
+            self.assertEqual(source.read_text(), "saved")
+            self.assertNotIn("unsaved user draft", str(snapshot))
+            self.window._release_deliverable_edit_session(show_preview=False)
+            second = self.window.create_new_session(workspace_dir=directory)
+            self.window.set_current_session(second)
+            self.assertEqual(browser.submission_context(second)["tabs"], [])
+            background = browser.submission_context(first)
+            self.assertEqual(len(background["tabs"]), 2)
+            self.assertFalse(background["panel_visible"])
+            self.assertEqual(background["visible_tab_id"], "")
+            self.assertEqual(snapshot["tabs"][0]["mode"], "edit")  # Prior capture is immutable.
+
+    def test_submission_context_bounds_tabs_and_keeps_active_terminal_status(self):
+        from core.workbench_terminal import TerminalSession
+        from ui.browser_panes import TerminalPane
+        browser = self.window.browser_workbench
+        session_id = self.window.current_session_id
+        for index in range(25):
+            web = browser.store.open(session_id, "web", url=f"https://example.test/{index}")
+            if index == 0:
+                web.url = "data:text/html," + "x" * 3000
+        tab = browser.store.open(session_id, "terminal", cwd=str(ROOT), shell="pwsh", activate=True)
+        terminal = TerminalSession(session_id, tab.id, {}, str(ROOT))
+        terminal.status, terminal.exit_code = "exited", 7
+        pane = TerminalPane(tab, browser.store, browser.bridge, terminal)
+        browser.panes[tab.id] = pane
+        snapshot = browser.submission_context(session_id)
+        self.assertEqual(len(snapshot["tabs"]), 20)
+        self.assertEqual(snapshot["omitted_tabs"], 6)
+        self.assertEqual(snapshot["active_tab_id"], tab.id)
+        self.assertEqual(snapshot["tabs"][0]["status"], "exited")
+        self.assertEqual(snapshot["tabs"][0]["exit_code"], 7)
+        self.assertEqual(snapshot["tabs"][0]["cwd"], str(ROOT))
+        self.assertEqual(snapshot["tabs"][1]["omitted_fields"], ["url"])
+        self.assertNotIn("url", snapshot["tabs"][1])
 
     def test_user_closes_live_terminal_without_confirmation(self):
         from PySide6.QtWidgets import QWidget

@@ -8,6 +8,7 @@ import copy
 import ast
 import re
 import json
+import logging
 import base64
 import html
 import importlib
@@ -51042,6 +51043,16 @@ a {{ overflow-wrap: anywhere; }}
                         self.get_session(sid)
                     ),
                 )
+    def _workbench_submission_context(self, state):
+        browser = getattr(self, "browser_workbench", None)
+        if browser is None:
+            return None
+        try:
+            return browser.submission_context(state.session_id)
+        except Exception:
+            logging.getLogger(__name__).exception("workbench.context_capture_failed session=%s", state.session_id)
+            return {"session_id": state.session_id, "error": "右侧状态读取失败，请通过工具重新读取。"}
+
     def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False, conversation_refs=None):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if not state:
@@ -51088,6 +51099,7 @@ a {{ overflow-wrap: anywhere; }}
                 "same_turn_guidance": True,
                 "turn_id": str(expected_turn_id),
                 "request_id": expected_request_id,
+                "workbench_context": self._workbench_submission_context(state),
             },
         }
         if payload.get("content_parts"):
@@ -51733,6 +51745,9 @@ a {{ overflow-wrap: anywhere; }}
         message_meta = {**existing_meta, **dict(payload.get("meta") or {})}
         if isinstance(user_message_meta, dict):
             message_meta.update(user_message_meta)
+        # Queued guidance retains its original submission snapshot across retry.
+        if not existing_message_payload:
+            message_meta["workbench_context"] = self._workbench_submission_context(state)
         message_meta["turn_id"] = str(next_turn_id)
         message_meta["request_id"] = submit_request_id
         message_meta["conversation_agent"] = copy.deepcopy(turn_agent)

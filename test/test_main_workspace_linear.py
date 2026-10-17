@@ -1293,6 +1293,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
     def test_first_valid_submit_projects_session_into_sidebar_before_worker_runs(self):
         state = self.window.get_current_session()
+        web = self.window.browser_workbench.store.open(state.session_id, "web", url="https://example.test/current", activate=True)
         staged = SimpleNamespace(
             session_id=state.session_id,
             revision=1,
@@ -1341,6 +1342,11 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             )
         ensure_visible.assert_called_once_with(state)
         process.assert_called_once()
+        message = next(m for m in state.messages if m.get("role") == "user")
+        self.assertEqual(message["meta"]["workbench_context"]["active_tab_id"], web.id)
+        self.assertEqual(message["content"], "首次提交立即显示")
+        from ui_window_cleanup import close_test_window
+        close_test_window(self.window, delete=False)
 
     def test_staged_chat_save_is_really_enqueued(self):
         state = self.window.get_current_session()

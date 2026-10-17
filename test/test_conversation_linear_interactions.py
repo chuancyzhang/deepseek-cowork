@@ -3010,6 +3010,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         window = MainWindow()
         try:
             state = window.get_current_session()
+            web = window.browser_workbench.store.open(state.session_id, "web", url="https://example.test/guidance", activate=True)
             window._retire_session_empty_state(state, reason="test_waiting_tool_guidance")
             state.active_turn_id = 8
             state.active_turn_request_id = "request-8"
@@ -3029,6 +3030,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
             self.assertEqual(message["meta"]["turn_id"], "8")
             self.assertTrue(message["meta"]["same_turn_guidance"])
+            self.assertEqual(message["meta"]["workbench_context"]["active_tab_id"], web.id)
             self.assertNotIn("deferred_from_turn", message["meta"])
             event = next(
                 item
@@ -3040,8 +3042,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(event.get("deferred_consumed", False))
             self.assertEqual(state.pending_guidance_messages, [])
         finally:
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_guidance_boundary_routes_reentrant_thinking_to_new_group(self):
         window = MainWindow()
@@ -3178,6 +3180,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         window = MainWindow()
         try:
             state = window.get_current_session()
+            web = window.browser_workbench.store.open(state.session_id, "web", url="https://example.test/daemon", activate=True)
             state.daemon_running = True
             state.active_turn_id = 4
             state.active_turn_request_id = "request-guidance-barrier"
@@ -3212,9 +3215,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIn(fake_worker, state.guidance_workers)
             self.assertEqual(len(accepted_messages), 1)
             self.assertGreater(accepted_messages[0]["created_at"], 0)
+            self.assertEqual(accepted_messages[0]["meta"]["workbench_context"]["active_tab_id"], web.id)
         finally:
-            window.close()
-            window.deleteLater()
+            # This fixture's daemon client/worker are test doubles, not live work.
+            state.daemon_running = False
+            state.guidance_workers = []
+            window.daemon_client = None
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_stop_marks_partial_stage_without_message_actions(self):
         window = MainWindow()

@@ -88,8 +88,8 @@ def run():
         window.resize(1440, 900); window.show()
         window.show_context_drawer(window.RIGHT_TAB_FILES)
         window.set_file_navigator_visible(False, reason="browser_qa")
-        window.add_chat_bubble("User", "完善报告，并检查交付文件。", animate=False)
-        window.add_chat_bubble("Agent", "文件、网页和终端可以在右侧继续查看。你可以随时接管网页或终端。", animate=False)
+        window.add_chat_bubble("User", "帮我分析右侧打开的网页。", animate=False)
+        window.add_chat_bubble("Agent", "当前页面是“项目进展”。我会先读取页面内容，再检查交互。", animate=False)
         browser = window.browser_workbench
         browser.new_tab(); events()
         capture("browser-start")
@@ -102,6 +102,9 @@ def run():
         wait(lambda: browser.panes[web_tab.id].document_ready)
         wait(lambda: browser.panes[terminal_tab.id].terminal.status == "running")
         browser.activate(web_tab.id)
+        snapshot = window._workbench_submission_context(window.get_current_session())
+        assert snapshot["visible_tab_id"] == web_tab.id
+        assert snapshot["tabs"][0]["url"] == web_tab.url
         browser.store.set_owner(web_tab.session_id, web_tab.id, "agent")
         browser.panes[web_tab.id].refresh_control()
         capture("browser-web")
@@ -146,6 +149,10 @@ def run():
     finally:
         main.MainWindow.showEvent = original_show
         window._release_deliverable_edit_session(show_preview=False)
+        finished = []
+        window._shutdown_workers_async(lambda _preserved: finished.append(True))
+        wait(lambda: bool(finished))
+        window._checkpoint_close_ready = True
         window.close(); window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         server.shutdown(); server.server_close()

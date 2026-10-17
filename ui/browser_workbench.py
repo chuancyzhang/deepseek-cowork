@@ -123,6 +123,49 @@ class BrowserWorkbench(QObject):
         tab = self.active_tab()
         return tab is not None and tab.kind == "file"
 
+    def submission_context(self, session_id):
+        """Capture on the GUI thread, without reading files or claiming control."""
+        active = self.store.active.get(session_id, "")
+        tabs = [tab for tab in self.store.list(session_id) if tab.kind != "new"]
+        # Always include the selected tab, even with many background tabs open.
+        tabs.sort(key=lambda tab: tab.id != active)
+        visible = bool(session_id == self.session_id()
+                       and getattr(self.window, "right_drawer_open", False)
+                       and self.window.right_drawer_tab == self.window.RIGHT_TAB_FILES)
+        entries = []
+        for tab in tabs[:20]:
+            entry = {key: getattr(tab, key) for key in ("id", "kind", "owner", "status")}
+            entry["title"] = tab.title[:180]
+            if tab.kind == "web":
+                entry["url"] = tab.url
+            elif tab.kind == "file":
+                editor = getattr(self.window, "deliverable_edit_session", None)
+                editing = bool(editor and session_id == self.session_id()
+                               and path_key(editor.path) == path_key(tab.path))
+                entry.update(path=tab.path, unsaved=bool(editing and self.window.deliverable_edit_dirty),
+                             mode="edit" if editing else "preview")
+                if editing:
+                    entry["editor_status"] = self.window.deliverable_edit_state
+            elif tab.kind == "terminal":
+                entry.update(cwd=tab.cwd, shell=tab.shell)
+                pane = self.panes.get(tab.id)
+                if isinstance(pane, TerminalPane):
+                    entry.update(status=pane.terminal.status, exit_code=pane.terminal.exit_code)
+            # Never inline a data URL or turn a clipped path into a false target.
+            omitted = [key for key in ("url", "path", "cwd") if len(entry.get(key, "")) > 2048]
+            for key in omitted:
+                entry.pop(key)
+            if omitted:
+                entry["omitted_fields"] = omitted
+            entries.append(entry)
+        active = active if any(item["id"] == active for item in entries) else ""
+        result = {"session_id": session_id, "tabs": entries, "active_tab_id": active,
+                  "visible_tab_id": active if visible else "", "panel_visible": visible,
+                  "omitted_tabs": max(0, len(tabs) - len(entries))}
+        log.info("workbench.context_capture session=%s tabs=%s active=%s visible=%s",
+                 session_id, len(entries), active, visible)
+        return result
+
     def _compat_state(self, session_id):
         state = self.window.get_session(session_id)
         if state is None:

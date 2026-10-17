@@ -1369,6 +1369,7 @@ class LLMWorker(QThread):
             return False
         for message in pending:
             self._append_ledger_message(current_messages, generated_messages, message)
+            self._append_workbench_context(message, current_messages, generated_messages)
             self.observability_signal.emit({
                 "type": "guidance",
                 "content": message.get("content") or "",
@@ -3222,6 +3223,20 @@ class LLMWorker(QThread):
                 "多个连接涉及不同账号且任务无法确定时，先确认目标，不自动混合账号。")
         self._append_ledger_message(current_messages, generated_messages, message)
 
+    def _append_workbench_context(self, source_message, current_messages, generated_messages):
+        if self.is_subagent:
+            return
+        from .workbench_context import context_message
+        snapshot = (source_message.get("meta") or {}).get("workbench_context")
+        message = context_message(snapshot, self.session_id, str(source_message.get("id") or ""), current_messages)
+        if message is not None:
+            self._append_ledger_message(current_messages, generated_messages, message)
+            self.observability_signal.emit({
+                "type": "workbench_context", "source_user_message_id": source_message.get("id"),
+                "tab_count": len(snapshot.get("tabs") or []),
+                "active_tab_id": snapshot.get("active_tab_id", ""), "timestamp": time.time(),
+            })
+
     def run(self):
         try:
             self._run_main()
@@ -3274,6 +3289,14 @@ class LLMWorker(QThread):
         turn_count = 0
         total_duration = 0
         generated_messages = []
+
+        # Only the latest actual submission supplies new workbench facts. Old
+        # snapshots remain historical, including when a non-desktop client sends.
+        from .conversation_render import _is_hidden_context_message
+        source_message = next((message for message in reversed(current_messages)
+                               if message.get("role") == "user" and not _is_hidden_context_message(message)), None)
+        if source_message is not None:
+            self._append_workbench_context(source_message, current_messages, generated_messages)
 
         if not self.bootstrap.active:
             # Append a new fact for this submission. Never rewrite old references or the system prefix.

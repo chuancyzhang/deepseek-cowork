@@ -637,6 +637,8 @@ while not stopped:
 
 `WorkbenchStore` 是运行期标签状态源，按聊天保存 `new/file/web/terminal` 的顺序和激活状态，不写入聊天历史。旧文件入口投影为同一模型。网页和终端保留自己的实例；文件继续复用现有编辑与离开守卫。隐藏的网页仍保留原 Page，在不显示到屏幕的同一个控件上渲染，保证后台观察能截图，不打开替代网页。
 
+提交普通消息或运行中引导时，GUI 通过 `submission_context` 抓取本聊天最多 20 个标签的元数据，优先保留当前标签，区分选中与实际显示，并标记省略数量。此操作不读取文件正文、不抓取页面、不取得控制权。快照保存到对应用户消息的 `meta.workbench_context`，Agent 在消息尾部追加隐藏的 `workbench_submission` 上下文；已提交的历史、系统提示词与工具定义不变。引导转入下一轮保留发送时快照；恢复通过确定性消息 ID 去重；会话 ID 不匹配或子 Agent 不注入。历史快照不恢复实际网页/终端，正文明确标记为不可信观察数据，后续工具结果更新状态。空标签快照可撤销对历史打开内容的引用。浏览器后端选择及能力边界保持原规则。
+
 网页使用共享持久 Profile；HTML 预览、内容编辑、PDF、只读工作表和终端分别使用独立 Profile。在线网页没有保存文件或终端的 WebChannel。清除浏览数据会关闭网页并切换到新的存储目录，再释放旧目录。PDF 阅读缓存副本以避免占用源文件，Office 通过后台 PowerShell COM helper 只读转换。Word/Excel 只对确认新建的独立 PID 创建 Job；PowerPoint 使用 MultiUse COM，可复用无窗口的后台进程，按 Office 类型串行转换，仅打开和关闭本次只读隐藏副本，宏安全设置在打开后立即恢复。PowerPoint 不加入 kill-on-close Job，已有实例不调用 Quit；取消或超时通过标记文件通知 helper，在当前 COM 调用结束后关闭副本并清理文件，桌面不等待阻塞的共享调用。新建 PowerPoint 仅在没有剩余文档时退出。Windows Word 的 HWND 来自临时文档 Window，Excel/PowerPoint 来自 Application（[Word Window.Hwnd](https://learn.microsoft.com/en-us/office/vba/api/word.window.hwnd)、[Office COM 实例复用规则](https://learn.microsoft.com/en-us/previous-versions/troubleshoot/microsoft-365/microsoft-365-apps/office-suite-problems/getobject-createobject-behavior)）。
 
 HTML 普通编辑入口固定进入可视化内容编辑，不按脚本存在与否或旧的全局源码偏好改变入口。编辑副本禁用脚本，按原始 base 与文件目录解析本地资源；保存只将编辑后的 body 合并回原文档，保护原始 head、脚本和嵌入节点。源码编辑仍由显式菜单进入。
@@ -650,6 +652,8 @@ HTML 普通编辑入口固定进入可视化内容编辑，不按脚本存在与
 工具从 `ExecutionAuthorization` 取得聊天与 run_id，模型不能自行传入聊天标识。后台 daemon 通过已认证的运行流发出请求 ID；桌面只领取仍在等待的请求，领取不可重复，终态或取消后不能再次领取。重连和历史回放不重执行动作；没有桌面宿主时明确失败。授权仍由现有工具调用边界处理。
 
 网页观察返回版本、元素和截图，截图走现有持久工具图片管线并支持 Responses/Chat Completions；图片失败保留文本和元素并报告部分失败。桌面调用串行执行，提交前再次校验控制权与页面版本；元素点击解析视口坐标、校验遮挡后发送 Qt 原生输入，填写会延迟检查实际结果。原生输入返回 dispatched，要求重新观察验证，不能据此声称业务操作成功。用户接管使排队动作及旧观察失效。当前聊天自动跟随，手动切换暂停；后台、其他产品页面和未保存编辑不抢焦点。运行结束自动释放网页控制权并保留标签。终端接管与 Ctrl+C 中断是两个独立动作。
+
+观察版本绑定导航代次和一次观察，不再要求全局 DOM 修订号永远不变。动作校验目标节点身份、语义/值、可见性和遮挡；坐标额外校验视口、元素矩形和结构/属性修订，Canvas/iframe 保留保守检查。时钟的文字更新不使无关目标失效；每次动作消费观察，失败不自动重放。Qt 原生事件与 JavaScript 回调存在异步边界，输入许可在页面收到可信事件并执行默认动作后释放，并设置有界超时；不能在 Qt 发出事件后立即撤销。拒绝日志只记录会话、标签、动作和原因，不记录页面正文或输入值。
 
 文件变化使用内容版本区分自己的保存与外部修改，没有草稿时自动刷新；有草稿时保留双方版本并展示冲突操作。受管理的补丁、文件写入、另存和恢复通过规范路径锁协调；Windows 命名互斥量覆盖 UI 与 daemon 进程，仍在原子替换前复核哈希，外部 shell 和软件不依赖该锁。读取工具只报告草稿状态，不返回草稿正文。
 

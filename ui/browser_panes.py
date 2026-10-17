@@ -351,6 +351,11 @@ class BrowserPane(ControlledPane):
                     raise WorkbenchError("stale_page", "页面已变化，请重新观察。")
                 if not isinstance(value, dict):
                     raise WorkbenchError("action_failed", "网页没有返回操作结果。")
+                if not value.get("ok"):
+                    request.started = False
+                    value["executed"] = False
+                    log.info("workbench.action_rejected session=%s tab=%s action=%s status=%s reason=%s",
+                             request.session_id, self.tab.id, action, value.get("status"), value.get("reason", ""))
                 if native and value.get("ok"):
                     from PySide6.QtTest import QTest
                     self.agent_input = True
@@ -367,6 +372,7 @@ class BrowserPane(ControlledPane):
                             x, y = round(float(coordinates.get("x", -1)) * zoom), round(float(coordinates.get("y", -1)) * zoom)
                             if not self.view.rect().contains(QPoint(x, y)):
                                 raise WorkbenchError("invalid_coordinate", "坐标不在当前网页视口中，请重新截图。")
+                            request.started = True
                             QTest.mouseClick(target, Qt.LeftButton, pos=QPoint(x, y))
                         else:
                             allowed = {"Enter": Qt.Key_Return, "Tab": Qt.Key_Tab, "Escape": Qt.Key_Escape,
@@ -375,12 +381,12 @@ class BrowserPane(ControlledPane):
                             key = allowed.get(str(args.get("key")))
                             if key is None:
                                 raise WorkbenchError("unsupported_key", "不支持此按键。")
+                            request.started = True
                             QTest.keyClick(target, key)
                     finally:
                         if temporary_focus:
                             QApplication.sendEvent(target, QFocusEvent(QEvent.FocusOut, Qt.OtherFocusReason))
                         self.agent_input = False
-                        self.page.runJavaScript("window.coworkNativeAction=false", 1)
                     self.tab.page_revision += 1
                     value = {"ok": True, "status": "dispatched", "verification": "请重新观察页面确认操作结果，勿盲目重复执行。"}
                 if action == "fill" and value.get("ok"):
@@ -408,21 +414,23 @@ class BrowserPane(ControlledPane):
                 request.check()
                 self.store.check_control(self.tab.session_id, self.tab.id, request.revision)
                 if not isinstance(value, dict) or not value.get("ok"):
+                    log.info("workbench.action_rejected session=%s tab=%s action=%s status=%s reason=%s",
+                             request.session_id, self.tab.id, action,
+                             value.get("status") if isinstance(value, dict) else "action_failed",
+                             value.get("reason", "") if isinstance(value, dict) else "invalid_result")
                     callback(value if isinstance(value, dict) else {"ok": False, "status": "action_failed"})
                     return
                 if not expected.startswith(str(self.tab.page_revision) + ":"):
                     raise WorkbenchError("stale_page", "页面已变化，请重新观察。")
-                request.started = True
                 if native:
-                    if action == "click":
-                        self.page.runJavaScript("JSON.stringify(window.coworkAct(" + json.dumps(dict(args, action="prepare_click")) + "))", 1, done)
-                    else:
-                        self.page.runJavaScript("window.coworkNativeAction=true; JSON.stringify({ok:true})", 1, done)
+                    prepared = dict(args, action="prepare_native", target_action=action)
+                    self.page.runJavaScript("JSON.stringify(window.coworkAct(" + json.dumps(prepared) + "))", 1, done)
                 else:
+                    request.started = True
                     self.page.runJavaScript("JSON.stringify(window.coworkAct(" + json.dumps(args, ensure_ascii=False) + "))", 1, done)
             except Exception as exc:
                 request.fail(exc)
-        check = dict(args, action="validate")
+        check = dict(args, action="validate", target_action=action)
         self.page.runJavaScript("JSON.stringify(window.coworkAct && window.coworkAct(" + json.dumps(check, ensure_ascii=False) + "))", 1, validated)
 
     def close_pane(self):

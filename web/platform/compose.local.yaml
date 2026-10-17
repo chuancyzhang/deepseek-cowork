@@ -1,0 +1,42 @@
+name: cowork-enterprise-local
+services:
+  database:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: cowork
+      POSTGRES_USER: cowork
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cowork -d cowork"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+  platform:
+    image: cowork-enterprise:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env.local
+    environment:
+      COWORK_DATA_DIR: /data
+      COWORK_DEVELOPMENT: "1"
+      COWORK_PUBLIC_URL: http://localhost:8788
+    ports:
+      - "127.0.0.1:8788:8080"
+    volumes:
+      - releases:/data
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+volumes:
+  database:
+  releases:

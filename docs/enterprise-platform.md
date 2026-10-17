@@ -45,3 +45,9 @@
 ![企业提问查询（示例数据）](images/enterprise/questions.jpg)
 
 Linux 部署、首次管理员、OIDC/OAuth2/LDAP 参数、发布和备份规则见[企业平台部署说明](../web/platform/README.md)。
+
+## 首次部署与平台管理员
+
+空平台启动后访问 `/app`，网页会引导创建独立的平台管理员；无需先配置企业认证。初始化码从部署端获取，具体命令见[部署说明](../web/platform/README.md#首次网页初始化与管理员登录)。创建后进入“设置 → 添加认证来源”，保存 OAuth2、OIDC 或 LDAP 配置，测试登录通过后启用。员工仍使用企业账号；平台管理员可通过登录页的独立入口登录。
+
+![首次网页初始化](images/enterprise/platform-setup.png)

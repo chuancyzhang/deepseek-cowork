@@ -1,4 +1,5 @@
 .env
+.env.local
 certs/
 data/
 bootstrap-auth.json

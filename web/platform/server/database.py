@@ -45,6 +45,23 @@ class Member(Base):
     last_login_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+class LocalAdministrator(Base):
+    __tablename__ = "local_administrator"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    member_id: Mapped[str] = mapped_column(String(32), unique=True)
+    username: Mapped[str] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(Text)
+    salt: Mapped[str] = mapped_column(String(64))
+
+
+class Installation(Base):
+    __tablename__ = "installation"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    failures: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[float] = mapped_column(Float, default=0)
+
+
 class AuthSource(Base):
     __tablename__ = "auth_sources"
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

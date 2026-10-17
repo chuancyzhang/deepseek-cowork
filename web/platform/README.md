@@ -11,6 +11,26 @@
 - `migrations/`：数据库版本约定；当前为初始结构版本 1。
 - `compose.yaml`：PostgreSQL、应用与 HTTPS 反向代理。
 
+## Windows 本机 Docker 启动
+
+本机配置使用 `compose.local.yaml`，仅映射 `127.0.0.1:8788`，数据库不对宿主机开放端口。数据库和发布文件使用独立命名卷；该入口运行真实中心服务，不注入演示管理员。
+
+首次已构建或导入 `cowork-enterprise:local` 镜像后，在此文件夹执行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1`。脚本首次生成 `.env.local` 的随机数据库密码和加密密钥，以后保留原配置；请保管此文件，不要在已有数据卷时删除重建。访问 `http://localhost:8788/app`。首次打开网页会进入初始化页面：获取一次性初始化码，创建独立管理员账号，然后在“设置 → 添加认证来源”配置企业认证。
+
+停止：`docker compose --env-file .env.local -f compose.local.yaml stop`。重新启动：再次运行启动脚本。导出的镜像包不包含本机凭据或数据库；镜像导入可用 `docker load -i images.tar`。
+
+## 首次网页初始化与管理员登录
+
+1. 启动容器后打开 `/app`，空平台自动显示“初始化企业平台”。
+2. 在部署目录执行下面命令获取一次性初始化码：
+   - 本机：`docker compose --env-file .env.local -f compose.local.yaml exec -T platform cat /data/setup-code`
+   - Linux：`docker compose exec -T platform cat /data/setup-code`
+3. 在网页填写初始化码、管理员账号、密码及确认密码。账号为 3–64 位字母、数字、点、横线或下划线；密码至少 12 个字符。
+4. 创建后直接进入“设置”，点击“添加认证来源”，填写 OAuth2、OIDC 或 LDAP 参数；保存草稿、完成测试登录、启用。
+5. 员工使用企业认证登录；管理员使用登录页的“平台管理员登录”。尚无启用的企业认证时，网页直接显示管理员登录。
+
+管理员密码按随机盐和 scrypt 派生存储，不能读取原密码。此管理员入口仅提供网页会话，不作为员工桌面认证来源。初始化码只保存在部署卷的 `setup-code` 文件中，不由网页公开、不进入镜像；初始化后永久失效。已有成员或认证来源的平台不开放初始化。连续 5 次错误后暂停尝试 5 分钟，失败输入保留。当前版本没有网页找回或修改管理员密码入口，请妥善保管创建的密码。
+
 ## Linux 部署
 
 将整个 `web/platform/` 文件夹复制到 Linux 服务器，例如 `/opt/cowork-platform/`。准备 Docker Compose、可达的认证与模型服务、企业域名以及受客户端信任的 HTTPS 证书。以下命令都在该目录内执行，不依赖上级目录。
@@ -33,7 +53,7 @@ docker compose run --rm --no-deps platform python -m server generate-key
 | `COWORK_PLATFORM_ID` | 固定平台标识；以后不得将同一数据库改绑其他标识 |
 | `COWORK_PLATFORM_NAME` | 企业显示名称 |
 | `COWORK_ENCRYPTION_KEY` | 中心模型密钥和认证凭据的 Fernet 加密密钥，必须独立保管 |
-| `COWORK_BOOTSTRAP_PROVIDER`、`COWORK_BOOTSTRAP_SUBJECT` | 事先指定的首位管理员认证来源和稳定用户标识，不能使用“第一个登录的人” |
+| `COWORK_BOOTSTRAP_PROVIDER`、`COWORK_BOOTSTRAP_SUBJECT` | 仅旧式命令行初始化使用；网页创建独立管理员时留空 |
 | `COWORK_LOGIN_PROVIDER` | 员工统一登录使用的认证来源 ID；仅一个启用来源时可省略，多个来源时必须明确指定 |
 | `COWORK_SESSION_SECONDS` | 中心会话期限，默认 8 小时 |
 | `COWORK_MAX_MODEL_CONCURRENCY` | 同时运行的模型请求上限，默认 64；达到上限明确返回忙碌状态 |
@@ -41,7 +61,17 @@ docker compose run --rm --no-deps platform python -m server generate-key
 
 数据库与应用端口不映射到宿主机，仅反向代理开放 443。不要直接将应用 8080 端口暴露为公网入口。证书由企业统一管理；应用和 LDAP 均不会关闭证书校验。若必须使用内网 HTTP 模型端点，部署方可明确设置 `COWORK_ALLOW_MODEL_HTTP=1`，这不改变登录和客户端下载的 HTTPS 要求。
 
-首次启动与数据库初始化：
+首次启动（自动迁移数据库），然后按上文完成网页初始化：
+
+```bash
+sh start.sh
+```
+
+### 可选：沿用企业账号作为首位管理员
+
+已有自动部署流程可继续使用下述命令行导入方式；该方式与首次网页创建管理员二选一。须预先填写两项 `COWORK_BOOTSTRAP_*`。
+
+数据库初始化：
 
 ```bash
 docker compose up -d database
@@ -173,6 +203,6 @@ python -m pytest -q test/test_enterprise_deployment.py test/test_enterprise_plat
 
 扩展检查中的模型目录/首次配置测试有 10 项既有失败；在未修改的 HEAD 隔离副本复现相同结果，原因是旧 `deepseek-v4-*` 预期与当前推荐模型配置不一致。本次未修改这部分模型推荐规则，不宣称全仓回归通过。
 
-真实企业 SSO/LDAP、实际模型端点、干净 Windows 机器首次安装和 Linux/PostgreSQL 压测仍需部署联调。本机 Docker Desktop 因残留 `sailor-ingest.sock` 启动失败，运行期容器验证未完成；Compose 配置已静态校验。没有生成或发布正式企业发行包。
+真实企业 SSO/LDAP、实际模型端点、干净 Windows 机器首次安装和 Linux/PostgreSQL 压测仍需部署联调。2026-10-17 在本机 Docker Desktop 的 Linux 容器中完成应用镜像构建及 PostgreSQL 17 启动，两项容器健康检查通过，`/healthz`、`/api/v1/platform-info`、`/api/v1/auth/providers` 和 `/app` 均返回 200。已导出本机启动镜像包；未生成或发布正式 Windows 企业客户端发行包。
 
 UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口，数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。

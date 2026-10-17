@@ -18,6 +18,7 @@ import httpx
 from sqlalchemy import delete, select, update
 
 from .auth import Authentication, oauth_compatibility_preset
+from .administrator import AdministratorAccess
 from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
                        Member, Model, Platform, Question)
@@ -51,6 +52,7 @@ def create_app(settings=None, *, transport=None):
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     database = Database(settings)
+    administrator = AdministratorAccess(settings, database)
     vault = Vault(settings.encryption_key)
     management = Management(settings, database, vault)
     releases = Releases(settings, database)
@@ -80,6 +82,7 @@ def create_app(settings=None, *, transport=None):
     @asynccontextmanager
     async def lifespan(app):
         database.migrate(settings)
+        administrator.prepare()
         # Interrupted processing cannot be inferred complete from temporary files.
         with database.transaction() as db:
             db.execute(update(ClientRelease).where(ClientRelease.state == "processing")
@@ -170,6 +173,22 @@ def create_app(settings=None, *, transport=None):
     @app.get("/api/v1/auth/providers")
     def providers():
         return {"items": app.state.auth.public_sources()}
+
+    @app.get("/api/v1/setup")
+    def setup_status():
+        return administrator.status()
+
+    @app.post("/api/v1/setup")
+    async def setup_administrator(request: Request):
+        payload = await read_json(request, 8192)
+        member_id = await asyncio.to_thread(administrator.initialize, payload)
+        return set_session(JSONResponse({"status": "completed"}), app.state.auth.session(member_id, "web"))
+
+    @app.post("/api/v1/auth/administrator")
+    async def administrator_login(request: Request):
+        payload = await read_json(request, 8192)
+        member_id = await asyncio.to_thread(administrator.login, payload)
+        return set_session(JSONResponse({"status": "completed"}), app.state.auth.session(member_id, "web"))
 
     @app.post("/api/v1/auth/transactions")
     async def begin_login(request: Request):

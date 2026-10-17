@@ -427,7 +427,7 @@ class ConfigManager:
         if legacy_provider_configs != self.config.get("model_provider_configs"):
             self.config["model_provider_configs"] = legacy_provider_configs
             updated = True
-        if not self._get_profile_from_configs(
+        if not str(self.config.get("selected_model_id") or "").startswith("enterprise:") and not self._get_profile_from_configs(
             normalized_channels,
             self.config.get("selected_model_id"),
         ):
@@ -1076,7 +1076,8 @@ class ConfigManager:
         self.config["model_provider_configs"] = self._provider_configs_from_channels(normalized_channels)
         if selected_model_id is not None:
             self.config["selected_model_id"] = str(selected_model_id or "").strip()
-        if not self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id")):
+        if (not str(self.config.get("selected_model_id") or "").startswith("enterprise:")
+                and not self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id"))):
             self.config["selected_model_id"] = self._first_model_id(normalized_channels)
         self._sync_legacy_model_fields(
             save=False,
@@ -1112,7 +1113,8 @@ class ConfigManager:
                 profile["api_key"] = channel.get("api_key") or ""
                 profile["base_url"] = channel.get("base_url") or ""
                 profiles.append(profile)
-        return profiles
+        from core.enterprise_client import EnterpriseStore
+        return profiles + EnterpriseStore(self.data_dir).profiles()
 
     def has_usable_model_profile(self):
         return any(
@@ -1226,6 +1228,11 @@ class ConfigManager:
     def get_model_profile(self, model_id=None):
         configs = self.get_model_channels()
         selected_id = str(model_id or self.config.get("selected_model_id") or "").strip()
+        if selected_id.startswith("enterprise:"):
+            from core.enterprise_client import EnterpriseStore
+            return next((p for p in EnterpriseStore(self.data_dir).profiles() if p["id"] == selected_id),
+                        {"id": selected_id, "display_name": "企业模型 · 需要登录或刷新授权", "model_name": selected_id,
+                         "provider_type": "openai", "api_key": "", "enterprise_unavailable": True})
         profile = self._get_profile_from_configs(configs, selected_id)
         if profile:
             return profile

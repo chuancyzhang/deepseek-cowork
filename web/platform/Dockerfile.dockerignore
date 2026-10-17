@@ -1,0 +1,8 @@
+**
+!requirements.txt
+!server
+!server/**
+!ui
+!ui/**
+**/__pycache__
+**/*.pyc

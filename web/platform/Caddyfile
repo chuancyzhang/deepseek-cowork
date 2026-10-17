@@ -1,0 +1,4 @@
+{$COWORK_HOST} {
+    tls /certs/tls.crt /certs/tls.key
+    reverse_proxy platform:8080
+}

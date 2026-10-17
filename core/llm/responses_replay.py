@@ -10,15 +10,19 @@ def build_provider_replay_namespace(
     base_url: str,
     model: str,
     protocol: str,
+    enterprise_scope: str = "",
 ) -> dict[str, str | int]:
     """Return stable provenance for newly persisted provider-native replay data."""
-    return {
+    result = {
         "version": 1,
         "provider_family": str(provider_family or "").strip().lower(),
         "base_url": str(base_url or "").strip().lower().rstrip("/"),
         "model": str(model or "").strip(),
         "protocol": str(protocol or "").strip().lower(),
     }
+    if enterprise_scope:
+        result["enterprise_scope"] = enterprise_scope
+    return result
 
 
 def provider_replay_namespaces_compatible(source: object, target: object) -> bool:
@@ -26,4 +30,5 @@ def provider_replay_namespaces_compatible(source: object, target: object) -> boo
     if not isinstance(source, dict) or not isinstance(target, dict):
         return False
     required = ("version", "provider_family", "base_url", "model", "protocol")
-    return all(source.get(key) == target.get(key) for key in required)
+    return (all(source.get(key) == target.get(key) for key in required)
+            and source.get("enterprise_scope", "") == target.get("enterprise_scope", ""))

@@ -41,6 +41,13 @@ class LLMFactory:
     @staticmethod
     def create_provider_from_profile(profile, reasoning_effort=None):
         profile = dict(profile or {})
+        if profile.get("enterprise_unavailable"):
+            from core.enterprise_client import EnterpriseError
+            raise EnterpriseError("所选企业模型不可用，请在账号与连接中登录或刷新授权。")
+        if profile.get("enterprise"):
+            from .enterprise import bind_provider
+            ordinary = {k: v for k, v in profile.items() if k != "enterprise"}
+            return bind_provider(LLMFactory.create_provider_from_profile(ordinary, reasoning_effort), profile)
         provider_type = str(profile.get("provider_type") or profile.get("provider") or "openai").lower()
         api_key = profile.get("api_key")
         base_url = profile.get("base_url")

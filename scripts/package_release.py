@@ -71,6 +71,7 @@ QTWEBENGINE_LOCALE_ALLOWLIST = {
 
 REQUIRED_PATHS = (
     "deepseek-cowork.exe",
+    "_internal/enterprise_capabilities.json",
     "_internal/python_env/python.exe",
     "_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
     "_internal/python_env/Lib/site-packages/xlrd/__init__.py",
@@ -147,7 +148,8 @@ def _forbidden_reason(relative: Path) -> str:
     lowered = path.lower()
     basename = relative.name
     if ("user_data" in {part.lower() for part in relative.parts}
-            or basename.lower().startswith(("connections.sqlite3", "knowledge_library.sqlite3"))
+            or basename.lower().startswith(("connections.sqlite3", "knowledge_library.sqlite3", "enterprise.sqlite3"))
+            or basename.lower() == "enterprise_connection.json"
             or basename.lower() in {"connection_templates.local.json", "app_variables.json", "app_variables.previous.json"}
             or "connection_locks" in {part.lower() for part in relative.parts}):
         return "local identity, credentials or user data"
@@ -342,6 +344,12 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
     missing = [path for path in REQUIRED_PATHS if path not in paths]
     if missing:
         raise PackageAuditError("Missing required packaged files: " + ", ".join(missing))
+    try:
+        capabilities = json.loads((dist_dir / "_internal/enterprise_capabilities.json").read_text(encoding="utf-8"))
+        if capabilities != {"supported_connection_schemas": [1], "supported_platform_api_versions": [1]}:
+            raise ValueError()
+    except (ValueError, OSError):
+        raise PackageAuditError("Invalid enterprise capability declaration in standard package.") from None
     if not any(path.startswith("_internal/winpty/_winpty") and path.endswith(".pyd") for path in paths):
         raise PackageAuditError("Missing native pywinpty extension in _internal/winpty.")
 
@@ -399,6 +407,8 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
     ]
     return {
         "app_version": APP_VERSION,
+        "supported_connection_schemas": [1],
+        "supported_platform_api_versions": [1],
         "dist_dir": str(dist_dir),
         "total_bytes": total_bytes,
         "total_mb": round(total_bytes / 1024 / 1024, 2),

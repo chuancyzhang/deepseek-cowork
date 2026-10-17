@@ -39,7 +39,7 @@ class MultiSourceKnowledgePage(QDialog):
         for source, name in SOURCES.items():
             self.sources.addItem(name, source)
         header.addWidget(self.sources)
-        connections_button = QPushButton("管理账号与连接")
+        connections_button = QPushButton("管理资料服务连接")
         connections_button.clicked.connect(self.open_connections)
         header.addWidget(connections_button)
         header.addStretch()
@@ -67,7 +67,7 @@ class MultiSourceKnowledgePage(QDialog):
         current = self.parent()
         while current is not None:
             if callable(getattr(current, "open_settings", None)):
-                current.open_settings("账号与连接")
+                current.open_settings("资料服务连接")
                 return
             current = current.parent()
 
@@ -154,7 +154,7 @@ class CloudKnowledgePage(KnowledgePage):
         self.account_label.show()
         self.account_label.setWordWrap(True)
         self.account_bar.layout().addWidget(self.account_label)
-        account_button = QPushButton("账号与连接")
+        account_button = QPushButton("资料服务连接")
         account_menu = QMenu(account_button)
         for title, callback in (("检查连接", self.check_connection), ("重新连接", self.reconnect),
                                 ("官方页面 / 续期", self.open_official), ("断开连接", self.logout)):
@@ -234,7 +234,7 @@ class CloudKnowledgePage(KnowledgePage):
             self.account_label.setText("授权失效 · " + self.service.display_name)
             if self.scope and self.scope.get("_connection_ref"):
                 self.login_box.hide()
-                self.notice.setText("此服务使用已连接的账号，请到设置 → 账号与连接重新登录，再返回刷新。")
+                self.notice.setText("此服务使用已连接的账号，请到设置 → 资料服务连接重新登录，再返回刷新。")
             else:
                 self.login_box.show()
 
@@ -259,7 +259,7 @@ class CloudKnowledgePage(KnowledgePage):
         if not connected:
             if self.scope and self.scope.get("_connection_ref"):
                 self.login_box.hide()
-                self.notice.setText("所选账号当前不可用，请到设置 → 账号与连接重新登录或明确切回原有配置。")
+                self.notice.setText("所选账号当前不可用，请到设置 → 资料服务连接重新登录或明确切回原有配置。")
             else:
                 self.notice.setText("连接后即可浏览、阅读和引用资料。")
             return

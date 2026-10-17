@@ -728,6 +728,7 @@ def _collect_minimal_pyside6():
 qt_minimal_datas = _collect_minimal_pyside6()
 
 application_datas = []
+_add_analysis_data_file(application_datas, os.path.join(SPEC_DIR, "resources", "enterprise_capabilities.json"), ".")
 application_datas.extend(copy_metadata("pywinpty"))
 application_datas.extend(collect_data_files("winpty", includes=["*.exe"]))
 application_datas.append((os.path.join(SPEC_DIR, "bundled_plugins", "data_security", "NOTICE.txt"), "bundled_plugins/data_security"))

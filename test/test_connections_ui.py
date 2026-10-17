@@ -9,7 +9,7 @@ from core.connections.broker import ConnectionBroker
 from core.connections.store import ConnectionStore
 from core.connections.templates import validate_template
 from core.theme import DesignTokens
-from ui.account_connections import AccountConnectionsPage
+from ui.account_connections import ServiceConnectionsPage
 from test_connections import FakeAdapter, Protector, template
 
 
@@ -24,7 +24,7 @@ class ConnectionsUiTests(unittest.TestCase):
         self.store = ConnectionStore(self.temp.name, Protector())
         self.broker = ConnectionBroker(self.temp.name, self.temp.name, store=self.store, adapters=FakeAdapter)
         self.broker.catalog.write(self.broker.catalog.distributed_path, [template("weknora", service="weknora")])
-        self.page = AccountConnectionsPage(broker=self.broker)
+        self.page = ServiceConnectionsPage(broker=self.broker)
         self.page.resize(520, 760)
         self.page.show()
         self.app.processEvents()

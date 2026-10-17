@@ -106,7 +106,12 @@ class UpdatePanel(QWidget):
         self.local.setVisible(not (phase == "error" and state.get("source") == "local"))
         if not self.coordinator.install_enabled and available:
             self.primary.setText("查看新版")
+        if self.coordinator.enterprise_download_url() and not ready:
+            self.primary.setText("打开企业下载页")
         self.primary.setEnabled(phase != "installing" and (not busy or ready or available) and not state.get("install_requested"))
+        if getattr(self.coordinator, "enterprise_connection_error", ""):
+            self.status.setText(self.coordinator.enterprise_connection_error)
+            self.primary.setEnabled(False)
         self.local.setEnabled(self.coordinator.install_enabled and phase != "installing")
         self.cancel_button.setVisible((busy and phase != "installing") or bool(state.get("can_cancel_install")))
         self.cancel_button.setText("取消更新" if state.get("install_requested") or phase == "installing" else "取消下载")
@@ -135,7 +140,10 @@ class UpdatePanel(QWidget):
     def act(self):
         state = self.coordinator.snapshot()
         result = state.get("result") or {}
-        if not self.coordinator.install_enabled and result.get("update_available"):
+        enterprise_url = self.coordinator.enterprise_download_url()
+        if enterprise_url and not self.coordinator.prepared:
+            QDesktopServices.openUrl(QUrl(enterprise_url))
+        elif not self.coordinator.install_enabled and result.get("update_available"):
             QDesktopServices.openUrl(QUrl(result["release"]["html_url"]))
         elif state.get("phase") == "error":
             if state.get("source") == "local":

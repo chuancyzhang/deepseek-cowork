@@ -64,6 +64,8 @@ class PackageReleaseTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             if relative.startswith("_internal/ripgrep_env/"):
                 path.write_bytes(self.rg_fixtures[path.name])
+            elif relative == "_internal/enterprise_capabilities.json":
+                path.write_text(json.dumps({"supported_connection_schemas": [1], "supported_platform_api_versions": [1]}), encoding="utf-8")
             elif relative.endswith("wecom_cli/bundle.json"):
                 manifest = json.loads((ROOT / "resources/wecom_cli/bundle.json").read_text(encoding="utf-8"))
                 manifest["executable_sha256"] = package_release.WECOM_CLI_SHA256

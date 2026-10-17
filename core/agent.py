@@ -679,6 +679,8 @@ class LLMWorker(QThread):
         self.agent_id = agent_id or parent_agent_id or ""
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
+        if (self.run_context.get("selected_model_profile") or {}).get("enterprise"):
+            self.api_key = "enterprise-session"
         from core.long_context import normalize_policy
         self.long_context_policy = normalize_policy(self.run_context.get("desktop_long_context"))
         if self.is_subagent or self.run_context.get("im_provider") or self.run_context.get("channel"):
@@ -692,6 +694,15 @@ class LLMWorker(QThread):
         )
         self.turn_id = str(turn_id or "")
         self.request_id = str(request_id or "")
+        # Only the explicitly tagged current user submission enters the question ledger.
+        self._enterprise_questions = []
+        if not self.is_subagent:
+            for message in reversed(messages):
+                meta = message.get("meta") or {}
+                if message.get("role") == "user" and str(meta.get("turn_id") or "") == self.turn_id:
+                    if meta.get("enterprise_submission"):
+                        self._enterprise_questions.append(meta["enterprise_submission"])
+                    break
         from core.execution_authorization import ExecutionAuthorization, current_authorization
         inherited_authorization = execution_authorization or current_authorization()
         self.execution_authorization = (
@@ -1368,6 +1379,8 @@ class LLMWorker(QThread):
         if not pending:
             return False
         for message in pending:
+            if not self.is_subagent and (message.get("meta") or {}).get("enterprise_submission"):
+                self._enterprise_questions.append(message["meta"]["enterprise_submission"])
             self._append_ledger_message(current_messages, generated_messages, message)
             self._append_workbench_context(message, current_messages, generated_messages)
             self.observability_signal.emit({
@@ -3495,6 +3508,7 @@ class LLMWorker(QThread):
                         base_url=provider_base_url,
                         model=provider_model,
                         protocol=provider_protocol,
+                        enterprise_scope=getattr(provider, "enterprise_replay_scope", ""),
                     )
                     sanitized_messages, sanitization_meta = sanitize_llm_messages(
                         request_messages,
@@ -3563,6 +3577,8 @@ class LLMWorker(QThread):
                             tools=self._tools_for_messages(sanitized_messages),
                             prompt_cache_key=self.conversation_id or self.session_id,
                             request_context={
+                                "enterprise_questions": list(self._enterprise_questions),
+                                "enterprise_accepted": lambda ids: setattr(self, "_enterprise_questions", [q for q in self._enterprise_questions if q["id"] not in ids]),
                                 "client_request_id": attempt_id,
                                 "run_id": self.request_id or self.turn_id or self.session_id,
                                 "turn_id": self.turn_id,

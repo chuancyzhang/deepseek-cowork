@@ -11637,7 +11637,7 @@ class SettingsDialog(QDialog):
 
         def add_settings_page(label, icon_name, page):
             allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "运行日志", "更新与关于"},
+                "settings": {"外观", "回答偏好", "模型与服务", "账号与连接", "资料服务连接", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "运行日志", "更新与关于"},
                 "capabilities": {"MCP 服务", "专家"},
                 "projects": {"项目", "对话", "记忆", "归档"},
             }
@@ -12250,9 +12250,13 @@ class SettingsDialog(QDialog):
         add_settings_page("回答偏好", "fa5s.comment", preference_page)
         add_settings_page("模型与服务", "fa5s.brain", model_page)
         if domain == "settings":
-            from ui.account_connections import AccountConnectionsPage
+            from ui.account_connections import AccountConnectionsPage, ServiceConnectionsPage
             self.account_connections_page = AccountConnectionsPage(config_manager=self.config_manager)
+            if hasattr(self._main, "refresh_model_selector"):
+                self.account_connections_page.enterprise.changed.connect(self._main.refresh_model_selector)
             add_settings_page("账号与连接", "fa5s.user-circle", self.account_connections_page)
+            self.service_connections_page = ServiceConnectionsPage(config_manager=self.config_manager)
+            add_settings_page("资料服务连接", "fa5s.link", self.service_connections_page)
         add_settings_page("MCP 服务", "fa5s.plug", mcp_page)
         add_settings_page("专家", "fa5s.user-astronaut", agent_page)
         add_settings_page("记忆", "fa5s.brain", memory_page)
@@ -12280,7 +12284,7 @@ class SettingsDialog(QDialog):
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
             from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "运行日志", "更新与关于"]
+            order = ["外观", "回答偏好", "模型与服务", "账号与连接", "资料服务连接", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "运行日志", "更新与关于"]
             pages = dict(zip(self._page_labels, self._settings_pages))
             items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
             self.nav_combo.clear()
@@ -12299,7 +12303,8 @@ class SettingsDialog(QDialog):
             if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
                     or self.long_context_panel.has_pending_input()
                     or self.browser_automation_panel.has_pending_input()
-                    or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
+                    or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())
+                    or (hasattr(self, "service_connections_page") and self.service_connections_page.has_pending_input())):
                 if not self._confirm_discard_settings():
                     self.nav_list.blockSignals(True)
                     self.nav_list.setCurrentRow(self._active_settings_row)
@@ -12317,7 +12322,7 @@ class SettingsDialog(QDialog):
             self.nav_combo.setCurrentIndex(row)
             self.nav_combo.blockSignals(False)
             if hasattr(self, "settings_action_bar"):
-                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "变量与凭据", "消息连接", "实验功能", "运行日志", "更新与关于"})
+                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "账号与连接", "资料服务连接", "变量与凭据", "消息连接", "实验功能", "运行日志", "更新与关于"})
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
@@ -12625,6 +12630,8 @@ class SettingsDialog(QDialog):
         if hasattr(self, "long_context_panel") and not self.long_context_panel.confirm_leave():
             return False
         if hasattr(self, "account_connections_page") and not self.account_connections_page.confirm_leave():
+            return False
+        if hasattr(self, "service_connections_page") and not self.service_connections_page.confirm_leave():
             return False
         if not self.mcp_server_manager.confirm_editor():
             return False
@@ -30572,6 +30579,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.add_system_toast(f"无法检查模型配置：{exc}", "error", auto_close_ms=8000)
             return False
         self._model_onboarding_shown = True
+        try:
+            from ui.enterprise_connection import offer_enterprise_onboarding
+            if offer_enterprise_onboarding(self.config_manager, self):
+                return False
+        except Exception as exc:
+            log_model_service_event("enterprise_onboarding_unavailable", error_type=type(exc).__name__)
+            self.add_system_toast("企业连接文件无法读取，可在账号与连接中检查；个人模型仍可使用。", "warning", auto_close_ms=8000)
         dialog = DeepSeekQuickstartDialog(self.config_manager, self)
         self._model_onboarding_dialog = dialog
         result = dialog.exec()
@@ -34288,6 +34302,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             profile = next((item for item in profiles if item.get("id") == selected_model_id), None)
             if isinstance(profile, dict):
                 return profile
+            if selected_model_id.startswith("enterprise:"):
+                return self.config_manager.get_model_profile(selected_model_id)
             if not profiles:
                 try:
                     profile = self.config_manager.get_model_profile(selected_model_id)
@@ -50659,6 +50675,10 @@ a {{ overflow-wrap: anywhere; }}
         ):
             meta.pop(key, None)
         meta.update(payload.get("meta") or {})
+        if meta.get("enterprise_submission"):
+            from core.enterprise_client import submission as enterprise_submission
+            original = meta["enterprise_submission"]
+            meta["enterprise_submission"] = enterprise_submission({"enterprise": original["identity"]}, edited_text, previous=original)
         replacement["meta"] = meta
         return replacement
 
@@ -51102,6 +51122,17 @@ a {{ overflow-wrap: anywhere; }}
                 "workbench_context": self._workbench_submission_context(state),
             },
         }
+        from core.enterprise_client import submission as enterprise_submission
+        active_profile = (getattr(state.llm_worker, "run_context", {}) or {}).get("selected_model_profile") if state.llm_worker else None
+        if not active_profile:
+            active_profile = next(((m.get("meta") or {}).get("selected_model_profile") for m in reversed(state.messages)
+                if str((m.get("meta") or {}).get("turn_id") or "") == str(expected_turn_id)
+                and (m.get("meta") or {}).get("selected_model_profile")), None)
+        if not active_profile:
+            active_profile = self._model_profile_snapshot_for_state(state)
+        question = enterprise_submission(active_profile, raw_user_text)
+        if question:
+            message["meta"]["enterprise_submission"] = question
         if payload.get("content_parts"):
             message["content_parts"] = payload.get("content_parts")
 
@@ -51773,6 +51804,17 @@ a {{ overflow-wrap: anywhere; }}
             message_meta["selected_model_id"] = turn_model_id
         if turn_model_profile:
             message_meta["selected_model_profile"] = turn_model_profile
+            from core.enterprise_client import submission as enterprise_submission
+            previous = message_meta.get("enterprise_submission")
+            retry_id = message_meta.get("retry_of_user_message_id")
+            if retry_id:
+                previous = next(((m.get("meta") or {}).get("enterprise_submission") for m in state.messages if m.get("id") == retry_id), previous)
+            is_retry = bool(retry_id or message_meta.get("regenerated"))
+            question = enterprise_submission(turn_model_profile, raw_user_text, previous=previous) if (previous or not is_retry) else None
+            if question and not ppt_agent_internal_stage:
+                message_meta["enterprise_submission"] = question
+            else:
+                message_meta.pop("enterprise_submission", None)
             turn_protocol = str(
                 turn_model_profile.get("api_protocol")
                 or turn_model_profile.get("protocol")

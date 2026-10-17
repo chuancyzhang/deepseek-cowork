@@ -66,7 +66,7 @@
 
 实测性能与源码回归见[验证记录](data-security-validation.md)。这些本地基准不代表所有数据分布和机器的耗时，也不保证启用匿名化后所有分析任务语义等价。
 
-操作总览见[用户指南](user-guide.md#23-调整外观和常用设置)；执行许可仍由[上帝模式与按次授权](GOD_MODE.md)控制，账号认证见[账号与连接](account-connections.md)。
+操作总览见[用户指南](user-guide.md#23-调整外观和常用设置)；执行许可仍由[上帝模式与按次授权](GOD_MODE.md)控制，账号认证见[资料服务连接](account-connections.md)。
 
 ## 规则来源
 

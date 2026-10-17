@@ -208,13 +208,35 @@ class UpdateCoordinator(QObject):
         if self.automatic_started:
             return
         self.automatic_started = True
+        if self.enterprise_download_url():
+            self.publish(message="企业客户端请从企业平台下载更新，再选择本地安装包。")
+            return
         if self.worker is None:
             self.check()
 
     def check(self):
         self.automatic_started = True
+        enterprise_url = self.enterprise_download_url()
+        if getattr(self, "enterprise_connection_error", ""):
+            self.publish(phase="error", message=self.enterprise_connection_error, error=self.enterprise_connection_error)
+            return
+        if enterprise_url:
+            self.publish(message="请在企业平台下载更新，再选择本地安装包。")
+            return
         if self.worker is None:
             self._start("online")
+
+    def enterprise_download_url(self):
+        from core.enterprise_connection import read_connection
+        from core.enterprise_client import EnterpriseStore
+        import sqlite3
+        self.enterprise_connection_error = ""
+        try:
+            connection = EnterpriseStore().read().get("connection") or read_connection(self.install_dir)
+            return connection["platform_url"] + "/downloads" if connection else ""
+        except (ValueError, OSError, sqlite3.DatabaseError, TypeError, KeyError):
+            self.enterprise_connection_error = "企业连接文件或本机状态无法读取，请在账号与连接中检查后再更新。"
+            return ""
 
     def _start(self, operation, payload=None):
         self.worker = UpdateWorker(operation, self.root, self.install_dir, self.current_version, self.install_enabled, payload, self)
@@ -247,7 +269,7 @@ class UpdateCoordinator(QObject):
             else:
                 self._start("plan", self.prepared)
         elif self.worker is None:
-            self._start("online")
+            self.check()
         self.publish()
 
     def select_local(self, path):

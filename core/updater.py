@@ -194,6 +194,15 @@ def build_update_plan(install_dir, staged_app_dir, progress_callback=None):
     if not os.path.isdir(install_dir):
         raise UpdaterError("当前安装目录不存在。")
 
+    from core.enterprise_connection import read_connection, check_update_connection, EnterpriseConfigurationError
+    from core.enterprise_client import EnterpriseStore
+    try:
+        # A confirmed connection takes precedence over package defaults.
+        current = EnterpriseStore().read().get("connection") or read_connection(install_dir)
+        check_update_connection(current, read_connection(staged_app_dir))
+    except EnterpriseConfigurationError as exc:
+        raise UpdaterError(str(exc)) from None
+
     _emit(progress_callback, "正在比较当前版本与新版本文件", None)
     current_files = _collect_app_files(install_dir)
     staged_files = _collect_app_files(staged_app_dir)

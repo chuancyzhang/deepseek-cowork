@@ -1,0 +1,5 @@
+.env
+certs/
+data/
+bootstrap-auth.json
+__pycache__/

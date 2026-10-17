@@ -670,7 +670,7 @@ class KnowledgePage(QDialog):
         if not connected:
             if self.scope and self.scope.get("_connection_ref"):
                 self.login_box.hide()
-                self.notice.setText("统一连接不可用，请打开“管理账号与连接”重新认证或明确切回原有配置。")
+                self.notice.setText("统一连接不可用，请打开“管理资料服务连接”重新认证或明确切回原有配置。")
             else:
                 self.notice.clear()
             return

@@ -515,6 +515,8 @@ class PlatformTests(unittest.TestCase):
                 archive.writestr("deepseek-cowork/"+name, b"test build fixture")
             archive.writestr("deepseek-cowork/_internal/enterprise_capabilities.json", json.dumps({
                 "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}))
+            archive.writestr("deepseek-cowork/_internal/config.json", json.dumps({
+                "api_key": "", "base_url": "https://api.deepseek.com", "disabled_skills": []}))
         data = package.getvalue()
         report = {"app_version": "1.2.3", "zip_bytes": len(data), "zip_sha256": hashlib.sha256(data).hexdigest(),
                   "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}

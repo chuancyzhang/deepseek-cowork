@@ -224,3 +224,5 @@ python -m pytest -q test/test_enterprise_deployment.py test/test_enterprise_plat
 UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口（使用 `http://127.0.0.1:8787/qa/login`，与 localhost 服务隔离 Cookie），数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。
 
 认证来源列表提供“删除”操作，并在执行前确认。仅可删除已停用且未关联成员的来源；正在进行的登录需先结束或等待过期。若来源被指定为客户端统一登录入口，先更换入口。已关联成员的来源可停用，保留员工账号、授权与历史记录。
+
+标准包仅允许 `_internal/config.json` 中包含空 API Key、默认 `https://api.deepseek.com` 地址和空 `disabled_skills` 列表；本地打包与平台使用同一内容校验规则。其他路径的配置文件、未知字段、重复字段、凭据或自定义值均拒绝分发。

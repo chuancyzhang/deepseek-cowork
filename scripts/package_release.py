@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.app_version import APP_VERSION  # noqa: E402
+from web.platform.server.package_policy import (  # noqa: E402
+    DEFAULT_CONFIG_PATH, MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
+)
 from scripts.bundled_runtime_checks import (  # noqa: E402
     GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
 )
@@ -143,6 +146,8 @@ def _forbidden_reason(relative: Path) -> str:
     path = relative.as_posix()
     lowered = path.lower()
     basename = relative.name
+    if basename.lower() == "config.json" and path != DEFAULT_CONFIG_PATH:
+        return "local configuration outside the shipped default path"
     if ("user_data" in {part.lower() for part in relative.parts}
             or basename.lower().startswith(("connections.sqlite3", "knowledge_library.sqlite3", "enterprise.sqlite3"))
             or basename.lower() == "enterprise_connection.json"
@@ -357,6 +362,14 @@ def audit_distribution(dist_dir: Path) -> dict:
     if forbidden:
         detail = "; ".join(f"{item['path']} ({item['reason']})" for item in forbidden[:20])
         raise PackageAuditError(f"Forbidden packaged files found: {detail}")
+
+    default_config = dist_dir / DEFAULT_CONFIG_PATH
+    if default_config.exists():
+        try:
+            with default_config.open("rb") as handle:
+                validate_default_config(handle.read(MAX_DEFAULT_CONFIG_BYTES + 1))
+        except (ValueError, UnicodeError):
+            raise PackageAuditError("_internal/config.json is not the empty shipped default; rebuild with the default configuration.") from None
 
     from core.connections.templates import read_bundle
     template_path = dist_dir / "connection_templates.json"

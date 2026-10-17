@@ -13,6 +13,7 @@ import zipfile
 from sqlalchemy import select, update
 
 from .connection_contract import CONNECTION_FILE, validate_connection
+from .package_policy import DEFAULT_CONFIG_PATH, MAX_DEFAULT_CONFIG_BYTES, validate_default_config
 from .database import ClientRelease, Operation, Platform, uid
 from .security import PlatformError, digest, encode
 
@@ -54,8 +55,15 @@ def inspect_archive(archive, settings, *, enterprise=False):
         if canonical in seen:
             raise PlatformError("unsafe_archive", "安装包包含重复或大小写冲突的路径。")
         seen.add(canonical)
-        if any(p.casefold() in FORBIDDEN_ROOTS for p in parts[1:]) or PurePosixPath(relative).name.casefold() in FORBIDDEN_FILES:
-            raise PlatformError("private_archive", "标准包包含用户数据或本机配置，不能分发。")
+        if relative == DEFAULT_CONFIG_PATH and not info.is_dir():
+            try:
+                if info.file_size > MAX_DEFAULT_CONFIG_BYTES:
+                    raise ValueError()
+                validate_default_config(archive.read(info))
+            except (ValueError, UnicodeError):
+                raise PlatformError("private_archive", "_internal/config.json 不是空白默认配置，不能分发；请使用默认配置重新构建标准包。") from None
+        elif any(p.casefold() in FORBIDDEN_ROOTS for p in parts[1:]) or PurePosixPath(relative).name.casefold() in FORBIDDEN_FILES:
+            raise PlatformError("private_archive", "标准包包含用户数据或本机配置，不能分发：" + relative)
         if relative == CONNECTION_FILE and not enterprise:
             raise PlatformError("already_enterprise", "请上传不含企业连接文件的标准客户端包。")
         total += info.file_size

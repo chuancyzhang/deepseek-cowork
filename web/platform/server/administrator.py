@@ -1,5 +1,4 @@
 """One-time deployment setup and a separate, web-only platform administrator."""
-import hashlib
 import logging
 import re
 import threading
@@ -8,13 +7,9 @@ import time
 from sqlalchemy import select
 
 from .database import AuthSource, Installation, LocalAdministrator, Member, Platform
-from .security import PlatformError, digest, equal, token
+from .security import PlatformError, digest, equal, password_hash, token
 
 log = logging.getLogger(__name__)
-
-
-def password_hash(password, salt):
-    return hashlib.scrypt(password.encode('utf-8'), salt=salt.encode('ascii'), n=16384, r=8, p=1).hex()
 
 
 class AdministratorAccess:

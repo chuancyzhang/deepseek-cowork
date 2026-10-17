@@ -23,7 +23,7 @@
 
 1. 启动容器后打开 `/app`，空平台自动显示“初始化企业平台”。
 2. 在网页填写管理员账号、密码及确认密码，直接创建首位管理员。账号为 3–64 位字母、数字、点、横线或下划线；密码至少 12 个字符。
-3. 创建后直接进入“设置”，点击“添加认证来源”，填写 OAuth2、OIDC 或 LDAP 参数；保存草稿、完成测试登录、启用。
+3. 创建后直接进入“设置”，点击“添加认证来源”，选择平台账号密码，或填写 OAuth2、OIDC、LDAP 参数；保存草稿、完成测试登录、启用。
 4. 员工使用企业认证登录，默认是普通成员；首位管理员在“成员 → 管理与分配”授予或收回管理员角色。其他管理员不能转授管理员角色。
 5. 管理员使用登录页的“平台管理员登录”。尚无启用的企业认证时，网页直接显示管理员登录。
 
@@ -54,7 +54,7 @@ docker compose run --rm --no-deps platform python -m server generate-key
 | `COWORK_PLATFORM_NAME` | 企业显示名称 |
 | `COWORK_ENCRYPTION_KEY` | 中心模型密钥和认证凭据的 Fernet 加密密钥，必须独立保管 |
 | `COWORK_BOOTSTRAP_PROVIDER`、`COWORK_BOOTSTRAP_SUBJECT` | 仅旧式命令行初始化使用；网页创建独立管理员时留空 |
-| `COWORK_LOGIN_PROVIDER` | 员工统一登录使用的认证来源 ID；仅一个启用来源时可省略，多个来源时必须明确指定 |
+| `COWORK_LOGIN_PROVIDER` | 员工登录入口的部署默认值；网页“客户端统一登录方式”保存后优先使用网页配置。仅一个启用来源时可省略 |
 | `COWORK_SESSION_SECONDS` | 中心会话期限，默认 8 小时 |
 | `COWORK_MAX_MODEL_CONCURRENCY` | 同时运行的模型请求上限，默认 64；达到上限明确返回忙碌状态 |
 | `COWORK_CLEANUP_SECONDS` | 到期提问删除间隔，默认 60 秒，允许 1–300 秒 |
@@ -105,6 +105,20 @@ sh start.sh
 在身份平台注册准确回调地址：`https://企业域名/auth/callback/company-sso`。首位管理员完成认证后自动验证此来源，其余员工之后登录自动创建无模型权限的普通成员。管理员在“模型”中添加、测试、启用模型，再到“成员”分配。随后可移除 `.env` 中的两项 bootstrap 配置并重建应用容器，删除本次导入文件；后续认证设置通过管理页面维护。
 
 首次配置完成后，日常启动只需进入部署目录运行 `sh start.sh`（等同于 `docker compose up -d --build --wait`）。命令等待应用健康检查，失败会返回非零状态。查看日志使用 `docker compose logs --tail=100 platform`；停止使用 `docker compose stop`，数据保存在命名卷中。程序代码升级后同样运行启动命令；不要使用删除数据卷的参数。
+
+## 平台账号密码（数据库认证）
+
+不依赖外部身份平台，员工账号与密码校验值存储在本平台的 PostgreSQL 中。客户端仍使用“登录企业账号”入口，在平台网页输入账号密码，完成后自动回到客户端。
+
+1. “设置 → 添加认证来源”选择“平台账号密码”，填写名称和来源 ID，保存草稿；无需填写外部数据库或协议参数。
+2. 点击“管理员工账号 → 创建员工账号”，填写账号、成员姓名和初始密码（至少 12 个字符）。账号名称创建后不可更改；相同来源不能重名，不同来源的同名账号属于不同成员。
+3. 回到认证来源页，点击“测试登录”，用新建员工账号登录；测试成功后回到管理页启用该来源。
+4. 有多个启用来源时，在“设置 → 客户端统一登录方式”选择该来源并保存。只有一个来源时自动使用它。
+5. 在账号列表的“模型与权限”或“成员”页分配模型。新建账号默认是普通成员，管理员角色仍只能由首位管理员授权。
+
+账号列表可修改姓名、停用账号、重设密码。密码使用随机盐与 scrypt 保存校验值，接口不返回密码、哈希或盐。重设密码会撤销已有平台会话及未完成的登录交接；停用账号也会拒绝新登录。登录连续 5 次失败会暂停该账号 5 分钟，管理员重设密码可清除锁定。管理员角色的数据库账号只能由首位管理员管理其密码和状态，避免通过重设密码绕过管理员授权。
+
+数据库账号由管理员创建，不开放员工自助注册。忘记密码由管理员在账号页面重设，当前没有员工自助修改密码入口。登录协议与桌面交接保持兼容，不改变模型请求前缀、个人配置或本机对话。
 
 ## OAuth2 兼容配置与 LDAP
 
@@ -205,4 +219,6 @@ python -m pytest -q test/test_enterprise_deployment.py test/test_enterprise_plat
 
 真实企业 SSO/LDAP、实际模型端点、干净 Windows 机器首次安装和 Linux/PostgreSQL 压测仍需部署联调。2026-10-17 在本机 Docker Desktop 的 Linux 容器中完成应用镜像构建及 PostgreSQL 17 启动，两项容器健康检查通过，`/healthz`、`/api/v1/platform-info`、`/api/v1/auth/providers` 和 `/app` 均返回 200。已导出本机启动镜像包；未生成或发布正式 Windows 企业客户端发行包。
 
-UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口，数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。
+数据库账号及原有企业流程的聚焦回归为 `python -m pytest -q test/test_enterprise_database_auth.py test/test_enterprise_setup.py test/test_enterprise_platform.py test/test_enterprise_client.py test/test_enterprise_deployment.py`，52 项测试及 3 个子测试通过，包含现有桌面客户端完成账号密码浏览器登录并取得模型授权。Docker PostgreSQL 独立 schema 另行验证并发同名创建只成功一次、认证测试/启用、桌面交接和重设密码撤销令牌。
+
+UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口（使用 `http://127.0.0.1:8787/qa/login`，与 localhost 服务隔离 Cookie），数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。

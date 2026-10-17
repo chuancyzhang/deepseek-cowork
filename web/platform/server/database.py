@@ -62,6 +62,26 @@ class Installation(Base):
     locked_until: Mapped[float] = mapped_column(Float, default=0)
 
 
+class DatabaseAccount(Base):
+    __tablename__ = "database_accounts"
+    __table_args__ = (UniqueConstraint("provider_id", "username"),)
+    member_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(128))
+    username: Mapped[str] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(Text)
+    salt: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(default=1)
+    failures: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[float] = mapped_column(Float, default=0)
+
+
+class LoginEntry(Base):
+    __tablename__ = "login_entry"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    provider_id: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(default=1)
+
+
 class AuthSource(Base):
     __tablename__ = "auth_sources"
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

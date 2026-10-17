@@ -18,7 +18,7 @@ from web.platform.server.database import AuthSource, Member, Model, ModelGrant, 
 def main():
     with tempfile.TemporaryDirectory(prefix="cowork-enterprise-ui-") as directory:
         settings = Settings(database_url="sqlite:///" + str(Path(directory) / "fixture.sqlite3"), data_dir=directory,
-                            platform_id="ui-fixture", platform_name="示例企业", public_url="http://localhost:8787",
+                            platform_id="ui-fixture", platform_name="示例企业", public_url="http://127.0.0.1:8787",
                             encryption_key=Fernet.generate_key().decode(), development=True)
         app = create_app(settings, transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})))
         original = app.router.lifespan_context
@@ -37,6 +37,14 @@ def main():
                     db.add_all([ModelGrant(member_id=admin.id, model_id=model.id), ModelGrant(member_id=staff.id, model_id=model.id),
                                 Question(id="fixture-question", member_id=staff.id, client_id="fixture-installation", submission_id="fixture-submission", model_id=model.id,
                                          body="请整理本周项目进展，列出已完成事项和待确认问题。", received_at=time.time(), expires_at=time.time() + 30 * 86400)])
+                app.state.auth.save_source({"id": "staff", "name": "员工账号密码", "mode": "database",
+                                            "config": {}, "secrets": {}, "enabled": False})
+                account = app.state.auth.accounts.save("staff", {"username": "chen.ning", "name": "陈宁",
+                    "password": "fixture-only employee password"}, "fixture-admin")
+                with app.state.database.transaction() as db:
+                    source = db.get(AuthSource, "staff")
+                    source.enabled, source.verified_revision = True, source.revision
+                    db.add(ModelGrant(member_id=account["id"], model_id="fixture-model"))
                 yield
         app.router.lifespan_context = lifespan
         @app.get("/qa/login")
@@ -46,7 +54,12 @@ def main():
             response.set_cookie("cowork_session", session["access_token"], httponly=True, samesite="lax")
             response.set_cookie("cowork_csrf", session["csrf_token"], samesite="lax")
             return response
-        uvicorn.run(app, host="127.0.0.1", port=8787, access_log=False, log_level="warning")
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8787, access_log=False, log_level="warning"))
+        @app.post("/qa/stop")
+        def stop():
+            server.should_exit = True
+            return {"status": "stopping"}
+        server.run()
 
 
 if __name__ == "__main__":

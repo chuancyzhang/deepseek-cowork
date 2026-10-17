@@ -21,7 +21,7 @@ from .auth import Authentication, oauth_compatibility_preset
 from .administrator import AdministratorAccess
 from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
-                       LocalAdministrator, Member, Model, Platform, Question)
+                       LocalAdministrator, LoginEntry, Member, Model, Platform, Question)
 from .management import Management, member_view, model_view
 from .releases import Releases, public_release
 from .security import PlatformError, Vault, digest
@@ -271,7 +271,12 @@ def create_app(settings=None, *, transport=None):
                     return directory_form(transaction_id, request.cookies, username=username, error=exc.message, status=exc.status)
                 except PlatformError:
                     return HTMLResponse("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>登录未完成</title>"
-                        "<h1>登录未完成</h1><p>本次登录尝试已结束。请返回客户端重新登录，或联系管理员检查目录服务。</p></html>", status_code=401)
+                        "<h1>登录未完成</h1><p>本次登录尝试已结束。请返回客户端重新登录，或联系管理员检查账号与认证配置。</p></html>", status_code=401)
+            if exc.code in {"account_locked", "account_changed", "member_disabled", "source_changed", "source_disabled"}:
+                return HTMLResponse("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>登录未完成</title>"
+                    "<h1>登录未完成</h1><p>" + html.escape(exc.message) + "</p><p>客户端输入和本机历史仍保留。"
+                    "请按提示处理后返回客户端重新登录。</p><a href='" + html.escape(settings.public_url + "/app", quote=True)
+                    + "'>返回企业平台</a></html>", status_code=exc.status)
             raise
         return login_completed(result)
 
@@ -491,7 +496,11 @@ def create_app(settings=None, *, transport=None):
                        for s in db.scalars(select(AuthSource).order_by(AuthSource.name))]
             events = [{"id": e.id, "action": e.action, "target": e.target, "outcome": e.outcome, "created_at": e.created_at}
                       for e in db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(100))]
+            entry = db.get(LoginEntry, 1)
+            login_provider = entry.provider_id if entry else settings.login_provider
+            login_revision = entry.revision if entry else 0
         return {"sources": sources, "cleanup": cleanup_state, "events": events,
+                "login_provider": login_provider, "login_revision": login_revision,
                 "platform_id": settings.platform_id, "public_url": settings.public_url,
                 "session_seconds": settings.session_seconds, "refresh": "not_enabled", "global_logout": "not_enabled"}
 
@@ -506,6 +515,42 @@ def create_app(settings=None, *, transport=None):
         payload = await read_json(request, 65536)
         payload["id"] = source_id
         return {"id": app.state.auth.save_source(payload, actor=actor["id"])}
+
+    @app.put("/api/v1/admin/login-entry")
+    async def save_login_entry(request: Request):
+        actor = principal(request, admin=True)
+        payload = await read_json(request, 8192)
+        with database.transaction() as db:
+            db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            entry = db.get(LoginEntry, 1)
+            if payload.get("revision") != (entry.revision if entry else 0):
+                raise PlatformError("conflict", "登录入口已变更，请刷新后重试。", 409)
+            source = db.get(AuthSource, payload.get("provider_id", ""))
+            if not source or not source.enabled or source.verified_revision != source.revision:
+                raise PlatformError("source_unavailable", "请选择已测试并启用的认证方式。", 409)
+            if entry:
+                entry.provider_id, entry.revision = source.id, entry.revision + 1
+            else:
+                db.add(LoginEntry(id=1, provider_id=source.id))
+            database.audit(db, "login_entry.saved", member_id=actor["id"], target=source.id)
+        return {"status": "saved"}
+
+    @app.get("/api/v1/admin/auth-sources/{source_id}/accounts")
+    def database_accounts(source_id: str, request: Request):
+        principal(request, admin=True)
+        return {"items": app.state.auth.accounts.list(source_id)}
+
+    @app.post("/api/v1/admin/auth-sources/{source_id}/accounts")
+    async def create_database_account(source_id: str, request: Request):
+        actor = principal(request, admin=True)
+        payload = await read_json(request, 8192)
+        return await asyncio.to_thread(app.state.auth.accounts.save, source_id, payload, actor["id"])
+
+    @app.put("/api/v1/admin/auth-sources/{source_id}/accounts/{member_id}")
+    async def update_database_account(source_id: str, member_id: str, request: Request):
+        actor = principal(request, admin=True)
+        payload = await read_json(request, 8192)
+        return await asyncio.to_thread(app.state.auth.accounts.save, source_id, payload, actor["id"], member_id)
 
     @app.get("/api/v1/admin/client-releases")
     def release_list(request: Request):

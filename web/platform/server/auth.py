@@ -12,7 +12,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import service_url
-from .database import AuthSource, Installation, LoginSession, LoginTransaction, Member, Platform
+from .database import AuthSource, Installation, LoginEntry, LoginSession, LoginTransaction, Member, Platform
+from .database_accounts import DatabaseAccounts
 from .security import PlatformError, challenge, digest, equal, token
 
 log = logging.getLogger(__name__)
@@ -40,8 +41,12 @@ def field(payload, path, default=None):
 
 
 def validate_source(mode, config, secrets, settings):
-    if mode not in {"oauth2", "oidc", "ldap"} or not isinstance(config, dict):
-        raise PlatformError("invalid_source", "请选择 OAuth2、OIDC 或 LDAP。")
+    if mode not in {"oauth2", "oidc", "ldap", "database"} or not isinstance(config, dict):
+        raise PlatformError("invalid_source", "请选择平台账号密码、OAuth2、OIDC 或 LDAP。")
+    if mode == "database":
+        if config or secrets:
+            raise PlatformError("invalid_source", "平台账号密码无需外部连接参数，请在账号管理中创建员工账号。")
+        return {}
     if set(config) - PUBLIC_CONFIG_FIELDS or set(secrets) - {"client_secret", "bind_password"}:
         raise PlatformError("invalid_source", "认证配置包含不支持的字段。")
     p = dict(config)
@@ -111,6 +116,7 @@ def oauth_compatibility_preset(base_url):
 class Authentication:
     def __init__(self, settings, database, vault, client):
         self.settings, self.database, self.vault, self.client = settings, database, vault, client
+        self.accounts = DatabaseAccounts(database)
 
     def public_sources(self):
         with self.database.transaction() as db:
@@ -189,7 +195,8 @@ class Authentication:
             raise PlatformError("invalid_login", "缺少有效的桌面交接校验。")
         with self.database.transaction() as db:
             if not source_id:
-                source_id = self.settings.login_provider
+                entry = db.get(LoginEntry, 1)
+                source_id = entry.provider_id if entry else self.settings.login_provider
                 if not source_id:
                     enabled = list(db.scalars(select(AuthSource.id).where(AuthSource.enabled)))
                     if len(enabled) != 1:
@@ -201,7 +208,7 @@ class Authentication:
             snapshot = {"id": source.id, "name": source.name, "mode": source.mode,
                         "revision": source.revision, "verified_revision": source.verified_revision,
                         "config": source.config, "secrets": self.vault.open(source.secret), "test_actor": test_actor}
-        if snapshot["mode"] != "ldap":
+        if snapshot["mode"] not in {"ldap", "database"}:
             snapshot["config"] = await self.resolved(snapshot)
         state, verifier, nonce = token(), token(), token()
         tx = LoginTransaction(provider_id=source_id, source_snapshot=self.vault.seal(snapshot), mode=mode,
@@ -221,7 +228,7 @@ class Authentication:
                 raise PlatformError("login_expired", "此登录链接已使用或过期，请重新发起登录。", 409)
             tx.browser_hash = digest(browser_token)
             snapshot, transient = self.vault.open(tx.source_snapshot), self.vault.open(tx.transient_secret)
-            if snapshot["mode"] == "ldap":
+            if snapshot["mode"] in {"ldap", "database"}:
                 return f"{self.settings.public_url}/auth/directory/{tx.id}", browser_token
             p = snapshot["config"]
             params = {**p.get("authorize_parameters", {}), "client_id": p["client_id"],
@@ -244,7 +251,7 @@ class Authentication:
             if not cookie or not equal(tx.browser_hash, digest(cookie)):
                 raise PlatformError("login_binding_failed", "请在发起登录的浏览器窗口继续。", 403)
             snapshot = self.vault.open(tx.source_snapshot)
-            if snapshot["mode"] != "ldap":
+            if snapshot["mode"] not in {"ldap", "database"}:
                 raise PlatformError("source_unavailable", "该登录入口不可用。", 404)
             return {"provider_id": tx.provider_id, "name": snapshot["name"],
                     "state": self.vault.open(tx.transient_secret)["state"]}
@@ -340,6 +347,11 @@ class Authentication:
                         raise PlatformError("source_changed", "登录期间认证配置已变更，请重新登录。", 409)
                     if not source.enabled and not snapshot.get("test_actor"):
                         raise PlatformError("source_disabled", "认证来源已停用。", 403)
+                    if source.mode == "database":
+                        account_member = db.scalar(select(Member).where(Member.provider_id == source.id,
+                                                  Member.subject == identity["subject"]).with_for_update())
+                        if not account_member or not account_member.enabled or account_member.revision != identity.get("_member_revision"):
+                            raise PlatformError("account_changed", "登录期间账号已变更，请重新登录。", 409)
                     if snapshot.get("test_actor"):
                         actor = db.get(Member, snapshot["test_actor"])
                         if not actor or not actor.enabled or actor.role != "admin":
@@ -366,13 +378,15 @@ class Authentication:
                 if attempt:
                     raise
 
-    def session(self, member_id, kind):
+    def session(self, member_id, kind, *, expected_revision=None):
         session_token, csrf = token(), token()
         expires_at = time.time() + self.settings.session_seconds
         with self.database.transaction() as db:
-            member = db.get(Member, member_id)
+            member = db.scalar(select(Member).where(Member.id == member_id).with_for_update())
             if not member or not member.enabled:
                 raise PlatformError("member_disabled", "此成员当前不可用。", 403)
+            if expected_revision is not None and member.revision != expected_revision:
+                raise PlatformError("account_changed", "登录期间账号或密码已变更，请重新登录。", 409)
             db.add(LoginSession(token_hash=digest(session_token), member_id=member_id, kind=kind,
                                 csrf_hash=digest(csrf), expires_at=expires_at))
             self.database.audit(db, "login.completed", member_id=member_id)
@@ -396,7 +410,9 @@ class Authentication:
                 raise PlatformError("login_rejected", "认证已取消或被认证服务拒绝。")
             if snapshot["mode"] == "ldap" and credentials is not None:
                 identity = await self.ldap_identity(snapshot, *credentials)
-            elif snapshot["mode"] != "ldap" and credentials is None:
+            elif snapshot["mode"] == "database" and credentials is not None:
+                identity = await asyncio.to_thread(self.accounts.authenticate, snapshot["id"], *credentials)
+            elif snapshot["mode"] not in {"ldap", "database"} and credentials is None:
                 identity = await self.identity_from_code(snapshot, transient, code)
             else:
                 raise PlatformError("invalid_login", "登录方式不匹配。")
@@ -408,18 +424,20 @@ class Authentication:
                     raise PlatformError("login_cancelled", "登录事务已取消或过期。", 409)
                 tx.member_id, tx.status = member_id, "ready"
                 tx.transient_secret = self.vault.seal({"handoff": handoff})
-                tx.source_snapshot = self.vault.seal({"test_actor": snapshot.get("test_actor", "")})
+                tx.source_snapshot = self.vault.seal({"test_actor": snapshot.get("test_actor", ""),
+                                                     "member_revision": identity.get("_member_revision")})
             if snapshot.get("test_actor"):
                 return {"mode": "test", "transaction_id": tx_id}
             if mode == "web":
                 with self.database.transaction() as db:
                     db.execute(update(LoginTransaction).where(LoginTransaction.id == tx_id).values(status="consumed"))
-                return {"mode": "web", "transaction_id": tx_id, **self.session(member_id, "web")}
+                return {"mode": "web", "transaction_id": tx_id,
+                        **self.session(member_id, "web", expected_revision=identity.get("_member_revision"))}
             return {"mode": "desktop", "transaction_id": tx_id}
         except Exception as exc:
             reason = exc.code if isinstance(exc, PlatformError) else "auth_internal_failed"
             transient["attempts"] = transient.get("attempts", 0) + 1
-            retry = snapshot["mode"] == "ldap" and reason in {"ldap_failed", "invalid_credentials"} and transient["attempts"] < 5
+            retry = snapshot["mode"] in {"ldap", "database"} and reason in {"ldap_failed", "invalid_credentials"} and transient["attempts"] < 5
             with self.database.transaction() as db:
                 db.execute(update(LoginTransaction).where(LoginTransaction.id == tx_id, LoginTransaction.status == "exchanging")
                            .values(status="pending" if retry else "failed", error=reason,
@@ -452,7 +470,8 @@ class Authentication:
                 raise PlatformError("handoff_used", "交接码无效、已使用或已取消，请重新登录。", 409)
             tx.status, tx.transient_secret = "consumed", self.vault.seal({})
             member_id = tx.member_id
-        return {"status": "completed", **self.session(member_id, "desktop")}
+            member_revision = self.vault.open(tx.source_snapshot).get("member_revision")
+        return {"status": "completed", **self.session(member_id, "desktop", expected_revision=member_revision)}
 
     async def ldap_login(self, source_id, username, password, *, kind="web", test_actor=""):
         with self.database.transaction() as db:

@@ -18,6 +18,10 @@ def digest(value):
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+def password_hash(password, salt):
+    return hashlib.scrypt(password.encode("utf-8"), salt=salt.encode("ascii"), n=16384, r=8, p=1).hex()
+
+
 def challenge(verifier):
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
 

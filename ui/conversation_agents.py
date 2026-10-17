@@ -98,7 +98,7 @@ class ConversationAgentsMixin:
             bind_theme(button, lambda _=None, target=button: target.setStyleSheet(product_button_style("secondary")), surface="composer")
             button.clicked.connect(lambda _checked=False, action=callback: (popover.close(), action()))
             footer.addWidget(button)
-        popover.layout().addLayout(footer)
+        popover.layout().insertLayout(popover.layout().count() - 1, footer)
         popover.show_for(self.agent_picker_btn, prefer_above=True)
         popover.search.setFocus()
 

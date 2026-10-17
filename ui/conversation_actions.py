@@ -7,11 +7,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QSignalBlocker
 from shiboken6 import isValid
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QAbstractItemView, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -20,7 +20,10 @@ from core.conversation_actions import (
 )
 from core.theme import DesignTokens, bind_theme
 from core.inline_visualization import find_inline_visualization_files
-from ui.primitives import ProductInlineNotice, ProductPopover, ProductSegmentedControl
+from ui.primitives import (
+    ProductInlineNotice, ProductPopover, ProductSegmentedControl,
+    product_button_style, product_field_style,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -44,50 +47,101 @@ class ConversationMentionPopover(ProductPopover):
     selected = Signal(str, object)
 
     def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False, selected_agent_id=None):
-        super().__init__(parent, width=420)
+        super().__init__(parent, width=500)
         self.conversations = conversations
         self.profiles = profiles
         self.workspace = workspace
         self.selected_agent_id = selected_agent_id
+        self.pending_agent_id = selected_agent_id
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
         self.kind = "智能体" if agents_only else "会话"
         self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
         layout.addWidget(self.tabs)
         self.tabs.setVisible(not agents_only)
+        self.title = QLabel("选择专家")
+        self.title.setVisible(agents_only)
+        layout.addWidget(self.title)
         self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
         self.tabs.currentChanged.connect(self.change_kind)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索会话标题或项目")
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedHeight(32)
         layout.addWidget(self.search)
+        self.agent_summary = QWidget()
+        self.agent_summary.setObjectName("ExpertSelectionSummary")
+        summary_layout = QHBoxLayout(self.agent_summary)
+        summary_layout.setContentsMargins(8, 4, 6, 4)
+        self.selection_summary = QLabel()
+        self.selection_summary.setWordWrap(True)
+        summary_layout.addWidget(self.selection_summary, 1)
+        self.selection_chip = QPushButton()
+        self.selection_chip.clicked.connect(self.clear_agent_selection)
+        summary_layout.addWidget(self.selection_chip)
+        layout.addWidget(self.agent_summary)
         self.items = QListWidget()
         self.items.setMinimumHeight(250)
         layout.addWidget(self.items)
         self.empty = QLabel("没有匹配的会话")
         layout.addWidget(self.empty)
         self.search.textChanged.connect(self.refresh_items)
-        self.items.itemClicked.connect(self.choose)
+        self.items.itemClicked.connect(lambda item: self.choose(item) if self.kind == "会话" else None)
         self.items.itemActivated.connect(self.choose)
+        self.items.itemChanged.connect(self._agent_item_changed)
         self.search.returnPressed.connect(lambda: self.choose(self.items.currentItem()))
+        self.agent_actions = QWidget()
+        actions = QHBoxLayout(self.agent_actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        self.clear_btn = QPushButton("清除")
+        self.clear_btn.clicked.connect(self.clear_agent_selection)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.close)
+        self.apply_btn = QPushButton("应用")
+        self.apply_btn.clicked.connect(self.apply_agent_selection)
+        actions.addWidget(self.clear_btn)
+        actions.addStretch()
+        actions.addWidget(self.cancel_btn)
+        actions.addWidget(self.apply_btn)
+        layout.addWidget(self.agent_actions)
         bind_theme(self, self.refresh_picker_theme, surface="composer")
         self.change_kind(self.kind)
 
     def refresh_picker_theme(self, _=None):
-        self.search.setStyleSheet(f"QLineEdit {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; padding: 6px; }}")
-        self.items.setStyleSheet(f"QListWidget {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; border: none; }} QListWidget::item {{ padding: 7px; }} QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}")
+        self.search.setStyleSheet(product_field_style())
+        self.items.setStyleSheet(
+            f"QListWidget {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; padding: 4px; }} "
+            "QListWidget::item { padding: 7px 8px; margin: 1px 0; } "
+            f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }} "
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}")
         self.empty.setStyleSheet(f"color: {DesignTokens.text_secondary};")
         self.hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
+        self.title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
+        self.agent_summary.setStyleSheet(
+            f"QWidget#ExpertSelectionSummary {{ background: {DesignTokens.bg_secondary}; border-radius: 6px; }}")
+        self.selection_summary.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
+        for button, variant in ((self.clear_btn, "ghost"), (self.cancel_btn, "secondary"),
+                                (self.apply_btn, "primary"), (self.selection_chip, "secondary")):
+            button.setStyleSheet(product_button_style(variant, radius=7))
+            button.setCursor(Qt.PointingHandCursor)
 
     def change_kind(self, kind):
         self.kind = kind
         self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索专家名称或用途")
-        self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "选择后，本会话后续消息继续使用这位专家")
+        self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "每次选择一位专家；点击应用后，本会话后续消息继续使用")
+        self.agent_summary.setVisible(kind == "智能体")
+        self.agent_actions.setVisible(kind == "智能体")
+        self.items.setSelectionMode(QAbstractItemView.NoSelection if kind == "智能体" else QAbstractItemView.SingleSelection)
         self.empty.setText("没有匹配的" + ("会话" if kind == "会话" else "专家"))
         self.refresh_items()
 
     def refresh_items(self):
         query = self.search.text().strip().casefold()
+        blocker = QSignalBlocker(self.items)
         self.items.clear()
         records = sorted(self.conversations, key=lambda row: (
             (row.get("meta") or {}).get("workspace_dir") != self.workspace,
@@ -106,8 +160,6 @@ class ConversationMentionPopover(ProductPopover):
                 subtitle = record.get("description") or ""
                 if kind != "会话" and record.get("builtin"):
                     title += " · 内置"
-                if kind == "智能体" and self.selected_agent_id and record.get("id") == self.selected_agent_id:
-                    title = "✓ 已选择 · " + title
                 if kind == "会话":
                     updated = datetime.fromtimestamp(record.get("updated_at") or 0).strftime("%m-%d %H:%M")
                     subtitle = f"{project} · {updated}" + (" · 已归档" if meta.get("archived") or record.get("status") == "archived" else "")
@@ -117,14 +169,64 @@ class ConversationMentionPopover(ProductPopover):
             for record, text in found:
                 item = QListWidgetItem(text, self.items)
                 item.setData(Qt.UserRole, (kind, record))
+                if kind == "智能体":
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked if record.get("id") == self.pending_agent_id else Qt.Unchecked)
                 first = first or item
         self.empty.setVisible(first is None)
         if first is not None:
             self.items.setCurrentItem(first)
+        del blocker
+        self._refresh_agent_summary()
+
+    def _agent_item_changed(self, item):
+        kind, record = item.data(Qt.UserRole)
+        if kind != "智能体":
+            return
+        if item.checkState() == Qt.Checked:
+            self.pending_agent_id = record["id"]
+        elif self.pending_agent_id == record["id"]:
+            self.pending_agent_id = None
+        self._sync_agent_checks()
+
+    def _sync_agent_checks(self):
+        with QSignalBlocker(self.items):
+            for index in range(self.items.count()):
+                item = self.items.item(index)
+                kind, record = item.data(Qt.UserRole)
+                if kind == "智能体":
+                    item.setCheckState(Qt.Checked if record["id"] == self.pending_agent_id else Qt.Unchecked)
+        self._refresh_agent_summary()
+
+    def _refresh_agent_summary(self):
+        profile = next((p for p in self.profiles if p["id"] == self.pending_agent_id), None)
+        self.selection_chip.setVisible(profile is not None)
+        if profile:
+            name = profile.get("name") or "专家"
+            self.selection_summary.setText("已选 1 位专家")
+            self.selection_chip.setText(self.selection_chip.fontMetrics().elidedText(name, Qt.ElideRight, 220) + "  ×")
+            self.selection_chip.setToolTip("移除 " + name)
+        else:
+            self.selection_summary.setText("当前专家不可用，请重新选择或清除" if self.pending_agent_id else "未选择专家，将使用普通助手")
+        self.apply_btn.setEnabled(self.pending_agent_id != self.selected_agent_id)
+
+    def clear_agent_selection(self):
+        self.pending_agent_id = None
+        self._sync_agent_checks()
+
+    def apply_agent_selection(self):
+        if not self.apply_btn.isEnabled():
+            return
+        profile = next((p for p in self.profiles if p["id"] == self.pending_agent_id), None)
+        self.selected.emit("智能体", profile)
+        self.close()
 
     def choose(self, item):
         data = item.data(Qt.UserRole) if item is not None else None
         if data:
+            if data[0] == "智能体":
+                item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+                return
             self.selected.emit(*data)
             self.close()
 

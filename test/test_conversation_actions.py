@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
 from core.chat_storage import ChatStorage
 from core.conversation_actions import (
@@ -83,8 +83,42 @@ class ConversationActionsTests(unittest.TestCase):
         picker.tabs.buttons["智能体"].click()
         self.assertEqual(picker.items.count(), 1)
         picker.choose(picker.items.item(0))
+        self.assertEqual(selected, [("会话", "chat")])
+        picker.apply_btn.click()
         self.assertEqual(selected, [("会话", "chat"), ("智能体", "agent")])
         picker.deleteLater()
+
+    def test_expert_checks_are_single_selection_and_survive_search_until_apply(self):
+        profiles = [{"id": "a", "name": "甲专家"}, {"id": "b", "name": "乙专家"}]
+        picker = ConversationMentionPopover([], profiles, "", None, agents_only=True, selected_agent_id="a")
+        selected = []
+        picker.selected.connect(lambda kind, record: selected.append(record))
+        self.assertEqual(picker.items.item(0).checkState(), Qt.Checked)
+        self.assertFalse(picker.apply_btn.isEnabled())
+        picker.items.item(1).setCheckState(Qt.Checked)
+        self.assertEqual(picker.items.item(0).checkState(), Qt.Unchecked)
+        self.assertEqual(selected, [])
+        picker.search.setText("甲")
+        self.assertEqual(picker.items.item(0).checkState(), Qt.Unchecked)
+        self.assertEqual(picker.pending_agent_id, "b")
+        picker.search.clear()
+        self.assertEqual(picker.items.item(1).checkState(), Qt.Checked)
+        picker.apply_btn.click()
+        self.assertEqual(selected, [profiles[1]])
+        picker.deleteLater()
+
+    def test_expert_clear_is_only_committed_on_apply(self):
+        profiles = [{"id": "a", "name": "甲专家"}]
+        selected = []
+        for apply in (False, True):
+            picker = ConversationMentionPopover([], profiles, "", None, agents_only=True, selected_agent_id="a")
+            picker.selected.connect(lambda kind, record: selected.append(record))
+            picker.clear_btn.click()
+            self.assertEqual(picker.items.item(0).checkState(), Qt.Unchecked)
+            self.assertEqual(selected, [])
+            (picker.apply_btn if apply else picker.cancel_btn).click()
+            self.assertEqual(selected, [None] if apply else [])
+            picker.deleteLater()
 
     def test_reference_snapshot_submission_failure_and_running_guidance(self):
         with tempfile.TemporaryDirectory() as root:

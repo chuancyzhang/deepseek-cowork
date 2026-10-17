@@ -117,7 +117,7 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = self._create_minimal_dist(temp_dir)
 
-            report = package_release.audit_distribution(dist, max_dist_mb=1)
+            report = package_release.audit_distribution(dist)
 
             self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS) + 1)
             self.assertTrue(any(item["name"] == "_internal/PySide6" for item in report["components"]))
@@ -144,7 +144,7 @@ class PackageReleaseTests(unittest.TestCase):
                     else:
                         target.write_bytes(b"wrong-version-or-corrupt")
                     with self.assertRaises(package_release.PackageAuditError):
-                        package_release.audit_distribution(dist, max_dist_mb=1)
+                        package_release.audit_distribution(dist)
 
     def test_audit_rejects_selector_even_when_manager_is_also_configured(self):
         for helpers in (["helper-selector"], ["helper-selector", "manager"], []):
@@ -152,7 +152,7 @@ class PackageReleaseTests(unittest.TestCase):
                 dist = self._create_minimal_dist(temp_dir)
                 with patch.object(bundled_runtime_checks, "_git_config_values", return_value=helpers):
                     with self.assertRaisesRegex(package_release.PackageAuditError, "credential.helper=manager"):
-                        package_release.audit_distribution(dist, max_dist_mb=1)
+                        package_release.audit_distribution(dist)
 
     def test_audit_rejects_disabled_authentication_and_missing_gui_dependency(self):
         for key in ("credential.interactive", "credential.guiPrompt"):
@@ -162,12 +162,12 @@ class PackageReleaseTests(unittest.TestCase):
                     ["manager"] if name == "credential.helper" else ["false"] if name == key else []
                 )):
                     with self.assertRaisesRegex(package_release.PackageAuditError, "disables account authorization"):
-                        package_release.audit_distribution(dist, max_dist_mb=1)
+                        package_release.audit_distribution(dist)
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = self._create_minimal_dist(temp_dir)
             (dist / "_internal/git_bash_env/mingw64/bin/libSkiaSharp.dll").unlink()
             with self.assertRaisesRegex(package_release.PackageAuditError, "libSkiaSharp"):
-                package_release.audit_distribution(dist, max_dist_mb=1)
+                package_release.audit_distribution(dist)
 
     def test_audit_rejects_tampered_browser_skill_artifacts(self):
         for archive_name in (
@@ -186,7 +186,7 @@ class PackageReleaseTests(unittest.TestCase):
                 )
                 artifact.write_bytes(artifact.read_bytes() + b"tampered")
                 with self.assertRaisesRegex(package_release.PackageAuditError, "SHA256"):
-                    package_release.audit_distribution(dist, max_dist_mb=1)
+                    package_release.audit_distribution(dist)
 
     def test_audit_rejects_debug_qt_resources_and_extra_locales(self):
         cases = (
@@ -205,14 +205,14 @@ class PackageReleaseTests(unittest.TestCase):
                 target.write_bytes(b"forbidden")
 
                 with self.assertRaises(package_release.PackageAuditError):
-                    package_release.audit_distribution(dist, max_dist_mb=1)
+                    package_release.audit_distribution(dist)
 
     def test_native_terminal_extension_is_required(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = self._create_minimal_dist(temp_dir)
             (dist / "_internal/winpty/_winpty.cp314-win_amd64.pyd").unlink()
             with self.assertRaisesRegex(package_release.PackageAuditError, "pywinpty"):
-                package_release.audit_distribution(dist, max_dist_mb=1)
+                package_release.audit_distribution(dist)
 
     def test_audit_rejects_editor_source_maps_node_modules_and_cdn_imports(self):
         cases = (
@@ -231,7 +231,7 @@ class PackageReleaseTests(unittest.TestCase):
                 target.write_bytes(content)
 
                 with self.assertRaises(package_release.PackageAuditError):
-                    package_release.audit_distribution(dist, max_dist_mb=1)
+                    package_release.audit_distribution(dist)
 
     def test_checked_in_editor_notices_match_pinned_runtime_dependencies(self):
         editor_root = ROOT / "web" / "editors"
@@ -288,28 +288,24 @@ class PackageReleaseTests(unittest.TestCase):
                 dist,
                 output,
                 report_path,
-                max_dist_mb=1,
-                max_zip_mb=1,
             )
 
             saved = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["zip_sha256"], report["zip_sha256"])
             self.assertEqual(saved["zip_bytes"], output.stat().st_size)
 
-    def test_failed_size_gate_preserves_existing_release(self):
+    def test_failed_archive_write_preserves_existing_release(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
             output = root / "release.zip"
             output.write_bytes(b"previous-release")
 
-            with self.assertRaises(package_release.PackageAuditError):
+            with patch.object(package_release, "create_deterministic_zip", side_effect=OSError("disk full")), self.assertRaises(OSError):
                 package_release.package_release(
                     dist,
                     output,
                     root / "report.json",
-                    max_dist_mb=1,
-                    max_zip_mb=0,
                 )
 
             self.assertEqual(output.read_bytes(), b"previous-release")

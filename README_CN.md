@@ -7,7 +7,7 @@ Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前应用版本：**5.2.9** · [查看本版发布说明](docs/releases/5.2.9.md)
+当前应用版本：**5.3.0** · [查看本版发布说明](docs/releases/5.3.0.md)
 
 ## 当前版本的重点
 
@@ -75,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 
-发行包使用固定运行时、离线编辑器资源和打包审计；最终体积与组件清单以本次构建生成的报告为准。
+发行包使用固定运行时、离线编辑器资源和打包审计；不设置目录或 ZIP 总体积上限，仍检查必要文件、依赖完整性及禁止混入的内容。最终体积与组件清单以本次构建生成的报告为准。
 
 发行包内置 ripgrep 15.1.0（`rg`），命令工具可直接搜索文件，无需额外安装。
 自带 Git 默认使用 Git Credential Manager（`manager`），不再要求选择凭据助手；

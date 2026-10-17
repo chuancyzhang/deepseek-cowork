@@ -149,7 +149,6 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         self.assertIn("_audit_wecom_cli_assets", release_text)
         self.assertIn("_internal/resources/wecom_cli/bin/wecom-cli.exe", release_text)
         self.assertIn("_internal/ai_skills/wecom-unified/skill.json", release_text)
-        self.assertIn("DEFAULT_MAX_DIST_MB = 865", release_text)
 
 
 if __name__ == "__main__":

@@ -27,10 +27,6 @@ from scripts.bundled_runtime_checks import (  # noqa: E402
 
 ARCHIVE_ROOT = "deepseek-cowork"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
-# The pinned WeCom CLI and its official Skill add about 10.6 MiB to the
-# distribution. Keep a narrow, explicit allowance for that reviewed bundle.
-DEFAULT_MAX_DIST_MB = 865
-DEFAULT_MAX_ZIP_MB = 375
 EDITOR_MAX_UNPACKED_BYTES = 30 * 1024 * 1024
 EDITOR_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
 EDITOR_ASSET_PREFIX = "_internal/web/editors/dist/"
@@ -334,7 +330,7 @@ def _audit_wecom_cli_assets(dist_dir: Path) -> dict:
     }
 
 
-def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB) -> dict:
+def audit_distribution(dist_dir: Path) -> dict:
     dist_dir = dist_dir.resolve()
     if not dist_dir.is_dir():
         raise PackageAuditError(f"Distribution directory does not exist: {dist_dir}")
@@ -385,13 +381,6 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
         item = components.setdefault(_component_name(relative), {"bytes": 0, "files": 0})
         item["bytes"] += size
         item["files"] += 1
-
-    limit_bytes = int(float(max_dist_mb) * 1024 * 1024)
-    if total_bytes > limit_bytes:
-        raise PackageAuditError(
-            f"Distribution size {total_bytes / 1024 / 1024:.2f} MB exceeds "
-            f"{float(max_dist_mb):.2f} MB limit."
-        )
 
     ordered_components = [
         {
@@ -471,10 +460,8 @@ def package_release(
     dist_dir: Path,
     output_path: Path,
     report_path: Path,
-    max_dist_mb: float = DEFAULT_MAX_DIST_MB,
-    max_zip_mb: float = DEFAULT_MAX_ZIP_MB,
 ) -> dict:
-    report = audit_distribution(dist_dir, max_dist_mb=max_dist_mb)
+    report = audit_distribution(dist_dir)
     output_path = output_path.resolve()
     candidate_path = output_path.with_name(f".{output_path.name}.candidate-{os.getpid()}")
     candidate_path.unlink(missing_ok=True)
@@ -482,11 +469,6 @@ def package_release(
         report["zip_sha256"] = create_deterministic_zip(dist_dir, candidate_path)
         report["zip_bytes"] = candidate_path.stat().st_size
         report["zip_mb"] = round(report["zip_bytes"] / 1024 / 1024, 2)
-        if report["zip_bytes"] > int(float(max_zip_mb) * 1024 * 1024):
-            raise PackageAuditError(
-                f"Release ZIP size {report['zip_mb']:.2f} MB exceeds "
-                f"{float(max_zip_mb):.2f} MB limit."
-            )
         os.replace(candidate_path, output_path)
     finally:
         candidate_path.unlink(missing_ok=True)
@@ -518,8 +500,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=ROOT / "dist" / "deepseek-cowork-package-report.json",
     )
-    parser.add_argument("--max-dist-mb", type=float, default=DEFAULT_MAX_DIST_MB)
-    parser.add_argument("--max-zip-mb", type=float, default=DEFAULT_MAX_ZIP_MB)
     parser.add_argument(
         "--audit-only",
         action="store_true",
@@ -532,14 +512,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.audit_only:
-            report = audit_distribution(args.dist_dir, max_dist_mb=args.max_dist_mb)
+            report = audit_distribution(args.dist_dir)
         else:
             report = package_release(
                 args.dist_dir,
                 args.output,
                 args.report,
-                max_dist_mb=args.max_dist_mb,
-                max_zip_mb=args.max_zip_mb,
             )
     except PackageAuditError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

@@ -215,10 +215,13 @@ class BrowserBackendCoordinator:
         errors = []
         for external_id in ids:
             try:
-                from .browser_skill_component import _stop_session_after_interruption, _run_bsk
+                from .browser_skill_component import _stop_session_after_interruption, _run_bsk, _parse_json_output
                 if external_id.startswith("request:"):
                     cancellation = _run_bsk(["--json", "--quiet", "session", "request", external_id[len("request:"):], "--cancel"], timeout=10)
-                    result = {"stopped": cancellation["returncode"] == 0}
+                    payload = _parse_json_output(cancellation["stdout"], cancellation["stderr"])
+                    result = {"stopped": cancellation["returncode"] == 0
+                              and isinstance(payload, dict) and payload.get("state") == "closed"
+                              and payload.get("request_id") == external_id[len("request:"):]}
                 else:
                     result = _stop_session_after_interruption(external_id)
                 if not result.get("stopped"):

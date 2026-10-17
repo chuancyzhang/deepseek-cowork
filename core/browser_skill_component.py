@@ -1641,7 +1641,8 @@ def _prepare_bundled_browser_upgrade(status, abort_check=None):
 def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
     command_args = [str(item) for item in (args or [])]
     status = _prepare_bundled_browser_upgrade(browser_skill_status(run_diagnostics=False), abort_check)
-    starting_session = command_args[:2] == ["session", "start"]
+    starting_session = (command_args[:2] == ["session", "start"]
+                        and not any(arg in {"--help", "-h"} for arg in command_args))
     if (starting_session and not status.get("ready") and status.get("installed")
             and not status.get("needs_update") and not status.get("needs_repair")):
         # Recover stale offline/service diagnostics at the task boundary only.
@@ -1669,6 +1670,35 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
                 "detail": service.get("detail"),
             }}
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 1800))
+    if starting_session and "--request-id" in command_args:
+        request_index = command_args.index("--request-id") + 1
+        if request_index < len(command_args):
+            request_id = command_args[request_index]
+            # The service must exist before prepare. Never restart it between
+            # prepare and start: losing the reservation must fail visibly.
+            preparation = run_browser_skill_cli(
+                ["session", "request", request_id, "--prepare"],
+                timeout_seconds=min(timeout_seconds, 15), abort_check=abort_check,
+            )
+            prepared = preparation.get("result")
+            confirmed = (preparation.get("status") == "completed"
+                         and isinstance(prepared, dict)
+                         and prepared.get("request_id") == request_id
+                         and prepared.get("state") == "prepared")
+            log_browser_skill_event("session_request_prepare", request_id=request_id, ok=confirmed,
+                                    state=prepared.get("state") if isinstance(prepared, dict) else "",
+                                    code=(preparation.get("error") or {}).get("code"))
+            if not confirmed:
+                if preparation.get("status") == "completed":
+                    preparation.update(status="incomplete", error={
+                        "code": "session_request_not_prepared",
+                        "message": "浏览器创建请求未确认准备完成，本次未创建会话。请结束本轮后重试。",
+                    })
+                return preparation
+    if abort_check and abort_check():
+        return {"status": "incomplete", "error": {
+            "code": "aborted", "message": "BrowserSkill 命令已由用户中止。",
+        }}
     started = time.monotonic()
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"

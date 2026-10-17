@@ -190,13 +190,17 @@ class BrowserBackendTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         auth = self.auth()
         context = {"execution_authorization": auth}
-        with patch.object(module, "run_browser_skill_cli", return_value={"status": "completed", "result": {"session_id": "owned"}}) as run:
+        def execute(args, **kwargs):
+            if args[:2] == ["session", "request"]:
+                return {"status": "completed", "result": {"request_id": args[2], "state": "active", "session": {"session_id": "owned"}}}
+            return {"status": "completed", "result": {"session_id": "owned"}}
+        with patch.object(module, "run_browser_skill_cli", side_effect=execute) as run:
             result = module.browser_skill_cli(["session", "start"], _context=context)
             self.assertEqual(result["status"], "completed")
-            self.assertIn("--request-id", run.call_args.args[0])
+            self.assertIn("--request-id", run.call_args_list[0].args[0])
             for args in (["snapshot", "--session", "other"], ["session", "stop", "--all"], ["snapshot"], ["session", "request", "other", "--cancel"]):
                 self.assertEqual(module.browser_skill_cli(args, _context=context)["status"], "incomplete")
-            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_count, 2)
         with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}) as stop:
             finish_run(auth)
             stop.assert_called_once_with("owned")

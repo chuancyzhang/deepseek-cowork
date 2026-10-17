@@ -109,6 +109,8 @@ def _normalize_args(args, workspace_root):
         normalized.append(text)
     command = normalized[0].strip().lower()
     if command not in _ALLOWED_COMMANDS:
+        if command == "start":
+            raise ValueError('unsupported BrowserSkill command: start; use args=["session", "start"]')
         raise ValueError(f"unsupported BrowserSkill command: {command}")
     normalized[0] = command
     if command == "navigate" and len(normalized) >= 2:
@@ -192,14 +194,38 @@ def _run_owned_command(normalized, context, timeout_seconds, abort_state):
         if normalized[:2] == ["session", "start"] and not help_only:
             request_token = f"{int(time.time() * 1000) + 600000}:{uuid.uuid4()}"
             coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token)
+            log_browser_skill_event("session_request_registered", session_id=auth.session_id,
+                                   run_id=auth.run_id, request_id=request_token)
             normalized.extend(["--request-id", request_token])
         result = run_browser_skill_cli(normalized, timeout_seconds=timeout_seconds,
                                        abort_check=lambda: bool(abort_state["aborted"]))
         payload = result.get("result") or {}
-        if normalized[:2] == ["session", "start"] and isinstance(payload, dict) and payload.get("session_id"):
+        if request_token and result.get("status") == "completed" and isinstance(payload, dict) and payload.get("session_id"):
             coordinator.track_session(auth.session_id, auth.run_id, str(payload["session_id"]))
-            if request_token:
+            # Persist ownership before claiming; a crash or lost reply keeps the
+            # request available for targeted cancellation by the run coordinator.
+            claim = run_browser_skill_cli(
+                ["session", "request", request_token, "--claim"],
+                timeout_seconds=min(timeout_seconds, 15),
+                abort_check=lambda: bool(abort_state["aborted"]),
+            )
+            claimed = claim.get("result")
+            confirmed = (claim.get("status") == "completed" and isinstance(claimed, dict)
+                         and claimed.get("request_id") == request_token
+                         and claimed.get("state") == "active"
+                         and isinstance(claimed.get("session"), dict)
+                         and claimed["session"].get("session_id") == payload["session_id"])
+            log_browser_skill_event("session_request_claim", session_id=auth.session_id,
+                                   run_id=auth.run_id, request_id=request_token, ok=confirmed,
+                                   state=claimed.get("state") if isinstance(claimed, dict) else "",
+                                   code=(claim.get("error") or {}).get("code"))
+            if confirmed:
                 coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token, stopped=True)
+            else:
+                result.update(status="incomplete", request_claim=claim, error={
+                    "code": "session_claim_failed",
+                    "message": "浏览器窗口已创建，但未确认接管；请结束本轮后重试。已保留会话归属，任务结束时会定向清理。",
+                })
         elif request_token and result.get("status") == "completed":
             result.update(status="incomplete", error={"code": "session_result_unknown", "message": "未获得可确认的会话 ID，请勿重复创建。任务结束时会清理本次创建请求，可在实验功能中查看释放状态。"})
         stopped = not help_only and normalized[:2] == ["session", "stop"] and result.get("status") == "completed"

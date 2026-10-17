@@ -48,7 +48,7 @@ def test_connection_schema_and_update_channel(tmp_path):
     with pytest.raises(EnterpriseConfigurationError):
         parse_connection(data[:-1] + b',"platform_id":"duplicate"}')
     for changes in ({"extra": 1}, {"schema_version": 2}, {"platform_url": "https://user:pass@example.com"},
-                    {"platform_url": "http://enterprise.example"}, {"platform_url": "https://example.com/../bad"}):
+                    {"platform_url": "ftp://enterprise.example"}, {"platform_url": "https://example.com/../bad"}):
         with pytest.raises(EnterpriseConfigurationError):
             parse_connection(json.dumps({**CONNECTION, **changes}).encode())
     for candidate in (None, {**CONNECTION, "platform_id": "other"}, {**CONNECTION, "platform_name": "same-version conflict"}):
@@ -258,3 +258,30 @@ def test_employee_page_has_one_browser_login_and_no_configuration_forms(tmp_path
         page.close()
         page.deleteLater()
         app.processEvents()
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8788", "http://127.0.0.1:8788", "http://[::1]:8788", "http://192.168.1.10:8788", "http://enterprise.example/cowork", "https://enterprise.example"])
+def test_http_and_https_package_connection_is_readable_and_bindable(tmp_path, url):
+    from core.enterprise_connection import validate_connection
+    connection = {**CONNECTION, "platform_url": url}
+    (tmp_path / "enterprise_connection.json").write_text(json.dumps(connection), encoding="utf-8")
+    assert read_connection(tmp_path) == connection
+    assert validate_connection(connection) == connection
+    assert read_connection(tmp_path, development=False) == connection
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com", "file:///platform", "http://", "http://user:pass@example.com", "http://localhost:8788/?token=x", "http://example.com/#fragment", "http://example.com/../private"])
+def test_connection_rejects_invalid_or_credential_urls(url):
+    with pytest.raises(EnterpriseConfigurationError):
+        parse_connection(json.dumps({**CONNECTION, "platform_url": url}).encode())
+
+
+@pytest.mark.parametrize("url,trust_env", [("http://localhost:8788", False), ("https://127.0.0.1", False), ("http://[::1]:8788", False), ("http://enterprise.example", True)])
+def test_loopback_requests_bypass_system_proxy(url, trust_env):
+    from unittest.mock import MagicMock
+    response = MagicMock(is_success=True)
+    response.json.return_value = {"status": "ok"}
+    with patch("core.enterprise_client.httpx.Client") as constructor:
+        constructor.return_value.__enter__.return_value.request.return_value = response
+        assert EnterpriseClient().request({**CONNECTION, "platform_url": url}, "GET", "/healthz") == {"status": "ok"}
+        assert constructor.call_args.kwargs["trust_env"] is trust_env

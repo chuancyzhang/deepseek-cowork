@@ -41,17 +41,16 @@ def validate_connection(value, *, development=False):
     value["platform_name"] = name.strip()
     url = value["platform_url"]
     if not isinstance(url, str):
-        raise EnterpriseConfigurationError("企业平台地址必须是 HTTPS 地址。")
+        raise EnterpriseConfigurationError("企业平台地址必须是 HTTP 或 HTTPS 地址。")
     try:
         p = urlsplit(url)
         _ = p.port
     except ValueError:
         raise EnterpriseConfigurationError("企业平台地址无效。") from None
-    local_http = development and p.scheme == "http" and p.hostname in {"localhost", "127.0.0.1", "::1"}
-    if (not p.hostname or (p.scheme != "https" and not local_http) or p.username or p.password
+    if (not p.hostname or p.scheme not in {"http", "https"} or p.username or p.password
             or p.query or p.fragment or "\\" in url or any(c.isspace() for c in url)
             or any(part in {".", ".."} for part in p.path.split("/"))):
-        raise EnterpriseConfigurationError("企业平台地址须使用 HTTPS，且不含凭据、查询参数或片段。")
+        raise EnterpriseConfigurationError("企业平台地址须使用 HTTP 或 HTTPS，且不含凭据、查询参数或片段。")
     value["platform_url"] = url.rstrip("/")
     if value["distribution_channel"] != "enterprise":
         raise EnterpriseConfigurationError("企业分发渠道无效。")

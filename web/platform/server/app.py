@@ -566,10 +566,11 @@ def create_app(settings=None, *, transport=None):
         return await asyncio.to_thread(app.state.auth.accounts.save, source_id, payload, actor["id"], member_id)
 
     @app.get("/api/v1/admin/client-releases")
-    def release_list(request: Request):
+    def release_list(request: Request, deleted: bool = False):
         principal(request, admin=True)
         with database.transaction() as db:
-            return {"items": [public_release(r, admin=True) for r in db.scalars(select(ClientRelease).order_by(ClientRelease.created_at.desc()))],
+            query = select(ClientRelease).where(ClientRelease.state == "deleted" if deleted else ClientRelease.state != "deleted")
+            return {"items": [public_release(r, admin=True) for r in db.scalars(query.order_by(ClientRelease.created_at.desc()))],
                     "catalog_revision": db.get(Platform, 1).catalog_revision}
 
     @app.post("/api/v1/admin/client-releases")

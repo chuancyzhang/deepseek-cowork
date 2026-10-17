@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -126,12 +127,15 @@ class EnterpriseClient:
         self.transport = transport
 
     def request(self, connection, method, path, *, token="", payload=None):
+        loopback = urlsplit(connection["platform_url"]).hostname in {"localhost", "127.0.0.1", "::1"}
         try:
-            with httpx.Client(transport=self.transport, timeout=20, follow_redirects=False) as client:
+            with httpx.Client(transport=self.transport, timeout=20, follow_redirects=False,
+                              trust_env=not loopback) as client:
                 response = client.request(method, connection["platform_url"] + path, json=payload,
                                           headers={"Authorization": "Bearer " + token} if token else {})
             data = response.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("enterprise.request_failed method=%s loopback=%s reason=%s", method, loopback, type(exc).__name__)
             raise EnterpriseError("暂时无法连接企业平台，请检查网络后重试。") from None
         if not response.is_success:
             raise EnterpriseError(str((data.get("error") or {}).get("message") or "企业平台未完成请求，请重试。"))

@@ -45,6 +45,7 @@ def main():
                     source = db.get(AuthSource, "staff")
                     source.enabled, source.verified_revision = True, source.revision
                     db.add(ModelGrant(member_id=account["id"], model_id="fixture-model"))
+                app.state.releases.create({"app_version": "5.3.0", "arch": "x64", "notes": "界面验收示例"}, "fixture-admin")
                 yield
         app.router.lifespan_context = lifespan
         @app.get("/qa/login")

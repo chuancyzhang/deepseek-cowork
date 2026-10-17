@@ -548,6 +548,49 @@ class PlatformTests(unittest.TestCase):
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended").json()["release"])
         self.assertEqual(self.client.get("/api/v1/client-releases/"+release["id"]+"/download").status_code, 404)
 
+    def test_release_delete_restore_and_dependency_guards(self):
+        from web.platform.server.database import ClientRelease
+        self.web_login()
+        actor = self.client.get("/api/v1/me").json()["member"]["id"]
+        record = self.app.state.releases.create({"app_version": "5.3.0", "arch": "x64"}, actor)
+        release_id = record["id"]
+        path = "/api/v1/admin/client-releases/" + release_id
+        directory = self.app.state.releases.directory(release_id)
+        directory.mkdir(exist_ok=True)
+        package = directory / "retained.source.zip"
+        package.write_bytes(b"retained archive")
+        for state, stage, code in (("published", "ready", "release_published"),
+                                   ("processing", "validate", "release_busy"),
+                                   ("draft", "receive", "release_busy")):
+            with self.db.transaction() as db:
+                item = db.get(ClientRelease, release_id)
+                item.state, item.stage = state, stage
+            payload = {"operation_id": "delete-test-" + state, "catalog_revision": 0, "revision": 1}
+            response = self.client.post(path + "/delete", headers=self.headers(), json=payload)
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["error"]["code"], code)
+        with self.db.transaction() as db:
+            item = db.get(ClientRelease, release_id)
+            item.state, item.stage = "failed", "validate"
+        payload = {"operation_id": "delete-failed-release", "catalog_revision": 0, "revision": 1}
+        self.assertEqual(self.client.post(path + "/delete", json=payload).status_code, 403)
+        stale = self.client.post(path + "/delete", headers=self.headers(), json={**payload, "revision": 99})
+        self.assertEqual(stale.status_code, 409)
+        deleted = self.client.post(path + "/delete", headers=self.headers(), json=payload)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(self.client.post(path + "/delete", headers=self.headers(), json=payload).json(), deleted.json())
+        self.assertEqual(self.client.get("/api/v1/admin/client-releases").json()["items"], [])
+        self.assertEqual(self.client.get("/api/v1/admin/client-releases?deleted=true").json()["items"][0]["id"], release_id)
+        self.assertEqual(self.client.get(path + "/download").status_code, 404)
+        self.assertEqual(self.client.post(path + "/prepare", headers=self.headers()).status_code, 409)
+        restored = self.client.post(path + "/restore", headers=self.headers(), json={
+            "operation_id": "restore-failed-release", "catalog_revision": 1, "revision": 2})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["release"]["state"], "failed")
+        self.assertFalse(restored.json()["release"]["recommended"])
+        self.assertEqual(package.read_bytes(), b"retained archive")
+        self.assertEqual(len(self.client.get("/api/v1/admin/client-releases").json()["items"]), 1)
+
     def test_archive_traversal_and_prebranded_source_are_rejected(self):
         import zipfile
         from web.platform.server.releases import inspect_archive

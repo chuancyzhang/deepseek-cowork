@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 
 from core.enterprise_client import EnterpriseClient, EnterpriseStore
-from core.enterprise_connection import read_connection
+from core.enterprise_connection import read_connection, EnterpriseConfigurationError
 from core.theme import DesignTokens, bind_theme
 from ui.knowledge_library import LibraryJobs
 from ui.primitives import product_button_style, ProductMessageDialog
+
+log = logging.getLogger(__name__)
 
 
 def offer_enterprise_onboarding(config_manager, parent):
@@ -111,9 +114,11 @@ class EnterpriseConnectionPanel(QWidget):
             member = state.get("member") if state.get("expires_at", 0) > time.time() else None
             default_status = "已登录 · " + member["name"] if member else "登录已过期，请重新登录" if state.get("member") else "未登录"
             self.status.setText(message or default_status)
-        except Exception:
+        except Exception as exc:
             self.connection = None
-            self.status.setText(message or "企业连接无法读取，请联系管理员检查客户端配置。")
+            log.warning("enterprise.connection_unreadable reason=%s", type(exc).__name__)
+            reason = str(exc) if isinstance(exc, EnterpriseConfigurationError) else "请联系管理员检查客户端配置。"
+            self.status.setText(message or "企业连接无法读取：" + reason)
         self.company.setText((self.connection or {}).get("platform_name", "尚未配置企业登录"))
         self.guide.setVisible(not member)
         self.guide.setText("在企业认证网页输入账号密码或扫码。登录完成后，客户端会自动连接。" if self.connection

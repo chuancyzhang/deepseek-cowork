@@ -287,11 +287,28 @@ class Releases:
                 return old.result
             if payload.get("catalog_revision") != platform.catalog_revision:
                 raise PlatformError("catalog_conflict", "发布目录已变化，请刷新后核对。", 409)
-            item = db.get(ClientRelease, release_id)
+            item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
             target = (ClientRelease.target_os == item.target_os, ClientRelease.arch == item.arch)
-            if action == "publish":
+            if action in {"delete", "restore"}:
+                if payload.get("revision") != item.revision:
+                    raise PlatformError("release_changed", "发布记录已变化，请刷新后核对。", 409)
+                if action == "delete":
+                    if item.state == "published" or item.recommended:
+                        raise PlatformError("release_published", "请先撤下已发布版本，再删除记录。", 409)
+                    if item.state == "processing" or (item.stage == "receive" and item.state != "failed"):
+                        raise PlatformError("release_busy", "正在上传或生成安装包，请先取消或等待完成。", 409)
+                    if item.state not in {"draft", "failed", "ready", "withdrawn"}:
+                        raise PlatformError("release_deleted", "此记录已删除，请刷新列表。", 409)
+                    item.stage, item.state = "deleted:" + item.state, "deleted"
+                else:
+                    previous = item.stage.removeprefix("deleted:")
+                    if item.state != "deleted" or previous not in {"draft", "failed", "ready", "withdrawn"}:
+                        raise PlatformError("not_deleted", "只能恢复已删除的发布记录。", 409)
+                    item.state, item.stage = previous, ""
+                item.recommended = False
+            elif action == "publish":
                 if item.state != "ready" or not self.download_path(item).is_file():
                     raise PlatformError("not_publishable", "最终包尚未就绪。", 409)
                 item.state, item.published_at = "published", time.time()
@@ -328,6 +345,7 @@ class Releases:
             result = {"release": public_release(item, admin=True), "catalog_revision": platform.catalog_revision}
             db.add(Operation(id=operation_id, member_id=actor, request_hash=request_hash, result=result))
             self.database.audit(db, "release." + action, member_id=actor, target=release_id)
+            log.info("release.mutated release=%s action=%s actor=%s", release_id, action, actor)
             return result
 
     def download_path(self, item):

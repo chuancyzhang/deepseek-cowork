@@ -194,7 +194,8 @@ def test_admin_account_password_requires_founder(local_auth):
     assert save_account(local_auth,account,password='replacement password 456').status_code==200
 
 
-def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path):
+@pytest.mark.parametrize("platform_url", ["https://localhost", "http://localhost:8788", "http://enterprise.example"])
+def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path,platform_url):
     client,app,settings,headers,source,account=local_auth
     enable(local_auth)
     assert client.put('/api/v1/admin/login-entry',headers=headers,json={'provider_id':'staff','revision':0}).status_code==200
@@ -203,7 +204,7 @@ def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path):
     with app.state.database.transaction() as db:
         model=Model(id='test-model',name='测试模型',provider='openai',protocol='chat_completions',model_name='test',base_url='https://models.example/v1',secret=app.state.vault.seal({'api_key':'test'}),enabled=True,tested_revision=1)
         db.add(model);db.add(ModelGrant(member_id=account['id'],model_id='test-model'))
-    connection={'schema_version':1,'config_version':1,'platform_id':settings.platform_id,'platform_name':settings.platform_name,'platform_url':'https://localhost','distribution_channel':'enterprise'}
+    connection={'schema_version':1,'config_version':1,'platform_id':settings.platform_id,'platform_name':settings.platform_name,'platform_url':platform_url,'distribution_channel':'enterprise'}
     def forward(request):
         response=client.request(request.method,request.url.path,content=request.content,headers=dict(request.headers),follow_redirects=False)
         return httpx.Response(response.status_code,headers=dict(response.headers),content=response.content)

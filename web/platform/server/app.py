@@ -21,7 +21,7 @@ from .auth import Authentication, oauth_compatibility_preset
 from .administrator import AdministratorAccess
 from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
-                       Member, Model, Platform, Question)
+                       LocalAdministrator, Member, Model, Platform, Question)
 from .management import Management, member_view, model_view
 from .releases import Releases, public_release
 from .security import PlatformError, Vault, digest
@@ -306,7 +306,11 @@ def create_app(settings=None, *, transport=None):
     @app.get("/api/v1/me")
     def me(request: Request):
         user = principal(request)
-        return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id}
+        with database.transaction() as db:
+            founder = db.get(LocalAdministrator, 1)
+            can_assign_admin = user["role"] == "admin" and (not founder or founder.member_id == user["id"])
+        return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id,
+                "can_assign_admin": can_assign_admin}
 
     @app.post("/api/v1/auth/logout")
     def logout(request: Request):

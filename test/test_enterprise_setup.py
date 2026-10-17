@@ -23,8 +23,7 @@ def server(tmp_path):
 
 
 def create_admin(client, settings, **changes):
-    payload = dict(setup_code=(settings.data_dir/'setup-code').read_text().strip(),
-                   username='admin', password='unique administrator password')
+    payload = dict(username='admin', password='unique administrator password')
     payload.update(changes)
     return client.post('/api/v1/setup', json=payload)
 
@@ -53,11 +52,9 @@ def test_setup_login_and_configuration_without_enterprise_auth(server):
         assert len(credential.password_hash) == 128
 
 
-def test_setup_code_and_origin_protection(server):
+def test_setup_validation_and_origin_protection(server):
     client, app, settings = server
-    assert create_admin(client, settings, setup_code='wrong').status_code == 403
-    assert create_admin(client, settings, setup_code='错误初始化码').status_code == 403
-    payload=dict(setup_code=(settings.data_dir/'setup-code').read_text().strip(),username='admin',password='long enough password')
+    payload=dict(username='admin',password='long enough password')
     assert client.post('/api/v1/setup', json=payload, headers={'Origin':'https://untrusted.invalid'}).status_code == 403
     assert create_admin(client, settings, password='short').status_code == 400
     assert client.get('/api/v1/setup').json()['required']
@@ -93,11 +90,6 @@ def test_setup_rejects_concurrent_claim(server):
 
 def test_throttling_persists_and_recovers(server):
     client, app, settings = server
-    for _ in range(5):
-        assert create_admin(client, settings, setup_code='wrong').status_code == 403
-    assert create_admin(client, settings).status_code == 429
-    with app.state.database.transaction() as db:
-        db.get(Installation,1).locked_until=time.time()-1
     assert create_admin(client, settings).status_code == 200
     for _ in range(5):
         assert client.post('/api/v1/auth/administrator',json={'username':'admin','password':'wrong'}).status_code == 401
@@ -111,3 +103,36 @@ def test_disabled_admin_cannot_login(server):
     with app.state.database.transaction() as db:
         db.scalar(select(Member)).enabled=False
     assert client.post('/api/v1/auth/administrator',json={'username':'admin','password':'unique administrator password'}).status_code == 401
+
+
+def test_only_founder_can_authorize_another_administrator(server):
+    client, app, settings = server
+    assert create_admin(client, settings).status_code == 200
+    founder=client.get('/api/v1/me').json()['member']['id']
+    with app.state.database.transaction() as db:
+        member=Member(provider_id='sso',subject='employee',name='员工')
+        another=Member(provider_id='sso',subject='another',name='另一个员工')
+        db.add_all([member,another]);db.flush()
+        member_id,another_id=member.id,another.id
+    payload={'revision':1,'role':'admin'}
+    session=app.state.auth.session(member_id,'web')
+    headers={'Authorization':'Bearer '+session['access_token']}
+    assert client.put('/api/v1/admin/members/'+member_id,json=payload,headers=headers).status_code==403
+    csrf={'X-CSRF-Token':client.cookies['cowork_csrf']}
+    assert client.put('/api/v1/admin/members/'+member_id,json=payload,headers=csrf).status_code==200
+    assert client.put('/api/v1/admin/members/'+another_id,json=payload,headers=headers).status_code==403
+    assert client.put('/api/v1/admin/members/'+founder,json={'revision':1,'enabled':False},headers=headers).status_code==409
+    assert client.put('/api/v1/admin/members/'+member_id,json={'revision':2,'role':'member'},headers=csrf).status_code==200
+    assert create_admin(client,settings).status_code==409
+
+
+def test_legacy_bootstrap_cannot_grant_admin_after_setup(server):
+    from dataclasses import replace
+    client,app,settings=server
+    assert create_admin(client,settings).status_code==200
+    app.state.auth.settings=replace(settings,bootstrap_provider='legacy',bootstrap_subject='new-person')
+    with app.state.database.transaction() as db:
+        db.add(AuthSource(id='legacy',name='legacy',mode='oauth2',config={},secret='',enabled=True,revision=1,verified_revision=1))
+    member_id=app.state.auth.register({'id':'legacy','revision':1,'verified_revision':1},{'subject':'new-person','name':'new-person','email':''})
+    with app.state.database.transaction() as db:
+        assert db.get(Member,member_id).role=='member'

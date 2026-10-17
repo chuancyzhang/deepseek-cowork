@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from .config import service_url
-from .database import AuthSource, LoginSession, Member, Model, ModelGrant, Question
+from .database import AuthSource, LocalAdministrator, LoginSession, Member, Model, ModelGrant, Question
 from .security import PlatformError, digest, encode, equal
 
 MODEL_OPTIONS = {"supports_vision", "supports_image_generation", "stream_usage_enabled", "deepseek_thinking_enabled",
@@ -76,6 +76,11 @@ class Management:
             enabled = payload.get("enabled", member.enabled)
             if role not in {"admin", "member"} or type(enabled) is not bool:
                 raise PlatformError("invalid_member", "成员角色或启用状态无效。")
+            founder = db.get(LocalAdministrator, 1)
+            if founder and member.id == founder.member_id and (role != "admin" or not enabled):
+                raise PlatformError("founder_required", "首位管理员负责管理员授权，不能停用或降级。", 409)
+            if founder and role != member.role and actor != founder.member_id:
+                raise PlatformError("founder_required", "管理员角色只能由首位管理员授权或收回。", 403)
             if member.role == "admin" and member.enabled and (role != "admin" or not enabled):
                 admins = db.scalar(select(func.count()).select_from(Member).where(Member.role == "admin", Member.enabled))
                 if admins <= 1:

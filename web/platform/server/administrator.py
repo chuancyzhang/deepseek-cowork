@@ -1,7 +1,6 @@
 """One-time deployment setup and a separate, web-only platform administrator."""
 import hashlib
 import logging
-import os
 import re
 import threading
 import time
@@ -22,7 +21,6 @@ class AdministratorAccess:
     def __init__(self, settings, database):
         self.settings, self.database = settings, database
         self.lock = threading.RLock()
-        self.code_path = settings.data_dir / 'setup-code'
 
     def available(self, db):
         state = db.get(Installation, 1)
@@ -34,14 +32,7 @@ class AdministratorAccess:
                 db.add(Installation(id=1))
                 db.flush()
             if self.available(db):
-                try:
-                    fd = os.open(self.code_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                except FileExistsError:
-                    pass
-                else:
-                    with os.fdopen(fd, 'w', encoding='ascii') as file:
-                        file.write(token() + '\n')
-                log.info('installation.pending code_file=/data/setup-code')
+                log.info('installation.pending')
 
     def status(self):
         with self.database.transaction() as db:
@@ -72,22 +63,15 @@ class AdministratorAccess:
             state = db.get(Installation, 1)
             if not self.available(db):
                 raise PlatformError('setup_completed', '平台已完成初始化，请使用已有管理员账号登录。', 409)
-            self.throttle(state)
-            code = payload.get('setup_code')
-            if not isinstance(code, str) or not equal(digest(code), digest(self.code_path.read_text(encoding='ascii').strip())):
-                self.reject(db, state, 'installation.rejected')
-            else:
-                salt = token()
-                member = Member(provider_id='__platform_admin__', subject=username, name=username, role='admin')
-                db.add(member)
-                db.flush()
-                db.add(LocalAdministrator(id=1, member_id=member.id, username=username,
-                                          password_hash=password_hash(password, salt), salt=salt))
-                state.completed, state.failures, state.locked_until = True, 0, 0
-                member_id = member.id
-                self.database.audit(db, 'installation.completed', member_id=member_id)
-        if not member_id:
-            raise PlatformError('setup_code_invalid', '初始化码不正确，请从部署服务器获取后重试。', 403)
+            salt = token()
+            member = Member(provider_id='__platform_admin__', subject=username, name=username, role='admin')
+            db.add(member)
+            db.flush()
+            db.add(LocalAdministrator(id=1, member_id=member.id, username=username,
+                                      password_hash=password_hash(password, salt), salt=salt))
+            state.completed, state.failures, state.locked_until = True, 0, 0
+            member_id = member.id
+            self.database.audit(db, 'installation.completed', member_id=member_id)
         log.info('installation.completed member=%s', member_id)
         return member_id
 

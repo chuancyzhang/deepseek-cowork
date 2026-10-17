@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import service_url
-from .database import AuthSource, LoginSession, LoginTransaction, Member
+from .database import AuthSource, Installation, LoginSession, LoginTransaction, Member, Platform
 from .security import PlatformError, challenge, digest, equal, token
 
 log = logging.getLogger(__name__)
@@ -323,14 +323,18 @@ class Authentication:
                 "email": str(field(profile, p["email_path"], "") or "")[:512]}
 
     def register(self, snapshot, identity):
-        bootstrap = (snapshot["id"] == self.settings.bootstrap_provider
+        bootstrap_candidate = (snapshot["id"] == self.settings.bootstrap_provider
                      and identity["subject"] == self.settings.bootstrap_subject)
-        if snapshot.get("verified_revision") != snapshot["revision"] and not (bootstrap or snapshot.get("test_actor")):
-            raise PlatformError("source_not_verified", "管理员尚未完成此认证配置的测试登录。", 403)
         # Unique provider+subject plus retry resolves simultaneous first logins.
         for attempt in range(2):
             try:
                 with self.database.transaction() as db:
+                    db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+                    installation = db.get(Installation, 1)
+                    bootstrap = (bootstrap_candidate and not (installation and installation.completed)
+                                 and not db.scalar(select(Member.id).limit(1)))
+                    if snapshot.get("verified_revision") != snapshot["revision"] and not (bootstrap or snapshot.get("test_actor")):
+                        raise PlatformError("source_not_verified", "管理员尚未完成此认证配置的测试登录。", 403)
                     source = db.get(AuthSource, snapshot["id"])
                     if source is None or source.revision != snapshot["revision"]:
                         raise PlatformError("source_changed", "登录期间认证配置已变更，请重新登录。", 409)
@@ -355,6 +359,8 @@ class Authentication:
                     member.name, member.email, member.last_login_at = identity["name"], identity["email"], time.time()
                     if bootstrap:
                         source.verified_revision = source.revision
+                        if installation:
+                            installation.completed = True
                     return member.id
             except IntegrityError:
                 if attempt:

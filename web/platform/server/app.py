@@ -522,6 +522,13 @@ def create_app(settings=None, *, transport=None):
         payload["id"] = source_id
         return {"id": app.state.auth.save_source(payload, actor=actor["id"])}
 
+    @app.delete("/api/v1/admin/auth-sources/{source_id}")
+    async def delete_source(source_id: str, request: Request):
+        actor = principal(request, admin=True)
+        payload = await read_json(request, 8192)
+        app.state.auth.delete_source(source_id, payload.get("revision"), actor=actor["id"])
+        return {"status": "deleted"}
+
     @app.put("/api/v1/admin/login-entry")
     async def save_login_entry(request: Request):
         actor = principal(request, admin=True)

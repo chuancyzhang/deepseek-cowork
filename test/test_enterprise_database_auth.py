@@ -220,3 +220,31 @@ def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path):
     assert state['member']['id']==account['id']
     assert state['models'][0]['id']=='test-model'
     assert store.profiles()[0]['enterprise']['member_id']==account['id']
+
+
+def test_delete_unused_source_and_dependency_guards(local_auth):
+    client,app,settings,headers,source,account=local_auth
+    url='/api/v1/admin/auth-sources/empty'
+    payload={**source,'id':'empty'}
+    assert client.put(url,headers=headers,json=payload).status_code==200
+    assert client.request('DELETE',url,json={'revision':1}).status_code==403
+    assert client.request('DELETE',url,headers=headers,json={'revision':99}).status_code==409
+    tx=transaction(client,source='empty',test=True,headers=headers)
+    response=client.request('DELETE',url,headers=headers,json={'revision':1})
+    assert response.json()['error']['code']=='source_login_pending'
+    from web.platform.server.database import LoginTransaction
+    with app.state.database.transaction() as db:
+        db.get(LoginTransaction,tx['id']).expires_at=0
+    assert client.request('DELETE',url,headers=headers,json={'revision':1}).status_code==200
+    assert client.get(tx['form_url']).status_code==409
+    assert client.request('DELETE',url,headers=headers,json={'revision':1}).status_code==404
+    assert all(s['id']!='empty' for s in client.get('/api/v1/admin/settings',headers=headers).json()['sources'])
+    response=client.request('DELETE','/api/v1/admin/auth-sources/staff',headers=headers,json={'revision':1})
+    assert response.json()['error']['code']=='source_has_members'
+    assert client.put(url,headers=headers,json={**payload,'enabled':True}).status_code==200
+    response=client.request('DELETE',url,headers=headers,json={'revision':1})
+    assert response.json()['error']['code']=='source_enabled'
+    assert client.put('/api/v1/admin/login-entry',headers=headers,json={'provider_id':'empty','revision':0}).status_code==200
+    assert client.put(url,headers=headers,json={**payload,'revision':1}).status_code==200
+    response=client.request('DELETE',url,headers=headers,json={'revision':1})
+    assert response.json()['error']['code']=='source_in_use'

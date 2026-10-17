@@ -219,6 +219,8 @@ python -m pytest -q test/test_enterprise_deployment.py test/test_enterprise_plat
 
 真实企业 SSO/LDAP、实际模型端点、干净 Windows 机器首次安装和 Linux/PostgreSQL 压测仍需部署联调。2026-10-17 在本机 Docker Desktop 的 Linux 容器中完成应用镜像构建及 PostgreSQL 17 启动，两项容器健康检查通过，`/healthz`、`/api/v1/platform-info`、`/api/v1/auth/providers` 和 `/app` 均返回 200。已导出本机启动镜像包；未生成或发布正式 Windows 企业客户端发行包。
 
-数据库账号及原有企业流程的聚焦回归为 `python -m pytest -q test/test_enterprise_database_auth.py test/test_enterprise_setup.py test/test_enterprise_platform.py test/test_enterprise_client.py test/test_enterprise_deployment.py`，54 项测试及 3 个子测试通过，包含无账号时直接启用来源、原生表单来源校验、现有桌面客户端完成账号密码浏览器登录并取得模型授权。Docker PostgreSQL 独立 schema 另行验证并发同名创建只成功一次、认证测试/启用、桌面交接和重设密码撤销令牌。
+数据库账号及原有企业流程的聚焦回归为 `python -m pytest -q test/test_enterprise_database_auth.py test/test_enterprise_setup.py test/test_enterprise_platform.py test/test_enterprise_client.py test/test_enterprise_deployment.py`，55 项测试及 3 个子测试通过，包含无账号时直接启用来源、原生表单来源校验、现有桌面客户端完成账号密码浏览器登录并取得模型授权。Docker PostgreSQL 独立 schema 另行验证并发同名创建只成功一次、认证测试/启用、桌面交接和重设密码撤销令牌。
 
 UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口（使用 `http://127.0.0.1:8787/qa/login`，与 localhost 服务隔离 Cookie），数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。
+
+认证来源列表提供“删除”操作，并在执行前确认。仅可删除已停用且未关联成员的来源；正在进行的登录需先结束或等待过期。若来源被指定为客户端统一登录入口，先更换入口。已关联成员的来源可停用，保留员工账号、授权与历史记录。

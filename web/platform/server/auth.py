@@ -130,6 +130,7 @@ class Authentication:
         if not isinstance(payload.get("name"), str) or not 1 <= len(payload["name"].strip()) <= 80:
             raise PlatformError("invalid_source", "请填写 1–80 字的认证名称。")
         with self.database.transaction() as db:
+            db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
             source = db.get(AuthSource, source_id)
             if source and payload.get("revision") != source.revision:
                 raise PlatformError("conflict", "认证配置已被其他操作修改，请刷新核对。", 409)
@@ -156,6 +157,29 @@ class Authentication:
             source.enabled = enabled
             self.database.audit(db, "auth_source.saved", member_id=actor, target=source_id)
         return source_id
+
+    def delete_source(self, source_id, revision, *, actor):
+        with self.database.transaction() as db:
+            db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            source = db.get(AuthSource, source_id)
+            if source is None:
+                raise PlatformError("not_found", "认证来源不存在，请刷新列表。", 404)
+            if source.revision != revision:
+                raise PlatformError("conflict", "认证来源已修改，请刷新后核对。", 409)
+            if source.enabled:
+                raise PlatformError("source_enabled", "请先在配置页停用此认证来源，再删除。", 409)
+            entry = db.get(LoginEntry, 1)
+            if source_id == (entry.provider_id if entry else self.settings.login_provider):
+                raise PlatformError("source_in_use", "此来源仍是客户端统一登录入口，请先在设置中更换登录方式。", 409)
+            if db.scalar(select(Member.id).where(Member.provider_id == source_id).limit(1)):
+                raise PlatformError("source_has_members", "此来源已关联成员，不能删除。可保持停用，成员账号、授权和记录将保留。", 409)
+            if db.scalar(select(LoginTransaction.id).where(LoginTransaction.provider_id == source_id,
+                    LoginTransaction.expires_at > time.time(),
+                    LoginTransaction.status.in_(["pending", "exchanging", "ready"])).limit(1)):
+                raise PlatformError("source_login_pending", "此来源仍有登录正在进行，请结束登录或等待登录链接过期（最长 10 分钟）后再删除。", 409)
+            db.delete(source)
+            self.database.audit(db, "auth_source.deleted", member_id=actor, target=source_id)
+        log.info("auth_source.deleted source=%s actor=%s", source_id, actor)
 
     async def json_request(self, method, url, *, config=None, **kwargs):
         try:
@@ -217,6 +241,10 @@ class Authentication:
                               challenge=code_challenge, state_hash=digest(state), expires_at=time.time() + LOGIN_SECONDS,
                               transient_secret=self.vault.seal({"state": state, "verifier": verifier, "nonce": nonce}))
         with self.database.transaction() as db:
+            db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            source = db.get(AuthSource, source_id)
+            if source is None or source.revision != snapshot["revision"] or source.mode != snapshot["mode"]:
+                raise PlatformError("source_changed", "认证来源已变更，请重新发起登录。", 409)
             db.add(tx)
             db.flush()
             self.database.audit(db, "login.created", target=tx.id)

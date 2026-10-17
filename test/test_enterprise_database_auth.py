@@ -53,8 +53,6 @@ def submit(client,tx,password=PASSWORD,username='employee'):
 
 def enable(local_auth):
     client,app,settings,headers,source,account=local_auth
-    tx=transaction(client,test=True,headers=headers)
-    assert submit(client,tx).status_code==200
     response=client.put('/api/v1/admin/auth-sources/staff',headers=headers,json={**source,'revision':1,'enabled':True})
     assert response.status_code==200,response.text
 
@@ -70,10 +68,9 @@ def exchange(client,tx):
     return client.post(prefix+'/exchange',json={'verifier':tx['verifier'],'handoff_code':status.get('handoff_code','')})
 
 
-def test_admin_create_test_enable_employee_web_login(local_auth):
+def test_admin_create_enable_employee_web_login(local_auth):
     client,app,settings,headers,source,account=local_auth
     assert client.post('/api/v1/auth/transactions',json={'provider_id':'staff','mode':'web'}).status_code==404
-    assert client.put('/api/v1/admin/auth-sources/staff',headers=headers,json={**source,'revision':1,'enabled':True}).status_code==400
     enable(local_auth)
     tx=transaction(client)
     bad=submit(client,tx,password='wrong')
@@ -88,6 +85,36 @@ def test_admin_create_test_enable_employee_web_login(local_auth):
     with app.state.database.transaction() as db:
         credential=db.get(DatabaseAccount,account['id'])
         assert len(credential.password_hash)==128 and credential.password_hash!=PASSWORD
+
+
+def test_enable_empty_source_then_create_account(server):
+    client,app,settings=server
+    assert create_admin(client,settings).status_code==200
+    headers={'Authorization':'Bearer '+client.cookies['cowork_session']}
+    source={'id':'staff','name':'员工账号','mode':'database','config':{},'secrets':{},'enabled':True}
+    assert client.put('/api/v1/admin/auth-sources/staff',headers=headers,json=source).status_code==200
+    assert client.put('/api/v1/admin/login-entry',headers=headers,json={'provider_id':'staff','revision':0}).status_code==200
+    assert client.post('/api/v1/admin/auth-sources/staff/accounts',headers=headers,json={
+        'username':'employee','name':'测试员工','password':PASSWORD}).status_code==200
+    tx=transaction(client)
+    assert submit(client,tx).status_code==303
+
+
+def test_native_form_origin_policy_and_csrf(local_auth):
+    client,app,settings,headers,source,account=local_auth
+    enable(local_auth)
+    tx=transaction(client)
+    assert client.get(tx['form_url']).headers['referrer-policy']=='strict-origin'
+    for origin in ('null','https://other.example'):
+        response=client.post(tx['form_url'],headers={'Origin':origin},data={
+            'state':tx['state'],'username':'employee','password':PASSWORD})
+        assert response.status_code==403 and response.json()['error']['code']=='origin_rejected'
+    response=client.post(tx['form_url'],headers={'Origin':settings.origin},data={
+        'state':tx['state'],'username':'employee','password':'wrong'})
+    assert response.status_code==401 and response.headers['referrer-policy']=='strict-origin'
+    assert client.post(tx['form_url'],headers={'Origin':settings.origin},data={
+        'state':tx['state'],'username':'employee','password':PASSWORD},follow_redirects=False).status_code==303
+    assert client.get('/app').headers['referrer-policy']=='no-referrer'
 
 
 def test_duplicate_username_and_source_isolation(local_auth):

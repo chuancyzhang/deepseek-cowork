@@ -147,11 +147,14 @@ def create_app(settings=None, *, transport=None):
         request.state.request_id = uuid.uuid4().hex
         origin = request.headers.get("origin")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin != settings.origin:
+            log.warning("request.origin_rejected request=%s method=%s reason=%s",
+                        request.state.request_id, request.method,
+                        "opaque_origin" if origin == "null" else "origin_mismatch")
             return JSONResponse({"error": {"code": "origin_rejected", "message": "请求来源不匹配，请从平台页面重新操作。"}}, status_code=403)
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -237,7 +240,10 @@ def create_app(settings=None, *, transport=None):
             + "<form class='form' method='post' action='" + action + "'><input type='hidden' name='state' value='"
             + html.escape(transaction["state"], quote=True) + "'><label>账号<input name='username' autocomplete='username' required maxlength='512' value='"
             + html.escape(username, quote=True) + "'></label><label>密码<input name='password' type='password' autocomplete='current-password' required maxlength='4096'></label>"
-            "<button class='primary'>登录</button></form></section></main></html>", status_code=status)
+            "<button class='primary'>登录</button></form></section></main></html>", status_code=status,
+            # no-referrer makes native form POSTs send Origin: null. Keep the
+            # origin for CSRF validation without disclosing transaction paths.
+            headers={"Referrer-Policy": "strict-origin"})
 
     @app.get("/auth/directory/{transaction_id}")
     def directory_login_page(transaction_id: str, request: Request):

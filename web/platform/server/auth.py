@@ -148,6 +148,8 @@ class Authentication:
                     source.revision += 1
             source.name, source.mode, source.config = payload["name"].strip(), payload["mode"], config
             source.secret = self.vault.seal(secrets)
+            if source.mode == "database":
+                source.verified_revision = source.revision
             enabled = bool(payload.get("enabled"))
             if enabled and source.verified_revision != source.revision and not bootstrap:
                 raise PlatformError("verification_required", "请先保存草稿并完成测试登录，再启用此配置。")

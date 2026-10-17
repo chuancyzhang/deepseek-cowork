@@ -23,7 +23,7 @@
 
 1. 启动容器后打开 `/app`，空平台自动显示“初始化企业平台”。
 2. 在网页填写管理员账号、密码及确认密码，直接创建首位管理员。账号为 3–64 位字母、数字、点、横线或下划线；密码至少 12 个字符。
-3. 创建后直接进入“设置”，点击“添加认证来源”，选择平台账号密码，或填写 OAuth2、OIDC、LDAP 参数；保存草稿、完成测试登录、启用。
+3. 创建后直接进入“设置”，点击“添加认证来源”，选择平台账号密码后直接保存并启用；OAuth2、OIDC、LDAP 则填写参数、保存草稿、完成测试登录后启用。
 4. 员工使用企业认证登录，默认是普通成员；首位管理员在“成员 → 管理与分配”授予或收回管理员角色。其他管理员不能转授管理员角色。
 5. 管理员使用登录页的“平台管理员登录”。尚无启用的企业认证时，网页直接显示管理员登录。
 
@@ -110,9 +110,9 @@ sh start.sh
 
 不依赖外部身份平台，员工账号与密码校验值存储在本平台的 PostgreSQL 中。客户端仍使用“登录企业账号”入口，在平台网页输入账号密码，完成后自动回到客户端。
 
-1. “设置 → 添加认证来源”选择“平台账号密码”，填写名称和来源 ID，保存草稿；无需填写外部数据库或协议参数。
+1. “设置 → 添加认证来源”选择“平台账号密码”，填写名称和来源 ID，点击“保存并启用”；无需填写外部数据库或协议参数。
 2. 点击“管理员工账号 → 创建员工账号”，填写账号、成员姓名和初始密码（至少 12 个字符）。账号名称创建后不可更改；相同来源不能重名，不同来源的同名账号属于不同成员。
-3. 回到认证来源页，点击“测试登录”，用新建员工账号登录；测试成功后回到管理页启用该来源。
+3. 平台账号密码无需测试登录；可以先启用来源再创建账号。已有草稿直接点击“启用”即可。
 4. 有多个启用来源时，在“设置 → 客户端统一登录方式”选择该来源并保存。只有一个来源时自动使用它。
 5. 在账号列表的“模型与权限”或“成员”页分配模型。新建账号默认是普通成员，管理员角色仍只能由首位管理员授权。
 
@@ -157,7 +157,7 @@ sh start.sh
 
 LDAP 使用 `mode: "ldap"`，配置 `host`、`port`、`tls`（`ldaps` 或 `starttls`）、`base_dn`、`user_filter`（例如 `(uid={username})`）、`identity_attribute`（例如 `entryUUID`），可选 `bind_dn` 和 `ca_file`。查询账号密码放在 `secrets.bind_password`。`ca_file` 是容器内管理员挂载的 CA 文件路径。身份属性必须稳定，不能以登录名或 DN 变化伪装为同一成员。查询用户后再用其 DN 和用户密码绑定；不保存用户密码。
 
-已有认证配置变更须保存草稿、完成测试登录后再启用。不同认证来源的相同用户标识不会合并。停用成员会撤销中心会话，不能通过重新登录再次加入。
+OAuth2、OIDC、LDAP 配置变更须保存草稿、完成测试登录后再启用；平台账号密码无需测试，保存配置保留当前启用状态。不同认证来源的相同用户标识不会合并。停用成员会撤销中心会话，不能通过重新登录再次加入。
 
 ## 子路径与原生进程部署
 
@@ -219,6 +219,6 @@ python -m pytest -q test/test_enterprise_deployment.py test/test_enterprise_plat
 
 真实企业 SSO/LDAP、实际模型端点、干净 Windows 机器首次安装和 Linux/PostgreSQL 压测仍需部署联调。2026-10-17 在本机 Docker Desktop 的 Linux 容器中完成应用镜像构建及 PostgreSQL 17 启动，两项容器健康检查通过，`/healthz`、`/api/v1/platform-info`、`/api/v1/auth/providers` 和 `/app` 均返回 200。已导出本机启动镜像包；未生成或发布正式 Windows 企业客户端发行包。
 
-数据库账号及原有企业流程的聚焦回归为 `python -m pytest -q test/test_enterprise_database_auth.py test/test_enterprise_setup.py test/test_enterprise_platform.py test/test_enterprise_client.py test/test_enterprise_deployment.py`，52 项测试及 3 个子测试通过，包含现有桌面客户端完成账号密码浏览器登录并取得模型授权。Docker PostgreSQL 独立 schema 另行验证并发同名创建只成功一次、认证测试/启用、桌面交接和重设密码撤销令牌。
+数据库账号及原有企业流程的聚焦回归为 `python -m pytest -q test/test_enterprise_database_auth.py test/test_enterprise_setup.py test/test_enterprise_platform.py test/test_enterprise_client.py test/test_enterprise_deployment.py`，54 项测试及 3 个子测试通过，包含无账号时直接启用来源、原生表单来源校验、现有桌面客户端完成账号密码浏览器登录并取得模型授权。Docker PostgreSQL 独立 schema 另行验证并发同名创建只成功一次、认证测试/启用、桌面交接和重设密码撤销令牌。
 
 UI 验收夹具可用 `python test/enterprise_ui_fixture.py` 启动；仅绑定本机 8787 端口（使用 `http://127.0.0.1:8787/qa/login`，与 localhost 服务隔离 Cookie），数据位于临时目录，`/qa/login` 仅存在于此测试脚本，生产应用没有该入口。测试完成须停止夹具。

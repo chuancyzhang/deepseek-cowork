@@ -1418,12 +1418,12 @@ class OpenAIProvider(LLMProvider):
             m.pop("reasoning", None)
             
             # Most OpenAI-compatible providers reject reasoning_content entirely.
-            # DeepSeek thinking mode requires replaying non-empty assistant
-            # reasoning_content for prior tool-using turns.
+            # DeepSeek distinguishes an explicitly empty replay from an absent
+            # field. Never drop a real empty string or invent one for missing data.
             if "reasoning_content" in m:
                 if (
                     not is_deepseek
-                    or not m.get("reasoning_content")
+                    or not isinstance(m.get("reasoning_content"), str)
                     or m.get("role") != "assistant"
                 ):
                     m.pop("reasoning_content", None)

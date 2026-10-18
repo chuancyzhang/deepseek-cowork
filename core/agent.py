@@ -96,12 +96,13 @@ def _stable_json_hash(value):
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 def _reasoning_text_from_message(msg):
+    """Return native replay text, including empty text; None means unavailable."""
     if not isinstance(msg, dict):
-        return ""
+        return None
     reasoning_content = msg.get("reasoning_content")
-    if isinstance(reasoning_content, str) and reasoning_content:
+    if isinstance(reasoning_content, str):
         return reasoning_content
-    return ""
+    return None
 
 
 def _clean_reasoning_content_by_turn(
@@ -129,7 +130,7 @@ def _clean_reasoning_content_by_turn(
             role = msg.get("role")
             if role == "assistant" and (preserve_all_reasoning or turn_has_tool_calls):
                 reasoning_text = _reasoning_text_from_message(msg)
-                if reasoning_text:
+                if reasoning_text is not None:
                     msg["reasoning_content"] = reasoning_text
                 else:
                     msg.pop("reasoning_content", None)
@@ -267,7 +268,7 @@ def find_tool_call_messages_without_reasoning(messages):
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         tool_calls = message.get("tool_calls") or []
-        if not tool_calls or _reasoning_text_from_message(message).strip():
+        if not tool_calls or _reasoning_text_from_message(message) is not None:
             continue
         missing.append({
             "message_index": index,
@@ -376,7 +377,7 @@ def project_incompatible_completed_tool_rounds(
             projected.append(copied)
             index += 1
             continue
-        if _reasoning_text_from_message(copied).strip():
+        if _reasoning_text_from_message(copied) is not None:
             projected.append(copied)
             index += 1
             continue
@@ -616,9 +617,9 @@ def sanitize_llm_messages(
                 if call_id
             })
             raise ValueError(
-                "工具调用历史缺少目标模型所需的 reasoning，不能安全原样续接"
+                "工具调用历史的 reasoning_content 字段缺失或类型无效，不能安全原样续接"
                 + (f"（call_id: {', '.join(call_ids)}）" if call_ids else "")
-                + "。请使用原模型继续；原历史不会被静默裁剪。"
+                + "。已有消息和成果已保留，请从完整记录恢复后重试；原历史不会被静默裁剪。"
             )
     ensure_tool_call_sequence(
         ledger_messages,
@@ -632,7 +633,14 @@ def sanitize_llm_messages(
         preserve_legacy_deepseek_replay=preserve_legacy_deepseek_replay,
     )
     if return_metadata:
-        return cleaned, {"protocol_tool_round_projections": protocol_projections}
+        return cleaned, {
+            "protocol_tool_round_projections": protocol_projections,
+            "empty_reasoning_message_count": sum(
+                message.get("role") == "assistant"
+                and message.get("reasoning_content") == ""
+                for message in cleaned
+            ),
+        }
     return cleaned
 
 class LLMWorker(QThread):
@@ -3526,6 +3534,19 @@ class LLMWorker(QThread):
                     protocol_projections = sanitization_meta.get(
                         "protocol_tool_round_projections"
                     ) or []
+                    if require_reasoning_replay:
+                        empty_reasoning_count = sanitization_meta["empty_reasoning_message_count"]
+                        self._record_provider_attempt(attempt_id, {
+                            "empty_reasoning_message_count": empty_reasoning_count,
+                        })
+                        if empty_reasoning_count:
+                            self.observability_signal.emit({
+                                "type": "provider_empty_reasoning_replayed",
+                                "request_id": attempt_id,
+                                "turn_id": self.turn_id,
+                                "empty_reasoning_message_count": empty_reasoning_count,
+                                "timestamp": time.time(),
+                            })
                     if protocol_projections:
                         self._record_provider_attempt(
                             attempt_id,

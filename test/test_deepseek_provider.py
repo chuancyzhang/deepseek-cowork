@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import unittest
@@ -1013,6 +1014,30 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         self.assertEqual(prepared[0]["reasoning_content"], "keep final reasoning")
 
+    def test_prepare_messages_distinguishes_empty_and_unavailable_reasoning(self):
+        source = [
+            {"role": "assistant", "content": "empty", "reasoning_content": "", "reasoning": "ui-only"},
+            {"role": "assistant", "content": "missing"},
+            {"role": "assistant", "content": "null", "reasoning_content": None},
+            {"role": "assistant", "content": "invalid", "reasoning_content": 0},
+            {"role": "user", "content": "user", "reasoning_content": ""},
+        ]
+        original = copy.deepcopy(source)
+        for base_url, model_name, keep_empty in [
+            ("https://api.deepseek.com", "deepseek-flash", True),
+            ("https://api.openai.com/v1", "gpt-4.1-mini", False),
+        ]:
+            with self.subTest(model=model_name):
+                provider, _ = self._build_provider(base_url=base_url, model_name=model_name)
+                prepared, _ = provider._prepare_chat_completions_messages(source)
+                self.assertEqual("reasoning_content" in prepared[0], keep_empty)
+                if keep_empty:
+                    self.assertEqual(prepared[0]["reasoning_content"], "")
+                for message in prepared[1:]:
+                    self.assertNotIn("reasoning_content", message)
+                self.assertNotIn("reasoning", prepared[0])
+        self.assertEqual(source, original)
+
     def test_chat_stream_omits_none_tool_call_arguments(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1",
@@ -1805,6 +1830,72 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
 
 class TestDeepSeekMessageSanitization(unittest.TestCase):
+    def _chat_tool_round(self, fields):
+        namespace = build_provider_replay_namespace(
+            provider_family="deepseek", base_url="https://api.deepseek.com",
+            model="deepseek-flash", protocol="chat_completions",
+        )
+        return [
+            {"role": "user", "content": "read"},
+            {
+                "role": "assistant", "content": "", "reasoning": "ui-only",
+                "tool_calls": [{"id": "call-empty", "type": "function", "function": {
+                    "name": "read_file", "arguments": "{}",
+                }}],
+                "meta": {PROVIDER_REPLAY_NAMESPACE_META_KEY: namespace},
+                **fields,
+            },
+            {"role": "tool", "tool_call_id": "call-empty", "content": "ok"},
+        ], namespace
+
+    def test_explicit_reasoning_survives_replay_without_rewriting_prefix(self):
+        for value in ("", " \n", "native reasoning"):
+            for legacy in (False, True):
+                with self.subTest(value=value, legacy=legacy):
+                    source, namespace = self._chat_tool_round({"reasoning_content": value})
+                    if legacy:
+                        source[1].pop("meta")
+                    original = copy.deepcopy(source)
+                    replay, meta = sanitize_llm_messages(
+                        source, require_reasoning_replay=True, return_metadata=True,
+                        target_replay_namespace=namespace,
+                    )
+                    self.assertEqual(replay[1]["reasoning_content"], value)
+                    self.assertEqual(replay[1]["tool_calls"], source[1]["tool_calls"])
+                    self.assertEqual(meta["protocol_tool_round_projections"], [])
+                    self.assertEqual(meta["empty_reasoning_message_count"], int(value == ""))
+                    extended = sanitize_llm_messages(
+                        source + [{"role": "user", "content": "continue"}],
+                        require_reasoning_replay=True, target_replay_namespace=namespace,
+                    )
+                    self.assertEqual(extended[:len(replay)], replay)
+                    self.assertEqual(source, original)
+
+    def test_missing_or_invalid_native_reasoning_is_not_replaced_by_ui_text(self):
+        for fields in ({}, {"reasoning_content": None}, {"reasoning_content": 0},
+                       {"reasoning_content": []}, {"reasoning_content": {}}):
+            with self.subTest(fields=fields):
+                source, namespace = self._chat_tool_round(fields)
+                original = copy.deepcopy(source)
+                with self.assertRaisesRegex(ValueError, "reasoning_content.*call-empty"):
+                    sanitize_llm_messages(
+                        source, require_reasoning_replay=True, target_replay_namespace=namespace,
+                    )
+                self.assertEqual(source, original)
+
+    def test_empty_reasoning_does_not_make_foreign_replay_compatible(self):
+        source, namespace = self._chat_tool_round({"reasoning_content": ""})
+        original = copy.deepcopy(source)
+        target = dict(namespace, model="another-model")
+        replay, meta = sanitize_llm_messages(
+            source, require_reasoning_replay=True, return_metadata=True,
+            target_replay_namespace=target,
+        )
+        self.assertEqual(len(meta["protocol_tool_round_projections"]), 1)
+        self.assertNotIn("tool_calls", replay[1])
+        self.assertNotIn("reasoning_content", replay[1])
+        self.assertEqual(source, original)
+
     def test_clear_reasoning_content_preserves_tool_call_turns_only(self):
         cleaned = clear_reasoning_content([
             {"role": "user", "content": "plain turn"},

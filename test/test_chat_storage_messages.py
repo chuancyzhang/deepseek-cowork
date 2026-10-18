@@ -22,6 +22,33 @@ class TestChatStorageMessages(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_empty_native_reasoning_survives_storage_and_transcript_roundtrip(self):
+        storage = ChatStorage(self.db_path)
+        messages = [
+            {"id": "empty", "role": "assistant", "content": "", "reasoning_content": ""},
+            {"id": "empty-ui", "role": "assistant", "content": "", "reasoning_content": "", "reasoning": "UI text"},
+            {"id": "missing", "role": "assistant", "content": ""},
+            {"id": "null", "role": "assistant", "content": "", "reasoning_content": None, "reasoning": "UI text"},
+            {"id": "ui-empty", "role": "assistant", "content": "", "reasoning": ""},
+        ]
+        storage.save_conversation("empty-reasoning", messages)
+        storage.upsert_agent("agent-empty", conversation_id="empty-reasoning")
+        storage.replace_agent_messages("agent-empty", messages)
+        legacy_path = os.path.join(self.temp_dir, "chat_history_empty-legacy.json")
+        with open(legacy_path, "w", encoding="utf-8") as stream:
+            json.dump(messages, stream)
+
+        restored = ChatStorage(self.db_path)
+        collections = [restored.get_messages("empty-reasoning"), restored.get_agent_messages("agent-empty")]
+        collections.extend(item["messages"] for item in restored.iter_conversation_transcripts())
+        self.assertEqual(len(collections), 4)
+        for items in collections:
+            by_id = {message["id"]: message for message in items}
+            for message_id in ("empty", "empty-ui"):
+                self.assertEqual(by_id[message_id]["reasoning_content"], "")
+            for message_id in ("missing", "null", "ui-empty"):
+                self.assertNotIn("reasoning_content", by_id[message_id])
+
     def test_save_conversation_rolls_back_summary_when_message_write_fails(self):
         storage = ChatStorage(self.db_path)
         with patch.object(

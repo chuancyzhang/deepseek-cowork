@@ -497,7 +497,12 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
         tool_calls_json = (
             json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
         )
-        reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
+        # Native replay takes precedence even when empty/null. The legacy UI
+        # alias must not overwrite it or turn absent data into an empty replay.
+        reasoning_content = (
+            msg["reasoning_content"] if "reasoning_content" in msg
+            else msg.get("reasoning") or None
+        )
         content_parts_json = self._json_dumps(msg.get("content_parts"))
         meta_json = self._json_dumps(msg.get("meta"))
         result_obj_json = self._json_dumps(msg.get("result_obj"))
@@ -1658,7 +1663,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
                             message["tool_calls"] = json.loads(msg_row["tool_calls"])
                         except Exception:
                             message["tool_calls"] = msg_row["tool_calls"]
-                    if msg_row["reasoning_content"]:
+                    if msg_row["reasoning_content"] is not None:
                         message["reasoning_content"] = msg_row["reasoning_content"]
                     content_parts = self._parse_json_value(msg_row["content_parts"])
                     if isinstance(content_parts, list):
@@ -1787,8 +1792,11 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
                 }
                 if raw_msg.get("tool_calls"):
                     message["tool_calls"] = raw_msg.get("tool_calls")
-                reasoning = raw_msg.get("reasoning_content") or raw_msg.get("reasoning")
-                if reasoning:
+                reasoning = (
+                    raw_msg["reasoning_content"] if "reasoning_content" in raw_msg
+                    else raw_msg.get("reasoning") or None
+                )
+                if reasoning is not None:
                     message["reasoning_content"] = reasoning
                 if isinstance(raw_msg.get("content_parts"), list):
                     message["content_parts"] = raw_msg.get("content_parts")

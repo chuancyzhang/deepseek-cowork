@@ -2553,6 +2553,85 @@ class TestAgentSystemPrompt(unittest.TestCase):
 
 
 class TestLLMWorkerToolLoopGuard(unittest.TestCase):
+    def test_deepseek_empty_reasoning_tool_round_continues_after_success_or_error(self):
+        from core.llm.providers import OpenAIProvider
+        from core.chat_storage import ChatStorage
+        from core.agent import sanitize_llm_messages
+
+        class Skills(_PromptSkillManagerStub):
+            def get_tool_definitions(self, *args, **kwargs):
+                return [{"type": "function", "function": {
+                    "name": "read_file", "description": "read",
+                    "parameters": {"type": "object", "properties": {}},
+                }}]
+
+            def check_for_updates(self):
+                return False
+
+            def get_tool_record(self, name):
+                return {"source_kind": "core_builtin", "read_only": True}
+
+            def call_tool(self, name, args, context=None):
+                return tool_result
+
+        def frame(delta, finish=None):
+            return {"choices": [{"delta": delta, "finish_reason": finish}]}
+
+        for failed in (False, True):
+            with self.subTest(tool_failed=failed), tempfile.TemporaryDirectory() as directory:
+                tool_result = (
+                    {"ok": False, "status": "invalid_kind", "error": "目标不是网页。", "executed": False}
+                    if failed else {"ok": True, "content": "file contents"}
+                )
+                client = MagicMock()
+                client.chat.completions.create.side_effect = [
+                    [frame({"reasoning_content": ""}),
+                     frame({"tool_calls": [{"index": 0, "id": "call-empty", "function": {
+                         "name": "read_file", "arguments": "{}",
+                     }}]}), frame({"reasoning_content": None}, "tool_calls")],
+                    [frame({"content": "done"}), frame({}, "stop")],
+                ]
+                with patch("openai.OpenAI", return_value=client):
+                    provider = OpenAIProvider("test-key", "https://api.deepseek.com", "deepseek-flash")
+                finished, events = [], []
+                with (
+                    patch("core.agent.SkillManager", return_value=Skills()),
+                    patch("core.agent.LLMFactory.create_provider", return_value=provider),
+                ):
+                    worker = LLMWorker(
+                        [{"role": "user", "content": "read file"}],
+                        _DaemonConfigStub(directory, values={"api_key": "test-key"}),
+                        workspace_dir=directory, session_id="empty-replay",
+                        turn_id="turn-1", request_id="run-1",
+                        run_context={"mode": RUN_MODE_EXECUTION},
+                    )
+                    worker.finished_signal.connect(finished.append)
+                    worker.observability_signal.connect(events.append)
+                    worker.run()
+                self.assertEqual(len(finished), 1)
+                self.assertNotIn("error", finished[0])
+                self.assertEqual(finished[0]["content"], "done")
+                self.assertEqual(client.chat.completions.create.call_count, 2)
+                wire = client.chat.completions.create.call_args.kwargs["messages"]
+                assistant = next(message for message in wire if message.get("tool_calls"))
+                self.assertEqual(assistant["reasoning_content"], "")
+                self.assertEqual(sum(m.get("tool_call_id") == "call-empty" for m in wire), 1)
+                attempt = worker.runtime_journal.get_attempt("empty-replay", "run-1:request:2")
+                self.assertEqual(attempt["empty_reasoning_message_count"], 1)
+                self.assertEqual(attempt["status"], "completed")
+                self.assertTrue(any(event["type"] == "provider_empty_reasoning_replayed" for event in events))
+
+                # Reopening the saved tool round must preserve the same native field.
+                generated = finished[0]["generated_messages"]
+                storage = ChatStorage(os.path.join(directory, "roundtrip.sqlite"))
+                storage.save_conversation("roundtrip", generated)
+                restored = storage.get_messages("roundtrip")
+                native = next(message for message in restored if message.get("tool_calls"))
+                self.assertEqual(native["reasoning_content"], "")
+                replay = sanitize_llm_messages(restored, require_reasoning_replay=True)
+                replay_wire, _ = provider._prepare_chat_completions_messages(replay)
+                self.assertEqual(next(m for m in replay_wire if m.get("tool_calls"))["reasoning_content"], "")
+
     def test_tool_result_is_kept_when_final_journal_write_fails(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

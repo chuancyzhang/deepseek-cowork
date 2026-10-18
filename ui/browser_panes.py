@@ -27,13 +27,15 @@ def asset_path(name):
     return path
 
 
-def input_url(value):
+def input_url(value, *, allow_local=False):
     value = str(value or "").strip()
     if not value:
         return QUrl("about:blank")
     if value == "about:blank":
         return QUrl(value)
     candidate = QUrl.fromUserInput(value)
+    if allow_local and candidate.isLocalFile():
+        return candidate
     if candidate.scheme() not in {"http", "https"} or (" " in value) or (":" not in value and "." not in value and value != "localhost"):
         if "://" in value:
             raise WorkbenchError("unsupported_url", "这里只打开 HTTP 或 HTTPS 网页；本地文件请从文件目录打开。")
@@ -147,6 +149,8 @@ class BrowserPane(ControlledPane):
                 return holder[0] if holder else None
 
             def acceptNavigationRequest(self, url, kind, main_frame):
+                if url.isLocalFile() and pane.tab.path:
+                    return True
                 if url.scheme() not in {"http", "https", "about", "blob", "data"}:
                     if main_frame:
                         pane.show_notice("此链接需要系统应用打开，请复制链接后使用对应应用。")
@@ -156,7 +160,7 @@ class BrowserPane(ControlledPane):
         self.page = Page(profile, self.view)
         self.view.setPage(self.page)
         settings = self.page.settings()
-        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, bool(tab.path))
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
@@ -211,7 +215,7 @@ class BrowserPane(ControlledPane):
         self.view.loadProgress.connect(lambda value: self.show_notice(f"正在加载 {value}%") if self.tab.status == "loading" else None)
         self.view.installEventFilter(self)
         self.refresh_theme()
-        self.view.setUrl(input_url(tab.url))
+        self.view.setUrl(input_url(tab.url, allow_local=bool(tab.path)))
 
     def show_find(self):
         self.find.show(); self.find.setFocus(); self.find.selectAll()
@@ -279,7 +283,7 @@ class BrowserPane(ControlledPane):
         if self.tab.owner == "agent":
             return
         try:
-            self.view.setUrl(input_url(self.address.text()))
+            self.view.setUrl(input_url(self.address.text(), allow_local=bool(self.tab.path)))
         except WorkbenchError as exc:
             self.show_notice(str(exc))
 
@@ -300,6 +304,8 @@ class BrowserPane(ControlledPane):
         self.document_ready = False
         self.tab.status = "loading"
         self.tab.page_revision += 1
+        log.info("browser.load_started session=%s run=%s tab=%s source=%s", self.tab.session_id,
+                 self.tab.owner_run_id, self.tab.id, "local_html" if self.tab.path else "url")
         self.changed.emit()
 
     def load_finished(self, ok):
@@ -307,6 +313,8 @@ class BrowserPane(ControlledPane):
             return
         self.document_ready = bool(ok)
         self.tab.status = "ready" if ok else "failed"
+        log.info("browser.load_finished session=%s run=%s tab=%s status=%s", self.tab.session_id,
+                 self.tab.owner_run_id, self.tab.id, self.tab.status)
         self.show_notice("" if ok else "网页加载失败。可刷新重试，或在系统浏览器打开。")
         self.install_input_filter()
         self.refresh_control()

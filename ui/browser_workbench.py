@@ -299,14 +299,32 @@ class BrowserWorkbench(QObject):
         except Exception as exc:
             self.start_notice.setText(str(exc)); self.start_notice.show()
 
-    def open_web(self, session_id, url, *, activate=False):
-        url = input_url(url).toString()
+    def open_web(self, session_id, url="", *, path="", activate=False):
+        if path:
+            if url:
+                raise WorkbenchError("invalid_arguments", "打开网页时请选择 url 或本地 HTML path，不要同时提供。")
+            if not os.path.isabs(path):
+                state = self.window.get_session(session_id)
+                if state is None:
+                    raise WorkbenchError("session_unavailable", "原聊天已关闭。")
+                path = os.path.join(self.window._workspace_dir_for_state(state), path)
+            path = os.path.abspath(path)
+            if not os.path.isfile(path):
+                raise WorkbenchError("file_unavailable", "本地 HTML 文件不存在或无法访问。")
+            if Path(path).suffix.lower() not in {".html", ".htm"}:
+                raise WorkbenchError("unsupported_file", "网页面板只运行本地 HTML 文件；其他文件请用 kind='file' 打开。")
+            url = QUrl.fromLocalFile(path).toString()
+        else:
+            url = input_url(url).toString()
         if activate and not self.window.confirm_leave_deliverable_edit("打开网页"):
             raise WorkbenchError("cancelled", "已取消打开网页，编辑内容已保留。")
         if activate:
             self.pause_follow()
         previous = self.active_tab(session_id)
-        tab = self.store.open(session_id, "web", url=url, title=url, activate=activate)
+        tab = self.store.open(session_id, "web", url=url, path=path,
+                              title=os.path.basename(path) if path else url, status="loading", activate=activate)
+        log.info("workbench.web_open session=%s tab=%s source=%s", session_id, tab.id,
+                 "local_html" if path else "url")
         try:
             self.ensure_pane(tab)
         except Exception:
@@ -484,7 +502,7 @@ class BrowserWorkbench(QObject):
                     self.check_browser_handoff(request)
                 request.started = True
                 if kind == "web":
-                    tab = self.open_web(request.session_id, args.get("url", ""))
+                    tab = self.open_web(request.session_id, args.get("url", ""), path=args.get("path", ""))
                     self.claim_browser(request, tab)
                 elif kind == "terminal":
                     tab = self.open_terminal(request.session_id, args.get("shell", ""), args.get("cwd", ""))

@@ -7,9 +7,9 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QUrl
 from PySide6.QtWidgets import QApplication
-from PySide6.QtWebEngineCore import QWebEngineProfile
+from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
 from core.workbench import WorkbenchBridge, WorkbenchStore, WorkbenchRequest
 from ui.browser_panes import BrowserPane
 
@@ -52,6 +52,11 @@ class BrowserTargetFreshnessTests(unittest.TestCase):
         self.profile.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
+
+    def test_normal_web_page_does_not_gain_local_file_access(self):
+        self.assertFalse(self.pane.page.settings().testAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls))
+        self.assertFalse(self.pane.page.acceptNavigationRequest(
+            QUrl.fromLocalFile(os.path.abspath(__file__)), QWebEnginePage.NavigationType.NavigationTypeLinkClicked, True))
 
     def wait(self, predicate, timeout=8):
         end = time.monotonic() + timeout

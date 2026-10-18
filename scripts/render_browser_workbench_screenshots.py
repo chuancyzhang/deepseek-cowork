@@ -109,6 +109,25 @@ def run():
         browser.panes[web_tab.id].refresh_control()
         capture("browser-web")
         capture("browser-web", 1000, 720)
+        html_path = workspace / "本地动画.html"
+        html_path.write_text('''<!doctype html><meta charset="utf-8"><title>本地动画预览</title>
+        <link rel="stylesheet" href="animation.css">
+        <h1>本地动画预览</h1><p>HTML、样式和脚本均从本地文件加载。</p>
+        <div class="track"><span id="dot"></span></div>
+        <p id="status">正在加载动画…</p><button onclick="running=!running;this.textContent=running?'暂停':'继续'">暂停</button>
+        <script src="animation.js"></script>''', encoding="utf-8")
+        (workspace / "animation.css").write_text('''body{font:16px "Microsoft YaHei";padding:32px;color:#202124;background:#fff}
+        h1{font-size:28px}.track{height:48px;max-width:440px;margin:32px 0;background:#eef4ef;border-radius:6px;position:relative}
+        #dot{position:absolute;top:12px;left:12px;width:24px;height:24px;border-radius:50%;background:#39734d}
+        button{padding:9px 18px;background:#fff;border:1px solid #ccc;border-radius:5px}''', encoding="utf-8")
+        (workspace / "animation.js").write_text('''let running=true,step=0;
+        document.querySelector('#status').textContent='动画运行中 · 本地资源已加载';
+        setInterval(()=>{if(running)document.querySelector('#dot').style.left=(12+(step++%100)/100*(document.querySelector('.track').clientWidth-48))+'px'},40);''', encoding="utf-8")
+        local_tab = browser.open_web(window.current_session_id, path=str(html_path), activate=True)
+        wait(lambda: browser.panes[local_tab.id].document_ready)
+        window.add_chat_bubble("User", "检查这个本地 HTML 动画的运行效果。", animate=False)
+        capture("browser-local-html")
+        capture("browser-local-html", 1000, 720)
         browser.activate(terminal_tab.id)
         terminal = browser.panes[terminal_tab.id].terminal
         terminal.write("printf '\\033[2J\\033[H'; printf '正在检查交付文件…\\n报告.pdf  42816 bytes\\n检查完成。\\n'\r")

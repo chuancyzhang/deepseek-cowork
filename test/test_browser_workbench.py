@@ -401,6 +401,97 @@ class WorkbenchFileUiTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIs(browser.store.get(auth.session_id, web.id), web)
 
+    def test_local_html_web_tool_observes_background_page_and_relative_assets(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        from ai_skills.workbench.impl import browser_open, browser_observe
+        from browser_test_context import browser_config
+        from core.browser_backend import BrowserBackendCoordinator, bind_run, finish_run
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "动画 #1 中文.html"
+            source.write_text('''<!doctype html><meta charset="utf-8"><title>Local animation</title>
+                <link rel="stylesheet" href="style.css"><h1>Waiting</h1>
+                <img src="dot.svg"><button>Play</button><output>0</output>
+                <script src="animation.js"></script>''', encoding="utf-8")
+            (root / "style.css").write_text("body{background:rgb(238,247,240)}h1{color:rgb(12,34,56)}", encoding="utf-8")
+            (root / "dot.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="8" fill="green"/></svg>', encoding="utf-8")
+            (root / "animation.js").write_text("document.querySelector('h1').textContent='Local script loaded';window.ticks=0;setInterval(()=>document.querySelector('output').textContent=String(++window.ticks),50)", encoding="utf-8")
+            foreground = self.window.current_session_id
+            session = self.window.create_new_session(workspace_dir=directory)
+            self.window.set_current_session(foreground)
+            config = browser_config(directory)
+            BrowserBackendCoordinator(config).save(True)
+            auth = ExecutionAuthorization(session, "local-html-run", True, "")
+            bind_run(config, auth, worker=True)
+            context = {"execution_authorization": auth, "model_supports_vision": True,
+                       "model_api_protocol": "chat_completions"}
+            browser = self.window.browser_workbench
+            active_before = browser.active_tab().id
+
+            def call(tool, **arguments):
+                results = []
+                thread = threading.Thread(target=lambda: results.append(tool(**arguments, _context=context)))
+                thread.start()
+                self.wait(lambda: bool(results))
+                thread.join(1)
+                self.assertTrue(results[0]["ok"], results)
+                return results[0]
+
+            try:
+                result = call(browser_open, kind="web", path=source.name)
+                tab = browser.store.get(session, result["tab"]["id"])
+                self.assertEqual(QUrl(tab.url).toLocalFile(), str(source).replace("\\", "/"))
+                pane = browser.panes[tab.id]
+                self.wait(lambda: pane.document_ready)
+
+                def js(code):
+                    values = []
+                    pane.page.runJavaScript(code, values.append)
+                    self.wait(lambda: bool(values))
+                    return values[0]
+
+                self.assertEqual(js("getComputedStyle(document.querySelector('h1')).color"), "rgb(12, 34, 56)")
+                self.assertEqual(js("document.querySelector('img').naturalWidth"), 16)
+                self.assertTrue(pane.page.settings().testAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls))
+                first = call(browser_observe, tab_id=tab.id)
+                self.assertIn("Local script loaded", first["text"])
+                self.assertTrue(any(item["name"] == "Play" for item in first["elements"]))
+                self.assertTrue(first["page_version"])
+                self.assertEqual(first["image_status"], "ready")
+                self.assertTrue(Path(first["screenshot"]["path"]).is_file())
+                self.assertEqual(first["content_parts"], [first["screenshot"]])
+                ticks = js("window.ticks")
+                self.wait(lambda: js("window.ticks") > ticks + 1)
+                self.assertNotEqual(call(browser_observe, tab_id=tab.id)["text"], first["text"])
+                self.assertEqual(self.window.current_session_id, foreground)
+                self.assertEqual(browser.active_tab().id, active_before)
+            finally:
+                finish_run(auth)
+
+    def test_local_html_open_validates_target_before_creating_tab(self):
+        browser = self.window.browser_workbench
+        session = self.window.current_session_id
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "page.HTM"
+            source.write_text("<h1>Local HTML</h1>", encoding="utf-8")
+            text = source.with_suffix(".txt")
+            text.write_text("plain text", encoding="utf-8")
+            for args, code in [
+                ({"url": "https://example.test", "path": str(source)}, "invalid_arguments"),
+                ({"path": str(source.with_name("missing.html"))}, "file_unavailable"),
+                ({"path": str(text)}, "unsupported_file"),
+            ]:
+                with self.subTest(args=args):
+                    before = len(browser.store.list(session))
+                    with self.assertRaises(WorkbenchError) as error:
+                        browser.open_web(session, **args)
+                    self.assertEqual(error.exception.code, code)
+                    self.assertEqual(len(browser.store.list(session)), before)
+            tab = browser.open_web(session, path=str(source))
+            self.wait(lambda: browser.panes[tab.id].document_ready)
+            self.assertEqual(tab.path, str(source))
+
 
 if __name__ == "__main__":
     unittest.main()

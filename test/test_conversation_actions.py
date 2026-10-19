@@ -55,6 +55,7 @@ class ConversationActionsTests(unittest.TestCase):
                     refresh_history_list=MagicMock(), input_field=MagicMock(),
                     load_session=MagicMock(side_effect=lambda sid: self.assertEqual(state.chat_layout.count(), 0)))
                 worker = Worker()
+                window.chat_storage.get_team_space_binding.return_value = None
                 with patch("ui.conversation_actions.BranchWorker", return_value=worker):
                     ConversationActionsMixin.branch_conversation(window, "source", "a")
                 self.assertEqual(state.chat_layout.count(), 1)
@@ -177,6 +178,7 @@ class ConversationActionsTests(unittest.TestCase):
                     {"content": text, "display_content": text}, kwargs.get("conversation_refs")),
                 _flush_ui_stream_buffers=lambda *args: None,
                 _new_message_id=lambda: "guidance",
+                _workbench_submission_context=lambda state: {},
                 _accept_turn_guidance=lambda state, message, *args: accepted.append(message),
             )
             self.assertTrue(MainWindow._submit_turn_guidance(window, state, "继续参考", conversation_refs=[ref]))

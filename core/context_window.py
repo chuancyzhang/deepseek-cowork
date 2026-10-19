@@ -179,7 +179,9 @@ class ContextWindowManager:
         for m in messages[1:]:
             meta = m.get("meta") or {}
             kind = meta.get("kind")
-            if kind in {"runtime_context", "runtime_context_update", "skill_context", "skill_context_update", "skill_state_update"}:
+            if meta.get("source") == "team_space":
+                facts[("team_space", "")] = m
+            elif kind in {"runtime_context", "runtime_context_update", "skill_context", "skill_context_update", "skill_state_update"}:
                 key = ("skill", meta.get("skill_name")) if str(kind).startswith("skill") else ("runtime", "")
                 facts[key] = m
             elif meta.get("source") == "knowledge_context" or kind == "knowledge_context":

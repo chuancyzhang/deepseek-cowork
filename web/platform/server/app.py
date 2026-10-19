@@ -25,6 +25,8 @@ from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSes
 from .management import Management, member_view, model_view
 from .releases import Releases, public_release
 from .security import PlatformError, Vault, digest
+from .team_spaces import TeamSpaces
+from .team_space_routes import team_space_router
 
 log = logging.getLogger(__name__)
 UI = Path(__file__).resolve().parent.parent / "ui"
@@ -56,6 +58,7 @@ def create_app(settings=None, *, transport=None):
     vault = Vault(settings.encryption_key)
     management = Management(settings, database, vault)
     releases = Releases(settings, database)
+    team_spaces = TeamSpaces(settings, database)
     cleanup_state = {"last_success_at": None, "deleted": 0, "error": ""}
     jobs = set()
 
@@ -67,6 +70,7 @@ def create_app(settings=None, *, transport=None):
             db.execute(delete(LoginTransaction).where(LoginTransaction.expires_at <= now))
             if count:
                 database.audit(db, "questions.expired", target=str(count))
+        team_spaces.cleanup_uploads()
         cleanup_state.update(last_success_at=now, deleted=count, error="")
         return count
 
@@ -83,6 +87,7 @@ def create_app(settings=None, *, transport=None):
     async def lifespan(app):
         database.migrate(settings)
         administrator.prepare()
+        team_spaces.recover_uploads()
         # Interrupted processing cannot be inferred complete from temporary files.
         with database.transaction() as db:
             db.execute(update(ClientRelease).where(ClientRelease.state == "processing")
@@ -113,6 +118,7 @@ def create_app(settings=None, *, transport=None):
                   docs_url=None, redoc_url=None, openapi_url=None, root_path=settings.path_prefix)
     app.state.settings, app.state.database, app.state.vault = settings, database, vault
     app.state.management, app.state.releases, app.state.cleanup = management, releases, cleanup
+    app.state.team_spaces = team_spaces
 
     def principal(request, *, admin=False):
         authorization = request.headers.get("authorization", "")
@@ -130,6 +136,8 @@ def create_app(settings=None, *, transport=None):
         response.set_cookie("cowork_session", session["access_token"], httponly=True, **options)
         response.set_cookie("cowork_csrf", session["csrf_token"], httponly=False, **options)
         return response
+
+    app.include_router(team_space_router(team_spaces, principal, read_json))
 
     @app.exception_handler(PlatformError)
     async def platform_error(request, exc):
@@ -171,6 +179,7 @@ def create_app(settings=None, *, transport=None):
             platform = db.get(Platform, 1)
             return {"platform_id": platform.platform_id, "platform_name": platform.name,
                     "config_version": platform.config_version, "supported_api_versions": [1],
+                    "team_spaces": {"version": 1, "minimum_client_version": 1},
                     "question_retention_days": 30, "question_scope": "enterprise_models_only"}
 
     @app.get("/api/v1/auth/providers")
@@ -321,7 +330,8 @@ def create_app(settings=None, *, transport=None):
             founder = db.get(LocalAdministrator, 1)
             can_assign_admin = user["role"] == "admin" and (not founder or founder.member_id == user["id"])
         return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id,
-                "can_assign_admin": can_assign_admin}
+                "can_assign_admin": can_assign_admin,
+                "can_use_team_spaces": not founder or founder.member_id != user["id"]}
 
     @app.post("/api/v1/auth/logout")
     def logout(request: Request):
@@ -420,6 +430,13 @@ def create_app(settings=None, *, transport=None):
         metadata = body.pop("_cowork", None)
         if not isinstance(metadata, dict) or metadata.get("model_revision") != model["revision"]:
             raise PlatformError("model_changed", "企业模型配置已更新，请刷新企业连接后重新发起本轮。", 409)
+        space_binding = metadata.pop("team_space", None)
+        if space_binding is not None:
+            if (not isinstance(space_binding, dict) or set(space_binding) - {"space_id", "assets", "snapshots"}
+                    or not isinstance(space_binding.get("space_id"), str)):
+                raise PlatformError("invalid_space_binding", "空间调用归属无效，未继续外发。")
+            team_spaces.policy(actor["id"], space_binding["space_id"], "enterprise", model_id,
+                               assets=space_binding.get("assets", []), snapshots=space_binding.get("snapshots", []))
         if body.get("model") != model["model_name"]:
             raise PlatformError("model_mismatch", "请求模型与授权模型不一致，请刷新企业模型列表。", 409)
         if not isinstance(body.get("stream", False), bool):

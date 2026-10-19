@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import time
 import uuid
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, select, event
+from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, select, event, inspect, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -220,19 +220,27 @@ class Database:
             yield session
 
     def migrate(self, settings):
-        Base.metadata.create_all(self.engine)
-        with self.transaction() as db:
-            platform = db.get(Platform, 1)
-            if platform is None:
-                db.add(Platform(id=1, platform_id=settings.platform_id,
-                                name=settings.platform_name, public_url=settings.public_url))
-            elif platform.platform_id != settings.platform_id:
+        from .team_space_tables import SPACE_TABLES
+        # Validate before DDL. V2 adds independent tables; no existing columns,
+        # grants, questions or release records are rewritten by this migration.
+        with self.engine.begin() as connection:
+            platform = None
+            if inspect(connection).has_table("platform"):
+                platform = connection.execute(select(Platform.__table__).where(Platform.id == 1)).mappings().first()
+            if platform and platform["platform_id"] != settings.platform_id:
                 raise ValueError("数据库属于其他 platform_id；不得复用为新企业实例。")
-            elif platform.schema_version != 1:
+            if platform and platform["schema_version"] not in {1, 2}:
                 raise ValueError("数据库结构版本不兼容，需执行对应版本迁移。")
-            elif (platform.name, platform.public_url) != (settings.platform_name, settings.public_url):
-                platform.name, platform.public_url = settings.platform_name, settings.public_url
-                platform.config_version += 1
+            Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t not in SPACE_TABLES])
+            if platform is None:
+                connection.execute(Platform.__table__.insert().values(id=1, platform_id=settings.platform_id,
+                    name=settings.platform_name, public_url=settings.public_url, schema_version=1))
+            if platform is None or platform["schema_version"] == 1:
+                Base.metadata.create_all(connection, tables=SPACE_TABLES)
+                connection.execute(update(Platform).where(Platform.id == 1).values(schema_version=2))
+            if platform and (platform["name"], platform["public_url"]) != (settings.platform_name, settings.public_url):
+                connection.execute(update(Platform).where(Platform.id == 1).values(name=settings.platform_name,
+                    public_url=settings.public_url, config_version=platform["config_version"] + 1))
 
     def audit(self, db, action, *, member_id="", target="", outcome="ok"):
         db.add(AuditEvent(action=action, member_id=member_id, target=target, outcome=outcome))

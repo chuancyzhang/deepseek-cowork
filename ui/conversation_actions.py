@@ -456,6 +456,16 @@ class ConversationActionsMixin:
         state = self.get_session(session_id)
         if not state or getattr(state, "branch_in_progress", False):
             return
+        binding_getter = getattr(getattr(self, "chat_storage", None), "get_team_space_binding", None)
+        try:
+            binding = binding_getter(session_id) if binding_getter else None
+        except Exception as error:
+            self._show_conversation_notice(state, f"无法核对会话归属：{error}。原会话已保留。", "error")
+            return
+        if ((getattr(state, "persisted_conversation_meta", {}) or {}).get("team_space_required")
+                or binding):
+            self._show_conversation_notice(state, "空间任务请从团队空间的计划或资料创建新任务；原会话和结果保留。", "info")
+            return
         if not getattr(state, "history_loaded", False) or getattr(state, "history_loading", False):
             self._show_conversation_notice(state, "历史消息仍在加载，请稍后再分支。", "info")
             return

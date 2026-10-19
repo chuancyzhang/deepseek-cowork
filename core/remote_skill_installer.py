@@ -443,7 +443,7 @@ def _normalize_config_field(
 
 
 class RemoteSkillInstallerAgentRunner:
-    def __init__(self, config_manager, model_profile=None, reasoning_effort=""):
+    def __init__(self, config_manager, model_profile=None, reasoning_effort="", context=None):
         if config_manager is None:
             raise ValueError("远程 Skill 安装需要可用的模型配置。")
         self.provider = LLMFactory.create_provider(
@@ -451,6 +451,12 @@ class RemoteSkillInstallerAgentRunner:
             model_profile=model_profile if isinstance(model_profile, dict) else None,
             reasoning_effort=reasoning_effort or None,
         )
+        context = context or {}
+        from core.team_spaces import resolve_run_binding, bind_space_provider
+        binding = resolve_run_binding(context.get("chat_storage"), context.get("conversation_id"), context.get("run_context"))
+        if binding:
+            self.provider = bind_space_provider(self.provider, binding,
+                model_profile or config_manager.get_model_profile(), client=context.get("team_space_client"))
 
     def _run(self, user_prompt):
         content = collect_llm_content(
@@ -551,6 +557,7 @@ class RemoteSkillInstallService:
             self.context.get("config_manager"),
             model_profile=(self.context.get("run_context") or {}).get("selected_model_profile"),
             reasoning_effort=(self.context.get("run_context") or {}).get("reasoning_effort") or "",
+            context=self.context,
         )
         self.mutation_lock = mutation_lock or threading.RLock()
         os.makedirs(self.plan_root, exist_ok=True)

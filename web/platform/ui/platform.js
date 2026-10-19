@@ -37,8 +37,8 @@ function updateChrome(){
   const nav=document.getElementById("navigation"),identity=document.getElementById("identity");
   identity.replaceChildren();
   if(me){const label=document.createElement("span");label.textContent=me.member.name;identity.append(label,button("退出",async()=>{await api("/auth/logout",{method:"POST"});me=null;dirty=false;updateChrome();navigate("/app");}));}
-  nav.hidden=me?.member.role!=="admin";
-  if(!nav.hidden){const active=location.pathname.slice(base.length).split("/")[2]||"members";nav.innerHTML=[["members","成员"],["models","模型"],["questions","提问记录"],["settings","设置"]].map(([key,label])=>`<a data-route class="${active===key||(key==="settings"&&["releases","sources"].includes(active))?"active":""}" href="${base}/app/${key}">${label}</a>`).join("");}
+  nav.hidden=!me;
+  if(me){const active=location.pathname.slice(base.length).split("/")[2]||(me.member.role==="admin"?"members":"team-spaces");const links=me.member.role==="admin"?[["members","成员"],["models","模型"],["questions","提问记录"],["settings","设置"]]:[];if(spaceEnabled())links.unshift(["team-spaces","团队空间"]);nav.innerHTML=links.map(([key,label])=>`<a data-route class="${active===key||(key==="settings"&&["releases","sources"].includes(active))?"active":""}" href="${base}/app/${key}">${label}</a>`).join("");}
 }
 async function login(){
   const setup=await api("/setup");
@@ -66,6 +66,7 @@ async function members(){
 }
 function editMember(member,models){
   heading(member.name,"模型权限按账号生效；管理员角色由首位管理员授权或收回。","/app/members");
+  content.querySelector(".page-title").append(button("管理其空间所有权",()=>navigate("/app/members/"+member.id+"/spaces")));
   content.insertAdjacentHTML("beforeend",`<form class="form" id="member-form"><div class="row"><label>平台角色<select name="role"><option value="member" ${member.role==="member"?"selected":""}>普通成员</option><option value="admin" ${member.role==="admin"?"selected":""}>平台管理员</option></select></label><label>账号状态<select name="enabled"><option value="true" ${member.enabled?"selected":""}>启用</option><option value="false" ${!member.enabled?"selected":""}>停用</option></select></label></div><div><h3>可用模型</h3><div class="check-list">${models.length?models.map(m=>`<label><input type="checkbox" name="models" value="${esc(m.id)}" ${member.model_ids.includes(m.id)?"checked":""}>${esc(m.name)}${m.enabled?"":"（当前停用）"}</label>`).join(""):"请先在模型页面添加服务。"}</div></div><label>默认模型<select name="default_model_id"><option value="">不设置（未分配模型）</option>${models.map(m=>`<option value="${esc(m.id)}" ${m.id===member.default_model_id?"selected":""}>${esc(m.name)}</option>`).join("")}</select></label><div class="actions-row"><button class="primary">保存权限</button><button type="button" id="cancel-member">取消</button></div></form>`);
   const form=document.getElementById("member-form");form.elements.role.disabled=!me.can_assign_admin||member.provider_id==="__platform_admin__";form.elements.enabled.disabled=member.provider_id==="__platform_admin__";watchForm(form);document.getElementById("cancel-member").onclick=()=>navigate("/app/members");
   const syncDefault=()=>{const selected=new FormData(form).getAll("models"),current=form.elements.default_model_id.value;const allowed=models.filter(m=>selected.includes(m.id));form.elements.default_model_id.innerHTML=allowed.length?allowed.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join(""):'<option value="">未分配模型</option>';if(selected.includes(current))form.elements.default_model_id.value=current;};form.querySelectorAll('[name="models"]').forEach(input=>input.addEventListener("change",syncDefault));syncDefault();
@@ -165,10 +166,12 @@ async function downloads(){
   content.innerHTML=`<section class="download"><h1>${esc(platform.platform_name)} · Cowork</h1><p class="muted">下载企业客户端，完整解压后运行。登录后取得管理员分配的模型。</p>${r?`<div class="form"><h2>Windows ${esc(r.arch)} · ${esc(r.app_version)}</h2><dl><dt>发布时间</dt><dd>${date(r.published_at)}</dd><dt>文件大小</dt><dd>${(r.bytes/1024/1024).toFixed(1)} MiB</dd><dt>SHA-256</dt><dd class="code">${esc(r.sha256)}</dd></dl><p>${esc(r.notes||"暂无更新说明")}</p><a class="button primary" href="${base}/api/v1/client-releases/${r.id}/download">下载企业客户端</a><p class="help">完整解压后运行 deepseek-cowork.exe。也可选择暂不登录，继续个人使用。</p></div>`:empty("暂无可下载版本，请联系管理员发布企业客户端。")}<p class="section"><a href="${base}/app" data-route>返回企业平台</a></p></section>`;
 }
 async function render(){
-  routeGeneration++;clearTimeout(releasePoll);message("");updateChrome();
+  routeGeneration++;clearTimeout(releasePoll);clearTimeout(spacePoll);message("");updateChrome();
   const route=location.pathname.slice(base.length);
   if(route==="/downloads")return downloads();
   if(!me)return login();
+  if(route.startsWith("/app/team-spaces")||(route==="/app"&&me.member.role!=="admin"&&spaceEnabled()))return teamSpaceRoute(route==="/app"?"/app/team-spaces":route);
+  if(/^\/app\/members\/[^/]+\/spaces$/.test(route)&&me.member.role==="admin"){const id=route.split("/")[3],data=await api("/admin/members");const member=data.items.find(m=>m.id===id);if(!member)throw new Error("成员不存在。");return spaceOwnerRecovery(member);}
   if(me.member.role!=="admin"){heading("已连接企业平台",`你好，${me.member.name}。`);content.insertAdjacentHTML("beforeend",`<p>${me.models.length?"已分配模型："+esc(me.models.map(x=>x.name).join("、")):"尚未分配企业模型，请联系管理员。"}</p><p>请在 Cowork 客户端执行任务；本机历史不会同步到这里。</p><a class="button primary" href="${base}/downloads" data-route>下载客户端</a>`);return;}
   if(route==="/app/releases/new")return newRelease();
   if(route.startsWith("/app/releases/"))return releaseDetail(route.split("/").pop());

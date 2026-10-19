@@ -56,15 +56,17 @@ LEGACY_PLAN_META_KEYS = {
 
 from .agent_inbox import AgentInboxStorage
 from .context_storage import ContextStorage
+from .team_space_storage import TeamSpaceConversationStorage
 
 
-class ChatStorage(AgentInboxStorage, ContextStorage):
+class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorage):
     def __init__(self, db_path):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._ensure_schema()
         self._ensure_agent_inbox()
         self._ensure_context_schema()
+        self._ensure_team_space_schema()
 
     @contextmanager
     def _connect(self):
@@ -683,6 +685,8 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
             (conversation_id,),
         ).fetchone()
         if existing:
+            meta = self._preserve_team_space_marker(existing["meta"], meta)
+            meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
             if meta is None:
                 meta_json = existing["meta"]
             conn.execute(
@@ -768,6 +772,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
                 raise KeyError(f"conversation not found: {conversation_id}")
             meta = self._parse_json_dict(row["meta"])
             meta.update(meta_patch)
+            meta = self._preserve_team_space_marker(row["meta"], meta)
             conn.execute(
                 "UPDATE conversations SET meta = ? WHERE id = ?",
                 (json.dumps(meta, ensure_ascii=False), conversation_id),
@@ -1480,6 +1485,8 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
         grouped = {}
         for conversation in self.list_conversations():
             meta = conversation.get("meta") or {}
+            if meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
+                continue
             if str(meta.get("workspace_source") or "").strip().lower() == "chat":
                 continue
             workspace_dir = str(meta.get("workspace_dir") or "").strip()
@@ -1495,6 +1502,8 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
         result = []
         for conversation in self.list_conversations():
             meta = conversation.get("meta") or {}
+            if meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
+                continue
             if str(meta.get("workspace_source") or "").strip().lower() == "chat":
                 result.append(conversation)
                 continue
@@ -1526,6 +1535,8 @@ class ChatStorage(AgentInboxStorage, ContextStorage):
             rows = conn.execute("SELECT id, title, status, meta FROM conversations").fetchall()
             for row in rows:
                 meta = self._parse_json_dict(row["meta"])
+                if meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
+                    continue
                 if str(meta.get("workspace_source") or "").strip().lower() == "chat":
                     continue
                 row_workspace = str(meta.get("workspace_dir") or "").strip()

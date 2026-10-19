@@ -12,6 +12,7 @@ Current app version: **5.3.0** · [Read the release notes](docs/releases/5.3.0.m
 
 ## Current highlights
 
+- **Team spaces:** share plans, immutable file revisions, and selected results through the company center; execute in isolated local conversations. See the [team-space guide](docs/team-spaces.md).
 - **Multiple knowledge sources:** connect WeKnora, Tencent Docs, and Lexiang, use selected references, and save results within the chosen source and account scope.
 - **Optional accounts and connections:** manage sign-in, service connections, and capability permissions; existing configuration remains available until explicitly replaced.
 - **Optional data security:** all features start disabled; opt into capability checks, credential warnings, or tokenization of selected model-request text.

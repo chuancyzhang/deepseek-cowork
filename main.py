@@ -27580,6 +27580,8 @@ class MemoryUpdateWorker(QThread):
             transcripts = [
                 item for item in transcripts
                 if item.get("messages")
+                and not (item.get("meta") or {}).get("team_space_required")
+                and (item.get("meta") or {}).get("workspace_source") != "team_space"
             ]
             if self.scope == "workspace":
                 transcripts = filter_transcripts_for_workspace(transcripts, self.workspace_dir)
@@ -28355,6 +28357,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     PAGE_KNOWLEDGE = "knowledge"
     PAGE_SETTINGS = "settings"
     PAGE_PROJECTS = "projects"
+    PAGE_TEAM_SPACES = "team_spaces"
 
     def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
@@ -28784,6 +28787,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             f"QPushButton:disabled {{ color: {DesignTokens.text_disabled}; background: transparent; }}"
         )
         self.product_nav_buttons = {}
+
+        sidebar_spaces_btn = QPushButton(" 团队空间")
+        sidebar_spaces_btn.setIcon(qta.icon('fa5s.users', color=DesignTokens.text_secondary))
+        sidebar_spaces_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_spaces_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_spaces_btn.setCheckable(True)
+        sidebar_spaces_btn.clicked.connect(lambda checked=False: self.show_product_page(self.PAGE_TEAM_SPACES))
+        self.product_nav_buttons[self.PAGE_TEAM_SPACES] = sidebar_spaces_btn
+        sidebar_layout.addWidget(sidebar_spaces_btn)
 
         sidebar_skills_btn = QPushButton(" 功能中心")
         sidebar_skills_btn.setText(" 能力")
@@ -30194,6 +30206,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         controller.register_component("left.capabilities", self.product_nav_buttons[self.PAGE_CAPABILITIES], self.sidebar_layout)
         controller.register_component("left.favorites", self.product_nav_buttons[self.PAGE_FAVORITES], self.sidebar_layout)
         controller.register_component("left.knowledge", self.product_nav_buttons[self.PAGE_KNOWLEDGE], self.sidebar_layout)
+        controller.register_component("left.team_spaces", self.product_nav_buttons[self.PAGE_TEAM_SPACES], self.sidebar_layout)
         controller.register_component("left.settings", self.product_nav_buttons[self.PAGE_SETTINGS], self.sidebar_layout)
 
         controller.register_component("header.back", self.product_back_btn, self.top_bar_layout)
@@ -30335,6 +30348,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         for button in self.product_nav_buttons.values():
             button.setStyleSheet(sidebar_btn_style)
         nav_icons = {
+            self.PAGE_TEAM_SPACES: "fa5s.users",
             self.PAGE_CAPABILITIES: "fa5s.puzzle-piece",
             self.PAGE_FAVORITES: "fa5s.star",
             self.PAGE_KNOWLEDGE: "fa5s.book",
@@ -39689,12 +39703,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if not state:
             return ""
         source = str(getattr(state, "workspace_source", "") or "").strip().lower()
-        if source in {"chat", "project"}:
+        if source in {"chat", "project", "team_space"}:
             return source
         meta = getattr(state, "persisted_conversation_meta", {}) or {}
         if isinstance(meta, dict):
             source = str(meta.get("workspace_source") or "").strip().lower()
-            if source in {"chat", "project"}:
+            if source in {"chat", "project", "team_space"}:
                 state.workspace_source = source
                 return source
         return ""
@@ -39706,6 +39720,21 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if not state:
             return ""
         normalized = self._normalize_project_path(workspace_dir)
+        # The durable record is authoritative, including before history hydration.
+        from core.team_space_storage import TeamSpaceError, actual_path
+        try:
+            storage = getattr(self, "chat_storage", None)
+            binding = storage.get_team_space_binding(state.session_id) if storage is not None else None
+            if storage is None and (getattr(state, "persisted_conversation_meta", {}) or {}).get("team_space_required"):
+                raise TeamSpaceError("空间会话存储尚不可用，不能改变目录。")
+        except TeamSpaceError as exc:
+            self.add_system_toast(str(exc), "error", session_id=state.session_id)
+            return ""
+        if binding:
+            if actual_path(normalized) != actual_path(binding["workspace_dir"]):
+                self.add_system_toast("空间会话不能更换目录。请从团队空间新建任务。", "error", session_id=state.session_id)
+                return ""
+            source = "team_space"
         previous_workspace = self._normalize_project_path(getattr(state, "workspace_dir", ""))
         workspace_changed = self._project_key(previous_workspace) != self._project_key(normalized)
         if (
@@ -39716,7 +39745,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         ):
             return ""
         normalized_source = str(source or "").strip().lower()
-        if normalized and normalized_source not in {"chat", "project"}:
+        if normalized and normalized_source not in {"chat", "project", "team_space"}:
             normalized_source = "chat" if self._is_chat_workspace_path(normalized, getattr(state, "session_id", "")) else "project"
         if not normalized:
             normalized_source = ""
@@ -39839,7 +39868,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         workspace_dir = self._workspace_dir_for_state(state)
         source = self._session_workspace_source(state)
         title = self._resolved_session_title(state) if state else "新对话"
-        if source == "project" and workspace_dir:
+        if source == "team_space":
+            self.ws_label.setText("团队空间任务")
+            self.ws_label.setIcon(qta.icon("fa5s.users", color=DesignTokens.text_secondary))
+            self.ws_label.setToolTip(workspace_dir)
+        elif source == "project" and workspace_dir:
             project_meta = next(
                 (
                     item for item in self.config_manager.get_projects(include_hidden=True)
@@ -39961,6 +39994,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def _ensure_session_visible_in_history(self, state):
         if not self._session_has_history_content(state):
+            return
+        if (getattr(state, "persisted_conversation_meta", {}) or {}).get("team_space_required"):
             return
         session_id = str(getattr(state, "session_id", "") or "").strip()
         if not session_id:
@@ -40672,6 +40707,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state = state or self.get_current_session()
         if not state:
             return False
+        if self._session_workspace_source(state) == "team_space":
+            return False
         if not session_history_ready(state):
             return False
         if getattr(state, "messages", None):
@@ -40693,7 +40730,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 project_meta = item
                 break
         workspace_source = self._session_workspace_source(state)
-        label = "聊天工作目录" if workspace_source == "chat" else (
+        label = "空间专用目录" if workspace_source == "team_space" else "聊天工作目录" if workspace_source == "chat" else (
             self._project_display_name(workspace_dir, project_meta) if workspace_dir else "聊天工作目录"
         )
         metrics = QFontMetrics(button.font())
@@ -41104,7 +41141,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         for conv in conversations:
             meta = conv.get("meta") or {}
-            if meta.get("archived"):
+            if meta.get("archived") or meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
                 continue
             session_id = conv["id"]
             title = conv["title"] or "新任务"
@@ -46683,6 +46720,63 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_context_badges(session_id)
         self.add_system_toast("资料引用已更新，下次提交时生效。", "success")
 
+    def start_team_space_task(self, request):
+        """Create the durable scope before any message can reach a worker."""
+        from core.team_spaces import TeamSpaceClient
+        from core.team_space_storage import validate_binding
+        page = self.product_pages.get(self.PAGE_TEAM_SPACES)
+        try:
+            binding = validate_binding(request["binding"])
+            client = page.client if page else TeamSpaceClient()
+            client.session()
+            if (binding["platform_id"], binding["member_id"]) != (client.identity["platform_id"], client.identity["member_id"]):
+                raise RuntimeError("账号已切换，请回到原空间重新启动；任务草稿保留。")
+            session_id = self.create_new_session(title=request["title"], make_current=False)
+            state = self.get_session(session_id)
+            self._set_session_workspace(state, binding["workspace_dir"], source="team_space")
+            state.selected_model_id = request["model_id"]
+            state.selected_skill_names = list(request["skills"])
+            state.composer_draft = request["prompt"]
+            self.chat_storage.upsert_conversation(session_id, title=request["title"], meta=self._compose_session_meta(state))
+            self.chat_storage.bind_team_space(session_id, binding)
+            state.persisted_conversation_meta = self.chat_storage.get_conversation_meta(session_id)
+            if page:
+                page.client.local_store.draft(page.client.identity, binding["space_id"], page.draft_key, delete=True)
+                page.dirty, page.draft_key = False, ""
+            self.activate_session(session_id)
+            self.show_conversation_page()
+            self.input_field.setPlainText(request["prompt"])
+            self.refresh_model_selector()
+            self.refresh_selected_skill_controls(session_id)
+            self.handle_send()
+        except Exception as exc:
+            self.add_system_toast(f"空间任务未能启动：{exc}。输入已保留。", "error", auto_close_ms=10000)
+
+    def team_space_share_source(self, session_id):
+        """Return only selectable visible text and the actual local run state."""
+        binding = self.chat_storage.get_team_space_binding(session_id)
+        page = self.product_pages.get(self.PAGE_TEAM_SPACES)
+        if not binding or not page or not page.space or (
+            binding["platform_id"], binding["member_id"], binding["space_id"]
+        ) != (page.client.identity["platform_id"], page.client.identity["member_id"], page.space["id"]):
+            raise RuntimeError("所选本机任务不属于当前账号和空间。")
+        state = self.get_session(session_id)
+        if state:
+            self._flush_ui_stream_buffers(state)
+        record = self.chat_storage.get_conversation_record(session_id) or {}
+        messages = state.messages if state and state.history_loaded else self.chat_storage.get_messages(session_id)
+        meta = record.get("meta") or {}
+        status = getattr(state, "session_status", None) if state else None
+        status = status or meta.get("session_status", "draft")
+        running = bool(state and ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False)))
+        source_state = "running" if running else "completed" if status == "completed" else "stopped" if status in {"stopped", "interrupted"} else "failed" if status in {"failed", "error"} else "manual"
+        selected = [{"role": m["role"], "content": m["content"]} for m in messages
+            if m.get("role") in {"user", "assistant"} and isinstance(m.get("content"), str) and m["content"].strip()
+            and not (m.get("meta") or {}).get("team_space_context")
+            and not (m.get("meta") or {}).get("hidden")
+            and not (m.get("meta") or {}).get("internal")]
+        return {"title": record.get("title") or "任务成果", "source_ref": session_id, "state": source_state, "messages": selected}
+
     def _ensure_product_page(self, route, section=None):
         page = self.product_pages.get(route)
         if page is not None and _qt_object_alive(page):
@@ -46699,6 +46793,11 @@ a {{ overflow-wrap: anywhere; }}
             from ui.knowledge_sources import MultiSourceKnowledgePage as KnowledgePage
             page = KnowledgePage(self, service=self._knowledge_service(), artifacts=self._knowledge_artifacts)
             page.referenceRequested.connect(self.use_knowledge_reference)
+        elif route == self.PAGE_TEAM_SPACES:
+            from ui.team_spaces import TeamSpacesPage
+            page = TeamSpacesPage(self)
+            page.taskRequested.connect(self.start_team_space_task)
+            page.conversationRequested.connect(self.activate_session)
         elif route == self.PAGE_PROJECTS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain="projects")
         elif route == self.PAGE_SETTINGS:
@@ -46708,6 +46807,9 @@ a {{ overflow-wrap: anywhere; }}
         return self._prepare_embedded_product_page(page, route)
 
     def _confirm_leave_product_page(self):
+        if self.current_product_route == self.PAGE_TEAM_SPACES:
+            page = self.product_pages.get(self.PAGE_TEAM_SPACES)
+            return page is None or page.confirm_leave()
         if self.current_product_route == self.PAGE_FAVORITES and self.current_product_subroute == "favorite_editor":
             editor = self.product_pages.get("favorite_editor")
             if editor is not None and editor.is_dirty():
@@ -47125,7 +47227,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         if route == self.PAGE_CONVERSATION:
             return self.show_conversation_page()
-        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS, self.PAGE_KNOWLEDGE, self.PAGE_PROJECTS}:
+        if route not in {self.PAGE_CAPABILITIES, self.PAGE_FAVORITES, self.PAGE_SETTINGS, self.PAGE_KNOWLEDGE, self.PAGE_PROJECTS, self.PAGE_TEAM_SPACES}:
             raise ValueError(f"未知产品页面：{route}")
         if self.current_product_route != route and not self._confirm_leave_product_page():
             return False
@@ -47157,6 +47259,7 @@ a {{ overflow-wrap: anywhere; }}
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
+            self.PAGE_TEAM_SPACES: ("团队空间", "共享分工和成果，在自己的电脑执行。"),
             self.PAGE_CAPABILITIES: ("能力", "技能、MCP 服务与专家。"),
             self.PAGE_PROJECTS: ("项目与对话", "管理项目、历史、记忆和归档。"),
             self.PAGE_FAVORITES: ("常用", "保存经常重复的任务，下次直接开始或按时自动运行。"),
@@ -49668,8 +49771,19 @@ a {{ overflow-wrap: anywhere; }}
             getattr(state, "favorite_run_id", "") or ppt_agent_internal_stage
             or normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION
             or self._history_writer_owner_for_session(state.session_id) == "daemon"))
+        storage = getattr(self, "chat_storage", None)
+        from core.team_space_storage import TeamSpaceError
+        try:
+            team_binding = storage.get_team_space_binding(state.session_id) if storage is not None else None
+            if storage is None and (getattr(state, "persisted_conversation_meta", {}) or {}).get("team_space_required"):
+                raise TeamSpaceError("空间会话存储不可用。")
+        except TeamSpaceError:
+            # The committed submission must reach the existing worker terminal
+            # error path. An invalid explicit scope fails before any model call.
+            team_binding = {"version": 0}
         return normalize_run_context(
             {
+                **({"team_space": team_binding} if team_binding else {}),
                 "mode": mode,
                 **agent_context,
                 "clarify_mode_state": normalize_clarify_phase(

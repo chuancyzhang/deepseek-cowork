@@ -214,6 +214,23 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             self.assertEqual(ctx["selected_model_profile"]["model_name"], "model-b-name")
             self.assertEqual(ctx["selected_model_profile"]["api_key"], "key-b")
 
+    def test_damaged_space_binding_reaches_terminal_failure_without_personal_fallback(self):
+        from core.team_space_storage import TeamSpaceError
+        with tempfile.TemporaryDirectory() as base_dir:
+            window = self._window(base_dir)
+            state = _State("damaged-space")
+            state.workspace_dir = base_dir
+            state.workspace_source = "team_space"
+            state.persisted_conversation_meta = {"team_space_required": "damaged"}
+            window._ensure_session_workspace = MagicMock(return_value=base_dir)
+            window.chat_storage = MagicMock()
+            window.chat_storage.get_team_space_binding.side_effect = TeamSpaceError("绑定损坏")
+
+            ctx = window._build_run_context(state, RUN_MODE_EXECUTION)
+
+            self.assertEqual(ctx["team_space"], {"version": 0})
+            self.assertEqual(state.persisted_conversation_meta, {"team_space_required": "damaged"})
+
     def test_grill_run_context_is_identical_for_local_and_daemon_dispatch(self):
         with tempfile.TemporaryDirectory() as base_dir, patch("main.get_base_dir", return_value=base_dir):
             window = self._window(base_dir)

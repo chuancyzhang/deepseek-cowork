@@ -17,6 +17,7 @@ def main():
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     sub.add_parser("migrate")
+    sub.add_parser("verify-space-files")
     sub.add_parser("generate-key")
     auth = sub.add_parser("import-auth")
     auth.add_argument("file", type=Path)
@@ -40,7 +41,13 @@ def main():
     db = Database(settings)
     try:
         db.migrate(settings)
-        if args.command == "import-auth":
+        if args.command == "verify-space-files":
+            from .team_spaces import TeamSpaces
+            result = TeamSpaces(settings, db).verify_storage()
+            print(json.dumps(result, ensure_ascii=False))
+            if result["failures"]:
+                raise SystemExit(1)
+        elif args.command == "import-auth":
             if not settings.bootstrap_provider or not settings.bootstrap_subject:
                 parser.error("首次导入前必须配置预先指定的管理员 provider 与稳定 subject。")
             from .auth import Authentication
@@ -51,7 +58,7 @@ def main():
             Authentication(settings, db, Vault(settings.encryption_key), None).save_source(payload, bootstrap=True)
             print("认证来源已导入。仅预先指定的管理员可完成首次认证；测试成功后其他成员才可加入。")
         else:
-            print("数据库结构版本 1 已就绪。")
+            print("数据库结构版本 2 已就绪。")
     finally:
         db.close()
 

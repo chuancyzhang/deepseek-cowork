@@ -2858,6 +2858,9 @@ class LLMWorker(QThread):
         return projected
 
     def _call_run_tool(self, name, args, context):
+        guard = getattr(self, "_team_space_guard", None)
+        if guard is not None:
+            guard()
         from core.execution_authorization import invoke
         invoker = context.get("_frozen_tool_invoker")
         if invoker is not None:
@@ -3228,6 +3231,12 @@ class LLMWorker(QThread):
         return True
 
     def _append_knowledge_context(self, current_messages, generated_messages):
+        from .team_spaces import resolve_run_binding, task_context_message
+        binding = resolve_run_binding(getattr(self, "chat_storage", None), self.conversation_id, self.run_context)
+        if binding:
+            space_message = task_context_message(binding, current_messages)
+            if space_message:
+                self._append_ledger_message(current_messages, generated_messages, space_message)
         from .knowledge_library import knowledge_context_message
         message = knowledge_context_message(
             self.run_context.get("knowledge_context"), self.request_id, current_messages)
@@ -3310,6 +3319,22 @@ class LLMWorker(QThread):
         turn_count = 0
         total_duration = 0
         generated_messages = []
+
+        # Invalid/missing scope is a visible failure before any bootstrap or
+        # context append. A QThread exception alone would leave the UI running.
+        try:
+            from core.team_spaces import resolve_run_binding
+            space_binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
+            if space_binding:
+                from core.team_spaces import TeamSpaceClient
+                from core.enterprise_client import EnterpriseStore
+                self._team_space_client = TeamSpaceClient(EnterpriseStore(space_binding["data_dir"]),
+                    identity={"platform_id": space_binding["platform_id"], "member_id": space_binding["member_id"]})
+                self._team_space_client.session()
+        except Exception as exc:
+            self.finished_signal.emit({"error": str(exc), "error_type": type(exc).__name__,
+                "generated_messages": [], "turn_id": self.turn_id, "request_id": self.request_id})
+            return
 
         # Only the latest actual submission supplies new workbench facts. Old
         # snapshots remain historical, including when a non-desktop client sends.
@@ -3418,6 +3443,20 @@ class LLMWorker(QThread):
                         model_profile=self.run_context.get("selected_model_profile"),
                     )
                     provider.data_security_run = self.data_security_run
+                    from core.team_spaces import resolve_run_binding, bind_space_provider
+                    space_binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
+                    if space_binding:
+                        if os.path.normcase(os.path.realpath(self.workspace_dir or "")) != os.path.normcase(os.path.realpath(space_binding["workspace_dir"])):
+                            raise RuntimeError("空间任务目录与原会话不一致，已阻止继续执行。")
+                        from core.team_spaces import TeamSpaceClient
+                        from core.enterprise_client import EnterpriseStore
+                        if not getattr(self, "_team_space_client", None):
+                            self._team_space_client = TeamSpaceClient(EnterpriseStore(space_binding["data_dir"]),
+                                identity={"platform_id": space_binding["platform_id"], "member_id": space_binding["member_id"]})
+                        provider = bind_space_provider(provider, space_binding,
+                            self.run_context.get("selected_model_profile") or self.config_manager.get_model_profile(self.run_context.get("selected_model_id")),
+                            client=self._team_space_client)
+                        self._team_space_guard = provider.team_space_guard
                     if self.long_context_policy["enabled"] and not self.bootstrap.active:
                         from core.context_window import ContextWindowManager
                         if self.context_window_manager is None:
@@ -4452,6 +4491,7 @@ class LLMWorker(QThread):
                                 "config_manager": self.config_manager,
                                 "skill_manager": self.skill_manager,
                                 "chat_storage": self.chat_storage,
+                                "team_space_client": getattr(self, "_team_space_client", None),
                                 "agent_manager": self.agent_manager,
                                 "file_state": self.file_state_cache,
                                 "agent_state_signal": self.agent_state_signal,

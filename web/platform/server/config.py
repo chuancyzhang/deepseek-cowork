@@ -43,6 +43,8 @@ class Settings:
     cleanup_seconds: int = 60
     model_read_timeout: int = 660
     allow_model_http: bool = False
+    max_space_file_bytes: int = 128 * 1024 * 1024
+    max_space_bytes: int = 5 * 1024 * 1024 * 1024
 
     def __post_init__(self):
         object.__setattr__(self, "data_dir", Path(self.data_dir).resolve())
@@ -58,6 +60,8 @@ class Settings:
             raise ValueError("平台会话期限须在 5 分钟至 30 天之间。")
         if self.max_model_concurrency < 1 or not 1 <= self.cleanup_seconds <= 300:
             raise ValueError("并发上限或清理周期无效。")
+        if not 1 <= self.max_space_file_bytes <= self.max_space_bytes:
+            raise ValueError("团队空间单文件上限必须为正数且不超过空间容量。")
         from cryptography.fernet import Fernet
         Fernet(self.encryption_key.encode("ascii"))
 
@@ -93,4 +97,6 @@ class Settings:
             max_model_concurrency=int(os.environ.get("COWORK_MAX_MODEL_CONCURRENCY", 64)),
             cleanup_seconds=int(os.environ.get("COWORK_CLEANUP_SECONDS", 60)),
             allow_model_http=os.environ.get("COWORK_ALLOW_MODEL_HTTP") == "1",
+            max_space_file_bytes=int(os.environ.get("COWORK_MAX_SPACE_FILE_BYTES", 128 * 1024 * 1024)),
+            max_space_bytes=int(os.environ.get("COWORK_MAX_SPACE_BYTES", 5 * 1024 * 1024 * 1024)),
         )

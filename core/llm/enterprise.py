@@ -34,6 +34,8 @@ class EnterpriseTransport(httpx.BaseTransport):
         body["_cowork"] = {"client_id": state["client_id"], "run_id": context.get("run_id") or uuid.uuid4().hex,
                            "model_revision": self.binding.get("model_revision", 1),
                            "questions": questions}
+        if "team_space" in context:
+            body["_cowork"]["team_space"] = context["team_space"]
         # The SDK still sees the original vendor endpoint for protocol/cache behavior.
         # Only this transport can access the session token; it never leaves for the vendor.
         headers = {k: v for k, v in request.headers.items()

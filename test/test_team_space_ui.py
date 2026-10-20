@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -11,7 +12,7 @@ import httpx
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QTreeWidget, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTreeWidget, QWidget
 
 from core.chat_storage import ChatStorage
 from core.enterprise_client import EnterpriseStore
@@ -100,6 +101,102 @@ class TeamSpaceNativeTests(unittest.TestCase):
         if directory:
             Path(directory).mkdir(parents=True, exist_ok=True)
             self.page.grab().save(str(Path(directory) / (name + ".png")))
+
+    def test_list_loading_stays_compact_and_failure_can_retry(self):
+        original = self.page.client.list
+        release = threading.Event()
+        def delayed(**filters):
+            if not release.wait(10):
+                raise RuntimeError("Test did not release the list request")
+            return original(**filters)
+        with patch.object(self.page.client, "list", side_effect=delayed):
+            try:
+                self.page.list()
+                for name, width, height in (("wide", 1440, 960), ("narrow", 480, 640)):
+                    self.page.resize(width, height)
+                    self.qt.processEvents()
+                    headings = [label for label in self.page.scroll.widget().findChildren(QLabel)
+                                if label.property("spaceTextRole") == "heading"]
+                    self.assertEqual([label.text() for label in headings], ["我的空间"])
+                    heading = headings[0]
+                    subtitle = self.page.layout.itemAt(1).widget()
+                    self.assertLess(heading.height(), 60)
+                    self.assertLess(subtitle.height(), 90)
+                    self.assertLessEqual(subtitle.y() - heading.geometry().bottom(), 16)
+                    self.assertTrue(self.page.loading_indicator.isVisible())
+                    self.assertFalse(self.page.refresh_button.isEnabled())
+                    self.assertFalse(self.page.back_button.isVisible())
+                    self.assertEqual(self.page.scroll.horizontalScrollBar().maximum(), 0)
+                    self.shot("desktop-list-loading-" + name)
+            finally:
+                release.set()
+            self.wait()
+        self.assertFalse(self.page.loading_indicator.isVisible())
+        self.assertTrue(self.page.findChildren(QTreeWidget))
+        self.shot("desktop-list-narrow")
+
+        with patch.object(self.page.client, "list", side_effect=TeamSpacePaused("企业中心暂时无法连接，请检查网络。")):
+            self.page.list()
+            self.wait()
+        self.assertFalse(self.page.loading_indicator.isVisible())
+        self.assertTrue(self.page.refresh_button.isEnabled())
+        self.assertEqual(self.page.refresh_button.text(), "重试")
+        self.assertIn("无法连接", self.page.status.text())
+        self.assertFalse(any(label.text() == "还没有加入空间"
+                             for label in self.page.scroll.widget().findChildren(QLabel)))
+        self.shot("desktop-list-error")
+        self.click("重试")
+        self.assertEqual(self.page.refresh_button.text(), "刷新")
+        self.assertEqual(self.page.findChildren(QTreeWidget)[0].topLevelItemCount(), 1)
+        self.page.resize(1440, 960)
+        self.qt.processEvents()
+        self.shot("desktop-list")
+
+    def test_empty_list_invitation_and_search_have_distinct_states(self):
+        state = self.enterprise.read()
+        state.update(member={"id": "outsider", "name": "新同事"}, generation="new-member")
+        self.enterprise.write(state, self.backend.tokens["outsider"])
+        self.page.refresh()
+        self.wait()
+        self.assertTrue(any(label.text() == "还没有加入空间"
+                            for label in self.page.scroll.widget().findChildren(QLabel)))
+        self.assertEqual([button.text() for button in self.page.findChildren(QPushButton)
+                          if button.isVisible() and button.property("spaceKind") == "primary"], ["新建空间"])
+        self.page.resize(480, 640)
+        self.qt.processEvents()
+        self.assertEqual(self.page.scroll.horizontalScrollBar().maximum(), 0)
+        self.shot("desktop-list-empty")
+        self.click("新建空间")
+        self.assertEqual(self.page.fields["name"].text(), "")
+        self.click("返回列表")
+
+        self.backend.command("owner", "invite.create", member_id="outsider", role="member")
+        self.page.refresh()
+        self.wait()
+        invitations = self.page.findChildren(QTreeWidget)[0]
+        invitations.setCurrentItem(invitations.topLevelItem(0))
+        self.click("接受邀请")
+        self.assertEqual(self.page.findChildren(QTreeWidget)[0].topLevelItemCount(), 1)
+
+        query = next(field for field in self.page.findChildren(QLineEdit)
+                     if field.accessibleName() == "搜索已加入空间")
+        query.setText("不存在的空间")
+        self.click("搜索")
+        self.assertTrue(any(label.text() == "没有找到匹配的空间"
+                            for label in self.page.scroll.widget().findChildren(QLabel)))
+        self.shot("desktop-list-search-empty")
+        query = next(field for field in self.page.findChildren(QLineEdit)
+                     if field.accessibleName() == "搜索已加入空间")
+        query.clear()
+        QTest.keyClick(query, Qt.Key_Return)
+        self.wait()
+        self.assertEqual(self.page.findChildren(QTreeWidget)[0].topLevelItemCount(), 1)
+        self.backend.command("owner", "space.update", revision=self.backend.get()["revision"],
+                             name="跨部门客户方案与交付资料协作空间 · " * 4)
+        self.open_space()
+        heading = self.page.layout.itemAt(0).widget()
+        self.assertGreater(heading.height(), heading.fontMetrics().height() * 2)
+        self.assertGreaterEqual(heading.height(), heading.heightForWidth(heading.width()))
 
     def test_complete_native_plan_upload_task_and_share(self):
         self.open_space("plans")
@@ -224,6 +321,7 @@ class TeamSpaceNativeTests(unittest.TestCase):
         with patch.object(self.page.client, "execute", side_effect=lost_ack):
             self.click("发布成果")
         self.assertIn("确认响应丢失", self.page.status.text())
+        self.assertEqual(self.page.refresh_button.text(), "刷新")
         self.click("发布成果")
         shares = self.backend.get(suffix="/shares")["items"]
         self.assertEqual(len(shares), 1, self.page.status.text())

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import copy
 import json
+import logging
 from pathlib import Path
 import re
 import threading
@@ -16,7 +17,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from shiboken6 import isValid
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QDialog, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from core.team_spaces import TeamSpaceClient
@@ -39,6 +40,8 @@ EVENTS = {"space.created": "创建空间", "settings.updated": "修改设置", "
     "asset.published": "发布资料", "asset.update": "整理资料", "asset.withdraw": "撤下资料",
     "asset.restore": "恢复资料", "folder.create": "新建文件夹", "share.publish": "发布成果",
     "share.withdraw": "撤回成果", "owner.recovered": "恢复空间所有权"}
+
+log = logging.getLogger(__name__)
 
 
 def stamp(value):
@@ -101,7 +104,19 @@ class TeamSpacesPage(QDialog):
         self.status = QLabel("正在连接企业中心…")
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        outer.addWidget(self.status)
+        self.status_row = QWidget(self)
+        status_layout = QHBoxLayout(self.status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        self.loading_indicator = QProgressBar()
+        self.loading_indicator.setObjectName("TeamSpaceLoading")
+        self.loading_indicator.setRange(0, 0)
+        self.loading_indicator.setTextVisible(False)
+        self.loading_indicator.setFixedSize(56, 4)
+        self.loading_indicator.setAccessibleName("正在加载")
+        self.loading_indicator.hide()
+        status_layout.addWidget(self.loading_indicator, 0, Qt.AlignVCenter)
+        status_layout.addWidget(self.status, 1)
+        outer.addWidget(self.status_row)
         self.cancel_button = self.button("取消传输", self.cancel.set)
         self.cancel_button.hide()
         outer.addWidget(self.cancel_button, 0, Qt.AlignLeft)
@@ -120,6 +135,13 @@ class TeamSpacesPage(QDialog):
             f"{{background:{DesignTokens.bg_main};color:{DesignTokens.text_primary};}} "
             f"QScrollArea#TeamSpaceScroll {{background:{DesignTokens.bg_main};border:none;}}")
         self.identity_label.setStyleSheet(f"color: {DesignTokens.text_secondary};")
+        self.status.setStyleSheet(f"color:{DesignTokens.text_secondary};font-size:{DesignTokens.font_size_meta}px;")
+        self.loading_indicator.setStyleSheet(
+            f"QProgressBar#TeamSpaceLoading {{background:{DesignTokens.bg_secondary};border:none;border-radius:2px;}}"
+            f"QProgressBar#TeamSpaceLoading::chunk {{background:{DesignTokens.primary};border-radius:2px;}}")
+        for label in self.findChildren(QLabel):
+            if label.property("spaceTextRole"):
+                self._style_label(label)
         for widget in self.findChildren(QPushButton):
             if widget.objectName() == "PrimaryBtn":
                 continue  # ProductEmptyState owns its primary action theme.
@@ -164,6 +186,8 @@ class TeamSpacesPage(QDialog):
         self.sign_in_state = None
         self.identity_label.show()
         self.toolbar.show()
+        self.back_button.show()
+        self.status_row.show()
         self.status.show()
         self.dirty, self.fields, self.draft_key = False, {}, ""
         self.editing = None
@@ -174,20 +198,17 @@ class TeamSpacesPage(QDialog):
         self.layout = QVBoxLayout(body)
         self.layout.setSpacing(12)
         self.layout.setContentsMargins(0, 0, 8, 0)
+        # Before an async load completes, labels must not absorb the viewport's
+        # spare height. This also keeps short details and read-only forms compact.
+        self.layout.setAlignment(Qt.AlignTop)
         old = self.scroll.takeWidget()
         if old:
             old.deleteLater()
         self.scroll.setWidget(body)
         if title:
-            heading = QLabel(title)
-            font = heading.font()
-            font.setPointSize(18)
-            font.setBold(True)
-            heading.setFont(font)
-            heading.setWordWrap(True)
-            self.layout.addWidget(heading)
+            self.label(title, role="heading")
         if subtitle:
-            self.label(subtitle)
+            self.label(subtitle, role="secondary")
 
     def _show_sign_in(self, *, expired=False):
         state = self.client.enterprise_store.read()
@@ -208,6 +229,8 @@ class TeamSpacesPage(QDialog):
         self.toolbar.hide()
         self.status.clear()
         self.status.hide()
+        self.status_row.hide()
+        self.loading_indicator.hide()
         self.cancel_button.hide()
         empty = _SignInState(title, description, action, appearance="plain",
             icon=qta.icon("fa5s.users", color=DesignTokens.primary))
@@ -231,6 +254,9 @@ class TeamSpacesPage(QDialog):
             empty.layout().addWidget(self.button("我已登录，刷新", self.refresh), 0, Qt.AlignCenter)
         self.sign_in_state = empty
         self._fit_sign_in_state()
+        # The sign-in panel deliberately uses the available height for its
+        # surrounding spacers; ordinary content pages are top-aligned.
+        self.layout.setAlignment(Qt.AlignmentFlag(0))
         self.layout.addStretch(1)
         self.layout.addWidget(empty, 0, Qt.AlignHCenter)
         self.layout.addStretch(2)
@@ -251,11 +277,21 @@ class TeamSpacesPage(QDialog):
         super().resizeEvent(event)
         self._fit_sign_in_state()
 
-    def label(self, text):
+    def _style_label(self, label):
+        role = label.property("spaceTextRole")
+        size = DesignTokens.font_size_page if role == "heading" else DesignTokens.font_size_body
+        weight = DesignTokens.font_weight_semibold if role == "heading" else "normal"
+        color = DesignTokens.text_secondary if role == "secondary" else DesignTokens.text_primary
+        label.setStyleSheet(f"font-size:{size}px;font-weight:{weight};color:{color};")
+
+    def label(self, text, *, role="body"):
         label = QLabel(str(text))
+        label.setProperty("spaceTextRole", role)
         label.setTextFormat(Qt.PlainText)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._style_label(label)
         self.layout.addWidget(label)
         return label
 
@@ -297,16 +333,20 @@ class TeamSpacesPage(QDialog):
             raise TeamSpaceError("请先选择一项。")
         return item.data(0, Qt.UserRole)
 
-    def _async(self, work, done, *, transfer=False, polling=False):
+    def _async(self, work, done, *, transfer=False, polling=False,
+               loading_message="正在处理，请稍候…", refresh_error_label="刷新"):
         if self.busy:
             return
         self.busy = True
         self.cancel.clear()
         self.cancel_button.setVisible(transfer)
         self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("刷新")
         if not polling:
-            self.status.setText("正在与中心核对…内容已保留。")
+            self.status.setText(loading_message)
+            self.loading_indicator.show()
         ticket, client = self.ticket, self.client
+        log.debug("team_space.ui_request_started ticket=%s route=%s", ticket, self.route[0])
         def execute():
             try:
                 result = work()
@@ -317,14 +357,15 @@ class TeamSpacesPage(QDialog):
         future = self.pool.submit(execute)
         def completed(future):
             if isValid(self.bridge):
-                self.bridge.done.emit((ticket, client, done, polling), *future.result())
+                self.bridge.done.emit((ticket, client, done, polling, refresh_error_label), *future.result())
         future.add_done_callback(completed)
 
     def _done(self, context, result, error):
-        ticket, client, callback, polling = context
+        ticket, client, callback, polling, refresh_error_label = context
         self.busy = False
         self.refresh_button.setEnabled(True)
         self.cancel_button.hide()
+        self.loading_indicator.hide()
         try:
             client.session()
         except TeamSpaceError:
@@ -333,10 +374,13 @@ class TeamSpacesPage(QDialog):
         if ticket != self.ticket or client is not self.client:
             return
         if error:
+            log.warning("team_space.ui_request_failed ticket=%s route=%s type=%s code=%s",
+                        ticket, self.route[0], type(error).__name__, getattr(error, "code", ""))
             if getattr(error, "status", 0) == 401:
                 self._show_sign_in(expired=True)
                 return
             self.status.setText(str(error) + (" 草稿已保留。" if self.draft_key else ""))
+            self.refresh_button.setText(refresh_error_label)
             if getattr(error, "status", 0) == 409 and self.draft_key:
                 self._conflict()
             if polling:
@@ -345,7 +389,8 @@ class TeamSpacesPage(QDialog):
                     self.timer.start(min(60000, 10000 * 2 ** self.failures))
             return
         self.failures = 0
-        self.status.setText("中心已确认 · 最后更新 " + stamp(datetime.now().timestamp()))
+        log.debug("team_space.ui_request_completed ticket=%s route=%s", ticket, self.route[0])
+        self.status.setText("已更新 · " + stamp(datetime.now().timestamp()))
         self._call(lambda: callback(result))
         self.apply_theme()
         if self.isVisible():
@@ -402,14 +447,21 @@ class TeamSpacesPage(QDialog):
     def list(self, search="", archived=False, offset=0):
         self.route = ("list", dict(search=search, archived=archived, offset=offset))
         self.space = None
-        self._reset("团队空间", "共享资料和分工，在本机执行，再将选定成果交给团队。")
+        self._reset("已归档空间" if archived else "我的空间", "选择空间继续协作，或创建空间邀请同事。")
+        self.back_button.hide()
         def loaded(result):
             data, inbox = result
             self.actions(("新建空间", lambda: self.settings(None), True))
             query = QLineEdit(search)
             query.setPlaceholderText("搜索已加入空间")
-            self.layout.addWidget(query)
-            self.actions(("搜索", lambda: self.list(query.text(), archived)), ("查看活跃空间" if archived else "查看归档空间", lambda: self.list(query.text(), not archived)))
+            query.setClearButtonEnabled(True)
+            query.setAccessibleName("搜索已加入空间")
+            query.returnPressed.connect(lambda: self._call(lambda: self.list(query.text(), archived)))
+            search_row = QHBoxLayout()
+            search_row.addWidget(query, 1)
+            search_row.addWidget(self.button("搜索", lambda: self.list(query.text(), archived)))
+            search_row.addWidget(self.button("活跃空间" if archived else "已归档", lambda: self.list(query.text(), not archived)))
+            self.layout.addLayout(search_row)
             if inbox["items"]:
                 self.label("待处理邀请")
                 tree = self.table(["空间", "邀请人", "角色", "状态"], inbox["items"], lambda r: [r["space_name"], r["sender_name"], ROLES[r["role"]], STATES[r["state"]]])
@@ -420,10 +472,19 @@ class TeamSpacesPage(QDialog):
             if data["items"]:
                 self.table(["空间", "本人角色", "共享更新"], data["items"], lambda r: [r["name"], ROLES[r["role"]], stamp(r["updated_at"])], lambda r: self.open_space(r["id"]))
             else:
-                self.label("还没有空间。创建一个空间，或等待同事邀请。" if not archived else "没有已归档空间。")
+                if search:
+                    self.label("没有找到匹配的空间")
+                    self.label("换个关键词，或清空搜索查看全部空间。", role="secondary")
+                elif archived:
+                    self.label("没有已归档空间")
+                    self.label("归档后的空间会显示在这里，可切回“活跃空间”继续协作。", role="secondary")
+                else:
+                    self.label("还没有加入空间")
+                    self.label("点击“新建空间”开始协作，或请同事邀请你。收到的邀请会显示在这里。", role="secondary")
             self.pager(data, offset, lambda next: self.list(search, archived, next))
             self.layout.addStretch()
-        self._async(lambda: (self.client.list(search=search, archived=str(archived).lower(), offset=offset), self.client.request("GET", "/team-space-invites")), loaded)
+        self._async(lambda: (self.client.list(search=search, archived=str(archived).lower(), offset=offset), self.client.request("GET", "/team-space-invites")), loaded,
+                    loading_message="正在加载空间和邀请…", refresh_error_label="重试")
 
     def pager(self, data, offset, callback):
         controls = []
@@ -499,14 +560,11 @@ class TeamSpacesPage(QDialog):
                 self.table(["资料", "更新人", "版本", "状态"], data["items"], lambda r: [r["name"], r["author_name"], r["latest"], STATES[r["state"]]], lambda r: self.open_object("asset", r["id"]))
             self.pager(data, offset, lambda next: self.open_space(space_id, tab, next, search, assignee_id, state, folder_id))
             self.layout.addStretch()
-        self._async(lambda: (self.client.detail(space_id), self.client.collection(space_id, collection, **filters)), loaded)
+        self._async(lambda: (self.client.detail(space_id), self.client.collection(space_id, collection, **filters)), loaded,
+                    loading_message="正在加载空间内容…")
 
     def header(self, tab=""):
-        heading = self.label(self.space["name"])
-        font = heading.font()
-        font.setPointSize(18)
-        font.setBold(True)
-        heading.setFont(font)
+        self.label(self.space["name"], role="heading")
         self.label(ROLES[self.space["role"]] + (" · 已归档，共享内容只读" if self.space["state"] == "archived" else " · 团队空间"))
         row = QHBoxLayout()
         for key, label in [("activity", "动态"), ("plans", "计划"), ("tasks", "任务"), ("assets", "资产")]:

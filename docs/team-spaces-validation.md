@@ -50,6 +50,14 @@ python -m pytest -q test/test_enterprise_platform.py test/test_enterprise_databa
 
 本次涉及 MainWindow 的运行用临时目录替换 `core.env_utils.get_app_data_dir`，避免读取或改写真实配置。普通模型请求没有空间策略网络访问；空间策略和管理元数据不修改 system/developer/tool 稳定前缀，共享任务输入追加到原消息流程。
 
+## 2026-10-20 登录后页面补充验证
+
+2026-10-20 登录后页面布局补充验证：原生界面 9 项通过，150% 缩放下另跑列表加载、空列表与登录恢复 3 项通过。使用受控延迟停留在数据返回前，检查 1440×960 与 480×640 窗口中的标题、说明实际高度和间距；覆盖连接失败后重试、邀请接受、回车搜索、长名称换行，以及原有计划、上传、任务、成果和草稿流程。仅检查浅色主题及浅色强调色预览取消，没有进行深色主题测试；最终产品验收由用户完成。
+
+![加载中，内容保持顶部紧凑排列](screenshots/team-spaces/list/desktop-list-loading-narrow.png)
+
+上述补充可用 `python -m pytest -q test/test_team_space_ui.py` 复现；设置 `QT_SCALE_FACTOR=1.5` 后用 `-k 'list_loading or empty_list or sign_in_guidance'` 运行缩放检查。截图保存在 `docs/screenshots/team-spaces/list/`。
+
 ## 未覆盖与验证限制
 
 未宣称全仓测试通过。`test_main_workspace_linear.py` 的整组离屏运行出现关闭等待超时、首次模型设置弹窗等待，以及一次 Qt 原生 access violation，未形成完整通过报告；相关三个独立入口用例已单独通过，未以跳过失败断言的方式宣称整组通过。原有引用测试缺少工作台方法的失败已在未修改 HEAD 中复现，随后仅补齐测试替身。

@@ -26073,7 +26073,24 @@ class DrawerResizeHandle(QWidget):
         self.setCursor(Qt.SizeHorCursor)
         self.setFixedWidth(8)
         self.setToolTip("拖动调整预览宽度")
+        self.setAccessibleName("拖动调整右侧栏宽度")
         self.setStyleSheet("background: transparent; border: none;")
+        bind_theme(self, lambda _resolved=None: self.update(), surface="preview_shell")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        color = DesignTokens.text_secondary if self.underMouse() or self._press_x is not None else DesignTokens.separator
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(2, max(0, (self.height() - 40) // 2), 3, min(40, self.height()), 1.5, 1.5)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -26095,6 +26112,7 @@ class DrawerResizeHandle(QWidget):
         if self._press_x is not None:
             self._press_x = None
             self.resizeFinished.emit()
+            self.update()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -30702,7 +30720,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.context_drawer_user_width = self._clamp_int(
             int(requested_width), self.context_drawer_min_width, maximum
         )
-        self.context_drawer_expanded = self.context_drawer_user_width > self.context_drawer_max_width
+        content_width = parent.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
+        normal_limit = max(
+            self.context_drawer_min_width,
+            min(self.context_drawer_max_width,
+                content_width - self.context_drawer_gap - self.context_drawer_min_content_width),
+        )
+        # Manual dragging must enter expanded mode as soon as the normal
+        # conversation reserve would clamp it, not only beyond the fixed 500px cap.
+        self.context_drawer_expanded = self.context_drawer_user_width > normal_limit
         self._sync_deliverable_expand_button()
         self.sync_context_drawer_layout()
         self._sync_deliverable_text_editor_layout()
@@ -31606,10 +31632,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         width_limit = content_width - self.context_drawer_gap - self.context_drawer_min_content_width
         if getattr(self, "context_drawer_expanded", False):
             width = min(width, max(self.context_drawer_min_width, int(parent.width() * 0.72)))
-        elif width_limit < self.context_drawer_preferred_min_width:
-            width = max(self.context_drawer_min_width, width_limit)
         else:
-            width = min(width, width_limit)
+            width = min(width, max(self.context_drawer_min_width, width_limit))
         width = min(width, max(self.context_drawer_min_width, parent.width() - (margin * 2)))
         height = max(120, parent.height() - (margin * 2))
         x = parent.width() - width - margin

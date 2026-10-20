@@ -19,7 +19,7 @@ config_dir = Path(os.environ["APPDATA"]) / "DeepSeekCowork"
 config_dir.mkdir(parents=True)
 (config_dir / "config.json").write_text("{}", encoding="utf-8")
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtTest import QTest
@@ -29,6 +29,12 @@ import main
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/wide":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write((ROOT / "test/fixtures/browser-wide-page.html").read_bytes())
+            return
         if self.path == "/download":
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -50,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=str(ROOT / ".tmp/browser-qa"))
+    parser.add_argument("--zoom-only", action="store_true", help="Capture clipped-page zoom and drawer resize")
     options = parser.parse_args()
     output = Path(options.output); output.mkdir(parents=True, exist_ok=True)
     app = QApplication.instance() or QApplication([])
@@ -88,9 +95,61 @@ def run():
         window.resize(1440, 900); window.show()
         window.show_context_drawer(window.RIGHT_TAB_FILES)
         window.set_file_navigator_visible(False, reason="browser_qa")
-        window.add_chat_bubble("User", "帮我分析右侧打开的网页。", animate=False)
-        window.add_chat_bubble("Agent", "当前页面是“项目进展”。我会先读取页面内容，再检查交互。", animate=False)
+        window.add_chat_bubble("User", "右侧的网页显示不全。" if options.zoom_only else "帮我分析右侧打开的网页。", animate=False)
+        window.add_chat_bubble("Agent", "可拖动左边缘加宽面板，再用“网页缩放”缩小查看。点击百分比可恢复原始大小。"
+                               if options.zoom_only else "当前页面是“项目进展”。我会先读取页面内容，再检查交互。", animate=False)
         browser = window.browser_workbench
+        if options.zoom_only:
+            tab = browser.open_web(window.current_session_id, f"http://127.0.0.1:{server.server_port}/wide")
+            pane = browser.panes[tab.id]
+            wait(lambda: pane.document_ready)
+            browser.activate(tab.id)
+            def js(source):
+                values = []
+                pane.page.runJavaScript(source, values.append)
+                wait(lambda: bool(values))
+                return values[0]
+            # Exercise the actual handle, not just the width setter.
+            handle = window.right_resize_handle
+            events()
+            width_before = window.right_sidebar.width()
+            requested_widths = []
+            handle.widthRequested.connect(requested_widths.append)
+            start = QPoint(4, handle.height() // 2)
+            QTest.mousePress(handle, Qt.LeftButton, pos=start)
+            QTest.mouseMove(handle, start - QPoint(100, 0))
+            QTest.mouseRelease(handle, Qt.LeftButton, pos=start)
+            events()
+            assert window.right_sidebar.width() > width_before, (
+                width_before, window.right_sidebar.width(), requested_widths,
+                window.main_container.width(), window.context_drawer_user_width)
+            # Shrinking below the preferred width must also honor the request.
+            window.set_context_drawer_width(window.context_drawer_min_width)
+            events()
+            assert window.right_sidebar.width() == window.context_drawer_min_width
+            for width, height, zoom in ((1440, 900, .5), (1000, 720, .33)):
+                window.resize(width, height); events()
+                window.set_context_drawer_width(int(window.main_container.width() * .7))
+                events()
+                pane.set_zoom(1.)
+                wait(lambda: js("document.querySelector('main').getBoundingClientRect().left") < 0)
+                capture("browser-wide-before", width, height)
+                pane.set_zoom(zoom)
+                wait(lambda: js("document.querySelector('main').getBoundingClientRect().left >= 0 && document.querySelector('main').getBoundingClientRect().right <= innerWidth"))
+                capture("browser-wide-fit", width, height)
+                assert pane.toolbar.width() >= pane.toolbar.minimumSizeHint().width()
+                assert pane.zoom_bar.width() >= pane.zoom_bar.minimumSizeHint().width()
+            saved_color = DesignTokens.bg_main
+            theme.repository.write_preview(name="网页缩放验收", overrides={"tokens": {"primary": "#39734d", "primary_hover": "#2d603e"}}, default_tokens=default_design_tokens())
+            assert theme.apply_repository_state(reason="browser_zoom_preview")
+            capture("browser-wide-theme-preview", 1000, 720)
+            assert theme.restore_saved_theme()
+            assert DesignTokens.bg_main == saved_color
+            browser.store.set_owner(tab.session_id, tab.id, "agent")
+            pane.refresh_control()
+            capture("browser-wide-agent", 1000, 720)
+            print(f"browser zoom / drawer drag / theme cancellation: PASS scale={scale}", flush=True)
+            return
         browser.new_tab(); events()
         capture("browser-start")
         capture("browser-start", 1000, 720)

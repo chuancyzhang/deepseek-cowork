@@ -19,6 +19,8 @@
 
 停止：`docker compose --env-file .env.local -f compose.local.yaml stop`。重新启动：再次运行启动脚本。导出的镜像包不包含本机凭据或数据库；镜像导入可用 `docker load -i images.tar`。
 
+更新服务端代码后，需要重新构建镜像；`start-local.ps1` 使用 `--no-build`，仅重启不会更新容器内代码。在本目录先执行 `docker compose --env-file .env.local -f compose.local.yaml build platform`，构建成功后执行 `docker compose --env-file .env.local -f compose.local.yaml stop platform`，按下文“数据、备份与恢复”备份业务库和文件卷，再执行 `docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform`。保留原 `.env.local` 和命名卷；启动自动检查数据库迁移。升级后检查 `/healthz` 与 `/api/v1/platform-info` 的目标能力声明。桌面客户端需要独立更新。
+
 ## 首次网页初始化与管理员登录
 
 1. 启动容器后打开 `/app`，空平台自动显示“初始化企业平台”。

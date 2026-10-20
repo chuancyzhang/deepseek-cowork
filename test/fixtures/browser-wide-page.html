@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>固定宽度网页 · 缩放验收</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; overflow-x: hidden; background: #edf3f6; color: #183342; font: 20px "Microsoft YaHei", sans-serif; }
+  main { width: 1440px; position: relative; left: 50%; transform: translateX(-50%); padding: 48px; }
+  header { display: flex; justify-content: space-between; border-bottom: 1px solid #b7cbd5; padding-bottom: 24px; }
+  section { display: flex; justify-content: space-between; align-items: center; padding: 80px 0; gap: 80px; }
+  h1 { font-size: 48px; line-height: 1.5; margin: 0 0 24px; }
+  p { line-height: 1.8; }
+  form { width: 440px; flex: none; padding: 40px; background: white; border: 1px solid #c8d6dd; }
+  label { display: block; margin: 24px 0 10px; }
+  input { padding: 14px; width: 100%; font: inherit; border: 1px solid #a9bac3; }
+  button { margin-top: 24px; padding: 14px 32px; font: inherit; background: #285d75; color: white; border: 0; cursor: pointer; }
+  footer { display: flex; justify-content: space-between; border-top: 1px solid #b7cbd5; padding-top: 24px; }
+</style>
+<main>
+  <header><strong id="left-edge">知识服务平台 · 演示</strong><span id="right-edge">帮助中心　联系我们</span></header>
+  <section>
+    <div><h1>完整查看网页<br>继续手头的工作</h1><p>此验收页采用 1440 像素固定布局，且隐藏横向滚动条。<br>缩小网页后，左右两端与表单都应完整可见。</p></div>
+    <form onsubmit="event.preventDefault();window.saves++;document.querySelector('output').textContent='已保存'">
+      <strong>填写进展</strong>
+      <label for="draft">本周进展</label><input id="draft" value="缩放前输入的内容">
+      <button id="save">保存</button><p><output></output></p>
+    </form>
+  </section>
+  <footer><span>左侧内容完整可见</span><span>右侧内容完整可见</span></footer>
+</main>
+<script>window.saves = 0;</script>
+</html>

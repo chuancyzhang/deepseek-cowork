@@ -132,6 +132,7 @@ class ControlledPane(QWidget):
 
 class BrowserPane(ControlledPane):
     openWindow = Signal(object)
+    ZOOM_LEVELS = (.25, .33, .5, .67, .75, .8, .9, 1., 1.1, 1.25, 1.5, 1.75, 2., 2.5, 3., 4., 5.)
 
     def __init__(self, tab, store, bridge, profile, parent=None):
         super().__init__(tab, store, bridge, parent)
@@ -185,6 +186,29 @@ class BrowserPane(ControlledPane):
         self.more = button("⋯", "网页操作", self.show_menu)
         row.addWidget(self.more)
         self.outer.addWidget(self.toolbar)
+        # Keep these controls on their own row so the address remains usable in
+        # the narrow drawer, including at high Windows display scaling.
+        self.zoom_bar = QWidget(self)
+        zoom_row = QHBoxLayout(self.zoom_bar)
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        self.zoom_label = QLabel("网页缩放")
+        zoom_row.addWidget(self.zoom_label)
+        self.zoom_out = button("−", "缩小网页，显示更多内容（Ctrl+- 或 Ctrl+滚轮）",
+                               lambda: self.change_zoom(-1))
+        self.zoom_reset = button("100%", "恢复原始大小（Ctrl+0）", lambda: self.set_zoom(1.))
+        self.zoom_in = button("+", "放大网页（Ctrl++ 或 Ctrl+=）", lambda: self.change_zoom(1))
+        for item in (self.zoom_out, self.zoom_reset, self.zoom_in):
+            zoom_row.addWidget(item)
+        zoom_row.addStretch()
+        self.outer.addWidget(self.zoom_bar)
+        self.zoom_shortcuts = []
+        for sequence, delta in (("Ctrl+=", 1), ("Ctrl++", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda change=delta: self.change_zoom(change))
+            self.zoom_shortcuts.append(shortcut)
+        self.view.setZoomFactor(float(tab.view_state.get("zoom_factor", 1.)))
+        self.refresh_zoom()
         self.find = QLineEdit()
         self.find.setPlaceholderText("在页面中查找 · Esc 关闭")
         self.find.textChanged.connect(self.page.findText)
@@ -216,6 +240,47 @@ class BrowserPane(ControlledPane):
         self.view.installEventFilter(self)
         self.refresh_theme()
         self.view.setUrl(input_url(tab.url, allow_local=bool(tab.path)))
+
+    def refresh_theme(self, _resolved=None):
+        super().refresh_theme(_resolved)
+        if hasattr(self, "zoom_label"):
+            self.zoom_label.setStyleSheet(f"color:{DesignTokens.text_secondary}; background:transparent;")
+
+    def refresh_zoom(self):
+        zoom = self.view.zoomFactor()
+        available = self.tab.owner != "agent"
+        self.zoom_reset.setText(f"{zoom:.0%}")
+        self.zoom_reset.setAccessibleName(f"网页缩放 {zoom:.0%}，点击恢复 100%")
+        self.zoom_out.setEnabled(available and zoom - self.ZOOM_LEVELS[0] > .001)
+        self.zoom_in.setEnabled(available and self.ZOOM_LEVELS[-1] - zoom > .001)
+        self.zoom_reset.setEnabled(available)
+        self.zoom_bar.setToolTip("先接管网页，再调整缩放" if not available else "缩小网页可显示更多内容")
+        for shortcut in self.zoom_shortcuts:
+            shortcut.setEnabled(available)
+
+    def change_zoom(self, delta):
+        if not delta:
+            self.set_zoom(1.)
+            return
+        current = self.view.zoomFactor()
+        levels = self.ZOOM_LEVELS if delta > 0 else reversed(self.ZOOM_LEVELS)
+        target = next((value for value in levels if (value - current) * delta > .001), current)
+        self.set_zoom(target)
+
+    def set_zoom(self, zoom):
+        if self.closed or self.tab.owner == "agent":
+            return
+        zoom = max(self.ZOOM_LEVELS[0], min(self.ZOOM_LEVELS[-1], float(zoom)))
+        if abs(zoom - self.view.zoomFactor()) < .001:
+            return
+        # Invalidate observations before Chromium asynchronously relays layout.
+        # A zoom changes both the CSS viewport and native input coordinates.
+        self.tab.page_revision += 1
+        self.view.setZoomFactor(zoom)
+        self.tab.view_state["zoom_factor"] = zoom
+        self.refresh_zoom()
+        log.info("browser.zoom_changed session=%s tab=%s zoom=%s",
+                 self.tab.session_id, self.tab.id, zoom)
 
     def show_find(self):
         self.find.show(); self.find.setFocus(); self.find.selectAll()
@@ -256,10 +321,17 @@ class BrowserPane(ControlledPane):
             for widget in (self.address, self.back_button, self.forward_button, self.reload_button):
                 widget.setEnabled(not controlled)
             self.page.runJavaScript("window.coworkNativeAction=false; window.coworkHumanLocked=" + str(controlled).lower(), 1)
+            self.refresh_zoom()
 
     def eventFilter(self, obj, event):
         if obj is self.view and event.type() in {QEvent.ChildAdded, QEvent.Show}:
             QTimer.singleShot(0, self.install_input_filter)
+        if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta:
+                self.change_zoom(1 if delta > 0 else -1)
+            event.accept()
+            return True
         if self.tab.owner == "agent" and not self.agent_input:
             if event.type() in {QEvent.ContextMenu, QEvent.Drop, QEvent.InputMethod}:
                 return True

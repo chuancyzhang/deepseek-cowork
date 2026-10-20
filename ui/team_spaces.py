@@ -11,17 +11,18 @@ import threading
 import uuid
 from urllib.parse import urlsplit
 
+import qtawesome as qta
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from shiboken6 import isValid
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
     QDialog, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from core.team_spaces import TeamSpaceClient
 from core.team_space_storage import TeamSpaceError, TeamSpacePaused, checksum
 from core.theme import DesignTokens, bind_theme
-from ui.primitives import ProductMessageBox as QMessageBox, product_button_style, product_field_style, product_segmented_style
+from ui.primitives import ProductEmptyState, ProductMessageBox as QMessageBox, product_button_style, product_field_style, product_segmented_style
 
 
 ROLES = {"owner": "所有者", "admin": "管理员", "member": "成员"}
@@ -49,12 +50,23 @@ class _Bridge(QObject):
     progress = Signal(str)
 
 
+class _SignInState(ProductEmptyState):
+    def refresh_theme(self, _resolved=None):
+        super().refresh_theme(_resolved)
+        self.title_label.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_page}px;font-weight:{DesignTokens.font_weight_semibold};color:{DesignTokens.text_primary};")
+        self.description_label.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_body}px;color:{DesignTokens.text_secondary};")
+        self.icon_label.setPixmap(qta.icon("fa5s.users", color=DesignTokens.primary).pixmap(24, 24))
+
+
 class TeamSpacesPage(QDialog):
     taskRequested = Signal(object)
     conversationRequested = Signal(str)
 
     def __init__(self, host, *, client_factory=TeamSpaceClient):
         super().__init__(host)
+        self.setObjectName("TeamSpacesPage")
         self.host, self.client_factory = host, client_factory
         self.client = client_factory()
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="team-space-ui")
@@ -70,19 +82,22 @@ class TeamSpacesPage(QDialog):
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self._poll)
         outer = QVBoxLayout(self)
+        self.outer_layout = outer
         outer.setContentsMargins(24, 16, 24, 16)
         outer.setSpacing(12)
         self.identity_label = QLabel()
         self.identity_label.setWordWrap(True)
         outer.addWidget(self.identity_label)
-        top = QHBoxLayout()
+        self.toolbar = QWidget(self)
+        top = QHBoxLayout(self.toolbar)
+        top.setContentsMargins(0, 0, 0, 0)
         self.back_button = self.button("空间列表", self.open_list)
         top.addWidget(self.back_button)
         top.addWidget(self.button("打开空间链接", self.open_link))
         top.addStretch()
         self.refresh_button = self.button("刷新", self.refresh)
         top.addWidget(self.refresh_button)
-        outer.addLayout(top)
+        outer.addWidget(self.toolbar)
         self.status = QLabel("正在连接企业中心…")
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -91,6 +106,8 @@ class TeamSpacesPage(QDialog):
         self.cancel_button.hide()
         outer.addWidget(self.cancel_button, 0, Qt.AlignLeft)
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("TeamSpaceScroll")
+        self.scroll.viewport().setObjectName("TeamSpaceViewport")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
         outer.addWidget(self.scroll, 1)
@@ -98,14 +115,24 @@ class TeamSpacesPage(QDialog):
         bind_theme(self, self.apply_theme)
 
     def apply_theme(self, *_):
+        self.setStyleSheet(
+            f"QDialog#TeamSpacesPage, QWidget#TeamSpaceContent, QWidget#TeamSpaceViewport "
+            f"{{background:{DesignTokens.bg_main};color:{DesignTokens.text_primary};}} "
+            f"QScrollArea#TeamSpaceScroll {{background:{DesignTokens.bg_main};border:none;}}")
         self.identity_label.setStyleSheet(f"color: {DesignTokens.text_secondary};")
         for widget in self.findChildren(QPushButton):
+            if widget.objectName() == "PrimaryBtn":
+                continue  # ProductEmptyState owns its primary action theme.
             widget.setStyleSheet(product_segmented_style() if widget.property("spaceTab") else product_button_style(widget.property("spaceKind") or "secondary"))
         for cls in (QLineEdit, QPlainTextEdit, QComboBox):
             for widget in self.findChildren(cls):
                 widget.setStyleSheet(product_field_style())
         for tree in self.findChildren(QTreeWidget):
             tree.setStyleSheet(f"QTreeWidget#SpaceTable {{background:{DesignTokens.bg_main}; color:{DesignTokens.text_primary}; border:1px solid {DesignTokens.border_subtle};}} QTreeWidget#SpaceTable::item {{padding:8px;}} QTreeWidget#SpaceTable::item:selected {{background:{DesignTokens.selection_bg};color:{DesignTokens.selection_text};}}")
+        if self.sign_in_state is not None:
+            for label in self.sign_in_state.findChildren(QLabel):
+                if label.property("spaceIdentity"):
+                    label.setStyleSheet(f"color:{DesignTokens.text_secondary};font-size:{DesignTokens.font_size_meta}px;")
 
     def button(self, label, callback, primary=False):
         button = QPushButton(label)
@@ -134,10 +161,16 @@ class TeamSpacesPage(QDialog):
 
     def _reset(self, title="", subtitle=""):
         self.ticket += 1
+        self.sign_in_state = None
+        self.identity_label.show()
+        self.toolbar.show()
+        self.status.show()
         self.dirty, self.fields, self.draft_key = False, {}, ""
         self.editing = None
         self.form_extras = {}
         body = QWidget()
+        body.setObjectName("TeamSpaceContent")
+        body.setAttribute(Qt.WA_StyledBackground, True)
         self.layout = QVBoxLayout(body)
         self.layout.setSpacing(12)
         self.layout.setContentsMargins(0, 0, 8, 0)
@@ -155,6 +188,68 @@ class TeamSpacesPage(QDialog):
             self.layout.addWidget(heading)
         if subtitle:
             self.label(subtitle)
+
+    def _show_sign_in(self, *, expired=False):
+        state = self.client.enterprise_store.read()
+        connection, member = state.get("connection") or {}, state.get("member") or {}
+        if not connection:
+            title, action = "连接企业，开始团队协作", "设置企业连接"
+            description = "与同事共享计划、资料和成果，任务在各自电脑上完成。\n请先在“账号与连接”中设置企业连接并登录。"
+        elif expired or member:
+            title, action = "重新登录企业账号", "前往登录"
+            description = "登录状态已失效，登录后即可继续访问团队空间。\n本机任务、已有内容和未提交草稿均已保留。"
+        else:
+            title, action = "登录后进入团队空间", "前往登录"
+            description = "与同事共享计划、资料和成果，任务在各自电脑上完成。\n使用企业员工账号登录，即可创建或加入空间。"
+        self._reset()
+        self.space = None
+        self.timer.stop()
+        self.identity_label.hide()
+        self.toolbar.hide()
+        self.status.clear()
+        self.status.hide()
+        self.cancel_button.hide()
+        empty = _SignInState(title, description, action, appearance="plain",
+            icon=qta.icon("fa5s.users", color=DesignTokens.primary))
+        empty.setMaximumWidth(560)
+        empty.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        empty.title_label.setWordWrap(True)
+        empty.description_label.setMaximumWidth(440)
+        empty.layout().setAlignment(Qt.AlignTop)
+        empty.layout().setAlignment(empty.description_label, Qt.AlignHCenter)
+        empty.layout().setSpacing(14)
+        empty.icon_label.setFixedSize(48, 48)
+        empty.refresh_theme()
+        empty.action_button.clicked.connect(lambda: self._call(lambda: self.host.open_settings("账号与连接")))
+        if connection:
+            identity = QLabel("企业：" + (connection.get("platform_name") or "已配置企业"))
+            identity.setAlignment(Qt.AlignCenter)
+            identity.setWordWrap(True)
+            identity.setTextFormat(Qt.PlainText)
+            identity.setProperty("spaceIdentity", True)
+            empty.layout().insertWidget(1, identity)
+            empty.layout().addWidget(self.button("我已登录，刷新", self.refresh), 0, Qt.AlignCenter)
+        self.sign_in_state = empty
+        self._fit_sign_in_state()
+        self.layout.addStretch(1)
+        self.layout.addWidget(empty, 0, Qt.AlignHCenter)
+        self.layout.addStretch(2)
+        self.apply_theme()
+
+    def _fit_sign_in_state(self):
+        if self.sign_in_state is None:
+            return
+        margins = self.outer_layout.contentsMargins()
+        content_margins = self.layout.contentsMargins()
+        width = min(520, self.width() - margins.left() - margins.right()
+                    - content_margins.left() - content_margins.right())
+        self.sign_in_state.setFixedWidth(max(120, width))
+        self.sign_in_state.description_label.setFixedWidth(max(80, min(440, width - 40)))
+        self.sign_in_state.setMinimumHeight(self.sign_in_state.layout().totalHeightForWidth(max(120, width)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_sign_in_state()
 
     def label(self, text):
         label = QLabel(str(text))
@@ -232,14 +327,15 @@ class TeamSpacesPage(QDialog):
         self.cancel_button.hide()
         try:
             client.session()
-        except TeamSpaceError as changed:
-            self._reset("请重新登录原企业账号", str(changed))
-            self.space = None
-            self.actions(("打开连接设置", lambda: self.host.open_settings(), True), ("重新连接", self.refresh))
+        except TeamSpaceError:
+            self._show_sign_in()
             return
         if ticket != self.ticket or client is not self.client:
             return
         if error:
+            if getattr(error, "status", 0) == 401:
+                self._show_sign_in(expired=True)
+                return
             self.status.setText(str(error) + (" 草稿已保留。" if self.draft_key else ""))
             if getattr(error, "status", 0) == 409 and self.draft_key:
                 self._conflict()
@@ -287,6 +383,11 @@ class TeamSpacesPage(QDialog):
             self.client, self.space, self.route = fresh, None, ("list", {})
             self._reset()
         state = self.client.enterprise_store.read()
+        try:
+            self.client.session()
+        except TeamSpaceError:
+            self._show_sign_in()
+            return
         self.identity_label.setText(f"{(state.get('connection') or {}).get('platform_name') or '尚未连接企业'} · {(state.get('member') or {}).get('name') or '未登录'}")
         if self.draft_key:
             self._poll()

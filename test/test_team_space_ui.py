@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 from PySide6.QtCore import Qt
@@ -172,6 +172,40 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.assertEqual(self.page.fields["body"].toPlainText(), "")
         self.assertEqual(self.local.draft({"platform_id": "test", "member_id": "owner"}, self.backend.space, "comment:space" + self.backend.space)["values"]["body"], "原账号草稿")
 
+    def test_sign_in_guidance_preserves_draft_and_returns_after_login(self):
+        self.open_space()
+        self.page.comment_form("space", self.backend.space)
+        self.page.fields["body"].setPlainText("登录过期前的草稿")
+        state = self.enterprise.read()
+        self.enterprise.write({**state, "expires_at": 0}, self.backend.tokens["owner"])
+        self.page.refresh()
+        self.wait()
+        self.assertFalse(self.page.toolbar.isVisible())
+        self.assertFalse(self.page.status.isVisible())
+        self.host.open_settings = Mock()
+        self.page.sign_in_state.action_button.click()
+        self.host.open_settings.assert_called_once_with("账号与连接")
+        self.shot("desktop-sign-in-expired")
+        self.page.resize(480, 560)
+        self.wait()
+        self.shot("desktop-sign-in-narrow")
+
+        self.enterprise.write({**state, "generation": "signed-in-again"}, self.backend.tokens["owner"])
+        self.click("我已登录，刷新")
+        self.assertTrue(self.page.toolbar.isVisible())
+        self.open_space()
+        self.page.comment_form("space", self.backend.space)
+        self.assertEqual(self.page.fields["body"].toPlainText(), "登录过期前的草稿")
+
+        self.enterprise.write({"connection": state["connection"]})
+        self.page.refresh()
+        self.wait()
+        self.shot("desktop-sign-in")
+        self.enterprise.write({})
+        self.page.refresh()
+        self.wait()
+        self.shot("desktop-connect-enterprise")
+
     def test_lost_publish_ack_recovers_once_without_reuploading_consumed_files(self):
         self.open_space("tasks")
         self.page.share_form()
@@ -236,6 +270,11 @@ class TeamSpaceNativeTests(unittest.TestCase):
         theme.repository.write_preview(name="团队空间预览", overrides={"tokens": {"primary": "#39734d", "primary_hover": "#2d603e"}}, default_tokens=default_design_tokens())
         self.assertTrue(theme.apply_repository_state(reason="team_space_preview"), theme.last_error)
         self.shot("desktop-theme-preview")
+        state = self.enterprise.read()
+        self.enterprise.write({**state, "expires_at": 0}, self.backend.tokens["owner"])
+        self.page.refresh()
+        self.wait()
+        self.shot("desktop-sign-in-theme-preview")
         self.assertTrue(theme.restore_saved_theme(), theme.last_error)
         self.assertEqual(DesignTokens.primary, saved)
         theme.stop()

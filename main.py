@@ -16798,8 +16798,10 @@ class InlineInteractionCard(QFrame):
     def __init__(self, request, parent=None):
         super().__init__(parent)
         self.request = dict(request or {})
+        self.run_id = str((self.request.get("metadata") or {}).get("run_id") or "")
         self.kind = str(self.request.get("kind") or "approval").strip().lower()
         self._resolved = False
+        self._terminal = False
         self.option_checks = []
         self.question_controls = []
         self.question_labels = []
@@ -16929,11 +16931,6 @@ class InlineInteractionCard(QFrame):
         actions.addWidget(self.submit_btn)
         layout.addLayout(actions)
 
-        timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
-        self.timeout_timer = QTimer(self)
-        self.timeout_timer.setSingleShot(True)
-        self.timeout_timer.timeout.connect(self._expire)
-        self.timeout_timer.start(int(timeout_seconds * 1000))
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="feedback")
 
@@ -16977,6 +16974,7 @@ class InlineInteractionCard(QFrame):
         validation_color = (
             DesignTokens.success_text
             if self._validation_tone == "success"
+            else DesignTokens.text_secondary if self._validation_tone == "info"
             else DesignTokens.error_text
         )
         self.validation_label.setStyleSheet(
@@ -17069,39 +17067,44 @@ class InlineInteractionCard(QFrame):
         if self._resolved:
             return
         self._resolved = True
-        self.timeout_timer.stop()
         self._set_controls_enabled(False)
-        self._validation_tone = "success"
+        self._validation_tone = "info"
         self.refresh_theme()
-        self.validation_label.setText("已提交")
+        self.validation_label.setText("正在提交…")
         self.validation_label.show()
         self.resolved.emit(value)
 
     def restore_after_resolution_error(self, message):
+        if self._terminal:
+            return
         self._resolved = False
         self._set_controls_enabled(True)
         self._validation_tone = "error"
         self.refresh_theme()
         self.validation_label.setText(f"提交失败：{str(message or '未知错误')}。请重试。")
         self.validation_label.show()
-        timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
-        self.timeout_timer.start(int(timeout_seconds * 1000))
 
     def stop_waiting(self):
-        self._resolved = True
-        self.timeout_timer.stop()
-        self._set_controls_enabled(False)
-        self.validation_label.setText("任务已停止，未提交的输入保留在这里。")
-        self.validation_label.show()
+        self.finish_waiting("cancelled")
 
-    def _expire(self):
-        if self._resolved:
-            return
+    def finish_waiting(self, status):
+        self._terminal = True
         self._resolved = True
         self._set_controls_enabled(False)
-        self.validation_label.setText("请求已超时")
+        for field in [self.text_input, *(control["input"] for control in self.question_controls)]:
+            field.setEnabled(True)
+            field.setReadOnly(True)
+        self.cancel_btn.hide()
+        self.submit_btn.hide()
+        messages = {
+            "timeout": "请求已超时，未提交的输入保留在这里。",
+            "cancelled": "任务已停止或请求已取消，未提交的输入保留在这里。",
+            "error": "请求处理失败，未提交的输入保留在这里。",
+        }
+        self._validation_tone = "info"
+        self.validation_label.setText(messages.get(status, "请求已结束，未提交的输入保留在这里。"))
+        self.refresh_theme()
         self.validation_label.show()
-        self.resolved.emit(False)
 
 
 def _conversation_skill_text_list(text):
@@ -18703,6 +18706,7 @@ class DaemonStreamWorker(QThread):
     agent_state_signal = Signal(dict)
     output_signal = Signal(str)
     interaction_signal = Signal(dict)
+    interaction_finished_signal = Signal(dict)
     turn_started_signal = Signal(str)
 
     def __init__(
@@ -18825,6 +18829,10 @@ class DaemonStreamWorker(QThread):
             data = msg.get("data") or {}
             if isinstance(data, dict) and data.get("request_id"):
                 self.interaction_signal.emit(data)
+        elif message_type == "interaction_finished":
+            data = msg.get("data") or {}
+            if isinstance(data, dict) and data.get("request_id"):
+                self.interaction_finished_signal.emit(data)
         elif message_type == "log":
             self.output_signal.emit(str(msg.get("data") or ""))
         elif message_type == "final":
@@ -28665,6 +28673,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         # Connect to Interaction Bridge
         bridge.interaction_requested.connect(self.handle_interaction_request)
+        bridge.interaction_finished.connect(self.handle_interaction_finished)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -35769,6 +35778,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             state.turn_steerable = False
             state.daemon_running = False
         if status in {"completed", "error", "failed", "interrupted", "draft"}:
+            self._finish_session_interactions(
+                state, status="cancelled" if status == "interrupted" else "ended",
+            )
             self._cancel_token_speed_monitor(state, f"session_{status}")
         if status != "running":
             state.provider_retry_attempt = 0
@@ -36447,11 +36459,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                     if (metadata.get("execution_permission")
                             and metadata.get("tool_call_id") == event.get("tool_call_id")
                             and metadata.get("run_id") == event.get("run_id")):
-                        state.pending_interactions.pop(interaction_id, None)
-                        card.timeout_timer.stop()
-                        state.chat_layout.removeWidget(card)
-                        card.hide()
-                        card.deleteLater()
+                        self._finish_inline_interaction(
+                            state, interaction_id, event.get("status"),
+                            remove=event.get("status") in {"approved", "denied"},
+                        )
             if event_type == "assistant_message_started":
                 source_id = str(event.get("message_id") or "")
                 state.active_source_message_id = source_id
@@ -39464,12 +39475,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         request = dict(request or {})
         session_id = str(request.get("session_id") or self.current_session_id or "")
         run_id = (request.get("metadata") or {}).get("run_id")
-        if run_id and not self._event_matches_active_run(self.get_session(session_id), request_id=run_id):
-            return
+        if run_id:
+            state = self.get_session(session_id)
+            if (not self._event_matches_active_run(state, request_id=run_id)
+                    or state.session_status not in {"running", "finalizing"}):
+                return
         self._show_inline_interaction_request(
             request,
             session_id,
-            lambda value: bridge.resolve_request(request.get("request_id"), value),
+            lambda value: bridge.respond_request(request.get("request_id"), value),
         )
     
     def handle_daemon_interaction_request(
@@ -39478,7 +39492,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         request = dict(request or {})
         target_session_id = str(session_id or request.get("session_id") or self.current_session_id or "")
         state = self.get_session(target_session_id)
-        if not self._event_matches_active_run(state, turn_id, run_request_id):
+        if (not self._event_matches_active_run(state, turn_id, run_request_id)
+                or state.session_status not in {"running", "finalizing"}):
             return
 
         def resolve(value):
@@ -39487,6 +39502,49 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             raise RuntimeError("后台连接不可用，回答尚未提交")
 
         self._show_inline_interaction_request(request, target_session_id, resolve)
+
+    def _finish_inline_interaction(self, state, request_id, status, *, remove=False):
+        card = state.pending_interactions.pop(request_id, None)
+        if card is None:
+            return
+        card.finish_waiting(status)
+        if remove or status in {"completed", "auto_selected"}:
+            state.chat_layout.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+        self._dismiss_interaction_toast(request_id)
+        if not state.pending_interactions and getattr(state, "run_phase", "") == "Awaiting input":
+            phase = {"running": "Analyzing", "finalizing": "Wrapping up", "completed": "Completed",
+                     "error": "Error", "failed": "Error", "interrupted": "Interrupted"}.get(state.session_status, "待开始")
+            self.set_session_phase(phase, state.session_id)
+        self.refresh_session_activity_indicator(state.session_id)
+        log_ui_navigation(
+            "interaction_inline_finished", session_id=state.session_id,
+            run_id=card.run_id, request_id=request_id, status=status,
+        )
+
+    def _finish_session_interactions(self, state, *, run_id=None, status="ended"):
+        run_id = str(run_id if run_id is not None else getattr(state, "active_turn_request_id", "") or "")
+        for request_id, card in list(getattr(state, "pending_interactions", {}).items()):
+            if card.run_id == run_id:
+                self._finish_inline_interaction(state, request_id, status)
+
+    def handle_interaction_finished(self, event, session_id=None, turn_id=None, run_request_id=None):
+        event = dict(event or {})
+        target_session_id = str(session_id or event.get("session_id") or "")
+        if event.get("session_id") != target_session_id:
+            return
+        state = self.get_session(target_session_id)
+        run_id = str(event.get("run_id") or "")
+        if not self._event_matches_active_run(state, turn_id, run_request_id or run_id or None):
+            return
+        card = state.pending_interactions.get(str(event.get("request_id") or ""))
+        if card is None or (run_id and card.run_id != run_id):
+            return
+        self._finish_inline_interaction(
+            state, str(event["request_id"]), str(event.get("status") or "ended"),
+            remove=event.get("answered") is True,
+        )
 
     def _show_inline_interaction_request(self, request, session_id, resolver):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -39500,22 +39558,41 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             "interaction_inline_show",
             session_id=state.session_id,
             request_id=request_id,
-            interaction_type=str((request or {}).get("type") or "input"),
+            interaction_type=str((request or {}).get("kind") or "input"),
             background=state.session_id != self.current_session_id,
         )
         card = InlineInteractionCard(request, self)
+        card.run_id = str((request.get("metadata") or {}).get("run_id")
+                          or getattr(state, "active_turn_request_id", "") or "")
         state.pending_interactions[request_id] = card
         state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
 
         def finish(value):
+            if state.pending_interactions.get(request_id) is not card:
+                return
             try:
                 acknowledgement = resolver(value)
-                if acknowledgement is False or (
-                    isinstance(acknowledgement, dict)
-                    and (acknowledgement.get("status") != "ok" or not acknowledgement.get("resolved"))
-                ):
-                    raise RuntimeError("请求已结束或未被接收，回答尚未提交")
+                if state.pending_interactions.get(request_id) is not card:
+                    return
+                accepted = acknowledgement is True or (
+                    isinstance(acknowledgement, dict) and acknowledgement.get("status") == "ok"
+                    and acknowledgement.get("resolved") is True
+                )
+                if not accepted:
+                    if (isinstance(acknowledgement, dict) and acknowledgement.get("status") == "ok"
+                            and acknowledgement.get("resolved") is False):
+                        if acknowledgement.get("reason") == "ended":
+                            self._finish_inline_interaction(
+                                state, request_id, acknowledgement.get("outcome") or "ended",
+                                remove=acknowledgement.get("answered") is True,
+                            )
+                            return
+                        if acknowledgement.get("reason") == "invalid":
+                            raise RuntimeError("回答未被接收，请检查输入内容")
+                    raise RuntimeError("暂时无法确认是否提交成功，输入已保留")
             except Exception as exc:
+                if state.pending_interactions.get(request_id) is not card:
+                    return
                 card.restore_after_resolution_error(exc)
                 log_ui_navigation(
                     "interaction_inline_resolve_failed",
@@ -39525,11 +39602,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
                 self.refresh_session_activity_indicator(state.session_id)
                 return
-            state.pending_interactions.pop(request_id, None)
-            state.chat_layout.removeWidget(card)
-            card.hide()
-            card.deleteLater()
-            self.refresh_session_activity_indicator(state.session_id)
+            self._finish_inline_interaction(state, request_id, "completed", remove=True)
             log_ui_navigation(
                 "interaction_inline_resolved",
                 session_id=state.session_id,
@@ -39550,6 +39623,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 "info",
                 session_id=state.session_id,
                 auto_close_ms=0,
+                request_id=request_id,
             )
         return card
 
@@ -49179,6 +49253,7 @@ a {{ overflow-wrap: anywhere; }}
             "observability_signal",
             "output_signal",
             "interaction_signal",
+            "interaction_finished_signal",
             "agent_state_signal",
             "step_signal",
             "skill_used_signal",
@@ -49660,9 +49735,7 @@ a {{ overflow-wrap: anywhere; }}
                 self._keep_detached_worker(llm_worker)
         if not needs_daemon_stop:
             self._stop_live_subagents(state, force=True)
-        for card in state.pending_interactions.values():
-            card.stop_waiting()
-        state.pending_interactions.clear()
+        self._finish_session_interactions(state, run_id=stopped_run_id, status="cancelled")
 
         self.flush_session_content(state.session_id, final=False)
         self.flush_session_thinking(state.session_id)
@@ -52807,12 +52880,9 @@ a {{ overflow-wrap: anywhere; }}
         result_obj = data.get("result_obj")
         response = result_obj.get("interaction_response") if isinstance(result_obj, dict) else None
         if isinstance(response, dict):
-            interaction = state.pending_interactions.pop(str(response.get("request_id") or ""), None)
-            if interaction is not None:
-                interaction.timeout_timer.stop()
-                state.chat_layout.removeWidget(interaction)
-                interaction.hide()
-                interaction.deleteLater()
+            self._finish_inline_interaction(
+                state, str(response.get("request_id") or ""), response.get("status") or "ended",
+            )
         client_action = result_obj.get("client_action") if isinstance(result_obj, dict) else None
         if (
             isinstance(client_action, dict)
@@ -53188,6 +53258,7 @@ a {{ overflow-wrap: anywhere; }}
         while self._system_toast_queue and len(self._visible_system_toasts) < DesignTokens.toast_max_visible:
             payload = self._system_toast_queue.pop(0)
             toast = SystemToast(payload["text"], payload["type"], self.main_container, actions=payload.get("actions", ()))
+            toast.interaction_request_id = payload.get("request_id")
             toast.set_repeat_count(payload.get("count", 1))
             toast.closeRequested.connect(self._dismiss_system_toast)
             self._visible_system_toasts.append(toast)
@@ -53215,21 +53286,32 @@ a {{ overflow-wrap: anywhere; }}
     def _complete_system_toast_exit(self, toast):
         self._dismiss_system_toast(toast)
 
-    def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None, *, actions=()):
+    def _dismiss_interaction_toast(self, request_id):
+        self._system_toast_queue = [
+            payload for payload in getattr(self, "_system_toast_queue", [])
+            if payload.get("request_id") != request_id
+        ]
+        for toast in list(getattr(self, "_visible_system_toasts", [])):
+            if _qt_object_alive(toast) and getattr(toast, "interaction_request_id", None) == request_id:
+                self._dismiss_system_toast(toast)
+
+    def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None, *, actions=(), request_id=None):
         message = str(text or "").strip()
         if not message:
             return
         visible = getattr(self, "_visible_system_toasts", [])
         if visible and not actions:
             latest = visible[-1]
-            if latest.base_text == message and latest.toast_type == type:
+            if (latest.base_text == message and latest.toast_type == type
+                    and getattr(latest, "interaction_request_id", None) == request_id):
                 latest.set_repeat_count(latest.repeat_count + 1)
                 latest.start_auto_close(self._system_toast_duration(type, auto_close_ms))
                 self._position_active_system_toast()
                 return
         if self._system_toast_queue and not actions:
             latest_payload = self._system_toast_queue[-1]
-            if latest_payload["text"] == message and latest_payload["type"] == type:
+            if (latest_payload["text"] == message and latest_payload["type"] == type
+                    and latest_payload.get("request_id") == request_id):
                 latest_payload["count"] = int(latest_payload.get("count", 1)) + 1
                 return
         self._system_toast_queue.append({
@@ -53239,6 +53321,7 @@ a {{ overflow-wrap: anywhere; }}
             "count": 1,
             "session_id": session_id,
             "actions": actions,
+            "request_id": request_id,
         })
         self._show_next_system_toast()
 
@@ -53492,6 +53575,11 @@ a {{ overflow-wrap: anywhere; }}
             state, worker, "interaction_signal",
             lambda req, sid=state.session_id, tid=turn_id, rid=request_id:
                 self.handle_daemon_interaction_request(req, sid, tid, rid),
+        )
+        self._connect_ui_stream_signal(
+            state, worker, "interaction_finished_signal",
+            lambda event, sid=state.session_id, tid=turn_id, rid=request_id:
+                self.handle_interaction_finished(event, sid, tid, rid),
         )
         self._connect_ui_stream_signal(
             state, worker, "turn_started_signal",

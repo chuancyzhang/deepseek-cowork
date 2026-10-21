@@ -50,6 +50,9 @@ class BackgroundInteractionTests(unittest.TestCase):
                             interaction_service.interaction_requested.emit({
                                 "session_id": session_id, "request_id": "wrong", "kind": "text",
                                 "metadata": {"run_id": run_id}})
+                            interaction_service.interaction_finished.emit({
+                                "session_id": session_id, "run_id": run_id,
+                                "request_id": "wrong", "status": "timeout"})
                         return interaction_service.create_request(self.tool_tasks.session_id,
                             "text", "选择运行环境", timeout_seconds=3, source_tool="request_user_input")
                     task, wait = self.tool_tasks.submit("ask", "request_user_input", {}, "call", ask)
@@ -71,9 +74,65 @@ class BackgroundInteractionTests(unittest.TestCase):
                     ack = self.client.respond_interaction(request["request_id"], "使用本地环境")
                     self.assertTrue(ack["resolved"])
         self.assertEqual(sum(chunk.get("type") == "interaction_request" for chunk in chunks), 1)
+        ended = [chunk["data"] for chunk in chunks if chunk.get("type") == "interaction_finished"]
+        self.assertEqual(len(ended), 1)
+        self.assertEqual(ended[0]["request_id"], request["request_id"])
+        self.assertEqual(ended[0]["status"], "completed")
+        self.assertTrue(ended[0]["answered"])
         final = next(chunk["result"] for chunk in chunks if chunk.get("type") == "final")
         self.assertEqual(final["content"], "使用本地环境")
         self.assertEqual(final["answer"]["status"], "completed")
+
+    def test_legacy_timeout_is_durable_and_replayed_without_tool_response_payload(self):
+        class Worker(QThread):
+            thinking_signal = Signal(str)
+            content_signal = Signal(str)
+            tool_call_signal = Signal(dict)
+            tool_result_signal = Signal(dict)
+            observability_signal = Signal(dict)
+            agent_state_signal = Signal(dict)
+            output_signal = Signal(str)
+            finished_signal = Signal(object)
+
+            def __init__(self, messages, config, workspace_dir, **kwargs):
+                super().__init__()
+                self.agent_manager = None
+                self.request_id = kwargs["request_id"]
+                self.execution_authorization = ExecutionAuthorization.start(
+                    config, kwargs["session_id"], self.request_id, workspace_dir)
+                self.tool_tasks = ToolTaskManager(kwargs["session_id"], self.request_id)
+
+            def run(self):
+                from core.interaction import ask_user
+                try:
+                    task, wait = self.tool_tasks.submit("delete", "delete_file", {}, "call",
+                        lambda: ask_user("Confirm delete recursively: 'repo'?", timeout_seconds=0.05))
+                    result = self.tool_tasks.await_initial(task, wait)
+                    self.finished_signal.emit({"content": "kept files", "approved": result})
+                finally:
+                    self.tool_tasks.close()
+
+        with patch("core.daemon.LLMWorker", Worker):
+            chunks = list(self.client.send_message_stream("daemon-session-test", "test timeout",
+                workspace_dir=self.temp_dir, run_context={"mode": "execution"}, writer_owner="ui:4242"))
+        self.assertFalse(any(chunk.get("type") == "tool_result" for chunk in chunks))
+        requested = next(chunk for chunk in chunks if chunk.get("type") == "interaction_request")
+        ended = [chunk for chunk in chunks if chunk.get("type") == "interaction_finished"]
+        self.assertEqual(len(ended), 1)
+        self.assertEqual(ended[0]["data"]["request_id"], requested["data"]["request_id"])
+        self.assertEqual(ended[0]["data"]["status"], "timeout")
+        self.assertFalse(ended[0]["data"]["answered"])
+        self.assertFalse(next(chunk["result"] for chunk in chunks if chunk.get("type") == "final")["approved"])
+        # A client which missed the completion can recover it through the
+        # existing cursor API; no separate interaction database is required.
+        replay = self.client.attach_run("daemon-session-test", requested["run_id"],
+                                       starting_after=requested["sequence"])
+        replayed = [event for event in replay["events"] if event["type"] == "interaction_finished"]
+        self.assertEqual([event["payload"]["data"] for event in replayed], [ended[0]["data"]])
+        self.assertLess(ended[0]["sequence"], next(chunk["sequence"] for chunk in chunks if chunk.get("type") == "final"))
+        late = self.client.respond_interaction(requested["data"]["request_id"], True)
+        self.assertFalse(late["resolved"])
+        self.assertEqual(late["reason"], "ended")
 
     def test_stop_cancels_background_question_and_keeps_other_session_pending(self):
         service = InteractionService()

@@ -1775,7 +1775,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     getattr(worker_holder.get("worker"), "current_assistant_message_id", "") or ""
                 )
                 try:
-                    return pipeline.enqueue(payload, terminal=payload.get("type") == "final")
+                    return pipeline.enqueue(
+                        payload, terminal=payload.get("type") in {"final", "interaction_finished"},
+                    )
                 except Exception as exc:
                     _log_daemon(
                         "runtime stream event write failed "
@@ -1893,18 +1895,24 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 
-            def handle_interaction_request(payload):
+            def route_interaction(payload, event_type):
                 if (payload or {}).get("session_id") != session_id:
                     return
-                request_run_id = (payload or {}).get("metadata", {}).get("run_id")
+                request_run_id = (payload or {}).get("run_id") or (payload or {}).get("metadata", {}).get("run_id")
                 if request_run_id:
                     if request_run_id != worker.execution_authorization.run_id:
                         return
                 elif QThread.currentThread() != worker:
                     return
                 request_payload = dict(payload or {})
-                send_stream({"type": "interaction_request", "data": request_payload})
-                _log_daemon(f"interaction dispatched session_id={session_id} run_id={request_id} request_id={request_payload.get('request_id')}")
+                send_stream({"type": event_type, "data": request_payload})
+                _log_daemon(f"interaction dispatched type={event_type} session_id={session_id} run_id={request_id} request_id={request_payload.get('request_id')} status={request_payload.get('status', '')}")
+
+            def handle_interaction_request(payload):
+                route_interaction(payload, "interaction_request")
+
+            def handle_interaction_finished(payload):
+                route_interaction(payload, "interaction_finished")
 
             from core.workbench import workbench_bridge
             from core.workbench_transport import dispatch as dispatch_workbench
@@ -1913,6 +1921,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             with workbench_host._lock:
                 workbench_host.remote_routes[route_key] = lambda act, args, ctx, timeout: dispatch_workbench(send_stream, act, args, ctx, timeout)
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
+            interaction_service.interaction_finished.connect(handle_interaction_finished, Qt.DirectConnection)
             activated = state.set_active_worker(
                 session_id,
                 worker,
@@ -1957,11 +1966,13 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 finally:
                     try:
                         interaction_service.interaction_requested.disconnect(handle_interaction_request)
+                        interaction_service.interaction_finished.disconnect(handle_interaction_finished)
                     except Exception as e:
                         _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
             else:
                 try:
                     interaction_service.interaction_requested.disconnect(handle_interaction_request)
+                    interaction_service.interaction_finished.disconnect(handle_interaction_finished)
                 except Exception as e:
                     _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
                 result_holder["result"] = {
@@ -2306,8 +2317,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             if not request_id:
                 self._send({"status": "error", "error": "Missing request_id"})
                 return
-            resolved = interaction_service.resolve_request(request_id, result)
-            self._send({"status": "ok", "resolved": resolved})
+            self._send(interaction_service.respond_request(request_id, result))
             return
         if action == "get_pending_interaction":
             session_id = data.get("session_id")
@@ -2579,8 +2589,12 @@ class DaemonClient:
     
     def respond_interaction(self, request_id, result):
         try:
-            return self._request({"action": "respond_interaction", "request_id": request_id, "result": result})
-        except Exception:
+            response = self._request({"action": "respond_interaction", "request_id": request_id, "result": result})
+            if response is None:
+                _log_daemon(f"interaction submit unconfirmed request_id={request_id} reason=empty_response")
+            return response
+        except Exception as exc:
+            _log_daemon(f"interaction submit unconfirmed request_id={request_id} error_type={type(exc).__name__}")
             return None
 
     def get_pending_interaction(self, session_id):

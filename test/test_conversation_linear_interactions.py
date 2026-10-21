@@ -352,7 +352,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "options": [{"label": "继续", "value": "continue"}],
                 },
                 state.session_id,
-                values.append,
+                lambda value: (values.append(value), True)[1],
             )
             card.option_checks[0].setChecked(True)
             card._submit()
@@ -387,6 +387,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 "info",
                 session_id=background.session_id,
                 auto_close_ms=0,
+                request_id="background-waiting",
             )
         finally:
             window.close()

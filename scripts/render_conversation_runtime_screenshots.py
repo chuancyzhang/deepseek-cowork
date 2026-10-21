@@ -50,7 +50,6 @@ def run():
                 {"label": "使用已有环境", "value": "existing", "description": "提供本机 Python 和模型目录。"},
                 {"label": "创建新的环境", "value": "new", "description": "在当前工作目录中准备环境。"},
                 {"label": "自定义", "value": "__custom__"}]}]}, host)
-        question.timeout_timer.stop()
         layout.addWidget(question)
         table = ConversationFileTable(host)
         paths = [str(Path(temporary, name)) for name in (
@@ -105,5 +104,82 @@ def run():
     print(f"Conversation screenshots: {output} ({scale}x)")
 
 
+def run_interaction_states():
+    app = QApplication.instance() or QApplication([])
+    for name in ("msyh.ttc", "msyhbd.ttc", "segoeui.ttf", "consola.ttf"):
+        path = Path(os.environ.get("WINDIR", "C:/Windows"), "Fonts", name)
+        if path.exists():
+            QFontDatabase.addApplicationFont(str(path))
+    app.setFont(QFont("Microsoft YaHei UI", 10))
+    output = ROOT / "docs/assets/conversation-runtime"
+    output.mkdir(parents=True, exist_ok=True)
+    scale = os.environ.get("QT_SCALE_FACTOR", "1")
+    with tempfile.TemporaryDirectory(prefix="cowork-interaction-qa-") as temporary:
+        repository = ThemeRepository(temporary)
+        manager = ThemeRuntimeManager(app, repository)
+        app.theme_manager = manager
+        assert manager.apply_repository_state(reason="interaction_capture"), manager.last_error
+        saved = repository.load()
+        host = QWidget()
+        host.setObjectName("InteractionSample")
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        waiting = InlineInteractionCard({"kind": "approval", "title": "请确认",
+            "message": "是否删除工作目录中的临时文件？"}, host)
+        expired = InlineInteractionCard({"kind": "approval", "title": "已结束的确认",
+            "message": "是否删除工作目录中的临时文件？"}, host)
+        expired.finish_waiting("timeout")
+        failed = InlineInteractionCard({"kind": "text", "title": "提交暂未确认",
+            "message": "请补充希望优先处理的内容。"}, host)
+        failed.text_input.setText("先检查文档中的数字与引用。")
+        failed.restore_after_resolution_error("暂时无法确认是否提交成功，输入已保留")
+        stopped = InlineInteractionCard({"kind": "text", "title": "停止后的输入",
+            "message": "请补充希望优先处理的内容。"}, host)
+        stopped.text_input.setText("这段输入已保留，可以选择和复制。")
+        stopped.stop_waiting()
+        for card in (waiting, expired, failed, stopped):
+            layout.addWidget(card)
+
+        def capture(name, width):
+            host.setStyleSheet(f"QWidget#InteractionSample {{ background: {DesignTokens.bg_main}; }}")
+            host.setFixedWidth(width)
+            host.show()
+            QTest.qWait(60)
+            host.adjustSize()
+            QTest.qWait(60)
+            if app.focusWidget() is not None:
+                app.focusWidget().clearFocus()
+            for card in (waiting, expired, failed, stopped):
+                assert card.geometry().right() <= host.width()
+                for button in (card.submit_btn, card.cancel_btn):
+                    if not button.isHidden():
+                        assert button.geometry().right() <= card.width()
+                if not card.validation_label.isHidden():
+                    assert card.validation_label.geometry().bottom() <= card.height()
+            image = host.grab()
+            assert image.save(str(output / f"{name}-{scale}x.png"))
+            return image.toImage()
+
+        capture("interactions-wide", 720)
+        before = capture("interactions-wide", 720)
+        capture("interactions-small", 380)
+        assert manager.apply_profile({"id": "interaction-preview", "name": "交互状态预览", "schema_version": 2,
+            "overrides": {"tokens": {"bg_main": "#f4f4f4", "bg_app": "#f4f4f4"}},
+            "assets": {}, "surfaces": {}, "components": {}, "content": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []}}, preview=True, reason="interaction_capture")
+        assert manager.restore_saved_theme(reason="interaction_capture_cancel")
+        after = capture("interactions-wide", 720)
+        assert repository.load() == saved
+        assert before == after, "Theme preview must not change saved appearance"
+        assert expired.submit_btn.isHidden() and stopped.submit_btn.isHidden()
+        assert failed.submit_btn.isEnabled() and stopped.text_input.isReadOnly()
+        host.close()
+        host.deleteLater()
+        app.processEvents()
+        manager.stop()
+    print(f"Interaction screenshots: {output} ({scale}x)")
+
+
 if __name__ == "__main__":
-    run()
+    run_interaction_states() if "--interactions" in sys.argv else run()

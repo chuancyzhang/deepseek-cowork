@@ -369,6 +369,7 @@ class InteractionResponse:
 
 class InteractionService(QObject):
     interaction_requested = Signal(dict)
+    interaction_finished = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -423,84 +424,112 @@ class InteractionService(QObject):
         )
         event = threading.Event()
         payload = request.to_dict()
+        deadline = time.monotonic() + request.timeout_seconds
         with self._lock:
-            self._pending[request.request_id] = {
+            entry = self._pending[request.request_id] = {
                 "request": payload,
                 "event": event,
                 "response": None,
+                "answered": False,
                 "created_at": time.time(),
-                "deadline": time.monotonic() + request.timeout_seconds,
+                "deadline": deadline,
                 "abort_check": abort_check,
             }
         self.interaction_requested.emit(payload)
         logger.info("interaction.wait session=%s run=%s request=%s kind=%s",
                     request.session_id, metadata.get("run_id", ""), request.request_id, request.kind)
-        if callable(abort_check):
-            deadline = time.monotonic() + request.timeout_seconds
-            while not event.wait(min(0.05, max(0, deadline - time.monotonic()))):
-                if abort_check():
-                    with self._lock:
-                        self._pending.pop(request.request_id, None)
-                    logger.info("interaction.cancelled session=%s run=%s request=%s",
-                                request.session_id, metadata.get("run_id", ""), request.request_id)
-                    return InteractionResponse(request_id=request.request_id, status="cancelled", approved=False).to_dict()
-                if time.monotonic() >= deadline:
-                    break
-            resolved = event.is_set()
-        else:
-            resolved = event.wait(request.timeout_seconds)
-        with self._lock:
-            entry = self._pending.pop(request.request_id, None)
-        if not resolved or not entry or not isinstance(entry.get("response"), dict):
-            logger.info("interaction.timeout session=%s run=%s request=%s",
-                        request.session_id, metadata.get("run_id", ""), request.request_id)
-            if (
-                payload.get("kind") == "questionnaire"
-                and payload.get("metadata", {}).get("auto_select_first_on_timeout")
-            ):
-                answers = _recommended_questionnaire_answers(payload)
-                if answers:
-                    return InteractionResponse(
-                        request_id=request.request_id,
-                        status="auto_selected",
-                        approved=True,
-                        answers=answers,
-                        raw_value=answers,
-                    ).to_dict()
-            return InteractionResponse(
-                request_id=request.request_id,
-                status="timeout",
-                approved=False,
-                raw_value=None,
-            ).to_dict()
-        logger.info("interaction.resolved session=%s run=%s request=%s status=%s",
-                    request.session_id, metadata.get("run_id", ""), request.request_id,
-                    entry["response"].get("status"))
-        return dict(entry["response"])
+        response = None
+        try:
+            cancelled = False
+            if callable(abort_check):
+                while not event.wait(min(0.05, max(0, deadline - time.monotonic()))):
+                    if abort_check():
+                        cancelled = True
+                        break
+                    if time.monotonic() >= deadline:
+                        break
+            else:
+                event.wait(max(0, deadline - time.monotonic()))
+            # Answer, cancellation and timeout choose one outcome under the same
+            # lock. A cancellation must not overwrite an already accepted answer.
+            with self._lock:
+                if entry["response"] is None:
+                    entry["response"] = (
+                        InteractionResponse(request.request_id, "cancelled", False).to_dict()
+                        if cancelled else self._timeout_response(payload)
+                    )
+                response = dict(entry["response"])
+            return response
+        finally:
+            with self._lock:
+                self._pending.pop(request.request_id, None)
+            outcome = response or {"status": "error", "approved": False}
+            status = outcome["status"]
+            logger.info("interaction.finished session=%s run=%s request=%s status=%s",
+                        request.session_id, metadata.get("run_id", ""), request.request_id, status)
+            # The owner emits once, before the tool returns, outside the lock.
+            # This also covers legacy tools which return only a boolean/string.
+            self.interaction_finished.emit({
+                "session_id": request.session_id,
+                "run_id": str(metadata.get("run_id") or ""),
+                "request_id": request.request_id,
+                "status": status,
+                "approved": bool(outcome.get("approved")),
+                "answered": bool(entry.get("answered")),
+            })
+
+    @staticmethod
+    def _timeout_response(request: dict[str, Any]) -> dict[str, Any]:
+        if (request.get("kind") == "questionnaire"
+                and request.get("metadata", {}).get("auto_select_first_on_timeout")):
+            answers = _recommended_questionnaire_answers(request)
+            if answers:
+                return InteractionResponse(
+                    request["request_id"], "auto_selected", True,
+                    answers=answers, raw_value=answers,
+                ).to_dict()
+        return InteractionResponse(request["request_id"], "timeout", False).to_dict()
 
     def resolve_request(self, request_id: str, raw_value: Any) -> bool:
+        """Keep the boolean API used by existing tools and integrations."""
+        return self.respond_request(request_id, raw_value)["resolved"]
+
+    def respond_request(self, request_id: str, raw_value: Any) -> dict[str, Any]:
+        """Acknowledge receipt, distinguishing a closed request from invalid input."""
         with self._lock:
             entry = self._pending.get(request_id)
-            if not isinstance(entry, dict) or entry.get("response") is not None:
-                return False
-            if time.monotonic() >= entry.get("deadline", float("inf")):
-                return False
-            abort_check = entry.get("abort_check")
-            if callable(abort_check) and abort_check():
-                return False
+            if not isinstance(entry, dict):
+                logger.info("interaction.submit_rejected request=%s reason=ended", request_id)
+                return {"status": "ok", "resolved": False, "reason": "ended"}
             request = entry.get("request") or {}
-            if raw_value is False or raw_value is None:
-                payload = _build_response_payload(request, status="cancelled", approved=False)
-                valid = True
+            if entry["response"] is None:
+                abort_check = entry.get("abort_check")
+                if callable(abort_check) and abort_check():
+                    entry["response"] = InteractionResponse(request_id, "cancelled", False).to_dict()
+                elif time.monotonic() >= entry["deadline"]:
+                    entry["response"] = self._timeout_response(request)
+            if entry["response"] is not None:
+                entry["event"].set()
+                acknowledgement = {"status": "ok", "resolved": False, "reason": "ended",
+                                   "outcome": entry["response"]["status"],
+                                   "answered": bool(entry.get("answered"))}
             else:
-                payload, valid, _ = parse_interaction_reply(request, raw_value)
-            if not valid:
-                return False
-            entry["response"] = payload
-            event = entry.get("event")
-            if isinstance(event, threading.Event):
-                event.set()
-            return True
+                if raw_value is False or raw_value is None:
+                    payload = _build_response_payload(request, status="cancelled", approved=False)
+                    valid = True
+                else:
+                    payload, valid, _ = parse_interaction_reply(request, raw_value)
+                if valid:
+                    entry["response"] = payload
+                    entry["answered"] = True
+                    entry["event"].set()
+                    acknowledgement = {"status": "ok", "resolved": True}
+                else:
+                    acknowledgement = {"status": "ok", "resolved": False, "reason": "invalid"}
+        logger.info("interaction.submit session=%s run=%s request=%s resolved=%s reason=%s",
+                    request.get("session_id", ""), request.get("metadata", {}).get("run_id", ""),
+                    request_id, acknowledgement["resolved"], acknowledgement.get("reason", ""))
+        return acknowledgement
 
     def get_pending_request(self, session_id: str) -> dict[str, Any] | None:
         target_session_id = (session_id or "").strip()
@@ -514,6 +543,9 @@ class InteractionService(QObject):
                 if isinstance(entry, dict)
                 and isinstance(entry.get("request"), dict)
                 and (entry["request"].get("session_id") or "").strip() == target_session_id
+                and entry.get("response") is None
+                and time.monotonic() < entry["deadline"]
+                and not (callable(entry.get("abort_check")) and entry["abort_check"]())
             ]
         if not matches:
             return None
@@ -531,18 +563,15 @@ class InteractionService(QObject):
                 and isinstance(entry.get("request"), dict)
                 and (entry["request"].get("session_id") or "").strip() == target_session_id
             ]
-        for entry in entries:
-            request = dict(entry.get("request") or {})
-            entry["response"] = InteractionResponse(
-                request_id=request.get("request_id") or "",
-                status=reason,
-                approved=False,
-                raw_value=None,
-            ).to_dict()
-            event = entry.get("event")
-            if isinstance(event, threading.Event):
-                event.set()
-            cancelled += 1
+            for entry in entries:
+                if entry.get("response") is not None:
+                    continue
+                request = entry["request"]
+                entry["response"] = InteractionResponse(
+                    request_id=request["request_id"], status=reason, approved=False,
+                ).to_dict()
+                entry["event"].set()
+                cancelled += 1
         return cancelled
 
 

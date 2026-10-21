@@ -67,7 +67,7 @@ class ConversationRuntimeFixTests(unittest.TestCase):
         QTest.keyClicks(card.text_input, "local environment")
         card.stop_waiting()
         self.assertEqual(card.text_input.text(), "local environment")
-        self.assertFalse(card.timeout_timer.isActive())
+        self.assertTrue(card._terminal)
         self.assertFalse(card.submit_btn.isEnabled())
         self.assertIn("任务已停止", card.validation_label.text())
         host.close()

@@ -26,7 +26,7 @@ class RuntimeStream:
     MAX_BYTES = 8 * 1024 * 1024
     BOUNDARIES = frozenset({
         "turn_started", "content_snapshot", "tool_call", "tool_result",
-        "interaction_request", "workbench_request", "final",
+        "interaction_request", "interaction_finished", "workbench_request", "final",
     })
 
     def __init__(self, journal, session_id, run_id, *, write, detach, failed, report):

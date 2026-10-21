@@ -13,7 +13,7 @@ Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观
 
 - **团队空间**：在企业中心共享分工、固定资料版本和选定成果，任务在独立本机目录与会话执行；[使用说明](docs/team-spaces.md)。
 - **多来源资料库**：连接 WeKnora、腾讯文档和乐享，读取选定资料并保存成果；来源、账号和任务范围独立绑定。
-- **可选账号与连接**：集中管理登录、服务连接与能力授权；未选用统一连接时继续使用原配置。
+- **独立资料库登录**：在 WeKnora、腾讯文档和乐享各自页面登录、续期与退出；企业登录集中在“设置 → 企业账号”。
 - **企业平台基础功能**：可选接入独立 Linux 中心，统一认证、分配企业模型、管理客户端分发及近 30 天企业提问；[使用与部署](docs/enterprise-platform.md)。
 - **可选数据安全**：插件及各项功能默认关闭，按需检查能力风险、提醒疑似凭证或令牌化模型请求中的选定文本。
 - **任务控制与恢复**：停止时向受支持工具传递取消，保留已有输出；资料上下文按需加入，历史打开不产生额外提问。
@@ -66,7 +66,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-完整账号认证功能需额外安装 `requirements-connections.txt`，源码与发行包步骤见[账号与连接](docs/account-connections.md#源码与发行包)。
+桌面端无需安装统一连接认证依赖；中心平台使用独立的依赖清单，见[企业平台部署](web/platform/README.md)。
 
 ### 构建发行包
 
@@ -90,7 +90,7 @@ Git 配置。缺失运行时、校验不符或仍配置 `helper-selector` 时，
 
 - [设置与能力管理](docs/unified-management.md)：能力、项目与设置的入口和保存边界
 - [资料库](docs/knowledge_library.md)：多来源连接、引用、上传和失败恢复
-- [账号与连接](docs/account-connections.md)：登录、授权、连接绑定和管理员分发
+- [资料库](docs/knowledge_library.md)：各来源登录、引用与保存；旧统一连接用户参见[升级说明](docs/account-connections.md)
 - [数据安全](docs/data-security.md)：默认关闭的检查与请求文本处理
 - [执行授权](docs/GOD_MODE.md)：上帝模式、按次许可和停止边界
 - [用户指南](docs/user-guide.md)：安装、配置与完整任务操作

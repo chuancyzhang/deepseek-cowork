@@ -235,7 +235,7 @@ class UpdateCoordinator(QObject):
             connection = EnterpriseStore().read().get("connection") or read_connection(self.install_dir)
             return connection["platform_url"] + "/downloads" if connection else ""
         except (ValueError, OSError, sqlite3.DatabaseError, TypeError, KeyError):
-            self.enterprise_connection_error = "企业连接文件或本机状态无法读取，请在账号与连接中检查后再更新。"
+            self.enterprise_connection_error = "企业连接文件或本机状态无法读取，请在企业账号中检查后再更新。"
             return ""
 
     def _start(self, operation, payload=None):

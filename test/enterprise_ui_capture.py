@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QScrollArea
 from PySide6.QtGui import QFont, QFontDatabase
 from core.enterprise_client import EnterpriseStore
 from core.theme import apply_theme
-from ui.account_connections import AccountConnectionsPage, ServiceConnectionsPage
+from ui.account_connections import AccountConnectionsPage
 
 
 def main():
@@ -53,30 +53,6 @@ def main():
         page.close()
         page.deleteLater()
         app.processEvents()
-    if os.environ.get("QT_SCALE_FACTOR", "1") == "1":
-        from core.connections.broker import ConnectionBroker
-        from core.connections.store import ConnectionStore
-        from test_connections import FakeAdapter, Protector, template
-        with tempfile.TemporaryDirectory(prefix="cowork-services-qt-") as temporary:
-            store = ConnectionStore(temporary, Protector())
-            broker = ConnectionBroker(temporary, temporary, store=store, adapters=FakeAdapter)
-            broker.catalog.write(broker.catalog.distributed_path, [template("weknora", service="weknora")])
-            page = ServiceConnectionsPage(broker=broker)
-            page.resize(760, 800)
-            page.add()
-            page.show()
-            app.processEvents()
-            target = destination.parent / "account-connections"
-            page.grab().save(str(target / "login.png"))
-            broker.authenticate(page.current_id, {})
-            page.refresh()
-            app.processEvents()
-            page.grab().save(str(target / "connected.png"))
-            page.poll.stop()
-            page.jobs.pool.shutdown(wait=True)
-            page.close()
-            page.deleteLater()
-            app.processEvents()
 
 
 if __name__ == "__main__":

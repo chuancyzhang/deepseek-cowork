@@ -151,7 +151,8 @@ def _forbidden_reason(relative: Path) -> str:
     if ("user_data" in {part.lower() for part in relative.parts}
             or basename.lower().startswith(("connections.sqlite3", "knowledge_library.sqlite3", "enterprise.sqlite3"))
             or basename.lower() == "enterprise_connection.json"
-            or basename.lower() in {"connection_templates.local.json", "app_variables.json", "app_variables.previous.json"}
+            or basename.lower().startswith("connection_templates")
+            or basename.lower() in {"app_variables.json", "app_variables.previous.json"}
             or "connection_locks" in {part.lower() for part in relative.parts}):
         return "local identity, credentials or user data"
     if "node_modules" in {part.lower() for part in relative.parts}:
@@ -370,13 +371,6 @@ def audit_distribution(dist_dir: Path) -> dict:
                 validate_default_config(handle.read(MAX_DEFAULT_CONFIG_BYTES + 1))
         except (ValueError, UnicodeError):
             raise PackageAuditError("_internal/config.json is not the empty shipped default; rebuild with the default configuration.") from None
-
-    from core.connections.templates import read_bundle
-    template_path = dist_dir / "connection_templates.json"
-    if template_path.exists():
-        _, template_errors = read_bundle(str(template_path))
-        if template_errors:
-            raise PackageAuditError("Invalid or secret-bearing connection templates in distribution")
 
     editor_assets = _audit_editor_assets(dist_dir, files)
     browser_skill_assets = _audit_browser_skill_assets(dist_dir)

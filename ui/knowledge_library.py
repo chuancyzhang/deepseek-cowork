@@ -2,6 +2,7 @@
 
 import copy
 import os
+import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -330,11 +331,15 @@ class KnowledgePage(QDialog):
         self.folder = None
         self.view = "catalog"
         self.read_serial = 0
+        self._auth_cancel = None
+        self._auth_serial = 0
+        self.destroyed.connect(lambda *_: self._auth_cancel.set() if self._auth_cancel else None)
         self.setObjectName("KnowledgePage")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 14, 20, 16)
         layout.setSpacing(10)
         header = QHBoxLayout()
+        self.heading_layout = header
         heading = QLabel("资料库")
         heading.setObjectName("LibraryHeading")
         header.addWidget(heading)
@@ -368,6 +373,10 @@ class KnowledgePage(QDialog):
         self.login_button.clicked.connect(self.login)
         self.password.returnPressed.connect(self.login)
         login_actions.addWidget(self.login_button)
+        self.cancel_login_button = QPushButton("取消登录")
+        self.cancel_login_button.clicked.connect(self.cancel_authentication)
+        self.cancel_login_button.hide()
+        login_actions.addWidget(self.cancel_login_button)
         register = QPushButton("打开网页版 / 注册账号")
         register.clicked.connect(lambda: self.open_management("/login", connected=False))
         login_actions.addWidget(register)
@@ -384,7 +393,8 @@ class KnowledgePage(QDialog):
         self.account_label = QLabel()
         self.account_label.setTextFormat(Qt.PlainText)
         self.account_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.account_label.hide()
+        self.account_label.setWordWrap(True)
+        account_layout.addWidget(self.account_label, 1)
         self.tenants = QComboBox()
         self.tenants.setMinimumWidth(110)
         self.tenants.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -392,6 +402,8 @@ class KnowledgePage(QDialog):
         account_layout.addWidget(self.tenants)
         logout = QPushButton("账号与设置")
         account_menu = QMenu(logout)
+        account_menu.addAction("检查连接", self.check_connection)
+        account_menu.addAction("重新登录", self.reconnect)
         account_menu.addAction("在 WeKnora 中管理", self.manage_current)
         account_menu.addSeparator()
         account_menu.addAction("退出账号", self.logout)
@@ -422,6 +434,10 @@ class KnowledgePage(QDialog):
         self.notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.notice.setTextFormat(Qt.PlainText)
         layout.addWidget(self.notice)
+        self.retry_state_button = QPushButton("重试读取登录状态")
+        self.retry_state_button.clicked.connect(self.refresh)
+        self.retry_state_button.hide()
+        layout.addWidget(self.retry_state_button, 0, Qt.AlignLeft)
         self.splitter = QSplitter(Qt.Horizontal)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -598,6 +614,7 @@ class KnowledgePage(QDialog):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         narrow = self.width() < 780
+        self.heading_layout.setDirection(QHBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight)
         self.tree.setMaximumWidth(150 if narrow else 240)
         self.items.setColumnHidden(1, narrow)
         self.items.setColumnHidden(2, narrow)
@@ -615,7 +632,59 @@ class KnowledgePage(QDialog):
 
     def error(self, error):
         self.notice.setText(f"{error}  可刷新重试，或打开 WeKnora 管理页面核对。")
+        self.retry_state_button.setVisible(getattr(error, "code", "") == "retirement_failed")
         self.login_button.setEnabled(True)
+        if getattr(error, "code", "") in {"unauthenticated", "invalid_refresh", "not_connected", "retirement_failed"}:
+            self.login_box.show()
+            self.account_label.setText("登录已失效，请重新登录")
+
+    def run_authentication(self, work, done, message, *, continuing=False):
+        if self._auth_cancel and not continuing:
+            self._auth_cancel.set()
+        cancelled = self._auth_cancel if continuing and self._auth_cancel else threading.Event()
+        self._auth_cancel = cancelled
+        self._auth_serial += 1
+        serial = self._auth_serial
+        previous_account = self.account_label.text()
+        self.cancel_login_button.show()
+        self.notice.setText(message)
+        def completed(result):
+            if cancelled.is_set() or serial != self._auth_serial:
+                return
+            self.cancel_login_button.hide()
+            done(result)
+        def failed(error):
+            if cancelled.is_set() or serial != self._auth_serial:
+                return
+            self.cancel_login_button.hide()
+            self.error(error)
+            if self.scope and not self.scope.get("unavailable"):
+                self.account_label.setText(previous_account)
+        self.jobs.submit(lambda: work(cancelled.is_set), completed, failed)
+
+    def cancel_authentication(self):
+        if self._auth_cancel:
+            self._auth_cancel.set()
+        self._auth_serial += 1
+        self.cancel_login_button.hide()
+        self.login_button.setEnabled(True)
+        if hasattr(self, "connect_button"):
+            self.connect_button.setEnabled(True)
+            self.confirm_button.setEnabled(False)
+        self.notice.setText("登录已取消，原有账号和资料选择已保留。")
+
+    def reconnect(self):
+        if self.scope:
+            self.base.setText(self.scope.get("base_url", ""))
+            self.email.setText(self.scope.get("email", ""))
+        self.login_box.show()
+        self.login_button.setEnabled(True)
+        self.notice.setText("重新登录成功后更新当前账号；失败会保留输入和原有资料选择。")
+
+    def check_connection(self):
+        scope = copy.deepcopy(self.scope)
+        self.run(lambda: self.service.request(scope, "GET", "/api/v1/auth/me"),
+                 lambda _: self.notice.setText("连接有效，可以继续使用。"), "正在检查连接…")
 
     def run(self, work, done, message="正在加载…"):
         epoch = self.epoch
@@ -661,6 +730,7 @@ class KnowledgePage(QDialog):
         self.tree.clear()
         self.current_kb = None
         self.scope = self.service.snapshot()
+        self.retry_state_button.setVisible(bool(self.scope and self.scope.get("error")))
         connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
@@ -668,11 +738,8 @@ class KnowledgePage(QDialog):
         self.login_spacer.setVisible(not connected)
         self.upload_button.setEnabled(False)
         if not connected:
-            if self.scope and self.scope.get("_connection_ref"):
-                self.login_box.hide()
-                self.notice.setText("统一连接不可用，请打开“管理资料服务连接”重新认证或明确切回原有配置。")
-            else:
-                self.notice.clear()
+            from core.connection_retirement import library_notice
+            self.notice.setText((self.scope or {}).get("error") or library_notice(self.service.store.data_dir, "weknora"))
             return
         self.account_label.setText(self.scope["email"])
         self.account_bar.setToolTip(self.scope["email"])
@@ -746,33 +813,25 @@ class KnowledgePage(QDialog):
             self.password.clear()
             self.login_button.setEnabled(True)
             self.refresh()
-        self.run(lambda: self.service.login(base, email, password), done, "正在登录 WeKnora…")
+        self.run_authentication(lambda cancelled: self.service.login(base, email, password, cancelled=cancelled), done, "正在登录 WeKnora…")
 
     def logout(self):
+        self.cancel_authentication()
         self.clear_view()
         def done(_):
             self.refresh()
         def failed(error):
             self.refresh()
-            self.notice.setText(f"本机登录态已清除。远端退出未确认：{error}")
+            if self.scope:
+                self.notice.setText(f"退出未完成，原账号状态已保留：{error}")
+            else:
+                self.notice.setText(f"本机登录态已清除。远端退出未确认：{error}")
         self.jobs.submit(self.service.logout, done, failed)
 
     def switch_tenant(self, index):
         tenant = self.tenants.itemData(index)
         if tenant == self.scope["tenant_id"]:
             return
-        if self.scope.get("_connection_ref"):
-            from ui.primitives import ProductMessageDialog
-            grants = self.service.broker.store.grants(self.scope["_connection_ref"])
-            affected = [g for g in grants if g["capability"] in {"library:weknora", "knowledge-library"}]
-            details = "\n".join(g["capability"] + "：" + ", ".join(g["operations"]) + "；范围：" + (", ".join(g["resources"]) or "该空间中服务允许的资料") for g in affected)
-            choice = ProductMessageDialog("使用另一个工作空间", "将创建此账号的新空间连接，并将以下授权用于新空间。原连接和运行任务保留。\n" + details,
-                "confirm", [("创建并切换", "switch", "primary", False), ("取消", "cancel", "secondary", True)], parent=self).exec_result("cancel")
-            if choice != "switch":
-                self.tenants.blockSignals(True)
-                self.tenants.setCurrentIndex(self.tenants.findData(self.scope["tenant_id"]))
-                self.tenants.blockSignals(False)
-                return
         self.clear_view()
         self.run(lambda: self.service.switch_tenant(tenant), lambda _: self.refresh(), "正在切换工作空间…")
 
@@ -985,6 +1044,8 @@ class KnowledgePage(QDialog):
             self.pdf_buffer.close()
 
     def closeEvent(self, event):
+        if self._auth_cancel:
+            self._auth_cancel.set()
         self.release_preview()
         super().closeEvent(event)
 

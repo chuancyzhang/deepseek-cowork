@@ -11,8 +11,8 @@
 | --- | --- | --- |
 | 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.3.0 发布说明](releases/5.3.0.md) |
 | 管理能力、项目和设置 | [设置与能力管理](unified-management.md) | [执行授权](GOD_MODE.md) |
-| 使用资料与保存成果 | [资料库](knowledge_library.md) | [资料服务连接](account-connections.md) |
-| 登录外部服务或恢复认证 | [资料服务连接](account-connections.md) | [用户指南](user-guide.md) |
+| 使用资料与保存成果 | [资料库](knowledge_library.md) | [旧连接升级说明](account-connections.md) |
+| 登录资料库或企业平台 | [资料库](knowledge_library.md)、[企业账号](enterprise-platform.md) | [用户指南](user-guide.md) |
 | 使用或部署企业统一模型 | [企业连接](enterprise-platform.md) | [中心部署说明](../web/platform/README.md) |
 | 与同事共享分工、资料和成果 | [团队空间](team-spaces.md) | [验证记录](team-spaces-validation.md) |
 | 判断产品适合什么工作 | [产品文档](product.md) | [路线图](roadmap.md) |

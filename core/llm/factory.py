@@ -43,7 +43,7 @@ class LLMFactory:
         profile = dict(profile or {})
         if profile.get("enterprise_unavailable"):
             from core.enterprise_client import EnterpriseError
-            raise EnterpriseError("所选企业模型不可用，请在账号与连接中登录或刷新授权。")
+            raise EnterpriseError("所选企业模型不可用，请在企业账号中登录或刷新授权。")
         if profile.get("enterprise"):
             from .enterprise import bind_provider
             ordinary = {k: v for k, v in profile.items() if k != "enterprise"}

@@ -51,8 +51,6 @@ class ExecutionAuthorization:
     artifact_root: str
     policy_version: int = 1
     _cancelled: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
-    _connection_routes: dict = field(default_factory=dict, repr=False, compare=False)
-    _connection_route_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     _browser_state: dict = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -79,19 +77,9 @@ class ExecutionAuthorization:
         snapshot = {"session_id": self.session_id, "run_id": self.run_id,
                 "god_mode": self.god_mode, "artifact_root": self.artifact_root,
                 "policy_version": self.policy_version, "cancelled": self._cancelled.is_set()}
-        with self._connection_route_lock:
-            if self._connection_routes:
-                snapshot["connection_routes"] = dict(self._connection_routes)
         if self._browser_state:
             snapshot["browser_backend"] = dict(self._browser_state["snapshot"])
         return snapshot
-
-    def connection_route(self, capability, selected):
-        """Freeze both legacy and managed routing at first use in this run."""
-        with self._connection_route_lock:
-            if capability not in self._connection_routes:
-                self._connection_routes[capability] = selected or ""
-            return self._connection_routes[capability] or None
 
     def check(self):
         if self._cancelled.is_set():
@@ -112,10 +100,8 @@ def authorization_from_host_snapshot(payload, *, session_id, run_id):
     if not isinstance(root, str) or (not payload["god_mode"] and not os.path.isabs(root)):
         raise ValueError("后台任务产物目录无效。")
     authorization = ExecutionAuthorization(session_id, run_id, payload["god_mode"], root)
-    routes = payload.get("connection_routes", {})
-    if not isinstance(routes, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in routes.items()):
-        raise ValueError("后台任务连接绑定无效。")
-    authorization._connection_routes.update(routes)
+    if payload.get("connection_routes"):
+        raise ValueError("旧版后台任务使用已停用的连接绑定，请在对应功能重新登录后发起任务。")
     if payload["cancelled"]:
         authorization.cancel()
     browser = payload.get("browser_backend")

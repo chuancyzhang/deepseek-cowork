@@ -35,7 +35,7 @@ def offer_enterprise_onboarding(config_manager, parent):
     ).exec_result("later")
     config_manager.set("enterprise_intro_seen", connection["platform_id"])
     if choice == "login":
-        parent.open_settings("账号与连接")
+        parent.open_settings("企业账号")
     return True
 
 

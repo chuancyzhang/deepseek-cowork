@@ -651,15 +651,12 @@ def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
     return result
 
 
-def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None):
-    from .connections.mcp import selected_connection, execute_mcp
-    if selected_connection(server_config, config_manager):
-        result = execute_mcp(server_config, config_manager, skill_manager)
-        if result.get("ok"):
-            from .data_security import inspect_capability
-            inspect_capability(config_manager, "mcp", server_config.get("id", "MCP"),
-                               {"transport": server_config.get("transport"), "tools": result.get("tools", [])})
-        return result
+def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None, *, reconfiguration_test=False):
+    from .connection_retirement import mcp_issue
+    issue = mcp_issue(server_config, config_manager, testing=reconfiguration_test)
+    if issue:
+        logger.warning("mcp_tools.list.blocked server=%s reason=connection_reconfiguration", server_config.get("id"))
+        return {"ok": False, "error": issue, "tools": [], "status": "configuration_required"}
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
@@ -692,14 +689,21 @@ def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None
         return {"ok": False, "error": error, "tools": []}
 
 
-def test_mcp_server_connection(server_config, config_manager=None, skill_manager=None):
+def test_mcp_server_connection(server_config, config_manager=None, skill_manager=None, *, reconfiguration_test=False):
     result = list_mcp_server_tools(
         server_config,
         config_manager=config_manager,
         skill_manager=skill_manager,
+        reconfiguration_test=reconfiguration_test,
     )
     if not result.get("ok"):
         return result
+    if reconfiguration_test:
+        from .connection_retirement import complete_mcp_reconfiguration, RetirementError
+        try:
+            complete_mcp_reconfiguration(server_config, config_manager)
+        except RetirementError as exc:
+            return {"ok": False, "error": str(exc), "tools": []}
     tool_names = [item.get("name") for item in result.get("tools") or [] if item.get("name")]
     return {
         "ok": True,
@@ -711,9 +715,11 @@ def test_mcp_server_connection(server_config, config_manager=None, skill_manager
 
 
 def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None, *, context=None):
-    from .connections.mcp import selected_connection, execute_mcp
-    if selected_connection(server_config, config_manager):
-        return execute_mcp(server_config, config_manager, skill_manager, tool_name=tool_name, arguments=arguments, context=context)
+    from .connection_retirement import mcp_issue
+    issue = mcp_issue(server_config, config_manager)
+    if issue:
+        logger.warning("mcp_tool.call.blocked server=%s reason=connection_reconfiguration", server_config.get("id"))
+        return {"ok": False, "status": "configuration_required", "error": issue, "executed": False}
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}

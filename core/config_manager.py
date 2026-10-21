@@ -166,10 +166,9 @@ def normalize_mcp_server(server, index=0, used_ids=None):
         "source_skill": source_skill,
         "managed_by_skill": bool(source.get("managed_by_skill") or source_skill),
     }
-    if source.get("connection_ref"):
-        if not isinstance(source["connection_ref"], str):
-            raise ValueError("MCP connection_ref 必须是连接 ID。")
-        normalized["connection_ref"] = source["connection_ref"]
+    if "connection_ref" in source or source.get("connection_setup_required"):
+        # Keep an actionable incompatibility marker; never silently drop auth.
+        normalized["connection_setup_required"] = True
     return normalized
 
 
@@ -1413,13 +1412,26 @@ class ConfigManager:
         self.save_config()
 
     def get_mcp_servers(self):
+        from .connection_retirement import register_explicit_refs, RetirementError
+        try:
+            register_explicit_refs(self.data_dir, self.config.get("mcp_servers") or [])
+        except RetirementError:
+            # Listing remains available for repair; discovery/calls report the error.
+            pass
         servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
         if servers != self.config.get("mcp_servers"):
             self.config["mcp_servers"] = servers
             self.save_config()
         return json.loads(json.dumps(servers, ensure_ascii=False))
 
+    def prepare_mcp_reconfiguration(self, server_id):
+        from .connection_retirement import prepare_mcp_reconfiguration
+        prepare_mcp_reconfiguration(self, server_id)
+
     def set_mcp_servers(self, servers):
+        from .connection_retirement import register_explicit_refs
+        register_explicit_refs(self.data_dir, self.config.get("mcp_servers") or [])
+        register_explicit_refs(self.data_dir, servers or [])
         normalized = self._normalize_mcp_servers(servers)
         if normalized == self.config.get("mcp_servers"):
             return

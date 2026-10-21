@@ -14,7 +14,7 @@ Current app version: **5.3.0** · [Read the release notes](docs/releases/5.3.0.m
 
 - **Team spaces:** share plans, immutable file revisions, and selected results through the company center; execute in isolated local conversations. See the [team-space guide](docs/team-spaces.md).
 - **Multiple knowledge sources:** connect WeKnora, Tencent Docs, and Lexiang, use selected references, and save results within the chosen source and account scope.
-- **Optional accounts and connections:** manage sign-in, service connections, and capability permissions; existing configuration remains available until explicitly replaced.
+- **Enterprise account:** sign in to the company center for assigned models and team spaces. Each knowledge source and Skill/MCP manages its own authentication; former shared connections require signing in again.
 - **Optional data security:** all features start disabled; opt into capability checks, credential warnings, or tokenization of selected model-request text.
 - **Task control and recovery:** stopping signals supported tools to cancel while preserving existing output; knowledge context is added on demand without creating extra historical questions.
 
@@ -67,7 +67,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-For the full optional authentication feature, also install `requirements-connections.txt`; see [source and release setup](docs/account-connections.md#源码与发行包).
+Library sources manage their own sign-in. Enterprise server authentication dependencies remain in its separate [deployment guide](web/platform/README.md).
 
 ### Build a release
 
@@ -84,7 +84,7 @@ Treat the report from the current build as authoritative for size and contents.
 
 - [Settings and capability management](docs/unified-management.md) (Chinese): navigation and save boundaries
 - [Knowledge library](docs/knowledge_library.md) (Chinese): sources, references, uploads, and recovery
-- [Accounts and connections](docs/account-connections.md) (Chinese): sign-in, permissions, and administrator setup
+- [Knowledge library](docs/knowledge_library.md) (Chinese): source sign-in, references, and uploads; [shared connection retirement](docs/account-connections.md)
 - [Data security](docs/data-security.md) (Chinese): optional checks and model-request text processing
 - [User guide](docs/user-guide.md) (Chinese): installation, setup, and complete task workflows
 - [Product document](docs/product.md) (Chinese): goals, principles, and boundaries

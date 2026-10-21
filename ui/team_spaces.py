@@ -356,7 +356,7 @@ class TeamSpacesPage(QDialog):
         connection, member = state.get("connection") or {}, state.get("member") or {}
         if not connection:
             title, action = "连接企业，开始团队协作", "设置企业连接"
-            description = "与同事共享计划、资料和成果，任务在各自电脑上完成。\n请先在“账号与连接”中设置企业连接并登录。"
+            description = "与同事共享计划、资料和成果，任务在各自电脑上完成。\n请先在“企业账号”中设置企业连接并登录。"
         elif expired or member:
             title, action = "重新登录企业账号", "前往登录"
             description = "登录状态已失效，登录后即可继续访问团队空间。\n本机任务、已有内容和未提交草稿均已保留。"
@@ -388,7 +388,7 @@ class TeamSpacesPage(QDialog):
         empty.layout().setSpacing(14)
         empty.icon_label.setFixedSize(48, 48)
         empty.refresh_theme()
-        empty.action_button.clicked.connect(lambda: self._call(lambda: self.host.open_settings("账号与连接")))
+        empty.action_button.clicked.connect(lambda: self._call(lambda: self.host.open_settings("企业账号")))
         if connection:
             identity = QLabel("企业：" + (connection.get("platform_name") or "已配置企业"))
             identity.setAlignment(Qt.AlignCenter)

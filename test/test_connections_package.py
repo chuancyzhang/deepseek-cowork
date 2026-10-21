@@ -21,22 +21,14 @@ class ConnectionPackageTests(unittest.TestCase):
         self.dist = helper._create_minimal_dist(self.temp.name)
         self.template = self.dist / "connection_templates.json"
 
-    def test_public_template_bundle_passes_full_audit(self):
-        self.template.write_bytes((ROOT / "docs/examples/connection_templates.json").read_bytes())
-        report = package_release.audit_distribution(self.dist)
-        self.assertGreater(report["file_count"], len(package_release.REQUIRED_PATHS))
-        self.assertEqual(report["wecom_cli_assets"]["version"], package_release.WECOM_CLI_VERSION)
-
-    def test_credentials_in_template_fail_before_packaging(self):
-        value = json.loads((ROOT / "docs/examples/connection_templates.json").read_text(encoding="utf-8"))
-        value["templates"][0]["parameters"]["client_secret"] = "forbidden-test-secret"
-        self.template.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(package_release.PackageAuditError, "secret-bearing"):
+    def test_retired_templates_are_not_distributable(self):
+        self.template.write_text('{"templates": []}', encoding="utf-8")
+        with self.assertRaisesRegex(package_release.PackageAuditError, "Forbidden packaged"):
             package_release.audit_distribution(self.dist)
 
     def test_local_state_and_database_sidecars_are_rejected(self):
         for name in ("connections.sqlite3", "connections.sqlite3-wal", "connections.sqlite3-shm",
-                     "knowledge_library.sqlite3", "connection_templates.local.json", "app_variables.json",
+                     "knowledge_library.sqlite3", "knowledge_library.sqlite3.backup", "connections.sqlite3.backup", "connection_templates.local.json", "app_variables.json",
                      "user_data/nested.json", "connection_locks/account.lock"):
             with self.subTest(name=name):
                 path = self.dist / name

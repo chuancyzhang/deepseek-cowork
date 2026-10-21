@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
-                              QListWidget, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+                              QListWidget, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
 from core.knowledge_library import KnowledgeError, same_identity
 from core.knowledge_sources import SOURCES, MultiSourceKnowledgeService
@@ -29,6 +29,7 @@ class MultiSourceKnowledgePage(QDialog):
         self.service = service or MultiSourceKnowledgeService()
         self.artifacts = artifacts
         self.pages = {}
+        self.source_views = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QHBoxLayout()
@@ -39,9 +40,6 @@ class MultiSourceKnowledgePage(QDialog):
         for source, name in SOURCES.items():
             self.sources.addItem(name, source)
         header.addWidget(self.sources)
-        connections_button = QPushButton("管理资料服务连接")
-        connections_button.clicked.connect(self.open_connections)
-        header.addWidget(connections_button)
         header.addStretch()
         layout.addLayout(header)
         self.stack = QStackedWidget()
@@ -60,21 +58,25 @@ class MultiSourceKnowledgePage(QDialog):
             # All upload entry points use the same dialog, including the old page.
             page.upload_paths = lambda paths, s=source: self.upload_paths(paths, source=s)
             self.pages[source] = page
-            self.stack.addWidget(page)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setWidget(page)
+            self.source_views[source] = scroll
+            self.stack.addWidget(scroll)
         return self.pages[source]
-
-    def open_connections(self):
-        current = self.parent()
-        while current is not None:
-            if callable(getattr(current, "open_settings", None)):
-                current.open_settings("资料服务连接")
-                return
-            current = current.parent()
 
     def switch_source(self, _index=0):
         source = self.sources.currentData()
         self.service.select_source(source)
-        self.stack.setCurrentWidget(self.page(source))
+        self.page(source)
+        self.stack.setCurrentWidget(self.source_views[source])
+
+    def closeEvent(self, event):
+        for page in self.pages.values():
+            if page._auth_cancel:
+                page._auth_cancel.set()
+        super().closeEvent(event)
 
     def upload_paths(self, paths, source=None):
         paths = list(dict.fromkeys(os.path.abspath(p) for p in paths if p))
@@ -135,6 +137,8 @@ class CloudKnowledgePage(KnowledgePage):
         self.connect_button.setProperty("libraryPrimary", True)
         self.connect_button.clicked.connect(self.connect_source)
         actions.addWidget(self.connect_button)
+        self.cancel_login_button.setParent(self.login_box)
+        actions.addWidget(self.cancel_login_button)
         self.confirm_button = QPushButton("已完成授权")
         self.confirm_button.clicked.connect(self.finish_authorization)
         self.confirm_button.setEnabled(False)
@@ -153,8 +157,7 @@ class CloudKnowledgePage(KnowledgePage):
         self.tenants.hide()
         self.account_label.show()
         self.account_label.setWordWrap(True)
-        self.account_bar.layout().addWidget(self.account_label)
-        account_button = QPushButton("资料服务连接")
+        account_button = QPushButton("当前账号")
         account_menu = QMenu(account_button)
         for title, callback in (("检查连接", self.check_connection), ("重新连接", self.reconnect),
                                 ("官方页面 / 续期", self.open_official), ("断开连接", self.logout)):
@@ -195,22 +198,23 @@ class CloudKnowledgePage(KnowledgePage):
             def done(url):
                 self.connect_button.setEnabled(True)
                 self.confirm_button.setEnabled(True)
+                self.cancel_login_button.show()
                 QDesktopServices.openUrl(QUrl(url))
                 self.notice.setText("请完成浏览器中的授权，再点击“已完成授权”。")
-            self.run(self.service.start_authorization, done, "正在准备授权…")
+            self.run_authentication(lambda cancelled: self.service.start_authorization(cancelled=cancelled), done, "正在准备授权…")
         else:
             company, token = self.company.text(), self.token.text()
             def done(_):
                 self.token.clear()
                 self.connect_button.setEnabled(True)
                 self.refresh()
-            self.run(lambda: self.service.connect(company, token), done, "正在验证企业与账号…")
+            self.run_authentication(lambda cancelled: self.service.connect(company, token, cancelled=cancelled), done, "正在验证企业与账号…")
 
     def finish_authorization(self):
         self.confirm_button.setEnabled(False)
         def done(_):
             self.refresh()
-        self.run(lambda: self.service.finish_authorization(confirmed=True), done, "正在核对授权结果…")
+        self.run_authentication(lambda cancelled: self.service.finish_authorization(confirmed=True, cancelled=cancelled), done, "正在核对授权结果…", continuing=True)
 
     def reconnect(self):
         self.login_box.show()
@@ -225,18 +229,15 @@ class CloudKnowledgePage(KnowledgePage):
 
     def error(self, error):
         self.notice.setText(str(error))
+        self.retry_state_button.setVisible(getattr(error, "code", "") == "retirement_failed")
         if self.account_label.text() == "凭据已保存 · 正在检查连接":
             self.account_label.setText("凭据已保存 · 连接检查或资料加载未完成")
         if hasattr(self, "connect_button"):
             self.connect_button.setEnabled(True)
             self.confirm_button.setEnabled(True)
-        if getattr(error, "code", "") in ("unauthenticated", "not_connected"):
+        if getattr(error, "code", "") in ("unauthenticated", "not_connected", "retirement_failed"):
             self.account_label.setText("授权失效 · " + self.service.display_name)
-            if self.scope and self.scope.get("_connection_ref"):
-                self.login_box.hide()
-                self.notice.setText("此服务使用已连接的账号，请到设置 → 资料服务连接重新登录，再返回刷新。")
-            else:
-                self.login_box.show()
+            self.login_box.show()
 
     def clear_view(self):
         super().clear_view()
@@ -251,17 +252,16 @@ class CloudKnowledgePage(KnowledgePage):
         self.tree.clear()
         self.current_kb = None
         self.scope = self.service.snapshot()
+        self.retry_state_button.setVisible(bool(self.scope and self.scope.get("error")))
         connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
         self.splitter.setVisible(connected)
         self.login_spacer.setVisible(not connected)
         if not connected:
-            if self.scope and self.scope.get("_connection_ref"):
-                self.login_box.hide()
-                self.notice.setText("所选账号当前不可用，请到设置 → 资料服务连接重新登录或明确切回原有配置。")
-            else:
-                self.notice.setText("连接后即可浏览、阅读和引用资料。")
+            from core.connection_retirement import library_notice
+            self.notice.setText((self.scope or {}).get("error") or library_notice(self.service.store.data_dir, self.service.source)
+                                or "连接后即可浏览、阅读和引用资料。")
             return
         self.account_label.setText("凭据已保存 · 正在检查连接")
         scope = copy.deepcopy(self.scope)

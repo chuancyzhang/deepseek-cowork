@@ -76,6 +76,47 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         QTest.mouseClick(table.viewport(), Qt.LeftButton, pos=point)
         self.assertEqual(activated, [item])
 
+    def test_failed_relogin_preserves_input_account_and_browse_position(self):
+        from core.knowledge_library import KnowledgeError
+        self.page.open_kb({"id": "kb-a", "name": "产品资料"})
+        self.wait_for(lambda: self.page.items.count() > 0)
+        self.page.items.item(0).setCheckState(0, Qt.Checked)
+        previous = self.store.connection()
+        self.page.reconnect()
+        self.page.email.setText("other@example.test")
+        self.page.password.setText("incorrect-password")
+        with patch.object(self.service, "login", side_effect=KnowledgeError("unauthenticated", "账号或密码错误")):
+            self.page.login()
+            self.wait_for(lambda: self.page.login_button.isEnabled())
+        self.assertEqual(self.page.password.text(), "incorrect-password")
+        self.assertEqual(self.page.email.text(), "other@example.test")
+        self.assertEqual(self.page.current_kb["id"], "kb-a")
+        self.assertEqual(self.page.items.item(0).checkState(0), Qt.Checked)
+        self.assertEqual(self.store.connection(), previous)
+        self.assertTrue(self.page.login_box.isVisible())
+
+    def test_cancelled_login_ignores_late_success_and_failure(self):
+        callbacks = []
+        self.page.reconnect()
+        self.page.password.setText("keep-my-input")
+        with patch.object(self.page.jobs, "submit", side_effect=lambda work, done, failed: callbacks.append((work, done, failed))):
+            self.page.login()
+        self.page.cancel_authentication()
+        callbacks[0][1]({})
+        callbacks[0][2](RuntimeError("late error"))
+        self.assertIn("已取消", self.page.notice.text())
+        self.assertEqual(self.page.password.text(), "keep-my-input")
+        self.assertTrue(self.page.login_box.isVisible())
+
+    def test_logout_storage_failure_does_not_claim_account_was_cleared(self):
+        from core.knowledge_library import KnowledgeError
+        original = self.store.connection()
+        with patch.object(self.service, "logout", side_effect=KnowledgeError("retirement_failed", "状态处理失败")):
+            self.page.logout()
+            self.wait_for(lambda: "退出未完成" in self.page.notice.text())
+        self.assertEqual(self.store.connection(), original)
+        self.assertNotIn("已清除", self.page.notice.text())
+
     def test_project_picker_filters_archived_and_searches(self):
         from ui.knowledge_library import KnowledgeProjectPicker
         picker = KnowledgeProjectPicker([
@@ -402,6 +443,57 @@ class MultiSourceLibraryUiTests(unittest.TestCase):
             self.assertFalse(page.splitter.isVisible())
             self.assertEqual(page.tree.topLevelItemCount(), 0)
             self.assertEqual(page.items.count(), 0)
+
+    def test_cloud_reauthentication_failure_and_cancel_preserve_current_selection(self):
+        from core.knowledge_library import KnowledgeError
+        for source in ("tencent-docs", "lexiang"):
+            with self.subTest(source=source):
+                self.page.sources.setCurrentIndex(self.page.sources.findData(source))
+                page = self.page.page(source)
+                self.wait_for(lambda: page.tree.topLevelItemCount() >= 4)
+                page.open_kb({"id": "space", "name": "团队资料"})
+                self.wait_for(lambda: page.items.count() > 0)
+                page.items.item(0).setCheckState(0, Qt.Checked)
+                original = self.store.connection(source=source)
+                page.reconnect()
+                page.company.setText("acme")
+                page.token.setText("keep-token")
+                callbacks = []
+                with patch.object(page.jobs, "submit", side_effect=lambda work, done, failed: callbacks.append((work, done, failed))):
+                    page.connect_source()
+                callbacks[0][2](KnowledgeError("unauthenticated", "模拟授权失效"))
+                self.assertEqual(page.items.item(0).checkState(0), Qt.Checked)
+                self.assertEqual(page.current_kb["id"], "space")
+                self.assertEqual(page.token.text(), "keep-token")
+                self.assertEqual(self.store.connection(source=source), original)
+                callbacks.clear()
+                with patch.object(page.jobs, "submit", side_effect=lambda work, done, failed: callbacks.append((work, done, failed))):
+                    page.connect_source()
+                page.cancel_authentication()
+                with patch("ui.knowledge_sources.QDesktopServices.openUrl") as open_browser:
+                    callbacks[0][1]("https://example.invalid/auth")
+                self.assertFalse(open_browser.called)
+                self.assertIn("已取消", page.notice.text())
+                self.assertFalse(page.confirm_button.isEnabled())
+                self.assertEqual(page.items.item(0).checkState(0), Qt.Checked)
+
+    def test_narrow_relogin_scrolls_without_expanding_window_or_losing_form(self):
+        self.page.resize(660, 640)
+        for source in ("weknora", "tencent-docs", "lexiang"):
+            with self.subTest(source=source):
+                self.page.sources.setCurrentIndex(self.page.sources.findData(source))
+                page = self.page.page(source)
+                self.app.processEvents()
+                if source != "weknora":
+                    self.wait_for(lambda: page.tree.topLevelItemCount() >= 4)
+                page.reconnect()
+                self.app.processEvents()
+                self.assertEqual(self.page.width(), 660)
+                self.assertEqual(self.page.height(), 640)
+                scroll = self.page.source_views[source]
+                self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
+                scroll.ensureWidgetVisible(page.login_box)
+                self.assertTrue(page.login_box.isVisible())
 
     def test_lexiang_folders_navigate_before_reading_leaf_document(self):
         caller = self.remote.call

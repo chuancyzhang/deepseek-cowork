@@ -796,14 +796,6 @@ class SkillManager:
         spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
         spec["config_fields"] = self._normalize_config_fields(spec.get("config_fields"))
         spec["config_requirements"] = self._normalize_config_requirements(spec.get("config_requirements"))
-        if "connection_requirements" in spec:
-            from .connections.broker import requirement_list
-            from .connections.errors import ConnectionError
-            try:
-                spec["connection_requirements"] = requirement_list(spec["connection_requirements"])
-                spec.pop("connection_requirements_error", None)
-            except ConnectionError:
-                spec["connection_requirements_error"] = "连接需求声明无效，请检查能力配置。"
         try:
             spec["authorization"] = normalize_authorization_declaration(spec.get("authorization"))
             spec.pop("authorization_error", None)
@@ -1634,20 +1626,9 @@ class SkillManager:
         return errors
 
     def get_skill_config_status(self, skill_name, values=None):
-        if values is None and skill_name == "superset-mcp":
-            from .connections.mcp import broker_for
-            broker = broker_for(self.config_manager)
-            selected = broker.store.selection("mcp:superset-mcp", "default")
-            if selected:
-                from .connections.errors import ConnectionError
-                try:
-                    connected = broker.store.get(selected)
-                    ready = connected["state"] == "ready"
-                    errors = [] if ready else ["请到账号与连接完成认证；原有配置不会自动接管。"]
-                except ConnectionError as exc:
-                    ready, errors = False, [str(exc)]
-                return {"has_config": True, "configured_count": int(ready), "required_count": 1,
-                        "missing_required": [], "config_errors": errors, "complete": ready, "connection_mode": "connection"}
+        from .connection_retirement import skill_issue
+        issue = skill_issue(skill_name, (self.skill_records.get(skill_name) or {}).get("spec") or {},
+                            getattr(self, "config_manager", None), draft=values is not None)
         fields = self.get_skill_config_fields(skill_name)
         if isinstance(values, dict):
             resolved_values = dict(values)
@@ -1670,8 +1651,10 @@ class SkillManager:
             elif field.get("required"):
                 missing.append(name)
         config_errors = self._skill_config_requirement_errors(skill_name, values=values)
+        if issue:
+            config_errors.append(issue)
         return {
-            "has_config": bool(fields),
+            "has_config": bool(fields) or bool(issue),
             "configured_count": len(configured),
             "required_count": len([field for field in fields if field.get("required")]),
             "missing_required": missing,
@@ -1679,18 +1662,11 @@ class SkillManager:
             "complete": not missing and not config_errors,
         }
 
-    def build_skill_config_env(self, skill_name):
-        if skill_name == "superset-mcp":
-            from .connections.mcp import broker_for
-            broker = broker_for(self.config_manager)
-            selected = broker.store.selection("mcp:superset-mcp", "default")
-            if selected:
-                item = broker.store.get(selected)
-                template = item["template"]
-                return {"SUPERSET_BASE_URL": template["base_url"],
-                        "SUPERSET_MCP_URL": template.get("parameters", {}).get("mcp_url") or template["base_url"] + "/mcp",
-                        "SUPERSET_PROVIDER": template.get("parameters", {}).get("provider", "db"),
-                        "SUPERSET_MCP_TIMEOUT_SECONDS": "30"}
+    def build_skill_config_env(self, skill_name, *, draft=False):
+        from .connection_retirement import skill_issue
+        issue = skill_issue(skill_name, (self.skill_records.get(skill_name) or {}).get("spec") or {}, getattr(self, "config_manager", None), draft=draft)
+        if issue:
+            raise ValueError(issue)
         fields = self.get_skill_config_fields(skill_name)
         values = self._resolved_skill_config_values(skill_name)
         env = {}
@@ -1733,7 +1709,7 @@ class SkillManager:
         if not presets:
             return {"ok": False, "error": f"Skill '{skill_name}' does not declare MCP server presets.", "servers": []}
         try:
-            env_values = self.build_skill_config_env(skill_name)
+            env_values = self.build_skill_config_env(skill_name, draft=True)
         except Exception as exc:
             return {"ok": False, "error": str(exc), "servers": []}
 
@@ -1984,15 +1960,13 @@ class SkillManager:
             def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, _context=None, **kwargs):
                 payload = dict(_arguments or {})
                 payload.update(kwargs)
-                from .connections.mcp import selected_connection
-                private = {"context": _context} if selected_connection(_server, self.config_manager) else {}
                 return call_mcp_tool(
                     _server,
                     _remote_name,
                     payload,
                     config_manager=self.config_manager,
                     skill_manager=self,
-                    **private,
+                    context=_context,
                 )
 
             export = {
@@ -3694,6 +3668,13 @@ class SkillManager:
         resolved_name = record.name if record else str(name or "").strip()
         if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
+        from .connection_retirement import skill_issue
+        target_skill = ((args or {}).get("skill_name") if resolved_name == "run_skill_script"
+                        else self.tool_to_skill_map.get(resolved_name))
+        if target_skill:
+            issue = skill_issue(target_skill, (self.skill_records.get(target_skill) or {}).get("spec") or {}, getattr(self, "config_manager", None))
+            if issue:
+                return {"ok": False, "status": "configuration_required", "executed": False, "error": issue}
         effective_context = dict(context or {})
         effective_context["execution_authorization"] = current_authorization(effective_context)
         effective_context.setdefault("workspace_dir", self.workspace_dir)
@@ -3775,13 +3756,6 @@ class SkillManager:
             args["workspace_dir"] = effective_context.get("workspace_dir") or self.workspace_dir
         if "_context" in sig.parameters:
             effective_context.setdefault("skill_change_publisher", self.change_publisher)
-            requirements = ((self.skill_records.get(skill_name) or {}).get("spec") or {}).get("connection_requirements")
-            if requirements:
-                from .connections.host import CapabilityConnections
-                from .execution_authorization import current_authorization
-                effective_context["connections"] = CapabilityConnections(skill_name, requirements,
-                    current_authorization(effective_context), data_dir=getattr(self.config_manager, "data_dir", None))
-        if "_context" in sig.parameters:
             args["_context"] = effective_context
         try:
             return func(**args)

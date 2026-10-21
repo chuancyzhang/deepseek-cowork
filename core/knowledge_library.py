@@ -9,6 +9,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from functools import wraps
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -23,6 +24,27 @@ class KnowledgeError(RuntimeError):
     def __init__(self, code, message, status=0):
         super().__init__(message)
         self.code, self.status = code, status
+
+
+def library_operation(kind):
+    """Record lifecycle identifiers and error codes, never arguments or credentials."""
+    def decorate(method):
+        @wraps(method)
+        def run(self, *args, **kwargs):
+            source = getattr(self, "source", "weknora")
+            task = args[0].get("id", "") if kind == "upload_check" and args and isinstance(args[0], dict) else ""
+            log.info("knowledge_%s start source=%s phase=%s task=%s", kind, source, method.__name__, task)
+            try:
+                result = method(self, *args, **kwargs)
+            except Exception as exc:
+                log.warning("knowledge_%s failed source=%s phase=%s task=%s reason=%s", kind, source,
+                            method.__name__, task, getattr(exc, "code", type(exc).__name__))
+                raise
+            status = result.get("status", "") if kind == "upload_check" and isinstance(result, dict) else ""
+            log.info("knowledge_%s complete source=%s phase=%s task=%s status=%s", kind, source, method.__name__, task, status)
+            return result
+        return run
+    return decorate
 
 
 def service_url(value):
@@ -112,6 +134,8 @@ class KnowledgeStore:
 
     def connection(self, db=None, secret=False, source="weknora"):
         if db is None:
+            from .connection_retirement import require_library_retirement
+            require_library_retirement(self.data_dir)
             with self.connect() as conn:
                 return self.connection(conn, secret, source)
         row = db.execute("SELECT * FROM source_connections WHERE source=?", (source,)).fetchone()
@@ -123,22 +147,51 @@ class KnowledgeStore:
             public["credentials"] = json.loads(self.crypt().unprotect(row["secret"]).decode("utf-8"))
         return public
 
-    def save_connection(self, public, credentials, db=None):
+    def save_connection(self, public, credentials, db=None, *, attempt=None, cancelled=None):
         if db is None:
+            from .connection_retirement import require_library_retirement
+            require_library_retirement(self.data_dir)
             with self.connect(write=True) as conn:
-                return self.save_connection(public, credentials, conn)
-        encrypted = self.crypt().protect(json.dumps(credentials).encode("utf-8"))
+                return self.save_connection(public, credentials, conn, attempt=attempt, cancelled=cancelled)
+        if cancelled and cancelled():
+            raise KnowledgeError("cancelled", "本次登录已取消，原有资料选择已保留。")
         source = public.get("source", "weknora")
+        if attempt is not None:
+            row = db.execute("SELECT value FROM library_settings WHERE key=?", ("login_attempt:" + source,)).fetchone()
+            if not row or json.loads(row[0]) != attempt:
+                log.info("knowledge_auth discarded source=%s reason=cancelled_or_superseded", source)
+                raise KnowledgeError("cancelled", "本次登录已取消或被新的登录替代，原有资料选择已保留。")
+        encrypted = self.crypt().protect(json.dumps(credentials).encode("utf-8"))
         db.execute("INSERT OR REPLACE INTO source_connections VALUES(?,?,?)", (source, json.dumps(public), encrypted))
+        from .connection_retirement import clear_library_pending
+        clear_library_pending(db, source)
+        if attempt is not None:
+            db.execute("DELETE FROM library_settings WHERE key=?", ("login_attempt:" + source,))
         # The old row is only an import source; retaining it could resurrect a logout.
         if source == "weknora":
             db.execute("DELETE FROM connection")
 
     def remove_connection(self, source):
+        from .connection_retirement import require_library_retirement
+        require_library_retirement(self.data_dir)
         with self.connect(write=True) as db:
+            self.invalidate_login(source, db)
             db.execute("DELETE FROM source_connections WHERE source=?", (source,))
             if source == "weknora":
                 db.execute("DELETE FROM connection")
+
+    def begin_login(self, source):
+        from .connection_retirement import require_library_retirement
+        require_library_retirement(self.data_dir)
+        return self.invalidate_login(source)
+
+    def invalidate_login(self, source, db=None):
+        if db is None:
+            with self.connect(write=True) as conn:
+                return self.invalidate_login(source, conn)
+        attempt = uuid.uuid4().hex
+        db.execute("INSERT OR REPLACE INTO library_settings VALUES(?,?)", ("login_attempt:" + source, json.dumps(attempt)))
+        return attempt
 
     def setting(self, key, value=None):
         with self.connect(write=value is not None) as db:
@@ -296,21 +349,33 @@ class KnowledgeService:
                     raise KnowledgeError("cancelled", "资料库操作已停止。")
                 time.sleep(0.1)
 
-    def login(self, base, email, password):
+    @library_operation("auth")
+    def login(self, base, email, password, *, cancelled=None):
         base = service_url(base)
-        result = self._http(base, "POST", "/api/v1/auth/login", json={"email": email, "password": password})
+        if cancelled and cancelled():
+            raise KnowledgeError("cancelled", "本次登录已取消。")
+        attempt = self.store.begin_login("weknora")
+        result = self._http(base, "POST", "/api/v1/auth/login", json={"email": email, "password": password}, cancelled=cancelled)
         user = result.get("user") or {}
         if not user.get("id") or not result.get("token") or not result.get("refresh_token"):
             raise KnowledgeError("invalid_login", "登录响应缺少用户或令牌，请检查 WeKnora 版本。")
         public = {"base_url": base, "connection_id": hashlib.sha256(base.encode()).hexdigest()[:24],
                   "user_id": str(user["id"]), "email": user.get("email", email),
                   "generation": uuid.uuid4().hex, "tenant_id": str((result.get("tenant") or result.get("active_tenant") or {}).get("id") or "")}
-        self.store.save_connection(public, {"token": result["token"], "refresh_token": result["refresh_token"]})
+        self.store.save_connection(public, {"token": result["token"], "refresh_token": result["refresh_token"]}, attempt=attempt, cancelled=cancelled)
         return public
 
+    def cancel_login(self):
+        self.store.invalidate_login("weknora")
+        log.info("knowledge_auth cancelled source=weknora")
+
+    @library_operation("auth")
     def logout(self):
         # Local revocation is authoritative even when remote logout is unavailable.
+        from .connection_retirement import require_library_retirement
+        require_library_retirement(self.store.data_dir)
         with self.store.connect(write=True) as db:
+            self.store.invalidate_login("weknora", db)
             connection = self.store.connection(db, secret=True)
             db.execute("DELETE FROM connection")
             db.execute("DELETE FROM source_connections WHERE source='weknora'")
@@ -319,7 +384,12 @@ class KnowledgeService:
                        token=connection["credentials"]["token"], tenant=connection["tenant_id"])
 
     def snapshot(self, refs=None, session_id=""):
-        connection = self.store.connection()
+        try:
+            connection = self.store.connection()
+        except KnowledgeError as exc:
+            if exc.code != "retirement_failed":
+                raise
+            return {"refs": copy.deepcopy(refs or []), "unavailable": True, "session_id": session_id, "error": str(exc)}
         if not connection:
             if refs:
                 return {"refs": copy.deepcopy(refs), "unavailable": True, "session_id": session_id}
@@ -567,6 +637,7 @@ class KnowledgeService:
         log.info("knowledge_upload complete id=%s status=%s", task["id"], task["status"])
         return task
 
+    @library_operation("upload_check")
     def check_upload(self, task):
         task = copy.deepcopy(task)
         current = self.snapshot()

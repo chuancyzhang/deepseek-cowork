@@ -133,7 +133,6 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                                "execution_authorization": ExecutionAuthorization("session-a", "test", True, "")}
                     with (patch("core.skill_manager.mcp_package_available", return_value=True),
                           patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": tools}),
-                          patch("core.connections.mcp.selected_connection", return_value=None),
                           patch("core.skill_manager.call_mcp_tool", return_value={"status": "ok", "structured_content": {"document": "native-result"}}) as call,
                           patch.object(provider, "tool", side_effect=AssertionError("Must not use the library adapter"))):
                         result = manager.call_tool("tool_search", {"query": server["id"], "limit": 8}, context)
@@ -162,7 +161,6 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         failure = {"status": "error", "error": "MCP authentication expired"}
         with (patch("core.skill_manager.mcp_package_available", return_value=True),
               patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": [{"name": "find_document"}]}),
-              patch("core.connections.mcp.selected_connection", return_value=None),
               patch("core.skill_manager.call_mcp_tool", return_value=failure) as remote,
               patch("core.knowledge_library.knowledge_script_call", side_effect=AssertionError("No fallback"))):
             manager.call_tool("tool_search", {"query": server["id"]}, context)
@@ -185,6 +183,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                 scope = {"sources": {source: {"unavailable": True, "refs": []}}, "default_source": source, "refs": []}
                 worker = LLMWorker.__new__(LLMWorker)
                 worker.workspace_dir, worker.config_manager = self.temp.name, None
+                worker.conversation_id = "knowledge-test"
                 worker.skill_manager = manager
                 worker.request_id, worker.turn_id = "new-request", "new-turn"
                 worker.run_context = {"knowledge_context": scope, "selected_skill_names": []}
@@ -265,7 +264,6 @@ class KnowledgeIntegrationTests(unittest.TestCase):
               patch("core.skill_manager.mcp_package_available", return_value=True),
               patch("core.skill_manager.list_mcp_server_tools", return_value={"ok": True, "tools": [{
                   "name": "find_document", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}}]}),
-              patch("core.connections.mcp.selected_connection", return_value=None),
               patch("core.skill_manager.call_mcp_tool", return_value={"status": "ok", "structured_content": {"title": "文档"}}) as remote,
               patch("core.knowledge_library.knowledge_script_call", side_effect=AssertionError("No library route"))):
             worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,

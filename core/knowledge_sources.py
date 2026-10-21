@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlsplit
 
 import requests
 
-from .knowledge_library import KnowledgeError, KnowledgeService, KnowledgeStore, same_identity
+from .knowledge_library import KnowledgeError, KnowledgeService, KnowledgeStore, same_identity, library_operation
 from .mcp_client import call_mcp_tool, list_mcp_server_tools
 
 log = logging.getLogger(__name__)
@@ -90,10 +90,6 @@ class MultiSourceKnowledgeService:
         self.providers = providers or {"weknora": KnowledgeService(self.store),
                                        "tencent-docs": TencentDocsProvider(self.store),
                                        "lexiang": LexiangProvider(self.store)}
-        if providers is None:
-            from .connections.knowledge import KnowledgeConnectionRouter
-            self.providers = {name: KnowledgeConnectionRouter(provider, name) for name, provider in self.providers.items()}
-
     @property
     def source(self):
         value = self.store.setting("active_source")
@@ -230,7 +226,13 @@ class McpKnowledgeProvider:
         return SOURCES[self.source]
 
     def snapshot(self, refs=None, session_id=""):
-        connection = self.store.connection(source=self.source)
+        try:
+            connection = self.store.connection(source=self.source)
+        except KnowledgeError as exc:
+            if exc.code != "retirement_failed":
+                raise
+            return {"source": self.source, "refs": copy.deepcopy(refs or []), "unavailable": True,
+                    "session_id": session_id, "error": str(exc)}
         if not connection:
             return {"source": self.source, "refs": copy.deepcopy(refs), "unavailable": True} if refs else None
         return {**connection, "refs": copy.deepcopy(refs or []), "session_id": session_id}
@@ -239,6 +241,11 @@ class McpKnowledgeProvider:
         self.store.remove_connection(self.source)
         self._schemas.clear()
         self.clear_cache()
+        log.info("knowledge_auth logout source=%s", self.source)
+
+    def cancel_login(self):
+        self.store.invalidate_login(self.source)
+        log.info("knowledge_auth cancelled source=%s", self.source)
 
     def identity(self, scope):
         connection = self.store.connection(source=self.source, secret=True)
@@ -336,7 +343,7 @@ class McpKnowledgeProvider:
             raise
         except Exception:
             log.warning("knowledge_mcp error source=%s tool=%s request=%s code=transport", self.source, tool, request_id)
-            raise KnowledgeError("unavailable", "资料服务连接中断，请检查网络。") from None
+            raise KnowledgeError("unavailable", "当前资料库连接中断，请检查网络。") from None
 
     def call(self, scope, tool, arguments, cancelled=None):
         if cancelled and cancelled():
@@ -474,9 +481,9 @@ class McpKnowledgeProvider:
         return {"source": self.source, "connection_id": uuid.uuid4().hex, "generation": uuid.uuid4().hex,
                 "tenant_id": tenant, "user_id": "", "email": self.display_name, "credentials": {"token": token}}
 
-    def _save_connection(self, connection):
+    def _save_connection(self, connection, *, attempt=None, cancelled=None):
         public = {k: v for k, v in connection.items() if k != "credentials"}
-        self.store.save_connection(public, connection["credentials"])
+        self.store.save_connection(public, connection["credentials"], attempt=attempt, cancelled=cancelled)
         self.clear_cache()
         log.info("knowledge_connection complete source=%s", self.source)
         return public
@@ -565,21 +572,30 @@ class TencentDocsProvider(McpKnowledgeProvider):
         self._pending_auth = None
         self._auth_lock = threading.RLock()
 
-    def start_authorization(self):
+    @library_operation("auth")
+    def start_authorization(self, *, cancelled=None):
         with self._auth_lock:
+            if cancelled and cancelled():
+                raise KnowledgeError("cancelled", "本次授权已取消。")
             code = secrets.token_hex(16)
-            self._pending_auth = (code, time.monotonic() + 300)
-            log.info("knowledge_auth start source=%s", self.source)
+            self._pending_auth = (code, time.monotonic() + 300, self.store.begin_login(self.source), cancelled)
             return "https://docs.qq.com/scenario/open-claw.html?" + urlencode({"nlc": 1, "authType": 1, "code": code, "mcp_source": "desktop"})
 
-    def finish_authorization(self, *, confirmed=False):
+    @library_operation("auth")
+    def finish_authorization(self, *, confirmed=False, cancelled=None):
         if not confirmed:
             raise KnowledgeError("confirmation_required", "请在浏览器完成授权后点击“已完成授权”。")
         with self._auth_lock:
             if not self._pending_auth or time.monotonic() >= self._pending_auth[1]:
                 self._pending_auth = None
                 raise KnowledgeError("auth_expired", "授权链接已过期，请重新发起授权。")
-            code = self._pending_auth[0]
+            pending = self._pending_auth
+            def is_cancelled():
+                return bool((cancelled and cancelled()) or (pending[3] and pending[3]()))
+            if is_cancelled():
+                self._pending_auth = None
+                raise KnowledgeError("cancelled", "本次授权已取消，请重新发起。")
+            code = pending[0]
             try:
                 response = self.transport.get("https://docs.qq.com/oauth/v2/mcp/token/get", params={"code": code},
                                               timeout=(5, 30), allow_redirects=False)
@@ -601,14 +617,19 @@ class TencentDocsProvider(McpKnowledgeProvider):
             # No public account identity API in this contract; a fresh authorization is
             # always a new local identity, never inferred from a document owner.
             connection["user_id"] = connection["connection_id"]
-            result = self._save_connection(connection)
+            result = self._save_connection(connection, attempt=pending[2], cancelled=is_cancelled)
             self._pending_auth = None
             return result
 
     def logout(self):
-        with self._auth_lock:
-            self._pending_auth = None
-            super().logout()
+        self.cancel_login()
+        super().logout()
+
+    def cancel_login(self):
+        # Invalidate the persistent attempt before a network-bound worker can commit.
+        # Do not wait for _auth_lock: it may be held during the remote verification.
+        super().cancel_login()
+        self._pending_auth = None
 
     def catalog(self, scope):
         spaces, page = [], 0
@@ -669,6 +690,7 @@ class TencentDocsProvider(McpKnowledgeProvider):
             raise KnowledgeError("invalid_response", "导入响应缺少任务标识，请核对上传记录。")
         task.update(remote_task_id=result["task_id"], status="processing", stage="importing")
 
+    @library_operation("upload_check")
     def check_upload(self, task, *, resume=False):
         self.identity(task["scope"])
         if self.active_upload(task):
@@ -800,10 +822,14 @@ class LexiangProvider(McpKnowledgeProvider):
         return KnowledgeError("invalid_response", "乐享身份信息格式不兼容，未保存连接。缺少：" +
                               "、".join(missing) + "。返回字段（不含值）：" + fields + "；诊断编号：" + request_id)
 
-    def connect(self, company, token):
+    @library_operation("auth")
+    def connect(self, company, token, *, cancelled=None):
         company, token = company.strip(), token.strip()
+        if cancelled and cancelled():
+            raise KnowledgeError("cancelled", "本次登录已取消。")
         if not company or not token:
             raise KnowledgeError("invalid_credentials", "请填写企业标识和 Token。")
+        attempt = self.store.begin_login(self.source)
         connection = self._new_connection(token, company)
         info = self._call(connection, "whoami", {})
         tenant = info.get("company") or {}
@@ -816,7 +842,7 @@ class LexiangProvider(McpKnowledgeProvider):
             raise self._identity_response_error(info, ["company.company_domain"])
         connection.update(user_id=user_id, email=name,
                           tenant_name=tenant.get("name") or company, domain=tenant["company_domain"])
-        return self._save_connection(connection)
+        return self._save_connection(connection, attempt=attempt, cancelled=cancelled)
 
     def _whoami_account(self, info):
         # Live Lexiang whoami identifies enterprise users as staff. Preserve
@@ -998,6 +1024,7 @@ class LexiangProvider(McpKnowledgeProvider):
             raise KnowledgeError("outcome_unknown", "上传已提交但未返回条目标识，请在乐享核对。")
         task.update(knowledge_id=entry_id, status="saved", stage="done", url=self.item_url(scope, entry_id))
 
+    @library_operation("upload_check")
     def check_upload(self, task, *, resume=False):
         self.identity(task["scope"])
         if self.active_upload(task):

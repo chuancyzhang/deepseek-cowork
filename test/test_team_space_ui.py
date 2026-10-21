@@ -578,7 +578,7 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.assertFalse(self.page.status.isVisible())
         self.host.open_settings = Mock()
         self.page.sign_in_state.action_button.click()
-        self.host.open_settings.assert_called_once_with("账号与连接")
+        self.host.open_settings.assert_called_once_with("企业账号")
         self.shot("desktop-sign-in-expired")
         self.page.resize(480, 560)
         self.wait()

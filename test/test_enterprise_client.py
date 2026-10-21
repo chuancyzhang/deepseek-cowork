@@ -220,7 +220,7 @@ def test_enterprise_first_start_offers_login_without_contacting_center(tmp_path)
     with patch("core.enterprise_client.read_connection", return_value=CONNECTION), patch("ui.enterprise_connection.ProductMessageDialog") as dialog, patch("httpx.Client", side_effect=AssertionError("unexpected network")):
         dialog.return_value.exec_result.return_value = "login"
         assert offer_enterprise_onboarding(config, parent)
-        parent.open_settings.assert_called_once_with("账号与连接")
+        parent.open_settings.assert_called_once_with("企业账号")
         assert values["enterprise_intro_seen"] == "company"
         assert not offer_enterprise_onboarding(config, parent)
     assert not (tmp_path / "enterprise.sqlite3").exists()

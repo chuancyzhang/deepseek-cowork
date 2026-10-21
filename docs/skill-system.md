@@ -1,6 +1,6 @@
 # DeepSeek Cowork Skill 系统
 
-当前应用版本：**5.2.9**
+当前应用版本：**5.3.0**
 
 ## SkillHub 专区
 
@@ -182,11 +182,11 @@ Skill 的 `allowed-tools`、稳定系统提示与 Tool Registry 必须使用同�
 配置保存在本地 `skill_configs`。运行时只注入字段声明的环境变量；必填项缺失
 直接返回根因，不从其他目录猜测密钥，也不静默切换 Provider。
 
-### 可选统一连接
+### 独立认证与旧接口退役
 
-能力可在 `skill.json` 声明 `connection_requirements`，由宿主管理连接绑定、操作范围与认证注入；声明本身不授予权限，也不添加模型工具参数。已有能力仍可使用原配置，切换必须由用户明确选择。
+Skill 使用自身 `config_fields`，MCP 使用自身认证配置；不再支持 `connection_requirements`、宿主 `_context["connections"]` 或 MCP `connection_ref`。仍声明旧接口的能力显示为不兼容，并在执行前阻止调用；插件作者需更新到独立认证，用户保存配置后重新测试。Superset 使用现有地址、账号、密码及登录方式配置。
 
-接入字段、远程 MCP 的 `mcp_headers` 交付、本地脚本边界和最小样例统一见[资料服务连接的能力接入](account-connections.md#能力接入)。请勿将连接凭据复制到普通工具参数或模型上下文。
+凭据不得放入普通模型工具参数或提示词；已有执行授权与资料范围校验继续生效。旧账号数据不会自动转移，详见[升级说明](account-connections.md)。
 
 启用数据安全检查后，安装／更新技能及保存／连接 MCP 会触发有界的异步检查。检查结果仅表示风险线索，不替代执行授权；全部默认关闭，详见[数据安全](data-security.md)。
 

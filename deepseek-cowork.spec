@@ -932,10 +932,3 @@ coll = COLLECT(
     upx_exclude=[],
     name='deepseek-cowork',
 )
-
-# Public deployment templates remain editable next to the executable.
-import shutil as _connection_shutil
-_connection_shutil.copyfile(
-    os.path.join(SPEC_DIR, "connection_templates.json"),
-    os.path.join(coll.name, "connection_templates.json"),
-)

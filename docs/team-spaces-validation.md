@@ -58,6 +58,32 @@ python -m pytest -q test/test_enterprise_platform.py test/test_enterprise_databa
 
 上述补充可用 `python -m pytest -q test/test_team_space_ui.py` 复现；设置 `QT_SCALE_FACTOR=1.5` 后用 `-k 'list_loading or empty_list or sign_in_guidance'` 运行缩放检查。截图保存在 `docs/screenshots/team-spaces/list/`。
 
+## 2026-10-21 统一交互与加载验证
+
+团队空间统一为固定标题及四个内容页签，个人本机任务独立显示。列表刷新按记录更新；浏览缓存限定在当前登录会话，账号切换、明确撤权及内容撤回不会重新展示旧缓存。未修改模型请求、消息组织、工具定义或 prompt prefix。
+
+原生页面专项 19 项通过；客户端与中心逻辑 31 项及 3 个子用例通过。150% 缩放另有 6 项通过，覆盖首次加载、缓存切页、断网恢复、文件夹和固定版本、本机任务与共享成果分离、浅色主题预览与取消。新增验证使用受控请求延迟、真实中心 API、真实 Qt 点击和回车操作，检查：
+
+- 首次没有数据时只占位内容区；标题和导航可见，未取得空间信息前禁止提交。
+- 已访问页签在请求返回前展示缓存；刷新前后保留同一个表格、选中记录及滚动位置。未变化的列表不重复获取成员和模型；轮询发现新增记录后原位更新。
+- 旧请求晚于新页签或账号切换返回时，不能覆盖内容、清除当前请求状态或注入旧传输进度。
+- 断网保留列表、表单控件和草稿，恢复后可继续；确认撤权时移除共享缓存，本机任务入口仍可用。已知成果撤回后返回旧详情也不重新显示正文。
+- 文件夹路径、回车搜索、固定文件修订、详情返回、本机原对话入口及明确选取成果正常工作。
+- 归档空间的共享编辑禁用，恢复和转移所有权仍可用；离线时管理操作禁用，核对连接成功后可正常恢复空间。
+- 首次加载已应用主题与占位条；多行资料在主题应用后重新计算高度，末行文字完整显示。
+
+```powershell
+.venv/Scripts/python.exe -X utf8 -m pytest -q test/test_team_space_ui.py test/test_team_space_client.py test/test_team_spaces.py
+$env:QT_SCALE_FACTOR='1.5'
+.venv/Scripts/python.exe -X utf8 -m pytest -q test/test_team_space_ui.py -k 'first_space_load or cached_tabs or offline_preserves or folder_navigation or my_tasks_and_shared or theme_preview'
+```
+
+截图位于 `docs/screenshots/team-spaces/unified/`。检查了普通窗口与 480 逻辑像素窗口，没有横向溢出；仅验证浅色主题和可取消的浅色强调色预览，没有执行深色测试。缓存和请求数量检查不代表真实企业网络的延迟基准；最终产品体验仍由用户验收。未打包、提交、推送或发布。
+
+![资料页，示例数据](screenshots/team-spaces/unified/desktop-assets-root.png)
+
+![150% 缩放，480 逻辑像素宽度](screenshots/team-spaces/unified/scale150/desktop-assets-narrow.png)
+
 ## 未覆盖与验证限制
 
 未宣称全仓测试通过。`test_main_workspace_linear.py` 的整组离屏运行出现关闭等待超时、首次模型设置弹窗等待，以及一次 Qt 原生 access violation，未形成完整通过报告；相关三个独立入口用例已单独通过，未以跳过失败断言的方式宣称整组通过。原有引用测试缺少工作台方法的失败已在未修改 HEAD 中复现，随后仅补齐测试替身。

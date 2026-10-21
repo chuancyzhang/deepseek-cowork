@@ -10,14 +10,14 @@ from unittest.mock import Mock, patch
 
 import httpx
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtGui import QAction, QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTreeWidget, QWidget
 
 from core.chat_storage import ChatStorage
 from core.enterprise_client import EnterpriseStore
 from core.team_space_storage import TeamSpaceStore
-from core.team_space_storage import TeamSpacePaused
+from core.team_space_storage import TeamSpaceError, TeamSpacePaused
 from core.team_spaces import TeamSpaceClient
 from ui.team_spaces import TeamSpacesPage
 import test_team_spaces as backend_tests
@@ -112,6 +112,7 @@ class TeamSpaceNativeTests(unittest.TestCase):
         with patch.object(self.page.client, "list", side_effect=delayed):
             try:
                 self.page.list()
+                QTest.qWait(230)
                 for name, width, height in (("wide", 1440, 960), ("narrow", 480, 640)):
                     self.page.resize(width, height)
                     self.qt.processEvents()
@@ -142,11 +143,11 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.assertTrue(self.page.refresh_button.isEnabled())
         self.assertEqual(self.page.refresh_button.text(), "重试")
         self.assertIn("无法连接", self.page.status.text())
-        self.assertFalse(any(label.text() == "还没有加入空间"
+        self.assertFalse(any(label.isVisible() and label.text() == "还没有加入空间"
                              for label in self.page.scroll.widget().findChildren(QLabel)))
         self.shot("desktop-list-error")
         self.click("重试")
-        self.assertEqual(self.page.refresh_button.text(), "刷新")
+        self.assertFalse(self.page.refresh_button.isVisible())
         self.assertEqual(self.page.findChildren(QTreeWidget)[0].topLevelItemCount(), 1)
         self.page.resize(1440, 960)
         self.qt.processEvents()
@@ -168,7 +169,7 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.shot("desktop-list-empty")
         self.click("新建空间")
         self.assertEqual(self.page.fields["name"].text(), "")
-        self.click("返回列表")
+        self.click("取消")
 
         self.backend.command("owner", "invite.create", member_id="outsider", role="member")
         self.page.refresh()
@@ -181,7 +182,8 @@ class TeamSpaceNativeTests(unittest.TestCase):
         query = next(field for field in self.page.findChildren(QLineEdit)
                      if field.accessibleName() == "搜索已加入空间")
         query.setText("不存在的空间")
-        self.click("搜索")
+        QTest.keyClick(query, Qt.Key_Return)
+        self.wait()
         self.assertTrue(any(label.text() == "没有找到匹配的空间"
                             for label in self.page.scroll.widget().findChildren(QLabel)))
         self.shot("desktop-list-search-empty")
@@ -194,7 +196,7 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.backend.command("owner", "space.update", revision=self.backend.get()["revision"],
                              name="跨部门客户方案与交付资料协作空间 · " * 4)
         self.open_space()
-        heading = self.page.layout.itemAt(0).widget()
+        heading = self.page.space_title
         self.assertGreater(heading.height(), heading.fontMetrics().height() * 2)
         self.assertGreaterEqual(heading.height(), heading.heightForWidth(heading.width()))
 
@@ -216,7 +218,8 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.click("上传并发布")
         self.assertEqual(len(self.backend.get(suffix="/assets")["items"]), 1, self.page.status.text())
         self.open_space("tasks")
-        self.click("开始任务")
+        self.click("我的任务")
+        self.click("新建任务")
         self.assertEqual(self.page.fields["model"].currentText(), "我配置的 · 个人模型")
         self.page.fields["title"].setText("本机方案任务")
         self.page.fields["prompt"].setPlainText("根据需求起草方案")
@@ -253,6 +256,300 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.page.members()
         self.wait()
         self.shot("desktop-members")
+
+    def test_cached_tabs_and_refresh_preserve_shell_rows_selection_and_scroll(self):
+        for index in range(16):
+            self.backend.command("owner", "plan.create", title=f"客户方案阶段 {index:02}", assignee_id="owner")
+        self.open_space("plans")
+        shell = self.page.space_header
+        tree = self.page.main_table
+        tree.setCurrentItem(tree.topLevelItem(6))
+        selected = tree.currentItem().data(0, Qt.UserRole)["id"]
+        self.page.scroll.verticalScrollBar().setValue(170)
+        scroll = self.page.scroll.verticalScrollBar().value()
+        original = self.page.client.collection
+        release = threading.Event()
+        def delayed(space_id, collection, **filters):
+            if collection == "plans" and not release.wait(10):
+                raise RuntimeError("Read was not released")
+            return original(space_id, collection, **filters)
+        with patch.object(self.page.client, "collection", side_effect=delayed), patch.object(self.page.client, "detail", wraps=self.page.client.detail) as detail:
+            try:
+                self.page.refresh()
+                self.qt.processEvents()
+                self.assertIs(self.page.main_table, tree)
+                self.assertIs(self.page.space_header, shell)
+                self.assertEqual(tree.topLevelItemCount(), 16)
+                self.assertEqual(tree.currentItem().data(0, Qt.UserRole)["id"], selected)
+                self.assertEqual(self.page.scroll.verticalScrollBar().value(), scroll)
+                self.shot("desktop-plans-refresh")
+            finally:
+                release.set()
+            self.wait()
+            self.assertEqual(detail.call_count, 0, "Unchanged collections must not refetch members/models")
+        self.assertIs(self.page.main_table, tree)
+        self.backend.command("owner", "plan.create", title="新增共享计划")
+        self.page._poll()
+        self.wait()
+        self.assertIs(self.page.main_table, tree)
+        self.assertEqual(tree.topLevelItemCount(), 17)
+        self.assertEqual(tree.currentItem().data(0, Qt.UserRole)["id"], selected)
+        self.open_space("assets")
+        release.clear()
+        with patch.object(self.page.client, "collection", side_effect=delayed):
+            try:
+                self.page.tab_buttons["plans"].click()
+                self.qt.processEvents()
+                self.assertEqual(self.page.main_table.topLevelItemCount(), 17, "Visited tabs render their cache before the network returns")
+                self.assertIs(self.page.space_header, shell)
+                self.assertEqual(self.page.scroll.verticalScrollBar().value(), scroll)
+            finally:
+                release.set()
+            self.wait()
+
+    def test_first_space_load_keeps_navigation_and_disables_unready_writes(self):
+        original = self.page.client.detail
+        release = threading.Event()
+        def delayed(space_id):
+            if not release.wait(10):
+                raise RuntimeError("Initial load was not released")
+            return original(space_id)
+        with patch.object(self.page.client, "detail", side_effect=delayed):
+            try:
+                self.page.open_space(self.backend.space)
+                QTest.qWait(230)
+                self.assertTrue(self.page.space_header.isVisible())
+                self.assertEqual(self.page.space_title.text(), self.backend.get()["name"])
+                self.assertEqual(self.page.route[1]["tab"], "plans")
+                self.assertTrue(all(button.isVisible() for button in self.page.tab_buttons.values()))
+                self.assertTrue(self.page._skeleton.isVisible())
+                self.assertFalse(next(b for b in self.page.findChildren(QPushButton) if b.text() == "新建计划").isEnabled())
+                self.assertTrue(self.page._skeleton.styleSheet())
+                search = next(w for w in self.page.scroll.widget().findChildren(QLineEdit) if w.accessibleName() == "搜索当前内容")
+                self.assertGreaterEqual(search.height(), 32)
+                self.shot("desktop-first-load")
+            finally:
+                release.set()
+            self.wait()
+
+    def test_late_read_cannot_replace_new_tab_or_clear_its_busy_state(self):
+        self.backend.command("owner", "plan.create", title="迟到的计划")
+        self.open_space("plans")
+        original = self.page.client.collection
+        started, release = threading.Event(), threading.Event()
+        def delayed(space_id, collection, **filters):
+            if collection == "plans":
+                started.set()
+                if not release.wait(10):
+                    raise RuntimeError("Read was not released")
+            return original(space_id, collection, **filters)
+        with patch.object(self.page.client, "collection", side_effect=delayed):
+            try:
+                self.page.refresh()
+                until = time.time() + 2
+                while not started.is_set() and time.time() < until:
+                    QTest.qWait(10)
+                self.assertTrue(started.is_set())
+                self.page.tab_buttons["tasks"].click()
+                self.wait()
+                self.assertEqual(self.page.route[1]["tab"], "tasks")
+                self.assertEqual(self.page.main_table.headerItem().text(0), "成果")
+            finally:
+                release.set()
+            QTest.qWait(200)
+            self.assertFalse(self.page.busy)
+            self.assertEqual(self.page.route[1]["tab"], "tasks")
+            self.assertEqual(self.page.main_table.topLevelItemCount(), 0)
+
+    def test_offline_preserves_read_content_and_form_input_then_recovers(self):
+        self.backend.command("owner", "plan.create", title="已加载的计划")
+        self.open_space("plans")
+        tree = self.page.main_table
+        with patch.object(self.page.client, "collection", side_effect=TeamSpacePaused("连接已中断")):
+            self.page.refresh()
+            self.wait()
+        self.assertIs(self.page.main_table, tree)
+        self.assertEqual(tree.topLevelItemCount(), 1)
+        self.assertIn("上次加载", self.page.status.text())
+        create = next(b for b in self.page.findChildren(QPushButton) if b.text() == "新建计划" and b.isVisible())
+        self.assertFalse(create.isEnabled())
+        self.shot("desktop-offline")
+        self.click("重试")
+        self.assertTrue(create.isEnabled())
+        self.click("新建计划")
+        field = self.page.fields["title"]
+        field.setText("网络恢复后继续编辑")
+        with patch.object(self.page.client, "collection", side_effect=TeamSpacePaused("连接已中断")):
+            self.page._poll()
+            self.wait()
+        self.assertIs(self.page.fields["title"], field)
+        self.assertEqual(field.text(), "网络恢复后继续编辑")
+        self.page._poll()
+        self.wait()
+        self.assertEqual(field.text(), "网络恢复后继续编辑")
+        self.click("保存计划")
+        self.assertTrue(any(p["title"] == "网络恢复后继续编辑" for p in self.backend.get(suffix="/plans")["items"]))
+
+    def test_revoked_access_clears_cached_shared_content_but_keeps_my_tasks_entry(self):
+        self.backend.command("owner", "plan.create", title="受保护的计划")
+        state = self.enterprise.read()
+        self.enterprise.write({**state, "member": {"id": "member", "name": "同事"}, "generation": "member-session"}, self.backend.tokens["member"])
+        self.page.refresh()
+        self.wait()
+        self.open_space("plans")
+        self.page.settings(self.page.space)
+        self.wait()
+        self.page.refresh()
+        self.wait()
+        self.assertEqual(self.page.route[0], "settings_view")
+        self.page.go_back()
+        self.wait()
+        member = next(m for m in self.backend.get()["members"] if m["id"] == "member")
+        self.backend.command("owner", "member.remove", member_id="member", revision=member["revision"])
+        self.page.refresh()
+        self.wait()
+        self.assertFalse(any(key[0] == self.backend.space for key in self.page._cache))
+        self.assertFalse(self.page.scroll.widget().findChildren(QTreeWidget))
+        self.assertTrue(self.page.my_tasks_button.isEnabled())
+        self.shot("desktop-permission-changed")
+        self.click("我的任务")
+        self.assertEqual(self.page.route[0], "my_tasks")
+        self.assertTrue(any(label.text() == "我的任务" for label in self.page.scroll.widget().findChildren(QLabel)))
+
+    def test_archived_space_recovers_connection_and_restores_from_management_menu(self):
+        self.backend.command("owner", "space.archive", revision=self.backend.get()["revision"])
+        self.open_space("plans")
+        self.page.settings(self.page.space)
+        actions = {a.text(): a for a in self.page.findChildren(QAction)}
+        restore, transfer = actions["恢复空间"], actions["转移所有权"]
+        self.assertTrue(restore.isEnabled())
+        self.assertTrue(transfer.isEnabled())
+        save = next(b for b in self.page.findChildren(QPushButton) if b.text() == "保存设置")
+        self.assertFalse(save.isEnabled())
+        with patch.object(self.page.client, "collection", side_effect=TeamSpacePaused("连接已中断")):
+            self.page._poll()
+            self.wait()
+        self.assertFalse(restore.isEnabled())
+        self.assertFalse(transfer.isEnabled())
+        self.page._poll()
+        self.wait()
+        self.assertTrue(restore.isEnabled())
+        restore.trigger()
+        self.wait()
+        self.assertEqual(self.backend.get()["state"], "active")
+        self.assertTrue(next(b for b in self.page.findChildren(QPushButton) if b.text() == "新建计划" and b.isVisible()).isEnabled())
+
+    def test_folder_navigation_fixed_version_and_return_restore_filter(self):
+        folder = self.backend.command("owner", "folder.create", name="需求调研")
+        asset = self.backend.asset(name="客户需求.txt", folder_id=folder["id"])
+        self.backend.asset(b"version two", asset_id=asset["id"], revision=1)
+        self.backend.asset(b"scope", name="交付边界.txt")
+        self.backend.asset(b"style", name="写作规范.txt")
+        self.open_space("assets")
+        tree = self.page.main_table
+        last = tree.topLevelItem(tree.topLevelItemCount() - 1)
+        self.assertLessEqual(tree.visualItemRect(last).bottom(), tree.viewport().height())
+        self.shot("desktop-assets-root")
+        row = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount()) if tree.topLevelItem(i).data(0, Qt.UserRole).get("_folder"))
+        QTest.mouseClick(tree.viewport(), Qt.LeftButton, pos=tree.visualItemRect(row).center())
+        self.wait()
+        self.assertEqual(self.page.route[1]["folder_id"], folder["id"])
+        query = next(w for w in self.page.scroll.widget().findChildren(QLineEdit) if w.accessibleName() == "搜索当前内容")
+        query.setText("客户")
+        QTest.keyClick(query, Qt.Key_Return)
+        self.wait()
+        self.page.open_object("asset", asset["id"], asset["revision_id"])
+        self.wait()
+        from PySide6.QtWidgets import QComboBox
+        versions = next(w for w in self.page.findChildren(QComboBox) if w.accessibleName() == "资料版本")
+        self.assertEqual(versions.currentData()["id"], asset["revision_id"])
+        self.shot("desktop-asset-detail")
+        self.page.go_back()
+        self.wait()
+        self.assertEqual(self.page.route[1]["search"], "客户")
+        self.assertEqual(self.page.route[1]["folder_id"], folder["id"])
+        self.assertEqual(self.page.main_table.topLevelItemCount(), 1)
+        for name, width, height in (("wide", 1100, 780), ("narrow", 480, 680)):
+            self.page.resize(width, height)
+            self.qt.processEvents()
+            self.assertEqual(self.page.scroll.horizontalScrollBar().maximum(), 0)
+            self.shot("desktop-assets-" + name)
+
+    def test_my_tasks_and_shared_results_are_separate_and_open_original_conversation(self):
+        identity = self.page.client.identity
+        binding = self.local.bind_workspace(identity, self.backend.space, Path(self.backend.temp.name) / "private-task")
+        self.host.chat_storage.save_conversation("local-task", [], title="尚未分享的方案草稿")
+        self.host.chat_storage.bind_team_space("local-task", binding)
+        self.backend.publish(title="已分享的需求摘要", body="仅供团队查看的整理结果。")
+        self.open_space("tasks")
+        self.assertEqual(self.page.main_table.topLevelItemCount(), 1)
+        self.assertIn("已分享的需求摘要", self.page.main_table.topLevelItem(0).text(0))
+        self.shot("desktop-results")
+        self.click("我的任务")
+        self.assertEqual(self.page.main_table.topLevelItemCount(), 1)
+        self.assertEqual(self.page.main_table.topLevelItem(0).text(0), "尚未分享的方案草稿")
+        self.shot("desktop-my-tasks")
+        tree = self.page.main_table
+        QTest.mouseClick(tree.viewport(), Qt.LeftButton, pos=tree.visualItemRect(tree.topLevelItem(0)).center())
+        self.wait()
+        opened = []
+        self.page.conversationRequested.connect(opened.append)
+        self.click("继续对话")
+        self.assertEqual(opened, ["local-task"])
+        self.click("选择内容发布为成果")
+        self.assertEqual(self.page.fields["body"].toPlainText(), "")
+        self.assertEqual(len(self.backend.get(suffix="/shares")["items"]), 1)
+
+    def test_known_withdrawal_does_not_reveal_old_body_when_returning_to_cached_detail(self):
+        share = self.backend.publish(title="阶段性成果", body="撤回后不应再次显示的正文")
+        self.open_space("tasks")
+        self.page.open_object("share", share["id"])
+        self.wait()
+        self.page.open_object("snapshot", share["snapshot_id"])
+        self.wait()
+        self.backend.command("owner", "share.withdraw", id=share["id"], revision=1, reason="撤回")
+        self.page.refresh()
+        self.wait()
+        self.assertFalse(any(key[0] == self.backend.space for key in self.page._cache))
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.assertFalse(self.page.scroll.widget().findChildren(QPlainTextEdit))
+        self.page.go_back()
+        self.wait()
+        self.assertEqual(self.page.route[1]["kind"], "share")
+        self.assertFalse(self.page.scroll.widget().findChildren(QPlainTextEdit))
+
+    def test_account_switch_during_read_discards_old_response_and_progress(self):
+        plan = self.backend.command("owner", "plan.create", title="旧页面内容")
+        self.open_space("plans")
+        client, ticket = self.page.client, self.page.ticket
+        original = client.object
+        entered, release = threading.Event(), threading.Event()
+        def delayed(*args):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Object read was not released")
+            return original(*args)
+        with patch.object(client, "object", side_effect=delayed):
+            try:
+                self.page.open_object("plan", plan["id"])
+                until = time.time() + 2
+                while not entered.is_set() and time.time() < until:
+                    QTest.qWait(10)
+                self.assertTrue(entered.is_set())
+                state = self.enterprise.read()
+                self.enterprise.write({**state, "member": {"id": "member", "name": "新账号"}, "generation": "switched"}, self.backend.tokens["member"])
+                self.page.refresh()
+                self.wait()
+                self.assertEqual(self.page.client.identity["member_id"], "member")
+                self.assertEqual(self.page.route[0], "list")
+                status = self.page.status.text()
+                self.page._progress((client, ticket), "旧账号上传进度")
+                self.assertEqual(self.page.status.text(), status)
+            finally:
+                release.set()
+            QTest.qWait(200)
+        self.assertEqual(self.page.route[0], "list")
+        self.assertFalse(any(key[1] == "open_object" for key in self.page._cache))
 
     def test_account_switch_drops_late_results_and_drafts_remain_scoped(self):
         self.open_space()

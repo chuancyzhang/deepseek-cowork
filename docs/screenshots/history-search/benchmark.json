@@ -1,0 +1,113 @@
+{
+  "sqlite": "3.50.4",
+  "conversations": 1000,
+  "messages": 24000,
+  "seed_sec": 1.921,
+  "database_before_mb": 106.88,
+  "legacy": {
+    "图": {
+      "median_ms": 120.73,
+      "max_ms": 139.32,
+      "matches": 11
+    },
+    "截图": {
+      "median_ms": 117.61,
+      "max_ms": 118.52,
+      "matches": 11
+    },
+    "截图归档": {
+      "median_ms": 116.53,
+      "max_ms": 118.15,
+      "matches": 11
+    },
+    "TokenQ78": {
+      "median_ms": 111.8,
+      "max_ms": 115.01,
+      "matches": 11
+    },
+    "不存在的关键词987654": {
+      "median_ms": 116.01,
+      "max_ms": 119.68,
+      "matches": 0
+    },
+    "报告": {
+      "median_ms": 63.59,
+      "max_ms": 64.13,
+      "matches": 200
+    }
+  },
+  "legacy_save": {
+    "median_ms": 4.36,
+    "max_ms": 6.72
+  },
+  "backfill_sec": 8.92,
+  "indexed": {
+    "图": {
+      "median_ms": 2.27,
+      "max_ms": 2.43,
+      "matches": 11
+    },
+    "截图": {
+      "median_ms": 2.33,
+      "max_ms": 2.6,
+      "matches": 11
+    },
+    "截图归档": {
+      "median_ms": 2.41,
+      "max_ms": 4.37,
+      "matches": 11
+    },
+    "TokenQ78": {
+      "median_ms": 2.77,
+      "max_ms": 3.14,
+      "matches": 11
+    },
+    "不存在的关键词987654": {
+      "median_ms": 2.13,
+      "max_ms": 2.35,
+      "matches": 0
+    },
+    "报告": {
+      "median_ms": 60.03,
+      "max_ms": 60.52,
+      "matches": 200
+    }
+  },
+  "indexed_save": {
+    "median_ms": 5.39,
+    "max_ms": 6.22
+  },
+  "sidebar_with_summaries": {
+    "图": {
+      "median_ms": 6.6,
+      "max_ms": 7.84,
+      "matches": 11
+    },
+    "截图": {
+      "median_ms": 6.68,
+      "max_ms": 6.94,
+      "matches": 11
+    },
+    "截图归档": {
+      "median_ms": 7.01,
+      "max_ms": 7.38,
+      "matches": 11
+    },
+    "TokenQ78": {
+      "median_ms": 7.2,
+      "max_ms": 7.41,
+      "matches": 11
+    },
+    "不存在的关键词987654": {
+      "median_ms": 5.29,
+      "max_ms": 5.48,
+      "matches": 0
+    },
+    "报告": {
+      "median_ms": 69.18,
+      "max_ms": 71.0,
+      "matches": 200
+    }
+  },
+  "index_added_mb": 52.97
+}

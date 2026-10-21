@@ -12,7 +12,7 @@ def ui_work_stopping(owner):
 
 def pause_ui_work_timers(owner):
     paused = []
-    for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer"):
+    for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer", "history_search_timer"):
         timer = getattr(owner, name, None)
         # A coalesced refresh can still be pending after its timer fired while
         # the scanner was busy. Resume that request if shutdown is aborted.

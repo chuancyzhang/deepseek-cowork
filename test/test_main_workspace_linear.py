@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,6 +36,10 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MainWindow()
+        # UI unit tests own their data; showing a window must not launch the
+        # first-run modal or unrelated background services while awaiting Qt.
+        self.window._startup_hydration_scheduled = True
+        self.window._background_services_scheduled = True
 
     def tearDown(self):
         self.window.close()
@@ -676,6 +681,12 @@ class MainWorkspaceLinearTests(unittest.TestCase):
                 self.assertEqual(set(self.window.project_rows), expected)
                 query.return_value = "项目"
                 self.window.refresh_history_list()
+                for _ in range(300):
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                    if self.window.history_search_controller.worker is None:
+                        break
+                self.assertIsNone(self.window.history_search_controller.worker)
                 self.assertEqual(set(self.window.project_rows), set(paths))
                 query.return_value = ""
                 self.window.refresh_history_list()
@@ -825,10 +836,16 @@ class MainWorkspaceLinearTests(unittest.TestCase):
                 return_value="独立聊天",
             ), patch.object(
                 self.window.chat_storage,
-                "search_conversations",
-                return_value=conversation_ids,
+                "search_sidebar_conversations",
+                return_value=(conversations, set(conversation_ids)),
             ):
                 self.window.refresh_history_list()
+                for _ in range(300):
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                    if self.window.history_search_controller.worker is None:
+                        break
+                self.assertIsNone(self.window.history_search_controller.worker)
             self.assertEqual(len(self.window.history_rows), 8)
             self.assertEqual(disclosure_copy(), [])
             self.assertEqual(self.window.unassigned_history_visible_limit, 6)

@@ -13,6 +13,7 @@ from .conversation_integrity import (
     normalize_message_ids,
 )
 from .message_persistence import filter_persistable_messages
+from .sidebar_search import SidebarSearchStorage, search_tokens
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ from .context_storage import ContextStorage
 from .team_space_storage import TeamSpaceConversationStorage
 
 
-class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorage):
+class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorage, SidebarSearchStorage):
     def __init__(self, db_path):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -72,6 +73,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
     def _connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.create_function("sidebar_search_tokens", 1, search_tokens, deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         try:
@@ -1444,9 +1446,22 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             )
         return conversations
 
-    def list_conversation_summaries(self, limit=None, offset=0):
+    def list_conversation_summaries(self, limit=None, offset=0, *, conversation_ids=None):
+        if conversation_ids is not None:
+            conversation_ids = list(dict.fromkeys(conversation_ids))
+            if not conversation_ids:
+                return []
+            # Stay below SQLite's parameter limit on older supported runtimes.
+            if len(conversation_ids) > 400:
+                rows = []
+                for start in range(0, len(conversation_ids), 400):
+                    rows.extend(self.list_conversation_summaries(conversation_ids=conversation_ids[start:start + 400]))
+                rows.sort(key=lambda row: int(row.get("updated_at") or 0), reverse=True)
+                start = max(0, int(offset or 0))
+                return rows[start:] if limit is None else rows[start:start + max(0, int(limit))]
         with self._connect() as conn:
-            params = []
+            params = list(conversation_ids or [])
+            where_clause = "WHERE c.id IN (" + ",".join("?" for _ in params) + ")" if conversation_ids is not None else ""
             limit_clause = ""
             if limit is not None:
                 limit_clause = "LIMIT ? OFFSET ?"
@@ -1471,6 +1486,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                     FROM im_sessions
                     GROUP BY conversation_id
                 ) im ON im.conversation_id = c.id
+                {where_clause}
                 ORDER BY c.updated_at DESC
                 {limit_clause}
                 """,
@@ -1558,80 +1574,6 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                 )
                 archived += 1
         return archived
-
-    def search_conversations(self, query, limit=50):
-        text = str(query or "").strip()
-        if not text:
-            return []
-        limit = max(1, int(limit or 50))
-        like_query = f"%{text}%"
-        matches = {}
-
-        def add_match(conversation_id, score):
-            if not conversation_id:
-                return
-            current = matches.get(conversation_id)
-            if current is None or score < current:
-                matches[conversation_id] = score
-
-        with self._connect() as conn:
-            title_rows = conn.execute(
-                """
-                SELECT id
-                FROM conversations
-                WHERE title LIKE ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (like_query, limit),
-            ).fetchall()
-            for index, row in enumerate(title_rows):
-                add_match(row["id"], index)
-
-            fts_query = '"' + text.replace('"', '""') + '"'
-            try:
-                message_rows = conn.execute(
-                    """
-                    SELECT m.conversation_id, MIN(m.position) AS first_position
-                    FROM messages_fts f
-                    JOIN messages m ON m.rowid = f.rowid
-                    WHERE messages_fts MATCH ?
-                    GROUP BY m.conversation_id
-                    LIMIT ?
-                    """,
-                    (fts_query, limit),
-                ).fetchall()
-            except sqlite3.Error:
-                message_rows = conn.execute(
-                    """
-                    SELECT conversation_id, MIN(position) AS first_position
-                    FROM messages
-                    WHERE content LIKE ? OR reasoning_content LIKE ?
-                    GROUP BY conversation_id
-                    LIMIT ?
-                    """,
-                    (like_query, like_query, limit),
-                ).fetchall()
-            for row in message_rows:
-                add_match(row["conversation_id"], 1000 + int(row["first_position"] or 0))
-
-            like_rows = conn.execute(
-                """
-                SELECT conversation_id, MIN(position) AS first_position
-                FROM messages
-                WHERE content LIKE ? OR reasoning_content LIKE ?
-                GROUP BY conversation_id
-                LIMIT ?
-                """,
-                (like_query, like_query, limit),
-            ).fetchall()
-            for row in like_rows:
-                add_match(row["conversation_id"], 2000 + int(row["first_position"] or 0))
-
-        return [
-            conversation_id
-            for conversation_id, _score in sorted(matches.items(), key=lambda item: item[1])
-        ][:limit]
 
     def iter_conversation_transcripts(self, include_archived=True, include_legacy_json=True):
         with self._connect() as conn:

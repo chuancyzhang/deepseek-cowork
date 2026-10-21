@@ -96,7 +96,8 @@ from core.conversation_actions import append_reference_context, branch_display_t
 from ui.conversation_actions import ConversationActionsMixin, reference_button
 from ui.conversation_agents import ConversationAgentsMixin, agent_identity_label
 from core.conversation_agents import builtin_agent_profiles, extract_agent_mentions, normalize_agent_selection, message_agent_identity
-from core.sidebar_projects import visible_sidebar_projects
+from core.sidebar_projects import SIDEBAR_SEARCH_PAGE_SIZE, page_sidebar_search, visible_sidebar_projects
+from ui.history_search import HistorySearchController
 from core.chat_save_queue import (
     ChatSaveRequest,
     ContextSaveRequest,
@@ -28765,7 +28766,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.history_search_timer.setSingleShot(True)
         self.history_search_timer.setInterval(140)
         self.history_search_timer.timeout.connect(self.refresh_history_list)
-        self.history_search_input.textChanged.connect(lambda *_: self.history_search_timer.start())
+        self.history_search_controller = HistorySearchController(
+            self, log_event=log_ui_navigation, can_start=lambda: not ui_work_stopping(self),
+        )
+        self.history_search_controller.completed.connect(self._handle_history_search_completed)
+        self._history_search_result = None
+        self._history_search_visible_limit = SIDEBAR_SEARCH_PAGE_SIZE
+        self.history_search_input.textChanged.connect(self._on_history_search_changed)
+        self.history_search_input.returnPressed.connect(self.refresh_history_list)
         sidebar_layout.addWidget(self.history_search_input)
         self.history_age_timer = QTimer(self)
         self.history_age_timer.setInterval(30000)
@@ -37893,6 +37901,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.daemon_process = None
 
     def shutdown_workers(self, preserve_daemon_runs=False):
+        search = getattr(self, "history_search_controller", None)
+        if search is not None:
+            search.cancel()
         # Retain parentless session workers even if their result callback clears
         # the session reference before their native thread has returned.
         self._shutdown_wait_workers = ui_worker_snapshot(self)
@@ -41227,8 +41238,65 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             auto_close_ms=3600,
         )
 
+    def _on_history_search_changed(self, _text):
+        self.history_search_controller.cancel()
+        self._history_search_result = None
+        self._history_search_visible_limit = SIDEBAR_SEARCH_PAGE_SIZE
+        self.history_search_timer.stop()
+        if self._history_query_text():
+            self._show_history_search_loading()
+            self.history_search_timer.start()
+        else:
+            self.refresh_history_list()
+
+    def _show_history_search_loading(self):
+        label = getattr(self, "_history_search_loading_label", None)
+        if not _qt_object_alive(label):
+            label = QLabel("正在搜索…")
+            label.setStyleSheet(apple_history_group_style())
+            self.history_layout.insertWidget(0, label)
+            self._history_search_loading_label = label
+
+    def _handle_history_search_completed(self, result):
+        if ui_work_stopping(self) or result.get("query") != self._history_query_text():
+            return
+        if not result.get("ok"):
+            self._history_search_result = None
+            self._render_history_list([], query=result["query"], search_failed=True)
+            return
+        self._history_search_result = result
+        started = time.perf_counter()
+        self._render_history_list(result["conversations"], query=result["query"], search_ids=result["ids"])
+        log_ui_navigation("history_search_rendered", generation=result["generation"],
+                          rows=len(self.history_rows), elapsed_ms=int((time.perf_counter() - started) * 1000))
+
+    def _show_more_history_search(self):
+        result = self._history_search_result
+        if not result or result.get("query") != self._history_query_text():
+            return
+        scroll_position = self.history_scroll.verticalScrollBar().value()
+        self._history_search_visible_limit += SIDEBAR_SEARCH_PAGE_SIZE
+        self._render_history_list(result["conversations"], query=result["query"], search_ids=result["ids"])
+        self.history_scroll.verticalScrollBar().setValue(scroll_position)
+
     def refresh_history_list(self):
+        if ui_work_stopping(self):
+            return
+        self.history_search_timer.stop()
+        query = self._history_query_text()
+        if query:
+            self._show_history_search_loading()
+            self.history_search_controller.submit(
+                self.chat_storage, query, self.config_manager.get_projects(include_hidden=True),
+            )
+            return
+        self.history_search_controller.cancel()
+        self._history_search_result = None
+        self._render_history_list(self.chat_storage.list_conversations())
+
+    def _render_history_list(self, stored_conversations, *, query="", search_ids=None, search_failed=False):
         self._history_sidebar_refresh_generation += 1
+        self._history_search_loading_label = None
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
         self.history_buttons = {}
@@ -41246,23 +41314,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if item.widget():
                 item.widget().deleteLater()
 
-        query = self._history_query_text()
         query_active = bool(query)
-        search_ids = None
-        if query:
-            try:
-                search_ids = set(self.chat_storage.search_conversations(query, limit=200))
-            except Exception:
-                search_ids = set()
-
-        stored_conversations = self.chat_storage.list_conversations()
         log_startup_stage(
             "history_sidebar_begin",
             query=bool(query_active),
             loaded=len(stored_conversations),
         )
-        conversations = self._merged_history_conversations(stored_conversations)
-        config_projects = self.config_manager.get_projects(include_hidden=True)
+        conversations = [] if search_failed else self._merged_history_conversations(stored_conversations)
+        config_projects = [] if search_failed else self.config_manager.get_projects(include_hidden=True)
         project_meta_by_key = {
             self._project_key(project.get("path")): project
             for project in config_projects
@@ -41293,7 +41352,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 continue
             project_meta = project_meta_by_key.get(project_key, {})
             project_name = self._project_display_name(workspace_path, project_meta) if workspace_path else ""
-            matches_query = not query or session_id in (search_ids or set()) or query.lower() in title.lower() or query.lower() in project_name.lower()
+            matches_query = not query or session_id in (search_ids or set()) or query.casefold() in title.casefold() or query.casefold() in project_name.casefold()
             if not matches_query:
                 continue
             updated_at = conv.get("last_message_at") or conv.get("updated_at")
@@ -41316,16 +41375,16 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             key = self._project_key(path)
             if not path or key in hidden_project_keys:
                 continue
-            if query and query.lower() not in self._project_display_name(path, project).lower() and key not in grouped:
+            if query and query.casefold() not in self._project_display_name(path, project).casefold() and key not in grouped:
                 continue
             grouped.setdefault(key, {"path": path, "sessions": []})
 
-        for path in self.config_manager.get("recent_workspaces", []) or []:
+        for path in ([] if search_failed else self.config_manager.get("recent_workspaces", []) or []):
             normalized = self._normalize_project_path(path)
             key = self._project_key(normalized)
             if not normalized or key in hidden_project_keys:
                 continue
-            if query and query.lower() not in self._project_display_name(normalized).lower() and key not in grouped:
+            if query and query.casefold() not in self._project_display_name(normalized).casefold() and key not in grouped:
                 continue
             grouped.setdefault(key, {"path": normalized, "sessions": []})
 
@@ -41375,6 +41434,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                     int(self.unassigned_history_visible_limit or 0),
                 )
 
+        hidden_search_results = 0
+        if query_active:
+            project_entries, unassigned_entries, hidden_search_results = page_sidebar_search(
+                project_entries, unassigned_entries, self._history_search_visible_limit,
+            )
         self._sidebar_project_entries = [dict(project) for project in project_entries]
         visible_project_paths = {project["path"] for project in self._visible_sidebar_projects(project_entries)}
         rendered_any = False
@@ -41460,6 +41524,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
                 self.history_disclosure_buttons[disclosure_key] = expand_btn
                 self.history_layout.addWidget(expand_btn)
+
+        if hidden_search_results:
+            more = QPushButton(f"显示更多结果（还有 {hidden_search_results} 项）")
+            more.setObjectName("HistoryDisclosureButton")
+            more.setCursor(Qt.PointingHandCursor)
+            more.setStyleSheet(apple_disclosure_button_style())
+            more.clicked.connect(self._show_more_history_search)
+            self.history_disclosure_buttons[("search", "")] = more
+            self.history_layout.addWidget(more)
 
         if not rendered_any:
             if query:

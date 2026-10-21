@@ -117,6 +117,19 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(window.file_browser_empty_state.action_button.text(), "清除筛选")
             window.clear_deliverable_filters.assert_called_once_with()
 
+    def test_deliverable_refresh_keeps_previous_list_visible_on_loading_and_error(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = self._file_empty_state_window(workspace)
+            window.file_navigator_scope = window.FILE_SCOPE_DELIVERABLES
+            window.deliverable_items = [{"path": os.path.join(workspace, "report.md")}]
+            window._sync_file_browser_empty_state(loading=True)
+            self.assertTrue(window.file_browser_empty_state.isHidden())
+            self.assertFalse(window.file_source_stack.isHidden())
+            window._sync_file_browser_empty_state(error="刷新失败，上次交付物列表已保留。请重试。")
+            self.assertFalse(window.file_browser_empty_state.isHidden())
+            self.assertFalse(window.file_source_stack.isHidden())
+            self.assertEqual(window.file_browser_empty_action, "retry_scan")
+
     def test_invalid_workspace_hides_controls_and_action(self):
         with tempfile.TemporaryDirectory() as parent:
             unavailable = os.path.join(parent, "missing-workspace")
@@ -1680,7 +1693,7 @@ class TestDeliverableScanning(unittest.TestCase):
 
             self.assertEqual(state.selected_deliverable_path, first)
             self.assertEqual(window.current_deliverable_path, first)
-            window.refresh_deliverables.assert_called_once_with()
+            window.refresh_deliverables.assert_called_once_with(reason="generated_file")
             window.set_context_tab_hint.assert_called_once_with(window.RIGHT_TAB_FILES, True)
             window.add_system_toast.assert_called_once()
             window.select_deliverable.assert_not_called()
@@ -1715,7 +1728,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 source="history",
                 workspace_dir=workspace,
             )
-            window.refresh_deliverables.assert_called_once_with()
+            window.refresh_deliverables.assert_called_once_with(reason="history_registration")
             window.set_context_tab_hint.assert_not_called()
             window.add_system_toast.assert_not_called()
             window.select_deliverable.assert_not_called()
@@ -1915,7 +1928,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window.handle_chat_deliverable_paths_changed([latest], "session-1")
 
             window.get_session.assert_called_once_with("session-1")
-            window.refresh_deliverables.assert_called_once_with()
+            window.refresh_deliverables.assert_called_once_with(reason="generated_file")
             window.set_context_tab_hint.assert_called_once_with(window.RIGHT_TAB_FILES, True)
             window.select_deliverable.assert_not_called()
 

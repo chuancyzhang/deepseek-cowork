@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("COWORK_EXTERNAL_BACKGROUND_SERVICES", "0")
 
-from PySide6.QtCore import QObject, QThread, QEvent, QTimer
+from PySide6.QtCore import QObject, QThread, QEvent, QTimer, QFileSystemWatcher
 from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
@@ -31,6 +31,9 @@ class Host(QObject):
     _finish_daemon_status = main.MainWindow._finish_daemon_status
     handle_daemon_status_finished = main.MainWindow.handle_daemon_status_finished
     refresh_deliverables = main.MainWindow.refresh_deliverables
+    _deliverable_scan_scope = main.MainWindow._deliverable_scan_scope
+    _watch_deliverable_paths = main.MainWindow._watch_deliverable_paths
+    handle_deliverable_fs_changed = main.MainWindow.handle_deliverable_fs_changed
     _start_deliverable_scan = main.MainWindow._start_deliverable_scan
     _finish_deliverable_scan = main.MainWindow._finish_deliverable_scan
     _handle_deliverable_scan_completed = main.MainWindow._handle_deliverable_scan_completed
@@ -52,9 +55,18 @@ class Host(QObject):
         self.sessions = {}
         self.results, self.rendered, self.scan_errors = [], [], []
         self.on_result = self.on_render = None
-        self.deliverables_list = object()
+        self.current_session_id = "scan-session"
+        self.current_deliverable_path = ""
+        self.deliverable_items = []
+        self.deliverables_list = MagicMock()
         self.deliverable_scan_generation = 0
+        self.deliverable_scan_view = None
+        self.deliverable_scan_pending = None
+        self.deliverable_scanner = None
         self.deliverable_scan_worker = None
+        self.deliverable_refresh_timer = QTimer(self)
+        self.deliverable_refresh_timer.setSingleShot(True)
+        self.deliverable_refresh_timer.timeout.connect(self._start_deliverable_scan)
         self.chat_storage = ChatStorage(str(root / "chat.db"))
         self.runtime_journal = RuntimeJournal(str(root / "journal"))
         self.skill_catalog_service = MagicMock()
@@ -85,16 +97,18 @@ class Host(QObject):
             callback()
 
     def _sync_file_browser_empty_state(self, **kwargs):
-        pass
+        self.file_state = kwargs
 
     def _apply_deliverable_items(self, items, render_current=False):
+        self.deliverable_items = list(items)
         self.rendered.append((items, render_current))
         if self.on_render:
             callback, self.on_render = self.on_render, None
             callback()
 
-    def _handle_deliverable_scan_failed(self, error, generation):
-        self.scan_errors.append((error, generation))
+    def _handle_deliverable_scan_failed(self, error, request):
+        self.scan_errors.append((error, request["generation"]))
+        main.MainWindow._handle_deliverable_scan_failed(self, error, request)
 
 
 class HeldWorker(QThread):
@@ -120,6 +134,7 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.host = Host(self.root)
         self.held = []
+        self.scan_gates = []
         self.log = patch("main.log_ui_navigation").start()
         self.qt_errors = []
         patch("sys.excepthook", side_effect=lambda kind, value, trace: self.qt_errors.append(value)).start()
@@ -127,7 +142,12 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.registry.active_count.return_value = 0
 
     def tearDown(self):
-        self.host._checkpoint_shutdown_pending = False
+        self.host._checkpoint_shutdown_pending = True
+        self.host.deliverable_refresh_timer.stop()
+        for gate in self.scan_gates:
+            gate.set()
+        if self.host.deliverable_scanner is not None:
+            self.assertTrue(self.host.deliverable_scanner.wait(3000))
         for worker in self.held:
             worker.release.set()
             worker.wait(2000)
@@ -151,7 +171,13 @@ class WorkerLifecycleTests(unittest.TestCase):
         while not predicate() and time.monotonic() < deadline:
             self.app.processEvents()
             time.sleep(.002)
-        self.assertTrue(predicate())
+        self.assertTrue(predicate(), {
+            "scan_pending": self.host.deliverable_scan_pending,
+            "scan_worker": self.host.deliverable_scan_worker,
+            "scan_errors": self.host.scan_errors,
+            "qt_errors": self.qt_errors,
+            "recent_events": self.log.mock_calls[-8:],
+        })
 
     def client(self):
         return SimpleNamespace(ping=lambda: {"signature": "test"}, status=lambda: {"status": "ok", "sessions": 1})
@@ -235,21 +261,19 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.assertTrue(entered)
 
     def test_scan_refresh_after_native_finish_runs_latest_generation_once(self):
-        scans = []
         actual = main.DeliverableScanWorker
-        def create(*args):
-            worker = actual(*args)
-            scans.append(worker.generation)
-            return worker
-        with patch("main.DeliverableScanWorker", side_effect=create):
+        with patch("main.DeliverableScanWorker", side_effect=actual) as factory:
             self.host.refresh_deliverables()
+            self.host.deliverable_refresh_timer.stop()
+            self.host._start_deliverable_scan()
             old = self.host.deliverable_scan_worker
             self.assertTrue(old.wait(1000))
             self.host.refresh_deliverables(render_current=True)
             self.assertIs(self.host.deliverable_scan_worker, old)
-            self.until(lambda: self.host.deliverable_scan_worker is None)
-        self.assertEqual(scans, [1, 2])
-        self.assertEqual(self.host.rendered, [([], True)])
+            self.until(lambda: old.scan_count == 2 and self.host.deliverable_scan_worker is None)
+        self.assertEqual(factory.call_count, 1)
+        self.assertIs(self.host.deliverable_scanner, old)
+        self.assertEqual(self.host.rendered, [([], False), ([], True)])
 
     def test_reentrant_scan_render_merges_refresh_without_overlapping_workers(self):
         def reenter():
@@ -261,6 +285,248 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.host.refresh_deliverables()
         self.until(lambda: len(self.host.rendered) == 2 and self.host.deliverable_scan_worker is None)
         self.assertEqual(self.host.deliverable_scan_generation, 2)
+
+    def test_scan_burst_coalesces_sources_and_does_not_postpone_active_timer(self):
+        host = self.host
+        for index in range(60):
+            host.refresh_deliverables(reason="filesystem" if index % 2 else "generated_file")
+        # Simulate an event arriving close to the end of the original coalescing window.
+        host.deliverable_refresh_timer.start(30)
+        host.refresh_deliverables(reason="tool_files_changed")
+        self.assertEqual(host.deliverable_refresh_timer.interval(), 30)
+        self.until(lambda: len(host.rendered) == 1)
+        self.assertEqual(host.deliverable_scanner.scan_count, 1)
+        self.assertEqual(host.deliverable_scanner.request["sources"],
+                         ("filesystem", "generated_file", "tool_files_changed"))
+
+    def test_scan_manual_request_is_prompt_and_uses_the_same_pending_slot(self):
+        host = self.host
+        host.refresh_deliverables(reason="filesystem")
+        host.refresh_deliverables(render_current=True, immediate=True, reason="manual")
+        self.assertEqual(host.deliverable_refresh_timer.interval(), 0)
+        self.until(lambda: host.rendered)
+        self.assertEqual(host.deliverable_scanner.scan_count, 1)
+        self.assertEqual(host.rendered, [([], True)])
+
+    def test_scan_reuses_one_object_and_one_completion_connection(self):
+        host = self.host
+        actual = main.DeliverableScanWorker
+        with patch("main.DeliverableScanWorker", side_effect=actual) as factory:
+            for index in range(200):
+                host.refresh_deliverables(immediate=True, reason="manual")
+                self.until(lambda: len(host.rendered) == index + 1)
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(host.deliverable_scanner.scan_count, 200)
+        self.assertIsNone(host.deliverable_scan_worker)
+        self.assertEqual(pending_ui_workers(host), [])
+
+    def test_scan_reads_database_in_background_and_merges_requests_during_slow_read(self):
+        host = self.host
+        entered, release = threading.Event(), threading.Event()
+        self.scan_gates.append(release)
+        calls = []
+        def read(workspace, prune_missing=True):
+            calls.append(QThread.currentThread())
+            if len(calls) == 1:
+                entered.set()
+                release.wait(3)
+            return []
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=read):
+            host.refresh_deliverables(immediate=True)
+            self.until(entered.is_set)
+            for _ in range(40):
+                host.refresh_deliverables(reason="filesystem")
+            ticked = []
+            QTimer.singleShot(0, lambda: ticked.append(True))
+            self.until(lambda: ticked)
+            self.assertEqual(len(calls), 1)
+            self.assertIsNot(calls[0], self.app.thread())
+            release.set()
+            self.until(lambda: len(host.rendered) == 2)
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0], calls[1])
+
+    def test_scan_waits_for_native_cleanup_before_reusing_the_object(self):
+        host = self.host
+        host.refresh_deliverables(immediate=True)
+        self.until(lambda: host.rendered)
+        worker = host.deliverable_scanner
+        self.assertTrue(worker.wait(1000))
+        with patch.object(worker, "wait", new=lambda timeout: False):
+            host.refresh_deliverables(immediate=True)
+            self.app.processEvents()
+            self.assertIsNone(host.deliverable_scan_worker)
+            self.assertEqual(worker.scan_count, 1)
+            self.assertIsNotNone(host.deliverable_scan_pending)
+        self.until(lambda: len(host.rendered) == 2)
+        self.assertEqual(worker.scan_count, 2)
+
+    def test_scan_view_switch_discards_old_results_even_when_returning_to_same_view(self):
+        host = self.host
+        entered, release = threading.Event(), threading.Event()
+        self.scan_gates.append(release)
+        reads = []
+        def read(workspace, prune_missing=True):
+            reads.append(workspace)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(3)
+            return []
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=read):
+            host.refresh_deliverables(immediate=True)
+            self.until(entered.is_set)
+            host.current_session_id = "other-session"
+            host.refresh_deliverables(immediate=True)
+            host.current_session_id = "scan-session"
+            host.refresh_deliverables(immediate=True)
+            release.set()
+            self.until(lambda: host.rendered)
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(host.rendered, [([], False)])
+        self.assertEqual(host.deliverable_scanner.request["view"][0], "scan-session")
+
+    def test_scan_workspace_switch_uses_captured_database_scope_and_discards_old_files(self):
+        host = self.host
+        first, second = self.root / "first", self.root / "second"
+        first.mkdir()
+        second.mkdir()
+        for workspace, name in ((first, "old.txt"), (second, "current.txt")):
+            file = workspace / name
+            file.write_text(name, encoding="utf-8")
+            host.chat_storage.register_deliverable(str(workspace), str(file))
+        host.workspace_dir = str(first)
+        entered, release = threading.Event(), threading.Event()
+        self.scan_gates.append(release)
+        original = host.chat_storage.list_deliverables
+        def read(workspace, **kwargs):
+            if workspace == str(first):
+                entered.set()
+                release.wait(3)
+            return original(workspace, **kwargs)
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=read):
+            host.refresh_deliverables(immediate=True)
+            self.until(entered.is_set)
+            host.workspace_dir = str(second)
+            host.refresh_deliverables(immediate=True, reason="workspace")
+            release.set()
+            self.until(lambda: host.rendered)
+        self.assertEqual(len(host.rendered), 1)
+        self.assertEqual([item["name"] for item in host.deliverable_items], ["current.txt"])
+        self.assertEqual(host.deliverable_scanner.scan_count, 2)
+
+    def test_scan_failure_keeps_results_and_explicit_retry_reuses_worker(self):
+        host = self.host
+        file = self.root / "report.md"
+        file.write_text("# Ready", encoding="utf-8")
+        host.chat_storage.register_deliverable(host.workspace_dir, str(file))
+        host.refresh_deliverables(immediate=True)
+        self.until(lambda: host.rendered)
+        worker = host.deliverable_scanner
+        kept = list(host.deliverable_items)
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=OSError("database unavailable")):
+            host.refresh_deliverables(immediate=True)
+            self.until(lambda: host.scan_errors)
+        self.assertEqual(host.deliverable_items, kept)
+        self.assertIn("已保留", host.file_state["error"])
+        self.assertEqual(len(host.rendered), 1)
+        host.refresh_deliverables(immediate=True, reason="retry")
+        self.until(lambda: len(host.rendered) == 2)
+        self.assertIs(host.deliverable_scanner, worker)
+        self.assertEqual(worker.error, "")
+        self.assertEqual(worker.scan_count, 3)
+
+    def test_idle_reusable_scanner_does_not_block_shutdown(self):
+        self.host.refresh_deliverables(immediate=True)
+        self.until(lambda: self.host.rendered)
+        scanner = self.host.deliverable_scanner
+        self.start_writers()
+        finished = []
+        self.host._shutdown_workers_async(finished.append)
+        self.until(lambda: finished)
+        self.assertEqual(pending_ui_workers(self.host, include_writers=True), [])
+        self.assertTrue(isValid(scanner))
+
+    def test_shutdown_finishes_active_scan_without_launching_pending_refresh(self):
+        host = self.host
+        entered, release = threading.Event(), threading.Event()
+        self.scan_gates.append(release)
+        def read(*args, **kwargs):
+            entered.set()
+            release.wait(3)
+            return []
+        self.start_writers()
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=read):
+            host.refresh_deliverables(immediate=True)
+            self.until(entered.is_set)
+            host.refresh_deliverables(reason="filesystem")
+            finished = []
+            host._shutdown_workers_async(finished.append)
+            self.app.processEvents()
+            self.assertFalse(finished)
+            self.assertIn(host.deliverable_scanner, pending_ui_workers(host))
+            release.set()
+            self.until(lambda: finished)
+        self.assertEqual(host.deliverable_scanner.scan_count, 1)
+        self.assertIsNone(host.deliverable_scan_worker)
+
+    def test_failed_shutdown_resumes_pending_scan_after_its_timer_already_fired(self):
+        host = self.host
+        entered, release = threading.Event(), threading.Event()
+        self.scan_gates.append(release)
+        reads = []
+        def read(*args, **kwargs):
+            reads.append(True)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(3)
+            return []
+        self.start_writers()
+        host.sessions["s"] = SimpleNamespace(session_id="s", daemon_running=False,
+            daemon_worker=None, llm_worker=None, active_turn_request_id="")
+        host.save_chat_history.return_value = False
+        with patch.object(host.chat_storage, "list_deliverables", side_effect=read):
+            host.refresh_deliverables(immediate=True)
+            self.until(entered.is_set)
+            host.refresh_deliverables(immediate=True, reason="manual")
+            self.until(lambda: not host.deliverable_refresh_timer.isActive())
+            self.assertIsNotNone(host.deliverable_scan_pending)
+            host._shutdown_workers_async(MagicMock())
+            release.set()
+            self.until(lambda: not host._checkpoint_shutdown_pending and len(host.rendered) == 2)
+        self.assertEqual(len(reads), 2)
+        self.assertIsNone(host.deliverable_scan_pending)
+
+    def test_file_watcher_tracks_unselected_deliverables_without_reinstalling_watches(self):
+        host = self.host
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        host.workspace_dir = str(workspace)
+        file = workspace / "unselected.md"
+        file.write_text("first", encoding="utf-8")
+        host.chat_storage.register_deliverable(str(workspace), str(file))
+        host.deliverable_watcher = QFileSystemWatcher(host)
+        host.deliverable_watcher.fileChanged.connect(host.handle_deliverable_fs_changed)
+        host.deliverable_watcher.directoryChanged.connect(host.handle_deliverable_fs_changed)
+        host.refresh_deliverables(immediate=True)
+        self.until(lambda: host.rendered)
+        host._watch_deliverable_paths()
+        self.assertIn(str(file), [os.path.normpath(p) for p in host.deliverable_watcher.files()])
+        with patch.object(host.deliverable_watcher, "removePaths", wraps=host.deliverable_watcher.removePaths) as remove:
+            host._watch_deliverable_paths()
+            remove.assert_not_called()
+        file.write_text("updated externally", encoding="utf-8")
+        self.until(lambda: host.deliverable_items[0]["size"] == len("updated externally"))
+        file.unlink()
+        self.until(lambda: not host.deliverable_items)
+
+    def test_preview_resource_event_refreshes_preview_without_scanning_list(self):
+        host = self.host
+        resource = str(self.root / "chart.css")
+        host._deliverable_preview_resources = {os.path.normcase(os.path.abspath(resource))}
+        with patch("ui.file_refresh.schedule_file_refresh") as preview:
+            host.handle_deliverable_fs_changed(resource)
+            preview.assert_called_once_with(host)
+        self.assertIsNone(host.deliverable_scan_pending)
 
     def test_shutdown_waits_for_slow_nested_worker_and_keeps_event_loop_alive(self):
         page = QObject(self.host)

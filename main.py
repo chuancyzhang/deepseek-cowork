@@ -2577,27 +2577,51 @@ def deliverable_preview_settle_script():
 
 
 class DeliverableScanWorker(QThread):
-    def __init__(self, workspace_dir, records, generation, parent=None):
+    """One reusable object; each run reads a captured workspace off the GUI thread."""
+
+    def __init__(self, chat_storage, parent=None):
         super().__init__(parent)
-        self.workspace_dir = workspace_dir
-        self.records = list(records or [])
-        self.generation = int(generation)
+        self.chat_storage = chat_storage
+        self.request = None
+        self.scan_count = 0
         self.items = []
         self.error = ""
-        self.render_current = False
+        self.records_count = 0
+        self.elapsed_ms = 0
+
+    def prepare(self, request):
+        if not self.wait(0):
+            raise RuntimeError("交付物扫描线程尚未结束")
+        self.request = dict(request)
+        self.scan_count += 1
+        self.items = []
+        self.error = ""
+        self.records_count = 0
+        self.elapsed_ms = 0
 
     def run(self):
+        started = time.monotonic()
         try:
+            log_ui_navigation("deliverable_scan_running", scan=self.scan_count,
+                              generation=self.request["generation"], session_id=self.request["view"][0])
+            root = self.request["workspace_dir"]
+            if not os.path.isdir(root):
+                raise OSError("工作区不存在或无法访问")
+            records = self.chat_storage.list_deliverables(root, prune_missing=True)
+            self.records_count = len(records)
             items = []
-            root = os.path.abspath(self.workspace_dir)
-            for record in self.records:
+            for record in records:
                 path = os.path.normpath(str(record.get("path") or ""))
                 if not path or not os.path.isfile(path):
                     continue
                 ext = os.path.splitext(path)[1].lower()
                 if ext not in DELIVERABLE_EXTENSIONS:
                     continue
-                stat = os.stat(path)
+                try:
+                    stat = os.stat(path)
+                except FileNotFoundError:
+                    # A watched file can be removed between the existence and stat calls.
+                    continue
                 kind, label, icon = DELIVERABLE_EXTENSIONS[ext]
                 try:
                     relative_path = os.path.relpath(path, root)
@@ -2619,6 +2643,8 @@ class DeliverableScanWorker(QThread):
             self.items = items
         except Exception as exc:
             self.error = str(exc)
+        finally:
+            self.elapsed_ms = round((time.monotonic() - started) * 1000, 1)
 
 
 class SkillManagerLoadWorker(QThread):
@@ -28472,15 +28498,18 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.deliverable_pdf_document = None
         self.deliverable_pdf_view = None
         self.deliverable_scan_generation = 0
+        self.deliverable_scan_view = None
+        self.deliverable_scan_pending = None
+        self.deliverable_scanner = None
+        # Only the active/finishing task occupies this slot; the idle scanner stays owned by Qt.
         self.deliverable_scan_worker = None
-        self.deliverable_scan_pending_render = False
         self.deliverable_watcher = QFileSystemWatcher(self)
         self.deliverable_watcher.directoryChanged.connect(self.handle_deliverable_fs_changed)
         self.deliverable_watcher.fileChanged.connect(self.handle_deliverable_fs_changed)
         self.deliverable_refresh_timer = QTimer(self)
         self.deliverable_refresh_timer.setSingleShot(True)
         self.deliverable_refresh_timer.setInterval(180)
-        self.deliverable_refresh_timer.timeout.connect(self.refresh_deliverables)
+        self.deliverable_refresh_timer.timeout.connect(self._start_deliverable_scan)
         self._agent_state_ui_event_seq = 0
         self.dynamic_conversation_width = DesignTokens.conversation_min_width
         self.dynamic_message_width = DesignTokens.message_min_width
@@ -29297,7 +29326,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.deliverables_refresh_btn.setCursor(Qt.PointingHandCursor)
         self.deliverables_refresh_btn.setFixedSize(30, 30)
         self.deliverables_refresh_btn.setStyleSheet(apple_tool_button_style(False))
-        self.deliverables_refresh_btn.clicked.connect(lambda: self.refresh_deliverables(render_current=True))
+        self.deliverables_refresh_btn.clicked.connect(
+            lambda: self.refresh_deliverables(render_current=True, immediate=True, reason="manual"))
         self.deliverable_open_btn = self.preview_open_btn
         self.deliverable_reveal_btn = self.preview_reveal_btn
         self.deliverable_copy_btn = self.preview_copy_btn
@@ -30705,7 +30735,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if getattr(self, "current_preview_path", ""):
                 self.render_selected_deliverable(force=True)
             else:
-                self.refresh_deliverables()
+                self.refresh_deliverables(immediate=True, reason="manual")
             event.accept()
             return
         if files_open and event.key() in {Qt.Key_Return, Qt.Key_Enter} and getattr(self, "file_navigator_visible", False):
@@ -30781,7 +30811,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             filter_button.setEnabled(scope == self.FILE_SCOPE_DELIVERABLES)
             filter_button.setToolTip("类型与排序" if scope == self.FILE_SCOPE_DELIVERABLES else "工作区文件按名称显示")
         if scope == self.FILE_SCOPE_DELIVERABLES and refresh:
-            self.refresh_deliverables(render_current=True)
+            self.refresh_deliverables(render_current=True, immediate=True, reason="navigator")
         self.apply_file_workspace_filters()
         if previous != scope:
             log_ui_navigation(
@@ -30997,8 +31027,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         empty = getattr(self, "file_browser_empty_state", None)
         if empty is not None and not empty.isHidden():
-            content_height = max(120, empty.sizeHint().height())
-        else:
+            available_width = max(1, int(getattr(self, "file_navigator_width", 320))
+                                  - margins.left() - margins.right())
+            block_heights.append(max(120, empty.sizeHint().height(), empty.heightForWidth(available_width)))
+        stack = getattr(self, "file_source_stack", None)
+        if stack is not None and not stack.isHidden():
             scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
             if scope == self.FILE_SCOPE_DELIVERABLES:
                 rows = getattr(getattr(self, "deliverables_list", None), "count", lambda: 0)()
@@ -31011,7 +31044,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 visible_row_limit = max(1, workbench_height // max(1, row_height) + 1)
                 rows = self._visible_workspace_file_row_count(limit=visible_row_limit)
             content_height = max(row_height, int(rows) * row_height + 8)
-        block_heights.append(content_height)
+            block_heights.append(content_height)
 
         spacing = max(0, layout.spacing())
         return (
@@ -31449,9 +31482,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         workspace = getattr(self, "workspace_dir", "")
         scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
+        keep_list = scope == self.FILE_SCOPE_DELIVERABLES and bool(getattr(self, "deliverable_items", []))
         action = ""
         if loading:
-            title, description, visible = "正在扫描交付物", "正在读取当前工作区中的可预览文件。", True
+            title, description, visible = "正在扫描交付物", "正在读取当前工作区中的可预览文件。", not keep_list
         elif error:
             title, description, visible = "无法读取文件", str(error), True
             action = "retry_scan"
@@ -31502,7 +31536,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             }.get(action, "")
             empty.set_action(action_text, visible=visible and bool(action_text))
         empty.setVisible(visible)
-        stack.setVisible(not visible)
+        stack.setVisible(not visible or bool(error and keep_list))
+        empty.layout().setAlignment(Qt.AlignTop if error and keep_list else Qt.AlignCenter)
+        panel = getattr(self, "file_navigator_panel", None)
+        if panel is not None and panel.layout() is not None:
+            panel.layout().setStretch(panel.layout().indexOf(empty), 0 if error and keep_list else 1)
+        workbench = getattr(self, "file_workbench", None)
+        if workbench is not None:
+            workbench.set_navigator_preferred_height(self._file_navigator_preferred_height())
 
     def _handle_file_browser_empty_action(self):
         action = str(getattr(self, "file_browser_empty_action", "") or "")
@@ -31514,7 +31555,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if workspace and os.path.isdir(workspace):
                 self.reveal_in_explorer(workspace)
         if action == "retry_scan":
-            self.refresh_deliverables(render_current=True)
+            self.refresh_deliverables(render_current=True, immediate=True, reason="retry")
 
     def _sync_deliverable_expand_button(self):
         btn = getattr(self, "deliverable_expand_btn", None)
@@ -32204,7 +32245,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_observability", tab_index=tab_index)
             elif tab_index == self.RIGHT_TAB_DELIVERABLES:
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_deliverables", tab_index=tab_index)
-                self.refresh_deliverables(render_current=True)
+                self.refresh_deliverables(render_current=True, immediate=True, reason="drawer")
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_deliverables", tab_index=tab_index)
             elif tab_index == self.RIGHT_TAB_SUB_AGENTS and hasattr(self, "sub_agent_monitor") and _qt_object_alive(self.sub_agent_monitor):
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="clear_sub_agent_monitor", tab_index=tab_index)
@@ -38015,7 +38056,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             getattr(self, "right_drawer_open", False)
             and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_DELIVERABLES
         ):
-            self.refresh_deliverables(render_current=True)
+            self.refresh_deliverables(render_current=True, immediate=True, reason="session")
         self._sync_file_header()
         self.refresh_conversation_reference_chips()
         self.refresh_branch_origin(state)
@@ -39950,7 +39991,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             )
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, bool(directory))
             self.set_context_tab_hint(self.RIGHT_TAB_DELIVERABLES, bool(directory))
-            self.refresh_deliverables()
+            self.refresh_deliverables(immediate=True, reason="workspace")
             self._sync_file_browser_empty_state()
         if refresh_sidebar:
             self.refresh_history_list()
@@ -41047,7 +41088,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self._sync_file_browser_empty_state()
             self.current_deliverable_path = ""
             self.deliverable_items = []
-            self.refresh_deliverables()
+            self.refresh_deliverables(immediate=True, reason="workspace_archived")
             self.update_ui_state_for_workspace()
         self.refresh_history_list()
         self.add_system_toast("项目已归档，可在项目与对话中恢复", "success", auto_close_ms=3200)
@@ -45252,73 +45293,127 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             and not getattr(self, "current_deliverable_stale", False)
         )
 
-    def refresh_deliverables(self, render_current=False):
+    def _deliverable_scan_scope(self):
+        workspace = str(getattr(self, "workspace_dir", "") or "")
+        return (str(getattr(self, "current_session_id", "") or ""),
+                os.path.normcase(os.path.abspath(workspace)) if workspace else "")
+
+    def refresh_deliverables(self, render_current=False, *, immediate=False, reason="refresh"):
+        """Coalesce refresh intentions; registration and file writes have already happened."""
         if not hasattr(self, "deliverables_list") or ui_work_stopping(self):
             return
         self.deliverable_scan_generation = int(getattr(self, "deliverable_scan_generation", 0)) + 1
-        self.deliverable_scan_pending_render = bool(
-            getattr(self, "deliverable_scan_pending_render", False) or render_current
-        )
-        worker = getattr(self, "deliverable_scan_worker", None)
-        if worker is not None:
-            return
-        self._start_deliverable_scan(
-            self.deliverable_scan_generation,
-            self.deliverable_scan_pending_render,
-        )
+        scope = self._deliverable_scan_scope()
+        view = getattr(self, "deliverable_scan_view", None)
+        if view is None or view[:2] != scope:
+            # Include a visit generation so A -> B -> A cannot accept A's earlier result.
+            view = (*scope, self.deliverable_scan_generation)
+            self.deliverable_scan_view = view
+            self.deliverable_items = []
+            self.deliverables_list.clear()
+            self._watch_deliverable_paths()
+        previous = getattr(self, "deliverable_scan_pending", None)
+        previous = previous if previous and previous["view"] == view else {}
+        sources = set(previous.get("sources", ()))
+        sources.add(reason)
+        self.deliverable_scan_pending = {
+            "generation": self.deliverable_scan_generation,
+            "view": view,
+            "workspace_dir": str(getattr(self, "workspace_dir", "") or ""),
+            "render_current": bool(render_current or previous.get("render_current")),
+            "sources": tuple(sorted(sources)),
+        }
+        log_ui_navigation("deliverable_scan_requested", generation=self.deliverable_scan_generation,
+                          session_id=scope[0], source=reason,
+                          coalesced=bool(previous or getattr(self, "deliverable_scan_worker", None)))
+        # Start the window at the first event, rather than postponing forever during writes.
+        timer = self.deliverable_refresh_timer
+        if immediate:
+            timer.start(0)
+        elif not timer.isActive():
+            timer.start(180)
 
-    def _start_deliverable_scan(self, generation, render_current=False):
-        if ui_work_stopping(self):
+    @Slot()
+    def _start_deliverable_scan(self):
+        if ui_work_stopping(self) or getattr(self, "deliverable_scan_worker", None) is not None:
             return
-        workspace_dir = getattr(self, "workspace_dir", None)
-        self.deliverable_scan_pending_render = False
-        if not workspace_dir or not os.path.isdir(workspace_dir):
-            self._apply_deliverable_items([], render_current=render_current)
+        request = getattr(self, "deliverable_scan_pending", None)
+        if request is None:
+            return
+        if request["view"][:2] != self._deliverable_scan_scope():
+            self.refresh_deliverables(immediate=True, reason="workspace_changed")
+            return
+        worker = getattr(self, "deliverable_scanner", None)
+        if worker is not None and not worker.wait(0):
+            # finished can precede native TLS cleanup. Never wait on the GUI thread.
+            log_ui_navigation("deliverable_scan_wait_native_exit", scan=worker.scan_count,
+                              generation=request["generation"])
+            self.deliverable_refresh_timer.start(180)
+            return
+        self.deliverable_scan_pending = None
+        if not request["workspace_dir"]:
+            self._apply_deliverable_items([], render_current=request["render_current"])
             return
         self._sync_file_browser_empty_state(loading=True)
-        records = self.chat_storage.list_deliverables(workspace_dir, prune_missing=True)
-        log_ui_navigation("deliverable_scan_start", generation=generation, records=len(records))
-        worker = DeliverableScanWorker(workspace_dir, records, generation, self)
-        worker.render_current = render_current
-        self.deliverable_scan_worker = worker
-        worker.finished.connect(self._finish_deliverable_scan, Qt.QueuedConnection)
-        worker.start()
+        try:
+            if worker is None:
+                log_ui_navigation("deliverable_scan_worker_create", session_id=request["view"][0])
+                worker = DeliverableScanWorker(self.chat_storage, self)
+                worker.finished.connect(self._finish_deliverable_scan, Qt.QueuedConnection)
+                self.deliverable_scanner = worker
+            worker.prepare(request)
+            self.deliverable_scan_worker = worker
+            log_ui_navigation("deliverable_scan_start", generation=request["generation"],
+                              scan=worker.scan_count, session_id=request["view"][0],
+                              sources=",".join(request["sources"]))
+            worker.start()
+        except Exception as exc:
+            if worker is None or worker.wait(0):
+                self.deliverable_scan_worker = None
+            self._handle_deliverable_scan_failed(str(exc), request)
 
-    def _handle_deliverable_scan_completed(self, items, generation, render_current=False):
-        if int(generation) != int(getattr(self, "deliverable_scan_generation", 0)):
+    def _handle_deliverable_scan_completed(self, items, request):
+        if (request["view"] != self.deliverable_scan_view
+                or request["view"][:2] != self._deliverable_scan_scope()):
             return
-        self._apply_deliverable_items(items, render_current=render_current)
+        # Scans are serial. A completed snapshot of this visit may be displayed while
+        # a newer refresh is pending, so continuous writes cannot starve the list.
+        self._apply_deliverable_items(items, render_current=request["render_current"])
 
-    def _handle_deliverable_scan_failed(self, error, generation):
-        if int(generation) != int(getattr(self, "deliverable_scan_generation", 0)):
+    def _handle_deliverable_scan_failed(self, error, request):
+        log_ui_navigation("deliverable_scan_failed", generation=request["generation"],
+                          session_id=request["view"][0], error=str(error))
+        if (request["view"] != self.deliverable_scan_view
+                or request["view"][:2] != self._deliverable_scan_scope()):
             return
-        log_sub_agent_runtime(
-            "deliverable_scan_failed",
-            workspace_dir=getattr(self, "workspace_dir", ""),
-            error=str(error),
-        )
-        self._sync_file_browser_empty_state(error=f"扫描交付物失败：{error}")
-        self.add_system_toast("扫描交付物失败，请检查工作区是否可访问。", "error", auto_close_ms=6000)
+        kept = bool(getattr(self, "deliverable_items", []))
+        message = "刷新失败，上次交付物列表已保留。" if kept else "扫描交付物失败。"
+        self._sync_file_browser_empty_state(error=f"{message}请检查工作区后重试。\n{error}")
+        self.add_system_toast(f"{message}可点击刷新重试。", "error", auto_close_ms=6000)
 
     @Slot()
     def _finish_deliverable_scan(self):
-        worker = self.sender()
-        if worker is not getattr(self, "deliverable_scan_worker", None):
+        # This slot has exactly one permanent signal source. Use its owned task
+        # reference: PySide's sender() context can be absent after dynamic slot registration.
+        worker = getattr(self, "deliverable_scan_worker", None)
+        if worker is None or worker is not getattr(self, "deliverable_scanner", None):
             return
         try:
-            log_ui_navigation("deliverable_scan_finished", generation=worker.generation, error=worker.error)
+            request = worker.request
+            log_ui_navigation("deliverable_scan_finished", generation=request["generation"],
+                              scan=worker.scan_count, session_id=request["view"][0],
+                              records=worker.records_count, items=len(worker.items), elapsed_ms=worker.elapsed_ms,
+                              stale=request["view"] != self.deliverable_scan_view, error=worker.error)
             if worker.error:
-                self._handle_deliverable_scan_failed(worker.error, worker.generation)
+                self._handle_deliverable_scan_failed(worker.error, request)
             else:
-                self._handle_deliverable_scan_completed(worker.items, worker.generation, worker.render_current)
+                self._handle_deliverable_scan_completed(worker.items, request)
         finally:
+            # Keep the reusable object parented to the window, but release the task slot.
             self.deliverable_scan_worker = None
-            worker.deleteLater()
-            if not ui_work_stopping(self) and self.deliverable_scan_generation != worker.generation:
-                self._start_deliverable_scan(
-                    self.deliverable_scan_generation,
-                    self.deliverable_scan_pending_render,
-                )
+            if (self.deliverable_scan_pending and not ui_work_stopping(self)
+                    and not self.deliverable_refresh_timer.isActive()):
+                self.deliverable_refresh_timer.start(0)
 
     def _apply_deliverable_items(self, items, render_current=False):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
@@ -45419,20 +45514,19 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def _watch_deliverable_paths(self):
         watcher = getattr(self, "deliverable_watcher", None)
-        if not watcher:
+        if not watcher or ui_work_stopping(self):
             return
         try:
-            files = watcher.files()
-            if files:
-                watcher.removePaths(files)
-            dirs = watcher.directories()
-            if dirs:
-                watcher.removePaths(dirs)
             watch_dirs = set()
+            watch_files = set()
+            preview_resources = set()
             if self.workspace_dir and os.path.isdir(self.workspace_dir):
                 watch_dirs.add(os.path.abspath(self.workspace_dir))
             for item in getattr(self, "deliverable_items", []) or []:
                 item_path = item.get("path") or ""
+                if item_path:
+                    # Directory watches alone do not reliably cover in-place file writes.
+                    watch_files.add(os.path.abspath(item_path))
                 item_dir = os.path.dirname(item_path)
                 if item_dir and os.path.isdir(item_dir):
                     watch_dirs.add(os.path.abspath(item_dir))
@@ -45441,26 +45535,40 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 current_dir = os.path.dirname(current)
                 if current_dir and os.path.isdir(current_dir):
                     watch_dirs.add(os.path.abspath(current_dir))
-                watcher.addPath(os.path.abspath(current))
+                watch_files.add(os.path.abspath(current))
                 if os.path.splitext(current)[1].lower() in {".html", ".htm"}:
                     from ui.file_refresh import html_resources
                     for resource in html_resources(current)[:100]:
                         if os.path.isfile(resource):
-                            watcher.addPath(resource)
+                            watch_files.add(resource)
+                            preview_resources.add(os.path.normcase(os.path.abspath(resource)))
                             watch_dirs.add(os.path.dirname(resource))
-            if watch_dirs:
-                watcher.addPaths(sorted(watch_dirs)[:200])
-        except Exception:
-            pass
+            self._deliverable_preview_resources = preview_resources
+            desired = watch_files | set(sorted(watch_dirs)[:200])
+            existing = set(watcher.files()) | set(watcher.directories())
+            # Leave unchanged watches installed, including while files are being written.
+            removed = existing - desired
+            if removed:
+                watcher.removePaths(sorted(removed))
+            added = desired - existing
+            if added:
+                failed = watcher.addPaths(sorted(added))
+                if failed:
+                    log_ui_navigation("deliverable_watch_incomplete", failed=len(failed), requested=len(added))
+        except (OSError, RuntimeError) as exc:
+            log_ui_navigation("deliverable_watch_failed", error=str(exc))
 
     def handle_deliverable_fs_changed(self, path):
         from ui.file_refresh import schedule_file_refresh
         schedule_file_refresh(self)
-        timer = getattr(self, "deliverable_refresh_timer", None)
-        if timer is not None:
-            timer.start()
-        else:
-            self.refresh_deliverables()
+        key = os.path.normcase(os.path.abspath(path))
+        resources = getattr(self, "_deliverable_preview_resources", set())
+        if key in resources and not any(
+            os.path.normcase(os.path.abspath(item["path"])) == key
+            for item in getattr(self, "deliverable_items", []) if item.get("path")
+        ):
+            return
+        self.refresh_deliverables(reason="filesystem")
 
     def discard_conflicted_deliverable(self):
         if not self.confirm_leave_deliverable_edit("放弃草稿并重新加载"):
@@ -45546,12 +45654,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             )
             return
         if not notify_user:
-            self.refresh_deliverables()
+            self.refresh_deliverables(reason="history_registration")
             return
         if state and office_card is not None:
             self._sync_office_task_card_paths(state, valid_paths)
         if not office_enabled:
-            self.refresh_deliverables()
+            self.refresh_deliverables(reason="generated_file")
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
             latest_name = os.path.basename(valid_paths[-1])
             self.add_system_toast(
@@ -45624,7 +45732,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         else:
             self.chat_storage.unregister_deliverable(workspace_dir, normalized)
             message = "已从交付物中移除"
-        self.refresh_deliverables()
+        self.refresh_deliverables(immediate=True, reason="deliverable_registration")
         self.add_system_toast(message, "success", auto_close_ms=2400)
 
     def select_deliverable(self, path, render_html=True):
@@ -46136,7 +46244,7 @@ a {{ overflow-wrap: anywhere; }}
             bytes_written=int(result.get("bytes_written") or 0),
             elapsed_ms=int(result.get("elapsed_ms") or 0),
         )
-        self.refresh_deliverables(render_current=False)
+        self.refresh_deliverables(render_current=False, reason="pdf_export")
         self.add_system_toast(
             f"已导出 PDF：{os.path.basename(str(result.get('target_path') or ''))}",
             "success",
@@ -52974,6 +53082,7 @@ a {{ overflow-wrap: anywhere; }}
                 )
             self.refresh_grill_mode_controls(state.session_id)
             self.save_chat_history(session_id=state.session_id)
+        changed_paths = []
         for record in state.step_records:
             if record.get("tool_id") != tool_id:
                 continue
@@ -53008,8 +53117,8 @@ a {{ overflow-wrap: anywhere; }}
             break
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
-        if state.has_file_changes and state.session_id == self.current_session_id:
-            self.refresh_deliverables()
+        if changed_paths and state.session_id == self.current_session_id:
+            self.refresh_deliverables(reason="tool_files_changed")
         if state.session_id == self.current_session_id:
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         

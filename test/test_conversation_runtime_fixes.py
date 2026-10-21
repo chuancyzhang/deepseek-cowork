@@ -54,6 +54,35 @@ class ConversationRuntimeFixTests(unittest.TestCase):
         host.close()
         host.deleteLater()
 
+    def test_only_current_tool_file_changes_request_deliverable_refresh(self):
+        state = SimpleNamespace(session_id="session", tool_cards={}, pending_tool_results={},
+            step_records=[], has_file_changes=True, changed_files=[])
+        window = MagicMock()
+        window.current_session_id = "session"
+        window.get_session.return_value = state
+        window._event_matches_active_run.return_value = True
+        window._timeline_find_event.return_value = None
+        scenarios = [
+            ("read", "text_file_read", {"ok": True, "text": "read existing file"}, [], False),
+            ("write", "apply_patch", {"ok": True, "changes": [{"path": "report.md"}]}, ["report.md"], True),
+            ("read_again", "text_file_read", {"ok": True, "text": "read again"}, [], False),
+            ("partial", "apply_patch", {"error": "partial failure", "applied_changes": [{"path": "saved.md"}]}, [], True),
+            ("failed", "apply_patch", {"error": "nothing changed"}, ["unchanged.md"], False),
+        ]
+        for identity, tool, result, related, expect_refresh in scenarios:
+            with self.subTest(identity=identity):
+                card = ToolCallCard(tool, {}, identity)
+                state.tool_cards[identity] = card
+                state.step_records.append({"tool_id": identity, "related_files": related})
+                window.refresh_deliverables.reset_mock()
+                MainWindow.update_tool_card(window, {"id": identity, "result": json.dumps(result),
+                    "result_obj": result}, "session")
+                if expect_refresh:
+                    window.refresh_deliverables.assert_called_once_with(reason="tool_files_changed")
+                else:
+                    window.refresh_deliverables.assert_not_called()
+                card.deleteLater()
+
     def test_text_question_field_is_laid_out_before_parent_is_shown(self):
         host = QWidget()
         layout = QVBoxLayout(host)

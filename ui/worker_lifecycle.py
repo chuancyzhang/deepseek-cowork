@@ -14,7 +14,11 @@ def pause_ui_work_timers(owner):
     paused = []
     for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer"):
         timer = getattr(owner, name, None)
-        if timer is not None and timer.isActive():
+        # A coalesced refresh can still be pending after its timer fired while
+        # the scanner was busy. Resume that request if shutdown is aborted.
+        pending_refresh = (name == "deliverable_refresh_timer"
+                           and getattr(owner, "deliverable_scan_pending", None) is not None)
+        if timer is not None and (timer.isActive() or pending_refresh):
             timer.stop()
             paused.append(timer)
     return paused
@@ -46,6 +50,8 @@ def pending_ui_workers(owner, *, include_writers=False):
     )
     # A native thread may have ended while its GUI completion is still queued
     # (or running a nested dialog). Its task slot must stay occupied until then.
+    # deliverable_scan_worker is the occupied task slot. The reusable
+    # deliverable_scanner is still found via Qt ownership, but is idle after wait(0).
     finishing = (getattr(owner, "daemon_connect_worker", None),
                  getattr(owner, "daemon_status_worker", None),
                  getattr(owner, "deliverable_scan_worker", None))

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdi
 from core.knowledge_library import KnowledgeError, same_identity
 from core.knowledge_sources import SOURCES, MultiSourceKnowledgeService
 from core.theme import bind_theme
-from ui.knowledge_library import KnowledgePage, LibraryJobs, STATUS
+from ui.knowledge_library import KnowledgePage, LibraryComboBox, LibraryJobs, STATUS
 from ui.primitives import apply_product_dialog, product_button_style, product_field_style
 
 
@@ -32,16 +32,11 @@ class MultiSourceKnowledgePage(QDialog):
         self.source_views = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        header = QHBoxLayout()
-        header.setContentsMargins(20, 10, 20, 0)
-        header.addWidget(QLabel("资料来源"))
-        self.sources = QComboBox()
-        self.sources.setStyleSheet(product_field_style())
+        self.sources = LibraryComboBox()
+        self.sources.setAccessibleName("资料来源")
+        self.sources.refresh_theme()
         for source, name in SOURCES.items():
             self.sources.addItem(name, source)
-        header.addWidget(self.sources)
-        header.addStretch()
-        layout.addLayout(header)
         self.stack = QStackedWidget()
         layout.addWidget(self.stack)
         self.sources.setCurrentIndex(self.sources.findData(self.service.source))
@@ -69,7 +64,10 @@ class MultiSourceKnowledgePage(QDialog):
     def switch_source(self, _index=0):
         source = self.sources.currentData()
         self.service.select_source(source)
-        self.page(source)
+        page = self.page(source)
+        page.source_name.hide()
+        page.source_slot.insertWidget(0, self.sources)
+        self.sources.show()
         self.stack.setCurrentWidget(self.source_views[source])
 
     def closeEvent(self, event):
@@ -97,7 +95,7 @@ class MultiSourceKnowledgePage(QDialog):
             self.sources.setCurrentIndex(self.sources.findData(provider.source))
 
     def refresh_theme(self, *args):
-        self.sources.setStyleSheet(product_field_style())
+        self.sources.refresh_theme()
         for page in self.pages.values():
             page.refresh_theme(*args)
 
@@ -110,7 +108,7 @@ class CloudKnowledgePage(KnowledgePage):
         self._current_task = None
         self.login_box.hide()
         self.login_box = QWidget()
-        self.login_box.setMaximumWidth(680)
+        self.login_box.setMaximumWidth(560)
         layout = QVBoxLayout(self.login_box)
         layout.setContentsMargins(0, 0, 0, 0)
         title = QLabel("连接" + self.service.display_name)
@@ -150,20 +148,23 @@ class CloudKnowledgePage(KnowledgePage):
         actions.addWidget(official)
         actions.addStretch()
         layout.addLayout(actions)
-        self.layout().insertWidget(1, self.login_box)
+        self.body_layout.insertWidget(0, self.login_box)
         # Replace the old account menu; it contains WeKnora-only actions.
-        for button in self.account_bar.findChildren(QPushButton):
-            button.hide()
+        old_menu = self.account_button.menu()
+        old_menu.removeAction(self.account_details_action)
         self.tenants.hide()
         self.account_label.show()
         self.account_label.setWordWrap(True)
-        account_button = QPushButton("当前账号")
+        account_button = self.account_button
         account_menu = QMenu(account_button)
+        self.account_details_action.setParent(account_menu)
+        account_menu.addAction(self.account_details_action)
+        account_menu.addSeparator()
         for title, callback in (("检查连接", self.check_connection), ("重新连接", self.reconnect),
                                 ("官方页面 / 续期", self.open_official), ("断开连接", self.logout)):
             account_menu.addAction(title, callback)
         account_button.setMenu(account_menu)
-        self.account_bar.layout().addWidget(account_button)
+        old_menu.deleteLater()
         self.search_scope.hide()
         self.query.setPlaceholderText("搜索当前来源" + ("的文档标题" if self.service.source == "tencent-docs" else "的资料"))
         self.up_button = QPushButton("上一级")
@@ -173,11 +174,11 @@ class CloudKnowledgePage(KnowledgePage):
         self.resume_button = QPushButton("继续放入目标目录")
         self.resume_button.clicked.connect(self.resume_placement)
         self.resume_button.hide()
-        self.layout().addWidget(self.resume_button)
+        self.body_layout.addWidget(self.resume_button)
         self.remote_button = QPushButton("在原平台查看")
         self.remote_button.clicked.connect(self.open_management)
         self.remote_button.hide()
-        self.layout().addWidget(self.remote_button)
+        self.body_layout.addWidget(self.remote_button)
         for button in self.findChildren(QPushButton):
             menu = button.menu()
             if menu:
@@ -249,19 +250,22 @@ class CloudKnowledgePage(KnowledgePage):
 
     def refresh(self):
         self.clear_view()
+        self._directory_expansion = []
         self.tree.clear()
         self.current_kb = None
+        self.catalog_names = {}
         self.scope = self.service.snapshot()
         self.retry_state_button.setVisible(bool(self.scope and self.scope.get("error")))
         connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
         self.splitter.setVisible(connected)
+        self.navigation.setVisible(connected)
+        self.navigation_spacer.setVisible(not connected)
         self.login_spacer.setVisible(not connected)
         if not connected:
             from core.connection_retirement import library_notice
-            self.notice.setText((self.scope or {}).get("error") or library_notice(self.service.store.data_dir, self.service.source)
-                                or "连接后即可浏览、阅读和引用资料。")
+            self.notice.setText((self.scope or {}).get("error") or library_notice(self.service.store.data_dir, self.service.source))
             return
         self.account_label.setText("凭据已保存 · 正在检查连接")
         scope = copy.deepcopy(self.scope)
@@ -282,7 +286,8 @@ class CloudKnowledgePage(KnowledgePage):
 
     def loaded_cloud(self, catalog):
         self.account_label.setText("已连接 · " + " · ".join(filter(None, [self.scope.get("tenant_name"), self.scope.get("email")])))
-        for title, kind in (("最近", "recent"), ("本地产物", "artifacts"), ("上传记录", "uploads")):
+        self.catalog_names = {str(kb["id"]): kb["name"] for key in ("mine", "others", "shared") for kb in catalog[key]}
+        for title, kind in (("最近访问", "recent"), ("本地文件", "artifacts"), ("上传记录", "uploads")):
             self.tree.addTopLevelItem(self.node(title, {"kind": kind}))
         for title, key in (("我的文件", "mine"), ("知识库空间", "others")):
             if not catalog[key]:
@@ -299,11 +304,12 @@ class CloudKnowledgePage(KnowledgePage):
                 if kb["organization_id"] == org["id"]:
                     parent.addChild(self.node(kb["name"], {"kind": "kb", "kb": kb}))
             parent.setExpanded(True)
-        self.navigate(self.tree.topLevelItem(0))
+        self.finish_navigation()
 
     def open_kb(self, kb):
         self.clear_view()
         self.current_kb = kb
+        self.select_directory(kb)
         self.parents = []
         self.folder, self.page, self.view = "", 1, "files"
         self.load_files()
@@ -322,17 +328,14 @@ class CloudKnowledgePage(KnowledgePage):
         self.up_button.setVisible(bool(self.parents))
         self.use_button.setEnabled(True)
         self.upload_button.setEnabled(True)
-        self.previous.setEnabled(self.page > 1)
-        self.next.setEnabled(self._has_next)
-        self.page_label.setText(f"第 {self.page} 页")
+        self.update_pagination(self._has_next)
         for value in values:
             if value["is_folder"]:
                 self.add_item(value["title"], {"folder": value})
             else:
                 ref = self.service.reference(self.scope, value["knowledge_base_id"], value["title"], value["id"], url=value["url"])
                 self.add_item(value["title"], {"ref": ref, "document": value})
-        self.notice.setText(("点击文件夹进入下一级，点击文档阅读。" if any(v["is_folder"] for v in values)
-                             else "点击资料阅读，勾选后可批量添加。") if values else "此目录暂无资料。")
+        self.notice.setText("" if values else "此目录暂无资料。可添加资料或返回上一级。")
 
     def go_up(self):
         self.clear_view()
@@ -411,13 +414,13 @@ class CloudKnowledgePage(KnowledgePage):
             return
         self.clear_view()
         self.view = "search"
-        self.title.setText("搜索结果 · " + self.service.display_name)
+        self.title.setText("搜索结果")
         scope = copy.deepcopy(self.scope)
         def done(values):
             for value in values:
                 ref = self.service.reference(scope, value["knowledge_base_id"], value["title"], value["id"], url=value["url"])
-                self.add_item(value["title"], {"ref": ref})
-            self.notice.setText(f"找到 {len(values)} 份资料。" if values else "没有匹配资料，请调整关键词。")
+                self.add_item(value["title"], {"ref": ref, "document": value})
+            self.notice.setText("" if values else "没有匹配资料，请调整关键词。")
         self.run(lambda: self.service.search(scope, query), done, "正在搜索当前来源…")
 
     def open_management(self, path="", connected=True):
@@ -439,7 +442,7 @@ class CloudKnowledgePage(KnowledgePage):
                   (initial and t["status"] not in {"rejected", "failed", "saved"}))]
         if not tasks:
             if initial:
-                self.notice.setText("点击上传记录可核对状态，已保存不代表已完成内容索引。")
+                self.notice.setText("" if self.items.count() else "还没有上传记录。可在资料目录中添加资料。")
             return
         self.upload_poll_busy = True
         def work():
@@ -462,7 +465,7 @@ class CloudKnowledgePage(KnowledgePage):
                 for task in self.service.store.uploads():
                     if same_identity(task["scope"], scope):
                         self.add_item(os.path.basename(task["path"]), {"task": task})
-                self.notice.setText("状态已更新；需要处理的记录请点击查看原因和继续入口。")
+                self.notice.clear()
         def failed(error):
             self.upload_poll_busy = False
             self.error(error)

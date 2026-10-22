@@ -6,12 +6,12 @@ import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, QSize, QBuffer, QByteArray, QIODevice
-from PySide6.QtGui import QDesktopServices, QFont, QTextDocument, QPixmap, QIcon
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, QSize, QRect, QBuffer, QByteArray, QIODevice
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QTextDocument, QPixmap, QIcon
 import qtawesome as qta
 from PySide6.QtWidgets import (QStyledItemDelegate, QStyleOptionViewItem, QStyle, QAbstractItemView, QComboBox, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel,
                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
-                              QPushButton, QSplitter, QStackedWidget, QTextBrowser, QTreeWidget,
+                              QPushButton, QSplitter, QStackedWidget, QTextBrowser, QTreeWidget, QWidgetAction,
                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from core.knowledge_library import KnowledgeService, KnowledgeError, response_data, rows, same_identity, segment
@@ -45,6 +45,100 @@ class LibrarySelectionDelegate(QStyledItemDelegate):
             else:
                 option.features &= ~QStyleOptionViewItem.HasCheckIndicator
 
+    def paint(self, painter, option, index):
+        payload = index.siblingAtColumn(0).data(Qt.UserRole) or {}
+        if payload.get("group"):
+            return super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        opt.icon = QIcon()
+        opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
+        style = opt.widget.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.save()
+        rect = option.rect
+        font = QFont(option.font)
+        font.setPixelSize(DesignTokens.font_size_meta)
+        painter.setFont(font)
+        painter.setPen(QColor(DesignTokens.text_secondary))
+        if index.column() == 0:
+            leading = QRect(rect.left() + 12, rect.center().y() - 9, 18, 18)
+            checked = index.data(Qt.CheckStateRole)
+            if checked is not None and (option.state & QStyle.State_MouseOver or checked == Qt.Checked.value):
+                check = QStyleOptionViewItem(option)
+                check.rect = leading
+                check.state &= ~(QStyle.State_On | QStyle.State_Off)
+                check.state |= QStyle.State_On if checked == Qt.Checked.value else QStyle.State_Off
+                style.drawPrimitive(QStyle.PE_IndicatorItemViewItemCheck, check, painter, opt.widget)
+            else:
+                icon = index.data(Qt.DecorationRole)
+                if icon:
+                    icon.paint(painter, leading)
+            text_rect = rect.adjusted(44, 0, -12, 0)
+            title = str(index.data() or "").split("\n")[0]
+            subtitle = str(index.data(Qt.UserRole + 1) or "")
+            font.setPixelSize(DesignTokens.font_size_body)
+            font.setWeight(QFont.Medium)
+            painter.setFont(font)
+            painter.setPen(QColor(DesignTokens.text_primary))
+            title_rect = QRect(text_rect.left(), rect.center().y() - (23 if subtitle else 12), text_rect.width(), 24)
+            painter.drawText(title_rect, Qt.AlignVCenter, QFontMetrics(font).elidedText(title, Qt.ElideRight, text_rect.width()))
+            if subtitle:
+                font.setPixelSize(DesignTokens.font_size_meta)
+                font.setWeight(QFont.Normal)
+                painter.setFont(font)
+                painter.setPen(QColor(DesignTokens.text_secondary))
+                meta_rect = QRect(text_rect.left(), rect.center().y() + 3, text_rect.width(), 22)
+                painter.drawText(meta_rect, Qt.AlignVCenter, QFontMetrics(font).elidedText(subtitle, Qt.ElideRight, text_rect.width()))
+        else:
+            text = str(index.data() or "")
+            # Successful indexing is the normal browsing state; upload receipts retain it.
+            if text == "—" or (index.column() == 3 and text == STATUS["completed"] and "task" not in payload):
+                text = ""
+            painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter,
+                             QFontMetrics(font).elidedText(text, Qt.ElideRight, max(0, rect.width() - 16)))
+        painter.setPen(QColor(DesignTokens.separator))
+        painter.drawLine(rect.left() + (44 if index.column() == 0 else 0), rect.bottom(), rect.right(), rect.bottom())
+        painter.restore()
+
+
+class LibraryNotice(QLabel):
+    """Empty success messages leave no blank status row in the workspace."""
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self):
+        self.setText("")
+
+
+class LibraryComboBox(QComboBox):
+    """Native selection with a theme-aware arrow independent of platform chrome."""
+    def refresh_theme(self):
+        self.setStyleSheet(product_field_style() +
+                          "QComboBox {padding-right:28px;}"
+                          "QComboBox::drop-down {border:none;width:24px;background:transparent;}"
+                          "QComboBox::down-arrow {image:none;}")
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        color = DesignTokens.text_secondary if self.isEnabled() else DesignTokens.text_disabled
+        qta.icon("fa5s.chevron-down", color=color).paint(painter, QRect(self.width() - 22, self.height() // 2 - 5, 10, 10))
+        painter.end()
+
+
+class LibraryNavigation(QTreeWidget):
+    def drawBranches(self, painter, rect, index):
+        selected = self.selectionModel().isSelected(index)
+        painter.fillRect(rect, QColor(DesignTokens.bg_sidebar_selected if selected else DesignTokens.bg_secondary))
+        if self.model().rowCount(index):
+            name = "fa5s.chevron-down" if self.isExpanded(index) else "fa5s.chevron-right"
+            qta.icon(name, color=DesignTokens.text_secondary).paint(
+                painter, QRect(rect.right() - 11, rect.center().y() - 5, 9, 9))
+
 
 class LibraryTable(QTreeWidget):
     """A document table with optional project groups and a shared row API."""
@@ -57,25 +151,26 @@ class LibraryTable(QTreeWidget):
         self.setObjectName("LibraryTable")
         self.setColumnCount(4)
         self.setHeaderLabels(["名称", "类型", "更新时间", "状态"])
+        self.setHeaderHidden(True)
+        self.setColumnHidden(1, True)
         self.setRootIsDecorated(False)
         self.setAlternatingRowColors(False)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setWordWrap(True)
+        self.setIconSize(QSize(18, 18))
+        self.setIndentation(0)
         self.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        for index, width in ((1, 90), (2, 120), (3, 105)):
+        self.header().setStretchLastSection(False)
+        for index, width in ((1, 90), (2, 124), (3, 112)):
             self.header().setSectionResizeMode(index, QHeaderView.Fixed)
             self.header().resizeSection(index, width)
         self._rows, self._groups = [], {}
 
     def checkbox_rect(self, item):
         index = self.indexFromItem(item, 0)
-        option = QStyleOptionViewItem()
-        option.initFrom(self)
-        option.rect = self.visualRect(index)
-        option.state |= QStyle.State_MouseOver
-        self.itemDelegate().initStyleOption(option, index)
-        return self.style().subElementRect(QStyle.SE_ItemViewItemCheckIndicator, option, self)
+        rect = self.visualRect(index)
+        return QRect(rect.left() + 12, rect.center().y() - 9, 18, 18)
 
     def mousePressEvent(self, event):
         item = self.itemAt(event.position().toPoint())
@@ -110,6 +205,14 @@ class LibraryTable(QTreeWidget):
     def clear(self):
         super().clear()
         self._rows, self._groups = [], {}
+        self.update_columns()
+
+    def update_columns(self, compact=None):
+        if compact is not None:
+            self._compact = compact
+        self.setColumnHidden(1, True)
+        self.setColumnHidden(2, getattr(self, "_compact", False) or not any(row.text(2) not in ("", "—") for row in self._rows))
+        self.setColumnHidden(3, not any(row.text(3) and (row.text(3) != STATUS["completed"] or "task" in row.data(Qt.UserRole)) for row in self._rows))
 
     def count(self):
         return len(self._rows)
@@ -117,15 +220,18 @@ class LibraryTable(QTreeWidget):
     def item(self, index):
         return self._rows[index]
 
-    def append(self, columns, payload, icon, group=""):
+    def append(self, columns, payload, icon, group="", subtitle="", icon_name="fa5.file-alt"):
         row = LibraryRow(columns)
         row.setData(0, Qt.UserRole, payload)
+        row.setData(0, Qt.UserRole + 1, subtitle)
+        row.setData(0, Qt.UserRole + 2, icon_name)
         if any(key in payload for key in ("ref", "document")):
             row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
             row.setCheckState(0, Qt.Unchecked)
         row.setIcon(0, icon)
-        row.setSizeHint(0, QSize(0, 60 if "\n" in columns[0] else 48))
-        row.setToolTip(0, columns[0])
+        row.setSizeHint(0, QSize(0, 72))
+        row.setToolTip(0, "\n".join(filter(None, (columns[0], subtitle, columns[2] if columns[2] != "—" else "", columns[3]))))
+        row.setToolTip(3, columns[3])
         if group:
             if group not in self._groups:
                 parent = LibraryRow([group, "", "", ""])
@@ -142,6 +248,7 @@ class LibraryTable(QTreeWidget):
         else:
             self.addTopLevelItem(row)
         self._rows.append(row)
+        self.update_columns()
         return row
 
 
@@ -326,6 +433,7 @@ class KnowledgePage(QDialog):
         self.scope = None
         self.current_kb = None
         self.current_ref = None
+        self.catalog_names = {}
         self.current_file = ""
         self.page = 1
         self.folder = None
@@ -335,25 +443,57 @@ class KnowledgePage(QDialog):
         self._auth_serial = 0
         self.destroyed.connect(lambda *_: self._auth_cancel.set() if self._auth_cancel else None)
         self.setObjectName("KnowledgePage")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 14, 20, 16)
-        layout.setSpacing(10)
-        header = QHBoxLayout()
-        self.heading_layout = header
-        heading = QLabel("资料库")
-        heading.setObjectName("LibraryHeading")
-        header.addWidget(heading)
-        header.addStretch()
-        layout.addLayout(header)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.sidebar = QWidget()
+        self.sidebar.setObjectName("LibrarySidebar")
+        self.sidebar.setFixedWidth(216)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(12, 20, 12, 16)
+        sidebar_layout.setSpacing(16)
+        self.source_slot = QVBoxLayout()
+        self.source_name = QLabel(getattr(self.service, "display_name", "WeKnora"))
+        self.source_name.setObjectName("LibrarySourceName")
+        self.source_slot.addWidget(self.source_name)
+        sidebar_layout.addLayout(self.source_slot)
+        self.navigation = QWidget()
+        navigation_layout = QVBoxLayout(self.navigation)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(8)
+        self.nav_buttons = []
+        for index, (label, icon_name) in enumerate((("最近访问", "fa5s.history"), ("本地文件", "fa5.folder-open"), ("上传记录", "fa5s.cloud-upload-alt"))):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setProperty("libraryNav", True)
+            button.setProperty("libraryIcon", icon_name)
+            button.clicked.connect(lambda _checked=False, i=index: self.navigate(self.tree.topLevelItem(i)))
+            navigation_layout.addWidget(button)
+            self.nav_buttons.append(button)
+        self.directory_query = QLineEdit()
+        self.directory_query.setPlaceholderText("筛选目录")
+        self.directory_query.setClearButtonEnabled(True)
+        self.directory_query.textChanged.connect(self.filter_directory)
+        navigation_layout.addWidget(self.directory_query)
+        sidebar_layout.addWidget(self.navigation, 1)
+        self.navigation_spacer = QWidget()
+        sidebar_layout.addWidget(self.navigation_spacer, 1)
+        root.addWidget(self.sidebar)
+        body = QWidget()
+        root.addWidget(body, 1)
+        layout = QVBoxLayout(body)
+        self.body_layout = layout
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(12)
 
         self.login_box = QWidget()
-        self.login_box.setMaximumWidth(680)
+        self.login_box.setMaximumWidth(560)
         login_layout = QVBoxLayout(self.login_box)
         login_layout.setContentsMargins(0, 0, 0, 0)
-        login_title = QLabel("连接你的资料库")
+        login_title = QLabel("连接 WeKnora")
         login_title.setObjectName("LibraryHeading")
         login_layout.addWidget(login_title)
-        login_help = QLabel("登录后，可查找和阅读你的资料，在对话中引用，并保存工作成果。请输入你平时打开 WeKnora 的服务地址和账号。")
+        login_help = QLabel("使用你的 WeKnora 服务地址、邮箱和密码登录。")
         login_help.setWordWrap(True)
         login_layout.addWidget(login_help)
         self.base = QLineEdit()
@@ -388,20 +528,30 @@ class KnowledgePage(QDialog):
         layout.addWidget(self.login_box)
 
         self.account_bar = QWidget()
-        account_layout = QHBoxLayout(self.account_bar)
+        account_layout = QVBoxLayout(self.account_bar)
         account_layout.setContentsMargins(0, 0, 0, 0)
+        account_details = QWidget()
+        account_details.setFixedWidth(280)
+        details_layout = QVBoxLayout(account_details)
+        details_layout.setContentsMargins(12, 10, 12, 10)
         self.account_label = QLabel()
         self.account_label.setTextFormat(Qt.PlainText)
         self.account_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.account_label.setWordWrap(True)
-        account_layout.addWidget(self.account_label, 1)
-        self.tenants = QComboBox()
+        details_layout.addWidget(self.account_label)
+        self.tenants = LibraryComboBox()
         self.tenants.setMinimumWidth(110)
         self.tenants.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.tenants.activated.connect(self.switch_tenant)
-        account_layout.addWidget(self.tenants)
-        logout = QPushButton("账号与设置")
+        details_layout.addWidget(self.tenants)
+        logout = self.account_button = QPushButton("账号与设置")
+        logout.setProperty("libraryGhost", True)
+        logout.setProperty("libraryIcon", "fa5.user-circle")
         account_menu = QMenu(logout)
+        self.account_details_action = QWidgetAction(account_menu)
+        self.account_details_action.setDefaultWidget(account_details)
+        account_menu.addAction(self.account_details_action)
+        account_menu.addSeparator()
         account_menu.addAction("检查连接", self.check_connection)
         account_menu.addAction("重新登录", self.reconnect)
         account_menu.addAction("在 WeKnora 中管理", self.manage_current)
@@ -409,27 +559,34 @@ class KnowledgePage(QDialog):
         account_menu.addAction("退出账号", self.logout)
         logout.setMenu(account_menu)
         account_layout.addWidget(logout)
-        header.addWidget(self.account_bar)
+        sidebar_layout.addWidget(self.account_bar)
         self.account_bar.hide()
 
         toolbar = ProductToolbar(self)
         self.query = QLineEdit()
         self.query.setPlaceholderText("搜索资料内容")
+        self.query.setClearButtonEnabled(True)
         self.query.returnPressed.connect(self.search)
         toolbar.layout.addWidget(self.query, 1)
-        self.search_scope = QComboBox()
+        self.search_scope = LibraryComboBox()
         for label, value in (("全部", "all"), ("我的资料", "mine"), ("共享组织", "shared")):
             self.search_scope.addItem(label, value)
         toolbar.layout.addWidget(self.search_scope)
         search = QPushButton("搜索")
+        search.setProperty("libraryGhost", True)
         search.clicked.connect(self.search)
         toolbar.layout.addWidget(search)
-        refresh = QPushButton("刷新")
+        refresh = QPushButton()
+        refresh.setToolTip("刷新")
+        refresh.setAccessibleName("刷新")
+        refresh.setProperty("libraryIcon", "fa5s.redo-alt")
+        refresh.setFixedWidth(36)
         refresh.clicked.connect(self.refresh_content)
         toolbar.layout.addWidget(refresh)
         self.search_toolbar = toolbar
 
-        self.notice = QLabel("正在读取连接状态…")
+        self.notice = LibraryNotice("正在读取连接状态…")
+        self.notice.setObjectName("LibraryNotice")
         self.notice.setWordWrap(True)
         self.notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.notice.setTextFormat(Qt.PlainText)
@@ -439,21 +596,27 @@ class KnowledgePage(QDialog):
         self.retry_state_button.hide()
         layout.addWidget(self.retry_state_button, 0, Qt.AlignLeft)
         self.splitter = QSplitter(Qt.Horizontal)
-        self.tree = QTreeWidget()
+        self.tree = LibraryNavigation()
         self.tree.setHeaderHidden(True)
         self.tree.setObjectName("LibraryNavigation")
         self.tree.setIndentation(14)
         self.tree.setMinimumWidth(110)
         self.tree.itemClicked.connect(self.navigate)
-        self.splitter.addWidget(self.tree)
+        navigation_layout.addWidget(self.tree, 1)
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(12)
         self.title = QLabel("资料")
         self.title.setTextFormat(Qt.PlainText)
         self.title.setWordWrap(True)
         self.title.setObjectName("LibraryHeading")
-        center_layout.addWidget(self.title)
+        title_row = QHBoxLayout()
+        title_row.addWidget(self.title, 1)
+        self.result_count = QLabel()
+        self.result_count.setObjectName("LibraryResultCount")
+        title_row.addWidget(self.result_count)
+        center_layout.addLayout(title_row)
         center_layout.addWidget(toolbar)
         actions = QHBoxLayout()
         self.use_button = QPushButton("和 Agent 一起用")
@@ -472,11 +635,12 @@ class KnowledgePage(QDialog):
         actions.addStretch()
         center_layout.addLayout(actions)
         folder_row = QHBoxLayout()
-        self.folders = QComboBox()
+        self.folder_layout = folder_row
+        self.folders = LibraryComboBox()
         self.folders.addItem("全部文件夹", None)
         self.folders.activated.connect(self.change_folder)
         folder_row.addWidget(self.folders, 1)
-        self.project_filter = QComboBox()
+        self.project_filter = LibraryComboBox()
         self.project_filter.addItem("全部项目", "")
         self.project_filter.activated.connect(lambda _index: self.show_artifacts())
         self.project_filter.hide()
@@ -484,18 +648,25 @@ class KnowledgePage(QDialog):
         self.wiki_button = QPushButton("Wiki")
         self.wiki_button.clicked.connect(self.show_wiki)
         folder_row.addWidget(self.wiki_button)
-        self.wiki_filter = QComboBox()
+        self.wiki_filter = LibraryComboBox()
         self.wiki_filter.addItem("全部分类", "")
         for key, label in WIKI_TYPES.items():
             self.wiki_filter.addItem(label, key)
         self.wiki_filter.activated.connect(lambda _index: self.show_wiki())
         folder_row.addWidget(self.wiki_filter, 1)
-        self.files_button = QPushButton("返回资料")
+        self.files_button = QPushButton("文档")
+        self.files_button.setProperty("libraryTab", True)
+        self.wiki_button.setProperty("libraryTab", True)
+        self.files_button.setCheckable(True)
+        self.wiki_button.setCheckable(True)
         self.files_button.setMaximumWidth(120)
         self.files_button.clicked.connect(lambda: self.open_kb(self.current_kb))
-        folder_row.addWidget(self.files_button)
+        folder_row.insertWidget(0, self.files_button)
+        folder_row.removeWidget(self.wiki_button)
+        folder_row.insertWidget(1, self.wiki_button)
         center_layout.addLayout(folder_row)
         self.items = LibraryTable()
+        self.items.model().modelReset.connect(self.result_count.clear)
         self.items.fileActivated.connect(self.select_item)
         self.items.itemChanged.connect(lambda *_args: self.update_batch_selection())
         center_layout.addWidget(self.items, 1)
@@ -529,18 +700,16 @@ class KnowledgePage(QDialog):
         pager.addWidget(self.next)
         pager.addStretch()
         center_layout.addLayout(pager)
-        self.splitter.addWidget(center)
         self.reader = KnowledgeReader()
         self.reader.setOpenExternalLinks(False)
         self.reader.setReadOnly(True)
         self.reader.setPlaceholderText("选择一份资料，查看正文和来源。")
         self.reader.anchorClicked.connect(self.open_source)
         self.content_stack = QStackedWidget()
-        center.setParent(None)
         self.content_stack.addWidget(center)
         reading = QWidget()
         reading_layout = QVBoxLayout(reading)
-        reading_layout.setContentsMargins(24, 8, 24, 8)
+        reading_layout.setContentsMargins(0, 0, 0, 0)
         reading_actions = QHBoxLayout()
         back = QPushButton("返回列表")
         back.clicked.connect(self.back_to_list)
@@ -572,7 +741,6 @@ class KnowledgePage(QDialog):
         reading_layout.addWidget(self.reader_stack, 1)
         self.content_stack.addWidget(reading)
         self.splitter.addWidget(self.content_stack)
-        self.splitter.setSizes([200, 800])
         layout.addWidget(self.splitter, 1)
         self.splitter.hide()
         self.login_spacer = QWidget()
@@ -593,32 +761,118 @@ class KnowledgePage(QDialog):
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
             f"QDialog#KnowledgePage {{background:{DesignTokens.bg_main}; color:{DesignTokens.text_primary};}}"
-            f"QDialog#KnowledgePage QLabel {{color:{DesignTokens.text_primary};}}"
-            f"QDialog#KnowledgePage QTreeWidget, QDialog#KnowledgePage QTextBrowser "
+            f"QDialog#KnowledgePage QLabel {{color:{DesignTokens.text_primary}; background:transparent;}}"
+            f"QTreeWidget#LibraryTable, QTextBrowser "
             f"{{background:{DesignTokens.bg_main}; color:{DesignTokens.text_primary}; border:none;}}"
             f"QDialog#KnowledgePage QTreeWidget::item:selected, QDialog#KnowledgePage QListWidget::item:selected "
             f"{{background:{DesignTokens.bg_sidebar_selected}; color:{DesignTokens.primary};}}")
         self.setStyleSheet(self.styleSheet() +
-            f"QLabel#LibraryHeading {{font-size:20px; font-weight:600; padding:6px 0;}}"
-            f"QTreeWidget#LibraryNavigation {{background:{DesignTokens.bg_main};}}"
-            f"QTreeWidget#LibraryNavigation::item {{padding:4px;}}"
-            f"QLabel#LibraryDocumentTitle {{font-size:24px; font-weight:600; padding:20px 0;}}"
-            f"QTreeWidget#LibraryTable::item {{border-bottom:1px solid {DesignTokens.separator}; padding:6px;}}"
-            f"QHeaderView::section {{background:{DesignTokens.bg_main};color:{DesignTokens.text_secondary};border:none;padding:10px;}}")
+            f"QLabel#LibraryHeading {{font-size:{DesignTokens.font_size_hero}px; font-weight:500; padding:2px 0 14px;}}"
+            f"QWidget#LibrarySidebar {{background:{DesignTokens.bg_secondary};border-right:1px solid {DesignTokens.separator};}}"
+            f"QLabel#LibrarySourceName {{font-size:{DesignTokens.font_size_section}px;font-weight:600;padding:8px;}}"
+            f"QLabel#LibraryNotice {{color:{DesignTokens.text_secondary};padding:6px 0;}}"
+            f"QLabel#LibraryResultCount {{color:{DesignTokens.text_secondary};font-size:{DesignTokens.font_size_meta}px;}}"
+            f"QTreeWidget#LibraryNavigation {{background:transparent;outline:none;}}"
+            f"QTreeWidget#LibraryNavigation::item {{padding:4px;border-radius:{DesignTokens.radius_sm}px;}}"
+            f"QTreeWidget#LibraryNavigation::item:hover {{background:{DesignTokens.bg_sidebar_hover};}}"
+            f"QLabel#LibraryDocumentTitle {{font-size:{DesignTokens.font_size_hero}px; font-weight:600; padding:20px 0;}}"
+            f"QTreeWidget#LibraryTable {{outline:none;}}"
+            f"QTreeWidget#LibraryTable::item:hover {{background:{DesignTokens.bg_card_subtle};}}")
         self.reader.document().setDefaultFont(QFont(self.font().family(), 12))
         for button in self.findChildren(QPushButton):
-            button.setStyleSheet(product_button_style("primary" if button.property("libraryPrimary") else "secondary"))
+            button.setAutoDefault(False)
+            kind = "primary" if button.property("libraryPrimary") else "ghost" if button.property("libraryGhost") or button.property("libraryNav") or button.property("libraryTab") else "secondary"
+            css = product_button_style(kind)
+            if button.property("libraryNav"):
+                css += (f"QPushButton {{text-align:left;font-weight:400;padding:3px 10px;}}"
+                        f"QPushButton:checked {{background:{DesignTokens.bg_sidebar_selected};color:{DesignTokens.primary};font-weight:600;}}")
+            if button.property("libraryTab"):
+                css += (f"QPushButton {{border-radius:0;font-weight:400;}}"
+                        f"QPushButton:checked {{color:{DesignTokens.primary};border-bottom:2px solid {DesignTokens.primary};}}")
+            button.setStyleSheet(css)
+            if button.property("libraryIcon"):
+                button.setIcon(qta.icon(button.property("libraryIcon"), color=DesignTokens.text_secondary))
         for field in self.findChildren(QLineEdit) + self.findChildren(QComboBox):
-            field.setStyleSheet(product_field_style())
+            if isinstance(field, LibraryComboBox):
+                field.refresh_theme()
+            else:
+                field.setStyleSheet(product_field_style())
+            field.setMinimumWidth(0)
+        def refresh_node(item):
+            name = item.data(0, Qt.UserRole + 2)
+            if name:
+                item.setIcon(0, qta.icon(name, color=DesignTokens.text_secondary))
+            for index in range(item.childCount()):
+                refresh_node(item.child(index))
+        for index in range(self.tree.topLevelItemCount()):
+            refresh_node(self.tree.topLevelItem(index))
+        for row in self.items._rows:
+            row.setIcon(0, qta.icon(row.data(0, Qt.UserRole + 2), color=DesignTokens.text_secondary))
+        self.items.viewport().update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         narrow = self.width() < 780
-        self.heading_layout.setDirection(QHBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight)
-        self.tree.setMaximumWidth(150 if narrow else 240)
-        self.items.setColumnHidden(1, narrow)
-        self.items.setColumnHidden(2, narrow)
-        self.splitter.setSizes([140 if narrow else 210, max(320, self.width() - 240)])
+        self.sidebar.setFixedWidth(170 if narrow else 216)
+        self.body_layout.setContentsMargins(16 if narrow else 28, 24, 16 if narrow else 28, 20)
+        self.items.update_columns(narrow)
+
+    def filter_directory(self, query):
+        query = query.strip().casefold()
+        def descendants(item):
+            yield item
+            for index in range(item.childCount()):
+                yield from descendants(item.child(index))
+        nodes = [item for index in range(3, self.tree.topLevelItemCount()) for item in descendants(self.tree.topLevelItem(index))]
+        if query and not getattr(self, "_directory_expansion", None):
+            self._directory_expansion = [(item, item.isExpanded()) for item in nodes]
+        def visit(item, ancestor_matches=False):
+            matches = ancestor_matches or query in item.text(0).casefold()
+            children = [visit(item.child(i), matches) for i in range(item.childCount())]
+            visible = matches or any(children)
+            if (item.data(0, Qt.UserRole) or {}).get("kind") == "group" and not children:
+                visible = False
+            item.setHidden(not visible)
+            if query and children and visible:
+                item.setExpanded(True)
+            return visible
+        for index in range(3, self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(index))
+        if not query:
+            for item, expanded in getattr(self, "_directory_expansion", []):
+                item.setExpanded(expanded)
+            self._directory_expansion = []
+
+    def finish_navigation(self):
+        # Shortcuts share the same navigation records as the source directory.
+        for index in range(min(3, self.tree.topLevelItemCount())):
+            self.tree.topLevelItem(index).setHidden(True)
+        self.filter_directory(self.directory_query.text())
+        self.navigate(self.tree.topLevelItem(0))
+
+    def select_directory(self, kb):
+        for button in self.nav_buttons:
+            button.setChecked(False)
+        def visit(item):
+            data = item.data(0, Qt.UserRole) or {}
+            if data.get("kind") == "kb" and data["kb"]["id"] == kb["id"]:
+                self.tree.setCurrentItem(item)
+                return True
+            return any(visit(item.child(i)) for i in range(item.childCount()))
+        for index in range(3, self.tree.topLevelItemCount()):
+            if visit(self.tree.topLevelItem(index)):
+                break
+
+    def update_pagination(self, has_next, total=None):
+        multiple = self.page > 1 or has_next
+        self.previous.setVisible(multiple)
+        self.next.setVisible(multiple)
+        self.page_label.setVisible(multiple)
+        self.previous.setEnabled(self.page > 1)
+        self.next.setEnabled(has_next)
+        self.page_label.setText(f"第 {self.page} 页")
+        if total is not None:
+            self.result_count.setText(f"{total} 项")
 
     def back_to_list(self):
         self.read_serial += 1
@@ -717,6 +971,8 @@ class KnowledgePage(QDialog):
         self.upload_button.hide()
         self.management_button.hide()
         self.page_label.clear()
+        self.page_label.hide()
+        self.result_count.clear()
         self.previous.hide()
         self.next.hide()
         self.previous.setEnabled(False)
@@ -727,14 +983,18 @@ class KnowledgePage(QDialog):
 
     def refresh(self):
         self.clear_view()
+        self._directory_expansion = []
         self.tree.clear()
         self.current_kb = None
+        self.catalog_names = {}
         self.scope = self.service.snapshot()
         self.retry_state_button.setVisible(bool(self.scope and self.scope.get("error")))
         connected = bool(self.scope) and not self.scope.get("unavailable")
         self.login_box.setVisible(not connected)
         self.account_bar.setVisible(connected)
         self.splitter.setVisible(connected)
+        self.navigation.setVisible(connected)
+        self.navigation_spacer.setVisible(not connected)
         self.login_spacer.setVisible(not connected)
         self.upload_button.setEnabled(False)
         if not connected:
@@ -758,6 +1018,8 @@ class KnowledgePage(QDialog):
         names = {"recent": "fa5s.history", "artifacts": "fa5s.folder-open", "uploads": "fa5s.cloud-upload-alt", "kb": "fa5s.book", "organization": "fa5s.users"}
         if kind in names:
             item.setIcon(0, qta.icon(names[kind], color=DesignTokens.text_secondary))
+            item.setData(0, Qt.UserRole + 2, names[kind])
+        item.setToolTip(0, str(title))
         if kind == "group":
             item.setSizeHint(0, QSize(0, 44))
 
@@ -772,11 +1034,12 @@ class KnowledgePage(QDialog):
         self.tenants.setCurrentIndex(self.tenants.findData(self.scope["tenant_id"]))
         self.tenants.blockSignals(False)
         if catalog is None:
-            self.notice.setText("请选择已加入的工作空间；创建工作空间请打开 WeKnora。")
+            self.notice.setText("请在左下角“账号与设置”中选择工作空间。")
             return
+        self.catalog_names = {str(kb["id"]): kb["name"] for key in ("mine", "others", "shared") for kb in catalog[key]}
         membership = next((m for m in info.get("memberships", []) if str(m["tenant_id"]) == self.scope["tenant_id"]), {})
         self.tenant_role = membership.get("role")
-        for title, kind in (("最近", "recent"), ("本地产物", "artifacts"), ("上传记录", "uploads")):
+        for title, kind in (("最近访问", "recent"), ("本地文件", "artifacts"), ("上传记录", "uploads")):
             self.tree.addTopLevelItem(self.node(title, {"kind": kind}))
         for title, key in (("我的资料", "mine"), ("工作空间其他资料", "others")):
             parent = self.node(title, {"kind": "group"})
@@ -794,7 +1057,7 @@ class KnowledgePage(QDialog):
                     parent.addChild(self.node(kb["name"], {"kind": "kb", "kb": kb}))
             parent.setExpanded(True)
         shared.setExpanded(True)
-        self.navigate(self.tree.topLevelItem(0))
+        self.finish_navigation()
 
     def login(self):
         if not self.base.text().strip() or not self.email.text().strip() or not self.password.text():
@@ -840,6 +1103,13 @@ class KnowledgePage(QDialog):
             return
         data = item.data(0, Qt.UserRole) or {}
         kind = data.get("kind")
+        if kind == "group":
+            item.setExpanded(not item.isExpanded())
+            return
+        for button, shortcut in zip(self.nav_buttons, ("recent", "artifacts", "uploads")):
+            button.setChecked(kind == shortcut)
+        if kind in ("recent", "artifacts", "uploads"):
+            self.tree.clearSelection()
         if kind == "kb":
             self.open_kb(data["kb"])
         elif kind == "recent":
@@ -847,7 +1117,7 @@ class KnowledgePage(QDialog):
             self.view = "recent"
             self.title.setText("最近访问")
             for ref in self.service.store.recent(self.scope):
-                self.add_item(ref["title"], {"ref": ref, "group_name": "Wiki 阅读" if ref.get("wiki_slug") else "资料阅读"})
+                self.add_item(ref["title"], {"ref": ref, "group_name": self.catalog_names.get(str(ref["kb_id"]), "")})
             self.notice.setText("" if self.items.count() else "还没有最近访问的资料。从左侧打开一个资料库，或搜索你想了解的内容。")
         elif kind == "artifacts":
             self.clear_view()
@@ -874,26 +1144,38 @@ class KnowledgePage(QDialog):
         if "folder" in payload:
             kind = "文件夹"
         state = task.get("status") or document.get("parse_status", "")
-        icon = qta.icon("fa5s.folder" if "folder" in payload else "fa5s.file-alt", color=DesignTokens.primary)
-        return self.items.append([str(title), kind, friendly_date(document.get("updated_at") or task.get("updated_at")),
-                                  STATUS.get(state, state)], payload, icon, payload.get("group_name", payload.get("project", "")))
+        icon_name = ("fa5.folder" if "folder" in payload else
+                     {"pdf": "fa5.file-pdf", "xlsx": "fa5.file-excel", "csv": "fa5.file-excel",
+                      "docx": "fa5.file-word", "pptx": "fa5.file-powerpoint", "html": "fa5.file-code"}.get(extension, "fa5.file-alt"))
+        icon = qta.icon(icon_name, color=DesignTokens.text_secondary)
+        parts = str(title).split("\n", 1)
+        location = payload.get("group_name") or payload.get("project") or document.get("folder_path") or ((self.current_kb or {}).get("name", "") if self.view in ("files", "wiki") else "")
+        metadata = location if location == kind or location.startswith(kind + " · ") else " · ".join(filter(None, (kind, location)))
+        subtitle = parts[1].replace("\n", " ") if len(parts) > 1 else metadata
+        row = self.items.append([str(title), kind, friendly_date(document.get("updated_at") or task.get("updated_at")),
+                                STATUS.get(state, state)], payload, icon, payload.get("project", ""), subtitle, icon_name)
+        self.result_count.setText(f"{self.items.count()} 项")
+        return row
 
     def show_artifacts(self):
         self.project_filter.show()
         self.items.clear()
-        self.title.setText("本地产物")
+        self.title.setText("本地文件")
         selected = self.project_filter.currentData()
         for entry in self.artifacts():
             if not selected or entry.get("project") == selected:
                 self.add_item(os.path.basename(entry["path"]), {"path": entry["path"], "project": entry.get("project") or "未分组"})
         self.update_batch_selection()
-        self.notice.setText("点击产物打开预览。" if self.items.count() else "还没有本地产物。")
+        self.notice.setText("" if self.items.count() else "还没有本地文件。对话中生成的文件会显示在这里。")
 
     def open_kb(self, kb):
         self.clear_view()
         self.current_kb = kb
-        for control in (self.folders, self.wiki_button, self.use_button, self.upload_button, self.management_button, self.previous, self.next):
+        self.select_directory(kb)
+        for control in (self.folders, self.files_button, self.wiki_button, self.use_button, self.upload_button, self.management_button, self.previous, self.next):
             control.show()
+        self.files_button.setChecked(True)
+        self.wiki_button.setChecked(False)
         self.view, self.page, self.folder = "files", 1, None
         self.title.setText(kb["name"])
         self.current_ref = self.service.reference(self.scope, kb["id"], kb["name"])
@@ -924,18 +1206,18 @@ class KnowledgePage(QDialog):
 
     def loaded_files(self, payload):
         self.items.clear()
-        for control in (self.folders, self.wiki_button, self.use_button, self.upload_button, self.management_button, self.previous, self.next):
+        for control in (self.folders, self.files_button, self.wiki_button, self.use_button, self.upload_button, self.management_button, self.previous, self.next):
             control.show()
+        self.files_button.setChecked(True)
+        self.wiki_button.setChecked(False)
         self.upload_button.setEnabled(self.can_offer_upload(self.current_kb))
         self.current_ref = self.service.reference(self.scope, self.current_kb["id"], self.current_kb["name"])
         self.use_button.setEnabled(True)
         for item in rows(payload):
             self.add_item(item.get("title", item["id"]), {"document": item})
         total = int(payload.get("total", 0))
-        self.page_label.setText(f"第 {self.page} 页 · {total} 份资料")
-        self.previous.setEnabled(self.page > 1)
-        self.next.setEnabled(self.page * 30 < total)
-        message = "点击资料打开阅读，悬停勾选可批量加入对话或项目。" if total else "这里还没有资料。"
+        self.update_pagination(self.page * 30 < total, total)
+        message = "" if total else "这里还没有资料。可点击“添加资料”开始。"
         if not getattr(self, "_folders_supported", True):
             message += " 当前服务不支持文件夹，已显示全部资料。"
         self.notice.setText(message)
@@ -958,12 +1240,16 @@ class KnowledgePage(QDialog):
             self.notice.setText("请先选择资料库。")
             return
         self.clear_view()
+        self.select_directory(self.current_kb)
         if reset:
             self.page = 1
         self.view = "wiki"
-        self.title.setText(self.current_kb["name"] + " · Wiki")
+        self.title.setText(self.current_kb["name"])
         self.wiki_filter.show()
         self.files_button.show()
+        self.wiki_button.show()
+        self.files_button.setChecked(False)
+        self.wiki_button.setChecked(True)
         self.management_button.show()
         self.items.setHeaderLabels(["标题", "分类", "更新时间", ""])
         self.items.setColumnHidden(3, True)
@@ -983,10 +1269,8 @@ class KnowledgePage(QDialog):
                     group += " · " + category
                 self.add_item(item["title"], {"wiki": item, "group_name": group,
                     "ref": self.service.reference(scope, kb, item["title"], wiki_slug=item["slug"])})
-            self.previous.setEnabled(page > 1)
-            self.next.setEnabled(page < data.get("total_pages", 1))
-            self.page_label.setText(f"Wiki · 第 {page} 页")
-            self.notice.setText("按分类浏览 Wiki。Wiki 编辑和目录管理在 WeKnora 中完成。" if pages else "此分类暂无 Wiki 页面。Wiki 编辑和管理在 WeKnora 中完成。")
+            self.update_pagination(page < data.get("total_pages", 1))
+            self.notice.setText("" if pages else "此分类暂无 Wiki 页面。可切换分类或在 WeKnora 中管理。")
         self.run(lambda: self.service.request(scope, "GET", f"/api/v1/knowledgebase/{segment(kb)}/wiki/pages", params={"page": page, "page_size": 30, "page_type": page_type_filter, "sort_by": "title", "sort_order": "asc"}), done)
 
     def select_item(self, item, _column=0):
@@ -1183,7 +1467,7 @@ class KnowledgePage(QDialog):
                 more = len(chunk_data) == result["page_size"]
             self.reader.document().setMarkdown(text, QTextDocument.MarkdownNoHTML)
             self.read_more.setVisible(more)
-            self.notice.setText(f"第 {args['page']} 页")
+            self.notice.setText(f"第 {args['page']} 页" if more or args["page"] > 1 else "")
             self.service.store.visit(ref)
         epoch = self.epoch
         self.notice.setText("正在阅读资料…")
@@ -1223,7 +1507,7 @@ class KnowledgePage(QDialog):
                     raise KnowledgeError("invalid_response", "搜索结果缺少资料来源标识。")
                 ref = self.service.reference(scope, kb_id, item.get("knowledge_title") or item.get("title") or doc_id, doc_id)
                 self.add_item(ref["title"] + "\n" + str(item.get("content", ""))[:180], {"ref": ref})
-            self.notice.setText(f"找到 {len(results)} 条相关片段。" if results else "没有匹配资料，可以调整关键词。")
+            self.notice.setText("" if results else "没有匹配资料，可以调整关键词。")
         self.run(work, done, "正在搜索知识…")
 
     def checked_payloads(self):
@@ -1418,7 +1702,7 @@ class KnowledgePage(QDialog):
                  if same_identity(task["scope"], self.scope) and ((initial and (task.get("knowledge_id") or task.get("remote_task_id") or task["status"] in ("unknown", "uploading", "placing"))) or task["status"] in ("pending", "processing", "finalizing", "placement_pending"))]
         if not tasks:
             if initial:
-                self.notice.setText("暂无需要核对的上传；上传中的任务完成后会留下回执。" if self.items.count() else "还没有上传记录。")
+                self.notice.setText("" if self.items.count() else "还没有上传记录。可在资料目录中添加资料。")
             return
         self.upload_poll_busy = True
         scope = copy.deepcopy(self.scope)
@@ -1438,7 +1722,7 @@ class KnowledgePage(QDialog):
             for task in self.service.store.uploads():
                 if same_identity(task["scope"], self.scope):
                     self.add_item(os.path.basename(task["path"]), {"task": task})
-            self.notice.setText("状态核对失败：" + "；".join(dict.fromkeys(errors)) if errors else "已同步远端状态；解析中的记录会自动更新。")
+            self.notice.setText("状态核对失败：" + "；".join(dict.fromkeys(errors)) if errors else "")
         def failed(error):
             self.upload_poll_busy = False
             self.error(error)

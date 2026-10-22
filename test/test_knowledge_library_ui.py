@@ -285,11 +285,11 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.page.open_kb({"id": "kb-a", "name": "产品资料"})
         self.wait_for(lambda: self.page.items.count() == 1)
         self.page.show_wiki()
-        self.wait_for(lambda: self.page.items.count() == 1 and "Wiki 编辑" in self.page.notice.text())
+        self.wait_for(lambda: self.page.items.count() == 1 and not self.page.notice.text())
         self.page.select_item(self.page.items.item(0))
         self.wait_for(lambda: "产品概览正文" in self.page.reader.toPlainText())
 
-    def test_wiki_groups_use_server_types_and_category_paths(self):
+    def test_wiki_rows_keep_server_types_and_category_paths(self):
         self.transport.wiki_pages = [
             {"slug": "summary", "title": "原始文档摘要", "page_type": "summary"},
             {"slug": "concept", "title": "认知力", "page_type": "concept", "category_path": ["投资基础"]},
@@ -299,14 +299,15 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.wait_for(lambda: self.page.items.count() == 1)
         self.page.show_wiki()
         self.wait_for(lambda: self.page.items.count() == 3)
-        self.assertEqual(self.page.items.topLevelItem(0).text(), "概览与导航")
-        self.assertEqual(self.page.items.topLevelItem(1).text(), "概念 · 投资基础")
-        self.assertEqual(self.page.items.topLevelItem(2).text(), "文档摘要")
+        self.assertEqual([self.page.items.item(i).text() for i in range(3)], ["Index", "认知力", "原始文档摘要"])
+        self.assertIn("概览与导航", self.page.items.item(0).data(0, Qt.UserRole + 1))
+        self.assertIn("概念 · 投资基础", self.page.items.item(1).data(0, Qt.UserRole + 1))
+        self.assertIn("文档摘要", self.page.items.item(2).data(0, Qt.UserRole + 1))
         self.assertTrue(self.page.items.isColumnHidden(3))
         self.assertTrue(self.page.files_button.isVisible())
         self.page.files_button.click()
         self.wait_for(lambda: self.page.view == "files" and self.page.items.count() == 1)
-        self.assertFalse(self.page.items.isColumnHidden(3))
+        self.assertTrue(self.page.items.isColumnHidden(3))
 
     def test_small_window_reflows_and_theme_can_be_reverted(self):
         self.page.resize(650, 760)
@@ -330,7 +331,7 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.page.navigate(self.page.tree.topLevelItem(1))
         self.page.jobs.pool.shutdown(wait=True)
         self.app.processEvents()
-        self.assertEqual(self.page.title.text(), "本地产物")
+        self.assertEqual(self.page.title.text(), "本地文件")
         self.assertEqual(self.page.items.count(), 2)
 
     def test_artifact_project_filter(self):
@@ -339,6 +340,46 @@ class KnowledgeLibraryUiTests(unittest.TestCase):
         self.page.show_artifacts()
         self.assertEqual(self.page.items.count(), 1)
         self.assertIn("report.docx", self.page.items.item(0).text())
+
+    def test_directory_filter_and_shortcuts_preserve_collapsed_groups(self):
+        mine = self.page.tree.topLevelItem(3)
+        shared = self.page.tree.topLevelItem(5)
+        shared.setExpanded(False)
+        self.page.directory_query.setText("共享研究")
+        self.assertTrue(mine.isHidden())
+        self.assertFalse(shared.isHidden())
+        self.assertTrue(shared.isExpanded())
+        self.page.directory_query.clear()
+        self.assertFalse(mine.isHidden())
+        self.assertFalse(shared.isExpanded())
+        self.page.nav_buttons[1].click()
+        self.assertEqual(self.page.view, "artifacts")
+        self.assertEqual(self.page.items.count(), 2)
+        self.assertTrue(self.page.nav_buttons[1].isChecked())
+
+    def test_directory_group_can_collapse_by_label_and_expand_by_arrow(self):
+        from PySide6.QtCore import QPoint
+        group = self.page.tree.topLevelItem(3)
+        tree = self.page.tree
+        self.assertTrue(group.isExpanded())
+        rect = tree.visualItemRect(group)
+        QTest.mouseClick(tree.viewport(), Qt.LeftButton, pos=rect.center())
+        self.assertFalse(group.isExpanded())
+        QTest.mouseClick(tree.viewport(), Qt.LeftButton, pos=QPoint(rect.left() - tree.indentation() // 2, rect.center().y()))
+        self.assertTrue(group.isExpanded())
+        self.assertTrue(self.page.nav_buttons[0].isChecked())
+
+    def test_search_enter_does_not_trigger_a_dialog_default_action(self):
+        self.page.query.setText("权限")
+        self.page.query.setFocus()
+        with patch("ui.knowledge_library.QDesktopServices.openUrl") as browser:
+            QTest.keyClick(self.page.query, Qt.Key_Return)
+            self.wait_for(lambda: self.page.view == "search" and self.page.items.count() > 0)
+        self.assertFalse(browser.called)
+        self.assertFalse(self.page.notice.isVisible())
+        self.page.error(RuntimeError("网络连接中断"))
+        self.assertTrue(self.page.notice.isVisible())
+        self.assertIn("网络连接中断", self.page.notice.text())
 
     def test_permission_failure_is_visible(self):
         self.transport.fail_status = 403
@@ -443,6 +484,35 @@ class MultiSourceLibraryUiTests(unittest.TestCase):
             self.assertFalse(page.splitter.isVisible())
             self.assertEqual(page.tree.topLevelItemCount(), 0)
             self.assertEqual(page.items.count(), 0)
+
+    def test_disconnected_source_picker_stays_at_top_and_accounts_are_in_menu(self):
+        from PySide6.QtCore import QPoint
+        for source in ("weknora", "tencent-docs", "lexiang"):
+            with self.subTest(source=source):
+                self.page.sources.setCurrentIndex(self.page.sources.findData(source))
+                inner = self.page.page(source)
+                self.service.provider(source).logout()
+                inner.refresh()
+                self.app.processEvents()
+                self.assertTrue(inner.login_box.isVisible())
+                self.assertTrue(self.page.sources.isVisible())
+                self.assertLess(self.page.sources.mapTo(inner.sidebar, QPoint(0, 0)).y(), 40)
+                self.assertFalse(inner.account_bar.isVisible())
+                self.assertFalse(inner.navigation.isVisible())
+                self.assertEqual(self.page.source_views[source].horizontalScrollBar().maximum(), 0)
+
+    def test_account_identity_is_available_only_in_source_menu(self):
+        page = self.page.page("tencent-docs")
+        self.assertFalse(page.account_label.isVisible())
+        menu = page.account_button.menu()
+        menu.popup(page.account_button.mapToGlobal(page.account_button.rect().topLeft()))
+        try:
+            self.app.processEvents()
+            self.assertTrue(page.account_label.isVisible())
+            self.assertIn("已连接", page.account_label.text())
+            self.assertIn("重新连接", [action.text() for action in menu.actions()])
+        finally:
+            menu.hide()
 
     def test_cloud_reauthentication_failure_and_cancel_preserve_current_selection(self):
         from core.knowledge_library import KnowledgeError

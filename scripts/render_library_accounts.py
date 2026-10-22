@@ -22,7 +22,7 @@ def main():
         config_dir = Path(temporary) / "DeepSeekCowork"
         config_dir.mkdir()
         (config_dir / "config.json").write_text("{}", encoding="utf-8")
-        from PySide6.QtCore import QCoreApplication, QEvent, Qt
+        from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QPushButton
@@ -79,6 +79,12 @@ def main():
                 page.resize(1000, 740)
                 page.show()
                 capture(page, source + "-login")
+                assert page.sources.mapTo(inner.sidebar, QPoint()).y() < 40
+                page.resize(660, 640)
+                capture(page, source + "-login-narrow")
+                assert page.sources.mapTo(inner.sidebar, QPoint()).y() < 40
+                assert page.source_views[source].horizontalScrollBar().maximum() == 0
+                page.resize(1000, 740)
                 provider = service.provider(source)
                 if source == "weknora":
                     provider.login("http://localhost", "reader@example.test", "password")
@@ -91,11 +97,33 @@ def main():
                 wait(lambda: inner.tree.topLevelItemCount() >= 4)
                 inner.open_kb({"id": "kb-a" if source == "weknora" else "space", "name": "产品资料"})
                 wait(lambda: inner.items.count() > 0)
+                # Representative fixture rows exercise types, metadata, long names and indexing states.
+                for index, title in enumerate(("用户访谈纪要.docx", "季度数据.xlsx", "产品研究报告.pdf", "面向多个项目的资料整理与团队协作说明.md")):
+                    document = {"id": f"sample-{index}", "knowledge_base_id": inner.current_kb["id"], "title": title,
+                                "updated_at": "2026-10-22T09:30:00+08:00", "parse_status": "processing" if index == 3 else "completed"}
+                    inner.add_item(title, {"document": document, "ref": provider.reference(inner.scope, inner.current_kb["id"], title, document["id"])})
                 capture(page, source + "-connected")
                 page.resize(660, 740)
                 capture(page, source + "-narrow")
                 assert page.size().width() == 660 and page.size().height() == 740
                 assert page.source_views[source].horizontalScrollBar().maximum() == 0
+                if source == "weknora":
+                    page.resize(1000, 740)
+                    for item in inner.items._rows:
+                        document = item.data(Qt.UserRole).get("document", {})
+                        store.visit(provider.reference(inner.scope, inner.current_kb["id"], document["title"], document["id"]))
+                    inner.nav_buttons[0].click()
+                    capture(page, "weknora-recent")
+                    provider.transport.wiki_pages = [
+                        {"slug": "index", "title": "产品资料概览", "page_type": "index"},
+                        {"slug": "concept", "title": "用户需求与验证方法", "page_type": "concept", "category_path": ["产品研究"]},
+                        {"slug": "summary", "title": "访谈纪要摘要", "page_type": "summary"}]
+                    inner.show_wiki()
+                    wait(lambda: inner.items.count() == 3)
+                    capture(page, "weknora-wiki")
+                    inner.files_button.click()
+                    wait(lambda: inner.items.count() == 1)
+                    page.resize(660, 740)
                 inner.items.item(0).setCheckState(0, Qt.Checked)
                 inner.reconnect()
                 if source == "weknora":

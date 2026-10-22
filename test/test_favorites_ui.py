@@ -5,18 +5,21 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QSizePolicy, QWidget
 
 from core.config_manager import ConfigManager
 from core.favorite_delivery import FavoriteDeliveryService
 from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
 from core.theme_service import ThemeRepository
+from ui_window_cleanup import close_test_window
 from main import (
     FAVORITE_EXECUTION_CHAT,
     FAVORITE_EXECUTION_WORKSPACE,
     FavoriteEditorPage,
+    FavoriteNameButton,
     FavoritesPage,
     MainWindow,
     MultiLineElidedLabel,
@@ -35,8 +38,10 @@ class FavoritesUiTests(unittest.TestCase):
         os.makedirs(self.workspace)
 
     def tearDown(self):
-        self.temp.cleanup()
+        # deleteLater requires a deferred-delete flush before its data disappears.
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
+        self.temp.cleanup()
 
     def _create_window(self):
         with patch("core.config_manager.get_app_data_dir", return_value=self.temp.name), patch(
@@ -129,8 +134,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertIn("飞书", editor.delivery_binding_status.text())
         finally:
             editor.deleteLater()
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_editor_uses_task_first_flow_and_progressive_run_options(self):
         editor = FavoriteEditorPage(
@@ -152,21 +156,23 @@ class FavoritesUiTests(unittest.TestCase):
             editor.schedule_attached_check.setChecked(True)
             self.assertFalse(editor.run_options_content.isHidden())
             self.assertFalse(editor.schedule_card.isHidden())
-            self.assertEqual(editor.schedule_attached_check.text(), "删除计划")
+            self.assertEqual(editor.schedule_attached_check.text(), "移除计划")
             self.assertIsNotNone(editor.favorite_payload()["schedule"])
         finally:
             editor.deleteLater()
 
-    def test_favorite_cards_are_compact_and_content_sized_for_odd_and_even_counts(self):
-        manager = self._create_window().config_manager
+    def test_favorite_list_keeps_rows_compact_and_actions_reachable_when_resized(self):
+        window = self._create_window()
+        manager = window.config_manager
         page = None
         try:
+            first_height = None
             for count in (1, 2, 3, 5):
                 manager.set_favorites([
                     {
                         "id": f"fav-{index}",
                         "name": f"任务 {index}",
-                        "description": "这是一段用于验证三行说明与统一卡片高度的较长普通用户任务用途。" * 2,
+                        "description": "这是一段用于验证长说明不会挤出操作按钮的普通用户任务用途。" * 3,
                         "prompt": f"执行任务 {index}",
                     }
                     for index in range(count)
@@ -177,38 +183,128 @@ class FavoritesUiTests(unittest.TestCase):
                 page.resize(1200, 760)
                 page.show()
                 self.app.processEvents()
-                cards = page.findChildren(type(page.container), "FavoriteCard")
-                self.assertEqual(len(cards), count)
-                self.assertEqual(len({card.height() for card in cards}), 1)
-                self.assertTrue(all(card.height() >= page.card_height() for card in cards))
-                self.assertTrue(all(card.sizePolicy().verticalPolicy() == QSizePolicy.Maximum for card in cards))
-                self.assertEqual(len(page.findChildren(QWidget, "FavoriteDeleteButton")), count)
-                self.assertEqual(len(page.findChildren(QWidget, "FavoriteMoreButton")), 0)
-                summaries = page.findChildren(MultiLineElidedLabel, "FavoriteSummary")
-                self.assertEqual(len(summaries), count)
-                self.assertTrue(all(summary.height() == summary.fontMetrics().lineSpacing() * 3 for summary in summaries))
+                rows = [page.grid.itemAt(i).widget() for i in range(page.grid.count())
+                        if page.grid.itemAt(i).widget().objectName() == "FavoriteTaskRow"]
+                self.assertEqual(len(rows), count)
+                self.assertEqual(len({row.x() for row in rows}), 1)
+                self.assertEqual(len({row.height() for row in rows}), 1)
+                if first_height is None:
+                    first_height = rows[0].height()
+                self.assertEqual(rows[0].height(), first_height)
+                self.assertLess(first_height, 160)
+                self.assertTrue(all(row.sizePolicy().verticalPolicy() == QSizePolicy.Maximum for row in rows))
+                self.assertFalse(page.findChildren(QWidget, "FavoriteDeleteButton"))
+                for row in rows:
+                    more = row.findChild(QToolButton, "FavoriteMoreButton")
+                    self.assertEqual([a.text() for a in more.menu().actions() if not a.isSeparator()],
+                                     ["编辑", "查看运行历史", "删除常用…"])
 
             page.resize(700, 760)
             self.app.processEvents()
             page.refresh_cards()
             self.app.processEvents()
-            cards = [
+            rows = [
                 page.grid.itemAt(index).widget()
                 for index in range(page.grid.count())
                 if page.grid.itemAt(index).widget()
-                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteTaskRow"
             ]
-            self.assertEqual(page._grid_columns, 1)
-            self.assertEqual(len(cards), 5)
-            self.assertEqual(len({card.height() for card in cards}), 1)
-            self.assertTrue(all(card.height() >= page.card_height() for card in cards))
+            self.assertEqual(len(rows), 5)
+            self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
+            self.assertEqual(len({row.x() for row in rows}), 1)
+            for row in rows:
+                buttons = row.findChildren(QPushButton) + row.findChildren(QToolButton)
+                for button in buttons:
+                    self.assertTrue(row.rect().contains(button.mapTo(row, button.rect().bottomRight())))
         finally:
             if page is not None:
                 page.deleteLater()
-            for widget in QApplication.topLevelWidgets():
-                if isinstance(widget, MainWindow):
-                    widget.close()
-                    widget.deleteLater()
+            close_test_window(window)
+
+    def test_list_keyboard_actions_and_search_do_not_launch_the_wrong_task(self):
+        window = self._create_window()
+        page = None
+        try:
+            window.config_manager.set_favorites([
+                {"id": "news", "name": "新闻整理", "description": "整理昨日新闻", "prompt": "整理新闻"},
+                {"id": "report", "name": "每周报告", "prompt": "整理报告"},
+            ])
+            page = FavoritesPage(window.config_manager)
+            page.resize(1100, 720)
+            page.show()
+            self.app.processEvents()
+            accidental_creates = []
+            page.create_btn.clicked.connect(lambda: accidental_creates.append(True))
+            with patch.object(page, "launch_favorite") as launch, patch.object(page, "edit_favorite") as edit:
+                page.search_input.setText("新闻")
+                page.search_input.setFocus()
+                QTest.keyClick(page.search_input, Qt.Key_Return)
+                self.app.processEvents()
+                launch.assert_not_called()
+                edit.assert_not_called()
+                self.assertFalse(accidental_creates)
+                rows = [page.grid.itemAt(i).widget() for i in range(page.grid.count())
+                        if page.grid.itemAt(i).widget().objectName() == "FavoriteTaskRow"]
+                self.assertEqual([r.property("favoriteId") for r in rows], ["news"])
+                title = rows[0].findChild(FavoriteNameButton)
+                title.setFocus()
+                QTest.keyClick(title, Qt.Key_Space)
+                edit.assert_called_once_with("news")
+                QTest.mouseClick(rows[0].findChild(QPushButton, "FavoriteStartButton"), Qt.LeftButton)
+                launch.assert_called_once_with("news")
+                more = rows[0].findChild(QToolButton, "FavoriteMoreButton")
+                more.menu().actions()[1].trigger()
+                self.assertTrue(page._view_history)
+                self.assertFalse(page.history_scope_row.isHidden())
+                QTest.mouseClick(page.history_clear_btn, Qt.LeftButton)
+                self.assertEqual(page._history_favorite_id, "")
+                self.assertTrue(page.history_scope_row.isHidden())
+        finally:
+            if page is not None:
+                page.close()
+                page.deleteLater()
+            close_test_window(window)
+
+    def test_editor_reflow_preserves_plan_and_tracks_header_save(self):
+        editor = FavoriteEditorPage(
+            projects=[{"name": "项目", "path": self.workspace}],
+            favorite={
+                "id": "reflow", "name": "每周报告", "description": "保留用途", "prompt": "整理周报",
+                "execution_mode": FAVORITE_EXECUTION_WORKSPACE, "workspace_dir": self.workspace,
+                "schedule": {"enabled": True, "schedule_type": "weekly", "weekdays": [1, 4],
+                             "time_of_day": "18:30", "prompt_mode": "custom", "custom_prompt": "定时整理周报"},
+            },
+        )
+        saved = []
+        editor.submit_callback = saved.append
+        try:
+            editor.show()
+            self.app.processEvents()
+            signature = editor._signature()
+            for width in (1200, 700, 480, 1200):
+                editor.resize(width, 720)
+                self.app.processEvents()
+                editor._update_editor_layout()
+                self.app.processEvents()
+                self.assertEqual(editor._signature(), signature)
+                self.assertFalse(editor.is_dirty())
+                self.assertEqual(editor.scroll.horizontalScrollBar().maximum(), 0)
+                self.assertTrue(editor.rect().contains(editor.save_btn.mapTo(editor, editor.save_btn.rect().bottomRight())))
+            editor.run_options_toggle.setChecked(False)
+            self.assertFalse(editor.execution_mode_combo.isHidden())
+            self.assertIn("每周", editor.schedule_summary_label.text())
+            editor.name_input.setText("更新后的周报")
+            self.assertTrue(editor.is_dirty())
+            self.assertTrue(editor.save_btn.isEnabled())
+            QTest.mouseClick(editor.save_btn, Qt.LeftButton)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["name"], "更新后的周报")
+            self.assertEqual(saved[0]["schedule"]["weekdays"], [1, 4])
+            self.assertEqual(saved[0]["schedule"]["custom_prompt"], "定时整理周报")
+            self.assertEqual(saved[0]["workspace_dir"], os.path.normpath(self.workspace))
+        finally:
+            editor.close()
+            editor.deleteLater()
 
     def test_favorite_value_controls_send_closed_wheel_to_page(self):
         editor = FavoriteEditorPage(
@@ -296,8 +392,7 @@ class FavoritesUiTests(unittest.TestCase):
         finally:
             if page is not None:
                 page.deleteLater()
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_delivery_readiness_requires_enterprise_message_configuration(self):
         window = self._create_window()
@@ -321,8 +416,7 @@ class FavoritesUiTests(unittest.TestCase):
         finally:
             if editor is not None:
                 editor.deleteLater()
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_enterprise_settings_round_trip_preserves_unsaved_favorite_editor(self):
         window = self._create_window()
@@ -345,8 +439,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertEqual(editor.prompt_edit.toPlainText(), "生成未保存的日报")
             self.assertTrue(editor.is_dirty())
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_binding_instruction_and_clipboard_use_complete_message(self):
         window = self._create_window()
@@ -369,8 +462,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertEqual(QApplication.clipboard().text(), command)
         finally:
             editor.deleteLater()
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_favorites_follow_theme_preview_and_restore_without_changing_data(self):
         previous_manager = getattr(self.app, "theme_manager", None)
@@ -411,7 +503,7 @@ class FavoritesUiTests(unittest.TestCase):
                 page.grid.itemAt(index).widget()
                 for index in range(page.grid.count())
                 if page.grid.itemAt(index).widget()
-                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteTaskRow"
             )
             self.assertIn("#1c2230", preview_card.styleSheet())
             self.assertFalse(window.theme_preview_bar.isHidden())
@@ -426,14 +518,13 @@ class FavoritesUiTests(unittest.TestCase):
                 page.grid.itemAt(index).widget()
                 for index in range(page.grid.count())
                 if page.grid.itemAt(index).widget()
-                and page.grid.itemAt(index).widget().objectName() == "FavoriteCard"
+                and page.grid.itemAt(index).widget().objectName() == "FavoriteTaskRow"
             )
             self.assertIn(original_panel, restored_card.styleSheet())
             self.assertTrue(window.theme_preview_bar.isHidden())
             self.assertEqual(window.config_manager.get_favorites(), original_favorites)
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
             self.app.theme_manager = previous_manager
 
     def test_composer_prefill_only_carries_real_project_workspace(self):
@@ -463,8 +554,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertEqual(captured[-1]["execution_mode"], FAVORITE_EXECUTION_WORKSPACE)
             self.assertEqual(captured[-1]["workspace_dir"], os.path.normpath(self.workspace))
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_prompt_favorite_launches_new_main_agent_chat_without_project(self):
         window = self._create_window()
@@ -487,8 +577,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertNotEqual(os.path.normpath(state.workspace_dir), os.path.normpath(self.workspace))
             self.assertEqual(submit.call_args.args[1], "研究这个主题")
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_scheduled_run_stays_in_background_and_records_terminal_error(self):
         window = self._create_window()
@@ -522,8 +611,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertEqual(finished["status"], "error")
             self.assertEqual(finished["error"], "provider unavailable")
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_scheduled_terminal_result_is_enqueued_after_completion(self):
         window = self._create_window()
@@ -615,8 +703,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertEqual(failed_finished["delivery_status"], "failed")
             self.assertIn("未可靠持久化", failed_finished["delivery_error"])
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_background_submit_retires_welcome_and_renders_user_request(self):
         window = self._create_window()
@@ -668,8 +755,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertIn("正在整理资料", agent_bubble.get_active_think_widget().text())
             self.assertEqual(agent_bubble.main_content_text, "日报已经整理完成。")
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_task_origin_is_persisted_and_shown_in_conversation_header(self):
         window = self._create_window()
@@ -691,8 +777,7 @@ class FavoritesUiTests(unittest.TestCase):
             window.update_conversation_header()
             self.assertEqual(window.workspace_subtitle_label.text(), "手动运行计划 · 常用「晨间简报」")
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_task_origin_restores_from_saved_conversation_meta(self):
         window = self._create_window()
@@ -721,8 +806,7 @@ class FavoritesUiTests(unittest.TestCase):
                 "由定时任务启动 · 常用「已删除的晨报」",
             )
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
     def test_missed_schedule_is_logged_and_not_backfilled(self):
         window = self._create_window()
@@ -750,8 +834,7 @@ class FavoritesUiTests(unittest.TestCase):
             self.assertIn("跳过", history[0]["summary"])
             self.assertGreater(window.config_manager.get_favorite("fav-missed")["schedule"]["next_run_at"], 1716200000)
         finally:
-            window.close()
-            window.deleteLater()
+            close_test_window(window)
 
 
 if __name__ == "__main__":

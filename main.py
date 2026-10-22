@@ -7660,6 +7660,25 @@ class MultiLineElidedLabel(QWidget):
             last.draw(painter, QPointF(0, 0))
 
 
+class FavoriteNameButton(QPushButton):
+    """A keyboard-accessible edit action that keeps long task names bounded."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(str(text), parent)
+        self._full_text = str(text)
+        self.setObjectName("FavoriteNameButton")
+        self.setAutoDefault(False)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setToolTip(f"编辑：{self._full_text}")
+        self.setAccessibleName(f"编辑：{self._full_text}")
+        self.setCursor(Qt.PointingHandCursor)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.setText(self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(1, self.width() - 4)))
+
+
 class FavoriteEditorPage(QDialog):
     def __init__(
         self,
@@ -7702,59 +7721,93 @@ class FavoriteEditorPage(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        self.editor_header = QFrame()
+        self.editor_header.setObjectName("FavoriteEditorHeader")
+        header = QHBoxLayout(self.editor_header)
+        header.setContentsMargins(24, 16, 24, 16)
+        header.setSpacing(16)
+        heading = QVBoxLayout()
+        heading.setSpacing(4)
+        header.addLayout(heading, 1)
+        root.addWidget(self.editor_header)
         scroll = QScrollArea()
         self.scroll = scroll
+        scroll.setObjectName("FavoriteEditorScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         root.addWidget(scroll, 1)
         content = QWidget()
+        content.setObjectName("FavoriteEditorContent")
         scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(14)
+        self.editor_columns = QBoxLayout(QBoxLayout.LeftToRight, content)
+        self.editor_columns.setContentsMargins(24, 24, 24, 24)
+        self.editor_columns.setSpacing(32)
+        self.task_column = QWidget()
+        self.task_column.setMinimumWidth(0)
+        self.task_column.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout = QVBoxLayout(self.task_column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(24)
+        layout.setAlignment(Qt.AlignTop)
+        self.settings_column = QFrame()
+        self.settings_column.setObjectName("FavoriteSettingsColumn")
+        self.settings_layout = QVBoxLayout(self.settings_column)
+        self.settings_layout.setContentsMargins(24, 0, 0, 0)
+        self.settings_layout.setSpacing(18)
+        self.settings_layout.setAlignment(Qt.AlignTop)
+        self.settings_layout.addWidget(self._kicker("运行设置"))
+        self.editor_columns.addWidget(self.task_column, 1, Qt.AlignTop)
+        self.editor_columns.addWidget(self.settings_column, 0, Qt.AlignTop)
+        self._editor_compact = None
 
         title = QLabel("编辑常用" if favorite else "新建常用")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("把经常重复的任务保存下来，下次可以直接开始，也可以按时自动运行。")
-        subtitle.setProperty("roleSubtitle", True)
+        subtitle = QLabel("保存任务内容和能力，下次直接开始。")
+        subtitle.setProperty("favoriteCaption", True)
         subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
 
         basics = QFrame()
         basics.setProperty("uiSurface", True)
         basics.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         basics_layout = QVBoxLayout(basics)
-        basics_layout.setContentsMargins(16, 16, 16, 16)
+        basics_layout.setContentsMargins(0, 0, 0, 0)
         basics_layout.setSpacing(12)
-        basics_layout.addWidget(self._kicker("任务"))
-        form = QFormLayout()
-        configure_responsive_form_layout(form)
-        form.setSpacing(12)
+        self.basics_grid = QGridLayout()
+        self.basics_grid.setHorizontalSpacing(16)
+        self.basics_grid.setVerticalSpacing(8)
+        self.name_label = self._kicker("任务名称")
+        self.description_label = self._kicker("补充说明（可选）")
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("例如：整理产品周报")
         self.description_input = QLineEdit()
-        self.description_input.setPlaceholderText("例如：每周汇总进展、风险和下周计划（可选）")
-        form.addRow("任务名称", self.name_input)
-        form.addRow("补充说明（可选）", self.description_input)
-        basics_layout.addLayout(form)
+        self.description_input.setPlaceholderText("简单说明用途，方便以后找到")
+        self.name_label.setBuddy(self.name_input)
+        self.description_label.setBuddy(self.description_input)
+        self.basics_grid.addWidget(self.name_label, 0, 0)
+        self.basics_grid.addWidget(self.name_input, 1, 0)
+        self.basics_grid.addWidget(self.description_label, 0, 1)
+        self.basics_grid.addWidget(self.description_input, 1, 1)
+        self._basics_narrow = False
+        basics_layout.addLayout(self.basics_grid)
         layout.addWidget(basics)
 
         execution = QFrame()
         execution.setProperty("uiSurface", True)
         execution.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         execution_layout = QVBoxLayout(execution)
-        execution_layout.setContentsMargins(16, 16, 16, 16)
+        execution_layout.setContentsMargins(0, 0, 0, 0)
         execution_layout.setSpacing(10)
         execution_layout.addWidget(self._kicker("在哪里运行"))
-        execution_hint = QLabel("通常使用独立聊天；需要读取或生成项目文件时，再选择一个项目。")
+        execution_hint = QLabel("需要读取或生成项目文件时，选择对应项目。")
         execution_hint.setWordWrap(True)
         execution_hint.setProperty("favoriteCaption", True)
         execution_hint.setStyleSheet(apple_caption_style())
-        execution_layout.addWidget(execution_hint)
         execution_form = QFormLayout()
         configure_responsive_form_layout(execution_form)
+        execution_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         self.execution_mode_combo = PageScrollSafeComboBox()
         self.execution_mode_combo.addItem("独立聊天", FAVORITE_EXECUTION_CHAT)
         self.execution_mode_combo.addItem("在项目中运行", FAVORITE_EXECUTION_WORKSPACE)
@@ -7774,43 +7827,49 @@ class FavoriteEditorPage(QDialog):
         if favorite_workspace and favorite_workspace not in known_paths:
             self.workspace_combo.addItem(f"不可用 · {favorite_workspace}", favorite_workspace)
             self.workspace_combo.setItemData(self.workspace_combo.count() - 1, favorite_workspace, Qt.ToolTipRole)
-        execution_form.addRow("运行位置", self.execution_mode_combo)
+        execution_form.addRow(self.execution_mode_combo)
         self.workspace_label = QLabel("选择项目")
         execution_form.addRow(self.workspace_label, self.workspace_combo)
         execution_layout.addLayout(execution_form)
+        execution_layout.addWidget(execution_hint)
         self.execution_card = execution
+        self.settings_layout.addWidget(execution)
 
         prompt_card = QFrame()
         prompt_card.setProperty("uiSurface", True)
         prompt_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         prompt_layout = QVBoxLayout(prompt_card)
-        prompt_layout.setContentsMargins(16, 16, 16, 16)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
         prompt_layout.setSpacing(10)
-        prompt_layout.addWidget(self._kicker("要完成的任务"))
-        prompt_hint = QLabel("写下每次开始后要直接执行的内容。也可以留空，只预先准备下面选择的能力。")
+        prompt_label = self._kicker("要完成什么")
+        prompt_layout.addWidget(prompt_label)
+        prompt_hint = QLabel("留空时只准备所选能力，进入聊天后再输入任务。")
         prompt_hint.setWordWrap(True)
         prompt_hint.setProperty("favoriteCaption", True)
         prompt_hint.setStyleSheet(apple_caption_style())
-        prompt_layout.addWidget(prompt_hint)
         self.prompt_edit = QTextEdit()
+        prompt_label.setBuddy(self.prompt_edit)
         self.prompt_edit.setPlaceholderText("例如：汇总本周项目进展，按结论、完成事项、风险和下周计划输出周报。")
         self.prompt_edit.setFixedHeight(150)
         prompt_layout.addWidget(self.prompt_edit)
+        prompt_layout.addWidget(prompt_hint)
         layout.addWidget(prompt_card)
 
         skills_card = QFrame()
         skills_card.setProperty("uiSurface", True)
         skills_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         skills_layout = QVBoxLayout(skills_card)
-        skills_layout.setContentsMargins(16, 16, 16, 16)
+        skills_layout.setContentsMargins(0, 0, 0, 0)
         skills_layout.setSpacing(10)
-        skills_layout.addWidget(self._kicker("需要使用的能力"))
+        skills_heading = QHBoxLayout()
+        skills_heading.addWidget(self._kicker("使用的能力"), 1)
+        skills_layout.addLayout(skills_heading)
         self.skill_search_input = QLineEdit()
         self.skill_search_input.setPlaceholderText("搜索可用能力")
         self.skill_search_input.setClearButtonEnabled(True)
         self.skill_search_input.textChanged.connect(self._filter_skills)
         self.skill_search_input.hide()
-        self.skill_list = QListWidget()
+        self.skill_list = QListWidget(self)
         self.skill_list.setMinimumHeight(130)
         self.skill_list.setMaximumHeight(210)
         self.skill_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -7865,10 +7924,10 @@ class FavoriteEditorPage(QDialog):
         self.selected_skills_summary.setStyleSheet(apple_caption_style())
         skills_layout.addWidget(self.selected_skills_summary)
         self.add_skills_btn = QPushButton("添加能力")
-        self.add_skills_btn.setObjectName("SecondaryBtn")
-        self.add_skills_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        self.add_skills_btn.setProperty("favoriteGhostButton", True)
+        self.add_skills_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.add_skills_btn.clicked.connect(self._show_skill_picker)
-        skills_layout.addWidget(self.add_skills_btn, 0, Qt.AlignLeft)
+        skills_heading.addWidget(self.add_skills_btn)
         layout.addWidget(skills_card)
 
         self.run_options_toggle = QPushButton()
@@ -7876,22 +7935,26 @@ class FavoriteEditorPage(QDialog):
         self.run_options_toggle.setProperty("favoriteDisclosureButton", True)
         self.run_options_toggle.setStyleSheet(apple_disclosure_button_style())
         self.run_options_toggle.toggled.connect(self._refresh_run_options_visibility)
-        layout.addWidget(self.run_options_toggle)
+        self.settings_layout.addWidget(self.run_options_toggle)
+        self.schedule_summary_label = QLabel()
+        self.schedule_summary_label.setProperty("favoriteCaption", True)
+        self.schedule_summary_label.setWordWrap(True)
+        self.settings_layout.addWidget(self.schedule_summary_label)
 
         self.run_options_content = QWidget()
         run_options_layout = QVBoxLayout(self.run_options_content)
         run_options_layout.setContentsMargins(0, 0, 0, 0)
         run_options_layout.setSpacing(14)
-        run_options_layout.addWidget(self.execution_card)
 
         schedule_toggle_row = QHBoxLayout()
         schedule_toggle_row.setContentsMargins(2, 2, 2, 2)
         schedule_title_box = QVBoxLayout()
         schedule_title_box.setSpacing(2)
-        schedule_title = QLabel("自动化")
+        schedule_title = QLabel("定时计划")
         schedule_title.setProperty("favoriteSectionTitle", True)
         schedule_title.setStyleSheet(apple_section_title_style(size=15))
-        schedule_hint = QLabel("需要时让任务按计划运行，并可把结果发送到企业消息。")
+        schedule_hint = QLabel("按计划运行，也可把结果发送到企业消息。")
+        schedule_hint.setWordWrap(True)
         schedule_hint.setProperty("favoriteCaption", True)
         schedule_hint.setStyleSheet(apple_caption_style())
         schedule_title_box.addWidget(schedule_title)
@@ -7909,13 +7972,14 @@ class FavoriteEditorPage(QDialog):
         self.schedule_card.setProperty("uiSurface", True)
         self.schedule_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         schedule_layout = QVBoxLayout(self.schedule_card)
-        schedule_layout.setContentsMargins(16, 16, 16, 16)
+        schedule_layout.setContentsMargins(0, 0, 0, 0)
         schedule_layout.setSpacing(12)
         state_row = QHBoxLayout()
         state_text_box = QVBoxLayout()
         state_text_box.setSpacing(2)
         state_text_box.addWidget(QLabel("自动运行"))
         auto_run_hint = QLabel("关闭后会保留时间设置，但不会自动触发。")
+        auto_run_hint.setWordWrap(True)
         auto_run_hint.setProperty("favoriteCaption", True)
         auto_run_hint.setStyleSheet(apple_caption_style())
         state_text_box.addWidget(auto_run_hint)
@@ -7927,6 +7991,7 @@ class FavoriteEditorPage(QDialog):
 
         prompt_mode_form = QFormLayout()
         configure_responsive_form_layout(prompt_mode_form)
+        prompt_mode_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         self.schedule_prompt_mode_combo = PageScrollSafeComboBox()
         self.schedule_prompt_mode_combo.addItem("使用上面的任务内容", FAVORITE_PROMPT_INHERIT)
         self.schedule_prompt_mode_combo.addItem("为定时运行单独填写", FAVORITE_PROMPT_CUSTOM)
@@ -7940,6 +8005,7 @@ class FavoriteEditorPage(QDialog):
 
         schedule_form = QFormLayout()
         configure_responsive_form_layout(schedule_form)
+        schedule_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         self.schedule_type_combo = PageScrollSafeComboBox()
         for label, value in (
             ("每天", FAVORITE_SCHEDULE_DAILY),
@@ -7960,14 +8026,14 @@ class FavoriteEditorPage(QDialog):
         weekly_page = QWidget()
         weekly_layout = QVBoxLayout(weekly_page)
         weekly_layout.setContentsMargins(0, 0, 0, 0)
-        weekday_row = QHBoxLayout()
+        weekday_row = QGridLayout()
+        weekday_row.setHorizontalSpacing(8)
         self.weekday_checks = []
         for index, label in enumerate(("一", "二", "三", "四", "五", "六", "日")):
             check = QCheckBox(f"周{label}")
             check.setProperty("weekdayIndex", index)
             self.weekday_checks.append(check)
-            weekday_row.addWidget(check)
-        weekday_row.addStretch()
+            weekday_row.addWidget(check, index // 4, index % 4)
         weekly_layout.addLayout(weekday_row)
         self.weekly_time_input = QLineEdit("09:00")
         weekly_layout.addWidget(self.weekly_time_input)
@@ -8053,7 +8119,7 @@ class FavoriteEditorPage(QDialog):
         self.delivery_binding_command_label.hide()
         schedule_layout.addWidget(self.delivery_binding_command_label)
 
-        delivery_actions = QHBoxLayout()
+        delivery_actions = QVBoxLayout()
         self.delivery_bind_btn = QPushButton("生成绑定码")
         self.delivery_bind_btn.setObjectName("SecondaryBtn")
         self.delivery_bind_btn.setStyleSheet(apple_button_style("secondary", radius=7))
@@ -8073,14 +8139,13 @@ class FavoriteEditorPage(QDialog):
         self.delivery_settings_btn.setStyleSheet(apple_button_style("secondary", radius=7))
         self.delivery_settings_btn.clicked.connect(self._open_delivery_settings)
         self.delivery_settings_btn.hide()
-        delivery_actions.addWidget(self.delivery_bind_btn)
-        delivery_actions.addWidget(self.delivery_copy_btn)
-        delivery_actions.addWidget(self.delivery_unbind_btn)
-        delivery_actions.addWidget(self.delivery_settings_btn)
-        delivery_actions.addStretch()
+        delivery_actions.addWidget(self.delivery_bind_btn, 0, Qt.AlignLeft)
+        delivery_actions.addWidget(self.delivery_copy_btn, 0, Qt.AlignLeft)
+        delivery_actions.addWidget(self.delivery_unbind_btn, 0, Qt.AlignLeft)
+        delivery_actions.addWidget(self.delivery_settings_btn, 0, Qt.AlignLeft)
         schedule_layout.addLayout(delivery_actions)
         run_options_layout.addWidget(self.schedule_card)
-        layout.addWidget(self.run_options_content)
+        self.settings_layout.addWidget(self.run_options_content)
 
         matching_history = [item for item in self.history if str(item.get("favorite_id") or "") == str(self.favorite.get("id") or "")]
         if matching_history:
@@ -8088,7 +8153,8 @@ class FavoriteEditorPage(QDialog):
             history_card.setProperty("uiSurface", True)
             history_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
             history_layout = QVBoxLayout(history_card)
-            history_layout.setContentsMargins(16, 16, 16, 16)
+            history_card.setObjectName("FavoriteRecentHistory")
+            history_layout.setContentsMargins(0, 18, 0, 0)
             history_layout.addWidget(self._kicker("最近运行"))
             for record in matching_history[:3]:
                 when = int(record.get("started_at") or record.get("scheduled_at") or 0)
@@ -8151,9 +8217,8 @@ class FavoriteEditorPage(QDialog):
             history_layout.addWidget(self.view_all_history_btn, 0, Qt.AlignLeft)
             layout.addWidget(history_card)
 
-        actions = ProductActionBar()
         self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.setObjectName("SecondaryBtn")
+        self.cancel_btn.setProperty("favoriteGhostButton", True)
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn = QPushButton("保存")
         self.save_btn.setObjectName("PrimaryBtn")
@@ -8162,10 +8227,12 @@ class FavoriteEditorPage(QDialog):
         self.run_schedule_btn.setObjectName("SecondaryBtn")
         self.run_schedule_btn.setVisible(bool(self.favorite.get("id") and self.favorite.get("schedule")))
         self.run_schedule_btn.clicked.connect(self._handle_run_schedule)
-        actions.layout.addWidget(self.run_schedule_btn)
-        actions.layout.addWidget(self.cancel_btn)
-        actions.layout.addWidget(self.save_btn)
-        root.addWidget(actions)
+        run_options_layout.addWidget(self.run_schedule_btn, 0, Qt.AlignLeft)
+        header.addWidget(self.cancel_btn)
+        header.addWidget(self.save_btn)
+        # Embedded pages must not inherit QDialog's implicit Enter-to-submit.
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
 
         self._load()
         self._refresh_selected_skills_summary()
@@ -8177,6 +8244,7 @@ class FavoriteEditorPage(QDialog):
         self._baseline = self._signature()
         self._connect_dirty_tracking()
         self._refresh_dirty()
+        self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="management")
         self.delivery_binding_timer = QTimer(self)
         self.delivery_binding_timer.setInterval(1500)
@@ -8187,17 +8255,25 @@ class FavoriteEditorPage(QDialog):
     def _kicker(self, text):
         label = QLabel(text)
         label.setProperty("favoriteKicker", True)
-        label.setStyleSheet(apple_section_kicker_style())
+        label.setStyleSheet(apple_section_title_style(size=DesignTokens.font_size_body))
         return label
 
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "FavoriteEditorPage")
+        self.setStyleSheet(self.styleSheet() + f"""
+            QDialog#FavoriteEditorPage, QWidget#FavoriteEditorContent,
+            QScrollArea#FavoriteEditorScroll {{ background: {DesignTokens.bg_panel}; border: none; }}
+            QFrame#FavoriteEditorHeader {{ background: {DesignTokens.bg_panel};
+                border: none; border-bottom: 1px solid {DesignTokens.separator}; }}
+        """)
         for surface in self.findChildren(QFrame):
             if surface.property("uiSurface"):
-                surface.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+                surface.setStyleSheet('QFrame[uiSurface="true"] { background: transparent; border: none; }')
+            if surface.objectName() == "FavoriteRecentHistory":
+                surface.setStyleSheet(f"QFrame#FavoriteRecentHistory {{ background: transparent; border: none; border-top: 1px solid {DesignTokens.separator}; }}")
         for label in self.findChildren(QLabel):
             if label.property("favoriteKicker"):
-                label.setStyleSheet(apple_section_kicker_style())
+                label.setStyleSheet(apple_section_title_style(size=DesignTokens.font_size_body))
             elif label.property("favoriteSectionTitle"):
                 label.setStyleSheet(apple_section_title_style(size=15))
             elif label.property("favoriteCaption"):
@@ -8215,6 +8291,44 @@ class FavoriteEditorPage(QDialog):
             padding=4,
             row_height=56,
         )
+        self._update_editor_layout()
+        self._refresh_run_options_visibility()
+
+    def _update_editor_layout(self):
+        if not hasattr(self, "editor_columns"):
+            return
+        compact = self.scroll.viewport().width() < DesignTokens.management_split_threshold
+        self.editor_columns.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
+        self.editor_columns.setStretch(0, 0 if compact else 1)
+        self.settings_column.setMinimumWidth(0 if compact else 320)
+        self.settings_column.setMaximumWidth(16777215 if compact else 320)
+        self.settings_layout.setContentsMargins(0 if compact else 24, 20 if compact else 0, 0, 0)
+        edge = "top" if compact else "left"
+        self.settings_column.setStyleSheet(
+            f"QFrame#FavoriteSettingsColumn {{ background: transparent; border: none; "
+            f"border-{edge}: 1px solid {DesignTokens.separator}; }}"
+        )
+        # Two short fields share a line only when their editable text still fits.
+        narrow_fields = (self.scroll.viewport().width() - 48 if compact else self.scroll.viewport().width() - 400) < 480
+        if getattr(self, "_basics_narrow", None) != narrow_fields:
+            for widget in (self.name_label, self.name_input, self.description_label, self.description_input):
+                self.basics_grid.removeWidget(widget)
+            self.basics_grid.addWidget(self.name_label, 0, 0)
+            self.basics_grid.addWidget(self.name_input, 1, 0)
+            self.basics_grid.addWidget(self.description_label, 2 if narrow_fields else 0, 0 if narrow_fields else 1)
+            self.basics_grid.addWidget(self.description_input, 3 if narrow_fields else 1, 0 if narrow_fields else 1)
+            self.basics_grid.setColumnStretch(0, 1)
+            self.basics_grid.setColumnStretch(1, 0 if narrow_fields else 1)
+            self._basics_narrow = narrow_fields
+        self._editor_compact = compact
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_editor_layout()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_editor_layout()
 
     def _field_page(self, label, field):
         page = QWidget()
@@ -8278,6 +8392,7 @@ class FavoriteEditorPage(QDialog):
         for switch in self.findChildren(AppleSwitch):
             switch.toggled.connect(callback)
         self.schedule_attached_check.toggled.connect(callback)
+        self.schedule_enabled_check.toggled.connect(self._refresh_schedule_summary)
         for spin in self.findChildren(QSpinBox):
             spin.valueChanged.connect(callback)
         self.once_datetime_edit.dateTimeChanged.connect(callback)
@@ -8469,15 +8584,32 @@ class FavoriteEditorPage(QDialog):
     def _refresh_run_options_visibility(self):
         expanded = self.run_options_toggle.isChecked()
         self.run_options_content.setVisible(expanded)
-        self.run_options_toggle.setText(
-            ("▾" if expanded else "▸") + " 运行环境与自动化"
-            + (" · 已设置" if self.schedule_attached_check.isChecked() else "")
-        )
+        self.run_options_toggle.setText("定时运行与通知")
+        self.run_options_toggle.setIcon(qta.icon(
+            "fa5s.chevron-down" if expanded else "fa5s.chevron-right",
+            color=DesignTokens.text_secondary,
+        ))
+        self.run_options_toggle.setIconSize(QSize(10, 10))
+        self.schedule_summary_label.setVisible(not expanded)
+        self._refresh_schedule_summary()
+
+    def _refresh_schedule_summary(self):
+        if not hasattr(self, "schedule_type_combo"):
+            return
+        if not self.schedule_attached_check.isChecked():
+            self.schedule_summary_label.setText("未设置计划，需要时手动开始。")
+            return
+        try:
+            summary = describe_favorite_schedule(self._schedule_payload())
+        except (ValueError, TypeError) as exc:
+            summary = f"计划无效：{exc}"
+        state = "已启用" if self.schedule_enabled_check.isChecked() else "已暂停"
+        self.schedule_summary_label.setText(f"{state} · {summary}")
 
     def _refresh_schedule_visibility(self):
         attached = self.schedule_attached_check.isChecked()
         self.schedule_card.setVisible(attached)
-        self.schedule_attached_check.setText("删除计划" if attached else "添加定时计划")
+        self.schedule_attached_check.setText("移除计划" if attached else "添加定时计划")
         if hasattr(self, "run_options_toggle"):
             self._refresh_run_options_visibility()
         if hasattr(self, "delivery_enabled_check"):
@@ -8503,6 +8635,7 @@ class FavoriteEditorPage(QDialog):
         except Exception as exc:
             preview = f"计划无效：{exc}"
         self.schedule_preview_label.setText(preview)
+        self._refresh_schedule_summary()
 
     def _refresh_delivery_state(self):
         attached = self.schedule_attached_check.isChecked()
@@ -8733,18 +8866,20 @@ class FavoritesPage(QDialog):
         self._view_history = False
         self._history_status_filter = "all"
         self._history_favorite_id = ""
-        self._grid_columns = 0
+        self._list_compact = None
+        self._latest_by_favorite = {}
         apply_product_dialog(self, "FavoritesPage")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+        layout.setSpacing(20)
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("常用")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("保存经常重复的任务，下次直接开始或按时自动运行。")
-        subtitle.setProperty("roleSubtitle", True)
+        subtitle = QLabel("保存常做的任务，需要时直接开始。")
+        subtitle.setProperty("favoriteCaption", True)
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
@@ -8755,26 +8890,38 @@ class FavoritesPage(QDialog):
         header.addWidget(self.create_btn)
         layout.addLayout(header)
 
-        view_tabs = QHBoxLayout()
+        tabs = QFrame()
+        tabs.setObjectName("FavoriteViewTabs")
+        view_tabs = QHBoxLayout(tabs)
+        view_tabs.setContentsMargins(0, 0, 0, 0)
+        view_tabs.setSpacing(24)
         self.tasks_view_btn = QPushButton("常用任务")
         self.history_view_btn = QPushButton("运行历史")
         for button in (self.tasks_view_btn, self.history_view_btn):
             button.setCheckable(True)
-            button.setStyleSheet(apple_segmented_button_style())
+            button.setObjectName("FavoriteViewTab")
         self.tasks_view_btn.clicked.connect(lambda: self._set_view(False))
         self.history_view_btn.clicked.connect(lambda: self._set_view(True))
         view_tabs.addWidget(self.tasks_view_btn)
         view_tabs.addWidget(self.history_view_btn)
         view_tabs.addStretch()
-        layout.addLayout(view_tabs)
+        layout.addWidget(tabs)
 
-        toolbar = QHBoxLayout()
+        self.toolbar = QBoxLayout(QBoxLayout.LeftToRight)
+        toolbar = self.toolbar
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索任务名称或用途")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setStyleSheet(apple_search_field_style())
+        self.search_input.setMinimumWidth(0)
+        self.search_input.setMaximumWidth(360)
+        self.search_input.setStyleSheet(apple_search_field_style() + "QLineEdit { min-height: 0; }")
+        self.search_input.setFixedHeight(DesignTokens.control_height_lg)
         self.search_input.textChanged.connect(self.refresh_cards)
         toolbar.addWidget(self.search_input, 1)
+        toolbar.addStretch()
+        filters = QHBoxLayout()
+        filters.setSpacing(6)
+        toolbar.addLayout(filters)
         self.history_status_combo = PageScrollSafeComboBox()
         for label, value in (
             ("全部状态", "all"),
@@ -8785,7 +8932,7 @@ class FavoritesPage(QDialog):
             self.history_status_combo.addItem(label, value)
         self.history_status_combo.currentIndexChanged.connect(self._set_history_status_filter)
         self.history_status_combo.hide()
-        toolbar.addWidget(self.history_status_combo)
+        filters.addWidget(self.history_status_combo)
         self.all_btn = QPushButton("全部")
         self.scheduled_btn = QPushButton("定时运行")
         for button in (self.all_btn, self.scheduled_btn):
@@ -8793,33 +8940,72 @@ class FavoritesPage(QDialog):
             button.setStyleSheet(apple_segmented_button_style())
         self.all_btn.clicked.connect(lambda: self._set_filter(False))
         self.scheduled_btn.clicked.connect(lambda: self._set_filter(True))
-        toolbar.addWidget(self.all_btn)
-        toolbar.addWidget(self.scheduled_btn)
+        filters.addWidget(self.all_btn)
+        filters.addWidget(self.scheduled_btn)
         layout.addLayout(toolbar)
 
+        self.history_scope_row = QWidget()
+        scope_layout = QHBoxLayout(self.history_scope_row)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_scope_label = QLabel()
+        self.history_scope_label.setWordWrap(True)
+        self.history_scope_label.setProperty("favoriteCaption", True)
+        scope_layout.addWidget(self.history_scope_label, 1)
+        self.history_clear_btn = QPushButton("查看全部任务")
+        self.history_clear_btn.setStyleSheet(apple_button_style("ghost"))
+        self.history_clear_btn.clicked.connect(lambda: self.show_history())
+        scope_layout.addWidget(self.history_clear_btn)
+        self.history_scope_row.hide()
+        layout.addWidget(self.history_scope_row)
+
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("FavoritesScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.container = QWidget()
+        self.container.setObjectName("FavoritesContent")
         self.grid = QGridLayout(self.container)
         self.grid.setContentsMargins(0, 4, 0, 0)
-        self.grid.setSpacing(10)
+        self.grid.setSpacing(0)
         self.grid.setAlignment(Qt.AlignTop)
         self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 1)
         self.scroll.setWidget(self.container)
         layout.addWidget(self.scroll, 1)
+        self.result_label = QLabel()
+        self.result_label.setProperty("favoriteCaption", True)
+        layout.addWidget(self.result_label)
+        self.all_btn.setChecked(True)
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
         self._set_view(False)
+        self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="management")
 
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "FavoritesPage")
-        self.search_input.setStyleSheet(apple_search_field_style())
+        self.setStyleSheet(self.styleSheet() + f"""
+            QDialog#FavoritesPage, QWidget#FavoritesContent, QScrollArea#FavoritesScroll {{
+                background: {DesignTokens.bg_panel}; border: none;
+            }}
+            QFrame#FavoriteViewTabs {{ background: transparent; border: none;
+                border-bottom: 1px solid {DesignTokens.separator}; }}
+            QPushButton#FavoriteViewTab {{ background: transparent; border: none;
+                border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 0 12px;
+                color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_body}px; }}
+            QPushButton#FavoriteViewTab:checked {{ color: {DesignTokens.text_primary};
+                border-bottom-color: {DesignTokens.primary}; font-weight: 600; }}
+            QPushButton#FavoriteViewTab:hover {{ color: {DesignTokens.primary}; }}
+            QPushButton#FavoriteViewTab:focus {{ background: {DesignTokens.primary_soft}; }}
+        """)
+        self.search_input.setStyleSheet(apple_search_field_style() + "QLineEdit { min-height: 0; }")
+        self.create_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_inverse))
         for button in (self.all_btn, self.scheduled_btn):
             button.setStyleSheet(apple_segmented_button_style())
-        for button in (self.tasks_view_btn, self.history_view_btn):
-            button.setStyleSheet(apple_segmented_button_style())
+        for label in self.findChildren(QLabel):
+            if label.property("favoriteCaption"):
+                label.setStyleSheet(apple_caption_style())
+        self.history_clear_btn.setStyleSheet(apple_button_style("ghost"))
         self.refresh_cards()
 
     def _set_view(self, history):
@@ -8829,6 +9015,10 @@ class FavoritesPage(QDialog):
         self.all_btn.setVisible(not self._view_history)
         self.scheduled_btn.setVisible(not self._view_history)
         self.history_status_combo.setVisible(self._view_history)
+        self.history_scope_row.setVisible(self._view_history and bool(self._history_favorite_id))
+        if self._history_favorite_id:
+            favorite = self._find(self._history_favorite_id) or {}
+            self.history_scope_label.setText(f"正在查看：{favorite.get('name') or '此任务'}")
         self.search_input.setPlaceholderText(
             "搜索任务名称" if self._view_history else "搜索任务名称或用途"
         )
@@ -8866,6 +9056,10 @@ class FavoritesPage(QDialog):
 
     def refresh_cards(self):
         self._clear_grid()
+        self._list_compact = self.scroll.viewport().width() < 800
+        self._latest_by_favorite = {}
+        for record in self.config_manager.get_favorite_run_history():
+            self._latest_by_favorite.setdefault(str(record.get("favorite_id") or ""), record)
         if self._view_history:
             self._refresh_history_rows()
             return
@@ -8884,25 +9078,37 @@ class FavoritesPage(QDialog):
             if query and query not in haystack:
                 continue
             visible.append(favorite)
+        self.tasks_view_btn.setText(f"常用任务  {len(self.favorites)}")
+        self.result_label.setText(
+            f"{len(visible)} 个常用任务" + (f" · 共 {len(self.favorites)} 个" if len(visible) != len(self.favorites) else "")
+        )
         if not visible:
             if self.favorites and (query or self._filter_scheduled):
-                empty = ProductEmptyState("没有匹配的常用项", "调整搜索词或筛选条件后再试。")
+                empty = ProductEmptyState("没有匹配的常用任务", "换个关键词，或查看全部任务。", "查看全部", appearance="plain", action_kind="secondary")
+                empty.action_button.clicked.connect(self._clear_task_filters)
             else:
-                empty = ProductEmptyState("还没有常用任务", "把经常重复的任务保存下来，之后可以直接开始。", "新建常用")
+                empty = ProductEmptyState("还没有常用任务", "保存任务内容和需要的能力，下次直接开始。", "新建常用", appearance="plain")
                 empty.action_button.clicked.connect(self.create_favorite)
-            self.grid.addWidget(empty, 0, 0, 1, 2)
+            empty.action_button.setAutoDefault(False)
+            self.grid.addWidget(empty, 0, 0)
             return
-        columns = 2 if self.scroll.viewport().width() >= 880 else 1
-        self._grid_columns = columns
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 1 if columns == 2 else 0)
+        start_row = 0
+        if not self._list_compact:
+            self.grid.addWidget(self._build_list_header(), 0, 0)
+            start_row = 1
         for index, favorite in enumerate(visible):
-            self.grid.addWidget(self._build_card(favorite), index // columns, index % columns)
-        spacer_row = (len(visible) + columns - 1) // columns
+            self.grid.addWidget(self._build_task_row(favorite), start_row + index, 0)
         spacer = QWidget()
-        spacer.setObjectName("FavoritesGridSpacer")
+        spacer.setObjectName("FavoritesListSpacer")
         spacer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.grid.addWidget(spacer, spacer_row, 0, 1, columns)
+        self.grid.addWidget(spacer, start_row + len(visible), 0)
+
+    def _clear_task_filters(self):
+        self._filter_scheduled = False
+        self.all_btn.setChecked(True)
+        self.scheduled_btn.setChecked(False)
+        self.search_input.clear()
+        self.refresh_cards()
 
     def _refresh_history_rows(self):
         query = self.search_input.text().strip().casefold()
@@ -8932,15 +9138,18 @@ class FavoritesPage(QDialog):
             if self._history_status_filter == "delivery_error" and delivery_status not in delivery_problem_states:
                 continue
             visible.append(record)
+        self.result_label.setText(f"{len(visible)} 条运行记录")
         if not visible:
             detail = "清除当前任务筛选或调整状态后再试。" if self._history_favorite_id else "运行定时计划或立即运行计划后，会在这里记录结果。"
-            empty = ProductEmptyState("暂无匹配的运行记录", detail)
-            self.grid.addWidget(empty, 0, 0, 1, 2)
+            empty = ProductEmptyState("暂无匹配的运行记录", detail, appearance="plain")
+            self.grid.addWidget(empty, 0, 0)
             return
-        self._grid_columns = 1
         for row_index, record in enumerate(visible):
-            self.grid.addWidget(self._build_history_row(record), row_index, 0, 1, 2)
+            self.grid.addWidget(self._build_history_row(record), row_index, 0)
         self.grid.setColumnStretch(0, 1)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.grid.addWidget(spacer, len(visible), 0)
 
     def _build_history_row(self, record):
         delivery_problem_states = {
@@ -8951,13 +9160,17 @@ class FavoritesPage(QDialog):
         }
         row = QFrame()
         row.setObjectName("FavoriteHistoryRow")
-        row.setProperty("uiSurface", True)
-        row.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        row.setStyleSheet(
+            f"QFrame#FavoriteHistoryRow {{ background: {DesignTokens.bg_panel}; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
+        )
         layout = QVBoxLayout(row)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(7)
-        top = QHBoxLayout()
+        top = QBoxLayout(QBoxLayout.TopToBottom if self._list_compact else QBoxLayout.LeftToRight)
         name = QLabel(str(record.get("favorite_name") or "未命名常用"))
+        name.setWordWrap(True)
         name.setStyleSheet(apple_section_title_style(size=14))
         top.addWidget(name, 1)
         when = int(record.get("started_at") or record.get("scheduled_at") or record.get("created_at") or 0)
@@ -8994,10 +9207,11 @@ class FavoritesPage(QDialog):
             detail.setProperty("favoriteCaption", True)
             detail.setStyleSheet(apple_caption_style())
             layout.addWidget(detail)
-        actions = QHBoxLayout()
+        actions = QBoxLayout(QBoxLayout.TopToBottom if self.scroll.viewport().width() < 480 else QBoxLayout.LeftToRight)
         actions.addStretch()
         if record.get("session_id"):
             open_btn = QPushButton("打开任务")
+            open_btn.setAutoDefault(False)
             open_btn.setStyleSheet(apple_button_style("ghost", radius=7))
             open_btn.clicked.connect(lambda checked=False, sid=record.get("session_id"): self._open_history_session(sid))
             actions.addWidget(open_btn)
@@ -9005,6 +9219,7 @@ class FavoritesPage(QDialog):
         if delivery_status in delivery_problem_states and record.get("delivery_id"):
             retry_text = "确认重新发送" if delivery_status == FAVORITE_DELIVERY_STATUS_UNKNOWN else "重新发送未成功项"
             retry_btn = QPushButton(retry_text)
+            retry_btn.setAutoDefault(False)
             retry_btn.setStyleSheet(apple_button_style("secondary", radius=7))
             retry_btn.clicked.connect(lambda checked=False, rec=dict(record): self._retry_history_delivery(rec))
             actions.addWidget(retry_btn)
@@ -9030,41 +9245,70 @@ class FavoritesPage(QDialog):
             self._main.retry_favorite_delivery(str(record.get("delivery_id") or ""))
             self.refresh()
 
-    @staticmethod
-    def card_height():
-        title_font = QFont(QApplication.font())
-        title_font.setPixelSize(15)
-        meta_font = QFont(QApplication.font())
-        meta_font.setPixelSize(DesignTokens.font_size_meta)
-        title_height = QFontMetrics(title_font).lineSpacing()
-        meta_height = QFontMetrics(meta_font).lineSpacing()
-        return max(154, 24 + title_height + meta_height * 3 + DesignTokens.control_height + 30)
+    def _build_list_header(self):
+        header = QFrame()
+        header.setObjectName("FavoriteListHeader")
+        header.setStyleSheet(
+            f"QFrame#FavoriteListHeader {{ background: {DesignTokens.bg_main}; border: none; "
+            f"border-radius: {DesignTokens.radius_sm}px; }}"
+        )
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row = QHBoxLayout(header)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(20)
+        for index, (text, width) in enumerate((("任务", 0), ("运行方式", 160), ("最近运行", 140), ("", 108))):
+            label = QLabel(text)
+            label.setStyleSheet(apple_caption_style())
+            if width:
+                label.setFixedWidth(width)
+            row.addWidget(label, 1 if index == 0 else 0)
+        return header
 
-    def _build_card(self, favorite):
-        card = QFrame()
-        card.setObjectName("FavoriteCard")
-        card.setProperty("uiSurface", True)
-        card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-        card.setMinimumHeight(self.card_height())
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
-        title_row = QHBoxLayout()
-        title_text = str(favorite.get("name") or "未命名常用")
-        title = ElidedToolLabel(title_text)
-        title.setFullText(title_text)
-        title.setStyleSheet(apple_section_title_style(size=15))
-        title_row.addWidget(title)
-        title_row.addStretch()
-        if favorite.get("schedule"):
-            schedule = favorite.get("schedule") or {}
-            badge = QLabel("定时已启用" if schedule.get("enabled") else "定时已暂停")
-            badge.setStyleSheet(apple_status_chip_style("running" if schedule.get("enabled") else "pending", subtle=not schedule.get("enabled")))
-            title_row.addWidget(badge)
-        layout.addLayout(title_row)
+    def _build_task_row(self, favorite):
+        favorite_id = str(favorite.get("id") or "")
+        row = QFrame()
+        row.setObjectName("FavoriteTaskRow")
+        row.setProperty("favoriteId", favorite_id)
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        row.setStyleSheet(
+            f"QFrame#FavoriteTaskRow {{ background: {DesignTokens.bg_panel}; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(12, 20, 12, 20)
+        layout.setSpacing(20)
+        identity = QWidget()
+        identity.setMinimumWidth(0)
+        identity.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        identity_layout = QHBoxLayout(identity)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(12)
+        mark = QLabel()
+        mark.setFixedSize(34, 34)
+        mark.setAlignment(Qt.AlignCenter)
+        mark.setPixmap(qta.icon("fa5s.star", color=DesignTokens.primary).pixmap(15, 15))
+        mark.setStyleSheet(f"background: {DesignTokens.primary_soft}; border: none; border-radius: {DesignTokens.radius_md}px;")
+        identity_layout.addWidget(mark, 0, Qt.AlignTop)
+        text_column = QVBoxLayout()
+        text_column.setSpacing(5)
+        identity_layout.addLayout(text_column, 1)
+        title = FavoriteNameButton(favorite.get("name") or "未命名常用")
+        title.setStyleSheet(
+            f"QPushButton#FavoriteNameButton {{ background: transparent; color: {DesignTokens.text_primary}; "
+            f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; text-align: left; border: none; padding: 0; }}"
+            f"QPushButton#FavoriteNameButton:hover {{ color: {DesignTokens.primary}; }}"
+            f"QPushButton#FavoriteNameButton:focus {{ background: {DesignTokens.primary_soft}; border-radius: 3px; }}"
+        )
+        title.clicked.connect(lambda: self.edit_favorite(favorite_id))
+        text_column.addWidget(title)
         prompt = str(favorite.get("prompt") or "").strip()
         skills = normalize_selected_skill_names(favorite.get("skill_names"))
+        summary = str(favorite.get("description") or prompt or "准备已选能力，进入聊天后输入任务。").strip()
+        summary_label = MultiLineElidedLabel(re.sub(r"\s+", " ", summary), max_lines=2)
+        summary_label.setObjectName("FavoriteSummary")
+        text_column.addWidget(summary_label)
+        layout.addWidget(identity, 1)
+
         if favorite.get("execution_mode") == FAVORITE_EXECUTION_CHAT:
             execution = "独立聊天"
         else:
@@ -9079,9 +9323,8 @@ class FavoritesPage(QDialog):
             )
             project_name = str((project or {}).get("name") or "").strip()
             project_name = project_name or os.path.basename(workspace_dir.rstrip(os.sep)) or "项目不可用"
-            execution = f"在「{project_name}」项目中"
-        meta_parts = [execution]
-        meta_parts.append(f"{len(skills)} 项能力" if skills else "不额外使用能力")
+            execution = f"项目 · {project_name}"
+        meta_parts = [execution, f"{len(skills)} 项能力" if skills else "不额外使用能力"]
         delivery = dict(((favorite.get("schedule") or {}).get("delivery") or {}))
         if delivery.get("enabled"):
             binding = None
@@ -9093,32 +9336,38 @@ class FavoritesPage(QDialog):
                 if binding and binding.get("status") == "active"
                 else "企业消息绑定不可用"
             )
-        meta = QLabel(" · ".join(meta_parts))
-        meta.setStyleSheet(apple_caption_style())
-        meta.setWordWrap(True)
-        layout.addWidget(meta)
-        summary = str(favorite.get("description") or prompt or "开始后会加载已选能力，等待你输入具体任务。").strip()
-        summary_label = MultiLineElidedLabel(re.sub(r"\s+", " ", summary), max_lines=3)
-        summary_label.setObjectName("FavoriteSummary")
-        layout.addWidget(summary_label)
+        run_info = QWidget()
+        run_info.setMinimumWidth(0)
+        run_layout = QVBoxLayout(run_info)
+        run_layout.setContentsMargins(0, 0, 0, 0)
+        run_layout.setSpacing(4)
+        execution_label = ElidedToolLabel(execution)
+        execution_label.setFullText(execution)
+        execution_label.setToolTip(" · ".join(meta_parts))
+        execution_label.setStyleSheet(apple_caption_style())
+        run_layout.addWidget(execution_label)
         schedule = dict(favorite.get("schedule") or {})
+        schedule_text = "手动开始"
+        schedule_detail = ""
         if schedule:
+            schedule_text = describe_favorite_schedule(schedule)
+            if not schedule.get("enabled"):
+                schedule_text = "已暂停 · " + schedule_text
             next_run = int(schedule.get("next_run_at") or 0)
-            schedule_line = (
-                "下次运行：" + datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M")
-                if schedule.get("enabled") and next_run
-                else "自动运行已暂停"
-            )
-            schedule_label = QLabel(schedule_line)
-            schedule_label.setStyleSheet(apple_caption_style())
-            layout.addWidget(schedule_label)
-        latest = next(
-            (
-                item for item in self.config_manager.get_favorite_run_history()
-                if str(item.get("favorite_id") or "") == str(favorite.get("id") or "")
-            ),
-            None,
-        )
+            if schedule.get("enabled") and next_run:
+                schedule_detail = "下次运行：" + datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M")
+        schedule_label = ElidedToolLabel(schedule_text)
+        schedule_label.setFullText(schedule_text)
+        schedule_label.setObjectName("FavoriteScheduleSummary")
+        schedule_label.setToolTip("\n".join(filter(None, (schedule_text, schedule_detail, " · ".join(meta_parts)))))
+        schedule_label.setStyleSheet(apple_caption_style())
+        run_layout.addWidget(schedule_label)
+
+        latest = self._latest_by_favorite.get(favorite_id)
+        latest_box = QWidget()
+        latest_layout = QVBoxLayout(latest_box)
+        latest_layout.setContentsMargins(0, 0, 0, 0)
+        latest_layout.setSpacing(4)
         if latest:
             latest_status = {
                 FAVORITE_RUN_STATUS_RUNNING: "运行中",
@@ -9127,46 +9376,81 @@ class FavoritesPage(QDialog):
                 FAVORITE_RUN_STATUS_INTERRUPTED: "已停止",
                 FAVORITE_RUN_STATUS_MISSED: "已错过",
             }.get(str(latest.get("status") or ""), "状态未知")
-            delivery_suffix = {
-                FAVORITE_DELIVERY_STATUS_COMPLETED: " · 企业消息已送达",
-                FAVORITE_DELIVERY_STATUS_PARTIAL: " · 企业消息部分送达",
-                FAVORITE_DELIVERY_STATUS_FAILED: " · 企业消息发送失败",
-                FAVORITE_DELIVERY_STATUS_UNKNOWN: " · 企业消息状态未知",
-                FAVORITE_DELIVERY_STATUS_BLOCKED: " · 待切换企业消息渠道",
+            tone = {
+                FAVORITE_RUN_STATUS_RUNNING: "primary", FAVORITE_RUN_STATUS_COMPLETED: "success",
+                FAVORITE_RUN_STATUS_ERROR: "error", FAVORITE_RUN_STATUS_MISSED: "warning",
+            }.get(str(latest.get("status") or ""), "neutral")
+            badge = ProductStatusBadge(latest_status, tone)
+            latest_layout.addWidget(badge, 0, Qt.AlignLeft)
+            when = int(latest.get("started_at") or latest.get("scheduled_at") or 0)
+            if when:
+                when_label = QLabel(datetime.fromtimestamp(when).strftime("%m月%d日 %H:%M"))
+                when_label.setStyleSheet(apple_caption_style())
+                latest_layout.addWidget(when_label)
+            delivery_problem = {
+                FAVORITE_DELIVERY_STATUS_PARTIAL: "企业消息部分送达",
+                FAVORITE_DELIVERY_STATUS_FAILED: "企业消息发送失败",
+                FAVORITE_DELIVERY_STATUS_UNKNOWN: "企业消息状态未知",
+                FAVORITE_DELIVERY_STATUS_BLOCKED: "待切换企业消息渠道",
             }.get(str(latest.get("delivery_status") or ""), "")
-            latest_label = QLabel(f"最近运行：{latest_status}{delivery_suffix}")
-            latest_label.setWordWrap(True)
-            latest_label.setStyleSheet(apple_caption_style())
-            layout.addWidget(latest_label)
-        layout.addStretch(1)
-        actions = QHBoxLayout()
-        edit_btn = QPushButton("编辑")
-        edit_btn.setStyleSheet(apple_button_style("ghost", radius=7))
-        edit_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.edit_favorite(fid))
-        delete_btn = QToolButton()
-        delete_btn.setObjectName("FavoriteDeleteButton")
-        delete_btn.setToolTip("删除常用")
-        delete_btn.setAccessibleName("删除常用")
-        delete_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
-        delete_btn.setStyleSheet(apple_icon_action_button_style("danger"))
-        delete_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.delete_favorite(fid))
+            if delivery_problem:
+                problem = QLabel(delivery_problem)
+                problem.setWordWrap(True)
+                problem.setStyleSheet(f"color: {DesignTokens.warning_text}; font-size: {DesignTokens.font_size_meta}px;")
+                problem.setToolTip(str(latest.get("delivery_error") or delivery_problem))
+                latest_layout.addWidget(problem)
+        else:
+            no_run = QLabel("尚未运行")
+            no_run.setStyleSheet(apple_caption_style())
+            latest_layout.addWidget(no_run)
+
+        if self._list_compact:
+            text_column.addWidget(run_info)
+            text_column.addWidget(latest_box)
+        else:
+            run_info.setFixedWidth(160)
+            latest_box.setFixedWidth(140)
+            layout.addWidget(run_info)
+            layout.addWidget(latest_box)
+        actions_box = QWidget()
+        actions_box.setFixedWidth(108)
+        actions = QHBoxLayout(actions_box)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
         start_btn = QPushButton("开始")
-        start_btn.setObjectName("PrimaryBtn")
-        start_btn.setStyleSheet(apple_button_style("primary", radius=7))
-        start_btn.clicked.connect(lambda checked=False, fid=favorite.get("id"): self.launch_favorite(fid))
-        actions.addWidget(edit_btn)
-        actions.addWidget(delete_btn)
-        actions.addStretch()
+        start_btn.setObjectName("FavoriteStartButton")
+        start_btn.setAutoDefault(False)
+        start_btn.setAccessibleName(f"开始：{favorite.get('name') or '常用任务'}")
+        start_btn.setIcon(qta.icon("fa5s.play", color=DesignTokens.text_secondary))
+        start_btn.setIconSize(QSize(10, 10))
+        start_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        start_btn.clicked.connect(lambda: self.launch_favorite(favorite_id))
         actions.addWidget(start_btn)
-        layout.addLayout(actions)
-        return card
+        more_btn = QToolButton()
+        more_btn.setObjectName("FavoriteMoreButton")
+        more_btn.setToolTip("更多操作")
+        more_btn.setAccessibleName(f"更多操作：{favorite.get('name') or '常用任务'}")
+        more_btn.setIcon(qta.icon("fa5s.ellipsis-h", color=DesignTokens.text_secondary))
+        more_btn.setFixedSize(28, DesignTokens.control_height)
+        more_btn.setStyleSheet(apple_icon_action_button_style() +
+                              "QToolButton#FavoriteMoreButton::menu-indicator { image: none; width: 0; height: 0; }")
+        menu = create_styled_menu(more_btn)
+        menu.addAction("编辑", lambda: self.edit_favorite(favorite_id))
+        menu.addAction("查看运行历史", lambda: self.show_history(favorite_id))
+        menu.addSeparator()
+        menu.addAction("删除常用…", lambda: self.delete_favorite(favorite_id))
+        more_btn.setMenu(menu)
+        more_btn.setPopupMode(QToolButton.InstantPopup)
+        actions.addWidget(more_btn)
+        layout.addWidget(actions_box, 0, Qt.AlignTop if self._list_compact else Qt.AlignVCenter)
+        return row
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._view_history:
-            return
-        expected = 2 if self.scroll.viewport().width() >= 880 else 1
-        if self._grid_columns and expected != self._grid_columns:
+        self.toolbar.setDirection(QBoxLayout.TopToBottom if self.width() < 540 else QBoxLayout.LeftToRight)
+        self.search_input.setMaximumWidth(16777215 if self.width() < 540 else 360)
+        compact = self.scroll.viewport().width() < 800
+        if compact != self._list_compact:
             QTimer.singleShot(0, self.refresh_cards)
 
     def _find(self, favorite_id):

@@ -811,6 +811,10 @@ def main_run():
             window.resize(1280, 760)
             save_widget(window, "s40-favorites-library.png", 220)
             favorites_page = window.product_pages[window.PAGE_FAVORITES]
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                window.resize(760, 720)
+                save_widget(window, "favorites-list-narrow.png", 180)
+                window.resize(1280, 760)
             favorites_page.show_history()
             save_widget(window, "s40b-favorites-history.png", 220)
             favorites_page._set_view(False)
@@ -831,7 +835,11 @@ def main_run():
             save_widget(window, "s43-favorite-message-delivery.png", 180)
             if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
                 window.resize(760, 720)
+                process_events(120)
+                editor_scroll.verticalScrollBar().setValue(0)
                 save_widget(window, "favorites-editor-narrow.png", 180)
+                editor_scroll.verticalScrollBar().setValue(editor_scroll.verticalScrollBar().maximum())
+                save_widget(window, "favorites-settings-narrow.png", 180)
                 window.resize(1280, 760)
 
             window.show_conversation_page()
@@ -902,6 +910,8 @@ def main_run():
                         "bg_app": "#101116",
                         "bg_main": "#15171d",
                         "bg_panel": "#181b22",
+                        "bg_chat": "#101116",
+                        "chat_text": "#eceef3",
                         "bg_sidebar": "#12141a",
                         "bg_sidebar_hover": "#1c2029",
                         "bg_sidebar_selected": "#23283a",

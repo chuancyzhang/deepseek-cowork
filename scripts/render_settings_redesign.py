@@ -43,8 +43,6 @@ def run():
         window._model_onboarding_shown = True
         window.resize(1280, 900)
         window.show()
-        assert window.open_settings("外观")
-        page = window.product_pages[window.PAGE_SETTINGS]
         output = Path(os.environ.get("COWORK_SETTINGS_SCREENSHOTS", ROOT / "docs/screenshots/settings-redesign"))
         output.mkdir(parents=True, exist_ok=True)
 
@@ -53,6 +51,9 @@ def run():
             path = output / name
             assert window.grab().save(str(path)), str(path)
 
+        capture("workspace.png")
+        assert window.open_settings("外观")
+        page = window.product_pages[window.PAGE_SETTINGS]
         QTest.qWait(200)
         durations = []
         for key in ("builtin_paper", "builtin_forest", "builtin_mist", "default"):

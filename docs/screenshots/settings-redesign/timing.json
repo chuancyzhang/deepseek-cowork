@@ -4,19 +4,19 @@
   "switches": [
     {
       "theme": "builtin_paper",
-      "elapsed_ms": 375.6
+      "elapsed_ms": 382.0
     },
     {
       "theme": "builtin_forest",
-      "elapsed_ms": 384.2
+      "elapsed_ms": 379.0
     },
     {
       "theme": "builtin_mist",
-      "elapsed_ms": 367.8
+      "elapsed_ms": 364.1
     },
     {
       "theme": "default",
-      "elapsed_ms": 365.8
+      "elapsed_ms": 363.8
     }
   ]
 }

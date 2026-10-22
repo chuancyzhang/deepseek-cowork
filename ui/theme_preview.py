@@ -1,14 +1,12 @@
-"""Local presentation samples and the always-available theme picker."""
+"""Local presentation samples and theme cards for appearance settings."""
 
-import qtawesome as qta
-from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QWidget, QToolButton, QMenu, QPushButton
+from PySide6.QtWidgets import QWidget, QPushButton
 
-from core.theme import DesignTokens, bind_theme, default_design_tokens
+from core.theme import DesignTokens, default_design_tokens
 from core.theme_presets import BUILTIN_THEMES, builtin_theme
 from core.theme_service import resolve_theme
-from ui.primitives import product_button_style, ProductMessageBox
 from ui.theme_workspace import WorkspaceSceneCanvas
 
 
@@ -118,72 +116,3 @@ class ThemeTile(QPushButton):
         font.setPixelSize(DesignTokens.font_size_body)
         p.setFont(font)
         p.drawText(QRectF(12, 64, self.width() - 20, 24), self.text() + (" · 当前" if self.isChecked() else ""))
-
-
-class ThemeQuickPicker(QToolButton):
-    manageRequested = Signal()
-
-    def __init__(self, manager, parent=None):
-        super().__init__(parent)
-        self.manager = manager
-        self.setObjectName("ThemeQuickPicker")
-        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.setPopupMode(QToolButton.InstantPopup)
-        self.setToolTip("切换工作台风格；可撤销上一次切换")
-        self.setAccessibleName("快捷切换主题")
-        self.menu = QMenu(self)
-        self.setMenu(self.menu)
-        self.menu.aboutToShow.connect(self._populate)
-        self.setEnabled(callable(getattr(manager, "switch_theme", None)))
-        if self.isEnabled():
-            manager.themeChanged.connect(self.refresh_theme)
-            manager.selectionChanged.connect(self.refresh_theme)
-        bind_theme(self, self.refresh_theme, surface="global")
-        self.refresh_theme()
-
-    def refresh_theme(self, _resolved=None):
-        current = getattr(self.manager, "current", None) or {}
-        self.setText(current.get("name") or "主题")
-        self.setIcon(qta.icon("fa5s.palette", color=DesignTokens.icon_secondary))
-        self.setStyleSheet(product_button_style("ghost").replace("QPushButton", "QToolButton"))
-
-    def _populate(self):
-        self.menu.clear()
-        try:
-            snapshot = self.manager.repository.load()
-            appearance = self.manager.repository.load_appearance()
-            for key, (label, _detail) in BUILTIN_THEMES.items():
-                action = self.menu.addAction(label)
-                action.setCheckable(True)
-                action.setChecked(snapshot.active_theme_id == key)
-                action.triggered.connect(lambda _checked=False, value=key: self._switch(theme_id=value))
-            if snapshot.themes:
-                submenu = self.menu.addMenu("自定义主题")
-                for theme in snapshot.themes:
-                    action = submenu.addAction(theme["name"])
-                    action.setCheckable(True)
-                    action.setChecked(snapshot.active_theme_id == theme["id"])
-                    action.triggered.connect(lambda _checked=False, key=theme["id"]: self._switch(theme_id=key))
-            self.menu.addSeparator()
-            modes = self.menu.addMenu("明暗模式")
-            modes.setEnabled(snapshot.active_theme_id in BUILTIN_THEMES)
-            modes.setToolTip("自定义主题使用自身配色")
-            for key, label in (("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
-                action = modes.addAction(label)
-                action.setCheckable(True)
-                action.setChecked(appearance["mode"] == key)
-                action.triggered.connect(lambda _checked=False, value=key: self._switch(mode=value))
-            self.menu.addSeparator()
-            undo = self.menu.addAction("撤销上次切换")
-            undo.setEnabled(self.manager._undo_selection is not None)
-            undo.triggered.connect(lambda: self._switch(undo=True))
-            self.menu.addAction("外观与阅读设置…", self.manageRequested)
-        except Exception as exc:
-            self.menu.addAction("无法读取主题列表").setEnabled(False)
-            ProductMessageBox.warning(self, "主题列表不可用", str(exc))
-
-    def _switch(self, **kwargs):
-        try:
-            self.manager.switch_theme(**kwargs)
-        except Exception as exc:
-            ProductMessageBox.warning(self, "切换失败", f"原主题已保留。\n{exc}")

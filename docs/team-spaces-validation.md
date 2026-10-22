@@ -84,6 +84,24 @@ $env:QT_SCALE_FACTOR='1.5'
 
 ![150% 缩放，480 逻辑像素宽度](screenshots/team-spaces/unified/scale150/desktop-assets-narrow.png)
 
+## 2026-10-22 页头与列表工具栏整理
+
+企业账号信息与“更多”合并为同一行，避免列表页隐藏返回按钮后留下单独的空工具栏；标题与状态区域按内容高度排列。搜索、已归档和新建空间放在同一工具栏，窄窗口按空间换行。全局页头的风格选择按钮已移除，换肤统一在“设置 → 外观与阅读”。本次只调整界面布局，不改变中心请求、账号身份、权限或任务处理。
+
+5 项原生回归通过，覆盖列表加载/错误重试、空列表与搜索、首次空间加载、缓存切页、登录恢复；150% 下另有 2 项列表检查通过。新增几何断言验证账号与菜单同排、顶部高度、工具栏对齐和无横向溢出。截图使用真实 Qt 控件及隔离的本地测试 API，未连接用户企业。
+
+```powershell
+$env:COWORK_SPACE_SCREENSHOTS='D:/code/cowork/docs/screenshots/team-spaces/header-cleanup'
+.venv/Scripts/python.exe -X faulthandler -m pytest -q test/test_team_space_ui.py -k 'list_loading or empty_list or first_space_load or cached_tabs or sign_in_guidance'
+$env:QT_SCALE_FACTOR='1.5'
+$env:COWORK_SPACE_SCREENSHOTS='D:/code/cowork/docs/screenshots/team-spaces/header-cleanup/scale-150'
+.venv/Scripts/python.exe -X faulthandler -m pytest -q test/test_team_space_ui.py -k 'list_loading or empty_list'
+```
+
+![页头与列表操作，示例数据](screenshots/team-spaces/header-cleanup/desktop-list.png)
+
+![150% 缩放下的小窗口](screenshots/team-spaces/header-cleanup/scale-150/desktop-list-loading-narrow.png)
+
 ## 未覆盖与验证限制
 
 未宣称全仓测试通过。`test_main_workspace_linear.py` 的整组离屏运行出现关闭等待超时、首次模型设置弹窗等待，以及一次 Qt 原生 access violation，未形成完整通过报告；相关三个独立入口用例已单独通过，未以跳过失败断言的方式宣称整组通过。原有引用测试缺少工作台方法的失败已在未修改 HEAD 中复现，随后仅补齐测试替身。

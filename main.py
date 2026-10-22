@@ -30236,10 +30236,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         title_box.addWidget(self.workspace_subtitle_label)
         top_bar.addLayout(title_box)
         top_bar.addStretch()
-        from ui.theme_preview import ThemeQuickPicker
-        self.theme_quick_picker = ThemeQuickPicker(self.theme_manager, self)
-        self.theme_quick_picker.manageRequested.connect(lambda: self.open_settings("外观与阅读"))
-        top_bar.addWidget(self.theme_quick_picker, 0, Qt.AlignTop)
         
         self.ws_container = QFrame()
         self.ws_container.setStyleSheet("QFrame { background: transparent; border: none; }")

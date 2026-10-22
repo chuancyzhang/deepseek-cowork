@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import httpx
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QAction, QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QTreeWidget, QWidget
@@ -127,6 +127,11 @@ class TeamSpaceNativeTests(unittest.TestCase):
                     self.assertTrue(self.page.loading_indicator.isVisible())
                     self.assertFalse(self.page.refresh_button.isEnabled())
                     self.assertFalse(self.page.back_button.isVisible())
+                    identity_center = self.page.identity_label.mapTo(self.page, self.page.identity_label.rect().center())
+                    more_center = self.page.list_more.mapTo(self.page, self.page.list_more.rect().center())
+                    self.assertLessEqual(abs(identity_center.y() - more_center.y()), 4)
+                    self.assertLessEqual(self.page.toolbar.height(), self.page.list_more.sizeHint().height() + 4)
+                    self.assertLessEqual(self.page.status_row.y() - self.page.toolbar.geometry().bottom(), 16)
                     self.assertEqual(self.page.scroll.horizontalScrollBar().maximum(), 0)
                     self.shot("desktop-list-loading-" + name)
             finally:
@@ -151,6 +156,9 @@ class TeamSpaceNativeTests(unittest.TestCase):
         self.assertEqual(self.page.findChildren(QTreeWidget)[0].topLevelItemCount(), 1)
         self.page.resize(1440, 960)
         self.qt.processEvents()
+        archived = next(button for button in self.page.findChildren(QPushButton) if button.text() == "已归档")
+        query_top = self.page.list_query.mapTo(self.page, QPoint()).y()
+        self.assertLessEqual(abs(archived.mapTo(self.page, QPoint()).y() - query_top), 4)
         self.shot("desktop-list")
 
     def test_empty_list_invitation_and_search_have_distinct_states(self):

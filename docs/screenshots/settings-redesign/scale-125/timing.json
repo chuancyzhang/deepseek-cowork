@@ -1,0 +1,22 @@
+{
+  "scope": "isolated desktop settings, empty history, built-in palettes; not a production benchmark",
+  "scale": "1.25",
+  "switches": [
+    {
+      "theme": "builtin_paper",
+      "elapsed_ms": 362.1
+    },
+    {
+      "theme": "builtin_forest",
+      "elapsed_ms": 396.9
+    },
+    {
+      "theme": "builtin_mist",
+      "elapsed_ms": 366.7
+    },
+    {
+      "theme": "default",
+      "elapsed_ms": 356.9
+    }
+  ]
+}

@@ -504,7 +504,9 @@ class ProductExperienceFixTests(unittest.TestCase):
 
                 self.assertEqual(config.get("default_workspace", ""), original_workspace)
                 self.assertEqual(dialog.memory_store.read_soul(), original_soul)
-                restore_theme.assert_called_once_with()
+                restore_theme.assert_not_called()
+                self.assertEqual(dialog.memory_soul_edit.toPlainText(), "尚未成功保存的记忆")
+                self.assertEqual(len(dialog.theme_settings_panel._themes), 1)
                 critical.assert_called_once()
                 self.assertTrue(dialog._settings_dirty)
             finally:

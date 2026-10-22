@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .env_utils import get_app_data_dir
+from .theme_presets import BUILTIN_THEMES, builtin_theme
 from .theme_package import (
     COMPONENT_CATALOG,
     CONTENT_DEFAULTS,
@@ -748,14 +749,40 @@ class ThemeRepository:
         self.store_path = os.path.join(self.themes_dir, THEME_STORE_FILENAME)
         self.preview_path = os.path.join(self.themes_dir, THEME_PREVIEW_FILENAME)
         self.legacy_preview_path = os.path.join(self.themes_dir, LEGACY_THEME_PREVIEW_FILENAME)
+        self.appearance_path = os.path.join(self.themes_dir, "_appearance.json")
+
+    def load_appearance(self) -> dict[str, Any]:
+        if not os.path.exists(self.appearance_path):
+            return {"mode": "light", "reading": {}}
+        with open(self.appearance_path, "r", encoding="utf-8") as stream:
+            return self.validate_appearance(json.load(stream))
+
+    @staticmethod
+    def validate_appearance(value):
+        if not isinstance(value, dict) or set(value) - {"mode", "reading"}:
+            raise ValueError("外观偏好格式无效。")
+        mode = value.get("mode", "light")
+        if mode not in {"light", "dark", "system"}:
+            raise ValueError("请选择跟随系统、浅色或深色。")
+        reading = value.get("reading") or {}
+        if not isinstance(reading, dict) or set(reading) - {"font_family", "mono_font_family", "font_scale", "density"}:
+            raise ValueError("阅读偏好包含未知字段。")
+        from .theme import default_design_tokens
+        normalized = validate_theme_overrides(reading, default_design_tokens())
+        return {"mode": mode, "reading": {key: normalized[key] for key in reading}}
+
+    def save_appearance(self, value):
+        normalized = self.validate_appearance(value)
+        _atomic_write_json(self.appearance_path, normalized)
+        return normalized
 
     @staticmethod
     def _validate_id(theme_id: str) -> str:
         normalized = str(theme_id or "").strip()
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", normalized):
             raise ValueError(f"主题 ID 不能用于文件名：{normalized}")
-        if normalized == DEFAULT_THEME_ID:
-            raise ValueError("默认主题没有用户主题包。")
+        if normalized in BUILTIN_THEMES:
+            raise ValueError("内置主题没有用户主题包。")
         return normalized
 
     def theme_path(self, theme_id: str) -> str:
@@ -856,7 +883,7 @@ class ThemeRepository:
             seen_ids.add(theme_id)
             seen_names.add(name.casefold())
         active = str(payload.get("active_theme_id") or DEFAULT_THEME_ID)
-        if active != DEFAULT_THEME_ID and active not in seen_ids:
+        if active not in BUILTIN_THEMES and active not in seen_ids:
             raise ValueError(f"活动主题不存在：{active}")
         canonical = {
             "active_theme_id": active,
@@ -930,7 +957,7 @@ class ThemeRepository:
         current_map = {item["id"]: item for item in current.themes}
         for raw in themes:
             theme_id = str(raw.get("id") or uuid.uuid4().hex).strip()
-            if theme_id == DEFAULT_THEME_ID or theme_id in seen_ids:
+            if theme_id in BUILTIN_THEMES or theme_id in seen_ids:
                 raise ValueError(f"主题 ID 无效或重复：{theme_id}")
             name = _normalize_name(raw.get("name"))
             if name.casefold() in seen_names:
@@ -957,7 +984,7 @@ class ThemeRepository:
             seen_ids.add(theme_id)
             seen_names.add(name.casefold())
         active = str(active_theme_id or DEFAULT_THEME_ID)
-        if active != DEFAULT_THEME_ID and active not in seen_ids:
+        if active not in BUILTIN_THEMES and active not in seen_ids:
             raise ValueError(f"活动主题不存在：{active}")
         return self._save(
             ThemeStoreSnapshot(current.revision, active, tuple(normalized)),
@@ -969,13 +996,15 @@ class ThemeRepository:
             result = default_theme_manifest()
             result["base"] = DEFAULT_THEME_ID
             return result
+        if theme_id in BUILTIN_THEMES:
+            return builtin_theme(theme_id)
         for item in self.load().themes:
             if item.get("id") == theme_id:
                 return _json_copy(item)
         return None
 
     def get_theme_assets(self, theme_id: str, default_tokens: dict[str, Any]) -> dict[str, bytes]:
-        if theme_id == DEFAULT_THEME_ID:
+        if theme_id in BUILTIN_THEMES:
             return {}
         return self._read_existing_assets(theme_id, default_tokens)
 
@@ -1034,7 +1063,7 @@ class ThemeRepository:
     def activate_theme(self, theme_id: str) -> ThemeStoreSnapshot:
         snapshot = self.load()
         target = str(theme_id or DEFAULT_THEME_ID).strip()
-        if target != DEFAULT_THEME_ID and target not in {item.get("id") for item in snapshot.themes}:
+        if target not in BUILTIN_THEMES and target not in {item.get("id") for item in snapshot.themes}:
             raise ValueError(f"主题不存在：{target}")
         _atomic_write_json(self.store_path, {} if target == DEFAULT_THEME_ID else {"active_theme_id": target})
         return self.load()
@@ -1298,20 +1327,28 @@ class ThemeRepository:
             return payload
         return None
 
+    def load_preview_bundle(self, default_tokens):
+        """Return validated metadata and assets together, without a second decode."""
+        if os.path.exists(self.preview_path):
+            return self._read_preview_package(default_tokens)
+        return self.load_preview(), {}
+
     def get_preview_assets(self, default_tokens: dict[str, Any]) -> dict[str, bytes]:
         if not os.path.exists(self.preview_path):
             return {}
         _preview, assets = self._read_preview_package(default_tokens)
         return assets
 
-    def clear_preview(self, preview_id: str = "") -> bool:
+    def clear_preview(self, preview_id: str = "", *, preview_revision: int | None = None) -> bool:
         paths = [path for path in (self.preview_path, self.legacy_preview_path) if os.path.exists(path)]
         if not paths:
             return False
-        if preview_id:
+        if preview_id or preview_revision is not None:
             current = self.load_preview()
-            if current and current.get("preview_id") != preview_id:
+            if current and preview_id and current.get("preview_id") != preview_id:
                 raise ValueError("预览 ID 与当前主题预览不匹配。")
+            if current and preview_revision is not None and int(current.get("revision") or 0) != int(preview_revision):
+                raise ValueError("主题候选已更新，请查看最新预览后再弃用。")
         for path in paths:
             os.unlink(path)
         return True

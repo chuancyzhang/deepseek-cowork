@@ -6,7 +6,7 @@ import os
 import re
 import uuid
 
-from PySide6.QtCore import QEvent, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QUrl, Signal, QTimer, QSignalBlocker
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -15,13 +15,16 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFontComboBox,
     QFormLayout,
+    QGridLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
+    QStackedWidget,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
 from core.theme_package import DEFAULT_WORKSPACE_SCENE, THEME_PACKAGE_SUFFIX, build_asset_record
 
 from core.theme import bind_theme, default_design_tokens, DesignTokens
+from core.theme_presets import BUILTIN_THEMES, builtin_theme
 from core.theme_service import (
     DEFAULT_THEME_ID,
     ThemeRepository,
@@ -37,7 +41,8 @@ from core.theme_service import (
     theme_contrast_warnings,
     validate_theme_overrides,
 )
-from ui.primitives import ProductInlineNotice, ProductMessageBox, product_code_style, product_field_style
+from ui.primitives import ProductInlineNotice, ProductMessageBox, ProductSegmentedControl, product_button_style, product_code_style, product_field_style
+from ui.theme_preview import ThemePreviewSample, ThemeTile
 
 
 class _ClickActivatedWheelMixin:
@@ -100,6 +105,8 @@ class _ClickActivatedFontComboBox(_ClickActivatedWheelMixin, QFontComboBox):
 
 class ThemeSettingsPanel(QWidget):
     changed = Signal()
+    selectionCommitted = Signal()
+    designRequested = Signal(str)
 
     BASIC_COLOR_TOKENS = (
         ("primary", "强调色"),
@@ -120,6 +127,7 @@ class ThemeSettingsPanel(QWidget):
         self.runtime_manager = runtime_manager
         self._loading = False
         self._snapshot = repository.load()
+        self._appearance_snapshot = repository.load_appearance()
         self._themes = [copy.deepcopy(item) for item in self._snapshot.themes]
         self._active_theme_id = self._snapshot.active_theme_id
         self._current_theme_id = self._active_theme_id
@@ -132,9 +140,18 @@ class ThemeSettingsPanel(QWidget):
         self._loaded_basic_explicit = set()
         self.last_commit_warning = ""
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.pages = QStackedWidget()
+        outer.addWidget(self.pages)
+        self.editor_page = QWidget()
+        root = QVBoxLayout(self.editor_page)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
+        back = QPushButton("← 返回外观与阅读")
+        back.setObjectName("SecondaryBtn")
+        back.clicked.connect(lambda: self.pages.setCurrentWidget(self.hub_page))
+        root.addWidget(back, 0, Qt.AlignLeft)
         root.addWidget(self._build_manager_section())
         root.addWidget(self._build_basic_section())
         more_toggle = QPushButton("更多主题配置")
@@ -158,8 +175,349 @@ class ThemeSettingsPanel(QWidget):
         )
         root.addStretch()
         self._connect_signals()
-        bind_theme(self, self._refresh_theme_styles, surface="management")
         self._rebuild_theme_combo(self._active_theme_id)
+        self.hub_page = self._build_hub()
+        self.pages.addWidget(self.hub_page)
+        self.pages.addWidget(self.editor_page)
+        self.pages.setCurrentWidget(self.hub_page)
+        if callable(getattr(runtime_manager, "switch_theme", None)):
+            runtime_manager.selectionChanged.connect(self._selection_updated)
+            runtime_manager.previewStateChanged.connect(self._candidate_updated)
+            runtime_manager.previewLoadingChanged.connect(self._candidate_loading)
+            runtime_manager.themeChanged.connect(self._runtime_updated)
+            self._candidate_updated(runtime_manager.preview)
+        bind_theme(self, self._refresh_theme_styles, surface="management")
+        self._sync_hub_selection()
+
+    def _build_hub(self):
+        hub = QWidget()
+        layout = QVBoxLayout(hub)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        frame, box = self._section("工作台风格", "点击即可切换，可以撤销。阅读字号和密度独立保存。")
+        self.theme_tiles = {}
+        self.tiles_layout = QGridLayout()
+        self.tiles_layout.setSpacing(10)
+        for index, theme_id in enumerate(BUILTIN_THEMES):
+            tile = ThemeTile(theme_id)
+            tile.clicked.connect(lambda _checked=False, key=theme_id: self._quick_switch(theme_id=key))
+            self.theme_tiles[theme_id] = tile
+            self.tiles_layout.addWidget(tile, index // 2, index % 2)
+        box.addLayout(self.tiles_layout)
+        row = QHBoxLayout()
+        self.mode_control = ProductSegmentedControl([("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")])
+        self.mode_control.currentChanged.connect(lambda mode: self._quick_switch(mode=mode))
+        row.addWidget(self.mode_control)
+        row.addStretch()
+        self.undo_btn = QPushButton("撤销切换")
+        self.undo_btn.clicked.connect(lambda: self._quick_switch(undo=True))
+        row.addWidget(self.undo_btn)
+        box.addLayout(row)
+        self.mode_hint = QLabel()
+        self.mode_hint.setWordWrap(True)
+        box.addWidget(self.mode_hint)
+        self.selection_status = QLabel()
+        self.selection_status.setWordWrap(True)
+        box.addWidget(self.selection_status)
+        library = QHBoxLayout()
+        self.saved_theme_combo = _ClickActivatedComboBox()
+        self.saved_theme_combo.setMinimumWidth(0)
+        library.addWidget(self.saved_theme_combo, 1)
+        use_saved = QPushButton("使用")
+        use_saved.clicked.connect(lambda: self._quick_switch(theme_id=self.saved_theme_combo.currentData()))
+        library.addWidget(use_saved)
+        manage = QPushButton("管理主题…")
+        manage.clicked.connect(lambda: self.pages.setCurrentWidget(self.editor_page))
+        library.addWidget(manage)
+        box.addLayout(library)
+        layout.addWidget(frame)
+
+        self.sample = ThemePreviewSample()
+        layout.addWidget(self.sample)
+        frame, box = self._section("阅读体验", "调整只影响阅读，保存后应用；更换主题会保留这些偏好。")
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setSpacing(12)
+        self.reading_font = _ClickActivatedFontComboBox()
+        self.reading_font.setMinimumWidth(0)
+        self.reading_font.setMaximumWidth(340)
+        self.reading_scale = _ClickActivatedDoubleSpinBox()
+        self.reading_scale.setRange(0.8, 1.5)
+        self.reading_scale.setSingleStep(0.05)
+        self.reading_scale.setSuffix(" ×")
+        self.reading_scale.setMaximumWidth(180)
+        self.reading_density = _ClickActivatedComboBox()
+        for label, key in (("紧凑", "compact"), ("标准", "standard"), ("舒适", "comfortable")):
+            self.reading_density.addItem(label, key)
+        self.reading_density.setMaximumWidth(180)
+        form.addRow("界面字体", self.reading_font)
+        form.addRow("文字大小", self.reading_scale)
+        form.addRow("界面密度", self.reading_density)
+        box.addLayout(form)
+        layout.addWidget(frame)
+        self._load_reading()
+        for signal in (self.reading_font.currentFontChanged, self.reading_scale.valueChanged, self.reading_density.currentIndexChanged):
+            signal.connect(self._reading_changed)
+
+        frame, box = self._section("用 AI 设计主题", "描述喜欢的颜色、氛围和阅读感受。生成过程可继续使用应用，候选主题确认后才会应用。")
+        self.ai_description = QPlainTextEdit()
+        self.ai_description.setPlaceholderText("例如：柔和的苔绿色，像纸张一样舒适，保持文字清晰。")
+        self.ai_description.setMaximumHeight(92)
+        box.addWidget(self.ai_description)
+        row = QHBoxLayout()
+        self.ai_generate = QPushButton("生成主题预览")
+        self.ai_generate.setObjectName("PrimaryBtn")
+        self.ai_generate.setEnabled(False)
+        self.ai_description.textChanged.connect(lambda: self.ai_generate.setEnabled(bool(self.ai_description.toPlainText().strip())))
+        self.ai_generate.clicked.connect(lambda: self.designRequested.emit(self.ai_description.toPlainText().strip()))
+        row.addWidget(self.ai_generate)
+        self.ai_stop = QPushButton("停止")
+        self.ai_stop.hide()
+        self.ai_stop.clicked.connect(self._stop_design)
+        row.addWidget(self.ai_stop)
+        self.ai_open = QPushButton("查看对话")
+        self.ai_open.hide()
+        self.ai_open.clicked.connect(self._open_design)
+        row.addWidget(self.ai_open)
+        self.ai_status = QLabel("可以先选择内置风格，再慢慢调整。")
+        self.ai_status.setWordWrap(True)
+        row.addWidget(self.ai_status, 1)
+        box.addLayout(row)
+        self.candidate_box = QWidget()
+        candidate_layout = QVBoxLayout(self.candidate_box)
+        candidate_layout.setContentsMargins(0, 8, 0, 0)
+        self.candidate_title = QLabel()
+        self.candidate_title.setWordWrap(True)
+        candidate_layout.addWidget(self.candidate_title)
+        self.candidate_sample = ThemePreviewSample()
+        candidate_layout.addWidget(self.candidate_sample)
+        row = QHBoxLayout()
+        self.compare_btn = QPushButton("查看当前效果")
+        self.compare_btn.setCheckable(True)
+        self.compare_btn.toggled.connect(self._compare_candidate)
+        row.addWidget(self.compare_btn)
+        self.discard_candidate_btn = QPushButton("弃用候选")
+        self.discard_candidate_btn.clicked.connect(self._discard_candidate)
+        row.addWidget(self.discard_candidate_btn)
+        row.addStretch()
+        self.apply_candidate_btn = QPushButton("应用主题")
+        self.apply_candidate_btn.setObjectName("PrimaryBtn")
+        self.apply_candidate_btn.clicked.connect(self._apply_candidate)
+        row.addWidget(self.apply_candidate_btn)
+        candidate_layout.addLayout(row)
+        self.candidate_box.hide()
+        box.addWidget(self.candidate_box)
+        layout.addWidget(frame)
+        layout.addStretch()
+        self._candidate = None
+        return hub
+
+    def set_design_host(self, host):
+        self._design_host = host
+        self.ai_description.setPlainText(getattr(host, "_theme_design_draft", ""))
+        self.ai_description.textChanged.connect(lambda: setattr(host, "_theme_design_draft", self.ai_description.toPlainText()))
+        self.designRequested.connect(self._start_design)
+        self._design_timer = QTimer(self)
+        self._design_timer.setInterval(1000)
+        self._design_timer.timeout.connect(self._refresh_design_task)
+        self._design_timer.start()
+        self._refresh_design_task()
+
+    def _start_design(self, description):
+        self.ai_generate.setEnabled(False)
+        try:
+            self._design_host.start_theme_design(description)
+            self.ai_status.setText("AI 正在设计主题，可以切换到其他设置继续工作。")
+        except Exception as exc:
+            self.ai_status.setText(str(exc))
+        self._refresh_design_task()
+
+    def _refresh_design_task(self):
+        host = self._design_host
+        session_id = getattr(host, "_theme_design_session_id", "")
+        state = host.sessions.get(session_id)
+        busy = bool(state and host._session_is_busy(state))
+        self.ai_generate.setEnabled(not busy and bool(self.ai_description.toPlainText().strip()))
+        self.ai_stop.setVisible(busy)
+        self.ai_stop.setEnabled(busy and not getattr(state, "stop_pending", False))
+        self.ai_open.setVisible(bool(state))
+        if not state:
+            return
+        status = str(getattr(state, "session_status", ""))
+        if getattr(state, "stop_pending", False):
+            message = "正在停止，已生成的候选会保留。"
+        elif busy:
+            message = "AI 正在设计；可以继续使用应用，或查看对话中的进度与确认请求。"
+        elif status == "interrupted":
+            message = "已停止。描述、对话和已生成的候选均已保留。"
+        elif status in {"error", "failed"}:
+            message = "本次生成未完成，描述已保留。查看对话中的原因后可以重试。"
+        elif status == "completed":
+            message = "设计已完成，请查看候选；需要补充信息时可继续该对话。"
+        else:
+            return
+        self.ai_status.setText(message)
+
+    def _stop_design(self):
+        host = getattr(self, "_design_host", None)
+        session_id = getattr(host, "_theme_design_session_id", "")
+        if session_id:
+            host.stop_agent(session_id=session_id)
+            self._refresh_design_task()
+
+    def _open_design(self):
+        host = getattr(self, "_design_host", None)
+        session_id = getattr(host, "_theme_design_session_id", "")
+        if session_id:
+            host.activate_session(session_id)
+
+    def _load_reading(self):
+        profile = copy.deepcopy(self._profile(self._snapshot.active_theme_id))
+        profile["overrides"] = {**profile.get("overrides", {}), **self._appearance_snapshot["reading"]}
+        resolved = resolve_theme(profile, default_design_tokens())
+        with QSignalBlocker(self.reading_font), QSignalBlocker(self.reading_scale), QSignalBlocker(self.reading_density):
+            self.reading_font.setCurrentFont(QFont(resolved["font_family"]))
+            self.reading_scale.setValue(resolved["font_scale"])
+            self.reading_density.setCurrentIndex(max(0, self.reading_density.findData(resolved["density"])))
+        self._reading_initial_values = self._reading_values()
+
+    def _reading_values(self):
+        return {**self._appearance_snapshot["reading"], "font_family": self.reading_font.currentFont().family(),
+                "font_scale": self.reading_scale.value(), "density": self.reading_density.currentData()}
+
+    def _reading_changed(self, *_args):
+        self._refresh_sample()
+        self.changed.emit()
+
+    def _refresh_sample(self):
+        if not hasattr(self, "sample"):
+            return
+        current = getattr(self.runtime_manager, "current", None)
+        if isinstance(current, dict) and current:
+            profile = {"id": current["id"], "name": current["name"], "overrides": {**current["overrides"], **self._reading_values()}}
+        else:
+            profile = copy.deepcopy(self._profile(self._snapshot.active_theme_id))
+            profile["overrides"] = {**profile.get("overrides", {}), **self._reading_values()}
+        self.sample.set_theme(resolve_theme(profile, default_design_tokens()))
+
+    def _runtime_updated(self, _resolved):
+        self._refresh_sample()
+
+    def _sync_hub_selection(self):
+        if not hasattr(self, "theme_tiles"):
+            return
+        for key, tile in self.theme_tiles.items():
+            tile.setChecked(key == self._snapshot.active_theme_id)
+            tile.dark = self._appearance_snapshot["mode"] == "dark"
+            tile.update()
+        self.mode_control.set_current(self._appearance_snapshot["mode"])
+        is_builtin = self._snapshot.active_theme_id in BUILTIN_THEMES
+        self.mode_control.setEnabled(is_builtin)
+        self.mode_hint.setText("内置风格均提供浅色与深色版本。" if is_builtin else "自定义主题使用自己的配色；切换为内置风格后可调整明暗模式。")
+        self.undo_btn.setEnabled(bool(getattr(self.runtime_manager, "_undo_selection", None)))
+        self.saved_theme_combo.clear()
+        self.saved_theme_combo.addItem("选择已保存的自定义主题", None)
+        for theme in self._snapshot.themes:
+            self.saved_theme_combo.addItem(theme["name"], theme["id"])
+        self._refresh_sample()
+
+    def _quick_switch(self, **kwargs):
+        if "theme_id" in kwargs and kwargs["theme_id"] is None:
+            return
+        try:
+            if not callable(getattr(self.runtime_manager, "switch_theme", None)):
+                raise ValueError("主题运行服务尚未就绪。")
+            self.runtime_manager.switch_theme(**kwargs)
+            self.selection_status.setText("已切换。可使用“撤销切换”恢复。")
+        except Exception as exc:
+            self.selection_status.setText(f"切换失败，原主题已保留：{exc}")
+        self._sync_hub_selection()
+
+    def _selection_updated(self, _selection):
+        previous = self._snapshot
+        editor_dirty = bool(self.state_signature()["editor_error"]) or any(
+            item != next((saved for saved in previous.themes if saved["id"] == item["id"]), None)
+            for item in self._themes)
+        self._snapshot = self.repository.load()
+        self._appearance_snapshot = self.repository.load_appearance()
+        old = {item["id"]: item for item in previous.themes}
+        local = {item["id"]: item for item in self._themes}
+        self._themes = [copy.deepcopy(local[item["id"]] if item["id"] in local and local[item["id"]] != old.get(item["id"]) else item)
+                        for item in self._snapshot.themes]
+        self._themes.extend(item for key, item in local.items() if key not in old and key not in {theme["id"] for theme in self._themes})
+        self._active_theme_id = self._snapshot.active_theme_id
+        if not editor_dirty:
+            self._rebuild_theme_combo(self._active_theme_id)
+        self._sync_hub_selection()
+        self.selectionCommitted.emit()
+
+    def saved_signature(self):
+        return {"active_theme_id": self._snapshot.active_theme_id,
+                "themes": [copy.deepcopy(item) for item in self._snapshot.themes], "editor_error": "",
+                "appearance_preferences": copy.deepcopy(self._appearance_snapshot)}
+
+    def _candidate_loading(self, loading):
+        if loading:
+            self.ai_status.setText("正在准备主题预览，当前界面保持不变…")
+
+    def _candidate_updated(self, candidate):
+        self._candidate = candidate
+        self.candidate_box.setVisible(bool(candidate))
+        self.compare_btn.setChecked(False)
+        if candidate:
+            try:
+                self.candidate_sample.set_theme(candidate["_resolved"])
+                self.candidate_title.setText(f"{candidate.get('name') or '主题候选'} · 仅在此区域预览")
+                self.ai_status.setText("预览已准备好，可以比较后应用。")
+                self.apply_candidate_btn.setEnabled(True)
+            except Exception as exc:
+                self.ai_status.setText(f"预览显示失败，当前主题未改变：{exc}")
+                self.apply_candidate_btn.setEnabled(False)
+
+    def _compare_candidate(self, checked):
+        if not self._candidate:
+            return
+        resolved = getattr(self.runtime_manager, "current", None) if checked else self._candidate.get("_resolved")
+        if isinstance(resolved, dict) and resolved:
+            self.candidate_sample.set_theme(resolved)
+        self.compare_btn.setText("查看候选效果" if checked else "查看当前效果")
+
+    def _discard_candidate(self):
+        if self.runtime_manager is not None and self._candidate:
+            try:
+                self.runtime_manager.restore_saved_theme(reason="candidate_discard",
+                    expected_id=self._candidate["preview_id"], expected_revision=self._candidate["revision"])
+            except Exception as exc:
+                self.ai_status.setText(f"弃用未完成，候选仍保留：{exc}")
+                self.runtime_manager.request_preview_update()
+
+    def _apply_candidate(self):
+        if not self._candidate:
+            return
+        try:
+            candidate = self._candidate
+            if candidate.get("session_id") == "settings":
+                current = self.repository.load_preview()
+                if not current or (current["preview_id"], current["revision"]) != (candidate["preview_id"], candidate["revision"]):
+                    raise ValueError("主题候选已更新，请查看最新预览后再应用。")
+                if self._preview_signature != self._draft_signature(self._profile(self._current_theme_id)):
+                    raise ValueError("草稿已更新，请先重新预览。")
+                self.commit(include_reading=False)
+            else:
+                self.runtime_manager.commit_current_preview(
+                    expected_id=candidate["preview_id"], expected_revision=candidate["revision"],
+                    reason="settings_candidate_apply")
+            self._selection_updated(None)
+            self.selection_status.setText("主题已应用。")
+        except Exception as exc:
+            self.ai_status.setText(f"应用未完成，输入已保留：{exc}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "theme_tiles"):
+            columns = 4 if self.width() >= 620 else 2
+            for index, tile in enumerate(self.theme_tiles.values()):
+                self.tiles_layout.addWidget(tile, index // columns, index % columns)
 
     def _section(self, title, description):
         frame = QFrame()
@@ -189,6 +547,13 @@ class ThemeSettingsPanel(QWidget):
         return frame, layout
 
     def _refresh_theme_styles(self, _resolved=None):
+        for button in self.findChildren(QPushButton):
+            if isinstance(button, ThemeTile) or button.property("segment"):
+                continue
+            button.setStyleSheet(product_button_style("primary" if button.objectName() == "PrimaryBtn" else "secondary"))
+        field_style = re.sub(r"QSpinBox(:[\w-]+)?", lambda match: f"{match[0]}, QDoubleSpinBox{match[1] or ''}", product_field_style())
+        for field in (self.reading_font, self.reading_scale, self.reading_density, self.saved_theme_combo, self.ai_description):
+            field.setStyleSheet(field_style)
         for frame in self._theme_frames:
             frame.setStyleSheet(
                 f'QFrame[uiSurface="true"] {{ background: transparent; border: none; '
@@ -217,13 +582,13 @@ class ThemeSettingsPanel(QWidget):
 
     def _build_manager_section(self):
         frame, layout = self._section(
-            "主题模式",
-            "默认主题保持只读；自定义主题由设置页和 AI 共用同一个主题服务。",
+            "管理自定义主题",
+            "新建或复制后编辑。预览只显示在示例中，保存后才改变工作台。",
         )
         row = QHBoxLayout()
         row.setSpacing(8)
         self.theme_combo = _ClickActivatedComboBox()
-        self.theme_combo.setMinimumWidth(220)
+        self.theme_combo.setMinimumWidth(0)
         self.theme_combo.setStyleSheet(product_field_style())
         row.addWidget(self.theme_combo, 1)
         self.new_btn = QPushButton("新建")
@@ -231,7 +596,7 @@ class ThemeSettingsPanel(QWidget):
         self.delete_btn = QPushButton("删除")
         self.preview_btn = QPushButton("预览")
         self.preview_btn.setObjectName("PrimaryBtn")
-        for button in (self.new_btn, self.copy_btn, self.delete_btn):
+        for button in (self.new_btn, self.copy_btn):
             button.setObjectName("SecondaryBtn")
             row.addWidget(button)
         row.addWidget(self.preview_btn)
@@ -243,7 +608,10 @@ class ThemeSettingsPanel(QWidget):
         self.refresh_btn = QPushButton("刷新列表")
         self.open_folder_btn = QPushButton("打开主题文件夹")
         self.reset_btn = QPushButton("切回默认")
+        menu_button = QPushButton("主题文件与更多操作")
+        menu = QMenu(menu_button)
         for button in (
+            self.delete_btn,
             self.import_btn,
             self.export_btn,
             self.refresh_btn,
@@ -251,17 +619,22 @@ class ThemeSettingsPanel(QWidget):
             self.reset_btn,
         ):
             button.setObjectName("SecondaryBtn")
-            file_row.addWidget(button)
+            button.setParent(frame)
+            button.hide()
+            menu.addAction(button.text(), button.click)
+        menu_button.setMenu(menu)
+        file_row.addWidget(menu_button)
         file_row.addStretch()
         layout.addLayout(file_row)
         return frame
 
     def _build_basic_section(self):
         frame, layout = self._section(
-            "基础外观",
-            "修改只更新草稿。点击“预览”后才一次性刷新界面；保存后正式应用。",
+            "编辑主题",
+            "修改保留为草稿。预览后可以继续调整，也可以稍后保存。",
         )
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form.setSpacing(10)
         self.name_edit = QLineEdit()
         self.name_edit.setMaxLength(40)
@@ -430,6 +803,8 @@ class ThemeSettingsPanel(QWidget):
             editor.valueChanged.connect(self._on_editor_changed)
 
     def _profile(self, theme_id):
+        if theme_id in BUILTIN_THEMES and theme_id != DEFAULT_THEME_ID:
+            return builtin_theme(theme_id, dark=self._appearance_snapshot["mode"] == "dark")
         if theme_id == DEFAULT_THEME_ID:
             return {
                 "id": DEFAULT_THEME_ID,
@@ -448,7 +823,8 @@ class ThemeSettingsPanel(QWidget):
     def _rebuild_theme_combo(self, selected_id):
         self._loading = True
         self.theme_combo.clear()
-        self.theme_combo.addItem("默认主题", DEFAULT_THEME_ID)
+        for key, (label, _description) in BUILTIN_THEMES.items():
+            self.theme_combo.addItem(label + "（内置）", key)
         for item in self._themes:
             self.theme_combo.addItem(item.get("name") or "未命名主题", item.get("id"))
         index = self.theme_combo.findData(selected_id)
@@ -462,6 +838,7 @@ class ThemeSettingsPanel(QWidget):
             raise ValueError(f"主题不存在：{theme_id}")
         resolved = resolve_theme(profile, default_design_tokens())
         overrides = copy.deepcopy(profile.get("overrides") or {})
+        self._loaded_overrides = copy.deepcopy(overrides)
         explicit_tokens = overrides.get("tokens") or {}
         self._loading = True
         self._current_theme_id = profile["id"]
@@ -473,6 +850,12 @@ class ThemeSettingsPanel(QWidget):
             max(0, self.density_combo.findData(overrides.get("density", "standard")))
         )
         self.radius_scale_spin.setValue(float(overrides.get("radius_scale", 1.0)))
+        self._loaded_appearance_values = {
+            "font_family": self.font_combo.currentFont().family(),
+            "mono_font_family": self.mono_font_combo.currentFont().family(),
+            "font_scale": self.font_scale_spin.value(), "density": self.density_combo.currentData(),
+            "radius_scale": self.radius_scale_spin.value(),
+        }
         for token_name, editor in self.color_edits.items():
             editor.setText(str(resolved["tokens"].get(token_name) or ""))
         for token_name, editor in self.geometry_spins.items():
@@ -541,7 +924,7 @@ class ThemeSettingsPanel(QWidget):
                 indent=2,
             )
         )
-        editable = profile["id"] != DEFAULT_THEME_ID
+        editable = profile["id"] not in BUILTIN_THEMES
         for widget in (
             self.name_edit,
             self.font_combo,
@@ -582,7 +965,7 @@ class ThemeSettingsPanel(QWidget):
             if (
                 token_name not in self._loaded_basic_explicit
                 and value.casefold() == loaded.casefold()
-            ) or value.casefold() == str(base_tokens.get(token_name) or "").casefold():
+            ):
                 tokens.pop(token_name, None)
             else:
                 tokens[token_name] = value
@@ -591,21 +974,21 @@ class ThemeSettingsPanel(QWidget):
             if (
                 token_name not in self._loaded_basic_explicit
                 and value == int(self._loaded_basic_values.get(token_name))
-            ) or value == int(base_tokens.get(token_name)):
+            ):
                 tokens.pop(token_name, None)
             else:
                 tokens[token_name] = value
-        return validate_theme_overrides(
-            {
+        fields = {
                 "font_family": self.font_combo.currentFont().family(),
                 "mono_font_family": self.mono_font_combo.currentFont().family(),
                 "font_scale": self.font_scale_spin.value(),
                 "density": self.density_combo.currentData(),
                 "radius_scale": self.radius_scale_spin.value(),
-                "tokens": tokens,
-            },
-            base_tokens,
-        )
+            }
+        fields = {key: value for key, value in fields.items()
+                  if key in self._loaded_overrides or value != self._loaded_appearance_values.get(key)}
+        fields["tokens"] = tokens
+        return validate_theme_overrides(fields, base_tokens)
 
     def _collect_current_editor_values(self):
         """Validate and return editor-backed fields without mutating the draft."""
@@ -628,7 +1011,7 @@ class ThemeSettingsPanel(QWidget):
         }
 
     def _store_current_editor(self):
-        if self._current_theme_id == DEFAULT_THEME_ID:
+        if self._current_theme_id in BUILTIN_THEMES:
             return
         profile = self._profile(self._current_theme_id)
         if profile is None:
@@ -681,12 +1064,12 @@ class ThemeSettingsPanel(QWidget):
                 content=profile.get("content") or {},
                 asset_bytes=self._ensure_profile_asset_bytes(profile),
             )
-            if self.runtime_manager is not None and not self.runtime_manager.apply_repository_state(
-                reason="settings_preview"
-            ):
-                raise ValueError("主题无法应用，请检查系统字体和令牌配置。")
+            if self.runtime_manager is not None:
+                self.runtime_manager.request_preview_update()
             self._preview_signature = self._draft_signature(profile)
+            self._settings_preview_id = preview["preview_id"]
             self._preview_active = True
+            self.pages.setCurrentWidget(self.hub_page)
             append_theme_log(
                 self.repository.data_dir,
                 "settings_preview_finish",
@@ -738,7 +1121,7 @@ class ThemeSettingsPanel(QWidget):
             self.validation_label.setText(f"无法切换主题：{exc}")
 
     def _on_editor_changed(self, *_args):
-        if self._loading or self._current_theme_id == DEFAULT_THEME_ID:
+        if self._loading or self._current_theme_id in BUILTIN_THEMES:
             return
         try:
             self._store_current_editor()
@@ -789,6 +1172,7 @@ class ThemeSettingsPanel(QWidget):
 
     def _new_theme(self):
         try:
+            self.pages.setCurrentWidget(self.editor_page)
             self._store_current_editor()
             self._append_theme("自定义主题", {})
         except Exception as exc:
@@ -796,6 +1180,7 @@ class ThemeSettingsPanel(QWidget):
 
     def _copy_theme(self):
         try:
+            self.pages.setCurrentWidget(self.editor_page)
             self._store_current_editor()
             source = self._profile(self._current_theme_id)
             asset_bytes = (
@@ -813,7 +1198,7 @@ class ThemeSettingsPanel(QWidget):
             self.validation_label.setText(f"暂无法复制主题：{exc}")
 
     def _delete_theme(self):
-        if self._current_theme_id == DEFAULT_THEME_ID:
+        if self._current_theme_id in BUILTIN_THEMES:
             return
         profile = self._profile(self._current_theme_id)
         reply = ProductMessageBox.question(
@@ -1101,7 +1486,7 @@ class ThemeSettingsPanel(QWidget):
             persisted_theme.pop("_asset_bytes", None)
             themes.append(persisted_theme)
         error = ""
-        if not self._loading and self._current_theme_id != DEFAULT_THEME_ID:
+        if not self._loading and self._current_theme_id not in BUILTIN_THEMES:
             try:
                 editor_values = self._collect_current_editor_values()
                 current = next(
@@ -1121,15 +1506,17 @@ class ThemeSettingsPanel(QWidget):
             "active_theme_id": self._active_theme_id,
             "themes": themes,
             "editor_error": error,
+            "appearance_preferences": {"mode": self._appearance_snapshot["mode"], "reading":
+                copy.deepcopy(self._appearance_snapshot["reading"]) if self._reading_values() == self._reading_initial_values else self._reading_values()},
         }
 
-    def commit(self):
+    def commit(self, *, include_reading=True):
         self.last_commit_warning = ""
         self._store_current_editor()
-        self.repository.clear_preview()
-        self._preview_active = False
-        self._preview_signature = None
         previous = self._snapshot
+        previous_reading_initial = copy.deepcopy(self._reading_initial_values)
+        previous_appearance = self.repository.load_appearance()
+        appearance = self.state_signature()["appearance_preferences"] if include_reading else copy.deepcopy(self._appearance_snapshot)
         persisted_themes = self.state_signature()["themes"]
         theme_changed = (
             self._active_theme_id != previous.active_theme_id
@@ -1156,8 +1543,15 @@ class ThemeSettingsPanel(QWidget):
                 expected_theme_ids={
                     str(item.get("id") or "") for item in previous.themes
                 },
-            )
+            ) if theme_changed else previous
+            self.repository.save_appearance(appearance)
             self._snapshot = snapshot
+            self._appearance_snapshot = appearance
+            if include_reading:
+                self._reading_initial_values = self._reading_values()
+            self._clear_own_preview()
+            self._preview_active = False
+            self._preview_signature = None
             runtime_applied = True
             if self.runtime_manager is not None:
                 self.runtime_manager.acknowledge_repository_state()
@@ -1191,12 +1585,16 @@ class ThemeSettingsPanel(QWidget):
                 active_theme_id=self._active_theme_id,
                 error=str(exc),
             )
-            if snapshot is not None:
-                self.repository.replace_state(
+            if snapshot is not None and theme_changed:
+                previous = self.repository.replace_state(
                     themes=[copy.deepcopy(item) for item in previous.themes],
                     active_theme_id=previous.active_theme_id,
                     default_tokens=default_design_tokens(),
                 )
+            self.repository.save_appearance(previous_appearance)
+            self._snapshot = previous
+            self._appearance_snapshot = previous_appearance
+            self._reading_initial_values = previous_reading_initial
             if self.runtime_manager is not None:
                 self.runtime_manager.acknowledge_repository_state()
                 self.runtime_manager.apply_repository_state(reason="settings_save_rollback")
@@ -1205,13 +1603,23 @@ class ThemeSettingsPanel(QWidget):
     def has_active_preview(self):
         return bool(self._preview_active)
 
+    def _clear_own_preview(self):
+        if not self._preview_active:
+            return
+        current = self.repository.load_preview()
+        if current and current["preview_id"] == getattr(self, "_settings_preview_id", None):
+            self.repository.clear_preview(current["preview_id"], preview_revision=current["revision"])
+
     def restore_saved_theme(self):
         self._snapshot = self.repository.load()
         self._themes = [copy.deepcopy(item) for item in self._snapshot.themes]
         self._active_theme_id = self._snapshot.active_theme_id
-        self.repository.clear_preview()
+        self._appearance_snapshot = self.repository.load_appearance()
+        self._clear_own_preview()
         self._preview_active = False
         self._preview_signature = None
         self._rebuild_theme_combo(self._active_theme_id)
+        self._load_reading()
+        self._sync_hub_selection()
         if self.runtime_manager is not None:
             self.runtime_manager.apply_repository_state(reason="settings_cancel")

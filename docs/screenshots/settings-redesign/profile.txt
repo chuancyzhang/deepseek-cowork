@@ -1,0 +1,53 @@
+         195719 function calls (188155 primitive calls) in 0.448 seconds
+
+   Ordered by: cumulative time
+   List reduced from 844 to 45 due to restriction <45>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    0.390    0.390 D:\code\cowork\core\theme.py:449(switch_theme)
+        1    0.000    0.000    0.372    0.372 D:\code\cowork\core\theme.py:596(apply_repository_state)
+        1    0.000    0.000    0.371    0.371 D:\code\cowork\core\theme.py:639(apply_profile)
+        1    0.004    0.004    0.365    0.365 D:\code\cowork\core\theme.py:811(_refresh_existing_widgets)
+        1    0.001    0.001    0.334    0.334 D:\code\cowork\core\theme.py:902(apply)
+      420    0.299    0.001    0.333    0.001 {method 'setStyleSheet' of 'PySide6.QtWidgets.QWidget' objects}
+        1    0.000    0.000    0.114    0.114 D:\code\cowork\main.py:12818(_refresh_settings_shell)
+        1    0.000    0.000    0.111    0.111 D:\code\cowork\ui\primitives.py:1154(apply_product_dialog)
+        1    0.000    0.000    0.082    0.082 D:\code\cowork\main.py:30830(_apply_runtime_theme)
+        1    0.027    0.027    0.061    0.061 {built-in method processEvents}
+    28208    0.018    0.000    0.037    0.000 D:\code\cowork\main.py:27581(eventFilter)
+        1    0.000    0.000    0.025    0.025 D:\code\cowork\ui\theme_settings.py:538(_refresh_theme_styles)
+    28604    0.009    0.000    0.020    0.000 {method 'type' of 'PySide6.QtCore.QEvent' objects}
+        5    0.000    0.000    0.013    0.003 D:\code\cowork\main.py:27635(update_layout)
+     3823    0.013    0.000    0.013    0.000 {built-in method builtins.getattr}
+       14    0.000    0.000    0.012    0.001 D:\code\cowork\ui\primitives.py:1541(refresh_theme)
+        1    0.000    0.000    0.011    0.011 D:\code\cowork\main.py:28722(refresh_theme)
+    28694    0.007    0.000    0.011    0.000 C:\Users\31952\AppData\Local\Programs\Python\Python314\Lib\enum.py:676(__call__)
+        1    0.000    0.000    0.010    0.010 D:\code\cowork\ui\token_usage.py:178(refresh_theme)
+        3    0.000    0.000    0.009    0.003 D:\code\cowork\main.py:31426(_sync_file_navigator_layout)
+        1    0.000    0.000    0.009    0.009 D:\code\cowork\ui\subagent_panel.py:173(apply_theme)
+      9/8    0.000    0.000    0.009    0.001 {method 'emit' of 'PySide6.QtCore.SignalInstance' objects}
+        1    0.000    0.000    0.008    0.008 D:\code\cowork\main.py:31117(_run_startup_hydration)
+        3    0.000    0.000    0.008    0.003 D:\code\cowork\main.py:27601(set_navigator_state)
+       47    0.007    0.000    0.008    0.000 {method 'findChildren' of 'PySide6.QtCore.QObject' objects}
+        1    0.000    0.000    0.008    0.008 D:\code\cowork\main.py:20424(refresh_theme)
+        1    0.000    0.000    0.008    0.008 D:\code\cowork\main.py:41765(refresh_history_list)
+      3/2    0.000    0.000    0.008    0.004 C:\Users\31952\AppData\Local\Programs\Python\Python314\Lib\contextlib.py:136(__enter__)
+        2    0.000    0.000    0.008    0.004 D:\code\cowork\core\theme_service.py:124(_atomic_write_json)
+       15    0.003    0.000    0.007    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+        1    0.000    0.000    0.007    0.007 D:\code\cowork\core\chat_storage.py:1497(list_conversations)
+        1    0.000    0.000    0.007    0.007 D:\code\cowork\core\chat_storage.py:1449(list_conversation_summaries)
+        1    0.000    0.000    0.007    0.007 D:\code\cowork\core\theme_service.py:1063(activate_theme)
+        1    0.000    0.000    0.007    0.007 D:\code\cowork\ui\theme_settings.py:436(_selection_updated)
+        8    0.000    0.000    0.007    0.001 D:\code\cowork\core\theme_service.py:466(resolve_theme)
+        2    0.000    0.000    0.007    0.003 D:\code\cowork\main.py:32619(sync_context_drawer_layout)
+       11    0.000    0.000    0.007    0.001 D:\code\cowork\ui\primitives.py:1488(refresh_theme)
+       20    0.003    0.000    0.006    0.000 D:\code\cowork\core\theme_service.py:151(configurable_theme_tokens)
+        1    0.000    0.000    0.006    0.006 D:\code\cowork\ui\log_export.py:276(refresh_theme)
+        1    0.000    0.000    0.005    0.005 D:\code\cowork\main.py:27594(refresh_theme)
+        1    0.000    0.000    0.005    0.005 D:\code\cowork\main.py:13800(_refresh_im_channel_theme)
+       11    0.000    0.000    0.005    0.000 D:\code\cowork\ui\primitives.py:1473(set_tone)
+        5    0.000    0.000    0.005    0.001 D:\code\cowork\ui\primitives.py:286(refresh_theme)
+        1    0.000    0.000    0.005    0.005 D:\code\cowork\ui\theme_settings.py:811(_rebuild_theme_combo)
+       12    0.000    0.000    0.005    0.000 D:\code\cowork\core\theme_service.py:355(validate_theme_overrides)
+
+

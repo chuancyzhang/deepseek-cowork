@@ -729,6 +729,13 @@ class WorkspaceThemeController:
             self._apply_layout(binding, spec.get("layout") or {})
 
     def apply(self, resolved: dict[str, Any]):
+        # The semantic controls are already refreshed by MainWindow. An empty
+        # declarative layer has nothing to reset or reapply to those controls.
+        if all(not any(profile.get(key) for key in ("surfaces", "components", "content")) and not (
+                (profile.get("workspace_scene") or {}).get("layers"))
+                for profile in (resolved, self._last_resolved or {})):
+            self._last_resolved = copy.deepcopy(resolved or {})
+            return
         previous = copy.deepcopy(self._last_resolved)
         surface_snapshot = {
             surface_id: binding.widget.styleSheet()

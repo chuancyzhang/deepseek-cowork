@@ -1,6 +1,7 @@
 import base64
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -62,6 +63,13 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        for target in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir"):
+            patcher = patch(target, return_value=self.temp_dir.name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        startup = patch.object(MainWindow, "start_background_services", lambda self: None)
+        startup.start()
+        self.addCleanup(startup.stop)
         self.previous_manager = getattr(self.app, "theme_manager", None)
         self.manager = ThemeRuntimeManager(
             self.app,
@@ -69,6 +77,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         )
         self.app.theme_manager = self.manager
         self.window = MainWindow(theme_manager=self.manager)
+        self.window._model_onboarding_shown = True
 
     def tearDown(self):
         with patch(
@@ -76,8 +85,14 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             return_value=["Microsoft YaHei UI", "Consolas"],
         ):
             self.manager.restore_saved_theme(reason="test_cleanup")
+        self.manager.stop()
         self.window.close()
+        deadline = time.monotonic() + 5
+        while not getattr(self.window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.window.file_model.directoryLoaded.disconnect()
         self.window.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.theme_manager = self.previous_manager
         self.temp_dir.cleanup()
         self.app.processEvents()

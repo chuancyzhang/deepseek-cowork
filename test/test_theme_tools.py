@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QImage
 
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.config_manager import ConfigManager
+from core.execution_authorization import ExecutionAuthorization
 from core.skill_manager import SkillManager
 from core.theme_service import ThemeRepository
 
@@ -42,6 +43,7 @@ class ThemeToolTests(unittest.TestCase):
             "config_manager": self.config_manager,
             "run_context": {"mode": RUN_MODE_EXECUTION},
             "session_id": "session-1",
+            "execution_authorization": ExecutionAuthorization("session-1", "theme-test", True, self.temp_dir),
         }
 
     def tearDown(self):

@@ -633,10 +633,12 @@ def build_form_row_label(text):
     label.setWordWrap(True)
     label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-    label.setStyleSheet(
-        f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600; "
-        "background: transparent; border: none;"
-    )
+    def refresh_label(_resolved=None):
+        label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_meta}px; font-weight: 600; "
+            "background: transparent; border: none;")
+    refresh_label()
+    bind_theme(label, refresh_label, surface="forms")
     return label
 
 CONTENT_FLUSH_INTERVAL_MS = 120
@@ -6382,6 +6384,7 @@ class ModelChannelEditor(QFrame):
         body_layout.setSpacing(14)
 
         note = QLabel("每个服务单独维护访问密钥、服务地址和模型列表，方便按用途或供应商分组。")
+        self.channel_note = note
         note.setWordWrap(True)
         note.setStyleSheet(apple_settings_inline_note_style())
         body_layout.addWidget(note)
@@ -6420,6 +6423,7 @@ class ModelChannelEditor(QFrame):
 
         fetch_row = QHBoxLayout()
         fetch_hint = QLabel("使用当前地址和密钥读取接口模型列表")
+        self.fetch_hint = fetch_hint
         fetch_hint.setMinimumWidth(0)
         fetch_hint.setWordWrap(True)
         fetch_hint.setStyleSheet(apple_caption_style())
@@ -6433,6 +6437,7 @@ class ModelChannelEditor(QFrame):
         body_layout.addLayout(fetch_row)
 
         model_title = QLabel("可用模型")
+        self.model_heading = model_title
         model_title.setStyleSheet(apple_settings_section_title_style())
         body_layout.addWidget(model_title)
         self.model_list = QListWidget()
@@ -6498,6 +6503,22 @@ class ModelChannelEditor(QFrame):
         self.provider_combo.currentIndexChanged.connect(self._refresh_fetch_button)
         self._refresh_fetch_button()
         self._refresh_model_actions()
+        bind_theme(self, self.refresh_theme, surface="settings")
+
+    def refresh_theme(self, _resolved=None):
+        self.channel_note.setStyleSheet(apple_settings_inline_note_style())
+        self.fetch_hint.setStyleSheet(apple_caption_style())
+        self.model_heading.setStyleSheet(apple_settings_section_title_style())
+        self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+        self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=8, padding=6))
+        apply_settings_combo_style(self.provider_combo)
+        self.refresh_header()
+        for button, icon, color in ((self.fetch_btn, "fa5s.sync-alt", DesignTokens.icon_secondary),
+                                    (self.add_model_btn, "fa5s.plus", DesignTokens.icon_secondary),
+                                    (self.edit_model_btn, "fa5s.pen", DesignTokens.icon_secondary),
+                                    (self.delete_model_btn, "fa5s.trash-alt", DesignTokens.error_text),
+                                    (self.test_btn, "fa5s.plug", DesignTokens.icon_secondary)):
+            button.setIcon(qta.icon(icon, color=color))
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -6993,6 +7014,7 @@ class ModelChannelManager(QWidget):
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(4)
         title = QLabel("模型与服务")
+        self.channel_heading = title
         title.setStyleSheet(apple_settings_section_title_style())
         title_box.addWidget(title)
         toolbar.addLayout(title_box, 1)
@@ -7048,6 +7070,9 @@ class ModelChannelManager(QWidget):
 
     def _refresh_default_model_theme(self, _resolved=None):
         apply_settings_combo_style(self.default_model_combo)
+        self.channel_list.setStyleSheet(apple_settings_nav_style())
+        self.channel_heading.setStyleSheet(apple_settings_section_title_style())
+        self.default_model_hint.setStyleSheet(apple_settings_inline_note_style())
 
     def _refresh_default_models(self):
         combo = self.default_model_combo
@@ -12100,8 +12125,8 @@ class SettingsDialog(QDialog):
         )
 
         appearance_page, appearance_layout = make_scroll_page(
-            "外观",
-            "创建和切换自定义主题，或让 AI 根据描述生成可确认的临时预览。",
+            "外观与阅读",
+            "选择喜欢的工作台风格，按自己的习惯调整阅读体验。",
         )
         theme_repository = (
             self._main.theme_manager.repository
@@ -12117,6 +12142,8 @@ class SettingsDialog(QDialog):
             ),
         )
         appearance_layout.addWidget(self.theme_settings_panel)
+        if self._main and hasattr(self._main, "start_theme_design"):
+            self.theme_settings_panel.set_design_host(self._main)
 
         agent_page, agent_layout = make_scroll_page(
             "专家",
@@ -12132,7 +12159,7 @@ class SettingsDialog(QDialog):
             skill_provider=skill_provider,
         )
         workspace_page, workspace_layout = make_scroll_page(
-            "工作区与存储",
+            "文件与存储",
             "把默认落点和聊天存储位置整理好，减少每次启动后的重复调整。",
         )
         archive_page, archive_layout = make_scroll_page(
@@ -12723,24 +12750,33 @@ class SettingsDialog(QDialog):
         add_settings_page("实验功能", "fa5s.flask", experiment_page)
         self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
         if domain == "settings":
-            from ui.project_management import SettingsNavigationDelegate
-            order = ["外观", "回答偏好", "模型与服务", "企业账号", "消息连接", "变量与凭据", "数据安全", "工作区与存储", "实验功能", "组件与依赖", "运行日志", "更新与关于"]
+            from ui.settings_sections import SettingsSection
             pages = dict(zip(self._page_labels, self._settings_pages))
-            items = {item.text(): item for item in [self.nav_list.takeItem(0) for _ in range(self.nav_list.count())]}
+            self.privacy_section = SettingsSection([(label, pages[label]) for label in ("数据安全", "变量与凭据")])
+            self.advanced_section = SettingsSection([(label, pages[label]) for label in ("实验功能", "组件与依赖", "运行日志", "更新与关于")])
+            sections = [
+                ("外观与阅读", "fa5s.palette", pages["外观"]),
+                ("回答偏好", "fa5s.comment", pages["回答偏好"]),
+                ("模型与服务", "fa5s.brain", pages["模型与服务"]),
+                ("消息连接", "fa5s.comments", pages["消息连接"]),
+                ("企业账号", "fa5s.user-circle", pages["企业账号"]),
+                ("隐私与数据", "fa5s.shield-alt", self.privacy_section),
+                ("文件与存储", "fa5s.folder-open", pages["工作区与存储"]),
+                ("高级与维护", "fa5s.sliders-h", self.advanced_section),
+            ]
+            self.nav_list.clear()
             self.nav_combo.clear()
-            groups = {"外观": "使用偏好", "模型与服务": "模型与连接", "变量与凭据": "访问与存储", "组件与依赖": "应用维护"}
-            for label in order:
-                item = items[label]
-                item.setData(Qt.UserRole + 1, groups.get(label, ""))
-                self.nav_list.addItem(item)
+            for label, icon, page in sections:
+                self.nav_list.addItem(QListWidgetItem(qta.icon(icon, color=DesignTokens.text_secondary), label))
                 self.nav_combo.addItem(label)
-            self._page_labels = order
-            self._settings_pages = [pages[label] for label in order]
-            self.nav_list.setItemDelegate(SettingsNavigationDelegate(self.nav_list))
+                self.content_stack.addWidget(page)
+            self._page_labels = [label for label, _, _ in sections]
+            self._settings_pages = [page for _, _, page in sections]
+            self.update_nav_item = self.nav_list.item(7)
         def show_settings_page(row):
             if row < 0 or row >= len(self._settings_pages):
                 return
-            if row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
+            if self.domain != "settings" and row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
                     or self.long_context_panel.has_pending_input()
                     or self.browser_automation_panel.has_pending_input()
                     or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
@@ -12761,7 +12797,7 @@ class SettingsDialog(QDialog):
             self.nav_combo.setCurrentIndex(row)
             self.nav_combo.blockSignals(False)
             if hasattr(self, "settings_action_bar"):
-                self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[row] not in {"项目", "对话", "归档", "企业账号", "变量与凭据", "消息连接", "实验功能", "运行日志", "更新与关于"})
+                self._sync_settings_action_bar()
 
         self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
@@ -12796,15 +12832,64 @@ class SettingsDialog(QDialog):
         self.settings_search.textChanged.connect(self._filter_settings_pages)
         self.settings_search.returnPressed.connect(self._activate_settings_search)
         layout.insertWidget(1, self.settings_search)
+        if domain == "settings":
+            self.settings_search.setPlaceholderText("搜索设置，例如字体、凭据、日志…")
+            self.settings_search.setMaximumWidth(600)
+            self.privacy_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
+            self.advanced_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
+            self.theme_settings_panel.selectionCommitted.connect(self._theme_selection_committed)
+        bind_theme(self, self._refresh_settings_shell, surface="settings")
+
+    def _refresh_settings_shell(self, _resolved=None):
+        if self.domain != "capabilities":
+            apply_product_dialog(self, "SettingsDialog")
+        self.nav_list.setStyleSheet(apple_settings_nav_style())
+        self.nav_combo.setStyleSheet(apple_combo_style())
+        if hasattr(self, "settings_search"):
+            self.settings_search.setStyleSheet(apple_search_field_style())
+        for page in self.findChildren(QWidget, "SettingsPageContent"):
+            set_stylesheet_if_changed(page, "QWidget#SettingsPageContent { background: palette(window); }")
+        for label in self.findChildren(QLabel, "SettingsPageIntro"):
+            label.setStyleSheet(apple_settings_inline_note_style())
+        if hasattr(self, "settings_dirty_label"):
+            self.settings_dirty_label.setStyleSheet(apple_caption_style())
+
+    def _theme_selection_committed(self):
+        # An immediate theme choice must never mark unrelated drafts as saved.
+        self._settings_baseline_state["appearance"] = self._strip_settings_state_metadata(self.theme_settings_panel.saved_signature())
+        self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
+        self._refresh_settings_dirty_state()
+
+    def _sync_settings_action_bar(self):
+        if not hasattr(self, "settings_action_bar"):
+            return
+        if self.domain == "settings":
+            label = self._page_labels[self._active_settings_row] if self._active_settings_row >= 0 else ""
+            self.settings_action_bar.setVisible(self._settings_dirty or label in {"外观与阅读", "回答偏好", "模型与服务", "文件与存储"} or
+                                               (label == "隐私与数据" and self.privacy_section.current_label == "数据安全"))
+        else:
+            self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[self._active_settings_row] not in {"项目", "对话", "归档"})
 
     def _activate_settings_search(self):
-        for row, page in enumerate(self._settings_pages):
+        from ui.settings_sections import SettingsSection
+        query = self.settings_search.text().strip().casefold()
+        def title_match(item):
+            row, page = item
+            titles = [self._page_labels[row], *(page.pages if isinstance(page, SettingsSection) else [])]
+            return 0 if query and any(query in title.casefold() for title in titles) else 1
+        for row, page in sorted(enumerate(self._settings_pages), key=title_match):
             if self.nav_list.item(row).isHidden():
                 continue
             self.nav_list.setCurrentRow(row)
             if self._active_settings_row != row:
                 return
-            query = self.settings_search.text().strip().casefold()
+            if isinstance(page, SettingsSection):
+                for title, child in sorted(page.pages.items(), key=lambda item: query not in item[0].casefold()):
+                    words = [title, *(label.text() for label in child.findChildren(QLabel))]
+                    if query and query in " ".join(words).casefold():
+                        page.select(title)
+                        page = child
+                        break
             for label in page.findChildren(QLabel):
                 if query in label.text().casefold() and isinstance(page, QScrollArea):
                     page.ensureWidgetVisible(label)
@@ -12812,9 +12897,12 @@ class SettingsDialog(QDialog):
             return
 
     def _filter_settings_pages(self, query):
+        from ui.settings_sections import SettingsSection
         query = query.strip().casefold()
         for row, page in enumerate(self._settings_pages):
             words = [self._page_labels[row]]
+            if isinstance(page, SettingsSection):
+                words.extend(page.pages)
             words.extend(label.text() for label in page.findChildren(QLabel))
             self.nav_list.item(row).setHidden(bool(query) and query not in " ".join(words).casefold())
 
@@ -13046,7 +13134,8 @@ class SettingsDialog(QDialog):
         if hasattr(self, "save_settings_btn"):
             self.save_settings_btn.setEnabled(dirty)
         if hasattr(self, "settings_dirty_label"):
-            self.settings_dirty_label.setText("有未保存的修改" if dirty else "没有未保存的修改")
+            self.settings_dirty_label.setText("有未保存的修改 · 切换设置页会保留" if dirty else "所有更改已保存")
+        self._sync_settings_action_bar()
 
     def _mark_settings_dirty(self):
         self._refresh_settings_dirty_state()
@@ -13062,7 +13151,8 @@ class SettingsDialog(QDialog):
         if hasattr(self, "save_settings_btn"):
             self.save_settings_btn.setEnabled(False)
         if hasattr(self, "settings_dirty_label"):
-            self.settings_dirty_label.setText("没有未保存的修改")
+            self.settings_dirty_label.setText("所有更改已保存")
+        self._sync_settings_action_bar()
 
     def _confirm_discard_settings(self):
         if hasattr(self, "browser_automation_panel") and not self.browser_automation_panel.confirm_leave():
@@ -13112,6 +13202,14 @@ class SettingsDialog(QDialog):
     def select_initial_page(self, initial_page_label):
         initial_page_label = "专家" if initial_page_label == "智能体" else initial_page_label
         initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于", "日志下载": "运行日志"}.get(initial_page_label, initial_page_label)
+        if self.domain == "settings":
+            if initial_page_label in self.privacy_section.pages:
+                self.privacy_section.select(initial_page_label)
+                initial_page_label = "隐私与数据"
+            elif initial_page_label in self.advanced_section.pages:
+                self.advanced_section.select(initial_page_label)
+                initial_page_label = "高级与维护"
+            initial_page_label = {"外观": "外观与阅读", "工作区与存储": "文件与存储"}.get(initial_page_label, initial_page_label)
         if not initial_page_label:
             self.nav_list.setCurrentRow(0)
             return
@@ -14101,7 +14199,9 @@ class SettingsDialog(QDialog):
             if model.get("id")
         ]
         page_label = self._page_labels[self._active_settings_row]
-        if page_label == "模型与服务" and all_model_ids and selected_model_id not in all_model_ids:
+        model_changed = (model_channels != self._settings_baseline_state["config"]["model_channels"] or
+                         selected_model_id != self._settings_baseline_state["config"]["selected_model_id"])
+        if (page_label == "模型与服务" or model_changed) and all_model_ids and selected_model_id not in all_model_ids:
             log_model_service_event("default_model_save_rejected", reason="selection_required")
             QMessageBox.warning(self, "请选择默认模型", "默认模型未选择或已删除，请在“模型与服务”重新选择后保存。")
             return
@@ -14246,8 +14346,6 @@ class SettingsDialog(QDialog):
             if config_changed:
                 log_model_service_event("default_model_save_failed", error_type=type(exc).__name__)
             try:
-                if appearance_changed:
-                    self.theme_settings_panel.restore_saved_theme()
                 if "soul" in memory_write_scopes:
                     target_memory_store.save_soul(previous_memory["soul"])
                 if "global" in memory_write_scopes:
@@ -14296,7 +14394,7 @@ class SettingsDialog(QDialog):
                     f"保存失败：{exc}\n回滚也未完成：{rollback_exc}",
                 )
                 return
-            QMessageBox.critical(self, "保存设置失败", f"所有修改已回滚：{exc}")
+            QMessageBox.critical(self, "保存设置失败", f"保存未完成，已恢复原配置。当前输入仍保留，可修改后重试：{exc}")
             return
         if config_changed:
             log_model_service_event("default_model_save_completed", model_id=selected_model_id)
@@ -27031,40 +27129,23 @@ class SmartSplitter(QSplitter):
         bind_theme(self, self.refresh_theme, surface="global")
 
     def refresh_theme(self, _resolved=None):
-        orientation = self.orientation()
-        if orientation == Qt.Horizontal:
-            self.setStyleSheet(f"""
-                QSplitter::handle:horizontal {{
-                    background-color: transparent; 
-                    width: 1px; 
-                    margin: 0; 
-                }}
-                QSplitter::handle:horizontal:hover {{
-                    background-color: {rgba_from_hex(DesignTokens.primary, 0.16)};
-                }}
-                QSplitter::handle:vertical {{
-                    background-color: {DesignTokens.separator};
-                    height: 1px; 
-                    margin: 4px 0; 
-                }}
-                QSplitter::handle:vertical:hover {{
-                    background-color: {DesignTokens.primary};
-                }}
-            """)
-        else:
-            self.setStyleSheet(f"""
-                QSplitter::handle:vertical {{
-                    background-color: {DesignTokens.separator};
-                    height: 1px; 
-                    margin: 4px 0; 
-                }}
-                QSplitter::handle:vertical:hover {{
-                    background-color: {DesignTokens.primary};
-                }}
-            """)
+        # Styling the splitter reparses QSS for every pane descendant. Only the
+        # handles own this presentation, so refresh them directly.
+        for index in range(self.count()):
+            handle = self.handle(index)
+            if handle is not None:
+                set_stylesheet_if_changed(handle, self._handle_style())
+
+    def _handle_style(self):
+        horizontal = self.orientation() == Qt.Horizontal
+        background = "transparent" if horizontal else DesignTokens.separator
+        hover = rgba_from_hex(DesignTokens.primary, 0.16) if horizontal else DesignTokens.primary
+        return f"QSplitterHandle {{ background: {background}; }} QSplitterHandle:hover {{ background: {hover}; }}"
 
     def createHandle(self):
-        return SmartSplitterHandle(self.orientation(), self)
+        handle = SmartSplitterHandle(self.orientation(), self)
+        handle.setStyleSheet(self._handle_style())
+        return handle
 
     def setSizes(self, sizes):
         super().setSizes(sizes)
@@ -28781,10 +28862,10 @@ class ThemePreviewSafetyBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 7, 12, 7)
         layout.setSpacing(8)
-        self.message_label = QLabel("正在预览自定义主题")
+        self.message_label = QLabel("主题候选已准备好")
         layout.addWidget(self.message_label, 1)
-        self.restore_button = QPushButton("恢复原主题")
-        self.save_button = QPushButton("保存主题")
+        self.restore_button = QPushButton("弃用候选")
+        self.save_button = QPushButton("查看预览")
         self.save_button.setObjectName("ThemePreviewSave")
         self.restore_button.clicked.connect(self.restoreRequested)
         self.save_button.clicked.connect(self.saveRequested)
@@ -28794,7 +28875,7 @@ class ThemePreviewSafetyBar(QFrame):
     def show_preview(self, preview):
         name = str((preview or {}).get("name") or "自定义主题")
         revision = int((preview or {}).get("revision") or 1)
-        self.message_label.setText(f"正在预览“{name}” · revision {revision}")
+        self.message_label.setText(f"“{name}”已生成 · 查看并确认后应用")
         self.setVisible(True)
 
 
@@ -28931,22 +29012,22 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         # Product-local stylesheet: keep selectors scoped so dialog and content
         # widgets can own their states without inherited chrome.
         self._theme_stylesheet_factory = lambda: f"""
-            QMainWindow {{ background-color: {DesignTokens.management_bg}; }}
-            QLabel[roleTitle="true"] {{ font-size: {DesignTokens.font_size_page}px; font-weight: {DesignTokens.font_weight_semibold}; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
-            QLabel[roleSubtitle="true"] {{ font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary}; }}
+            QMainWindow {{ background-color: palette(window); }}
+            QLabel[roleTitle="true"] {{ font-size: {DesignTokens.font_size_page}px; font-weight: {DesignTokens.font_weight_semibold}; color: palette(window-text); letter-spacing: 0px; }}
+            QLabel[roleSubtitle="true"] {{ font-size: {DesignTokens.font_size_meta}px; color: palette(placeholder-text); }}
             QTextEdit#MainInput {{
                 padding: 12px 14px;
                 border-radius: {DesignTokens.composer_radius}px;
-                border: 1px solid {DesignTokens.composer_border};
-                background: {DesignTokens.composer_bg};
+                border: 1px solid palette(mid);
+                background: palette(base);
                 font-size: {DesignTokens.font_size_body}px;
-                color: {DesignTokens.composer_text};
-                selection-background-color: {DesignTokens.selection_bg};
-                selection-color: {DesignTokens.selection_text};
+                color: palette(text);
+                selection-background-color: palette(highlight);
+                selection-color: palette(highlighted-text);
             }}
             QTextEdit#MainInput:focus {{
-                border: 1px solid {DesignTokens.primary_focus};
-                background: {DesignTokens.composer_bg};
+                border: 1px solid palette(highlight);
+                background: palette(base);
             }}
             QScrollArea {{ border: none; background: transparent; }}
             QTabWidget::pane {{ border: none; }}
@@ -28955,11 +29036,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 padding: 8px 14px;
                 margin-right: 4px;
                 border-radius: {DesignTokens.radius_sm}px;
-                color: {DesignTokens.text_secondary};
+                color: palette(placeholder-text);
             }}
             QTabBar::tab:selected {{
-                background: {DesignTokens.primary_soft};
-                color: {DesignTokens.primary};
+                background: palette(alternate-base);
+                color: palette(highlight);
                 font-weight: 600;
             }}
 
@@ -28971,13 +29052,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 margin: 0px;
             }}
             QScrollBar::handle:vertical {{
-                background: {DesignTokens.scrollbar_thumb};
+                background: palette(mid);
                 min-height: 20px;
                 border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px;
                 margin: 2px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: {DesignTokens.scrollbar_thumb_hover};
+                background: palette(dark);
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
@@ -28992,13 +29073,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 margin: 0px;
             }}
             QScrollBar::handle:horizontal {{
-                background: {DesignTokens.scrollbar_thumb};
+                background: palette(mid);
                 min-width: 20px;
                 border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px;
                 margin: 2px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: {DesignTokens.scrollbar_thumb_hover};
+                background: palette(dark);
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
@@ -29117,7 +29198,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         root_layout.setSpacing(0)
         root_layout.setSizeConstraint(QLayout.SetNoConstraint)
         self.theme_preview_bar = ThemePreviewSafetyBar()
-        self.theme_preview_bar.saveRequested.connect(self._save_theme_preview_from_bar)
+        self.theme_preview_bar.saveRequested.connect(lambda: self.open_settings("外观与阅读"))
         self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
         root_layout.addWidget(self.theme_preview_bar)
         
@@ -30155,6 +30236,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         title_box.addWidget(self.workspace_subtitle_label)
         top_bar.addLayout(title_box)
         top_bar.addStretch()
+        from ui.theme_preview import ThemeQuickPicker
+        self.theme_quick_picker = ThemeQuickPicker(self.theme_manager, self)
+        self.theme_quick_picker.manageRequested.connect(lambda: self.open_settings("外观与阅读"))
+        top_bar.addWidget(self.theme_quick_picker, 0, Qt.AlignTop)
         
         self.ws_container = QFrame()
         self.ws_container.setStyleSheet("QFrame { background: transparent; border: none; }")
@@ -30737,8 +30822,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def _restore_theme_preview_from_bar(self):
         if self.theme_manager is None:
             return
-        if self.theme_manager.restore_saved_theme(reason="safety_bar_restore"):
-            self.add_system_toast("已恢复原主题。", "success")
+        preview = self.theme_manager.preview or {}
+        try:
+            if self.theme_manager.restore_saved_theme(reason="safety_bar_restore",
+                    expected_id=preview.get("preview_id", ""), expected_revision=preview.get("revision")):
+                self.add_system_toast("已弃用候选，当前主题保持不变。", "success")
+        except Exception as exc:
+            self.add_system_toast(f"弃用未完成，候选仍保留：{exc}", "error")
+            self.theme_manager.request_preview_update()
 
     def _save_theme_preview_from_bar(self):
         if self.theme_manager is None:
@@ -30777,9 +30868,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         _resolved = _resolved or {}
         scene_active = bool(((_resolved.get("workspace_scene") or {}).get("layers") or []))
         workspace_background = "transparent" if scene_active else DesignTokens.bg_chat
-        self.setStyleSheet(self._theme_stylesheet_factory())
-        self.main_container.setStyleSheet(
-            f"QWidget#MainContainer {{ background: {workspace_background}; }}"
+        set_stylesheet_if_changed(self, self._theme_stylesheet_factory())
+        container_background = ("palette(base)" if not scene_active and DesignTokens.bg_chat == DesignTokens.overlay_bg else workspace_background)
+        set_stylesheet_if_changed(self.main_container,
+            f"QWidget#MainContainer {{ background: {container_background}; }}"
         )
         self.sidebar.setMinimumWidth(DesignTokens.sidebar_min_width)
         self.sidebar.setMaximumWidth(DesignTokens.sidebar_max_width)
@@ -30797,6 +30889,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.new_chat_btn.setIcon(
             qta.icon("fa5s.edit", color=DesignTokens.icon_primary)
         )
+        self.product_back_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.product_back_btn.setIcon(qta.icon("fa5s.arrow-left", color=DesignTokens.text_secondary))
         self.new_chat_btn.setStyleSheet(
             apple_button_style("ghost", radius=DesignTokens.radius_sm, align="left")
         )
@@ -30980,11 +31074,31 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
             )
             button.setStyleSheet(apple_tool_button_style(button.isChecked()))
-        self.refresh_history_list()
+        self._refresh_history_theme()
         self.refresh_context_badges()
         self.sync_context_drawer_layout()
         self.workspace_theme_controller.apply(_resolved or {})
         self.update()
+
+    def _refresh_history_theme(self):
+        """Repaint existing rows without re-reading storage or replacing editors."""
+        self.update_history_selection()
+        for label in self.history_age_labels.values():
+            label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent; border: none;")
+        for button in self.history_disclosure_buttons.values():
+            button.setStyleSheet(apple_disclosure_button_style())
+        for button in self.project_buttons.values():
+            button.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
+        for row in self.history_container.findChildren(QFrame, "HistoryRow"):
+            if isinstance(row, ProjectHistoryRow):
+                set_stylesheet_if_changed(row, apple_history_row_style(False))
+        for button in self.history_container.findChildren(QToolButton):
+            button.setStyleSheet(apple_ghost_icon_button_style(radius=13))
+            button.setIcon(sidebar_symbol_icon("ellipsis" if "操作" in button.accessibleName() else "plus", DesignTokens.icon_secondary, 16))
+        for index in range(self.history_layout.count()):
+            widget = self.history_layout.itemAt(index).widget()
+            if isinstance(widget, QLabel):
+                widget.setStyleSheet(apple_history_group_style())
 
     def _apply_initial_window_size(self):
         screen = QGuiApplication.primaryScreen()
@@ -48564,6 +48678,35 @@ a {{ overflow-wrap: anywhere; }}
         )
         return False
 
+    def start_theme_design(self, description):
+        """Use the normal durable conversation pipeline in a separate session."""
+        description = str(description or "").strip()
+        if not description:
+            raise ValueError("请先描述希望得到的主题。")
+        previous_id = getattr(self, "_theme_design_session_id", "")
+        previous = self.sessions.get(previous_id)
+        if previous and self._session_is_busy(previous):
+            raise ValueError("已有主题任务正在进行，可查看过程或先停止。")
+        records = self._home_action_skill_records()
+        skill = records.get("theme-customizer")
+        if not skill or not skill.get("enabled"):
+            raise ValueError("Theme Customizer 尚未就绪，请在能力中心启用后重试。")
+        session_id = self.create_new_session(title="主题设计", make_current=False, workspace_dir="")
+        state = self.sessions[session_id]
+        state.composer_draft = description
+        self._merge_home_action_skills(state, "theme", ["theme-customizer"])
+        self._theme_design_session_id = session_id
+        log_ui_navigation("settings_theme_design_submit", session_id=session_id)
+        submitted = self._submit_session_request(state, "请根据以下描述设计工作台主题，生成预览供我确认：\n" + description, [])
+        if not submitted:
+            self.save_chat_history(session_id=session_id)
+            log_ui_navigation("settings_theme_design_rejected", session_id=session_id)
+            raise ValueError("主题任务未能启动，描述已保留。请查看该对话中的原因后重试。")
+        state.composer_draft = ""
+        self.refresh_history_list()
+        log_ui_navigation("settings_theme_design_started", session_id=session_id)
+        return session_id
+
     def prepare_home_action(self, action_id):
         action_id = str(action_id or "").strip().lower()
         state = self.get_current_session()
@@ -50277,8 +50420,8 @@ a {{ overflow-wrap: anywhere; }}
             return "network_retry_exhausted", "暂时无法连接模型，请重试"
         return "provider_error", "本轮未完成，请重试"
 
-    def stop_agent(self):
-        state = self.get_current_session()
+    def stop_agent(self, *, session_id=None):
+        state = self.sessions.get(session_id) if session_id else self.get_current_session()
         if not state:
             return
         stopped_turn_id = state.active_turn_id

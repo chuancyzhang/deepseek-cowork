@@ -381,13 +381,12 @@ class ThemeSettingsUiTests(unittest.TestCase):
             panel.color_edits["primary"].setText("#3366cc")
             manager.apply_repository_state.assert_not_called()
             panel._preview_current()
-            manager.apply_repository_state.assert_called_once_with(
-                reason="settings_preview"
-            )
+            manager.request_preview_update.assert_called_once_with()
+            manager.apply_repository_state.assert_not_called()
             first_preview = self.repository.load_preview()
             panel.color_edits["primary"].setText("#2255aa")
             self.assertIn("不是最新", panel.validation_label.text())
-            self.assertEqual(manager.apply_repository_state.call_count, 1)
+            manager.apply_repository_state.assert_not_called()
             panel._preview_current()
             second_preview = self.repository.load_preview()
             self.assertEqual(

@@ -1,13 +1,17 @@
 import copy
+import hashlib
+import json
 import os
+import threading
 import time
 import weakref
 
 import qdarktheme
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import QObject, QTimer, Signal, Qt
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from shiboken6 import isValid as is_qt_object_valid
+from .theme_presets import BUILTIN_THEMES, builtin_theme
 
 from .theme_service import (
     DEFAULT_THEME_ID,
@@ -306,72 +310,62 @@ def _runtime_theme_stylesheet(resolved):
     mono_family = str(resolved.get("mono_font_family") or "Consolas").replace("'", "")
     return f"""
     QMainWindow, QDialog, QWidget#MainContainer {{
-        background: {tokens['management_bg']};
-        color: {tokens['text_primary']};
+        background: palette(window);
+        color: palette(window-text);
         font-family: '{font_family}';
     }}
-    QWidget#Sidebar {{
-        background: {tokens['bg_sidebar']};
-        color: {tokens['sidebar_text']};
-        border-right: 1px solid {tokens['sidebar_border']};
-    }}
-    QWidget#ConversationPage, QWidget#ConversationColumn,
-    QTabWidget#SessionTabs::pane {{
-        background: {tokens['bg_chat']};
-        color: {tokens['chat_text']};
-        border: none;
-    }}
-    QFrame#ContentCard {{
-        background: {tokens['composer_bg']};
-        color: {tokens['composer_text']};
-        border: 1px solid {tokens['composer_border']};
-        border-radius: {tokens['composer_radius']}px;
-    }}
-    QFrame#RightSidebar, QWidget[themeSurface="right-sidebar"] {{
-        background: {tokens['right_sidebar_bg']};
-        color: {tokens['right_sidebar_text']};
-        border-left: 1px solid {tokens['right_sidebar_border']};
-    }}
-    QWidget[themeSurface="preview-shell"] {{
-        background: {tokens['preview_shell_bg']};
-        color: {tokens['preview_shell_text']};
-        border-color: {tokens['preview_shell_border']};
-    }}
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
-        selection-background-color: {tokens['selection_bg']};
-        selection-color: {tokens['selection_text']};
+        selection-background-color: palette(highlight);
+        selection-color: palette(highlighted-text);
     }}
     QMenu {{
-        background: {tokens['overlay_bg']};
-        color: {tokens['overlay_text']};
-        border: 1px solid {tokens['overlay_border']};
-        selection-background-color: {tokens['primary_soft']};
-        selection-color: {tokens['text_primary']};
+        background: palette(base);
+        color: palette(text);
+        border: 1px solid palette(mid);
+        selection-background-color: palette(highlight);
+        selection-color: palette(highlighted-text);
     }}
     QToolTip {{
-        background-color: {tokens['bg_main']};
-        color: {tokens['text_primary']};
-        border: 1px solid {tokens['border']};
+        background-color: palette(tool-tip-base);
+        color: palette(tool-tip-text);
+        border: 1px solid palette(mid);
     }}
     QTextEdit[codeSurface="true"], QPlainTextEdit[codeSurface="true"] {{
         font-family: '{mono_family}';
     }}
     QScrollBar:vertical {{
         width: {tokens['scrollbar_width']}px;
-        background: {tokens['scrollbar_track']};
+        background: transparent;
         border: none;
     }}
     QScrollBar::handle:vertical {{
         min-height: 28px;
-        background: {tokens['scrollbar_thumb']};
+        background: palette(mid);
         border-radius: {max(1, int(tokens['scrollbar_width']) // 2)}px;
     }}
-    QScrollBar::handle:vertical:hover {{ background: {tokens['scrollbar_thumb_hover']}; }}
+    QScrollBar::handle:vertical:hover {{ background: palette(dark); }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0;
         background: transparent;
     }}
     """
+
+
+def _apply_runtime_palette(app, tokens):
+    """Keep palette-only switches out of QApplication's global QSS reparse."""
+    palette = app.palette()
+    for role, token in ((QPalette.Window, "management_bg"), (QPalette.WindowText, "text_primary"),
+                        (QPalette.Base, "overlay_bg"), (QPalette.Text, "overlay_text"), (QPalette.AlternateBase, "primary_soft"),
+                        (QPalette.Button, "bg_card"), (QPalette.ButtonText, "text_primary"),
+                        (QPalette.Highlight, "selection_bg"), (QPalette.HighlightedText, "selection_text"),
+                        (QPalette.Mid, "border"), (QPalette.Dark, "scrollbar_thumb_hover"),
+                        (QPalette.ToolTipBase, "bg_main"), (QPalette.ToolTipText, "text_primary"),
+                        (QPalette.PlaceholderText, "text_tertiary")):
+        palette.setColor(role, QColor(tokens[token]))
+    for role in (QPalette.Text, QPalette.WindowText, QPalette.ButtonText):
+        palette.setColor(QPalette.Disabled, role, QColor(tokens["text_disabled"]))
+    if palette != app.palette():
+        app.setPalette(palette)
 
 
 def _theme_animation_log_fields(profile):
@@ -402,6 +396,9 @@ class ThemeRuntimeManager(QObject):
     themeChanged = Signal(dict)
     themeApplyFailed = Signal(str)
     previewStateChanged = Signal(object)
+    previewLoadingChanged = Signal(bool)
+    selectionChanged = Signal(object)
+    _previewPrepared = Signal(object)
 
     def __init__(self, app, repository=None, parent=None):
         super().__init__(parent)
@@ -414,9 +411,18 @@ class ThemeRuntimeManager(QObject):
         self.app.theme_binding_registry = self.binding_registry
         self._last_store_stamp = None
         self._last_preview_stamp = None
+        self._applied_fingerprint = None
+        self._preview_generation = 0
+        self._preview_loading = False
+        self.preview = None
+        self._undo_selection = None
+        self._installed_fonts = None
+        self._previewPrepared.connect(self._accept_prepared_preview)
+        self.app.fontDatabaseChanged.connect(self._invalidate_fonts)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(700)
         self._poll_timer.timeout.connect(self.poll_external_changes)
+        self.app.styleHints().colorSchemeChanged.connect(self._system_color_changed)
 
     def start(self):
         if self.repository.clear_preview():
@@ -427,6 +433,48 @@ class ThemeRuntimeManager(QObject):
 
     def stop(self):
         self._poll_timer.stop()
+        self._preview_generation += 1
+
+    def _system_color_changed(self, _scheme):
+        if self.repository.load_appearance()["mode"] == "system":
+            self.apply_repository_state(reason="system_color_scheme")
+
+    def _invalidate_fonts(self):
+        self._installed_fonts = None
+
+    def selection(self):
+        return {"theme_id": self.repository.load().active_theme_id,
+                "appearance": self.repository.load_appearance()}
+
+    def switch_theme(self, theme_id=None, *, mode=None, undo=False):
+        previous = self.selection()
+        target = copy.deepcopy(self._undo_selection if undo else previous)
+        if target is None:
+            return False
+        if theme_id is not None:
+            target["theme_id"] = theme_id
+        if mode is not None:
+            target["appearance"]["mode"] = mode
+        if target == previous:
+            return True
+        if not undo and not target["appearance"]["reading"] and self.current:
+            target["appearance"]["reading"] = {key: self.current[key] for key in
+                ("font_family", "mono_font_family", "font_scale", "density")}
+        append_theme_log(self.repository.data_dir, "quick_switch_start", theme_id=target["theme_id"], mode=target["appearance"]["mode"])
+        try:
+            self.repository.activate_theme(target["theme_id"])
+            self.repository.save_appearance(target["appearance"])
+            if not self.apply_repository_state(reason="quick_switch"):
+                raise ValueError(self.last_error or "无法应用主题。")
+        except Exception:
+            self.repository.activate_theme(previous["theme_id"])
+            self.repository.save_appearance(previous["appearance"])
+            self.acknowledge_repository_state()
+            raise
+        self._undo_selection = None if undo else previous
+        self.selectionChanged.emit(target)
+        append_theme_log(self.repository.data_dir, "quick_switch_finish", theme_id=target["theme_id"], undo=bool(undo))
+        return True
 
     def report_runtime_error(self, error, *, reason="runtime_theme"):
         """Surface a late theme rendering failure through the normal diagnostics path."""
@@ -462,7 +510,7 @@ class ThemeRuntimeManager(QObject):
         try:
             items = []
             for filename in sorted(os.listdir(self.repository.themes_dir)):
-                if filename == os.path.basename(self.repository.preview_path):
+                if filename in {os.path.basename(self.repository.preview_path), os.path.basename(self.repository.legacy_preview_path)}:
                     continue
                 if not filename.lower().endswith((".json", ".cowork-theme")):
                     continue
@@ -475,7 +523,10 @@ class ThemeRuntimeManager(QObject):
 
     def _capture_stamps(self):
         self._last_store_stamp = self._directory_stamp()
-        self._last_preview_stamp = self._path_stamp(self.repository.preview_path)
+        self._last_preview_stamp = self._preview_stamp()
+
+    def _preview_stamp(self):
+        return (self._path_stamp(self.repository.preview_path), self._path_stamp(self.repository.legacy_preview_path))
 
     def acknowledge_repository_state(self):
         """Mark the current repository files as an app-local, already observed change."""
@@ -483,47 +534,91 @@ class ThemeRuntimeManager(QObject):
 
     def poll_external_changes(self):
         store_stamp = self._directory_stamp()
-        preview_stamp = self._path_stamp(self.repository.preview_path)
+        preview_stamp = self._preview_stamp()
         if store_stamp == self._last_store_stamp and preview_stamp == self._last_preview_stamp:
             return
-        self._last_store_stamp = store_stamp
-        self._last_preview_stamp = preview_stamp
-        self.apply_repository_state(
-            reason="external_change",
-            persisted_on_failure=True,
-        )
+        if store_stamp != self._last_store_stamp:
+            self._last_store_stamp = store_stamp
+            self.apply_repository_state(reason="external_change", persisted_on_failure=True)
+        if preview_stamp != self._last_preview_stamp:
+            self.request_preview_update()
+
+    def request_preview_update(self):
+        """Read and validate an AI candidate away from Qt; latest revision wins."""
+        if self._preview_loading:
+            return
+        stamp = self._preview_stamp()
+        if stamp == self._last_preview_stamp:
+            return
+        self._preview_generation += 1
+        generation = self._preview_generation
+        self._preview_loading = True
+        self.previewLoadingChanged.emit(True)
+        repository = self.repository
+        def prepare():
+            started = time.perf_counter()
+            result = {"generation": generation, "stamp": stamp}
+            try:
+                candidate, assets = repository.load_preview_bundle(default_design_tokens())
+                if candidate:
+                    appearance = repository.load_appearance()
+                    effective = {**candidate, "overrides": {**(candidate.get("overrides") or {}), **appearance["reading"]}}
+                    resolved = resolve_theme(effective, default_design_tokens())
+                    resolved.update({key: copy.deepcopy(candidate.get(key) or {})
+                                     for key in ("assets", "workspace_scene", "surfaces", "components", "content")})
+                    resolved["_asset_bytes"] = assets
+                    candidate = {**candidate, "_resolved": resolved}
+                result["preview"] = candidate
+            except Exception as exc:
+                result["error"] = str(exc)
+            result["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            if is_qt_object_valid(self):
+                self._previewPrepared.emit(result)
+        threading.Thread(target=prepare, name="theme-preview-prepare", daemon=True).start()
+
+    def _accept_prepared_preview(self, result):
+        if result["generation"] != self._preview_generation:
+            return
+        self._preview_loading = False
+        self.previewLoadingChanged.emit(False)
+        if result["stamp"] != self._preview_stamp():
+            self.request_preview_update()
+            return
+        self._last_preview_stamp = result["stamp"]
+        if result.get("error"):
+            append_theme_log(self.repository.data_dir, "preview_prepare_error", error=result["error"])
+            self.themeApplyFailed.emit("主题候选读取失败，当前主题保持不变：" + result["error"])
+            return
+        self.preview = result.get("preview")
+        self.previewStateChanged.emit(self.preview)
+        append_theme_log(self.repository.data_dir, "preview_prepare_finish",
+                         preview_revision=(self.preview or {}).get("revision", 0),
+                         elapsed_ms=result["elapsed_ms"], isolated=True)
 
     def apply_repository_state(self, *, reason="apply", persisted_on_failure=False):
         try:
-            preview = self.repository.load_preview()
-            if preview:
-                profile = {
-                    "id": f"preview:{preview.get('preview_id')}",
-                    "name": preview.get("name") or "主题预览",
-                    "base": DEFAULT_THEME_ID,
-                    "overrides": preview.get("overrides") or {},
-                    "schema_version": int(preview.get("schema_version") or 2),
-                    "assets": preview.get("assets") or {},
-                    "workspace_scene": preview.get("workspace_scene") or {},
-                    "surfaces": preview.get("surfaces") or {},
-                    "components": preview.get("components") or {},
-                    "content": preview.get("content") or {},
-                    "preview_id": preview.get("preview_id"),
-                    "preview_revision": int(preview.get("revision") or 1),
-                }
-                preview_mode = True
-            else:
-                snapshot = self.repository.load()
-                profile = self.repository.get_theme(snapshot.active_theme_id)
-                preview_mode = False
+            snapshot = self.repository.load()
+            appearance = self.repository.load_appearance()
+            dark = appearance["mode"] == "dark" or (
+                appearance["mode"] == "system" and self.app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+            profile = builtin_theme(snapshot.active_theme_id, dark=dark)
+            if profile is None:
+                profile = copy.deepcopy(next(item for item in snapshot.themes if item["id"] == snapshot.active_theme_id))
+            profile["overrides"] = {**(profile.get("overrides") or {}), **appearance["reading"]}
             applied = self.apply_profile(
                 profile,
-                preview=preview_mode,
                 reason=reason,
-                persisted_on_failure=bool(persisted_on_failure and not preview_mode),
+                persisted_on_failure=persisted_on_failure,
             )
             if applied:
-                self.previewStateChanged.emit(_json_theme_copy(preview) if preview else None)
+                self._last_store_stamp = self._directory_stamp()
+                if self._preview_stamp() == (None, None):
+                    self._preview_generation += 1
+                    self._preview_loading = False
+                    self._last_preview_stamp = (None, None)
+                    self.preview = None
+                    self.previewLoadingChanged.emit(False)
+                    self.previewStateChanged.emit(None)
             return applied
         except Exception as exc:
             self.last_error = str(exc)
@@ -551,6 +646,13 @@ class ThemeRuntimeManager(QObject):
         reason="apply",
         persisted_on_failure=False,
     ):
+        fingerprint = hashlib.sha256(json.dumps(
+            {"profile": profile, "preview": preview}, sort_keys=True, default=str,
+        ).encode("utf-8")).hexdigest()
+        if fingerprint == self._applied_fingerprint and not self.last_error:
+            append_theme_log(self.repository.data_dir, "apply_unchanged", reason=reason)
+            return True
+        started = time.perf_counter()
         animation_log = _theme_animation_log_fields(profile)
         append_theme_log(
             self.repository.data_dir,
@@ -624,14 +726,16 @@ class ThemeRuntimeManager(QObject):
                 resolved["_asset_bytes"] = self.repository.get_preview_assets(
                     default_design_tokens()
                 )
-            elif resolved["id"] != DEFAULT_THEME_ID:
+            elif resolved["id"] not in BUILTIN_THEMES:
                 resolved["_asset_bytes"] = self.repository.get_theme_assets(
                     resolved["id"],
                     default_design_tokens(),
                 )
             else:
                 resolved["_asset_bytes"] = {}
-            installed = {name.casefold(): name for name in QFontDatabase.families()}
+            if self._installed_fonts is None:
+                self._installed_fonts = {name.casefold(): name for name in QFontDatabase.families()}
+            installed = self._installed_fonts
             for field in ("font_family", "mono_font_family"):
                 family = str(resolved.get(field) or "").strip()
                 if family.casefold() not in installed:
@@ -641,10 +745,13 @@ class ThemeRuntimeManager(QObject):
                     setattr(DesignTokens, name, value)
             app_font = QFont(resolved["font_family"])
             app_font.setPixelSize(int(resolved["tokens"]["font_size_body"]))
-            self.app.setFont(app_font)
+            if self.app.font() != app_font:
+                self.app.setFont(app_font)
             self.app.setProperty("themeMonoFontFamily", resolved["mono_font_family"])
-            self.app.setStyleSheet(_runtime_theme_stylesheet(resolved))
-            apply_tooltip_palette(self.app)
+            stylesheet = _runtime_theme_stylesheet(resolved)
+            if self.app.styleSheet() != stylesheet:
+                self.app.setStyleSheet(stylesheet)
+            _apply_runtime_palette(self.app, resolved["tokens"])
             self.current = dict(resolved)
             self.current["preview"] = bool(preview)
             if preview:
@@ -655,6 +762,7 @@ class ThemeRuntimeManager(QObject):
             self.last_error = ""
             self.last_failure = {}
             self._refresh_existing_widgets()
+            self._applied_fingerprint = fingerprint
             self.themeChanged.emit(dict(self.current))
             append_theme_log(
                 self.repository.data_dir,
@@ -664,6 +772,7 @@ class ThemeRuntimeManager(QObject):
                 preview=bool(preview),
                 refreshed_controls=int(self.current.get("_binding_count") or 0),
                 surface_elapsed_ms=self.current.get("_binding_surface_elapsed_ms") or {},
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 **animation_log,
             )
             return True
@@ -702,33 +811,42 @@ class ThemeRuntimeManager(QObject):
             return False
 
     def _refresh_existing_widgets(self):
+        from PySide6.QtWidgets import QWidget
         revision = int(time.time() * 1000)
         bound_ids = self.binding_registry.apply(self.current or {})
         for top_level in self.app.topLevelWidgets():
             candidates = [top_level, *top_level.findChildren(QObject)]
             for candidate in candidates:
+                if isinstance(candidate, QWidget) and ("palette(" in candidate.styleSheet() or
+                        candidate.property("roleTitle") or candidate.property("roleSubtitle")):
+                    # Qt caches palette(...) brushes when polishing QSS. Updating
+                    # QApplication.palette alone leaves those brushes unchanged.
+                    candidate.setPalette(self.app.palette())
+                    candidate.style().unpolish(candidate)
+                    candidate.style().polish(candidate)
                 if id(candidate) in bound_ids:
                     continue
                 refresh = getattr(candidate, "refresh_theme", None)
                 if callable(refresh):
                     refresh()
             top_level.setProperty("themeRevision", revision)
-            style = top_level.style()
-            style.unpolish(top_level)
-            style.polish(top_level)
             top_level.update()
 
-    def restore_saved_theme(self, *, reason="preview_restore"):
-        self.repository.clear_preview()
+    def restore_saved_theme(self, *, reason="preview_restore", expected_id="", expected_revision=None):
+        self.repository.clear_preview(expected_id, preview_revision=expected_revision)
         applied = self.apply_repository_state(reason=reason)
         if applied:
             self.previewStateChanged.emit(None)
         return applied
 
-    def commit_current_preview(self, *, activate=True, reason="preview_commit"):
+    def commit_current_preview(self, *, activate=True, reason="preview_commit", expected_id=None, expected_revision=None):
+        previous_selection = self.selection()
         preview = self.repository.load_preview()
         if not preview:
             raise ValueError("当前没有主题预览。")
+        if (expected_id is not None and preview["preview_id"] != expected_id) or (
+                expected_revision is not None and int(preview["revision"]) != int(expected_revision)):
+            raise ValueError("主题候选已更新，请查看最新预览后再应用。")
         result = self.repository.commit_preview(
             preview_id=preview["preview_id"],
             preview_revision=int(preview.get("revision") or 1),
@@ -741,6 +859,9 @@ class ThemeRuntimeManager(QObject):
         ):
             raise ValueError("主题已保存，但当前界面刷新失败；请重启应用以载入新主题。")
         self.previewStateChanged.emit(None)
+        if activate:
+            self._undo_selection = previous_selection
+            self.selectionChanged.emit(self.selection())
         return result
 
 

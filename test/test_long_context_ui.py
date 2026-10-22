@@ -80,9 +80,11 @@ class TestLongContextUI(unittest.TestCase):
             self.assertFalse(dialog._settings_dirty)
             self.assertFalse(self.config.get("experimental_long_context")["enabled"])
             current_row = dialog.nav_list.currentRow()
-            with patch("ui.long_context.ProductMessageDialog.exec_result", return_value="stay"):
+            with patch("ui.long_context.ProductMessageDialog.exec_result", side_effect=AssertionError("cross-page draft should stay")):
                 dialog.nav_list.setCurrentRow(0)
-            self.assertEqual(dialog.nav_list.currentRow(), current_row)
+            self.assertEqual(dialog.nav_list.currentRow(), 0)
+            self.assertTrue(panel.has_pending_input())
+            dialog.nav_list.setCurrentRow(current_row)
             self.capture("settings-pending", dialog)
             panel.apply_button.click()
             self.assertEqual(ConfigManager().get("experimental_long_context"), {"enabled": True, "target_tokens": 1000000})
@@ -263,7 +265,7 @@ class TestLongContextUI(unittest.TestCase):
         self.assertTrue(notice.retry_button.isHidden())
         self.capture("compression-completed", host)
 
-    def test_theme_preview_is_reversible_for_new_components(self):
+    def test_confirmed_theme_is_reversible_for_new_components(self):
         font, style = self.app.font(), self.app.styleSheet()
         original = {key: getattr(DesignTokens, key) for key in default_design_tokens()}
         registry = getattr(self.app, "theme_binding_registry", None)
@@ -273,17 +275,19 @@ class TestLongContextUI(unittest.TestCase):
             panel = self.widget(LongContextSettings(self.config))
             panel.resize(440, 370)
             saved = repository.load()
-            repository.write_preview(name="上下文主题预览", overrides={"tokens": {"primary": "#265840"}},
+            preview = repository.write_preview(name="上下文主题预览", overrides={"tokens": {"primary": "#265840"}},
                                      default_tokens=default_design_tokens(), session_id="context-test")
             with patch("core.theme.QFontDatabase.families", return_value=["Microsoft YaHei UI", "Consolas"]):
                 self.assertTrue(runtime.apply_repository_state(reason="test_preview"), runtime.last_error)
-            self.assertIn("#265840", panel.styleSheet())
-            self.assertEqual(repository.load(), saved)
+                self.assertNotIn("#265840", panel.styleSheet())
+                self.assertEqual(repository.load(), saved)
+                runtime.commit_current_preview(expected_id=preview["preview_id"], expected_revision=preview["revision"])
+                self.assertIn("#265840", panel.styleSheet())
             self.capture("theme-preview", panel)
             with patch("core.theme.QFontDatabase.families", return_value=["Microsoft YaHei UI", "Consolas"]):
-                self.assertTrue(runtime.restore_saved_theme(), runtime.last_error)
+                self.assertTrue(runtime.switch_theme(undo=True), runtime.last_error)
             self.assertIsNone(repository.load_preview())
-            self.assertEqual(repository.load(), saved)
+            self.assertEqual(repository.load().active_theme_id, saved.active_theme_id)
         finally:
             runtime.stop()
             self.app.theme_binding_registry = registry

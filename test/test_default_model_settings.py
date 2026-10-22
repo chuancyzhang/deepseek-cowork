@@ -143,7 +143,7 @@ class DefaultModelSettingsTests(unittest.TestCase):
         self.assertEqual(self.combo.currentData(), "model-a")
         self.assertEqual(self.combo.currentText(), "新渠道名 / 新名称")
 
-    def test_theme_preview_updates_combo_and_can_be_cancelled(self):
+    def test_confirmed_theme_updates_combo_and_can_be_undone(self):
         original_font = self.app.font()
         original_style = self.app.styleSheet()
         original_tokens = {key: getattr(DesignTokens, key) for key in default_design_tokens()}
@@ -154,7 +154,7 @@ class DefaultModelSettingsTests(unittest.TestCase):
             manager = ModelChannelManager(self.config.get_model_channels(), selected_model_id="model-a")
             try:
                 saved = repository.load()
-                repository.write_preview(
+                preview = repository.write_preview(
                     name="默认模型主题测试",
                     overrides={"tokens": {"primary_soft": "#ddeeff"}},
                     default_tokens=default_design_tokens(),
@@ -162,13 +162,15 @@ class DefaultModelSettingsTests(unittest.TestCase):
                 )
                 with patch("core.theme.QFontDatabase.families", return_value=["Microsoft YaHei UI", "Consolas"]):
                     self.assertTrue(runtime.apply_repository_state(reason="test_preview"))
-                    self.assertEqual(manager.default_model_combo.view().palette().color(QPalette.Highlight).name(), "#ddeeff")
                     self.assertEqual(repository.load(), saved)
+                    self.assertNotEqual(manager.default_model_combo.view().palette().color(QPalette.Highlight).name(), "#ddeeff")
+                    runtime.commit_current_preview(expected_id=preview["preview_id"], expected_revision=preview["revision"])
+                    self.assertEqual(manager.default_model_combo.view().palette().color(QPalette.Highlight).name(), "#ddeeff")
                     self.capture("default-model-theme-preview", manager)
-                    self.assertTrue(runtime.restore_saved_theme())
+                    self.assertTrue(runtime.switch_theme(undo=True))
                     self.capture("default-model-theme-restored", manager)
                 self.assertIsNone(repository.load_preview())
-                self.assertEqual(repository.load(), saved)
+                self.assertEqual(repository.load().active_theme_id, saved.active_theme_id)
                 self.assertEqual(manager.get_default_model_id(), "model-a")
                 self.assertEqual(self.config.get_selected_model_id(), "model-a")
             finally:

@@ -1,7 +1,7 @@
 """Small presentation widgets for the existing capability store."""
 from PySide6.QtCore import Qt, Signal, QBuffer, QIODevice
 from PySide6.QtGui import QPainter, QColor, QTextLayout, QTextOption, QImageReader, QPixmap
-from PySide6.QtWidgets import QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QSizePolicy
+from PySide6.QtWidgets import QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QSizePolicy, QApplication
 
 from core.theme import DesignTokens as T
 
@@ -33,15 +33,19 @@ class ClampedText(QWidget):
         self.text = " ".join(str(text).split())
         self.lines = lines
         self.strong = strong
-        font = self.font()
-        font.setPixelSize(T.font_size_body if strong else T.font_size_meta)
-        font.setBold(strong)
-        self.setFont(font)
-        self.setFixedHeight(self.fontMetrics().lineSpacing() * lines + 2)
+        self.refresh_theme()
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setToolTip(self.text)
         self.setAccessibleName(self.text)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def refresh_theme(self):
+        font = QApplication.font()
+        font.setPixelSize(T.font_size_body if self.strong else T.font_size_meta)
+        font.setBold(self.strong)
+        self.setFont(font)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * self.lines + 2)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)

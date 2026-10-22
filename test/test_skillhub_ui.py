@@ -25,8 +25,8 @@ class SkillHubUiTests(unittest.TestCase):
         self.addCleanup(self.page.deleteLater)
 
     def test_tab_and_stale_query_response(self):
-        self.assertIn('hub', self.page.mode_control.buttons)
-        self.page._set_mode('hub')
+        self.assertEqual(set(self.page.mode_control.buttons), {'library', 'mine'})
+        self.page.hub_entry.click()
         first = self.callbacks[-1]
         self.page.search_input.setText('pdf')
         self.page.hub_timer.stop()
@@ -80,6 +80,7 @@ class SkillHubUiTests(unittest.TestCase):
         self.page._render_content()
         box = self.page.findChild(QComboBox, 'SkillHubVersion')
         box.setCurrentIndex(1)
+        box.activated.emit(1)
         original = DesignTokens.text_primary
         with patch.object(DesignTokens, 'text_primary', '#b010ab'):
             self.page.refresh_theme()
@@ -134,6 +135,7 @@ class SkillHubUiTests(unittest.TestCase):
             if mode == 'mine':
                 for skill in self.manager.get_all_skills.return_value:
                     skill.pop('source_type')
+                    skill['source_kind'] = 'user_installed'
                 self.manager.is_skill_editable.return_value = True
                 self.page.refresh_list()
                 self.page._set_mode(mode)
@@ -190,6 +192,24 @@ class SkillHubUiTests(unittest.TestCase):
         self.page.hub_tasks['sample'] = {'stage':'error','version':'0.9.0','message':'旧版本失败','diagnostic':'details'}
         self.page._render_content()
         self.assertFalse(any(w.text() == '重试安装' and not w.isHidden() for w in self.page.findChildren(QPushButton)))
+
+    def test_hidden_skill_page_reflows_when_returning_after_resize(self):
+        from PySide6.QtWidgets import QWidget
+        self.page.show()
+        self.page.resize(560, 760)
+        for _ in range(6):
+            self.app.processEvents()
+        other = QWidget()
+        self.page.section_stack.addWidget(other)
+        self.page.section_stack.setCurrentWidget(other)
+        self.page.resize(1060, 760)
+        for _ in range(6):
+            self.app.processEvents()
+        self.page.select_section('skills')
+        for _ in range(6):
+            self.app.processEvents()
+        self.assertEqual(self.page._column_count, 3)
+        self.page.close()
 
     def test_icon_disk_hit_refresh_and_invalid_image_not_saved(self):
         from PySide6.QtCore import QBuffer, QIODevice

@@ -64,7 +64,8 @@ from core.favorite_delivery import (
 )
 from core.skill_manager import SkillManager
 from core.skillhub import SkillHubClient, SkillHubCache, read_origin, identifier, preferred_version
-from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns, style_store_card
+from ui.skillhub_widgets import SkillHubCard, ClampedText, decode_icon, compact_count, store_columns
+from ui.capability_widgets import CapabilityCard, CapabilityGrid, CapabilitySwitch, CapabilityTabs, CapabilityFilter, capability_action_style
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker
 from ui.stream_event_buffer import StreamEventBuffer
@@ -7186,36 +7187,24 @@ class AgentProfileManager(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
-        toolbar = QHBoxLayout()
+        self.profile_header = ProductPageHeader("专家", "把常用的角色和工作方式保存下来，下次直接使用。", primary_text="新增专家")
+        self.profile_header.primaryRequested.connect(self.add_profile)
+        layout.addWidget(self.profile_header)
+        self.profile_editor_actions = QWidget()
+        toolbar = QHBoxLayout(self.profile_editor_actions)
         toolbar.setContentsMargins(0, 0, 0, 0)
-        title_box = QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(4)
-        title = QLabel("可用专家")
-        title.setStyleSheet(apple_settings_section_title_style())
-        title_box.addWidget(title)
-        toolbar.addLayout(title_box, 1)
-        toolbar.addStretch()
-
-        add_btn = QPushButton("新增专家")
-        add_btn.setObjectName("PrimaryBtn")
-        add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
-        add_btn.clicked.connect(self.add_profile)
-        toolbar.addWidget(add_btn)
-
         copy_btn = QPushButton("复制")
-        copy_btn.setObjectName("SecondaryBtn")
-        copy_btn.setIcon(qta.icon("fa5s.copy", color=DesignTokens.text_secondary))
+        copy_btn.setStyleSheet(product_button_style("secondary"))
         copy_btn.clicked.connect(self.copy_profile)
         toolbar.addWidget(copy_btn)
-
         delete_btn = QPushButton("删除")
         self.delete_profile_btn = delete_btn
-        delete_btn.setObjectName("SecondaryBtn")
-        delete_btn.setIcon(qta.icon("fa5s.trash", color=DesignTokens.text_secondary))
+        delete_btn.setStyleSheet(product_button_style("secondary"))
         delete_btn.clicked.connect(self.delete_profile)
         toolbar.addWidget(delete_btn)
-        layout.addLayout(toolbar)
+        toolbar.addStretch()
+        self.profile_editor_actions.hide()
+        layout.addWidget(self.profile_editor_actions)
 
         body = QHBoxLayout()
         self.profile_body_layout = body
@@ -7223,6 +7212,8 @@ class AgentProfileManager(QWidget):
         body.setSpacing(14)
         self.profile_search = QLineEdit()
         self.profile_search.setPlaceholderText("搜索专家名称或用途")
+        self.profile_search.setClearButtonEnabled(True)
+        self.profile_search.setStyleSheet(product_field_style())
         self.profile_search.textChanged.connect(self._filter_profiles)
         layout.addWidget(self.profile_search)
         self.profile_back = QPushButton("← 返回专家列表")
@@ -7233,21 +7224,28 @@ class AgentProfileManager(QWidget):
         layout.addWidget(self.profile_back, 0, Qt.AlignLeft)
         layout.addLayout(body, 1)
 
-        self.profile_list = QListWidget()
+        # Retain the selection model used by the editor and settings restore path.
+        self.profile_list = QListWidget(self)
         self.profile_list.setMinimumWidth(0)
         self.profile_list.itemActivated.connect(lambda *_: self.open_profile_editor())
         self.profile_list.setToolTip("双击或按 Enter 查看或编辑专家；内置专家可复制后定制")
         self.profile_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.profile_list.currentRowChanged.connect(self._on_profile_changed)
-        body.addWidget(self.profile_list)
+        self.profile_list.hide()
+        self.profile_grid = CapabilityGrid()
+        body.addWidget(self.profile_grid, 1)
 
         editor_card = QFrame()
-        self.profile_editor = editor_card
+        self.profile_editor = QScrollArea()
+        self.profile_editor.setFrameShape(QFrame.NoFrame)
+        self.profile_editor.setWidgetResizable(True)
+        self.profile_editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.profile_editor.setWidget(editor_card)
         editor_card.setStyleSheet(apple_settings_surface_style(radius=18))
         editor_layout = QVBoxLayout(editor_card)
         editor_layout.setContentsMargins(18, 18, 18, 18)
         editor_layout.setSpacing(14)
-        body.addWidget(editor_card, 1)
+        body.addWidget(self.profile_editor, 1)
         self.builtin_profile_note = QLabel("内置专家由应用维护，可直接使用；点击“复制”可创建自己的版本。")
         self.builtin_profile_note.setWordWrap(True)
         self.builtin_profile_note.setStyleSheet(apple_caption_style())
@@ -7312,17 +7310,59 @@ class AgentProfileManager(QWidget):
             self.profile_list.setCurrentRow(0)
         else:
             self._load_profile_into_fields(-1)
+        bind_theme(self, self._refresh_browse_theme, surface="management")
+
+    def _refresh_browse_theme(self, _resolved=None):
+        self.profile_search.setStyleSheet(product_field_style())
+
+    def _profile_action(self, profile_id, action):
+        index = next((i for i, p in enumerate(self.profiles) if p.get("id") == profile_id), -1)
+        if index < 0:
+            return
+        self.profile_list.setCurrentRow(index)
+        action()
+
+    def _toggle_profile(self, profile_id, enabled):
+        self._profile_action(profile_id, lambda: self.enabled_check.setChecked(enabled))
+        self._render_profile_cards()
+        log_ui_navigation("agent_enable_changed", profile_id=profile_id, enabled=bool(enabled))
+
+    def _render_profile_cards(self):
+        query = self.profile_search.text().strip().casefold()
+        cards = []
+        for profile in self.profiles:
+            name = profile.get("name") or "未命名专家"
+            description = profile.get("description") or "保存角色说明和能力范围，重复使用自己的工作方式。"
+            if query not in (name + " " + description).casefold():
+                continue
+            profile_id = profile.get("id")
+            builtin = bool(profile.get("builtin"))
+            card = CapabilityCard(name, description, "内置专家" if builtin else "我的专家", "fa5s.user", object_name="AgentProfileCard")
+            card.setProperty("profileId", profile_id)
+            card.title_button.clicked.connect(lambda checked=False, value=profile_id: self._profile_action(value, self.open_profile_editor))
+            card.add_status("内置 · 只读" if builtin else ("已开启" if profile.get("enabled", True) else "未开启"),
+                            "text_secondary" if builtin or not profile.get("enabled", True) else "success_text")
+            card.add_action("复制定制" if builtin else "编辑", lambda checked=False, value=profile_id, readonly=builtin: self._profile_action(value, self.copy_profile if readonly else self.open_profile_editor))
+            if not builtin:
+                switch = CapabilitySwitch(name, bool(profile.get("enabled", True)))
+                switch.clicked.connect(lambda checked, value=profile_id: self._toggle_profile(value, checked))
+                card.actions.addWidget(switch)
+            cards.append(card)
+        self.profile_grid.set_cards(cards, "没有匹配的专家，试试其他关键词。" if query else "还没有专家，点击“新增专家”开始。")
 
     def _filter_profiles(self, text):
         for row in range(self.profile_list.count()):
             item = self.profile_list.item(row)
             item.setHidden(text.strip().casefold() not in item.text().casefold())
+        self._render_profile_cards()
 
     def open_profile_editor(self):
         if self._current_index < 0:
             return
         self.editing_profile = True
-        self.profile_list.hide()
+        self.profile_grid.hide()
+        self.profile_header.primary_button.hide()
+        self.profile_editor_actions.show()
         self.profile_search.hide()
         self.profile_back.show()
         self._load_profile_into_fields(self._current_index)
@@ -7341,7 +7381,9 @@ class AgentProfileManager(QWidget):
         self.editing_profile = False
         self.profile_editor.hide()
         self.profile_back.hide()
-        self.profile_list.show()
+        self.profile_grid.show()
+        self.profile_header.primary_button.show()
+        self.profile_editor_actions.hide()
         self.profile_search.show()
         self.profile_empty.setVisible(not self.profiles)
         return True
@@ -7407,6 +7449,7 @@ class AgentProfileManager(QWidget):
             item.setToolTip(profile.get("description") or "")
             self.profile_list.addItem(item)
         self.profile_list.blockSignals(False)
+        self._render_profile_cards()
 
     def _load_profile_into_fields(self, index):
         self._loading_profile = True
@@ -9927,73 +9970,132 @@ class McpServerManager(QWidget):
         toolbar_host = QWidget()
         toolbar = QHBoxLayout(toolbar_host)
         toolbar.setContentsMargins(0, 0, 0, 0)
-        title_box = QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(4)
-        title = QLabel("我的服务")
-        title.setStyleSheet(apple_settings_section_title_style())
-        toolbar.addWidget(title, 1)
-        add = QPushButton("添加服务")
-        add.setStyleSheet(product_button_style("primary"))
-        add.clicked.connect(self.add_server)
-        toolbar.addWidget(add)
-        more = QPushButton("更多")
-        more.setStyleSheet(product_button_style("secondary"))
-        menu = create_styled_menu(more)
-        menu.addAction("导入配置（JSON）", self.import_servers_from_json)
-        menu.addAction("编辑所选服务", self.edit_server)
-        menu.addAction("测试所选服务", self.test_server)
-        menu.addSeparator()
-        menu.addAction("删除所选服务", self.delete_server)
-        more.setMenu(menu)
-        toolbar.addWidget(more)
+        header = ProductPageHeader("MCP 服务", "连接外部工具与数据，让 AI 在对话中调用。", primary_text="添加服务")
+        header.primaryRequested.connect(self.add_server)
+        toolbar.addWidget(header)
         layout.addWidget(toolbar_host)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索 MCP 服务")
         self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet(product_field_style())
         self.search_input.textChanged.connect(self._filter_servers)
         layout.addWidget(self.search_input)
 
-        self.server_list = QListWidget()
+        self.server_list = QListWidget(self)
         self.server_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.server_list.itemDoubleClicked.connect(lambda *_: self.edit_server())
         self.server_list.setToolTip("双击服务编辑连接信息；更多菜单可测试或删除服务")
         self.server_list.currentRowChanged.connect(self._refresh_detail)
-        layout.addWidget(self.server_list)
-        selected_actions = QWidget()
-        selected_layout = QHBoxLayout(selected_actions)
-        selected_layout.setContentsMargins(0, 0, 0, 0)
-        self.edit_selected_btn = QPushButton("编辑连接")
-        self.edit_selected_btn.setStyleSheet(product_button_style("secondary"))
-        self.edit_selected_btn.clicked.connect(self.edit_server)
-        self.test_selected_btn = QPushButton("测试连接")
-        self.test_selected_btn.setStyleSheet(product_button_style("secondary"))
-        self.test_selected_btn.clicked.connect(self.test_server)
-        selected_layout.addWidget(self.edit_selected_btn)
-        selected_layout.addWidget(self.test_selected_btn)
-        selected_layout.addStretch()
-        layout.addWidget(selected_actions)
-
-        self.detail_label = QLabel()
+        self.server_list.hide()
+        browse_actions = QWidget()
+        browse_layout = QHBoxLayout(browse_actions)
+        browse_layout.setContentsMargins(0, 0, 0, 0)
+        self.server_count = QLabel()
+        browse_layout.addWidget(self.server_count, 1)
+        self.import_button = QPushButton("导入配置")
+        self.import_button.setStyleSheet(product_button_style("ghost"))
+        self.import_button.clicked.connect(self.import_servers_from_json)
+        browse_layout.addWidget(self.import_button)
+        layout.addWidget(browse_actions)
+        self.server_grid = CapabilityGrid()
+        layout.addWidget(self.server_grid, 1)
+        self.detail_label = QLabel(self)
         self.detail_label.setWordWrap(True)
         self.detail_label.setTextFormat(Qt.RichText)
         self.detail_label.setStyleSheet(
             f"background: transparent; border: none; padding: 4px 2px; "
             f"color: {DesignTokens.text_secondary}; font-size: 12px;"
         )
-        layout.addWidget(self.detail_label)
-
-        self.status_label = QLabel("连接测试结果会显示在这里。")
+        self.detail_label.hide()
+        self.status_label = QLabel("开启服务后，AI 可以在对话中使用它提供的工具。更改状态后请保存。")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(self.status_label)
         layout.addStretch()
         self._refresh_list()
+        bind_theme(self, self._refresh_browse_theme, surface="management")
+
+    def _refresh_browse_theme(self, _resolved=None):
+        self.search_input.setStyleSheet(product_field_style())
+        self.import_button.setStyleSheet(product_button_style("ghost"))
+        self.server_count.setStyleSheet(apple_caption_style())
+        self.status_label.setStyleSheet(apple_settings_inline_note_style())
+
+    def _server_action(self, server_id, action):
+        index = next((i for i, s in enumerate(self.servers) if s.get("id") == server_id), -1)
+        if index < 0:
+            return
+        self.server_list.setCurrentRow(index)
+        action()
+
+    def _toggle_server(self, server_id, enabled):
+        server = next((s for s in self.servers if s.get("id") == server_id), None)
+        if server is None or server.get("managed_by_skill"):
+            return
+        server["enabled"] = bool(enabled)
+        self.changed.emit()
+        self._refresh_list()
+        log_ui_navigation("mcp_enable_changed", server_id=server_id, enabled=bool(enabled))
+
+    def _render_server_cards(self):
+        from core.connection_retirement import mcp_issue
+        query = self.search_input.text().strip().casefold()
+        cards = []
+        for server in self.servers:
+            name = server.get("name") or "MCP 服务"
+            managed = bool(server.get("managed_by_skill"))
+            description = server.get("description") or ("由对应技能提供，开关与配置请在技能页管理。" if managed else
+                          "连接远程服务，按授权调用它提供的工具。" if server.get("url") else
+                          "在本机启动服务，使用它提供的工具。")
+            if query not in (name + " " + description).casefold():
+                continue
+            server_id = server.get("id")
+            card = CapabilityCard(name, description, "技能托管" if managed else "MCP 服务", "fa5s.plug", object_name="McpServerCard")
+            card.setProperty("serverId", server_id)
+            card.title_button.clicked.connect(lambda checked=False, value=server_id: self._server_action(value, self.edit_server))
+            state = "已开启" if server.get("enabled", True) else "未开启"
+            result = self.test_results.get(server_id)
+            issue = mcp_issue(server, self.config_manager)
+            testing = self.test_worker is not None and getattr(self, "_testing_server", {}).get("id") == server_id
+            detail = issue or (result[1] if result and result[0] == server else "尚未测试当前配置。")
+            if testing:
+                state += " · 测试中"
+            elif issue:
+                state += " · 待配置"
+            elif result and result[0] == server:
+                state += " · 测试成功" if result[2] else " · 测试失败"
+            else:
+                state += " · 未测试"
+            status = card.add_status(state, "warning_text" if issue else "text_secondary")
+            status.setToolTip(detail)
+            test = card.add_action("测试中…" if testing else "测试连接", lambda checked=False, value=server_id: self._server_action(value, self.test_server))
+            test.setEnabled(self.test_worker is None)
+            if not managed:
+                more = card.add_action("···", lambda: None)
+                more.setAccessibleName(f"{name}的更多操作")
+                menu = create_styled_menu(more)
+                menu.addAction("编辑连接", lambda value=server_id: self._server_action(value, self.edit_server))
+                menu.addAction("删除服务", lambda value=server_id: self._server_action(value, self.delete_server))
+                more.setMenu(menu)
+                switch = CapabilitySwitch(name, bool(server.get("enabled", True)))
+                switch.clicked.connect(lambda checked, value=server_id: self._toggle_server(value, checked))
+                card.actions.addWidget(switch)
+            # Full test diagnostics stay selectable without expanding every card.
+            if issue or (result and result[0] == server):
+                show_details = lambda checked=False, title=name, message=detail: ProductMessageDialog(title, message, "info", parent=self).exec()
+                if managed:
+                    card.add_action("详情", show_details)
+                else:
+                    menu.addAction("测试详情", show_details)
+            cards.append(card)
+        self.server_count.setText(f"我的服务 · {len(cards)} 项")
+        self.server_grid.set_cards(cards, "没有匹配的服务，试试其他关键词。" if query else "还没有 MCP 服务。点击“添加服务”，或导入已有配置。")
 
     def _filter_servers(self, *_):
         query = self.search_input.text().casefold().strip()
         for row in range(self.server_list.count()):
             self.server_list.item(row).setHidden(query not in self.server_list.item(row).text().casefold())
+        self._render_server_cards()
 
     def _open_editor(self, index=None):
         if self.editor_dialog is not None:
@@ -10108,8 +10210,6 @@ class McpServerManager(QWidget):
             self.server_list.addItem(item)
         self.server_list.blockSignals(False)
         self.server_list.setFixedHeight(min(330, max(72, self.server_list.count() * 54 + 16)))
-        self.edit_selected_btn.setEnabled(bool(self.servers))
-        self.test_selected_btn.setEnabled(bool(self.servers))
         if self.server_list.count():
             self.server_list.setCurrentRow(max(0, min(self.server_list.currentRow(), self.server_list.count() - 1)))
         self._refresh_detail()
@@ -10124,8 +10224,7 @@ class McpServerManager(QWidget):
         result = self.test_results.get(server.get("id"))
         from core.connection_retirement import mcp_issue
         issue = mcp_issue(server, self.config_manager)
-        self.status_label.setText(issue or (result[1] if result and result[0] == server else "尚未测试当前配置。"))
-        self.detail_label.setText("双击服务可编辑连接信息。测试结果仅代表最近一次检查。")
+        self.detail_label.setText(issue or (result[1] if result and result[0] == server else "尚未测试当前配置。"))
 
     def add_server(self):
         self._open_editor()
@@ -10287,14 +10386,18 @@ class McpServerManager(QWidget):
         self.test_worker.finished_signal.connect(self._handle_test_result)
         self.test_worker.finished.connect(self.test_worker.deleteLater)
         self.test_worker.start()
+        self._render_server_cards()
+        log_ui_navigation("mcp_test_start", server_id=server.get("id"))
 
     def _handle_test_result(self, result):
         self.test_worker = None
         server = getattr(self, "_testing_server", {})
         stamp = datetime.now().strftime("%m-%d %H:%M")
         message = f"{stamp} · 测试成功 · {result.get('tool_count', 0)} 个工具" if result.get("ok") else f"{stamp} · 测试失败：{result.get('error') or '未知错误'}"
-        self.test_results[server.get("id")] = (server, message)
+        self.test_results[server.get("id")] = (server, message, bool(result.get("ok")))
+        self.status_label.setText(f"{server.get('name') or 'MCP 服务'}：{message}")
         self._refresh_detail()
+        self._render_server_cards()
         log_ui_navigation("mcp_test_done", server_id=server.get("id"), ok=bool(result.get("ok")))
     def get_servers(self):
         return json.loads(json.dumps(self.servers, ensure_ascii=False))
@@ -11911,6 +12014,9 @@ class SettingsDialog(QDialog):
         self._settings_baseline = ""
         self._settings_baseline_state = {}
         apply_product_dialog(self, "SettingsDialog")
+        if domain == "capabilities":
+            self._refresh_capabilities_surface()
+            bind_theme(self, self._refresh_capabilities_surface, surface="management")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
@@ -12531,8 +12637,13 @@ class SettingsDialog(QDialog):
 
         model_layout.addWidget(self.model_channel_manager)
         model_layout.addStretch()
-        agent_layout.addWidget(self.agent_profile_manager)
-        agent_layout.addStretch()
+        if domain == "capabilities":
+            old_agent_page = agent_page
+            agent_page = QWidget()
+            agent_layout = QVBoxLayout(agent_page)
+            agent_layout.setContentsMargins(0, 0, 0, 0)
+            old_agent_page.deleteLater()
+        agent_layout.addWidget(self.agent_profile_manager, 1)
         workspace_layout.addWidget(storage_group)
         log_group, log_layout = build_settings_surface("运行日志", show_subtitle=False)
         logs_link = QPushButton("查看与导出运行日志")
@@ -12552,7 +12663,7 @@ class SettingsDialog(QDialog):
             old_mcp_page = mcp_page
             mcp_page = QWidget()
             mcp_layout = QVBoxLayout(mcp_page)
-            mcp_layout.setContentsMargins(16, 12, 16, 12)
+            mcp_layout.setContentsMargins(0, 0, 0, 0)
             old_mcp_page.deleteLater()
         mcp_layout.addWidget(self.mcp_server_manager, 1)
         permission_page_layout.addWidget(permission_group)
@@ -12738,6 +12849,7 @@ class SettingsDialog(QDialog):
             try:
                 manager = self.agent_profile_manager
                 manager.profiles = json.loads(json.dumps(self.config_manager.get_agent_profiles()))
+                manager.profiles = builtin_agent_profiles(manager.profiles) + manager.profiles
                 manager._untouched_drafts.clear()
                 manager._current_index = -1
                 manager._refresh_profile_list()
@@ -13318,6 +13430,10 @@ class SettingsDialog(QDialog):
         self.component_log_edit.setPlainText("\n".join(logs))
         scrollbar = self.component_log_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _refresh_capabilities_surface(self, _resolved=None):
+        apply_product_dialog(self, "SettingsDialog")
+        self.setStyleSheet(self.styleSheet() + f"QDialog#SettingsDialog {{background: {DesignTokens.bg_main};}}")
 
     def refresh_current_version_label(self):
         self.update_current_label.setText(f"当前版本：{APP_VERSION}")
@@ -14241,6 +14357,7 @@ class AdvancedSkillsCenterDialog(QDialog):
         self.selected_skill_by_tab = {}
         self._grid_columns = 2
         apply_product_dialog(self, "SkillsCenterDialog")
+        self.setStyleSheet(self.styleSheet() + f"QDialog#SkillsCenterDialog {{background: {DesignTokens.bg_main};}}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -15210,9 +15327,11 @@ class SkillsCenterDialog(QDialog):
         apply_product_dialog(self, "SkillsCenterDialog")
 
         root = QVBoxLayout(self)
-        self.section_control = ProductSegmentedControl([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "专家")], current="skills")
+        root.setContentsMargins(24, 12, 24, 20)
+        root.setSpacing(20)
+        self.section_control = CapabilityTabs([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "专家")], current="skills")
         self.section_control.currentChanged.connect(self.select_section)
-        root.addWidget(self.section_control, 0, Qt.AlignLeft)
+        root.addWidget(self.section_control)
         self.section_stack = QStackedWidget()
         root.addWidget(self.section_stack, 1)
         self.skill_page = QWidget()
@@ -15220,13 +15339,14 @@ class SkillsCenterDialog(QDialog):
         self.management_page = None
         self.current_section = "skills"
         layout = QVBoxLayout(self.skill_page)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(12)
-        header = ProductPageHeader("技能", "找到适合任务的技能，或管理自己的能力")
+        header = ProductPageHeader("技能", "找到能帮你完成任务的技能，开启后在对话中使用。")
+        header.title_label.setProperty("roleTitle", False)
         header_row.addWidget(header, 1, Qt.AlignTop)
         self.import_skill_btn = QPushButton("添加技能")
         self.import_skill_btn.setObjectName("CapabilityImportSkill")
@@ -15234,9 +15354,8 @@ class SkillsCenterDialog(QDialog):
         self.import_skill_btn.clicked.connect(self._import_skill_zip)
         header_row.addWidget(self.import_skill_btn, 0, Qt.AlignTop)
         self.builtin_btn = QPushButton("内置技能")
-        self.builtin_btn.setStyleSheet(product_button_style("secondary"))
+        self.builtin_btn.setStyleSheet(product_button_style("ghost"))
         self.builtin_btn.clicked.connect(lambda: self._set_mode("builtin"))
-        header_row.addWidget(self.builtin_btn, 0, Qt.AlignTop)
         self.advanced_btn = QPushButton("开发与诊断")
         self.advanced_btn.setObjectName("CapabilityAdvancedManagement")
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
@@ -15250,43 +15369,40 @@ class SkillsCenterDialog(QDialog):
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setStyleSheet(product_field_style())
         self.search_input.textChanged.connect(self._on_search_changed)
-        layout.addWidget(self.search_input)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search_input, 1)
+        self.scene_selector = CapabilityFilter()
+        self.scene_selector.addItem("全部任务", "all")
+        for key, label in CAPABILITY_SCENES.items():
+            self.scene_selector.addItem(label, key)
+        apply_settings_combo_style(self.scene_selector)
+        self.scene_selector.currentIndexChanged.connect(lambda: self._set_scene(self.scene_selector.currentData()))
+        search_row.addWidget(self.scene_selector)
+        layout.addLayout(search_row)
 
         browse_bar = QHBoxLayout()
         browse_bar.setContentsMargins(0, 0, 0, 0)
         browse_bar.setSpacing(8)
         self.mode_control = ProductSegmentedControl(
-            [("library", "精选技能"), ("hub", "SkillHub"), ("mine", "我的能力")],
+            [("library", "发现技能"), ("mine", "我的能力")],
             current="library",
         )
         self.mode_control.currentChanged.connect(self._set_mode)
         browse_bar.addWidget(self.mode_control, 0)
         browse_bar.addStretch()
+        browse_bar.addWidget(self.builtin_btn)
         self.hub_refresh_btn = QPushButton("刷新 SkillHub")
         self.hub_refresh_btn.setStyleSheet(product_button_style("secondary"))
         self.hub_refresh_btn.setToolTip("清除浏览缓存并重新获取技能和版本，不影响已安装技能")
         self.hub_refresh_btn.clicked.connect(self._refresh_hub_catalog)
         self.hub_refresh_btn.hide()
         browse_bar.addWidget(self.hub_refresh_btn)
-        layout.addLayout(browse_bar)
+        layout.insertLayout(1, browse_bar)
         self.builtin_back = QPushButton("返回技能")
-        self.builtin_back.clicked.connect(lambda: self._set_mode(getattr(self, "_before_builtin", "library")))
+        self.builtin_back.clicked.connect(lambda: self._set_mode(getattr(self, "_before_builtin", "library") if self.current_mode == "builtin" else "library"))
         self.builtin_back.hide()
         self.builtin_back.setStyleSheet(product_button_style("ghost"))
         layout.addWidget(self.builtin_back, 0, Qt.AlignLeft)
-        self.scene_control = ProductSegmentedControl(
-            [("all", "全部"), *CAPABILITY_SCENES.items()],
-            current="all",
-        )
-        self.scene_control.currentChanged.connect(self._set_scene)
-        self.scene_scroll = QScrollArea()
-        self.scene_scroll.setFrameShape(QFrame.NoFrame)
-        self.scene_scroll.setWidgetResizable(True)
-        self.scene_scroll.setMinimumWidth(0)
-        self.scene_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scene_scroll.setFixedHeight(52)
-        self.scene_scroll.setWidget(self.scene_control)
-        layout.addWidget(self.scene_scroll)
 
         self.hub_filters = QWidget()
         hub_bar = QHBoxLayout(self.hub_filters)
@@ -15315,6 +15431,7 @@ class SkillsCenterDialog(QDialog):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.viewport().installEventFilter(self)
         self.scroll.setStyleSheet(
             "QScrollArea#CapabilityLibraryScroll { background: transparent; border: none; }"
         )
@@ -15325,6 +15442,10 @@ class SkillsCenterDialog(QDialog):
         self.content_layout.setSpacing(18)
         self.scroll.setWidget(self.content)
         layout.addWidget(self.scroll, 1)
+        self.hub_entry = QPushButton("没有找到合适的？  去 SkillHub 查找更多 ↗")
+        self.hub_entry.setStyleSheet(product_button_style("ghost"))
+        self.hub_entry.clicked.connect(lambda: self._set_mode("hub"))
+        layout.addWidget(self.hub_entry, 0, Qt.AlignLeft)
 
         self.refresh_list()
         bind_theme(self, self.refresh_theme, surface="management")
@@ -15342,6 +15463,7 @@ class SkillsCenterDialog(QDialog):
             return False
         if section == "skills":
             self.section_stack.setCurrentWidget(self.skill_page)
+            QTimer.singleShot(0, self._hub_reflow)
         else:
             if self.management_page is None:
                 self.management_page = SettingsDialog(self.config_manager, self._main, domain="capabilities")
@@ -15349,6 +15471,8 @@ class SkillsCenterDialog(QDialog):
                 self.management_page.setProperty("embeddedProductPage", True)
                 self.management_page.setProperty("sectionHosted", True)
                 self.management_page.setMinimumSize(0, 0)
+                self.management_page.layout().setContentsMargins(0, 0, 0, 0)
+                self.management_page.layout().setSpacing(0)
                 self.management_page.nav_list.hide()
                 self.management_page.nav_combo.hide()
                 self.management_page.settings_search.hide()
@@ -15375,9 +15499,13 @@ class SkillsCenterDialog(QDialog):
 
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "SkillsCenterDialog")
+        self.setStyleSheet(self.styleSheet() + f"QDialog#SkillsCenterDialog {{background: {DesignTokens.bg_main};}}")
         self.hub_sort.setStyleSheet(product_field_style())
         self.hub_category.refresh_theme()
         self.search_input.setStyleSheet(product_field_style())
+        apply_settings_combo_style(self.scene_selector)
+        self.hub_entry.setStyleSheet(product_button_style("ghost"))
+        self.builtin_btn.setStyleSheet(product_button_style("ghost"))
         self.import_skill_btn.setStyleSheet(product_button_style("primary"))
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self._render_content()
@@ -15456,11 +15584,13 @@ class SkillsCenterDialog(QDialog):
         if mode == "builtin":
             self._before_builtin = self.current_mode
         self.hub_refresh_btn.setVisible(mode == "hub")
-        self.builtin_back.setVisible(mode == "builtin")
-        self.mode_control.setVisible(mode != "builtin")
+        self.builtin_back.setVisible(mode in {"builtin", "hub"})
+        self.mode_control.setVisible(mode in {"library", "mine"})
+        self.mode_control.set_current(mode)
         self.import_skill_btn.setVisible(mode != "builtin")
         self.advanced_btn.hide()
-        self.builtin_btn.setVisible(mode != "builtin")
+        self.builtin_btn.setVisible(mode in {"library", "mine"})
+        self.hub_entry.setVisible(mode in {"library", "mine"})
         self._mode_state[self.current_mode] = (self.search_text, self.scroll.verticalScrollBar().value())
         if self.current_mode == "builtin" and self._builtin_detail_open:
             self._mode_state["builtin"] = (self.search_text, self._builtin_list_scroll)
@@ -15472,7 +15602,7 @@ class SkillsCenterDialog(QDialog):
         self.search_input.blockSignals(True)
         self.search_input.setText(self.search_text)
         self.search_input.blockSignals(False)
-        self.scene_scroll.setVisible(mode == "library")
+        self.scene_selector.setVisible(mode == "library")
         self.hub_filters.setVisible(mode == "hub" and not self.hub_slug)
         self.hub_timer.stop()
         log_ui_navigation("capability_library_mode_change", mode=mode)
@@ -15487,7 +15617,9 @@ class SkillsCenterDialog(QDialog):
         if scene != "all" and scene not in CAPABILITY_SCENES:
             raise ValueError(f"未知能力场景：{scene}")
         self.current_scene = scene
-        self.scene_control.set_current(scene)
+        self.scene_selector.blockSignals(True)
+        self.scene_selector.setCurrentIndex(self.scene_selector.findData(scene))
+        self.scene_selector.blockSignals(False)
         log_ui_navigation("capability_library_scene_change", scene=scene)
         self._render_content()
 
@@ -15817,8 +15949,8 @@ class SkillsCenterDialog(QDialog):
         official.setStyleSheet(product_button_style("ghost"))
 
     def _render_hub(self):
-        self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_app};}}")
-        self.import_skill_btn.setStyleSheet(product_button_style("secondary"))
+        self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_main};}}")
+        self.import_skill_btn.setStyleSheet(product_button_style("secondary" if self.current_mode == "hub" else "primary"))
         columns = store_columns(self.scroll.viewport().width())
         self._hub_layout_key = (columns, self.scroll.viewport().width() < 720)
         if self.hub_slug:
@@ -15939,7 +16071,7 @@ class SkillsCenterDialog(QDialog):
         layout.setSpacing(6)
         heading = QLabel(title)
         heading.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_body}px; font-weight: 700; color: {DesignTokens.text_primary}; "
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary}; "
             f"padding: 0 0 4px 2px;"
         )
         layout.addWidget(heading)
@@ -15960,31 +16092,14 @@ class SkillsCenterDialog(QDialog):
         return section
 
     def _capability_row(self, skill, *, user_owned=False):
-        row = QFrame()
-        row.setObjectName("CapabilityStoreCard")
-        style_store_card(row)
-        layout = QVBoxLayout(row)
-        layout.setContentsMargins(DesignTokens.spacing_md, DesignTokens.spacing_md,
-                                  DesignTokens.spacing_md, DesignTokens.spacing_md)
-        layout.setSpacing(DesignTokens.spacing_sm)
-        header = QHBoxLayout()
         display_name = readable_skill_name(skill) or str(skill.get("name") or "未命名能力")
-        icon = QLabel(display_name[:1])
-        icon.setAlignment(Qt.AlignCenter)
-        icon.setFixedSize(32, 32)
-        icon.setStyleSheet(f"background: {DesignTokens.bg_app}; color: {DesignTokens.accent_ai}; border-radius: {DesignTokens.radius_md}px; font-weight: 600;")
-        header.addWidget(icon)
-        header.addWidget(ClampedText(display_name, strong=True), 1)
-        layout.addLayout(header)
-        layout.addWidget(ClampedText((skill.get("user_description") or skill.get("description") or "暂无简介") if capability_is_readonly_builtin(skill) else (capability_summary(skill, user_owned=user_owned) or "暂无简介"), lines=2))
-        examples = [str(item).strip() for item in
-                    (capability_presentation(skill).get("examples") or []) if str(item).strip()][:2]
-        if examples:
-            layout.addWidget(ClampedText("可以帮你：" + " · ".join(examples)))
-        layout.addStretch()
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(8)
+        description = (skill.get("user_description") or skill.get("description") or "暂无简介") if capability_is_readonly_builtin(skill) else (capability_summary(skill, user_owned=user_owned) or "暂无简介")
+        metadata = "内置技能" if capability_is_readonly_builtin(skill) else ("我的能力" if user_owned else CAPABILITY_SCENES.get(capability_scene(skill), "技能"))
+        icon = {"search_browse": "fa5s.globe", "docs_knowledge": "fa5s.file-alt", "data_analysis": "fa5s.chart-bar",
+                "content_creation": "fa5s.pen-nib", "financial_research": "fa5s.chart-line"}.get(capability_scene(skill), "fa5s.puzzle-piece")
+        row = CapabilityCard(display_name, description, metadata, icon, object_name="CapabilityStoreCard")
+        layout, header, actions = row.layout(), row.header, row.actions
+        row.title_button.clicked.connect(lambda checked=False, value=dict(skill): self._show_builtin_detail(value) if capability_is_readonly_builtin(value) else self._open_detail(value))
         if capability_is_readonly_builtin(skill):
             status = QLabel("随应用提供 · 只读")
             status.setStyleSheet(apple_caption_style())
@@ -15994,7 +16109,6 @@ class SkillsCenterDialog(QDialog):
             view.setStyleSheet(product_button_style("ghost"))
             view.clicked.connect(lambda checked=False, value=dict(skill): self._show_builtin_detail(value))
             actions.addWidget(view)
-            layout.addLayout(actions)
             return row
         name = str(skill.get("name") or "").strip()
         enabled = bool(skill.get("enabled"))
@@ -16006,7 +16120,7 @@ class SkillsCenterDialog(QDialog):
             state_text = str(authorization_status.get("state_text") or "CLI 不可用")
             connected = state == "connected"
             if enabled and connected:
-                label_text = "✓ 已开启"
+                label_text = "已开启"
                 label_color = DesignTokens.success_text
             elif enabled:
                 label_text = f"已开启 · {state_text}"
@@ -16039,7 +16153,7 @@ class SkillsCenterDialog(QDialog):
             )
             actions.addWidget(settings_btn)
             if enabled:
-                close_btn = QPushButton("关闭")
+                close_btn = CapabilitySwitch(display_name, True)
                 close_btn.setObjectName("CapabilityDisableAction")
                 close_btn.setStyleSheet(product_button_style("ghost"))
                 close_btn.clicked.connect(
@@ -16047,7 +16161,7 @@ class SkillsCenterDialog(QDialog):
                 )
                 actions.addWidget(close_btn)
             else:
-                action = QPushButton("开启" if connected else "连接并开启")
+                action = CapabilitySwitch(display_name, False) if connected else QPushButton("连接并开启")
                 action.setObjectName("CapabilityEnableAction")
                 action.setStyleSheet(product_button_style("primary"))
                 if connected:
@@ -16069,8 +16183,9 @@ class SkillsCenterDialog(QDialog):
             label = "内置浏览器模式 · 外部能力停用" if state["backend"] == "internal" else "外部 BrowserSkill · " + ("已就绪" if browser_ready else "需要连接扩展")
             if state["pending"]:
                 label += " · 等待任务结束后切换"
-            status = QLabel(label)
+            status = QLabel("切换待完成" if state["pending"] else "内置模式可用" if state["backend"] == "internal" else "已就绪" if browser_ready else "需要连接")
             status.setObjectName("CapabilityStateLabel")
+            status.setToolTip(label)
             status.setStyleSheet(f"color:{DesignTokens.text_secondary};")
             actions.addWidget(status, 1)
             setup = QPushButton("连接设置")
@@ -16078,14 +16193,18 @@ class SkillsCenterDialog(QDialog):
             setup.setStyleSheet(product_button_style("secondary"))
             setup.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
             actions.addWidget(setup)
-            mode = QPushButton("浏览器模式")
+            mode = QPushButton("···")
+            mode.setObjectName("BrowserAutomationMoreActions")
+            mode.setAccessibleName("浏览器自动化的更多操作")
             mode.setStyleSheet(product_button_style("secondary"))
-            mode.clicked.connect(lambda: self.window().open_settings("实验功能"))
+            menu = create_styled_menu(mode)
+            menu.addAction("浏览器模式", lambda: self.window().open_settings("实验功能"))
+            mode.setMenu(menu)
             actions.addWidget(mode)
             self._finish_capability_card(row, header, actions, skill, user_owned)
             return row
         if enabled:
-            status = QLabel("✓ 已开启")
+            status = QLabel("已开启")
             status.setObjectName("CapabilityStateLabel")
             status.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; "
@@ -16100,7 +16219,7 @@ class SkillsCenterDialog(QDialog):
                 settings_btn.setStyleSheet(product_button_style("ghost"))
                 settings_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
                 actions.addWidget(settings_btn)
-            close_btn = QPushButton("关闭")
+            close_btn = CapabilitySwitch(display_name, True)
             close_btn.setObjectName("CapabilityDisableAction")
             close_btn.setAccessibleName(f"关闭{readable_skill_name(skill)}")
             close_btn.setStyleSheet(product_button_style("ghost"))
@@ -16116,7 +16235,7 @@ class SkillsCenterDialog(QDialog):
                 )
                 actions.addWidget(hint)
             actions.addStretch()
-            action = QPushButton("设置后开启" if needs_config else "开启")
+            action = QPushButton("设置后开启") if needs_config else CapabilitySwitch(display_name, False)
             action.setObjectName("CapabilityEnableAction")
             action.setStyleSheet(product_button_style("primary"))
             if needs_config:
@@ -16130,19 +16249,10 @@ class SkillsCenterDialog(QDialog):
         return row
 
     def _finish_capability_card(self, row, header, actions, skill, user_owned):
-        # Keep existing state decisions and callbacks; arrange their controls consistently.
-        for index in range(actions.count() - 1, -1, -1):
+        for index in range(actions.count()):
             widget = actions.itemAt(index).widget()
-            if isinstance(widget, QPushButton) and widget.objectName() in {
-                "CapabilityEnableAction", "CapabilityDisableAction", "BrowserAutomationSetupAction"
-            }:
-                # Browser setup can coexist with close; keep close in the footer.
-                if widget.objectName() == "CapabilityDisableAction" and row.findChild(QPushButton, "BrowserAutomationSetupAction"):
-                    continue
-                actions.takeAt(index)
-                widget.setStyleSheet(product_button_style("secondary"))
-                widget.setAccessibleName(f"{widget.text()} {readable_skill_name(skill)}")
-                header.addWidget(widget)
+            if isinstance(widget, QPushButton) and not isinstance(widget, CapabilitySwitch):
+                widget.setStyleSheet(capability_action_style())
         if not any(isinstance(actions.itemAt(i).widget(), QLabel) for i in range(actions.count())):
             status = QLabel("未开启")
             status.setObjectName("CapabilityStateLabel")
@@ -16151,27 +16261,27 @@ class SkillsCenterDialog(QDialog):
         if user_owned:
             manage = QPushButton("管理")
             manage.setObjectName("CapabilityManageSkill")
-            manage.setStyleSheet(product_button_style("ghost"))
+            manage.setStyleSheet(capability_action_style())
             manage.clicked.connect(lambda checked=False, value=dict(skill): self._open_management(value))
-            actions.addWidget(manage)
+            actions.insertWidget(max(0, actions.count() - 1), manage)
             more = QPushButton("···")
             more.setObjectName("CapabilityMoreActions")
             more.setAccessibleName(f"{readable_skill_name(skill)}的更多操作")
             more.setToolTip("更多操作：导出、删除")
-            more.setStyleSheet(product_button_style("ghost") + "QPushButton#CapabilityMoreActions::menu-indicator {image: none; width: 0px;}")
+            more.setStyleSheet(capability_action_style())
             menu = create_styled_menu(more)
             menu.addAction("导出", lambda value=dict(skill): self._export_skill(value))
             menu.addAction("删除", lambda value=dict(skill): self._delete_skill(value))
             more.setMenu(menu)
-            actions.addWidget(more)
+            actions.insertWidget(max(0, actions.count() - 1), more)
         # Long connection messages wrap without widening the grid.
         for index in range(actions.count()):
             widget = actions.itemAt(index).widget()
             if isinstance(widget, QLabel):
                 widget.setWordWrap(True)
                 widget.setMinimumWidth(0)
+                widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 actions.setStretch(index, 1)
-        row.layout().addLayout(actions)
 
     def _toggle_skill(self, skill, enabled):
         if capability_is_readonly_builtin(skill):
@@ -16256,7 +16366,6 @@ class SkillsCenterDialog(QDialog):
         self._mode_state["mine"] = ("", 0)
         self._set_mode("mine")
         self.mode_control.set_current("mine")
-        self.scene_scroll.setVisible(False)
         self.refresh_list()
         log_ui_navigation("capability_import_done", source="store", skill_count=len(names))
         QMessageBox.information(self, "导入 Skill", message or "Skill 已导入。")
@@ -16343,8 +16452,8 @@ class SkillsCenterDialog(QDialog):
                               if self.current_mode != "hub" and self._local_scroll_token is token else None)
         self._clear_layout(self.content_layout)
         self._column_count = store_columns(self.scroll.viewport().width())
-        self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_app};}}")
-        self.import_skill_btn.setStyleSheet(product_button_style("secondary"))
+        self.content.setStyleSheet(f"QWidget#CapabilityLibraryContent {{background: {DesignTokens.bg_main};}}")
+        self.import_skill_btn.setStyleSheet(product_button_style("secondary" if self.current_mode == "hub" else "primary"))
         if self.current_mode == "hub":
             self._render_hub()
             token = object()
@@ -16360,7 +16469,7 @@ class SkillsCenterDialog(QDialog):
                 self.content_layout.addWidget(
                     ProductEmptyState(
                         "还没有自己的能力" if not self.search_text.strip() else "没有匹配的能力",
-                        "可以在对话中让 AI 创建能力，或点击右上角“导入 Skill”。"
+                        "可以在对话中让 AI 创建能力，或点击右上角“添加技能”。"
                         if not self.search_text.strip()
                         else "调整关键词后再试。",
                     )
@@ -16378,23 +16487,14 @@ class SkillsCenterDialog(QDialog):
             self.content_layout.addStretch()
             return
 
-        official = self._official_skills()
-        rendered = False
-        scene_keys = [self.current_scene] if self.current_scene != "all" else list(CAPABILITY_SCENES)
-        for scene in scene_keys:
-            scene_skills = sorted(
-                [skill for skill in official if capability_scene(skill) == scene],
-                key=lambda item: readable_skill_name(item).casefold(),
-            )
-            if not scene_skills:
-                continue
-            self.content_layout.addWidget(self._section(CAPABILITY_SCENES[scene], scene_skills))
-            rendered = True
-        invalid = [skill for skill in official if not capability_scene(skill)]
-        if invalid and self.current_scene == "all":
-            self.content_layout.addWidget(self._section("信息需要完善", invalid))
-            rendered = True
-        if not rendered:
+        official = [skill for skill in self._official_skills()
+                    if self.current_scene == "all" or capability_scene(skill) == self.current_scene]
+        official.sort(key=lambda item: (list(CAPABILITY_SCENES).index(capability_scene(item))
+                      if capability_scene(item) in CAPABILITY_SCENES else len(CAPABILITY_SCENES), readable_skill_name(item).casefold()))
+        if official:
+            title = CAPABILITY_SCENES.get(self.current_scene, "全部技能")
+            self.content_layout.addWidget(self._section(f"{title} · {len(official)} 项", official))
+        else:
             self.content_layout.addWidget(
                 ProductEmptyState(
                     "没有匹配的能力",
@@ -16410,6 +16510,11 @@ class SkillsCenterDialog(QDialog):
                    if self.current_mode == "hub" else columns != self._column_count)
         if changed:
             self._render_content()
+
+    def eventFilter(self, watched, event):
+        if hasattr(self, "scroll") and watched is self.scroll.viewport() and event.type() in {QEvent.Resize, QEvent.Show}:
+            QTimer.singleShot(0, self._hub_reflow)
+        return super().eventFilter(watched, event)
 
     def _show_builtin_detail(self, skill):
         if not self._builtin_detail_open:

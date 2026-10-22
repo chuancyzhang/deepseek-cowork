@@ -10,6 +10,7 @@
 | 你的目标 | 从这里开始 | 继续阅读 |
 | --- | --- | --- |
 | 安装并完成第一次任务 | [用户指南](user-guide.md) | [5.3.0 发布说明](releases/5.3.0.md) |
+| 认识首页、对话和右侧工作区 | [工作台界面](workspace-ui.md) | [执行授权](GOD_MODE.md) |
 | 管理能力、项目和设置 | [设置与能力管理](unified-management.md) | [执行授权](GOD_MODE.md) |
 | 使用资料与保存成果 | [资料库](knowledge_library.md) | [旧连接升级说明](account-connections.md) |
 | 登录资料库或企业平台 | [资料库](knowledge_library.md)、[企业账号](enterprise-platform.md) | [用户指南](user-guide.md) |

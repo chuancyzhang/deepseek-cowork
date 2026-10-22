@@ -26,90 +26,90 @@ from .theme_service import (
 
 
 class DesignTokens:
-    primary = "#5e6ad2"
-    primary_hover = "#4f5bc4"
-    primary_pressed = "#4651b7"
-    primary_soft = "#eef0ff"
-    primary_focus = "#c9cdf7"
-    selection_bg = "#b9c0f4"
-    selection_text = "#17181c"
-    primary_gradient_start = "#6975dc"
-    primary_gradient_end = "#5e6ad2"
+    primary = "#404040"
+    primary_hover = "#333333"
+    primary_pressed = "#282828"
+    primary_soft = "#f0f0f0"
+    primary_focus = "#b8b8b8"
+    selection_bg = "#d5d5d5"
+    selection_text = "#242424"
+    primary_gradient_start = "#404040"
+    primary_gradient_end = "#404040"
 
-    accent_ai = "#5e6ad2"
-    accent_user = "#4f566b"
+    accent_ai = "#505050"
+    accent_user = "#606060"
     accent_success = "#2f9e64"
     accent_tool = "#b7791f"
 
-    text_primary = "#202124"
-    text_secondary = "#5f6269"
-    text_tertiary = "#8b8e96"
+    text_primary = "#303030"
+    text_secondary = "#686868"
+    text_tertiary = "#767676"
     text_inverse = "#ffffff"
     text_disabled = "#a7a9af"
 
-    bg_app = "#f7f7f8"
+    bg_app = "#f8f8f8"
     bg_main = "#ffffff"
-    bg_secondary = "#f4f4f5"
-    bg_tertiary = "#ececee"
-    bg_sidebar = "#f2f2f3"
+    bg_secondary = "#f5f5f5"
+    bg_tertiary = "#eeeeee"
+    bg_sidebar = "#f6f6f6"
     bg_card = "#ffffff"
     bg_card_subtle = "#fafafa"
     bg_glass = "#ffffff"
-    bg_hover = "#e9e9eb"
-    bg_pressed = "#e2e2e5"
-    bg_disabled = "#f0f0f1"
-    bg_code = "#f6f6f7"
+    bg_hover = "#eeeeee"
+    bg_pressed = "#e4e4e4"
+    bg_disabled = "#f3f3f3"
+    bg_code = "#f6f6f6"
     bg_panel = "#ffffff"
     bg_panel_strong = "#ffffff"
-    bg_sidebar_selected = "#e7e8f8"
-    bg_sidebar_hover = "#e8e8ea"
+    bg_sidebar_selected = "#eaeaea"
+    bg_sidebar_hover = "#eeeeee"
     bg_chat = "#ffffff"
-    bg_user_bubble = "#eef0ff"
+    bg_user_bubble = "#f3f3f3"
     bg_assistant_stream = "#ffffff"
-    bg_settings_nav = "#f2f2f3"
-    bg_settings_nav_selected = "#e5e6f5"
-    bg_settings_summary = "#f4f4fb"
+    bg_settings_nav = "#f6f6f6"
+    bg_settings_nav_selected = "#eaeaea"
+    bg_settings_summary = "#f5f5f5"
 
-    sidebar_text = "#5f6269"
-    sidebar_text_muted = "#8b8e96"
-    sidebar_border = "#e6e6e9"
-    chat_text = "#202124"
-    chat_text_muted = "#5f6269"
-    chat_border = "#e8e8eb"
+    sidebar_text = "#686868"
+    sidebar_text_muted = "#767676"
+    sidebar_border = "#e6e6e6"
+    chat_text = "#303030"
+    chat_text_muted = "#686868"
+    chat_border = "#e6e6e6"
     composer_bg = "#ffffff"
-    composer_text = "#202124"
-    composer_text_muted = "#8b8e96"
-    composer_border = "#e8e8eb"
+    composer_text = "#303030"
+    composer_text_muted = "#767676"
+    composer_border = "#e6e6e6"
     right_sidebar_bg = "#ffffff"
     right_sidebar_header_bg = "#ffffff"
-    right_sidebar_text = "#202124"
-    right_sidebar_text_muted = "#5f6269"
-    right_sidebar_border = "#e6e6e9"
-    management_bg = "#f7f7f8"
+    right_sidebar_text = "#303030"
+    right_sidebar_text_muted = "#686868"
+    right_sidebar_border = "#e6e6e6"
+    management_bg = "#ffffff"
     management_panel_bg = "#ffffff"
-    management_border = "#e6e6e9"
+    management_border = "#e6e6e6"
     overlay_bg = "#ffffff"
-    overlay_text = "#202124"
-    overlay_border = "#d8d8dc"
+    overlay_text = "#303030"
+    overlay_border = "#dedede"
     preview_shell_bg = "#ffffff"
     preview_shell_toolbar_bg = "#ffffff"
-    preview_shell_text = "#202124"
-    preview_shell_text_muted = "#5f6269"
-    preview_shell_border = "#e6e6e9"
-    scrollbar_track = "#f1f1f3"
-    scrollbar_thumb = "#b9bbc2"
-    scrollbar_thumb_hover = "#9699a2"
-    icon_primary = "#202124"
-    icon_secondary = "#5f6269"
+    preview_shell_text = "#303030"
+    preview_shell_text_muted = "#686868"
+    preview_shell_border = "#e6e6e6"
+    scrollbar_track = "#f3f3f3"
+    scrollbar_thumb = "#bcbcbc"
+    scrollbar_thumb_hover = "#969696"
+    icon_primary = "#303030"
+    icon_secondary = "#686868"
     icon_disabled = "#a7a9af"
 
-    border = "#d8d8dc"
-    border_strong = "#c5c5cb"
-    separator = "#e6e6e9"
-    border_subtle = "#e8e8eb"
-    border_panel = "#dedee2"
-    border_settings_nav = "#dfdfe3"
-    border_settings_summary = "#d9dcf6"
+    border = "#dedede"
+    border_strong = "#c7c7c7"
+    separator = "#e6e6e6"
+    border_subtle = "#e8e8e8"
+    border_panel = "#e0e0e0"
+    border_settings_nav = "#e6e6e6"
+    border_settings_summary = "#e6e6e6"
 
     radius_sm = 6
     radius_md = 8
@@ -178,31 +178,31 @@ class DesignTokens:
     question_navigator_max_height = 280
     question_navigator_step = 16
 
-    conversation_min_width = 840
-    conversation_compact_min_width = 560
-    conversation_preferred_width = 1040
+    conversation_min_width = 680
+    conversation_compact_min_width = 320
+    conversation_preferred_width = 800
     conversation_max_width = 1040
-    conversation_closed_min_width = 900
+    conversation_closed_min_width = 640
     conversation_closed_max_width = 1040
-    conversation_closed_target_ratio = 0.76
-    conversation_open_min_width = 840
-    conversation_open_compact_min_width = 560
+    conversation_closed_target_ratio = 0.84
+    conversation_open_min_width = 560
+    conversation_open_compact_min_width = 320
     conversation_open_max_width = 1040
     conversation_open_target_ratio = 0.96
     conversation_open_left_spacer_ratio = 0.40
 
-    message_min_width = 720
-    message_compact_min_width = 420
+    message_min_width = 560
+    message_compact_min_width = 280
     message_max_width = 880
-    message_width_ratio = 0.86
-    user_bubble_min_width = 620
-    user_bubble_compact_min_width = 360
+    message_width_ratio = 0.96
+    user_bubble_min_width = 400
+    user_bubble_compact_min_width = 220
     user_bubble_max_width = 640
     user_bubble_ratio = 0.88
 
     # Conversation timeline density. Assistant stages remain individually
     # visible, but share one compact rhythm inside the same turn group.
-    chat_message_vertical_margin = 2
+    chat_message_vertical_margin = 10
     assistant_stage_header_height = 28
     assistant_stage_content_gap = 4
     assistant_stage_separator_vertical_margin = 8
@@ -210,8 +210,8 @@ class DesignTokens:
     assistant_stage_separator_right_margin = 8
     assistant_thinking_timeline_indent = 8
     assistant_thinking_content_indent = 14
-    user_message_padding_horizontal = 12
-    user_message_padding_vertical = 8
+    user_message_padding_horizontal = 16
+    user_message_padding_vertical = 12
     message_action_gap = 4
     toast_min_width = 260
     toast_max_width = 720
@@ -247,10 +247,10 @@ class DesignTokens:
     warning_panel_border = "#fdba74"
     warning_panel_text = "#9a3412"
 
-    info_bg = "#f1f2fb"
-    info_text = "#4f5bc4"
-    info_border = "#d9dcf6"
-    info_icon = "#5e6ad2"
+    info_bg = "#f3f3f3"
+    info_text = "#5f5f5f"
+    info_border = "#dedede"
+    info_icon = "#686868"
 
     toast_bg = "rgba(255, 255, 255, 0.94)"
     toast_border = "#dde3ec"
@@ -258,13 +258,13 @@ class DesignTokens:
     toast_tint_success = "#eefaf3"
     toast_tint_error = "#fdf0f0"
     toast_tint_warning = "#fff7ea"
-    toast_tint_info = "#eef5ff"
+    toast_tint_info = "#f4f4f4"
 
     muted_chip_bg = "#f0f0f3"
     muted_chip_text = "#636366"
 
-    status_running = "#5e6ad2"
-    status_thinking = "#7957c8"
+    status_running = "#686868"
+    status_thinking = "#787878"
     status_tool = "#a56a16"
     status_success = "#2f9e64"
     status_error = "#c83f49"

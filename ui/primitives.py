@@ -1159,7 +1159,7 @@ def apply_product_dialog(dialog, object_name):
         QDialog#{object_name} QLabel {{ background: transparent; border: none; }}
         {product_field_style()}
         QDialog#{object_name} QPushButton#PrimaryBtn {{
-            background: {DesignTokens.primary}; color: white; border: 1px solid {DesignTokens.primary};
+            background: {DesignTokens.primary}; color: {DesignTokens.text_inverse}; border: 1px solid {DesignTokens.primary};
             border-radius: {DesignTokens.radius_md}px; min-height: {DesignTokens.control_height}px;
             padding: 0 12px; font-weight: 600;
         }}

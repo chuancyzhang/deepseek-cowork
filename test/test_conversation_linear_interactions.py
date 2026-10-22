@@ -404,7 +404,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         layout.addWidget(empty_state)
         state = SimpleNamespace(session_id="first-submit", empty_state=empty_state, chat_layout=layout)
         before = {id(widget) for widget in QApplication.topLevelWidgets() if widget.isVisible()}
-        self.assertTrue(MainWindow._retire_session_empty_state(object(), state, reason="test_first_submit"))
+        window = SimpleNamespace(current_session_id=state.session_id, _sync_home_presentation=MagicMock())
+        self.assertTrue(MainWindow._retire_session_empty_state(window, state, reason="test_first_submit"))
+        window._sync_home_presentation.assert_called_once()
         self.app.processEvents()
         after = {id(widget) for widget in QApplication.topLevelWidgets() if widget.isVisible()}
         self.assertIsNone(state.empty_state)
@@ -497,6 +499,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         window = MainWindow()
         window.show()
         self.app.processEvents()
+        persistent_popovers = window.findChildren(ProductPopover)
         tracker = TopLevelShowTracker()
         self.app.installEventFilter(tracker)
         try:
@@ -510,12 +513,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
             self.app.sendPostedEvents(None, QEvent.DeferredDelete)
             self.app.processEvents()
-            self.assertEqual(window.findChildren(ProductPopover), [])
+            self.assertEqual(window.findChildren(ProductPopover), persistent_popovers)
             self.assertIsNone(window.composer_action_popover)
 
             QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
             self.app.processEvents()
-            self.assertEqual(len(window.findChildren(ProductPopover)), 1)
+            self.assertEqual(len(window.findChildren(ProductPopover)), len(persistent_popovers) + 1)
             self.assertTrue(window.composer_action_popover.isVisible())
             self.assertEqual(tracker.events, [])
             for row in window.composer_action_popover.findChildren(ProductActionRow):
@@ -524,8 +527,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     self.assertFalse(label.isWindow())
         finally:
             self.app.removeEventFilter(tracker)
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_grill_mode_is_one_shot_composer_context(self):
         state = SimpleNamespace(
@@ -822,7 +825,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
         self.assertFalse(group.process_disclosure.isHidden())
         self.assertIn("2 个阶段", group.process_disclosure.text())
-        self.assertIn("1 次 Tool 调用", group.process_disclosure.text())
+        self.assertIn("1 次工具调用", group.process_disclosure.text())
         self.assertTrue(first.isHidden())
         self.assertFalse(final.isHidden())
         self.assertTrue(final.thinking_widget.isHidden())
@@ -916,15 +919,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             state = window.get_current_session()
             state.turn_steerable = True
             window.input_field.clear()
-            window._session_has_live_activity = MagicMock(return_value=True)
-
-            window.refresh_composer_action_state()
+            with patch.object(window, "_session_has_live_activity", return_value=True):
+                window.refresh_composer_action_state()
 
             self.assertEqual(window.action_btn.text(), "调整方向")
             self.assertTrue(window.action_btn.isEnabled())
         finally:
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_provider_retry_is_runtime_only_and_does_not_change_messages(self):
         window = MainWindow()
@@ -3144,8 +3146,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(result.think_timer.isActive())
             self.assertNotIn("深度思考中", result.think_toggle_btn.text())
         finally:
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_rejected_daemon_guidance_does_not_mark_reply_as_stopped(self):
         window = MainWindow()

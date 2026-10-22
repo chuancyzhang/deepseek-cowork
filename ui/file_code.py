@@ -2,6 +2,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import QLineEdit, QPlainTextEdit
+from core.theme import DesignTokens
 
 from ui.primitives import ProductCodeViewer, product_field_style
 
@@ -21,6 +22,7 @@ class FileCodeViewer(ProductCodeViewer):
         self.find_shortcut.activated.connect(self.show_find)
         self.close_find_shortcut = QShortcut(QKeySequence("Escape"), self.search)
         self.close_find_shortcut.activated.connect(self.close_find)
+        self.refresh_theme()
 
     def show_find(self):
         self.search.show()
@@ -29,6 +31,11 @@ class FileCodeViewer(ProductCodeViewer):
 
     def refresh_theme(self, _resolved=None):
         super().refresh_theme(_resolved)
+        self.setStyleSheet(self.styleSheet() + (
+            f"QPlainTextEdit {{ background: {DesignTokens.preview_shell_bg}; border: none; border-radius: 0; }}"
+            f"QFrame#ProductCodeViewerHeader {{ background: {DesignTokens.preview_shell_toolbar_bg}; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.preview_shell_border}; }}"
+        ))
         if hasattr(self, "search"):
             self.search.setStyleSheet(product_field_style())
 

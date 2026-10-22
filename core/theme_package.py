@@ -94,7 +94,7 @@ PROTECTED_COMPONENTS = {
 
 CONTENT_DEFAULTS = {
     "brand.title": "DeepSeek Cowork",
-    "home.title": "从一个任务开始",
+    "home.title": "今天，想一起完成什么？",
     "home.card.ppt.title": "PPT 助手",
     "home.card.ppt.description": "创建或整理演示文稿",
     "home.card.finance.title": "进行金融分析",

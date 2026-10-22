@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid as is_qt_object_valid
 
-from core.theme import ThemeRuntimeManager
+from core.theme import ThemeRuntimeManager, default_design_tokens
 from core.theme_package import build_asset_record
 from core.theme_service import ThemeRepository
 from core.conversation_render import build_conversation_render_spans
@@ -160,7 +160,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         )
         late_chip = SessionContextChip("已选能力")
         try:
-            self.assertIn("#eef0ff", late_bubble.user_bubble_frame.styleSheet())
+            self.assertIn(default_design_tokens()["bg_user_bubble"], late_bubble.user_bubble_frame.styleSheet())
             self.assertIn("#f0f0f0", late_bubble.user_content_edit.styleSheet())
             self.assertIn("#f0f0f0", late_file.text_label.styleSheet())
             self.assertIn("#f0f0f0", late_guidance.content_label.styleSheet())
@@ -169,7 +169,8 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             self.assertFalse(late_guidance.delete_btn.icon().isNull())
             self.assertFalse(late_guidance.edit_btn.isHidden())
             self.assertIn("#171717", late_interaction.styleSheet())
-            self.assertIn("#181818", late_chip.styleSheet())
+            self.assertIn("background: transparent", late_chip.styleSheet())
+            self.assertIn("#f4f4f4", late_chip.styleSheet())
         finally:
             for widget in (
                 late_bubble,
@@ -350,6 +351,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             {"id": "question-2", "role": "user", "content": "第二问"},
             {"id": "answer-2", "role": "assistant", "content": "答复二", "meta": {"ui_reply_kind": "final"}},
         ]
+        self.window._retire_session_empty_state(state, reason="test_history_fixture")
         self.window._sync_question_navigator(state.session_id)
         self.app.processEvents()
         self.assertFalse(rail.isHidden())

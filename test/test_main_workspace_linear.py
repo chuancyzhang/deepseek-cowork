@@ -187,7 +187,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIs(self.window.prompt_action_group.parentWidget(), self.window.prompt_toolbar_container)
         self.assertEqual(self.window.action_btn.size().width(), 88)
         self.assertEqual(self.window.action_btn.size().height(), 34)
-        self.assertEqual(self.window.model_select_btn.minimumWidth(), 170)
+        self.assertEqual(self.window.model_select_btn.minimumWidth(), 100)
 
     def test_session_switch_after_sidebar_cycle_keeps_composer_in_bounds(self):
         self.window.show()
@@ -304,6 +304,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             {"id": "question-2", "role": "user", "content": "第二问"},
             {"id": "answer-2", "role": "assistant", "content": "答复二"},
         ]
+        self.window._retire_session_empty_state(state, reason="test_history_fixture")
         self.window._sync_question_navigator(state.session_id)
         self.app.processEvents()
         self.assertTrue(self.window.question_navigator_rail.isVisible())

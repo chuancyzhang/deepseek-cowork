@@ -21,11 +21,11 @@ def builtin_theme(theme_id, *, dark=False):
         "workspace_scene": {"attachment": "fixed", "layers": []},
         "surfaces": {}, "components": {}, "content": {},
     }
-    # Preserve the existing default exactly, including its semantic aliases.
+    # The default light appearance comes from the shared DesignTokens.
     if theme_id == "default" and not dark:
         return profile
     palettes = {
-        "default": ("#f7f7f8", "#ffffff", "#f2f2f3", "#5e6ad2", "#eef0ff"),
+        "default": ("#f8f8f8", "#ffffff", "#f6f6f6", "#404040", "#f0f0f0"),
         "builtin_paper": ("#f4f1e9", "#fffdf8", "#ede9df", "#906b3e", "#f1e7d6"),
         "builtin_forest": ("#f0f4f1", "#fcfdfb", "#e7eee8", "#39735a", "#e3efe7"),
         "builtin_mist": ("#f0f3f7", "#fcfdff", "#e6ecf3", "#4e6e96", "#e5edf8"),
@@ -33,11 +33,15 @@ def builtin_theme(theme_id, *, dark=False):
     bg, panel, sidebar, accent, soft = palettes[theme_id]
     if dark:
         bg, panel, sidebar, soft = "#191c21", "#21252b", "#171a1e", "#303b4e"
-        accent = {"default": "#a8b0fa", "builtin_paper": "#dfba83",
+        accent = {"default": "#d5d5d5", "builtin_paper": "#dfba83",
                   "builtin_forest": "#93c9ad", "builtin_mist": "#a2bddf"}[theme_id]
     text, muted, faint = ("#e9ebef", "#b3bac5", "#8c96a6") if dark else ("#262b30", "#606973", "#79838e")
     border = "#3a414b" if dark else "#dce0e1"
     hover = "#2c323a" if dark else soft
+    if dark and theme_id == "default":
+        bg, panel, sidebar, soft = "#1b1b1b", "#242424", "#202020", "#343434"
+        text, muted, faint = "#ededed", "#b3b3b3", "#929292"
+        border, hover = "#404040", "#303030"
     tokens = {}
     for key in ("bg_app", "management_bg", "bg_secondary", "bg_code", "bg_settings_summary", "bg_card_subtle"):
         tokens[key] = bg

@@ -109,6 +109,7 @@ class ConversationFileTable(QFrame):
         self._paths = list(paths)
         self._workspace_dir = workspace_dir
         self.heading.setText(f"文件 · {len(paths)}")
+        self.heading.setVisible(len(paths) > 1)
         self._rebuild_rows()
         self.setVisible(bool(paths))
 
@@ -132,7 +133,7 @@ class ConversationFileTable(QFrame):
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
             f"QFrame#ConversationFileTable {{ background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: {DesignTokens.radius_sm}px; }}")
+            "border: none; border-radius: 0; }")
         self.heading.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px; font-weight: 600; padding: 10px 12px;")
         self.toggle.setStyleSheet(
             f"QPushButton#ConversationFilesToggle {{ background: transparent; border: none; "

@@ -1,0 +1,59 @@
+# 工作台界面与操作入口
+
+首页、对话和管理页面共用主题颜色、字体与控件。默认采用柔和的中性色；已选择的其他主题继续生效。
+
+## 开始和继续任务
+
+新对话的输入区位于首页标题下方。可以直接描述任务，使用四个快捷入口，或继续最近的两项任务。“工作台选项”保留主题定制和工具箱入口。
+
+![首页](images/workspace-redesign/home-light-100.png)
+
+进入对话后，输入区固定在底部，消息在中间独立滚动。切换对话保留各自草稿。点击顶部标题或聚焦后按 `F2` 可改名，`Enter` 保存、`Esc` 取消；保存失败会保留原名称并提示原因。
+
+输入区的“+”添加上下文；专家、工作目录、模型和发送入口直接可达。指定能力或引用资料后才显示对应入口。点击“按次授权 / 完全访问”可打开原有执行授权开关；它仍是全局默认设置，只影响之后启动的任务，详见[执行授权](GOD_MODE.md)。
+
+“用量”保留完整用量浮窗；“目录”可以跳到某次提问。回答末尾保留复制、重新生成、分支和更多操作，悬停图标可查看说明。
+
+![对话](images/workspace-redesign/conversation-light-100.png)
+
+## 查看文件、执行过程和子任务
+
+右上角提供三个入口：
+
+- **工作区**：文件、网页和终端沿用同一组标签；目录按钮打开原有浮动文件目录。文件预览铺满可用区域，原有编辑、保存、查找和更多操作继续可用。
+- **任务详情**：包含“执行上下文、调用记录、技术详情”。上下文先展示当前会话的项目、引用资料、专家与能力、工作目录；展开“完整执行上下文”查看最近实际请求的原文。“复制全量”始终复制完整内容。调用记录仍可进入参数和结果详情。
+- **子任务**：查看与控制已有子任务，保留其独立对话、补充要求、停止和恢复入口。
+
+![文件工作区](images/workspace-redesign/workspace-light-100.png)
+
+![浮动文件目录](images/workspace-redesign/file-directory-light-100.png)
+
+![执行上下文](images/workspace-redesign/context-light-100.png)
+
+![参数与结果](images/workspace-redesign/tool-details-light-100.png)
+
+## 管理页面与小窗口
+
+团队空间、能力、常用任务、资料库和设置保留原有信息结构及操作，使用统一主题。窄窗口中输入区工具自动换行，右侧面板内容可滚动，深色主题也使用同一套布局。
+
+| 页面 | 浅色截图 | 深色与 150% 缩放截图 |
+| --- | --- | --- |
+| 首页 | [查看](images/workspace-redesign/home-light-100.png) | [查看](images/workspace-redesign/home-dark-150-compact.png) |
+| 团队空间 | [查看](images/workspace-redesign/team_spaces-light-100.png) | [查看](images/workspace-redesign/team_spaces-dark-150-compact.png) |
+| 能力 | [查看](images/workspace-redesign/capabilities-light-100.png) | [查看](images/workspace-redesign/capabilities-dark-150-compact.png) |
+| 常用任务 | [查看](images/workspace-redesign/favorites-light-100.png) | [查看](images/workspace-redesign/favorites-dark-150-compact.png) |
+| 资料库 | [查看](images/workspace-redesign/knowledge-light-100.png) | [查看](images/workspace-redesign/knowledge-dark-150-compact.png) |
+| 设置 | [查看](images/workspace-redesign/settings-light-100.png) | [查看](images/workspace-redesign/settings-dark-150-compact.png) |
+
+截图使用隔离的示例数据；团队空间、资料库展示未连接状态。它们验证界面布局，不代表已验证外部账号登录、网络服务或真实模型运行。
+
+## 复现界面检查
+
+在仓库根目录执行：
+
+```powershell
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --mode light
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --mode dark --scale 1.5 --compact
+```
+
+脚本使用临时配置和 Qt 离屏窗口，不读取个人会话、不调用模型；结束时检查主题预览未写入已保存配置。

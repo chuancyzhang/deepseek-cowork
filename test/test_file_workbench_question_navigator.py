@@ -359,9 +359,8 @@ class FileTabStripTest(unittest.TestCase):
                 self.assertTrue(window.file_workbench.is_effectively_pinned())
                 self.assertTrue(window.file_navigator_pin_notice.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
-            self.app.processEvents()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
 
 class QuestionNavigatorTest(unittest.TestCase):
@@ -437,6 +436,7 @@ class QuestionNavigatorTest(unittest.TestCase):
                 {"id": "a1", "role": "assistant", "content": "答复一"},
                 {"id": "u2", "role": "user", "content": "第二问"},
             ]
+            window._retire_session_empty_state(state, reason="test_history_fixture")
             window.resize(1280, 760)
             window.show()
             self.app.processEvents()
@@ -457,9 +457,8 @@ class QuestionNavigatorTest(unittest.TestCase):
             self.assertLessEqual(rail.height(), DesignTokens.question_navigator_max_height)
             self.assertLessEqual(rail.height(), state.chat_scroll.viewport().height())
         finally:
-            window.close()
-            window.deleteLater()
-            self.app.processEvents()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_unmaterialized_question_loads_every_span_through_current_history_page(self):
         window = MainWindow.__new__(MainWindow)

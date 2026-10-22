@@ -82,6 +82,7 @@ Treat the report from the current build as authoritative for size and contents.
 
 ## Documentation
 
+- [Workspace interface](docs/workspace-ui.md) (Chinese): home, conversations, task details, and theme screenshots
 - [Settings and capability management](docs/unified-management.md) (Chinese): navigation and save boundaries
 - [Knowledge library](docs/knowledge_library.md) (Chinese): sources, references, uploads, and recovery
 - [Knowledge library](docs/knowledge_library.md) (Chinese): source sign-in, references, and uploads; [shared connection retirement](docs/account-connections.md)

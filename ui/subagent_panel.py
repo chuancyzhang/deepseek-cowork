@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from core.theme import DesignTokens, bind_theme
+from ui.primitives import product_button_style
 from core.conversation_render import build_conversation_render_items
 from shiboken6 import isValid
 
@@ -181,6 +182,9 @@ class SubagentPanel(QWidget):
             editor.setStyleSheet(f"QPlainTextEdit {{background:{DesignTokens.bg_secondary}; color:{DesignTokens.text_primary}; border:1px solid {DesignTokens.border_subtle}; border-radius:6px; padding:6px;}}")
         for button in (*self.rows.values(), self.back, self.send, self.stop, self.resume, self.older, self.retry, self.raw_toggle):
             button.setStyleSheet(f"QPushButton {{color:{DesignTokens.text_primary}; background:{DesignTokens.bg_secondary}; border:1px solid {DesignTokens.border_subtle}; padding:8px; border-radius:6px;}} QPushButton:disabled {{color:{DesignTokens.text_tertiary};}} QPushButton:focus {{border-color:{DesignTokens.primary};}}")
+        self.send.setStyleSheet(product_button_style("primary"))
+        for button in (self.back, self.older, self.raw_toggle):
+            button.setStyleSheet(product_button_style("ghost"))
         self.notice.setStyleSheet(f"color:{DesignTokens.text_secondary};")
         self.metrics.setStyleSheet(f"color:{DesignTokens.text_secondary};")
         for label in (self.title, self.recipient):

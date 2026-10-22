@@ -88,6 +88,7 @@ Git 配置。缺失运行时、校验不符或仍配置 `helper-selector` 时，
 
 ## 文档
 
+- [工作台界面](docs/workspace-ui.md)：首页、对话、任务详情与主题截图
 - [设置与能力管理](docs/unified-management.md)：能力、项目与设置的入口和保存边界
 - [资料库](docs/knowledge_library.md)：多来源连接、引用、上传和失败恢复
 - [资料库](docs/knowledge_library.md)：各来源登录、引用与保存；旧统一连接用户参见[升级说明](docs/account-connections.md)

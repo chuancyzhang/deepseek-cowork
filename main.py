@@ -17036,10 +17036,12 @@ class ComposerActionPopover(ProductPopover):
             ("专家", "fa5s.user-tie", window.show_agent_picker, window.agent_picker_btn.isEnabled()),
             ("技能", "fa5s.puzzle-piece", window.open_session_skill_picker, ready and not busy),
             ("连接器", "fa5s.link", lambda: window.open_session_skill_picker(category="connectors"), ready and not busy),
+            ("对话", "fa5s.comments", window.show_conversation_reference_picker, bool(state) and window.input_field.isEnabled()),
         ):
             self._add_row(layout, title, "", qta.icon(icon, color=DesignTokens.text_secondary), callback,
                           enabled=enabled, submenu=True,
-                          tooltip="当前任务结束后可调整" if busy else "能力加载中")
+                          tooltip=("当前输入暂不可用，请稍后重试" if title == "对话" else
+                                   "当前任务结束后可调整" if busy else "能力加载中"))
         layout.addWidget(self._divider())
         self._add_row(layout, "添加文件", "图片、文档或其他工作资料",
                       qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary), window.select_files_for_prompt)
@@ -33376,6 +33378,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             ("add_agent", "专家"),
             ("select_skills", "技能"),
             ("select_connectors", "连接器"),
+            ("reference_conversation", "对话"),
             ("add_files", "添加文件"),
             ("knowledge_refs", "资料引用"),
             ("workspace", "工作目录"),

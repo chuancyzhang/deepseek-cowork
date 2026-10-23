@@ -232,7 +232,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_composer_add_popover_has_no_duplicate_agent_entry(self):
         source = inspect.getsource(ComposerActionPopover.__init__)
-        for title in ("添加文件", "模式", "专家", "技能", "连接器"):
+        for title in ("添加文件", "模式", "专家", "技能", "连接器", "对话"):
             self.assertIn(title, source)
         self.assertNotIn("添加智能体", source)
         self.assertNotIn("沉淀为 Skill", source)
@@ -254,6 +254,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             select_files_for_prompt=lambda: hits.append("file"),
             open_session_skill_picker=lambda: hits.append("skill"),
             show_agent_picker=lambda: hits.append("agent"),
+            show_conversation_reference_picker=lambda: hits.append("conversation"),
             show_composer_mode_picker=lambda: hits.append("grill"),
             agent_picker_btn=QPushButton(),
             knowledge_refs_button=QPushButton(),
@@ -265,7 +266,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             show_app_variable_insert_menu=lambda: None,
             toggle_grill_mode=lambda: hits.append("grill"),
             start_conversation_skill_flow=lambda: hits.append("capture"),
-            input_field=SimpleNamespace(toPlainText=lambda: ""),
+            input_field=SimpleNamespace(toPlainText=lambda: "", isEnabled=lambda: True),
             save_composer_as_favorite=lambda: hits.append("favorite"),
         )
         popover = ComposerActionPopover(window, host)

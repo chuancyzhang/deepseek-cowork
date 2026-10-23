@@ -108,6 +108,28 @@ class ConversationActionsTests(unittest.TestCase):
         self.assertEqual(selected, [profiles[1]])
         picker.deleteLater()
 
+    def test_conversation_only_picker_searches_projects_and_archived_history(self):
+        picker = ConversationMentionPopover([
+            {"id": "local", "title": "实施规划", "updated_at": 1,
+             "meta": {"workspace_source": "project", "workspace_dir": "D:/projects/规划"}},
+            {"id": "other", "title": "归档调研", "updated_at": 2, "status": "archived", "meta": {}},
+        ], [], "D:/projects/规划", None, conversations_only=True)
+        selected = []
+        picker.selected.connect(lambda kind, record: selected.append(record["id"]))
+        self.assertTrue(picker.tabs.isHidden())
+        self.assertEqual(picker.items.item(0).data(Qt.UserRole)[1]["id"], "local")
+        picker.search.setText("规划")
+        self.assertEqual(picker.items.count(), 1)
+        picker.search.setText("不存在")
+        self.assertTrue(picker.items.isHidden())
+        self.assertIn("没有匹配的对话", picker.empty.text())
+        picker.search.setText("归档调研")
+        self.assertFalse(picker.items.isHidden())
+        self.assertIn("已归档", picker.items.item(0).text())
+        picker.search.returnPressed.emit()
+        self.assertEqual(selected, ["other"])
+        picker.deleteLater()
+
     def test_expert_clear_is_only_committed_on_apply(self):
         profiles = [{"id": "a", "name": "甲专家"}]
         selected = []

@@ -46,9 +46,11 @@ def reference_button(text, parent=None):
 class ConversationMentionPopover(ProductPopover):
     selected = Signal(str, object)
 
-    def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False, selected_agent_id=None):
+    def __init__(self, conversations, profiles, workspace, parent, *, agents_only=False,
+                 conversations_only=False, selected_agent_id=None):
         super().__init__(parent, width=500)
         self.conversations = conversations
+        self.conversations_only = conversations_only
         self.profiles = profiles
         self.workspace = workspace
         self.selected_agent_id = selected_agent_id
@@ -59,9 +61,9 @@ class ConversationMentionPopover(ProductPopover):
         self.kind = "智能体" if agents_only else "会话"
         self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
         layout.addWidget(self.tabs)
-        self.tabs.setVisible(not agents_only)
-        self.title = QLabel("选择专家")
-        self.title.setVisible(agents_only)
+        self.tabs.setVisible(not (agents_only or conversations_only))
+        self.title = QLabel("引用对话" if conversations_only else "选择专家")
+        self.title.setVisible(agents_only or conversations_only)
         layout.addWidget(self.title)
         self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")
         self.hint.setWordWrap(True)
@@ -84,7 +86,9 @@ class ConversationMentionPopover(ProductPopover):
         summary_layout.addWidget(self.selection_chip)
         layout.addWidget(self.agent_summary)
         self.items = QListWidget()
-        self.items.setMinimumHeight(250)
+        self.items.setMinimumHeight(80 if conversations_only else 250)
+        if conversations_only:
+            self.items.setMaximumHeight(280)
         layout.addWidget(self.items)
         self.empty = QLabel("没有匹配的会话")
         layout.addWidget(self.empty)
@@ -111,13 +115,15 @@ class ConversationMentionPopover(ProductPopover):
         self.change_kind(self.kind)
 
     def refresh_picker_theme(self, _=None):
+        super().refresh_theme()
         self.search.setStyleSheet(product_field_style())
+        selection_bg = DesignTokens.bg_hover if self.conversations_only else DesignTokens.primary_soft
         self.items.setStyleSheet(
             f"QListWidget {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; padding: 4px; }} "
-            "QListWidget::item { padding: 7px 8px; margin: 1px 0; } "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; padding: 4px; outline: none; }} "
+            "QListWidget::item { border: none; border-radius: 6px; padding: 7px 8px; margin: 1px 0; } "
             f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }} "
-            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}")
+            f"QListWidget::item:selected {{ background: {selection_bg}; color: {DesignTokens.text_primary}; }}")
         self.empty.setStyleSheet(f"color: {DesignTokens.text_secondary};")
         self.hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
         self.title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
@@ -133,6 +139,9 @@ class ConversationMentionPopover(ProductPopover):
         self.kind = kind
         self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索专家名称或用途")
         self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "每次选择一位专家；点击应用后，本会话后续消息继续使用")
+        if self.conversations_only:
+            self.search.setPlaceholderText("搜索对话标题或项目")
+            self.hint.setText("选择历史对话作为参考，添加后可在输入框上方查看或移除。")
         self.agent_summary.setVisible(kind == "智能体")
         self.agent_actions.setVisible(kind == "智能体")
         self.items.setSelectionMode(QAbstractItemView.NoSelection if kind == "智能体" else QAbstractItemView.SingleSelection)
@@ -174,10 +183,20 @@ class ConversationMentionPopover(ProductPopover):
                     item.setCheckState(Qt.Checked if record.get("id") == self.pending_agent_id else Qt.Unchecked)
                 first = first or item
         self.empty.setVisible(first is None)
+        if self.conversations_only:
+            self.items.setVisible(first is not None)
+            self.items.setFixedHeight(min(280, max(80, self.items.count() * 56 + 12)))
+            self.empty.setAlignment(Qt.AlignCenter)
+            self.empty.setText("没有匹配的对话，请尝试其他关键词" if query else "暂无其他历史对话")
         if first is not None:
             self.items.setCurrentItem(first)
         del blocker
         self._refresh_agent_summary()
+        if self.conversations_only and self.isVisible() and self._anchor is not None:
+            # Filtering can shrink the content; keep the compact surface above
+            # its original entry point instead of stretching labels to fill it.
+            self.show_for(self._anchor, prefer_above=True)
+            self.search.setFocus()
 
     def _agent_item_changed(self, item):
         kind, record = item.data(Qt.UserRole)
@@ -256,6 +275,11 @@ class BranchWorker(QThread):
 
 
 class ConversationActionsMixin:
+    def show_conversation_reference_picker(self):
+        state = self.get_current_session()
+        if state and self.input_field.isEnabled():
+            self._show_conversation_picker(state)
+
     def show_conversation_mention_menu(self):
         state = self.get_current_session()
         if not state:
@@ -266,25 +290,38 @@ class ConversationActionsMixin:
         # An email address is ordinary text, not a mention picker trigger.
         if position < 1 or text[position - 1:position] != "@" or (position > 1 and not text[position - 2].isspace()):
             return
-        records = [row for row in self.chat_storage.list_conversation_summaries() if row["id"] != state.session_id]
+        self._show_conversation_picker(state, mention_context=(text, position))
+
+    def _show_conversation_picker(self, state, *, mention_context=None):
+        from_plus = mention_context is None
+        source = "plus" if from_plus else "mention"
+        try:
+            records = [row for row in self.chat_storage.list_conversation_summaries() if row["id"] != state.session_id]
+        except Exception:
+            logger.exception("conversation_reference_picker_failed session=%s source=%s", state.session_id, source)
+            self.add_system_toast("历史对话加载失败，输入已保留。请稍后重试。", "error", session_id=state.session_id)
+            return
         popover = ConversationMentionPopover(
-            records, self._available_agent_profiles(), self._workspace_dir_for_state(state), self,
+            records, [] if from_plus else self._available_agent_profiles(), self._workspace_dir_for_state(state), self,
+            conversations_only=from_plus,
             selected_agent_id=(getattr(state, "conversation_agent", None) or {}).get("id"))
         self.conversation_mention_popover = popover
 
         def selected(kind, record):
             if self.current_session_id != state.session_id:
                 return
-            current = self.input_field.toPlainText()
-            if current != text:
-                return
+            if mention_context is not None:
+                text, position = mention_context
+                if self.input_field.toPlainText() != text:
+                    return
             if kind == "智能体" and not self.select_conversation_agent(record, state.session_id):
                 return
-            selection = self.input_field.textCursor()
-            selection.setPosition(position - 1)
-            selection.setPosition(position, QTextCursor.KeepAnchor)
-            selection.removeSelectedText()
-            self.input_field.setTextCursor(selection)
+            if mention_context is not None:
+                selection = self.input_field.textCursor()
+                selection.setPosition(position - 1)
+                selection.setPosition(position, QTextCursor.KeepAnchor)
+                selection.removeSelectedText()
+                self.input_field.setTextCursor(selection)
             if kind == "智能体":
                 self._save_reference_draft(state)
             else:
@@ -294,11 +331,15 @@ class ConversationActionsMixin:
                 state.conversation_refs = refs
                 self.refresh_conversation_reference_chips()
                 self._save_reference_draft(state)
+                logger.info("conversation_reference_selected session=%s reference=%s source=%s count=%s",
+                            state.session_id, record["id"], source, len(refs))
             self.input_field.setFocus()
 
         popover.selected.connect(selected)
-        popover.show_for(self.input_field, prefer_above=True)
+        popover.show_for(self.tool_menu_btn if from_plus else self.input_field, prefer_above=True)
         popover.search.setFocus()
+        logger.info("conversation_reference_picker_opened session=%s source=%s count=%s",
+                    state.session_id, source, len(records))
 
     def _save_reference_draft(self, state):
         if state.session_id == self.current_session_id:

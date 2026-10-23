@@ -607,6 +607,25 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.host._dispose_application_event_filters.assert_not_called()
         self.assertEqual(self.host.setEnabled.call_args.args, (True,))
 
+    def test_reference_draft_timer_pauses_for_final_save_and_resumes_after_failure(self):
+        for success in (True, False):
+            with self.subTest(success=success):
+                host = Host(self.root)
+                timer = QTimer(host)
+                timer.setSingleShot(True)
+                timer.start(600)
+                host.sessions["s"] = SimpleNamespace(session_id="s", daemon_running=False,
+                    daemon_worker=None, llm_worker=None, active_turn_request_id="", reference_draft_timer=timer)
+                host.save_chat_history.return_value = success
+                finished = []
+                host._shutdown_workers_async(finished.append)
+                self.assertFalse(timer.isActive())
+                self.until(lambda: finished or not host._checkpoint_shutdown_pending)
+                host.save_chat_history.assert_called_once_with("s")
+                self.assertEqual(timer.isActive(), not success)
+                timer.stop()
+                host.deleteLater()
+
     def test_save_failure_reconnects_preserved_daemon_stream(self):
         self.start_writers()
         self.host.sessions["s"] = SimpleNamespace(session_id="s", daemon_running=True,

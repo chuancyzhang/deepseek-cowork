@@ -1,4 +1,5 @@
 """Render real chat surfaces and measure navigation with isolated local data."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -14,13 +15,13 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu
 os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
 
 
-def run():
+def run(*, references_only=False):
     with tempfile.TemporaryDirectory(prefix="cowork-chat-qa-") as temp:
         os.environ.update(APPDATA=temp, LOCALAPPDATA=temp)
         data = Path(temp, "DeepSeekCowork")
         data.mkdir()
         (data / "config.json").write_text("{}", encoding="utf-8")
-        from PySide6.QtCore import QMimeData
+        from PySide6.QtCore import QMimeData, Qt
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication
@@ -30,6 +31,7 @@ def run():
         from core.theme_presets import builtin_theme
         from core.theme_service import ThemeRepository
         from main import MainWindow
+        from ui.primitives import ProductActionRow
         app = QApplication([])
         for name in ("msyh.ttc", "msyhbd.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path("C:/Windows/Fonts", name)))
@@ -54,7 +56,7 @@ def run():
         window._sync_home_presentation()
         window.workspace_title_label.setText("AI 发展规划")
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
-        out = ROOT / "docs/screenshots/chat-experience"
+        out = ROOT / "docs/screenshots" / ("conversation-references" if references_only else "chat-experience")
         out.mkdir(parents=True, exist_ok=True)
         window.show()
 
@@ -67,6 +69,65 @@ def run():
             assert window.input_card.width() <= window.conversation_column.width()
             for button in (window.action_btn, window.model_select_btn):
                 assert button.mapTo(window.input_card, button.rect().bottomRight()).x() < window.input_card.width()
+
+        def shutdown():
+            window.close()
+            deadline = time.monotonic() + 5
+            while not getattr(window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+            assert getattr(window, "_checkpoint_close_ready", False)
+            window.deleteLater()
+            app.processEvents()
+            manager.stop()
+
+        if references_only:
+            workspace = window._workspace_dir_for_state(state)
+            for sid, title, source, project, status in (
+                ("reference-plan", "AI 发展规划 · 会议纪要", "chat", workspace, "active"),
+                ("reference-research", "用户访谈与需求整理", "chat", workspace, "active"),
+                ("reference-roadmap", "技术路线与实施计划", "project", "D:/projects/产品规划", "active"),
+                ("reference-archive", "试点项目复盘", "chat", "", "archived"),
+            ):
+                window.chat_storage.save_conversation(sid, [{"id": sid + "-u", "role": "user", "content": title}],
+                    title=title, status=status, meta={"workspace_source": source, "workspace_dir": project})
+            draft = "请参考之前的讨论，补充各阶段的验收标准。"
+            window.input_field.setPlainText(draft)
+            window.resize(860, 720)
+            QTest.qWait(250)
+            window.show_prompt_tool_menu()
+            capture("plus-menu", 860, 720)
+            row = next(row for row in window.composer_action_popover.findChildren(ProductActionRow)
+                       if row.title_label.text() == "对话")
+            QTest.mouseClick(row.title_label, Qt.LeftButton)
+            app.processEvents()
+            picker = window.conversation_mention_popover
+            capture("picker", 860, 720)
+            assert window.rect().contains(picker.geometry())
+            picker.search.setText("规划")
+            capture("search", 860, 720)
+            assert picker.items.count() == 2
+            picker.search.setText("不存在的关键词")
+            capture("empty", 860, 720)
+            assert picker.empty.isVisible()
+            picker.search.setText("会议纪要")
+            QTest.keyClick(picker.search, Qt.Key_Return)
+            capture("added", 860, 720)
+            assert state.conversation_refs == [{"session_id": "reference-plan", "title": "AI 发展规划 · 会议纪要"}]
+            assert window.input_field.toPlainText() == draft
+            window.resize(740, 620)
+            QTest.qWait(150)
+            window.show_conversation_reference_picker()
+            capture("minimum", 740, 620)
+            assert window.rect().contains(window.conversation_mention_popover.geometry())
+            saved = manager.repository.load()
+            assert manager.apply_profile(builtin_theme("default", dark=True), preview=True, reason="reference_qa")
+            capture("dark", 740, 620)
+            assert manager.restore_saved_theme(reason="reference_qa_cancel")
+            assert manager.repository.load() == saved
+            shutdown()
+            print(f"Conversation reference screenshots verified at {scale}x")
+            return
 
         capture("conversation")
         mime = QMimeData()
@@ -126,16 +187,10 @@ def run():
         measurements["session_switch"] = round((time.perf_counter() - start) * 1000, 1)
         print(json.dumps(measurements, ensure_ascii=False))
         (out / f"navigation-{scale}x.json").write_text(json.dumps(measurements, indent=2), encoding="utf-8")
-        window.close()
-        for _ in range(100):
-            QTest.qWait(50)
-            if getattr(window, "_checkpoint_close_ready", False):
-                break
-        assert getattr(window, "_checkpoint_close_ready", False)
-        window.deleteLater()
-        app.processEvents()
-        manager.stop()
+        shutdown()
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--references-only", action="store_true")
+    run(references_only=parser.parse_args().references_only)

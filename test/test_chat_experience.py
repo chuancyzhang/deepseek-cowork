@@ -3,6 +3,7 @@ import copy
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("COWORK_EXTERNAL_BACKGROUND_SERVICES", "0")
 from PySide6.QtCore import QMimeData, Qt, QCoreApplication, QEvent
 from PySide6.QtTest import QTest
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
 from core.conversation_render import build_conversation_render_spans
 from core.llm.providers import _build_openai_user_content
@@ -19,7 +21,7 @@ from core.theme import DesignTokens, default_design_tokens
 from core.theme_service import resolve_theme
 from main import MainWindow, SessionContextChip, render_markdown_or_html_with_cache
 from ui.conversation_search import find_conversation_messages
-from ui.primitives import SidebarInlineNameEditor
+from ui.primitives import ProductActionRow, SidebarInlineNameEditor
 
 
 class ChatExperienceTests(unittest.TestCase):
@@ -38,10 +40,11 @@ class ChatExperienceTests(unittest.TestCase):
 
     def tearDown(self):
         self.window.close()
-        for _ in range(100):
-            QTest.qWait(50)
-            if getattr(self.window, "_checkpoint_close_ready", False):
-                break
+        deadline = time.monotonic() + 5
+        while not getattr(self.window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
+            self.app.processEvents()
+            # Yield Python execution to the persistence workers as well as Qt.
+            time.sleep(0.01)
         self.assertTrue(getattr(self.window, "_checkpoint_close_ready", False))
         self.window.deleteLater()
         self.app.processEvents()
@@ -127,6 +130,89 @@ class ChatExperienceTests(unittest.TestCase):
             self.window._choose_composer_permission(initial)
         self.assertEqual(self.window.composer_permission.isChecked(), not initial)
         self.assertEqual(self.window.permission_button.text(), "完全访问" if not initial else "请求批准")
+
+    def test_plus_conversation_reference_keeps_draft_and_uses_existing_snapshot(self):
+        self.window.chat_storage.save_conversation("source", [
+            {"id": "source-u", "role": "user", "content": "需要引用的规划原文"},
+        ], title="历史规划")
+        self.window.input_field.setPlainText("请结合历史对话，继续补充验收标准。")
+        cursor = self.window.input_field.textCursor()
+        cursor.setPosition(6)
+        self.window.input_field.setTextCursor(cursor)
+        self.window.show()
+        self.window.show_prompt_tool_menu()
+        menu = self.window.composer_action_popover
+        row = next(row for row in menu.findChildren(ProductActionRow) if row.title_label.text() == "对话")
+        QTest.mouseClick(row.title_label, Qt.LeftButton)
+        self.app.processEvents()
+        picker = self.window.conversation_mention_popover
+        self.assertTrue(picker.isVisible())
+        self.assertTrue(picker.tabs.isHidden())
+        picker.search.setText("历史规划")
+        QTest.mouseClick(picker.items.viewport(), Qt.LeftButton,
+                         pos=picker.items.visualItemRect(picker.items.item(0)).center())
+        state = self.window.get_current_session()
+        self.assertEqual(state.conversation_refs, [{"session_id": "source", "title": "历史规划"}])
+        self.assertEqual(self.window.input_field.toPlainText(), "请结合历史对话，继续补充验收标准。")
+        self.assertEqual(self.window.input_field.textCursor().position(), 6)
+        self.assertTrue(self.window.conversation_reference_chips.isVisible())
+        prepared = self.window.prepare_conversation_references(state, state.conversation_refs)
+        self.assertIn("需要引用的规划原文", Path(prepared[0]["snapshot_path"]).read_text(encoding="utf-8"))
+        self.window.show_conversation_reference_picker()
+        picker = self.window.conversation_mention_popover
+        picker.choose(picker.items.item(0))
+        self.assertEqual(len(state.conversation_refs), 1)
+        self.window.create_new_session()
+        self.assertEqual(self.window.get_current_session().conversation_refs, [])
+        self.assertTrue(self.window.conversation_reference_chips.isHidden())
+        self.window.activate_session(state.session_id)
+        self.assertTrue(self.window.conversation_reference_chips.isVisible())
+        self.window.remove_conversation_reference(state.session_id, "source")
+        self.assertEqual(state.conversation_refs, [])
+
+    def test_conversation_picker_ignores_stale_session_and_can_retry_load_failure(self):
+        self.window.chat_storage.upsert_conversation("source", title="已有对话")
+        self.window.input_field.setPlainText("保留草稿")
+        self.window.show()
+        state = self.window.get_current_session()
+        with patch.object(self.window.chat_storage, "list_conversation_summaries", side_effect=OSError("read failed")), \
+             patch.object(self.window, "add_system_toast") as toast:
+            self.window.show_conversation_reference_picker()
+        self.assertIn("输入已保留", toast.call_args.args[0])
+        self.assertEqual(self.window.input_field.toPlainText(), "保留草稿")
+        self.window.show_conversation_reference_picker()
+        picker = self.window.conversation_mention_popover
+        record = picker.items.item(0).data(Qt.UserRole)[1]
+        self.window.create_new_session()
+        picker.selected.emit("会话", record)
+        self.assertEqual(state.conversation_refs, [])
+        self.assertEqual(self.window.get_current_session().conversation_refs, [])
+
+    def test_at_reference_still_consumes_only_trigger_and_ignores_changed_draft(self):
+        self.window.chat_storage.upsert_conversation("source", title="已有对话")
+        self.window.show()
+        self.window.input_field.setPlainText("name@example.com")
+        self.window.input_field.moveCursor(QTextCursor.End)
+        with patch.object(self.window, "_show_conversation_picker") as show:
+            self.window.show_conversation_mention_menu()
+            show.assert_not_called()
+        self.window.input_field.setPlainText("请参考 @")
+        self.window.input_field.moveCursor(QTextCursor.End)
+        self.window.show_conversation_mention_menu()
+        picker = self.window.conversation_mention_popover
+        picker.choose(picker.items.item(0))
+        state = self.window.get_current_session()
+        self.assertEqual(self.window.input_field.toPlainText(), "请参考 ")
+        self.assertEqual(state.conversation_refs[0]["session_id"], "source")
+        self.window.remove_conversation_reference(state.session_id, "source")
+        self.window.input_field.setPlainText("请参考 @")
+        self.window.input_field.moveCursor(QTextCursor.End)
+        self.window.show_conversation_mention_menu()
+        picker = self.window.conversation_mention_popover
+        self.window.input_field.setPlainText("已修改草稿")
+        picker.choose(picker.items.item(0))
+        self.assertEqual(self.window.input_field.toPlainText(), "已修改草稿")
+        self.assertEqual(state.conversation_refs, [])
 
     def test_skill_and_connector_categories_preserve_each_others_selection(self):
         self.window.skill_manager_ready = True

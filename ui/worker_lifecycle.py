@@ -21,6 +21,13 @@ def pause_ui_work_timers(owner):
         if timer is not None and (timer.isActive() or pending_refresh):
             timer.stop()
             paused.append(timer)
+    # Shutdown queues one final snapshot for every session. A delayed reference
+    # draft save must not submit another write after the writers are sealed.
+    for state in getattr(owner, "sessions", {}).values():
+        timer = getattr(state, "reference_draft_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            paused.append(timer)
     return paused
 
 

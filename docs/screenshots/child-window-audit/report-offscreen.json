@@ -1,0 +1,115 @@
+{
+  "platform": "offscreen",
+  "im_provider_count": 5,
+  "stages": [
+    {
+      "stage": "composer-plus",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-模式",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-连接器",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-对话",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "model-picker",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-knowledge",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-weknora",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-tencent-docs",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-lexiang",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-capabilities",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-favorites",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-settings",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-projects",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-team_spaces",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-conversation",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "editable-skill-files",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "favorite-schedule",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "mcp-new",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-text",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-multi_choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "subagent-details",
+      "unexpected_windows": 0
+    }
+  ],
+  "unexpected": []
+}

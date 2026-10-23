@@ -1,0 +1,184 @@
+{
+  "platform": "offscreen",
+  "stages": [
+    {
+      "stage": "composer-plus",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-模式",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "composer-连接器",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-对话",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "model-picker",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-knowledge",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-weknora",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-tencent-docs",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "library-lexiang",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "route-capabilities",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-favorites",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-settings",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-projects",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-team_spaces",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-conversation",
+      "unexpected_windows": 0
+    }
+  ],
+  "unexpected": [
+    {
+      "stage": "composer-专家",
+      "class": "QLabel",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:96 run: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:96 <lambda>: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "main.py:17168 _open_submenu: self._submenu_actions[row](anchor=row, parent_menu=self)",
+        "main.py:49012 show_agent_picker: self.show_conversation_agent_picker(anchor=anchor, parent_menu=parent_menu)",
+        "conversation_agents.py:110 show_conversation_agent_picker: popover = ConversationMentionPopover(",
+        "conversation_actions.py:67 __init__: self.title.setVisible(agents_only or conversations_only)"
+      ]
+    },
+    {
+      "stage": "composer-对话",
+      "class": "QLabel",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:96 run: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:96 <lambda>: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "main.py:17168 _open_submenu: self._submenu_actions[row](anchor=row, parent_menu=self)",
+        "conversation_actions.py:284 show_conversation_reference_picker: self._show_conversation_picker(state, anchor=anchor, parent_menu=parent_menu)",
+        "conversation_actions.py:307 _show_conversation_picker: popover = ConversationMentionPopover(",
+        "conversation_actions.py:67 __init__: self.title.setVisible(agents_only or conversations_only)"
+      ]
+    },
+    {
+      "stage": "composer-专家",
+      "class": "QLabel",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:96 run: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:96 <lambda>: stage(\"composer-\" + title, lambda row=row: menu._open_submenu(row))",
+        "main.py:17168 _open_submenu: self._submenu_actions[row](anchor=row, parent_menu=self)",
+        "main.py:49012 show_agent_picker: self.show_conversation_agent_picker(anchor=anchor, parent_menu=parent_menu)",
+        "conversation_agents.py:110 show_conversation_agent_picker: popover = ConversationMentionPopover(",
+        "conversation_actions.py:67 __init__: self.title.setVisible(agents_only or conversations_only)"
+      ]
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "class": "QPushButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:98 run: stage(\"skill-picker-transactional\", lambda: SessionSkillPickerPopover(",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:98 <lambda>: stage(\"skill-picker-transactional\", lambda: SessionSkillPickerPopover(",
+        "main.py:16907 __init__: cancel_btn.setVisible(not immediate)"
+      ]
+    },
+    {
+      "stage": "library-tencent-docs",
+      "class": "QPushButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:113 run: stage(\"library-\" + source, lambda index=index: page.sources.setCurrentIndex(index))",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:113 <lambda>: stage(\"library-\" + source, lambda index=index: page.sources.setCurrentIndex(index))",
+        "knowledge_sources.py:68 switch_source: page = self.page(source)",
+        "knowledge_sources.py:51 page: page = cls(self, service=self.service.provider(source), artifacts=self.artifacts)",
+        "knowledge_sources.py:144 __init__: self.confirm_button.setVisible(self.service.source == \"tencent-docs\")"
+      ]
+    },
+    {
+      "stage": "library-lexiang",
+      "class": "QPushButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:133 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:113 run: stage(\"library-\" + source, lambda index=index: page.sources.setCurrentIndex(index))",
+        "verify_child_window_lifecycle.py:80 stage: action()",
+        "verify_child_window_lifecycle.py:113 <lambda>: stage(\"library-\" + source, lambda index=index: page.sources.setCurrentIndex(index))",
+        "knowledge_sources.py:68 switch_source: page = self.page(source)",
+        "knowledge_sources.py:51 page: page = cls(self, service=self.service.provider(source), artifacts=self.artifacts)",
+        "knowledge_sources.py:148 __init__: official.setVisible(self.service.source == \"lexiang\")"
+      ]
+    }
+  ]
+}

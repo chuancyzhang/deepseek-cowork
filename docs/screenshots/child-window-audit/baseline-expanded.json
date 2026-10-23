@@ -1,0 +1,284 @@
+{
+  "platform": "offscreen",
+  "im_provider_count": 5,
+  "stages": [
+    {
+      "stage": "composer-plus",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-模式",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-连接器",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-对话",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "model-picker",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-knowledge",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-weknora",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-tencent-docs",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-lexiang",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-capabilities",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-favorites",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-settings",
+      "unexpected_windows": 2
+    },
+    {
+      "stage": "route-projects",
+      "unexpected_windows": 2
+    },
+    {
+      "stage": "route-team_spaces",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-conversation",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "editable-skill-files",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "favorite-schedule",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "mcp-new",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "inline-text",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "inline-choice",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "inline-multi_choice",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "subagent-details",
+      "unexpected_windows": 1
+    }
+  ],
+  "unexpected": [
+    {
+      "stage": "route-settings",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:115 run: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:115 <lambda>: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "main.py:48773 show_product_page: page = self._ensure_product_page(route, section=section)",
+        "main.py:48334 _ensure_product_page: page = SettingsDialog(self.config_manager, self, initial_page_label=section)",
+        "main.py:12524 __init__: python_source_row, self.python_source_combo, self.python_source_url, self.python_source_test_btn = build_source_editor(\"python\", PYTHON_SOURCES)",
+        "main.py:12501 build_source_editor: url_input.setVisible(bool(custom_selected))"
+      ]
+    },
+    {
+      "stage": "route-settings",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:115 run: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:115 <lambda>: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "main.py:48773 show_product_page: page = self._ensure_product_page(route, section=section)",
+        "main.py:48334 _ensure_product_page: page = SettingsDialog(self.config_manager, self, initial_page_label=section)",
+        "main.py:12525 __init__: node_source_row, self.node_source_combo, self.node_source_url, self.node_source_test_btn = build_source_editor(\"node\", NODE_SOURCES)",
+        "main.py:12501 build_source_editor: url_input.setVisible(bool(custom_selected))"
+      ]
+    },
+    {
+      "stage": "route-projects",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:115 run: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:115 <lambda>: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "main.py:48773 show_product_page: page = self._ensure_product_page(route, section=section)",
+        "main.py:48332 _ensure_product_page: page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain=\"projects\")",
+        "main.py:12524 __init__: python_source_row, self.python_source_combo, self.python_source_url, self.python_source_test_btn = build_source_editor(\"python\", PYTHON_SOURCES)",
+        "main.py:12501 build_source_editor: url_input.setVisible(bool(custom_selected))"
+      ]
+    },
+    {
+      "stage": "route-projects",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:115 run: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:115 <lambda>: stage(\"route-\" + route, lambda route=route: window.show_product_page(route))",
+        "main.py:48773 show_product_page: page = self._ensure_product_page(route, section=section)",
+        "main.py:48332 _ensure_product_page: page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain=\"projects\")",
+        "main.py:12525 __init__: node_source_row, self.node_source_combo, self.node_source_url, self.node_source_test_btn = build_source_editor(\"node\", NODE_SOURCES)",
+        "main.py:12501 build_source_editor: url_input.setVisible(bool(custom_selected))"
+      ]
+    },
+    {
+      "stage": "editable-skill-files",
+      "class": "QPushButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:128 run: stage(\"editable-skill-files\", lambda: widgets.append(CapabilityWorkbenchDialog(",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:128 <lambda>: stage(\"editable-skill-files\", lambda: widgets.append(CapabilityWorkbenchDialog(",
+        "main.py:3630 __init__: self._build_skill_tabs()",
+        "main.py:4646 _build_skill_tabs: self._build_files_tab()",
+        "main.py:5118 _build_files_tab: self.save_file_btn.setVisible(self.skill_manager.is_skill_editable(self.skill_name))"
+      ]
+    },
+    {
+      "stage": "favorite-schedule",
+      "class": "QPushButton",
+      "object": "SecondaryBtn",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:131 run: stage(\"favorite-schedule\", lambda: widgets.append(FavoriteEditorPage(favorite={",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:131 <lambda>: stage(\"favorite-schedule\", lambda: widgets.append(FavoriteEditorPage(favorite={",
+        "main.py:8298 __init__: self.run_schedule_btn.setVisible(bool(self.favorite.get(\"id\") and self.favorite.get(\"schedule\")))"
+      ]
+    },
+    {
+      "stage": "mcp-new",
+      "class": "QPushButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:134 run: stage(\"mcp-new\", lambda: widgets.append(McpServerEditDialog(parent=window)))",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:134 <lambda>: stage(\"mcp-new\", lambda: widgets.append(McpServerEditDialog(parent=window)))",
+        "main.py:9864 __init__: self.import_button.setVisible(not self._editing_existing)"
+      ]
+    },
+    {
+      "stage": "inline-text",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:136 run: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:136 <lambda>: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "main.py:17514 __init__: self.text_input.setVisible("
+      ]
+    },
+    {
+      "stage": "inline-choice",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:136 run: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:136 <lambda>: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "main.py:17514 __init__: self.text_input.setVisible("
+      ]
+    },
+    {
+      "stage": "inline-multi_choice",
+      "class": "QLineEdit",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:136 run: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:136 <lambda>: stage(\"inline-\" + kind, lambda kind=kind: widgets.append(InlineInteractionCard({",
+        "main.py:17514 __init__: self.text_input.setVisible("
+      ]
+    },
+    {
+      "stage": "subagent-details",
+      "class": "QToolButton",
+      "object": "",
+      "window_type": 1,
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:164 <module>: raise SystemExit(0 if run(args.output) else 1)",
+        "verify_child_window_lifecycle.py:139 run: stage(\"subagent-details\", lambda: widgets.append(SubAgentEventTile(",
+        "verify_child_window_lifecycle.py:87 stage: action()",
+        "verify_child_window_lifecycle.py:139 <lambda>: stage(\"subagent-details\", lambda: widgets.append(SubAgentEventTile(",
+        "main.py:25805 __init__: self.toggle_btn.setVisible(bool(self._details_text))"
+      ]
+    }
+  ]
+}

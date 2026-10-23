@@ -63,7 +63,7 @@ class ConversationMentionPopover(ProductPopover):
         self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
         layout.addWidget(self.tabs)
         self.tabs.setVisible(not (agents_only or conversations_only))
-        self.title = QLabel("引用对话" if conversations_only else "选择专家")
+        self.title = QLabel("引用对话" if conversations_only else "选择专家", self)
         self.title.setVisible(agents_only or conversations_only)
         layout.addWidget(self.title)
         self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")

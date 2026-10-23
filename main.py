@@ -5112,7 +5112,7 @@ class CapabilityWorkbenchDialog(QDialog):
         self.validate_btn = QPushButton("验证")
         self.validate_btn.setStyleSheet(apple_button_style("secondary", radius=14))
         self.validate_btn.clicked.connect(self.validate_current_skill)
-        self.save_file_btn = QPushButton("保存并重载")
+        self.save_file_btn = QPushButton("保存并重载", editor_wrap)
         self.save_file_btn.setStyleSheet(apple_button_style("primary", radius=14))
         self.save_file_btn.clicked.connect(self.save_current_skill_file)
         self.save_file_btn.setVisible(self.skill_manager.is_skill_editable(self.skill_name))
@@ -8293,7 +8293,7 @@ class FavoriteEditorPage(QDialog):
         self.save_btn = QPushButton("保存")
         self.save_btn.setObjectName("PrimaryBtn")
         self.save_btn.clicked.connect(self._handle_save)
-        self.run_schedule_btn = QPushButton("立即运行计划")
+        self.run_schedule_btn = QPushButton("立即运行计划", self)
         self.run_schedule_btn.setObjectName("SecondaryBtn")
         self.run_schedule_btn.setVisible(bool(self.favorite.get("id") and self.favorite.get("schedule")))
         self.run_schedule_btn.clicked.connect(self._handle_run_schedule)
@@ -9859,7 +9859,7 @@ class McpServerEditDialog(QDialog):
         self.transport_stack.addWidget(http_page)
 
         buttons = QHBoxLayout()
-        self.import_button = QPushButton("导入配置（JSON）")
+        self.import_button = QPushButton("导入配置（JSON）", self)
         self.import_button.setStyleSheet(product_button_style("secondary"))
         self.import_button.setVisible(not self._editing_existing)
         buttons.addWidget(self.import_button)
@@ -12483,6 +12483,7 @@ class SettingsDialog(QDialog):
         configure_responsive_form_layout(source_form)
 
         def build_source_editor(kind, presets):
+            row = QWidget(source_group)
             combo = QComboBox()
             apply_settings_combo_style(combo)
             for source_id, item in presets.items():
@@ -12495,14 +12496,13 @@ class SettingsDialog(QDialog):
                 combo.addItem(item["name"], item["id"])
             combo.addItem("添加自定义 HTTPS 源…", "custom")
             combo.setCurrentIndex(max(0, combo.findData(selected_id)))
-            url_input = QLineEdit()
+            url_input = QLineEdit(row)
             url_input.setPlaceholderText("https://example.com/simple/" if kind == "python" else "https://example.com/node/")
             url_input.setText((custom_selected or {}).get("url", ""))
             url_input.setVisible(bool(custom_selected))
             test_btn = QPushButton("测试")
             test_btn.setObjectName("SecondaryBtn")
             test_btn.setFixedWidth(72)
-            row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(8)
@@ -13574,7 +13574,7 @@ class SettingsDialog(QDialog):
         self.im_overview_notice = ProductInlineNotice("", "neutral")
         browse_layout.addWidget(self.im_overview_notice)
 
-        self.im_search_input = QLineEdit()
+        self.im_search_input = QLineEdit(browse)
         self.im_search_input.setPlaceholderText("搜索聊天软件")
         self.im_search_input.setClearButtonEnabled(True)
         self.im_search_input.setVisible(len(IM_PROVIDER_SPECS) > 6)
@@ -16901,7 +16901,7 @@ class SessionSkillPickerPopover(ProductPopover):
         clear_btn = QPushButton("清除")
         clear_btn.setStyleSheet(product_button_style("ghost", radius=7))
         clear_btn.clicked.connect(self.clear_selection)
-        cancel_btn = QPushButton("取消")
+        cancel_btn = QPushButton("取消", self)
         cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
         cancel_btn.clicked.connect(self.close)
         cancel_btn.setVisible(not immediate)
@@ -17508,7 +17508,7 @@ class InlineInteractionCard(QFrame):
 
             self.permission_details_button.toggled.connect(show_permission_details)
 
-        self.text_input = QLineEdit()
+        self.text_input = QLineEdit(self)
         self.text_input.setPlaceholderText("自定义" if self.kind in {"choice", "multi_choice"} else "请输入回答")
         self.text_input.setStyleSheet(product_field_style())
         self.text_input.setVisible(
@@ -25798,7 +25798,7 @@ class SubAgentEventTile(QFrame):
         self.time_label.setAlignment(Qt.AlignRight)
         self.time_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 10px;")
 
-        self.toggle_btn = QToolButton()
+        self.toggle_btn = QToolButton(self)
         self.toggle_btn.setText("详情")
         self.toggle_btn.setCursor(Qt.PointingHandCursor)
         self.toggle_btn.setStyleSheet(apple_ghost_icon_button_style(radius=10))

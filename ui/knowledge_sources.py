@@ -108,7 +108,7 @@ class CloudKnowledgePage(KnowledgePage):
         self._has_next = False
         self._current_task = None
         self.login_box.hide()
-        self.login_box = QWidget()
+        self.login_box = QWidget(self)
         self.login_box.setMaximumWidth(560)
         layout = QVBoxLayout(self.login_box)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -138,12 +138,12 @@ class CloudKnowledgePage(KnowledgePage):
         actions.addWidget(self.connect_button)
         self.cancel_login_button.setParent(self.login_box)
         actions.addWidget(self.cancel_login_button)
-        self.confirm_button = QPushButton("已完成授权")
+        self.confirm_button = QPushButton("已完成授权", self.login_box)
         self.confirm_button.clicked.connect(self.finish_authorization)
         self.confirm_button.setEnabled(False)
         self.confirm_button.setVisible(self.service.source == "tencent-docs")
         actions.addWidget(self.confirm_button)
-        official = QPushButton("打开官方配置页")
+        official = QPushButton("打开官方配置页", self.login_box)
         official.clicked.connect(self.open_official)
         official.setVisible(self.service.source == "lexiang")
         actions.addWidget(official)

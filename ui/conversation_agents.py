@@ -76,7 +76,7 @@ class ConversationAgentsMixin:
     def _fit_conversation_agent_chip(self):
         # Keep the role and its close button readable when the editor narrows chat.
         button = self.agent_picker_btn
-        width = max(32, min(150, self.input_card.width() - 140))
+        width = max(32, min(84 if self.input_card.width() < 820 else 150, self.input_card.width() - 140))
         name = getattr(button, "conversation_agent_name", "专家")
         button.setText(button.main_btn.fontMetrics().elidedText(name, Qt.ElideRight, width))
         button.main_btn.setMinimumWidth(button.main_btn.sizeHint().width())
@@ -99,7 +99,7 @@ class ConversationAgentsMixin:
             button.clicked.connect(lambda _checked=False, action=callback: (popover.close(), action()))
             footer.addWidget(button)
         popover.layout().insertLayout(popover.layout().count() - 1, footer)
-        popover.show_for(self.agent_picker_btn, prefer_above=True)
+        popover.show_for(self.tool_menu_btn, prefer_above=True)
         popover.search.setFocus()
 
     def _resolve_conversation_agent(self, state, source_message=None, *, dedicated_workflow=False):

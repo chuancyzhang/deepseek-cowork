@@ -480,6 +480,9 @@ def resolve_theme(
     tokens = copy.deepcopy(default_tokens)
     explicit_tokens = dict(overrides.get("tokens") or {})
     tokens.update(explicit_tokens)
+    if "chat_link" not in explicit_tokens:
+        background_luminance = _relative_luminance(tokens.get("bg_chat", tokens.get("bg_main")))
+        tokens["chat_link"] = "#8ab4f8" if background_luminance is not None and background_luminance < 0.18 else "#1f5fa8"
 
     inherited_region_tokens = {
         "sidebar_text": "text_secondary",
@@ -503,6 +506,8 @@ def resolve_theme(
         "overlay_bg": "bg_main",
         "overlay_text": "text_primary",
         "overlay_border": "border_default",
+        "toast_bg": "overlay_bg",
+        "toast_border": "overlay_border",
         "preview_shell_bg": "bg_main",
         "preview_shell_toolbar_bg": "bg_secondary",
         "preview_shell_text": "text_primary",

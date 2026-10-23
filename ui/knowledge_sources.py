@@ -25,7 +25,8 @@ class MultiSourceKnowledgePage(QDialog):
     referenceRequested = Signal(object, str)
 
     def __init__(self, parent=None, service=None, artifacts=None):
-        super().__init__(parent)
+        embedded = getattr(parent, "main_page_stack", None)
+        super().__init__(embedded if embedded is not None else parent, Qt.Widget if embedded is not None else Qt.Dialog)
         self.service = service or MultiSourceKnowledgeService()
         self.artifacts = artifacts
         self.pages = {}

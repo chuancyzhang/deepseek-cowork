@@ -182,7 +182,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.window.sync_conversation_widths()
 
         self.assertEqual(self.window._composer_toolbar_mode, "compact")
-        self.assertEqual(self.window.prompt_toolbar.direction(), QBoxLayout.TopToBottom)
+        self.assertEqual(self.window.prompt_toolbar.direction(), QBoxLayout.LeftToRight)
         self.assertIs(self.window.prompt_context_group.parentWidget(), self.window.prompt_toolbar_container)
         self.assertIs(self.window.prompt_action_group.parentWidget(), self.window.prompt_toolbar_container)
         self.assertEqual(self.window.action_btn.size().width(), 88)

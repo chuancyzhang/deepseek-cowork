@@ -632,6 +632,24 @@ class SidebarInlineNameEditor(QLineEdit):
         if not self._resolved:
             self._commit()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self, event):
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        # Blank surfaces often have NoFocus, so clicking them does not deliver
+        # focusOutEvent. Observe outside left clicks without consuming them.
+        if (event.type() == QEvent.MouseButtonPress
+                and not self._resolved and self.isVisible()
+                and event.button() == Qt.LeftButton
+                and not self.rect().contains(self.mapFromGlobal(event.globalPosition().toPoint()))):
+            self._commit()
+        return False
+
     def _commit(self):
         if self._resolved:
             return

@@ -232,9 +232,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_composer_add_popover_has_no_duplicate_agent_entry(self):
         source = inspect.getsource(ComposerActionPopover.__init__)
-        for title in ("添加文件", "指定能力", "拷问模式", "沉淀为 Skill"):
+        for title in ("添加文件", "模式", "专家", "技能", "连接器"):
             self.assertIn(title, source)
         self.assertNotIn("添加智能体", source)
+        self.assertNotIn("沉淀为 Skill", source)
 
     def test_composer_add_popover_clicks_enabled_action_and_keeps_disabled_action_inert(self):
         host = QWidget()
@@ -252,6 +253,16 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             _session_is_busy=lambda _state: False,
             select_files_for_prompt=lambda: hits.append("file"),
             open_session_skill_picker=lambda: hits.append("skill"),
+            show_agent_picker=lambda: hits.append("agent"),
+            show_composer_mode_picker=lambda: hits.append("grill"),
+            agent_picker_btn=QPushButton(),
+            knowledge_refs_button=QPushButton(),
+            project_selector_btn=QPushButton("当前目录"),
+            edit_knowledge_references=lambda: None,
+            show_project_selector_menu=lambda: None,
+            height=host.height,
+            config_manager=SimpleNamespace(list_app_variables=lambda **_kwargs: []),
+            show_app_variable_insert_menu=lambda: None,
             toggle_grill_mode=lambda: hits.append("grill"),
             start_conversation_skill_flow=lambda: hits.append("capture"),
             input_field=SimpleNamespace(toPlainText=lambda: ""),
@@ -263,7 +274,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(popover.show_for(anchor, prefer_above=True))
 
-        QTest.mouseClick(rows[0].title_label, Qt.LeftButton)
+        file_row = next(row for row in rows if row.title_label.text() == "添加文件")
+        QTest.mouseClick(file_row.title_label, Qt.LeftButton)
         self.app.processEvents()
         self.assertEqual(hits, ["file"])
         self.assertTrue(popover.isHidden())
@@ -271,7 +283,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         second_popover = ComposerActionPopover(window, host)
         second_rows = second_popover.findChildren(ProductActionRow)
         second_popover.show_for(anchor, prefer_above=True)
-        QTest.mouseClick(second_rows[3].title_label, Qt.LeftButton)
+        mode_row = next(row for row in second_rows if row.title_label.text() == "模式")
+        QTest.mouseClick(mode_row.title_label, Qt.LeftButton)
         self.app.processEvents()
         self.assertEqual(hits, ["file", "grill"])
 

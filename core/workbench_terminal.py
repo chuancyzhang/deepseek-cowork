@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import base64
 import logging
 import os
 import shutil
@@ -12,6 +13,32 @@ from collections import deque
 from .workbench import WorkbenchError
 
 log = logging.getLogger(__name__)
+
+
+def terminal_launch_args(profile):
+    """Shorten only the shell prompt; never rewrite output or change cwd."""
+    args = list(profile.get("args") or [])
+    if profile.get("id") in {"powershell", "pwsh"}:
+        script = r'''
+function global:prompt {
+    $taskLocation = $executionContext.SessionState.Path.CurrentLocation.Path
+    $taskLimit = [Math]::Max(16, [Math]::Min(48, [int]($Host.UI.RawUI.WindowSize.Width / 2)))
+    $taskDisplay = $taskLocation
+    if ($taskDisplay.Length -gt $taskLimit) {
+        $taskRoot = [IO.Path]::GetPathRoot($taskLocation)
+        $taskLeaf = Split-Path -Leaf $taskLocation
+        $taskPrefix = $taskRoot + '…\'
+        $taskRoom = [Math]::Max(4, $taskLimit - $taskPrefix.Length)
+        if ($taskLeaf.Length -gt $taskRoom) {
+            $taskLeaf = $taskLeaf.Substring(0, [int]($taskRoom / 2) - 1) + '…' + $taskLeaf.Substring($taskLeaf.Length - [int]($taskRoom / 2))
+        }
+        $taskDisplay = $taskPrefix + $taskLeaf
+    }
+    'PS ' + $taskDisplay + ('>' * ($nestedPromptLevel + 1)) + ' '
+}
+'''
+        args += ["-NoExit", "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
+    return args
 
 
 class WindowsProcessJob:
@@ -127,11 +154,12 @@ class TerminalSession:
                 raise WorkbenchError("cwd_missing", "终端启动目录已不存在。")
             env = build_sandbox_env()
             env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor", "CHERE_INVOKING": "1"})
+            env["PROMPT_DIRTRIM"] = "2"
             # Use the native nonblocking API. PtyProcess adds a blocking socket
             # reader whose shutdown can wait forever on an otherwise idle PTY.
             self.process = PTY(self._cols, self._rows, backend=Backend.ConPTY)
             self.process.spawn(self.profile["executable"],
-                cmdline=" " + subprocess.list2cmdline(self.profile["args"]), cwd=self.cwd,
+                cmdline=" " + subprocess.list2cmdline(terminal_launch_args(self.profile)), cwd=self.cwd,
                 env="\0".join(f"{key}={value}" for key, value in env.items()) + "\0")
             self.job = WindowsProcessJob(self.process.pid)
             if self._closed.is_set():

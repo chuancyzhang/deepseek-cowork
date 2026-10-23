@@ -116,17 +116,17 @@ class WorkspacePresentationTests(unittest.TestCase):
         checkbox = window.composer_permission
         original = checkbox.isChecked()
         window._show_composer_permission()
-        self.assertTrue(checkbox.isVisible())
-        checkbox.setChecked(not original)
+        self.assertTrue(window.permission_popover.isVisible())
+        QTest.mouseClick(window.permission_choices[not original][0], Qt.LeftButton)
         self.assertEqual(window.config_manager.get_god_mode(), not original)
         window.permission_popover.close()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.assertTrue(isValid(checkbox))
         window._show_composer_permission()
         with patch.object(window.config_manager, "set_god_mode", side_effect=OSError("只读配置")):
-            checkbox.setChecked(original)
+            QTest.mouseClick(window.permission_choices[original][0], Qt.LeftButton)
         self.assertEqual(checkbox.isChecked(), not original)
-        self.assertIn("完全访问" if not original else "按次授权", window.permission_button.text())
+        self.assertIn("完全访问" if not original else "请求批准", window.permission_button.text())
 
     def test_drawer_and_scrolling_leave_header_and_composer_reachable(self):
         window = self.window
@@ -139,7 +139,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         QTest.qWait(180)
         window.sync_context_drawer_layout()
         QTest.qWait(60)
-        self.assertTrue(window.selected_skills_badge.isVisible())
+        self.assertTrue(window.composer_skill_tags.isVisible())
         self.assertGreater(window.right_sidebar.y(), window.top_bar_widget.geometry().bottom())
         composer_position = window.input_card.mapTo(window, QPoint(0, 0))
         header_position = window.top_bar_widget.pos()
@@ -149,7 +149,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         QTest.qWait(30)
         self.assertEqual(window.input_card.mapTo(window, QPoint(0, 0)), composer_position)
         self.assertEqual(window.top_bar_widget.pos(), header_position)
-        for button in (window.tool_menu_btn, window.selected_skills_badge, window.permission_button, window.model_select_btn, window.action_btn):
+        for button in (window.tool_menu_btn, window.composer_skill_tags, window.permission_button, window.model_select_btn, window.action_btn):
             bottom_right = button.mapTo(window.input_card, button.rect().bottomRight())
             self.assertTrue(window.input_card.rect().contains(bottom_right), button.objectName() or button.text())
 
@@ -160,7 +160,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         state = window.get_current_session()
         state.messages = [{"id": f"question-{index}", "role": "user", "content": "需要完整保留的长问题标题" * 20} for index in range(30)]
         window._retire_session_empty_state(state, reason="test_directory_fixture")
-        anchor = next(button for button in state.session_widget.findChildren(QPushButton) if button.accessibleName() == "对话目录")
+        anchor = next(button for button in state.session_widget.findChildren(QPushButton) if button.accessibleName() == "历史提问")
         window._show_question_directory(anchor)
         QTest.qWait(50)
         popover = next(item for item in window.findChildren(ProductPopover) if item.isVisible())

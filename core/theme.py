@@ -74,6 +74,7 @@ class DesignTokens:
     sidebar_text_muted = "#767676"
     sidebar_border = "#e6e6e6"
     chat_text = "#303030"
+    chat_link = "#1f5fa8"
     chat_text_muted = "#686868"
     chat_border = "#e6e6e6"
     composer_bg = "#ffffff"
@@ -180,7 +181,7 @@ class DesignTokens:
 
     conversation_min_width = 680
     conversation_compact_min_width = 320
-    conversation_preferred_width = 800
+    conversation_preferred_width = 960
     conversation_max_width = 1040
     conversation_closed_min_width = 640
     conversation_closed_max_width = 1040
@@ -202,10 +203,10 @@ class DesignTokens:
 
     # Conversation timeline density. Assistant stages remain individually
     # visible, but share one compact rhythm inside the same turn group.
-    chat_message_vertical_margin = 10
+    chat_message_vertical_margin = 6
     assistant_stage_header_height = 28
     assistant_stage_content_gap = 4
-    assistant_stage_separator_vertical_margin = 8
+    assistant_stage_separator_vertical_margin = 4
     assistant_stage_separator_indent = 32
     assistant_stage_separator_right_margin = 8
     assistant_thinking_timeline_indent = 8

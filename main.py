@@ -16855,6 +16855,8 @@ class SessionSkillPickerPopover(ProductPopover):
             self.skill_list.setMinimumHeight(80)
             self.skill_list.setMaximumHeight(280)
         self.skill_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.skill_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.skill_list.setTextElideMode(Qt.ElideRight)
         self.skill_list.setStyleSheet(
             f"QListWidget {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
             "border-radius: 7px; padding: 4px; outline: none; }}"
@@ -16995,6 +16997,8 @@ class SessionSkillPickerPopover(ProductPopover):
         self.empty_label.setVisible(visible == 0)
         if self.immediate:
             self.skill_list.setFixedHeight(min(280, max(80, visible * 56 + 12)))
+            if self.isVisible():
+                self._position_popover()
 
     def clear_selection(self):
         for item in self._items:
@@ -17004,15 +17008,24 @@ class SessionSkillPickerPopover(ProductPopover):
     def _apply(self):
         if not self.immediate:
             self.applied.emit(self.selected_values())
-        self.close()
+        self.close_chain()
 
 
 class ComposerActionPopover(ProductPopover):
     """Linear action surface for the composer's plus button."""
 
     def __init__(self, window, parent=None):
-        super().__init__(parent or window, width=320)
+        super().__init__(parent or window, width=260)
         self.window = window
+        self.setProperty("submenuReserveWidth", 440)
+        self._submenu_actions = {}
+        self._action_rows = []
+        self._submenu_row = None
+        self._pending_submenu_row = None
+        self._submenu_timer = QTimer(self)
+        self._submenu_timer.setSingleShot(True)
+        self._submenu_timer.setInterval(280)
+        self._submenu_timer.timeout.connect(self._open_pending_submenu)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -17035,7 +17048,7 @@ class ComposerActionPopover(ProductPopover):
             ("模式", "fa5s.sliders-h", window.show_composer_mode_picker, not busy),
             ("专家", "fa5s.user-tie", window.show_agent_picker, window.agent_picker_btn.isEnabled()),
             ("技能", "fa5s.puzzle-piece", window.open_session_skill_picker, ready and not busy),
-            ("连接器", "fa5s.link", lambda: window.open_session_skill_picker(category="connectors"), ready and not busy),
+            ("连接器", "fa5s.link", lambda **kwargs: window.open_session_skill_picker(category="connectors", **kwargs), ready and not busy),
             ("对话", "fa5s.comments", window.show_conversation_reference_picker, bool(state) and window.input_field.isEnabled()),
         ):
             self._add_row(layout, title, "", qta.icon(icon, color=DesignTokens.text_secondary), callback,
@@ -17064,9 +17077,6 @@ class ComposerActionPopover(ProductPopover):
         self._add_row(layout, "资料引用", "选择用于当前会话的资料",
                       qta.icon("fa5s.book", color=DesignTokens.text_secondary), window.edit_knowledge_references,
                       enabled=window.knowledge_refs_button.isEnabled())
-        self._add_row(layout, "工作目录", window.project_selector_btn.text(),
-                      qta.icon("fa5s.folder", color=DesignTokens.text_secondary), window.show_project_selector_menu,
-                      enabled=window.project_selector_btn.isEnabled())
         current_prompt = window.input_field.toPlainText().strip() if state else ""
         can_save_favorite = bool(current_prompt or selected)
         self._add_row(
@@ -17083,24 +17093,108 @@ class ComposerActionPopover(ProductPopover):
     def _divider(self):
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none; margin: 4px 6px;")
+        bind_theme(divider, lambda _=None: divider.setStyleSheet(
+            f"background: {DesignTokens.separator}; border: none; margin: 4px 6px;"), surface="composer")
         return divider
 
     def _add_row(self, layout, title, detail, icon, callback, enabled=True, tooltip="", submenu=False):
         row = ProductActionRow(title, detail, icon, self)
+        self._action_rows.append(row)
         if submenu:
             chevron = QLabel()
             chevron.setPixmap(qta.icon("fa5s.chevron-right", color=DesignTokens.text_secondary).pixmap(12, 12))
             row.layout().addWidget(chevron)
+            self._submenu_actions[row] = callback
         row.setEnabled(enabled)
         if tooltip and not enabled:
             row.setToolTip(tooltip)
-        row.clicked.connect(lambda: self._trigger(callback))
+        row.clicked.connect(lambda: self._open_submenu(row) if submenu else self._trigger(callback))
         layout.addWidget(row)
+
+    def eventFilter(self, obj, event):
+        if self.isVisible():
+            if obj in self._action_rows:
+                if event.type() == QEvent.Enter:
+                    self._pending_submenu_row = obj
+                    self._submenu_timer.start()
+                elif event.type() == QEvent.Leave and self._pending_submenu_row is obj:
+                    self._submenu_timer.stop()
+                    self._pending_submenu_row = None
+                elif event.type() == QEvent.KeyPress:
+                    if event.key() == Qt.Key_Right and obj in self._submenu_actions:
+                        self._open_submenu(obj)
+                        return True
+                    if event.key() in (Qt.Key_Up, Qt.Key_Down):
+                        rows = [row for row in self._action_rows if row.isEnabled()]
+                        if obj in rows:
+                            rows[(rows.index(obj) + (1 if event.key() == Qt.Key_Down else -1)) % len(rows)].setFocus()
+                        return True
+            elif (event.type() == QEvent.Enter and self._child_popover is not None
+                  and isinstance(obj, QWidget)
+                  and (obj is self._child_popover or self._child_popover.isAncestorOf(obj))):
+                # Crossing another row diagonally on the way to the submenu
+                # must not replace the panel after the pointer reaches it.
+                self._submenu_timer.stop()
+                self._pending_submenu_row = None
+        return super().eventFilter(obj, event)
+
+    def _open_pending_submenu(self):
+        row, self._pending_submenu_row = self._pending_submenu_row, None
+        if self.isVisible() and row is not None:
+            self._open_submenu(row)
+
+    def _set_submenu_row(self, row):
+        previous, self._submenu_row = self._submenu_row, row
+        for item in (previous, row):
+            if item is not None:
+                item.setProperty("submenuOpen", item is row)
+                item.style().unpolish(item)
+                item.style().polish(item)
+                item.update()
+
+    def _open_submenu(self, row):
+        self._submenu_timer.stop()
+        self._pending_submenu_row = None
+        if not row.isEnabled():
+            return
+        if self._submenu_row is row and self._child_popover is not None:
+            return
+        if row not in self._submenu_actions:
+            if self._child_popover is not None:
+                self._child_popover.close()
+            self._set_submenu_row(None)
+            return
+        self._set_submenu_row(row)
+        self._submenu_actions[row](anchor=row, parent_menu=self)
+        if self._child_popover is not None:
+            log_ui_navigation("composer_submenu_opened",
+                              session_id=str(getattr(self.window, "current_session_id", "") or ""),
+                              category=row.title_label.text())
+            self._child_popover.closed.connect(
+                lambda current=row: self._set_submenu_row(None) if self._submenu_row is current else None)
+        else:
+            self._set_submenu_row(None)
+
+    def hideEvent(self, event):
+        # The base constructor can hide the widget before this timer exists.
+        if hasattr(self, "_submenu_timer"):
+            self._submenu_timer.stop()
+            self._pending_submenu_row = None
+            self._set_submenu_row(None)
+        super().hideEvent(event)
 
     def _trigger(self, callback):
         self.close()
         QTimer.singleShot(0, callback)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            rows = [row for row in self._action_rows if row.isEnabled()]
+            if rows:
+                rows[0 if event.key() == Qt.Key_Down else -1].setFocus()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class ModelSelectorPopover(ProductPopover):
@@ -30708,20 +30802,29 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         input_card_layout.addWidget(self.composer_skill_tags)
         input_card_layout.addWidget(self.input_field)
 
-        self.project_selector_btn = QToolButton()
+        self.composer_workspace_row = QWidget(self.input_card)
+        self.composer_workspace_row.setObjectName("ComposerWorkspaceRow")
+        workspace_row_layout = QHBoxLayout(self.composer_workspace_row)
+        workspace_row_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_row_layout.setSpacing(0)
+        self.project_selector_btn = QToolButton(self.composer_workspace_row)
+        self.project_selector_btn.setObjectName("ComposerWorkspaceButton")
         self.project_selector_btn.setCursor(Qt.PointingHandCursor)
         self.project_selector_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.project_selector_btn.setIcon(sidebar_symbol_icon("folder", DesignTokens.text_secondary, 16))
         self.project_selector_btn.setIconSize(QSize(16, 16))
-        self.project_selector_btn.setFixedHeight(32)
-        self.project_selector_btn.setMaximumWidth(280)
+        self.project_selector_btn.setFixedHeight(26)
+        self.project_selector_btn.setMaximumWidth(520)
         self.project_selector_btn.setStyleSheet(
-            f"QToolButton {{ background: transparent; color: {DesignTokens.text_secondary}; border: none; "
-            "border-radius: 12px; padding: 4px 10px; font-size: 12px; text-align: left; }}"
-            f"QToolButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}"
-            f"QToolButton:disabled {{ color: {DesignTokens.text_tertiary}; background: transparent; }}"
+            f"QToolButton#ComposerWorkspaceButton {{ background: transparent; color: {DesignTokens.text_secondary}; "
+            f"border: 1px solid transparent; border-radius: {DesignTokens.radius_sm}px; "
+            "padding: 2px 5px; font-size: 12px; text-align: left; }}"
+            f"QToolButton#ComposerWorkspaceButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}"
+            f"QToolButton#ComposerWorkspaceButton:focus {{ border-color: {DesignTokens.primary_focus}; }}"
         )
         self.project_selector_btn.clicked.connect(self.show_project_selector_menu)
+        workspace_row_layout.addWidget(self.project_selector_btn)
+        workspace_row_layout.addStretch()
 
         self.prompt_toolbar_container = QWidget(self.input_card)
         self.prompt_toolbar_container.setObjectName("ComposerToolbarContainer")
@@ -30755,7 +30858,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.knowledge_refs_button.hide()
         secondary_context_layout.addWidget(self.knowledge_refs_button)
         secondary_context_layout.addWidget(self.grill_mode_badge)
-        secondary_context_layout.addWidget(self.project_selector_btn)
         secondary_context_layout.addWidget(self.loop_hint)
         self.secondary_context_group.setParent(self.prompt_context_group)
         self.secondary_context_group.hide()
@@ -30828,6 +30930,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.permission_button.clicked.connect(self._show_composer_permission)
         self.composer_permission.toggled.connect(self._refresh_permission_presentation)
         primary_context_layout.addWidget(self.permission_button)
+        primary_context_layout.addWidget(self.agent_picker_btn)
         bind_theme(self.permission_button, self._refresh_permission_presentation, surface="composer")
         self._refresh_permission_presentation()
         self._apply_composer_toolbar_layout(compact=False)
@@ -30836,7 +30939,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.input_row_layout = QHBoxLayout(self.input_row)
         self.input_row_layout.setContentsMargins(0, 0, 0, 0)
         self.input_row_layout.setSpacing(0)
-        self.input_row_layout.addWidget(self.input_card, 0, Qt.AlignLeft)
+        self.composer_body = QWidget(self.input_row)
+        composer_body_layout = QVBoxLayout(self.composer_body)
+        composer_body_layout.setContentsMargins(0, 0, 0, 0)
+        composer_body_layout.setSpacing(4)
+        composer_body_layout.addWidget(self.input_card)
+        composer_body_layout.addWidget(self.composer_workspace_row)
+        self.input_row_layout.addWidget(self.composer_body, 0, Qt.AlignLeft)
         self.input_row_layout.addStretch(1)
         self.main_content_layout.addWidget(self.input_row)
 
@@ -31031,15 +31140,20 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.chat_row.setVisible(not show_home)
             self.input_card.setFixedWidth(max(280, self.conversation_column.width()))
             log_ui_navigation("conversation_home_presentation", session_id=getattr(state, "session_id", ""), home=show_home)
-        self.action_btn.setCompact(not show_home)
+        self.action_btn.setCompact(not show_home or self.input_card.width() < 620)
         self.action_btn.setIcon(qta.icon("fa5s.arrow-up", color=DesignTokens.text_inverse))
         if show_home:
             self._refresh_home_recent()
 
     def _apply_composer_toolbar_layout(self, compact):
         self.prompt_context_layout.setDirection(QBoxLayout.LeftToRight)
+        self._fit_project_selector()
+        self.action_btn.setCompact(not getattr(self, "_home_presentation_active", False) or self.input_card.width() < 620)
+        self._fit_conversation_agent_chip()
         compact = self.input_card.width() < 820
-        self.model_select_btn.setMaximumWidth(max(100, min(220, self.input_card.width() - 250)))
+        agent = self.agent_picker_btn
+        agent_width = agent.minimumWidth() + 8 if not agent.isHidden() else 0
+        self.model_select_btn.setMaximumWidth(max(100, min(220, self.input_card.width() - 250 - agent_width)))
         label = self.model_select_btn.property("compactLabel") if compact else self.model_select_btn.toolTip()
         if label:
             self.model_select_btn.setText(label)
@@ -31327,13 +31441,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             QSize(DesignTokens.icon_size, DesignTokens.icon_size)
         )
         self.project_selector_btn.setStyleSheet(
-            f"QToolButton {{ background: transparent; "
-            f"color: {DesignTokens.composer_text_muted}; border: none; "
-            f"border-radius: {DesignTokens.radius_lg}px; padding: 4px 10px; "
+            f"QToolButton#ComposerWorkspaceButton {{ background: transparent; "
+            f"color: {DesignTokens.composer_text_muted}; border: 1px solid transparent; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 2px 5px; "
             f"font-size: {DesignTokens.font_size_meta}px; text-align: left; }}"
-            f"QToolButton:hover {{ background: {DesignTokens.bg_hover}; "
+            f"QToolButton#ComposerWorkspaceButton:hover {{ background: {DesignTokens.bg_hover}; "
             f"color: {DesignTokens.composer_text}; }}"
-            f"QToolButton:disabled {{ color: {DesignTokens.text_disabled}; "
+            f"QToolButton#ComposerWorkspaceButton:focus {{ border-color: {DesignTokens.primary_focus}; }}"
+            f"QToolButton#ComposerWorkspaceButton:disabled {{ color: {DesignTokens.composer_text_muted}; "
             "background: transparent; }"
         )
         self.prompt_files_hint.setStyleSheet(
@@ -32678,7 +32793,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if getattr(self, "_home_presentation_active", False) and self.home_scroll.isVisible():
             composer_width = min(composer_width, max(280, self.home_scroll.viewport().width()))
         self.input_card.setFixedWidth(composer_width)
-        self._fit_conversation_agent_chip()
         self._apply_composer_toolbar_layout(
             compact=conversation_width < DesignTokens.conversation_min_width
         )
@@ -33381,7 +33495,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             ("reference_conversation", "对话"),
             ("add_files", "添加文件"),
             ("knowledge_refs", "资料引用"),
-            ("workspace", "工作目录"),
         ]
 
     def _normalize_prompt_file_paths(self, paths):
@@ -36624,7 +36737,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
         self.grill_mode_badge.setVisible(visible)
 
-    def show_composer_mode_picker(self):
+    def show_composer_mode_picker(self, *, anchor=None, parent_menu=None):
         from ui.capability_widgets import CapabilitySwitch
         state = self.get_current_session()
         if state is None:
@@ -36668,7 +36781,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         toggle.toggled.connect(change)
         bind_theme(popover, lambda resolved=None: (popover.refresh_theme(resolved), refresh(resolved)), surface="composer")
         refresh()
-        popover.show_for(self.tool_menu_btn, prefer_above=True)
+        popover.show_for(anchor or self.tool_menu_btn, prefer_above=True, parent_popover=parent_menu)
 
     def toggle_grill_mode(self):
         state = self.get_current_session()
@@ -41982,17 +42095,37 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         label = "空间专用目录" if workspace_source == "team_space" else "聊天工作目录" if workspace_source == "chat" else (
             self._project_display_name(workspace_dir, project_meta) if workspace_dir else "聊天工作目录"
         )
-        metrics = QFontMetrics(button.font())
-        button.setText(metrics.elidedText(label, Qt.ElideRight, 210))
+        full_label = "工作目录 · " + label
+        button.setProperty("workspaceLabel", full_label)
+        button.setAccessibleName(full_label)
+        self._fit_project_selector()
         button.setIcon(sidebar_symbol_icon("folder-open" if workspace_source == "project" else "folder", DesignTokens.text_secondary, 16))
         allowed = self._project_selector_switch_allowed(state)
         button.setEnabled(allowed)
+        button.setCursor(Qt.PointingHandCursor if allowed else Qt.ArrowCursor)
         if allowed:
-            button.setToolTip("选择已加入的项目")
+            hint = "点击选择已加入的项目或添加新项目"
+        elif workspace_source == "team_space":
+            hint = "空间会话使用专用目录，不能切换项目"
         elif state and getattr(state, "messages", None):
-            button.setToolTip("已有内容的对话不能切换项目")
+            hint = "已有内容的对话不能切换项目"
         else:
-            button.setToolTip("当前任务运行中或会话尚未加载，暂时不能切换项目")
+            hint = "当前任务运行中或会话尚未加载，暂时不能切换项目"
+        tooltip = "\n".join(part for part in (workspace_dir, hint) if part)
+        button.setToolTip(tooltip)
+        button.setAccessibleDescription(tooltip)
+
+    def _fit_project_selector(self):
+        button = getattr(self, "project_selector_btn", None)
+        if button is None:
+            return
+        label = button.property("workspaceLabel")
+        if not label:
+            return
+        margins = self.input_card.layout().contentsMargins()
+        available = max(120, min(520, self.input_card.width() - margins.left() - margins.right()))
+        button.setMaximumWidth(available)
+        button.setText(QFontMetrics(button.font()).elidedText(label, Qt.ElideMiddle, available - 36))
 
     def select_project_for_current_conversation(self, path):
         log_ui_navigation(
@@ -42099,7 +42232,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         search.textChanged.connect(filter_projects)
         menu.aboutToShow.connect(search.setFocus)
-        anchor = self.tool_menu_btn
+        anchor = self.project_selector_btn
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def show_project_menu(self, path, anchor, position=None):
@@ -48875,8 +49008,8 @@ a {{ overflow-wrap: anywhere; }}
         global_pos = self.input_field.mapToGlobal(rect.bottomLeft())
         menu.exec(global_pos)
 
-    def show_agent_picker(self):
-        self.show_conversation_agent_picker()
+    def show_agent_picker(self, *, anchor=None, parent_menu=None):
+        self.show_conversation_agent_picker(anchor=anchor, parent_menu=parent_menu)
 
     def _populate_agent_menu(self, menu):
         profiles = self._available_agent_profiles()
@@ -49688,7 +49821,7 @@ a {{ overflow-wrap: anywhere; }}
         self.refresh_context_badges(state.session_id)
         self.add_system_toast("已移除指定能力", "info", session_id=state.session_id, auto_close_ms=2600)
 
-    def open_session_skill_picker(self, *, category="skills"):
+    def open_session_skill_picker(self, *, category="skills", anchor=None, parent_menu=None):
         state = self.get_current_session()
         if not state:
             return
@@ -49720,9 +49853,10 @@ a {{ overflow-wrap: anywhere; }}
             log_ui_navigation("session_skills_apply", session_id=sid, selected_count=len(names or []))
 
         popover.applied.connect(apply)
-        popover.closed.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
-        anchor = self.selected_skills_badge if self.selected_skills_badge.isVisible() else self.tool_menu_btn
-        popover.show_for(anchor, prefer_above=True)
+        if parent_menu is None:
+            popover.closed.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
+        anchor = anchor or (self.selected_skills_badge if self.selected_skills_badge.isVisible() else self.tool_menu_btn)
+        popover.show_for(anchor, prefer_above=True, parent_popover=parent_menu)
         QTimer.singleShot(0, popover.search_input.setFocus)
 
     def update_skill_capture_button_state(self):

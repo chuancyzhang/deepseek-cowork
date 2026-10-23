@@ -64,7 +64,7 @@ class ConversationAgentsMixin:
         button.conversation_agent_name = name
         button.setAccessibleName("当前专家：" + name if selection else "选择专家")
         button.setRemovable(bool(selection))
-        self._fit_conversation_agent_chip()
+        button.setVisible(bool(selection))
         ready = bool(state and getattr(state, "history_loaded", False) and not getattr(state, "history_loading", False))
         busy = bool(state and self._session_is_busy(state))
         button.setEnabled(ready and not busy)
@@ -72,17 +72,38 @@ class ConversationAgentsMixin:
             "专家已停用或不存在，请重新选择或关闭专家" if unavailable else
             f"{name} · 本会话后续消息继续使用，点击可切换" if selection else "选择本会话使用的专家"
         ))
+        self._apply_composer_toolbar_layout(compact=self.input_card.width() < 820)
 
     def _fit_conversation_agent_chip(self):
         # Keep the role and its close button readable when the editor narrows chat.
         button = self.agent_picker_btn
-        width = max(32, min(84 if self.input_card.width() < 820 else 150, self.input_card.width() - 140))
+        button.setMinimumWidth(0)
+        button.setMaximumWidth(16777215)
+        button.main_btn.setMinimumWidth(0)
+        button.main_btn.setMaximumWidth(16777215)
+        # Reserve the model, submit/stop buttons and toolbar spacing first.
+        margins = self.input_card.layout().contentsMargins()
+        available = self.input_card.contentsRect().width() - margins.left() - margins.right()
+        for name in ("tool_menu_btn", "permission_button", "action_btn", "stop_btn"):
+            control = getattr(self, name, None)
+            if control is not None and not control.isHidden():
+                available -= (control.minimumWidth() if control.minimumWidth() == control.maximumWidth()
+                              else max(control.minimumWidth(), control.sizeHint().width()))
+        available -= 100 + 32
         name = getattr(button, "conversation_agent_name", "专家")
+        button.setText(name)
+        chrome = button.main_btn.sizeHint().width() - button.main_btn.fontMetrics().horizontalAdvance(name)
+        chrome += 26 if not button.close_btn.isHidden() else 0
+        width = max(12, min(150, available - chrome)) if self.input_card.isVisible() else 150
         button.setText(button.main_btn.fontMetrics().elidedText(name, Qt.ElideRight, width))
-        button.main_btn.setMinimumWidth(button.main_btn.sizeHint().width())
-        button.setMinimumWidth(button.sizeHint().width())
+        close_width = button.close_btn.width() + button.layout().spacing() if not button.close_btn.isHidden() else 0
+        main_width = button.main_btn.sizeHint().width()
+        if self.input_card.isVisible():
+            main_width = min(main_width, max(1, available - close_width))
+        button.main_btn.setFixedWidth(main_width)
+        button.setFixedWidth(main_width + close_width)
 
-    def show_conversation_agent_picker(self):
+    def show_conversation_agent_picker(self, *, anchor=None, parent_menu=None):
         state = self.get_current_session()
         if not state or self._session_is_busy(state):
             return
@@ -96,10 +117,11 @@ class ConversationAgentsMixin:
             button = QPushButton(title)
             button.setCursor(Qt.PointingHandCursor)
             bind_theme(button, lambda _=None, target=button: target.setStyleSheet(product_button_style("secondary")), surface="composer")
-            button.clicked.connect(lambda _checked=False, action=callback: (popover.close(), action()))
+            button.clicked.connect(lambda _checked=False, action=callback: (popover.close_chain(), action()))
             footer.addWidget(button)
         popover.layout().insertLayout(popover.layout().count() - 1, footer)
-        popover.show_for(self.tool_menu_btn, prefer_above=True)
+        anchor = anchor or (self.agent_picker_btn if self.agent_picker_btn.isVisible() else self.tool_menu_btn)
+        popover.show_for(anchor, prefer_above=True, parent_popover=parent_menu)
         popover.search.setFocus()
 
     def _resolve_conversation_agent(self, state, source_message=None, *, dedicated_workflow=False):

@@ -13,7 +13,7 @@ os.environ.setdefault("COWORK_EXTERNAL_BACKGROUND_SERVICES", "0")
 from PySide6.QtCore import QMimeData, Qt, QCoreApplication, QEvent
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QApplication, QMenu, QWidget, QVBoxLayout, QLabel
 from core.conversation_render import build_conversation_render_spans
 from core.llm.providers import _build_openai_user_content
 from core.workbench_terminal import terminal_launch_args
@@ -131,6 +131,52 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertEqual(self.window.composer_permission.isChecked(), not initial)
         self.assertEqual(self.window.permission_button.text(), "完全访问" if not initial else "请求批准")
 
+    def test_composer_directory_reuses_project_switch_and_stays_visible_when_locked(self):
+        project = Path(self.temp.name, "用于验证完整目录提示的项目名称" * 3)
+        project.mkdir()
+        self.window.config_manager.upsert_project(str(project))
+        self.window.input_field.setPlainText("保留这段草稿")
+        state = self.window.get_current_session()
+        self.window.resize(740, 620)
+        self.window.show()
+        self.app.processEvents()
+        button = self.window.project_selector_btn
+        self.assertTrue(button.isVisible())
+        self.assertTrue(button.isEnabled())
+        menu = QMenu(self.window)
+        positions = []
+
+        def choose_project(position):
+            positions.append(position)
+            next(action for action in menu.actions() if action.data() == str(project)).trigger()
+
+        menu.exec = choose_project
+        with patch("main.create_styled_menu", return_value=menu):
+            button.click()
+        self.assertEqual(positions, [button.mapToGlobal(button.rect().bottomLeft())])
+        self.assertEqual(state.workspace_dir, str(project))
+        self.assertEqual(state.workspace_source, "project")
+        self.assertEqual(self.window.input_field.toPlainText(), "保留这段草稿")
+        self.assertIn(str(project), button.toolTip())
+        self.assertIn(project.name, button.accessibleName())
+        self.window.sync_conversation_widths()
+        self.app.processEvents()
+        self.assertLessEqual(button.mapTo(self.window, button.rect().bottomRight()).x(),
+                             self.window.input_card.mapTo(self.window, self.window.input_card.rect().bottomRight()).x())
+        self.assertGreater(button.mapTo(self.window, button.rect().topLeft()).y(),
+                           self.window.input_card.mapTo(self.window, self.window.input_card.rect().bottomLeft()).y())
+        state.messages = [{"id": "workspace-u", "role": "user", "content": "已有消息"}]
+        self.window.normalize_session_ui(state)
+        self.assertTrue(button.isVisible())
+        self.assertFalse(button.isEnabled())
+        self.assertIn("已有内容", button.toolTip())
+        self.assertFalse(self.window.select_project_for_current_conversation(""))
+        self.window.create_new_session()
+        self.assertIn("聊天工作目录", button.text())
+        self.window.activate_session(state.session_id)
+        self.assertIn(str(project), button.toolTip())
+        self.assertFalse(button.isEnabled())
+
     def test_plus_conversation_reference_keeps_draft_and_uses_existing_snapshot(self):
         self.window.chat_storage.save_conversation("source", [
             {"id": "source-u", "role": "user", "content": "需要引用的规划原文"},
@@ -169,6 +215,86 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertTrue(self.window.conversation_reference_chips.isVisible())
         self.window.remove_conversation_reference(state.session_id, "source")
         self.assertEqual(state.conversation_refs, [])
+
+    def test_cascading_menu_hover_switch_keyboard_and_outside_close(self):
+        self.window.skill_manager_ready = True
+        self.window._available_session_skills = lambda: [
+            {"name": "report", "display_name": "报告", "type": "ai_generated"},
+            {"name": "docs", "display_name": "文档连接器", "source_format": "mcp_server"},
+        ]
+        self.window.resize(860, 720)
+        self.window.show()
+        self.app.processEvents()
+        self.window.show_prompt_tool_menu()
+        menu = self.window.composer_action_popover
+        rows = {row.title_label.text(): row for row in menu.findChildren(ProductActionRow)}
+        QTest.keyClick(menu, Qt.Key_Down)
+        self.assertIs(self.app.focusWidget(), rows["模式"])
+        original_position = menu.pos()
+        QTest.mouseMove(rows["技能"], rows["技能"].rect().center())
+        QTest.qWait(150)
+        self.assertIsNone(menu._child_popover)
+        QTest.qWait(220)
+        picker = menu._child_popover
+        self.assertIsNotNone(picker)
+        self.assertTrue(menu.isVisible())
+        self.assertTrue(self.window.rect().contains(picker.geometry()))
+        self.assertFalse(menu.geometry().intersects(picker.geometry()))
+        self.assertEqual(menu.pos(), original_position)
+        self.window.resize(740, 620)
+        QTest.qWait(100)
+        self.assertTrue(self.window.rect().contains(menu.geometry()))
+        self.assertTrue(self.window.rect().contains(picker.geometry()))
+        picker.search_input.setText("报告")
+        QTest.mouseClick(picker.search_input, Qt.LeftButton)
+        self.assertTrue(menu.isVisible())
+        QTest.mouseClick(rows["连接器"], Qt.LeftButton)
+        connector = menu._child_popover
+        self.assertIsNot(connector, picker)
+        self.assertEqual(connector.skill_list.item(0).data(Qt.UserRole), "docs")
+        QTest.keyClick(connector.search_input, Qt.Key_Escape)
+        self.assertTrue(menu.isVisible())
+        self.assertIsNone(menu._child_popover)
+        QTest.keyClick(rows["模式"], Qt.Key_Right)
+        self.assertIsNotNone(menu._child_popover)
+        QTest.mouseClick(self.window.input_field.viewport(), Qt.LeftButton)
+        self.assertFalse(menu.isVisible())
+
+    def test_selected_expert_chip_is_visible_removable_and_session_local(self):
+        profile = {"id": "qa-expert", "name": "产品规划与需求分析专家", "description": "规划产品"}
+        self.window._available_agent_profiles = lambda: [profile]
+        self.window.resize(740, 620)
+        self.window.show()
+        self.app.processEvents()
+        chip = self.window.agent_picker_btn
+        self.assertTrue(chip.isHidden())
+        self.assertTrue(self.window.select_conversation_agent(profile))
+        self.window.sync_conversation_widths()
+        self.app.processEvents()
+        self.assertTrue(chip.isVisible())
+        self.assertTrue(chip.close_btn.isVisible())
+        self.assertIn(profile["name"], chip.toolTip())
+        for control in (chip, self.window.model_select_btn, self.window.action_btn):
+            self.assertLess(control.mapTo(self.window.input_card, control.rect().bottomRight()).x(),
+                            self.window.input_card.width())
+        self.assertLess(chip.mapTo(self.window, chip.rect().bottomRight()).x(),
+                        self.window.model_select_btn.mapTo(self.window, self.window.model_select_btn.rect().topLeft()).x())
+        state = self.window.get_current_session()
+        with patch.object(self.window, "_session_is_busy", return_value=True):
+            self.window.refresh_conversation_agent_controls()
+            self.assertTrue(chip.isVisible())
+            self.assertFalse(chip.isEnabled())
+        self.window.create_new_session()
+        self.assertTrue(chip.isHidden())
+        self.window.activate_session(state.session_id)
+        self.assertTrue(chip.isVisible())
+        self.assertTrue(chip.isEnabled())
+        QTest.mouseClick(chip.main_btn, Qt.LeftButton)
+        self.assertIs(self.window.conversation_agent_popover._anchor, chip)
+        self.window.conversation_agent_popover.close()
+        QTest.mouseClick(chip.close_btn, Qt.LeftButton)
+        self.assertFalse(state.conversation_agent)
+        self.assertTrue(chip.isHidden())
 
     def test_conversation_picker_ignores_stale_session_and_can_retry_load_failure(self):
         self.window.chat_storage.upsert_conversation("source", title="已有对话")

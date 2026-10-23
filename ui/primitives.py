@@ -420,7 +420,14 @@ class ProductPopover(QFrame):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumWidth(int(width))
         self.setMaximumWidth(int(width))
+        self._preferred_width = int(width)
         self._anchor = None
+        self._parent_popover = None
+        self._child_popover = None
+        self._placement = (False, True, 6)
+        self._position_timer = QTimer(self)
+        self._position_timer.setSingleShot(True)
+        self._position_timer.timeout.connect(self._position_popover)
         self._outside_filter_installed = False
         self.setStyleSheet(
             f"QFrame#ProductPopover {{ background: {DesignTokens.bg_main}; "
@@ -437,33 +444,26 @@ class ProductPopover(QFrame):
             f"border-radius: {DesignTokens.overlay_radius}px; }}"
         )
 
-    def show_for(self, anchor, *, align_right=False, prefer_above=True, gap=6):
+    def show_for(self, anchor, *, align_right=False, prefer_above=True, gap=6, parent_popover=None):
         if anchor is None or not anchor.isVisible():
             return False
         host = self.parentWidget()
         if host is None:
             raise RuntimeError("ProductPopover requires an in-window parent widget.")
+        ancestors = set()
+        ancestor = parent_popover
+        while ancestor is not None:
+            ancestors.add(ancestor)
+            ancestor = ancestor._parent_popover
         for popover in host.findChildren(ProductPopover):
-            if popover is not self and popover.isVisible():
+            if popover is not self and popover not in ancestors and popover.isVisible():
                 popover.close()
+        self._parent_popover = parent_popover
+        if parent_popover is not None:
+            parent_popover._child_popover = self
         self._anchor = anchor
-        self.adjustSize()
-        available = host.rect().adjusted(8, 8, -8, -8)
-        anchor_top_left = anchor.mapTo(host, QPoint(0, 0))
-        anchor_bottom_left = anchor.mapTo(host, QPoint(0, anchor.height()))
-        x = anchor_top_left.x()
-        if align_right:
-            x = anchor_top_left.x() + anchor.width() - self.width()
-        above_y = anchor_top_left.y() - self.height() - int(gap)
-        below_y = anchor_bottom_left.y() + int(gap)
-        if prefer_above and above_y >= available.top():
-            y = above_y
-        elif below_y + self.height() <= available.bottom():
-            y = below_y
-        else:
-            y = max(available.top(), min(above_y, available.bottom() - self.height()))
-        x = max(available.left(), min(x, available.right() - self.width()))
-        self.move(x, y)
+        self._placement = (align_right, prefer_above, gap)
+        self._position_popover()
         self.show()
         self.raise_()
         if not self._outside_filter_installed:
@@ -472,9 +472,78 @@ class ProductPopover(QFrame):
         self.setFocus(Qt.OtherFocusReason)
         return True
 
+    def _position_popover(self):
+        anchor = self._anchor
+        if anchor is None or not anchor.isVisible():
+            return
+        host = self.parentWidget()
+        available = host.rect().adjusted(8, 8, -8, -8)
+        align_right, prefer_above, gap = self._placement
+        anchor_top_left = anchor.mapTo(host, QPoint(0, 0))
+        parent = self._parent_popover
+        if parent is not None:
+            gap = 4
+            right_x = parent.geometry().right() + 1 + gap
+            right_space = available.right() - right_x + 1
+            left_space = parent.x() - gap - available.left()
+            preferred = min(self._preferred_width, 440)
+            open_right = right_space >= min(preferred, left_space)
+            width = min(preferred, right_space if open_right else left_space)
+            self.setFixedWidth(max(1, width))
+            self.adjustSize()
+            x = right_x if open_right else parent.x() - gap - self.width()
+            y = max(available.top(), min(anchor_top_left.y(), available.bottom() - self.height() + 1))
+        else:
+            self.setFixedWidth(min(self._preferred_width, available.width()))
+            self.adjustSize()
+            x = anchor_top_left.x()
+            if align_right:
+                x += anchor.width() - self.width()
+            # Reserve room before opening a cascading menu, so entering a row
+            # does not shift the parent away from the pointer.
+            reserve = min(int(self.property("submenuReserveWidth") or 0),
+                          max(0, available.width() - self.width() - 4))
+            max_x = available.right() - self.width() + 1 - (reserve + 4 if reserve else 0)
+            x = max(available.left(), min(x, max_x))
+            above_y = anchor_top_left.y() - self.height() - int(gap)
+            below_y = anchor_top_left.y() + anchor.height() + int(gap)
+            if prefer_above and above_y >= available.top():
+                y = above_y
+            elif below_y + self.height() <= available.bottom() + 1:
+                y = below_y
+            else:
+                y = max(available.top(), min(above_y, available.bottom() - self.height() + 1))
+        self.move(x, y)
+        if self._child_popover is not None and self._child_popover.isVisible():
+            self._child_popover._position_popover()
+
+    def _root_popover(self):
+        root = self
+        while root._parent_popover is not None:
+            root = root._parent_popover
+        return root
+
+    def close_chain(self):
+        self._root_popover().close()
+
     def eventFilter(self, obj, event):
+        if self.isVisible() and obj is self.parentWidget() and event.type() == QEvent.Resize:
+            # Let the host layout move its anchors before clamping the chain.
+            self._position_timer.start(0)
+        if (self.isVisible() and event.type() == QEvent.KeyPress
+                and isinstance(obj, QWidget) and (obj is self or self.isAncestorOf(obj))):
+            if event.key() == Qt.Key_Escape or (event.key() == Qt.Key_Left
+                    and self._parent_popover is not None and not isinstance(obj, (QLineEdit, QPlainTextEdit))):
+                self.close()
+                return True
         if self.isVisible() and event.type() == QEvent.MouseButtonPress:
-            anchor = self._anchor
+            root = self._root_popover()
+            anchor = root._anchor
+            chain = []
+            current = root
+            while current is not None:
+                chain.append(current)
+                current = current._child_popover
             global_position = None
             position_getter = getattr(event, "globalPosition", None)
             if callable(position_getter):
@@ -485,7 +554,7 @@ class ProductPopover(QFrame):
 
             if global_position is not None:
                 try:
-                    inside_popover = self.rect().contains(self.mapFromGlobal(global_position))
+                    inside_popover = any(p.isVisible() and p.rect().contains(p.mapFromGlobal(global_position)) for p in chain)
                     inside_anchor = bool(
                         anchor
                         and anchor.isVisible()
@@ -496,13 +565,22 @@ class ProductPopover(QFrame):
                     inside_anchor = False
             else:
                 widget = obj if isinstance(obj, QWidget) else None
-                inside_popover = widget is self or bool(widget and self.isAncestorOf(widget))
+                inside_popover = any(widget is p or bool(widget and p.isAncestorOf(widget)) for p in chain)
                 inside_anchor = widget is anchor or bool(widget and anchor and anchor.isAncestorOf(widget))
             if not inside_popover and not inside_anchor:
-                self.close()
+                root.close()
         return super().eventFilter(obj, event)
 
     def hideEvent(self, event):
+        self._position_timer.stop()
+        child, self._child_popover = self._child_popover, None
+        if child is not None:
+            child.close()
+        parent, self._parent_popover = self._parent_popover, None
+        if parent is not None and parent._child_popover is self:
+            parent._child_popover = None
+        if parent is not None and parent.isVisible() and self._anchor is not None:
+            self._anchor.setFocus(Qt.OtherFocusReason)
         if self._outside_filter_installed and QApplication.instance() is not None:
             QApplication.instance().removeEventFilter(self)
             self._outside_filter_installed = False
@@ -556,6 +634,7 @@ class ProductActionRow(QFrame):
         self.setStyleSheet(
             f"QFrame#ProductActionRow {{ background: transparent; border: none; border-radius: 6px; }}"
             f"QFrame#ProductActionRow:hover, QFrame#ProductActionRow:focus {{ background: {DesignTokens.bg_hover}; }}"
+            f"QFrame#ProductActionRow[submenuOpen=\"true\"] {{ background: {DesignTokens.bg_hover}; }}"
             f"QLabel#ProductActionRowTitle {{ color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600; }}"
             f"QLabel#ProductActionRowDetail {{ color: {DesignTokens.text_tertiary}; font-size: 11px; }}"
         )

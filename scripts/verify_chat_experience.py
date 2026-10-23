@@ -15,7 +15,7 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu
 os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
 
 
-def run(*, references_only=False):
+def run(*, references_only=False, workspace_only=False):
     with tempfile.TemporaryDirectory(prefix="cowork-chat-qa-") as temp:
         os.environ.update(APPDATA=temp, LOCALAPPDATA=temp)
         data = Path(temp, "DeepSeekCowork")
@@ -56,19 +56,34 @@ def run(*, references_only=False):
         window._sync_home_presentation()
         window.workspace_title_label.setText("AI 发展规划")
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
-        out = ROOT / "docs/screenshots" / ("conversation-references" if references_only else "chat-experience")
+        out = ROOT / "docs/screenshots" / (
+            "composer-workspace" if workspace_only else "conversation-references" if references_only else "chat-experience")
         out.mkdir(parents=True, exist_ok=True)
         window.show()
 
         def capture(name, width=1360, height=860):
             window.resize(width, height)
+            app.processEvents()
+            menu = getattr(window, "composer_action_popover", None)
+            child = menu._child_popover if menu is not None and menu.isVisible() else None
+            if child is not None:
+                QTest.mouseMove(child, child.rect().center())
             QTest.qWait(250)
             window.sync_conversation_widths()
             QTest.qWait(120)
             assert window.grab().save(str(out / f"{name}-{scale}x.png"))
-            assert window.input_card.width() <= window.conversation_column.width()
-            for button in (window.action_btn, window.model_select_btn):
-                assert button.mapTo(window.input_card, button.rect().bottomRight()).x() < window.input_card.width()
+            try:
+                assert window.input_card.width() <= window.conversation_column.width()
+                for button in (window.action_btn, window.model_select_btn):
+                    assert button.mapTo(window.input_card, button.rect().bottomRight()).x() < window.input_card.width()
+                if window.agent_picker_btn.isVisible():
+                    assert window.agent_picker_btn.mapTo(window, window.agent_picker_btn.rect().bottomRight()).x() < window.model_select_btn.mapTo(window, window.model_select_btn.rect().topLeft()).x()
+            except AssertionError:
+                for key in ("input_card", "prompt_toolbar_container", "prompt_context_group", "prompt_action_group", "tool_menu_btn", "permission_button", "agent_picker_btn", "model_select_btn", "action_btn"):
+                    control = getattr(window, key)
+                    print(key, control.mapTo(window, control.rect().topLeft()), control.size(), control.minimumSize(), control.maximumSize(), control.sizeHint(), flush=True)
+                shutdown()
+                raise
 
         def shutdown():
             window.close()
@@ -80,6 +95,81 @@ def run(*, references_only=False):
             window.deleteLater()
             app.processEvents()
             manager.stop()
+
+        if workspace_only:
+            messages = state.messages
+            window.clear_chat_layout(state.chat_layout)
+            state.messages = []
+            state.render_items = []
+            state.empty_state = None
+            window.normalize_session_ui(state)
+            window._sync_home_presentation()
+            window.input_field.setPlainText("请整理这个项目中的资料，列出需要补充的信息。")
+            capture("chat-directory", 860, 720)
+            assert window.project_selector_btn.isVisible()
+            project = Path(temp, "项目", "年度产品规划与跨部门协作资料")
+            project.mkdir(parents=True)
+            assert window.select_project_for_current_conversation(str(project))
+            capture("project-directory", 860, 720)
+            window.config_manager.upsert_project(str(project), name="年度产品规划与跨部门协作资料（需求、调研、实施与验收记录）")
+            window.refresh_project_selector()
+            capture("minimum", 740, 620)
+            button = window.project_selector_btn
+            assert button.mapTo(window, button.rect().bottomRight()).x() <= window.input_card.mapTo(window, window.input_card.rect().bottomRight()).x()
+            assert button.mapTo(window, button.rect().topLeft()).y() > window.input_card.mapTo(window, window.input_card.rect().bottomLeft()).y()
+            assert str(project) in button.toolTip()
+            state.messages = messages
+            state.render_items = build_conversation_render_spans(state.messages)
+            state.displayed_render_count = len(state.render_items)
+            window._render_session_history_spans(state, state.render_items)
+            window.normalize_session_ui(state)
+            window._sync_home_presentation()
+            capture("conversation-directory", 860, 720)
+            assert not button.isEnabled() and button.isVisible()
+            profile = {"id": "qa-expert", "name": "产品规划与需求分析专家", "description": "拆解需求，制定实施计划与验收标准"}
+            window._available_agent_profiles = lambda: [profile]
+            window.select_conversation_agent(profile)
+            capture("selected-expert", 860, 720)
+            capture("expert-minimum", 740, 620)
+            window.skill_manager_ready = True
+            window._available_session_skills = lambda: [
+                {"name": "analysis", "display_name": "数据分析", "type": "ai_generated", "description": "分析数据并整理结论"},
+                {"name": "report", "display_name": "报告编写", "type": "ai_generated", "description": "撰写结构清楚的报告"},
+                {"name": "documents", "display_name": "文档连接器", "source_format": "mcp_server", "description": "读取连接的文档"},
+            ]
+            window.chat_storage.upsert_conversation("qa-history", title="产品规划 · 历史讨论")
+            window.show_prompt_tool_menu()
+            capture("plus-menu", 860, 720)
+            assert not any(row.title_label.text() == "工作目录"
+                           for row in window.composer_action_popover.findChildren(ProductActionRow))
+            menu = window.composer_action_popover
+            for title, name in (("模式", "mode"), ("专家", "experts"), ("技能", "skills"),
+                                ("连接器", "connectors"), ("对话", "conversations")):
+                row = next(row for row in menu.findChildren(ProductActionRow) if row.title_label.text() == title)
+                QTest.mouseMove(row, row.rect().center())
+                QTest.qWait(350)
+                capture(name, 860, 720)
+                child = menu._child_popover
+                assert menu.isVisible() and child is not None and child.isVisible()
+                assert window.rect().contains(child.geometry())
+                assert not menu.geometry().intersects(child.geometry())
+            capture("cascade-minimum", 740, 620)
+            assert window.rect().contains(menu.geometry())
+            assert window.rect().contains(menu._child_popover.geometry())
+            saved = manager.repository.load()
+            assert manager.apply_profile(builtin_theme("default", dark=True), preview=True, reason="workspace_qa")
+            capture("cascade-dark", 740, 620)
+            menu.close()
+            capture("dark", 740, 620)
+            assert manager.restore_saved_theme(reason="workspace_qa_cancel")
+            assert manager.repository.load() == saved
+            window.create_new_session()
+            window.select_conversation_agent(profile)
+            capture("home-selected-expert")
+            capture("home-minimum", 740, 620)
+            shutdown()
+            print(f"Composer workspace screenshots verified at {scale}x")
+            return
 
         if references_only:
             workspace = window._workspace_dir_for_state(state)
@@ -192,5 +282,8 @@ def run(*, references_only=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--references-only", action="store_true")
-    run(references_only=parser.parse_args().references_only)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--references-only", action="store_true")
+    scope.add_argument("--workspace-only", action="store_true")
+    args = parser.parse_args()
+    run(references_only=args.references_only, workspace_only=args.workspace_only)

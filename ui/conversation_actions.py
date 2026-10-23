@@ -51,6 +51,7 @@ class ConversationMentionPopover(ProductPopover):
         super().__init__(parent, width=500)
         self.conversations = conversations
         self.conversations_only = conversations_only
+        self.agents_only = agents_only
         self.profiles = profiles
         self.workspace = workspace
         self.selected_agent_id = selected_agent_id
@@ -86,8 +87,10 @@ class ConversationMentionPopover(ProductPopover):
         summary_layout.addWidget(self.selection_chip)
         layout.addWidget(self.agent_summary)
         self.items = QListWidget()
-        self.items.setMinimumHeight(80 if conversations_only else 250)
-        if conversations_only:
+        self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.items.setTextElideMode(Qt.ElideRight)
+        self.items.setMinimumHeight(80 if conversations_only or agents_only else 250)
+        if conversations_only or agents_only:
             self.items.setMaximumHeight(280)
         layout.addWidget(self.items)
         self.empty = QLabel("没有匹配的会话")
@@ -183,20 +186,20 @@ class ConversationMentionPopover(ProductPopover):
                     item.setCheckState(Qt.Checked if record.get("id") == self.pending_agent_id else Qt.Unchecked)
                 first = first or item
         self.empty.setVisible(first is None)
-        if self.conversations_only:
+        if self.conversations_only or self.agents_only:
             self.items.setVisible(first is not None)
             self.items.setFixedHeight(min(280, max(80, self.items.count() * 56 + 12)))
+        if self.conversations_only:
             self.empty.setAlignment(Qt.AlignCenter)
             self.empty.setText("没有匹配的对话，请尝试其他关键词" if query else "暂无其他历史对话")
         if first is not None:
             self.items.setCurrentItem(first)
         del blocker
         self._refresh_agent_summary()
-        if self.conversations_only and self.isVisible() and self._anchor is not None:
+        if (self.conversations_only or self.agents_only) and self.isVisible() and self._anchor is not None:
             # Filtering can shrink the content; keep the compact surface above
             # its original entry point instead of stretching labels to fill it.
-            self.show_for(self._anchor, prefer_above=True)
-            self.search.setFocus()
+            self._position_popover()
 
     def _agent_item_changed(self, item):
         kind, record = item.data(Qt.UserRole)
@@ -238,7 +241,7 @@ class ConversationMentionPopover(ProductPopover):
             return
         profile = next((p for p in self.profiles if p["id"] == self.pending_agent_id), None)
         self.selected.emit("智能体", profile)
-        self.close()
+        self.close_chain()
 
     def choose(self, item):
         data = item.data(Qt.UserRole) if item is not None else None
@@ -247,7 +250,7 @@ class ConversationMentionPopover(ProductPopover):
                 item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
                 return
             self.selected.emit(*data)
-            self.close()
+            self.close_chain()
 
 
 class BranchWorker(QThread):
@@ -275,10 +278,10 @@ class BranchWorker(QThread):
 
 
 class ConversationActionsMixin:
-    def show_conversation_reference_picker(self):
+    def show_conversation_reference_picker(self, *, anchor=None, parent_menu=None):
         state = self.get_current_session()
         if state and self.input_field.isEnabled():
-            self._show_conversation_picker(state)
+            self._show_conversation_picker(state, anchor=anchor, parent_menu=parent_menu)
 
     def show_conversation_mention_menu(self):
         state = self.get_current_session()
@@ -292,7 +295,7 @@ class ConversationActionsMixin:
             return
         self._show_conversation_picker(state, mention_context=(text, position))
 
-    def _show_conversation_picker(self, state, *, mention_context=None):
+    def _show_conversation_picker(self, state, *, mention_context=None, anchor=None, parent_menu=None):
         from_plus = mention_context is None
         source = "plus" if from_plus else "mention"
         try:
@@ -336,7 +339,8 @@ class ConversationActionsMixin:
             self.input_field.setFocus()
 
         popover.selected.connect(selected)
-        popover.show_for(self.tool_menu_btn if from_plus else self.input_field, prefer_above=True)
+        popover.show_for(anchor or (self.tool_menu_btn if from_plus else self.input_field),
+                         prefer_above=True, parent_popover=parent_menu)
         popover.search.setFocus()
         logger.info("conversation_reference_picker_opened session=%s source=%s count=%s",
                     state.session_id, source, len(records))

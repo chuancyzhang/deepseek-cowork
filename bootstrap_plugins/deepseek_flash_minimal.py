@@ -3,35 +3,24 @@ import os
 import shutil
 import subprocess
 import time
-from urllib.parse import urlsplit
 
+from core.llm.model_catalog import DEEPSEEK_MINIMAL_BOOTSTRAP_PLUGIN, get_default_bootstrap_plugin
 from core.process_utils import terminate_process_tree
 from core.sandbox_runtime import run_in_sandbox
 
 
 class DeepSeekFlashMinimalBootstrap:
-    plugin_id = "deepseek_flash_minimal"
+    plugin_id = DEEPSEEK_MINIMAL_BOOTSTRAP_PLUGIN
 
     def __init__(self):
         self.executable = ""
 
     def supports(self, provider, model):
-        # Exact supported models and official HTTPS endpoint; no substring matches.
-        if str(model or "").strip() not in {"deepseek-flash", "deepseek-v4-pro", "deepseek-pro"}:
-            return False
-        if str(provider.get("provider_type") or provider.get("provider") or "openai").lower() != "openai":
-            return False
-        try:
-            url = urlsplit(str(provider.get("base_url") or "").strip())
-            return bool(
-                url.scheme == "https"
-                and url.hostname == "api.deepseek.com"
-                and url.port in (None, 443)
-                and url.path.rstrip("/") in ("", "/v1")
-                and not (url.username or url.password or url.query or url.fragment)
-            )
-        except ValueError:
-            return False
+        # The official service, rather than a model-name allowlist, defines scope.
+        return get_default_bootstrap_plugin(
+            provider.get("provider_type") or provider.get("provider") or "openai",
+            provider.get("base_url"), model,
+        ) == self.plugin_id
 
     def system_prompt(self):
         return "You are a helpful software engineer assistant."

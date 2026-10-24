@@ -248,18 +248,13 @@ class ProductExperienceFixTests(unittest.TestCase):
             try:
                 editor = dialog.model_channel_manager.editors[0]
                 current = dict(editor._models()[0])
-                edited = dict(current)
-                edited["display_name"] = "Edited Model"
-                with patch("main.ModelEditDialog") as dialog_type:
-                    model_dialog = dialog_type.return_value
-                    model_dialog.exec.return_value = QDialog.Accepted
-                    model_dialog.get_model.return_value = edited
-                    editor.edit_model()
+                editor.edit_model()
+                editor.model_forms[current["id"]].display_name_input.setText("Edited Model")
                 self.app.processEvents()
                 self.assertTrue(dialog._settings_dirty)
                 self.assertTrue(dialog.save_settings_btn.isEnabled())
 
-                dialog._clear_settings_dirty()
+                dialog.save_settings()
                 editor.test_status_label.setText("测试通过 · 0.2 秒")
                 self.app.processEvents()
                 self.assertFalse(dialog._settings_dirty)

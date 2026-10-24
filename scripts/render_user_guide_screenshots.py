@@ -44,6 +44,23 @@ def process_events(delay_ms=120):
     QApplication.processEvents()
 
 
+def capture_inline_model_editor(window, settings):
+    """Capture the supported settings route, sharing its save and scroll area."""
+    editor = settings.model_channel_manager.open_new_model()
+    form = editor.model_forms[editor._active_form_id]
+    save_widget(window, "07-add-model.png")
+    form.model_name_input.setText("gpt-5.6")
+    form.display_name_input.setText("GPT-5.6 Sol")
+    form.api_protocol_combo.setCurrentIndex(form.api_protocol_combo.findData("responses"))
+    form.vision_check.setChecked(True)
+    form.thinking_check.setChecked(True)
+    for key in ("none", "low", "medium", "high", "xhigh", "max"):
+        form.reasoning_checks[key].setChecked(True)
+    form.reasoning_combo.setCurrentIndex(form.reasoning_combo.findData("medium"))
+    save_widget(window, "08-model-configuration.png")
+    settings.discard_page_changes()
+
+
 def save_widget(widget, filename, delay_ms=120):
     widget.show()
     widget.raise_()
@@ -1568,25 +1585,7 @@ def main_run():
             quickstart.api_key_input.setText("sk-••••••••••••••••")
             save_widget(quickstart, "s03b-deepseek-quickstart.png")
             quickstart.hide()
-            model_empty = main.ModelEditDialog("openai", parent=settings)
-            model_empty.model_name_input.setText("gpt-5.6")
-            save_widget(model_empty, "07-add-model.png")
-            model_empty.hide()
-            model_filled = main.ModelEditDialog(
-                "openai",
-                {
-                    "display_name": "GPT-5.6 Sol",
-                    "model_name": "gpt-5.6",
-                    "api_protocol": "responses",
-                    "supports_vision": True,
-                    "thinking_enabled": True,
-                    "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
-                    "reasoning_effort": "medium",
-                },
-                parent=settings,
-            )
-            save_widget(model_filled, "08-model-configuration.png")
-            model_filled.hide()
+            capture_inline_model_editor(window, settings)
             return
         if SCREENSHOT_SCOPE == "update-settings":
             if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
@@ -1774,23 +1773,7 @@ def main_run():
         save_widget(window, "05-open-settings.png")
         save_widget(window, "06-model-service-settings.png")
 
-        model_empty = main.ModelEditDialog("openai", parent=settings)
-        save_widget(model_empty, "07-add-model.png")
-        model_empty.hide()
-        model_filled = main.ModelEditDialog(
-            "openai",
-            {
-                "display_name": "DeepSeek V4 Pro",
-                "model_name": "deepseek-v4-pro",
-                "api_protocol": "chat_completions",
-                "supports_vision": True,
-                "thinking_enabled": True,
-                "reasoning_efforts": ["low", "medium", "high"],
-            },
-            parent=settings,
-        )
-        save_widget(model_filled, "08-model-configuration.png")
-        model_filled.hide()
+        capture_inline_model_editor(window, settings)
         select_settings_page(settings, "更新")
         save_widget(window, "10-update-settings.png")
         select_settings_page(settings, "个性与记忆")

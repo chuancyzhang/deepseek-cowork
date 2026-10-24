@@ -150,9 +150,11 @@ class TestAgentBootstrap(unittest.TestCase):
         self.assertFalse(result.get("error"), result)
 
     def test_scope_and_explicit_normal_contexts(self):
-        for model_name in ("deepseek-flash", "deepseek-v4-pro", "deepseek-pro"):
+        for model_name in ("deepseek-flash", "deepseek-v4-pro", "deepseek-pro",
+                           "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "future-official-model"):
             with self.subTest(model_name=model_name):
                 profile = {**PROFILE, "model_name": model_name}
+                profile.pop("bootstrap_plugin")
                 self.assertIsNotNone(resolve(profile, model_name))
                 requests, result, events, _, _, _ = self.run_worker(
                     [[{"type": "content", "content": "done"}]], profile=profile,
@@ -163,14 +165,17 @@ class TestAgentBootstrap(unittest.TestCase):
         for base_url in (
             "https://api.deepseek.com.evil.test", "https://proxy.test/api.deepseek.com",
             "http://api.deepseek.com", "https://api.deepseek.com:8443", "https://api.deepseek.com/custom",
+            "https://api.deepseek.com:not-a-port", "https://api.deepseek.com:99999",
+            "https://user@api.deepseek.com", "https://api.deepseek.com/?proxy=1",
+            "https://api.deepseek.com/#fragment",
         ):
             with self.subTest(base_url=base_url):
                 self.assertIsNone(resolve({**PROFILE, "base_url": base_url}, "deepseek-flash"))
         normal_cases = [
-            {"profile": {**PROFILE, "model_name": name}}
-            for name in ("deepseek-v4-flash", "deepseek-pro-custom", "deepseek-v4-pro-custom", "deepseek-flash-custom", "gpt-5")
-        ] + [
             {"profile": {**PROFILE, "bootstrap_plugin": ""}},
+            {"profile": {**PROFILE, "model_name": ""}},
+            {"profile": {**PROFILE, "provider_type": "anthropic"}},
+            {"profile": {**PROFILE, "base_url": "https://proxy.test/v1"}},
             {"context": {"workflow_mode": "office_html_first"}},
             {"context": {"knowledge_context": {"refs": [{"knowledge_id": "document-1"}]}}},
         ]

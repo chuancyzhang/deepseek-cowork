@@ -133,7 +133,10 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(vision["reasoning_efforts"], ["high", "max"])
         self.assertEqual(vision["reasoning_effort"], "max")
         self.assertTrue(vision["supports_vision"])
-        self.assertFalse(flash["supports_vision"])
+        self.assertTrue(flash["supports_vision"])
+        self.assertEqual(vision["bootstrap_plugin"], "deepseek_flash_minimal")
+        self.assertEqual(flash["bootstrap_plugin"], "deepseek_flash_minimal")
+        self.assertFalse(third_party.get("bootstrap_plugin"))
         self.assertEqual(third_party["api_protocol"], "chat_completions")
         self.assertEqual(third_party["reasoning_efforts"], [])
         self.assertFalse(third_party["supports_vision"])
@@ -144,6 +147,11 @@ class ConfigQuickstartTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.app_data = self.temp_dir.name
+        # Keep catalog fixtures stable when the product recommendation changes.
+        recommendation = patch.dict(model_catalog.MODEL_RECOMMENDATIONS[model_catalog.DEEPSEEK_RECOMMENDATION_KEY],
+                                    {"model_name": "deepseek-v4-flash"})
+        recommendation.start()
+        self.addCleanup(recommendation.stop)
 
     def _config(self):
         patches = (
@@ -176,12 +184,13 @@ class ConfigQuickstartTests(unittest.TestCase):
             for model in config.get_model_channels()[0]["models"]
         }
         for model in models.values():
+            self.assertEqual(model["bootstrap_plugin"], "deepseek_flash_minimal")
             self.assertEqual(model["api_protocol"], "responses")
             self.assertEqual(model["reasoning_efforts"], ["high", "max"])
             self.assertEqual(model["reasoning_effort"], "max")
         self.assertTrue(models["deepseek-v4-flash-vision-exp"]["supports_vision"])
-        self.assertFalse(models["deepseek-v4-flash"]["supports_vision"])
-        self.assertFalse(models["deepseek-v4-pro"]["supports_vision"])
+        self.assertTrue(models["deepseek-v4-flash"]["supports_vision"])
+        self.assertTrue(models["deepseek-v4-pro"]["supports_vision"])
 
     def test_fresh_quickstart_persists_only_discovered_models(self):
         config = self._config()
@@ -193,6 +202,40 @@ class ConfigQuickstartTests(unittest.TestCase):
             {model["model_name"] for model in config.get_model_channels()[0]["models"]},
             {"deepseek-v4-flash", "deepseek-extra"},
         )
+
+    def test_bootstrap_default_and_explicit_opt_out_survive_config_reload(self):
+        from bootstrap_plugins import resolve
+
+        config = self._config()
+        channels = [{
+            "channel_id": channel_id, "provider_type": "openai", "base_url": base_url,
+            "models": [{"id": channel_id + "-auto", "model_name": "future-official-model"},
+                       {"id": channel_id + "-off", "model_name": "deepseek-flash", "bootstrap_plugin": ""}],
+        } for channel_id, base_url in (("official", "https://api.deepseek.com/v1/"),
+                                      ("proxy", "https://example.test/v1"))]
+        config.set_model_channels(channels, "official-auto")
+        restored = ConfigManager()
+        for model_id, expected in (("official-auto", "deepseek_flash_minimal"),
+                                   ("official-off", ""), ("proxy-auto", ""), ("proxy-off", "")):
+            with self.subTest(model_id=model_id):
+                profile = restored.get_model_profile(model_id)
+                self.assertEqual(profile["bootstrap_plugin"], expected)
+                self.assertEqual(resolve(profile, profile["model_name"]) is not None, bool(expected))
+
+    def test_legacy_provider_config_uses_its_own_endpoint_for_bootstrap_default(self):
+        config = self._config()
+        for base_url, expected in (("https://api.deepseek.com", "deepseek_flash_minimal"),
+                                   ("https://proxy.test/v1", "")):
+            with self.subTest(base_url=base_url):
+                normalized = config._normalize_provider_config("openai", {
+                    "base_url": base_url, "models": [{"model_name": "deepseek-future"}],
+                })
+                self.assertEqual(normalized["models"][0]["bootstrap_plugin"], expected)
+                empty = config._normalize_provider_config("openai", {"base_url": base_url})
+                self.assertEqual(empty["models"][0]["bootstrap_plugin"], expected)
+                config.config.update(llm_provider="openai", base_url=base_url, model_name="deepseek-future")
+                legacy = config._normalize_model_provider_configs({})
+                self.assertEqual(legacy["openai"]["models"][0]["bootstrap_plugin"], expected)
 
     def test_existing_official_recommendation_can_change_without_duplicate_defaults(self):
         original = dict(model_catalog.MODEL_RECOMMENDATIONS[model_catalog.DEEPSEEK_RECOMMENDATION_KEY])
@@ -231,6 +274,7 @@ class ConfigQuickstartTests(unittest.TestCase):
             "deepseek_reasoning_effort": "high",
             "reasoning_efforts": ["high"],
             "reasoning_effort": "high",
+            "bootstrap_plugin": "",
         })
         channels.append({
             "channel_id": "other",
@@ -248,6 +292,7 @@ class ConfigQuickstartTests(unittest.TestCase):
         self.assertEqual(existing["api_protocol"], "chat_completions")
         self.assertEqual(existing["reasoning_efforts"], ["high"])
         self.assertEqual(existing["reasoning_effort"], "high")
+        self.assertEqual(existing["bootstrap_plugin"], "")
         self.assertTrue(any(channel["channel_id"] == "other" for channel in saved))
 
     def test_missing_recommendation_keeps_config_unchanged(self):
@@ -270,6 +315,12 @@ class ConfigQuickstartTests(unittest.TestCase):
 
 
 class ModelConfigurationUiTests(unittest.TestCase):
+    def setUp(self):
+        recommendation = patch.dict(model_catalog.MODEL_RECOMMENDATIONS[model_catalog.DEEPSEEK_RECOMMENDATION_KEY],
+                                    {"model_name": "deepseek-v4-flash"})
+        recommendation.start()
+        self.addCleanup(recommendation.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -278,15 +329,14 @@ class ModelConfigurationUiTests(unittest.TestCase):
                 QFontDatabase.addApplicationFont(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename))
             cls.app.setFont(QFont("Microsoft YaHei", 9))
 
-    def test_flash_bootstrap_switch_defaults_off_and_persists_per_model(self):
+    def test_official_bootstrap_switch_defaults_on_and_persists_per_model(self):
         from bootstrap_plugins import resolve
 
         dialog = ModelEditDialog("openai", {"model_name": "deepseek-flash"}, base_url="https://api.deepseek.com")
         try:
             self.assertTrue(dialog.bootstrap_check.isEnabled())
-            self.assertFalse(dialog.bootstrap_check.isChecked())
-            self.assertEqual(dialog.get_model()["bootstrap_plugin"], "")
-            dialog.bootstrap_check.setChecked(True)
+            self.assertTrue(dialog.bootstrap_check.isChecked())
+            self.assertEqual(dialog.get_model()["bootstrap_plugin"], "deepseek_flash_minimal")
             model = dialog.get_model(existing_id="flash-test")
             with tempfile.TemporaryDirectory() as directory, patch(
                 "core.config_manager.get_app_data_dir", return_value=directory,
@@ -304,26 +354,15 @@ class ModelConfigurationUiTests(unittest.TestCase):
             reopened.bootstrap_check.setChecked(False)
             self.assertEqual(reopened.get_model()["bootstrap_plugin"], "")
             reopened.deleteLater()
-            # Small-window layout keeps the save/cancel footer outside the scroll area.
-            dialog.resize(520, 440)
-            dialog.show()
-            self.app.processEvents()
-            self.assertGreater(dialog.model_form_scroll.verticalScrollBar().maximum(), 0)
-            self.assertLess(dialog.model_form_scroll.geometry().bottom(), dialog.height() - 30)
-            capture_dir = os.environ.get("COWORK_BOOTSTRAP_SCREENSHOT_DIR")
-            if capture_dir:
-                os.makedirs(capture_dir, exist_ok=True)
-                dialog.grab().save(os.path.join(capture_dir, "model-bootstrap-small.png"))
-                dialog.resize(560, 680)
-                self.app.processEvents()
-                dialog.grab().save(os.path.join(capture_dir, "model-bootstrap.png"))
+            # The shared page form exposes the existing switch under advanced settings.
+            dialog.advanced_button.setChecked(True)
+            self.assertFalse(dialog.bootstrap_field.isHidden())
         finally:
             dialog.close()
 
     def test_bootstrap_switch_tracks_supported_models_and_official_service(self):
         for provider, base_url, model_name in (
-            ("openai", "https://api.deepseek.com", "deepseek-v4-flash"),
-            ("openai", "https://api.deepseek.com", "deepseek-pro-custom"),
+            ("openai", "https://api.deepseek.com", ""),
             ("openai", "https://proxy.example.com", "deepseek-flash"),
             ("openai", "https://api.deepseek.com.example.com", "deepseek-flash"),
             ("anthropic", "https://api.deepseek.com", "deepseek-flash"),
@@ -336,7 +375,8 @@ class ModelConfigurationUiTests(unittest.TestCase):
                 dialog.deleteLater()
         dialog = ModelEditDialog("openai", {"model_name": "deepseek-flash"}, base_url="https://api.deepseek.com")
         dialog.bootstrap_check.setChecked(True)
-        for model_name in ("deepseek-v4-pro", "deepseek-pro"):
+        for model_name in ("deepseek-v4-pro", "deepseek-pro", "deepseek-v4-flash",
+                           "deepseek-v4-flash-vision-exp", "future-official-model"):
             dialog.model_name_input.setText(model_name)
             self.assertTrue(dialog.bootstrap_check.isEnabled())
             self.assertTrue(dialog.bootstrap_check.isChecked())
@@ -345,9 +385,24 @@ class ModelConfigurationUiTests(unittest.TestCase):
             reopened = ModelEditDialog("openai", restored, base_url="https://api.deepseek.com")
             self.assertTrue(reopened.bootstrap_check.isChecked())
             reopened.deleteLater()
-        dialog.model_name_input.setText("deepseek-pro-custom")
+        dialog.set_service("openai", "https://proxy.example.com")
         self.assertFalse(dialog.bootstrap_check.isChecked())
         dialog.deleteLater()
+
+    def test_new_official_form_defaults_on_but_keeps_manual_opt_out(self):
+        dialog = ModelEditDialog("openai", base_url="https://api.deepseek.com")
+        self.addCleanup(dialog.deleteLater)
+        dialog.model_name_input.setText("deepseek-future")
+        self.assertTrue(dialog.bootstrap_check.isChecked())
+        dialog.bootstrap_check.setChecked(False)
+        dialog.model_name_input.setText("deepseek-next")
+        dialog.display_name_input.setText("Next")
+        dialog.set_service("openai", "https://proxy.example.com")
+        dialog.set_service("openai", "https://api.deepseek.com")
+        self.assertFalse(dialog.bootstrap_check.isChecked())
+        reopened = ModelEditDialog("openai", dialog.get_model(), base_url="https://api.deepseek.com")
+        self.addCleanup(reopened.deleteLater)
+        self.assertFalse(reopened.bootstrap_check.isChecked())
 
     def test_import_dialog_prioritizes_recommendation_and_excludes_existing(self):
         dialog = ModelImportDialog(
@@ -391,7 +446,7 @@ class ModelConfigurationUiTests(unittest.TestCase):
             dialog.model_name_input.setText("deepseek-v4-flash-vision-exp")
             self.assertTrue(dialog.vision_check.isChecked())
             dialog.model_name_input.setText("deepseek-v4-flash")
-            self.assertFalse(dialog.vision_check.isChecked())
+            self.assertTrue(dialog.vision_check.isChecked())
             self.assertFalse(dialog.image_generation_check.isChecked())
         finally:
             dialog.close()
@@ -459,8 +514,8 @@ class ModelConfigurationUiTests(unittest.TestCase):
                 self.assertEqual(model["reasoning_efforts"], ["high", "max"])
                 self.assertEqual(model["reasoning_effort"], "max")
             self.assertTrue(models["deepseek-v4-flash-vision-exp"]["supports_vision"])
-            self.assertFalse(models["deepseek-v4-flash"]["supports_vision"])
-            self.assertFalse(models["deepseek-v4-pro"]["supports_vision"])
+            self.assertTrue(models["deepseek-v4-flash"]["supports_vision"])
+            self.assertTrue(models["deepseek-v4-pro"]["supports_vision"])
         finally:
             editor.close()
 
@@ -523,16 +578,11 @@ class ModelConfigurationUiTests(unittest.TestCase):
         try:
             self.assertEqual(editor.model_list.item(0).data(256), "flash")
             editor.model_list.setCurrentRow(1)
-            with patch("main.ModelEditDialog") as dialog_type:
-                dialog = dialog_type.return_value
-                dialog.exec.return_value = QDialog.Accepted
-                dialog.get_model.return_value = {
-                    "id": "pro",
-                    "display_name": "Pro edited",
-                    "model_name": "deepseek-v4-pro",
-                }
-                editor.edit_model()
+            editor.edit_model()
+            editor.model_forms["pro"].display_name_input.setText("Pro edited")
+            editor.show_model_list()
             self.assertEqual(editor.model_list.currentItem().data(256), "pro")
+            self.assertEqual(len(editor.model_list.selectedItems()), 1)
         finally:
             editor.close()
 

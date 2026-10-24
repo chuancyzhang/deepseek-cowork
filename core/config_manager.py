@@ -23,6 +23,7 @@ from .llm.providers import (
 from .llm.model_catalog import (
     DEEPSEEK_OFFICIAL_BASE_URL,
     build_new_model_defaults,
+    get_default_bootstrap_plugin,
     get_recommended_model,
     is_deepseek_official_base_url,
 )
@@ -705,7 +706,7 @@ class ConfigManager:
                 projects.append(normalized)
         return projects
 
-    def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
+    def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None, base_url=""):
         source = dict(model or {})
         model_name = str(source.get("model_name") or source.get("name") or "").strip()
         if should_migrate_legacy_model(model_name):
@@ -718,7 +719,9 @@ class ConfigManager:
             "id": model_id,
             "display_name": display_name or model_name,
             "model_name": model_name,
-            "bootstrap_plugin": str(source.get("bootstrap_plugin") or "").strip(),
+            "bootstrap_plugin": str(source.get("bootstrap_plugin", get_default_bootstrap_plugin(
+                provider_id, base_url, model_name,
+            )) or "").strip(),
             "supports_vision": bool(source.get("supports_vision", False)),
             "supports_image_generation": bool(
                 source.get("supports_image_generation", False)
@@ -770,6 +773,9 @@ class ConfigManager:
         provider_type = self._normalize_provider_type(
             source.get("provider_type", source.get("provider"))
         )
+        base_url = str(source.get("base_url") or (
+            DEFAULT_ANTHROPIC_BASE_URL if provider_type == "anthropic" else DEFAULT_DEEPSEEK_BASE_URL
+        ) or "").strip()
         default_name = "Anthropic" if provider_type == "anthropic" else "OpenAI 兼容服务"
         display_name = str(source.get("display_name") or source.get("label") or default_name).strip()
         channel_id = str(source.get("channel_id") or source.get("id") or "").strip()
@@ -790,6 +796,7 @@ class ConfigManager:
                 model,
                 model_index,
                 id_prefix=channel_id,
+                base_url=base_url,
             )
             base_id = entry["id"]
             suffix = 2
@@ -804,22 +811,19 @@ class ConfigManager:
             "display_name": display_name or default_name,
             "provider_type": provider_type,
             "api_key": str(source.get("api_key") if source.get("api_key") is not None else ""),
-            "base_url": str(
-                source.get("base_url")
-                or (DEFAULT_ANTHROPIC_BASE_URL if provider_type == "anthropic" else DEFAULT_DEEPSEEK_BASE_URL)
-                or ""
-            ).strip(),
+            "base_url": base_url,
             "models": normalized_models,
         }
 
     def _normalize_provider_config(self, provider_id, config):
         defaults = self._default_model_provider_configs().get(provider_id, {})
         source = dict(config or {})
+        base_url = str(source.get("base_url") or defaults.get("base_url") or "").strip()
         models = source.get("models") if isinstance(source.get("models"), list) else []
         normalized_models = []
         used_ids = set()
         for index, model in enumerate(models):
-            entry = self._normalize_model_entry(provider_id, model, index)
+            entry = self._normalize_model_entry(provider_id, model, index, base_url=base_url)
             base_id = entry["id"]
             suffix = 2
             while entry["id"] in used_ids:
@@ -828,13 +832,16 @@ class ConfigManager:
             used_ids.add(entry["id"])
             normalized_models.append(entry)
         if not normalized_models:
+            default_model = dict(defaults.get("models", [{}])[0])
+            # A generated default follows this service, not the catalog's endpoint.
+            default_model.pop("bootstrap_plugin", None)
             normalized_models = [
-                self._normalize_model_entry(provider_id, defaults.get("models", [{}])[0], 0)
+                self._normalize_model_entry(provider_id, default_model, 0, base_url=base_url)
             ]
         return {
             "display_name": str(source.get("display_name") or defaults.get("display_name") or provider_id).strip(),
             "api_key": str(source.get("api_key") if source.get("api_key") is not None else defaults.get("api_key", "")),
-            "base_url": str(source.get("base_url") or defaults.get("base_url") or "").strip(),
+            "base_url": base_url,
             "models": normalized_models,
         }
 
@@ -880,6 +887,7 @@ class ConfigManager:
                         ),
                     },
                     0,
+                    base_url=provider_configs[legacy_provider]["base_url"],
                 )
             ]
         return provider_configs

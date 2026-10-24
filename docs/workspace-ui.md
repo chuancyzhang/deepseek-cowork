@@ -83,6 +83,42 @@
 
 ## 复现界面检查
 
+### 模型选择与配置
+
+模型选择浮层底部提供“配置新模型”，无配置或无搜索结果时仍可进入。点击外部或按 `Esc` 收起，不抢占刚点击控件的焦点。配置保留“设置分类 → 服务列表 → 右侧配置”的页面结构，新增与编辑只替换右侧内容，不新增“所有设置 / 模型与服务”的页面跳转。小窗口下，两级导航分别收为选择框。已有服务的连接字段按需展开；模型列表使用名称、能力摘要两行呈现，名称可编辑，右侧直接测试，勾选后可批量配置。拉取导入及新对话默认模型保留。
+
+模型表单只使用页面底部“保存更改”；失败保留草稿，切换服务保留草稿，离开设置走统一确认。保存后的“返回对话并使用”绑定进入配置时的对话，不会自动更改其他对话或默认模型。
+
+| 状态 | 实际 Qt 截图 |
+| --- | --- |
+| 选择模型与配置入口 | [查看](images/model-configuration/picker.png) |
+| 模型列表 | [查看](images/model-configuration/model-list.png) |
+| 服务连接展开 | [查看](images/model-configuration/service-connections.png) |
+| 小窗口模型列表 | [查看](images/model-configuration/model-list-narrow.png) |
+| 深色模型列表 | [查看](images/model-configuration/model-list-dark.png) |
+| 页内编辑 | [查看](images/model-configuration/editor.png) |
+| 小窗口 | [查看](images/model-configuration/editor-narrow.png) |
+| 150% Qt 缩放、小窗口底部 | [查看](images/model-configuration/editor-narrow-bottom-150.png) |
+| 深色主题 | [查看](images/model-configuration/editor-dark.png) |
+| 未保存的主题候选 | [查看](images/model-configuration/editor-theme-preview.png) |
+| 校验错误与输入保留 | [查看](images/model-configuration/editor-validation.png) |
+
+```powershell
+.venv/Scripts/python.exe -X utf8 -B scripts/render_model_configuration.py
+$env:QT_SCALE_FACTOR='1.5'
+.venv/Scripts/python.exe -X utf8 -B scripts/render_model_configuration.py
+Remove-Item Env:QT_SCALE_FACTOR
+.venv/Scripts/python.exe -X utf8 -B -m pytest -q test/test_model_configuration_flow.py test/test_model_catalog_and_onboarding.py test/test_default_model_settings.py test/test_chat_scroll_regressions.py
+```
+
+截图脚本使用隔离配置、Qt 离屏窗口和示例密钥，不发起真实模型请求。验证原对话切换、其他会话与默认模型不变、主题候选不落盘、无游离窗口、无水平溢出，以及服务导航与内容区无额外占位。滚到底部必须看到测试操作，防止隐藏表单把当前页面撑出空白。缩放是 `QT_SCALE_FACTOR`，不是 Windows 系统缩放验收。
+
+页面调整后的模型配置、默认模型及目录导入回归共 51 项及 5 个子测试通过，另复查新增的模型行操作与切换设置保留草稿。覆盖保存重试、多个模型一次保存、原会话绑定、主题选项提交与撤销；未调用真实模型服务。变更文档的本地链接检查通过；全量 `scripts/check_docs.py` 仍被 9 份文档的 `5.3.0` 版本标记拦住，当前 `APP_VERSION` 为 `5.3.1`，已用 `HEAD` 核对这些旧标记在本次修改前存在。
+
+DeepSeek 官方模型默认极简启动的后续验证：`test/test_agent_bootstrap.py`、`test/test_model_catalog_and_onboarding.py`、`test/test_default_model_settings.py`、`test/test_model_configuration_flow.py` 共 68 项及 48 个子测试通过；补充复查旧配置与默认模型生成时使用对应服务地址。覆盖任意官方模型名、官方地址校验、缺省启用、已保存关闭值保留、首轮转完整能力、消息保留及失败恢复。设置页截图见 `images/model-configuration/deepseek-minimal-default.png` 与 `deepseek-minimal-narrow.png`，同脚本包含 150% Qt 缩放版本；未发起真实模型请求。
+
+### 其他工作台页面
+
 在仓库根目录执行：
 
 ```powershell

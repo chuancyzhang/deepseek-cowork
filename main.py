@@ -221,6 +221,7 @@ from ui.primitives import (
     product_segmented_style,
     product_surface_style,
 )
+from ui.model_configuration import ModelEditForm, ModelCatalogRow, ModelPageStack, ModelFieldCombo, model_field_style
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
 from core.runtime_logs import (
@@ -451,7 +452,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIco
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel, QItemSelectionModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -2250,7 +2251,7 @@ def linear_dialog_stylesheet(object_name):
     """
 
 
-def apply_settings_combo_style(combo):
+def apply_settings_combo_style(combo, *, popup_selection=None):
     """Keep settings combo popup items legible across active and inactive states."""
     view = combo.view()
     view.setStyleSheet(
@@ -2261,7 +2262,7 @@ def apply_settings_combo_style(combo):
             border: 1px solid {DesignTokens.border_subtle};
             outline: none;
             padding: 4px;
-            selection-background-color: {DesignTokens.selection_bg};
+            selection-background-color: {popup_selection or DesignTokens.selection_bg};
             selection-color: {DesignTokens.selection_text};
         }}
         QAbstractItemView::item {{
@@ -6002,287 +6003,8 @@ class DeepSeekQuickstartDialog(QDialog):
         super().closeEvent(event)
 
 
-class ModelEditDialog(QDialog):
-    def __init__(self, provider_id, model=None, parent=None, base_url=""):
-        super().__init__(parent)
-        self.setObjectName("ModelEditDialog")
-        self.provider_id = provider_id
-        self.base_url = str(base_url or "").strip()
-        source_model = dict(model or {})
-        self._editing_existing = bool(source_model)
-        model = source_model or build_new_model_defaults(provider_id, self.base_url, "")
-        self._stored_context_limits = {
-            key: model[key] for key in ("context_window_tokens", "max_output_tokens")
-            if type(model.get(key)) is int and 0 < model[key] <= 100000000
-        }
-        self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        available_height = screen.availableGeometry().height() if screen else 760
-        self.resize(560, min(680, max(440, available_height - 80)))
-        self.setMinimumSize(520, 440)
-        self.setStyleSheet(linear_dialog_stylesheet("ModelEditDialog"))
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 20)
-        layout.setSpacing(16)
-
-        header = QVBoxLayout()
-        header.setSpacing(4)
-        title = QLabel("编辑模型" if self._editing_existing else "添加模型")
-        title.setProperty("roleTitle", True)
-        subtitle = QLabel("显示名称用于界面选择；模型标识会原样发送给对应服务。")
-        subtitle.setWordWrap(True)
-        subtitle.setProperty("roleSubtitle", True)
-        header.addWidget(title)
-        header.addWidget(subtitle)
-        layout.addLayout(header)
-
-        card, card_layout = build_settings_surface("模型信息", "保持名称清晰，方便在提问栏和服务卡片里快速区分。", radius=18)
-        form = QFormLayout()
-        form.setSpacing(12)
-        configure_responsive_form_layout(form)
-
-        self.display_name_input = QLineEdit()
-        self.display_name_input.setPlaceholderText("例如：DeepSeek V4 Pro")
-        self.display_name_input.setText(str(model.get("display_name") or ""))
-        form.addRow(build_form_row_label("显示名称"), self.display_name_input)
-
-        self.model_name_input = QLineEdit()
-        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL if provider_id == "openai" else "claude-sonnet-4-5")
-        self.model_name_input.setText(str(model.get("model_name") or ""))
-        form.addRow(build_form_row_label("模型标识"), self.model_name_input)
-
-        self.api_protocol_combo = None
-        self._protocol_user_selected = False
-        self._syncing_protocol = False
-        if provider_id == "openai":
-            self.api_protocol_combo = QComboBox()
-            apply_settings_combo_style(self.api_protocol_combo)
-            self.api_protocol_combo.addItem("Chat Completions", API_PROTOCOL_CHAT_COMPLETIONS)
-            self.api_protocol_combo.addItem("Responses", API_PROTOCOL_RESPONSES)
-            configured_protocol = normalize_openai_api_protocol(model.get("api_protocol"))
-            protocol_index = self.api_protocol_combo.findData(configured_protocol)
-            self.api_protocol_combo.setCurrentIndex(max(0, protocol_index))
-            form.addRow(build_form_row_label("API 协议"), self.api_protocol_combo)
-
-            def mark_protocol_selected(_index):
-                if not self._syncing_protocol:
-                    self._protocol_user_selected = True
-
-            def sync_new_model_protocol(model_name):
-                if self._editing_existing or self._protocol_user_selected:
-                    return
-                protocol = (
-                    API_PROTOCOL_RESPONSES
-                    if is_deepseek_official_base_url(self.base_url)
-                    or is_gpt_5_6_model(model_name)
-                    else API_PROTOCOL_CHAT_COMPLETIONS
-                )
-                index = self.api_protocol_combo.findData(protocol)
-                self._syncing_protocol = True
-                self.api_protocol_combo.setCurrentIndex(index)
-                self._syncing_protocol = False
-
-            self.api_protocol_combo.currentIndexChanged.connect(mark_protocol_selected)
-            self.model_name_input.textChanged.connect(sync_new_model_protocol)
-            sync_new_model_protocol(self.model_name_input.text())
-
-        from bootstrap_plugins.deepseek_flash_minimal import DeepSeekFlashMinimalBootstrap
-        self._bootstrap_plugin = DeepSeekFlashMinimalBootstrap()
-        self.bootstrap_check = QCheckBox("启用极简启动")
-        self.bootstrap_check.setObjectName("ModelBootstrapCheck")
-        self.bootstrap_check.setChecked(model.get("bootstrap_plugin") == self._bootstrap_plugin.plugin_id)
-        bootstrap_field = QWidget()
-        bootstrap_layout = QVBoxLayout(bootstrap_field)
-        bootstrap_layout.setContentsMargins(0, 0, 0, 0)
-        bootstrap_layout.setSpacing(4)
-        bootstrap_layout.addWidget(self.bootstrap_check)
-        self.bootstrap_hint = QLabel("新对话首轮使用极简上下文，随后恢复完整能力。关闭时使用默认流程。")
-        self.bootstrap_hint.setWordWrap(True)
-        self.bootstrap_hint.setStyleSheet(apple_settings_inline_note_style())
-        bootstrap_layout.addWidget(self.bootstrap_hint)
-        form.addRow(build_form_row_label("启动方式"), bootstrap_field)
-
-        def sync_bootstrap_control():
-            supported = self._bootstrap_plugin.supports(
-                {"provider_type": self.provider_id, "base_url": self.base_url},
-                self.model_name_input.text().strip(),
-            )
-            form.setRowVisible(bootstrap_field, supported)
-            self.bootstrap_check.setEnabled(supported)
-            if not supported:
-                self.bootstrap_check.setChecked(False)
-
-        self.model_name_input.textChanged.connect(sync_bootstrap_control)
-        sync_bootstrap_control()
-
-        self.vision_check = QCheckBox("支持图片理解")
-        self.vision_check.setChecked(bool(model.get("supports_vision", False)))
-        form.addRow(build_form_row_label("图片理解"), self.vision_check)
-        if not self._editing_existing and is_deepseek_official_base_url(self.base_url):
-            self.model_name_input.textChanged.connect(
-                lambda model_name: self.vision_check.setChecked(
-                    bool(
-                        build_new_model_defaults(
-                            self.provider_id, self.base_url, model_name
-                        ).get("supports_vision")
-                    )
-                )
-            )
-
-        self.image_generation_check = None
-        if provider_id == "openai":
-            self.image_generation_check = QCheckBox("支持通过 Responses 生成图片")
-            self.image_generation_check.setChecked(
-                bool(model.get("supports_image_generation", False))
-            )
-            form.addRow(build_form_row_label("图片生成"), self.image_generation_check)
-
-        self.thinking_check = None
-        self.reasoning_combo = None
-        self.reasoning_checks = {}
-        if provider_id == "openai":
-            configured_efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
-            self.thinking_check = QCheckBox("支持推理强度")
-            self.thinking_check.setChecked(bool(configured_efforts))
-            form.addRow(build_form_row_label("推理"), self.thinking_check)
-
-            effort_labels = {
-                "none": "none",
-                "low": "low",
-                "medium": "medium",
-                "high": "high",
-                "xhigh": "xhigh",
-                "max": "max",
-            }
-            effort_widget = QWidget()
-            effort_layout = QHBoxLayout(effort_widget)
-            effort_layout.setContentsMargins(0, 0, 0, 0)
-            effort_layout.setSpacing(10)
-            for effort in SUPPORTED_REASONING_EFFORTS:
-                check = QCheckBox(effort)
-                check.setChecked(effort in configured_efforts)
-                self.reasoning_checks[effort] = check
-                effort_layout.addWidget(check)
-            effort_layout.addStretch()
-            form.addRow(build_form_row_label("支持档位"), effort_widget)
-
-            self.reasoning_combo = QComboBox()
-            apply_settings_combo_style(self.reasoning_combo)
-            for effort in SUPPORTED_REASONING_EFFORTS:
-                self.reasoning_combo.addItem(effort_labels[effort], effort)
-            effort = normalize_reasoning_effort(
-                model.get("reasoning_effort", model.get("deepseek_reasoning_effort")),
-                configured_efforts,
-            )
-            effort_index = self.reasoning_combo.findData(effort)
-            if effort_index >= 0:
-                self.reasoning_combo.setCurrentIndex(effort_index)
-            form.addRow(build_form_row_label("初始档位"), self.reasoning_combo)
-
-            def sync_reasoning_controls():
-                enabled = self.thinking_check.isChecked()
-                for check in self.reasoning_checks.values():
-                    check.setEnabled(enabled)
-                allowed = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
-                self.reasoning_combo.setEnabled(enabled and bool(allowed))
-                for index in range(self.reasoning_combo.count()):
-                    item_enabled = self.reasoning_combo.itemData(index) in allowed
-                    self.reasoning_combo.model().item(index).setEnabled(item_enabled)
-                if allowed and self.reasoning_combo.currentData() not in allowed:
-                    self.reasoning_combo.setCurrentIndex(self.reasoning_combo.findData(allowed[0]))
-
-            self.thinking_check.toggled.connect(lambda _checked: sync_reasoning_controls())
-            for check in self.reasoning_checks.values():
-                check.toggled.connect(lambda _checked: sync_reasoning_controls())
-            sync_reasoning_controls()
-
-        card_layout.addLayout(form)
-        hint = QLabel("建议让显示名称包含服务来源或用途，例如“OpenRouter / Claude Sonnet”或“本地图像理解”。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(apple_settings_inline_note_style())
-        card_layout.addWidget(hint)
-        self.model_form_scroll = QScrollArea()
-        self.model_form_scroll.setObjectName("ModelFormScroll")
-        self.model_form_scroll.setWidgetResizable(True)
-        self.model_form_scroll.setFrameShape(QFrame.NoFrame)
-        self.model_form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.model_form_scroll.viewport().setObjectName("ModelFormViewport")
-        self.model_form_scroll.setStyleSheet(
-            "QScrollArea#ModelFormScroll, QWidget#ModelFormViewport { background: transparent; }"
-        )
-        self.model_form_scroll.setWidget(card)
-        layout.addWidget(self.model_form_scroll, 1)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("保存")
-        ok_btn.setObjectName("PrimaryBtn")
-        ok_btn.clicked.connect(self.accept)
-        buttons.addWidget(cancel_btn)
-        buttons.addWidget(ok_btn)
-        layout.addLayout(buttons)
-
-    def get_model(self, existing_id=None):
-        model_name = self.model_name_input.text().strip()
-        display_name = self.display_name_input.text().strip() or model_name
-        item = {
-            "id": existing_id or "",
-            "display_name": display_name,
-            "model_name": model_name,
-            "bootstrap_plugin": (
-                self._bootstrap_plugin.plugin_id
-                if self.bootstrap_check.isChecked()
-                and self._bootstrap_plugin.supports(
-                    {"provider_type": self.provider_id, "base_url": self.base_url}, model_name,
-                ) else ""
-            ),
-            "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
-            "supports_image_generation": bool(
-                self.image_generation_check
-                and self.image_generation_check.isChecked()
-            ),
-        }
-        item.update(self._stored_context_limits)
-        if self.provider_id == "openai":
-            item["api_protocol"] = normalize_openai_api_protocol(
-                self.api_protocol_combo.currentData() if self.api_protocol_combo else ""
-            )
-            enabled = bool(self.thinking_check and self.thinking_check.isChecked())
-            efforts = [
-                effort for effort, check in self.reasoning_checks.items()
-                if enabled and check.isChecked()
-            ]
-            selected_effort = self.reasoning_combo.currentData() if efforts and self.reasoning_combo else ""
-            item["deepseek_thinking_enabled"] = enabled
-            item["deepseek_reasoning_effort"] = selected_effort or DEFAULT_DEEPSEEK_REASONING_EFFORT
-            item["reasoning_efforts"] = efforts
-            item["reasoning_effort"] = selected_effort
-        return item
-
-    def accept(self):
-        if not self.model_name_input.text().strip():
-            QMessageBox.warning(self, "模型配置", "请填写模型名称。")
-            return
-        if self.thinking_check and self.thinking_check.isChecked():
-            if not any(check.isChecked() for check in self.reasoning_checks.values()):
-                QMessageBox.warning(self, "模型配置", "请至少选择一个推理强度档位。")
-                return
-        if (
-            self.image_generation_check
-            and self.image_generation_check.isChecked()
-            and self.api_protocol_combo.currentData() != API_PROTOCOL_RESPONSES
-        ):
-            QMessageBox.warning(
-                self,
-                "模型配置",
-                "图片生成仅支持 Responses API，请先将 API 协议切换为 Responses。",
-            )
-            return
-        super().accept()
+# Historical screenshot/test import; the shared editor is a page widget, not a dialog.
+ModelEditDialog = ModelEditForm
 
 
 class ModelConnectionTestWorker(QThread):
@@ -6312,6 +6034,8 @@ class ModelConnectionTestWorker(QThread):
 
 class ModelChannelEditor(QFrame):
     changed = Signal()
+    modelEdited = Signal(str)
+    formRouteChanged = Signal(bool)
 
     def __init__(self, channel_config, parent=None, expanded=False, on_expand=None, on_delete=None):
         super().__init__(parent)
@@ -6323,6 +6047,12 @@ class ModelChannelEditor(QFrame):
         self.fetch_worker = None
         self._fetch_signature = None
         self._tested_signature = ""
+        self.model_forms = {}
+        self._new_model_id = ""
+        self._active_form_id = ""
+        self._edited_model_ids = set()
+        self._model_rows = {}
+        self._default_model_id = ""
         self.setObjectName("ModelChannelEditor")
         self.setStyleSheet(
             f"""
@@ -6347,23 +6077,23 @@ class ModelChannelEditor(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        header = QWidget()
+        header = QWidget(self)
         self.header = header
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(14, 12, 12, 12)
         header_layout.setSpacing(12)
 
-        self.expand_btn = QToolButton()
+        self.expand_btn = QToolButton(self)
         self.expand_btn.setFixedSize(30, 30)
         self.expand_btn.setStyleSheet(apple_icon_action_button_style())
         self.expand_btn.clicked.connect(self.toggle_expanded)
         header_layout.addWidget(self.expand_btn)
 
-        self.title_label = QLabel()
+        self.title_label = QLabel(self)
         self.title_label.setObjectName("ChannelTitle")
-        self.meta_label = QLabel()
+        self.meta_label = QLabel(self)
         self.meta_label.setObjectName("ChannelMeta")
-        self.status_chip = QLabel()
+        self.status_chip = QLabel(self)
         self.status_chip.setTextFormat(Qt.RichText)
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
@@ -6373,7 +6103,7 @@ class ModelChannelEditor(QFrame):
         title_box.addWidget(self.status_chip)
         header_layout.addLayout(title_box, 1)
 
-        self.delete_channel_btn = QToolButton()
+        self.delete_channel_btn = QToolButton(self)
         self.delete_channel_btn.setFixedSize(30, 30)
         self.delete_channel_btn.setStyleSheet(apple_icon_action_button_style("danger"))
         self.delete_channel_btn.setToolTip("删除服务")
@@ -6383,28 +6113,54 @@ class ModelChannelEditor(QFrame):
 
         layout.addWidget(header)
 
-        self.body = QWidget()
+        self.body = QWidget(self)
         body_layout = QVBoxLayout(self.body)
-        body_layout.setContentsMargins(18, 0, 18, 18)
-        body_layout.setSpacing(14)
+        body_layout.setContentsMargins(24, 0, 0, 0)
+        body_layout.setSpacing(16)
+        body_layout.setAlignment(Qt.AlignTop)
 
-        note = QLabel("每个服务单独维护访问密钥、服务地址和模型列表，方便按用途或供应商分组。")
+        self.service_summary = QWidget(self.body)
+        summary_layout = QHBoxLayout(self.service_summary)
+        summary_layout.setContentsMargins(0, 0, 0, 12)
+        self.service_title = QLabel("", self.service_summary)
+        self.service_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        summary_layout.addWidget(self.service_title, 1)
+        self.service_delete_btn = QPushButton("删除服务", self.service_summary)
+        self.service_delete_btn.clicked.connect(self.delete_channel)
+        summary_layout.addWidget(self.service_delete_btn)
+        body_layout.addWidget(self.service_summary)
+
+        note = QLabel("每个服务单独维护访问密钥、服务地址和模型列表，方便按用途或供应商分组。", self)
         self.channel_note = note
         note.setWordWrap(True)
         note.setStyleSheet(apple_settings_inline_note_style())
-        body_layout.addWidget(note)
+        note.hide()
 
-        form = QFormLayout()
-        form.setSpacing(12)
-        configure_responsive_form_layout(form)
-        self.display_name_input = QLineEdit()
+        self.connection_widget = QWidget(self.body)
+        form = QGridLayout(self.connection_widget)
+        form.setContentsMargins(0, 0, 0, 8)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(16)
+        form.setColumnStretch(0, 1)
+        form.setColumnStretch(1, 1)
+        def connection_field(label, widget):
+            field = QWidget(self.connection_widget)
+            box = QVBoxLayout(field)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(6)
+            caption = QLabel(label, field)
+            caption.setBuddy(widget)
+            box.addWidget(caption)
+            box.addWidget(widget)
+            return field
+        self.display_name_input = QLineEdit(self)
         self.display_name_input.setPlaceholderText("例如：OpenRouter / Anthropic")
         self.display_name_input.setText(str(self.channel_config.get("display_name") or ""))
         self.display_name_input.textChanged.connect(self.refresh_header)
-        form.addRow(build_form_row_label("服务名称"), self.display_name_input)
+        form.addWidget(connection_field("服务名称", self.display_name_input), 0, 0)
 
-        self.provider_combo = QComboBox()
-        apply_settings_combo_style(self.provider_combo)
+        self.provider_combo = ModelFieldCombo(self)
+        apply_settings_combo_style(self.provider_combo, popup_selection=DesignTokens.primary_soft)
         self.provider_combo.addItem("OpenAI 兼容", "openai")
         self.provider_combo.addItem("Anthropic", "anthropic")
         provider_type = str(self.channel_config.get("provider_type") or "openai").lower()
@@ -6412,63 +6168,78 @@ class ModelChannelEditor(QFrame):
         if provider_index >= 0:
             self.provider_combo.setCurrentIndex(provider_index)
         self.provider_combo.currentIndexChanged.connect(self.on_provider_changed)
-        form.addRow(build_form_row_label("服务类型"), self.provider_combo)
+        form.addWidget(connection_field("服务类型", self.provider_combo), 0, 1)
 
-        self.api_key_input = QLineEdit()
+        self.api_key_input = QLineEdit(self)
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setPlaceholderText("粘贴这个服务的访问密钥")
         self.api_key_input.setText(str(self.channel_config.get("api_key") or ""))
+        self.key_visibility_action = self.api_key_input.addAction(
+            qta.icon("fa5s.eye", color=DesignTokens.text_secondary), QLineEdit.TrailingPosition)
+        self.key_visibility_action.setToolTip("显示访问密钥")
+        self.key_visibility_action.triggered.connect(self._toggle_key_visibility)
         self.api_key_input.textChanged.connect(self.refresh_header)
-        form.addRow(build_form_row_label("访问密钥"), self.api_key_input)
+        form.addWidget(connection_field("访问密钥（API Key）", self.api_key_input), 2, 0, 1, 2)
 
-        self.base_url_input = QLineEdit()
+        self.base_url_input = QLineEdit(self)
         self.base_url_input.setText(str(self.channel_config.get("base_url") or ""))
-        form.addRow(build_form_row_label("服务地址"), self.base_url_input)
-        body_layout.addLayout(form)
+        form.addWidget(connection_field("服务地址", self.base_url_input), 1, 0, 1, 2)
+        self.connection_button = QPushButton("", self.body)
+        self.connection_button.setCheckable(True)
+        self.connection_button.setChecked(True)
+        self.connection_button.toggled.connect(self.connection_widget.setVisible)
+        self.connection_button.toggled.connect(self.refresh_header)
+        body_layout.addWidget(self.connection_button)
+        body_layout.addWidget(self.connection_widget)
 
-        fetch_row = QHBoxLayout()
-        fetch_hint = QLabel("使用当前地址和密钥读取接口模型列表")
+        self.fetch_row_widget = QWidget(self.body)
+        fetch_row = QHBoxLayout(self.fetch_row_widget)
+        fetch_row.setContentsMargins(0, 0, 0, 0)
+        fetch_hint = QLabel("可用模型", self)
         self.fetch_hint = fetch_hint
         fetch_hint.setMinimumWidth(0)
         fetch_hint.setWordWrap(True)
         fetch_hint.setStyleSheet(apple_caption_style())
         fetch_row.addWidget(fetch_hint, 1)
         fetch_row.addStretch()
-        self.fetch_btn = QPushButton("拉取模型")
+        self.fetch_btn = QPushButton("拉取模型", self)
         self.fetch_btn.setObjectName("SecondaryBtn")
         self.fetch_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.text_secondary))
         self.fetch_btn.clicked.connect(self.fetch_models)
         fetch_row.addWidget(self.fetch_btn)
-        body_layout.addLayout(fetch_row)
+        body_layout.addWidget(self.fetch_row_widget)
 
-        model_title = QLabel("可用模型")
+        model_title = QLabel("", self)
         self.model_heading = model_title
         model_title.setStyleSheet(apple_settings_section_title_style())
-        body_layout.addWidget(model_title)
-        self.model_list = QListWidget()
+        model_title.hide()
+        self.model_list = QListWidget(self)
         self.model_list.setMinimumHeight(104)
         self.model_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.model_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.model_list.setTextElideMode(Qt.ElideRight)
+        self.model_list.setObjectName("ModelCatalogList")
         self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
         self.model_list.currentRowChanged.connect(self.clear_test_result)
         self.model_list.itemSelectionChanged.connect(self._refresh_model_actions)
         body_layout.addWidget(self.model_list)
 
-        button_row = QHBoxLayout()
-        self.add_model_btn = QPushButton("新增模型")
+        self.model_actions = QWidget(self.body)
+        button_row = QHBoxLayout(self.model_actions)
+        button_row.setContentsMargins(0, 0, 0, 0)
+        self.add_model_btn = QPushButton("新增模型", self)
         self.add_model_btn.setObjectName("SecondaryBtn")
         self.add_model_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
-        self.edit_model_btn = QPushButton("编辑")
+        self.edit_model_btn = QPushButton("编辑", self)
         self.edit_model_btn.setObjectName("SecondaryBtn")
         self.edit_model_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
-        self.delete_model_btn = QPushButton("删除")
+        self.delete_model_btn = QPushButton("删除", self)
         self.delete_model_btn.setObjectName("SecondaryBtn")
         self.delete_model_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
         self.add_model_btn.clicked.connect(self.add_model)
         self.edit_model_btn.clicked.connect(self.edit_model)
         self.delete_model_btn.clicked.connect(self.delete_model)
-        self.test_btn = QPushButton("测试")
+        self.test_btn = QPushButton("测试", self)
         self.test_btn.setObjectName("SecondaryBtn")
         self.test_btn.setIcon(qta.icon("fa5s.plug", color=DesignTokens.text_secondary))
         self.test_btn.clicked.connect(self.test_current_model)
@@ -6476,18 +6247,38 @@ class ModelChannelEditor(QFrame):
         button_row.addWidget(self.edit_model_btn)
         button_row.addWidget(self.delete_model_btn)
         button_row.addStretch()
-        button_row.addWidget(self.test_btn)
-        body_layout.addLayout(button_row)
+        self.test_btn.hide()
+        body_layout.insertWidget(body_layout.indexOf(self.model_list), self.model_actions)
+        self.model_list.itemDoubleClicked.connect(lambda _item: self.edit_model())
+        self.form_navigation = QWidget(self.body)
+        navigation = QHBoxLayout(self.form_navigation)
+        navigation.setContentsMargins(0, 0, 0, 0)
+        self.form_title = QLabel("", self.form_navigation)
+        self.form_back_btn = QPushButton("返回模型列表", self.form_navigation)
+        self.form_back_btn.clicked.connect(self.show_model_list)
+        navigation.addWidget(self.form_title, 1)
+        navigation.addWidget(self.form_back_btn)
+        body_layout.addWidget(self.form_navigation)
+        self.model_form_stack = ModelPageStack(self.body)
+        self.model_form_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        body_layout.addWidget(self.model_form_stack)
+        self.form_test_btn = QPushButton("测试当前配置", self.body)
+        self.form_test_btn.clicked.connect(self.test_current_model)
+        body_layout.addWidget(self.form_test_btn, 0, Qt.AlignLeft)
+        self.form_navigation.hide()
+        self.model_form_stack.hide()
+        self.form_test_btn.hide()
 
-        self.test_status_label = QLabel("选择一个模型后，可验证地址、密钥与真实调用。")
+        self.test_status_label = QLabel("选择一个模型后，可验证地址、密钥与真实调用。", self)
         self.test_status_label.setWordWrap(True)
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         body_layout.addWidget(self.test_status_label)
 
-        self.recommendation_notice = QLabel()
+        self.recommendation_notice = QLabel(self)
         self.recommendation_notice.setWordWrap(True)
         self.recommendation_notice.setStyleSheet(apple_settings_inline_note_style())
         body_layout.addWidget(self.recommendation_notice)
+        body_layout.addStretch()
 
         layout.addWidget(self.body)
         self.refresh_model_list()
@@ -6499,6 +6290,8 @@ class ModelChannelEditor(QFrame):
         self.api_key_input.textChanged.connect(self.clear_test_result)
         self.base_url_input.textChanged.connect(self.clear_test_result)
         self.provider_combo.currentIndexChanged.connect(self.clear_test_result)
+        self.provider_combo.currentIndexChanged.connect(self._sync_form_services)
+        self.base_url_input.textChanged.connect(self._sync_form_services)
         self.display_name_input.textChanged.connect(lambda *_args: self.changed.emit())
         self.api_key_input.textChanged.connect(lambda *_args: self.changed.emit())
         self.base_url_input.textChanged.connect(lambda *_args: self.changed.emit())
@@ -6512,11 +6305,31 @@ class ModelChannelEditor(QFrame):
 
     def refresh_theme(self, _resolved=None):
         self.channel_note.setStyleSheet(apple_settings_inline_note_style())
-        self.fetch_hint.setStyleSheet(apple_caption_style())
+        self.key_visibility_action.setIcon(qta.icon(
+            "fa5s.eye" if self.api_key_input.echoMode() == QLineEdit.Password else "fa5s.eye-slash",
+            color=DesignTokens.text_secondary))
+        self.connection_button.setStyleSheet(product_button_style("ghost") +
+            f"QPushButton {{ text-align: left; padding: 0; color: {DesignTokens.text_primary}; font-weight: 400; }}")
+        self.service_title.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_page}px; font-weight: 600; }}")
+        self.service_delete_btn.setStyleSheet(product_button_style("ghost") +
+            f"QPushButton {{ color: {DesignTokens.error_text}; font-weight: 400; }}")
+        self.service_summary.setObjectName("ModelServiceSummary")
+        self.service_summary.setStyleSheet(f"QWidget#ModelServiceSummary {{ border-bottom: 1px solid {DesignTokens.separator}; }}")
+        self.form_back_btn.setStyleSheet(product_button_style("ghost"))
+        self.form_test_btn.setStyleSheet(product_button_style("secondary"))
+        self.form_title.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_section}px; font-weight: 600; }}")
+        self.fetch_hint.setStyleSheet(apple_settings_section_title_style())
         self.model_heading.setStyleSheet(apple_settings_section_title_style())
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
-        self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=8, padding=6))
-        apply_settings_combo_style(self.provider_combo)
+        self.model_list.setStyleSheet(
+            f"QListWidget#ModelCatalogList {{ background: {DesignTokens.bg_main}; border: none; border-top: 1px solid {DesignTokens.separator}; padding: 0; }}"
+            f"QListWidget#ModelCatalogList::item {{ border: none; border-bottom: 1px solid {DesignTokens.separator}; padding: 0; margin: 0; }}"
+            "QListWidget#ModelCatalogList::item:selected { background: transparent; }")
+        for field in (self.display_name_input, self.provider_combo, self.api_key_input, self.base_url_input):
+            field.setStyleSheet(model_field_style())
+        apply_settings_combo_style(self.provider_combo, popup_selection=DesignTokens.primary_soft)
+        for row in self._model_rows.values():
+            row.refresh_theme()
         self.refresh_header()
         for button, icon, color in ((self.fetch_btn, "fa5s.sync-alt", DesignTokens.icon_secondary),
                                     (self.add_model_btn, "fa5s.plus", DesignTokens.icon_secondary),
@@ -6524,6 +6337,7 @@ class ModelChannelEditor(QFrame):
                                     (self.delete_model_btn, "fa5s.trash-alt", DesignTokens.error_text),
                                     (self.test_btn, "fa5s.plug", DesignTokens.icon_secondary)):
             button.setIcon(qta.icon(icon, color=color))
+            button.setStyleSheet(product_button_style("secondary"))
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -6560,6 +6374,13 @@ class ModelChannelEditor(QFrame):
         tone = "success" if key_ready and model_count else ("warning" if key_ready or model_count else "neutral")
         summary_text = "已就绪" if key_ready and model_count else ("待补充密钥" if not key_ready else "待添加模型")
         self.title_label.setText(self._channel_name())
+        self.service_title.setText(self._channel_name())
+        self.service_title.setToolTip(self._channel_name())
+        if hasattr(self, "connection_button"):
+            expanded = self.connection_button.isChecked()
+            self.connection_button.setText("连接设置  −" if expanded else f"连接设置  ·  {provider_label}  ·  {'已填写密钥' if key_ready else '待填写密钥'}  ＋")
+        if hasattr(self, "fetch_hint"):
+            self.fetch_hint.setText(f"可用模型  {model_count}")
         self.meta_label.setText(f"{provider_label} · {model_count} 个模型 · {'已填写密钥' if key_ready else '未填写密钥'}")
         self.status_chip.setText(settings_status_chip(summary_text, tone))
         self._refresh_recommendation_notice()
@@ -6569,6 +6390,9 @@ class ModelChannelEditor(QFrame):
 
     def _refresh_recommendation_notice(self):
         if not hasattr(self, "recommendation_notice"):
+            return
+        if self._active_form_id:
+            self.recommendation_notice.hide()
             return
         recommended = self._recommended_model()
         if not recommended:
@@ -6585,7 +6409,7 @@ class ModelChannelEditor(QFrame):
             self.recommendation_notice.setStyleSheet(
                 f"color: {DesignTokens.warning_text}; font-size: 12px;"
             )
-        self.recommendation_notice.show()
+        self.recommendation_notice.setVisible(not bool(self._active_form_id))
 
     def set_expanded(self, expanded):
         self.expanded = bool(expanded)
@@ -6597,6 +6421,7 @@ class ModelChannelEditor(QFrame):
         self.header.hide()
         self.expanded = True
         self.body.show()
+        self.connection_button.setChecked(not self._has_api_key())
         self.setStyleSheet(
             "QFrame#ModelChannelEditor { background: transparent; border: none; border-radius: 0; }"
         )
@@ -6611,10 +6436,13 @@ class ModelChannelEditor(QFrame):
             self.on_delete(self)
 
     def refresh_model_list(self):
+        current = self.model_list.currentItem()
+        current_id = str(current.data(Qt.UserRole) or "") if current else ""
         selected_ids = {
             str(item.data(Qt.UserRole) or "") for item in self.model_list.selectedItems()
         }
         self.model_list.clear()
+        self._model_rows.clear()
         recommended = self._recommended_model()
         ordered_models = sorted(
             enumerate(self._models()),
@@ -6627,7 +6455,6 @@ class ModelChannelEditor(QFrame):
             label = model.get("display_name") or model.get("model_name") or "未命名模型"
             protocol = normalize_openai_api_protocol(model.get("api_protocol"))
             protocol_label = "Responses" if protocol == API_PROTOCOL_RESPONSES else "Chat Completions"
-            suffix = f"  ·  {protocol_label}" if self._provider_type() == "openai" else ""
             recommendation = "  ·  推荐" if str(model.get("model_name") or "") == recommended else ""
             image_capabilities = []
             if model.get("supports_vision"):
@@ -6641,15 +6468,30 @@ class ModelChannelEditor(QFrame):
             )
             efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
             reasoning = f"  ·  推理 {'/'.join(efforts)}" if efforts else ""
-            item = QListWidgetItem(
-                f"{label}  ·  {model.get('model_name', '')}{recommendation}{capability}{reasoning}{suffix}"
-            )
+            identity = str(model.get("model_name") or "")
+            details = (identity + "  ·  " if identity and identity != label else "")
+            details += (protocol_label if self._provider_type() == "openai" else "Anthropic")
+            details += capability + (f"  ·  推理 {model.get('reasoning_effort') or '/'.join(efforts)}" if efforts else "")
+            item = QListWidgetItem(f"{label}{recommendation}\n{details}")
+            item.setToolTip(f"{label}\n模型标识：{identity}\n{details}{reasoning}")
+            item.setSizeHint(QSize(0, max(76, self.model_list.fontMetrics().lineSpacing() * 2 + 28)))
             item.setData(Qt.UserRole, model.get("id"))
             self.model_list.addItem(item)
+            row = ModelCatalogRow(f"{label}{recommendation}", details, self.model_list)
+            self._model_rows[str(model.get("id") or "")] = row
+            self.model_list.setItemWidget(item, row)
+            row.selectionChanged.connect(lambda selected, target=item: self._select_model_row(target, selected))
+            row.editRequested.connect(lambda model_id=model.get("id"): self.open_model_form(model_id))
+            row.testRequested.connect(lambda target=item: self._test_model_row(target))
+            row.default_badge.setVisible(str(model.get("id") or "") == self._default_model_id)
             if str(model.get("id") or "") in selected_ids:
                 item.setSelected(True)
+            if str(model.get("id") or "") == current_id:
+                self.model_list.setCurrentItem(item, QItemSelectionModel.NoUpdate)
         if self.model_list.count() and not self.model_list.selectedItems():
             self.model_list.setCurrentRow(0)
+        row_height = max(76, self.model_list.fontMetrics().lineSpacing() * 2 + 28)
+        self.model_list.setFixedHeight(row_height * min(6, max(1, self.model_list.count())) + 2)
         self.refresh_header()
         self._refresh_model_actions()
 
@@ -6672,6 +6514,25 @@ class ModelChannelEditor(QFrame):
             self.delete_model_btn.setEnabled(count == 1)
         if hasattr(self, "test_btn"):
             self.test_btn.setEnabled(count == 1 and not (self.test_worker and self.test_worker.isRunning()))
+        for index in range(self.model_list.count()):
+            item = self.model_list.item(index)
+            row = self._model_rows.get(str(item.data(Qt.UserRole) or ""))
+            if row:
+                row.set_selected(item.isSelected())
+                running = bool(self.test_worker and self.test_worker.isRunning())
+                row.test_button.setEnabled(not running)
+                row.test_button.setText("测试中…" if running and getattr(self, "_testing_model_id", "") == item.data(Qt.UserRole) else "测试")
+
+    def _select_model_row(self, item, selected):
+        item.setSelected(selected)
+        selected_items = self.model_list.selectedItems()
+        target = item if selected else (selected_items[0] if len(selected_items) == 1 else None)
+        if target is not None:
+            self.model_list.setCurrentItem(target, QItemSelectionModel.NoUpdate)
+
+    def _test_model_row(self, item):
+        self.model_list.setCurrentItem(item, QItemSelectionModel.ClearAndSelect)
+        self.test_current_model()
 
     def _refresh_fetch_button(self, *_args):
         if not hasattr(self, "fetch_btn"):
@@ -6684,22 +6545,105 @@ class ModelChannelEditor(QFrame):
         if self.test_worker and self.test_worker.isRunning():
             return
         if hasattr(self, "test_status_label"):
-            self.test_status_label.setText("选择一个模型后，可验证地址、密钥与真实调用。")
+            self.test_status_label.setText(
+                "配置已修改，可重新测试。测试不保存；完成后点击页面底部“保存更改”。"
+                if self._active_form_id else "选择一个模型后，可验证地址、密钥与真实调用。")
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
 
     def add_model(self):
-        dialog = ModelEditDialog(
-            self._provider_type(),
-            parent=self,
-            base_url=self.base_url_input.text().strip(),
-        )
-        if dialog.exec() == QDialog.Accepted:
-            model = dialog.get_model()
-            model["id"] = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
+        model_id = self._new_model_id
+        form = self.model_forms.get(model_id)
+        has_complete_draft = bool(form and not form.validation_error()[0]
+                                  and any(item.get("id") == model_id for item in self._models()))
+        if form is None or has_complete_draft:
+            model_id = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
+            self._new_model_id = model_id
+        self.open_model_form(model_id)
+
+    def open_model_form(self, model_id):
+        model = next((item for item in self._models() if item.get("id") == model_id), None)
+        form = self.model_forms.get(model_id)
+        if form is None:
+            form = ModelEditForm(self._provider_type(), model, self.model_form_stack,
+                                 base_url=self.base_url_input.text().strip())
+            self.model_forms[model_id] = form
+            self.model_form_stack.addWidget(form)
+            form.changed.connect(lambda current_id=model_id: self._form_changed(current_id))
+        self._active_form_id = model_id
+        self.form_title.setText("新增模型" if model_id == self._new_model_id else "编辑模型")
+        self.model_form_stack.setCurrentWidget(form)
+        for widget in (self.model_list, self.model_actions, self.fetch_row_widget, self.model_heading, self.recommendation_notice):
+            widget.hide()
+        for widget in (self.form_navigation, self.model_form_stack, self.form_test_btn):
+            widget.show()
+        self.connection_button.setChecked(not self._has_api_key())
+        self.test_status_label.setText("复用当前服务的地址和密钥。测试不保存；完成后点击页面底部“保存更改”。")
+        self.formRouteChanged.emit(True)
+        log_model_service_event("model_editor_open", channel_id=self.channel_config.get("channel_id"), model_id=model_id)
+        QTimer.singleShot(0, form.model_name_input, form.model_name_input.setFocus)
+
+    def _form_changed(self, model_id):
+        form = self.model_forms[model_id]
+        model = form.get_model(model_id)
+        index = next((index for index, item in enumerate(self._models()) if item.get("id") == model_id), -1)
+        if index < 0:
             self._models().append(model)
-            self.refresh_model_list()
-            self.clear_test_result()
-            self.changed.emit()
+        else:
+            self._models()[index] = model
+        self._edited_model_ids.add(model_id)
+        self.clear_test_result()
+        self.refresh_header()
+        self.changed.emit()
+        self.modelEdited.emit(model_id)
+
+    def _sync_form_services(self, *_args):
+        for model_id, form in self.model_forms.items():
+            form.set_service(self._provider_type(), self.base_url_input.text().strip())
+            if model_id in self._edited_model_ids or any(item.get("id") == model_id for item in self._models()):
+                self._form_changed(model_id)
+
+    def _toggle_key_visibility(self):
+        reveal = self.api_key_input.echoMode() == QLineEdit.Password
+        self.api_key_input.setEchoMode(QLineEdit.Normal if reveal else QLineEdit.Password)
+        self.key_visibility_action.setToolTip("隐藏访问密钥" if reveal else "显示访问密钥")
+        self.key_visibility_action.setIcon(qta.icon("fa5s.eye-slash" if reveal else "fa5s.eye", color=DesignTokens.text_secondary))
+
+    def show_model_list(self):
+        active_id = self._active_form_id
+        self._active_form_id = ""
+        for widget in (self.form_navigation, self.model_form_stack, self.form_test_btn):
+            widget.hide()
+        for widget in (self.model_list, self.model_actions, self.fetch_row_widget, self.service_summary):
+            widget.show()
+        self.refresh_model_list()
+        for row in range(self.model_list.count()):
+            item = self.model_list.item(row)
+            if str(item.data(Qt.UserRole) or "") == active_id:
+                self.model_list.setCurrentItem(item, QItemSelectionModel.ClearAndSelect)
+                break
+        self.connection_button.setChecked(not self._has_api_key())
+        self.formRouteChanged.emit(False)
+
+    def validate_model_forms(self):
+        for model_id in self._edited_model_ids:
+            form = self.model_forms.get(model_id)
+            if form is not None and form.validation_error()[0]:
+                self.open_model_form(model_id)
+                form.validate()
+                log_model_service_event("model_editor_validation_failed", model_id=model_id)
+                return False
+        return True
+
+    def mark_models_saved(self):
+        self._edited_model_ids.clear()
+        self._new_model_id = ""
+        for model_id, form in self.model_forms.items():
+            source = next((item for item in self._models() if item.get("id") == model_id), None)
+            if source:
+                form._editing_existing = True
+                form._source = copy.deepcopy(source)
+        if self._active_form_id:
+            self.form_title.setText("编辑模型")
 
     def _current_model_index(self):
         item = self.model_list.currentItem()
@@ -6756,6 +6700,8 @@ class ModelChannelEditor(QFrame):
                     error_type=type(exc).__name__,
                 )
                 raise
+            for model_id in selected_ids:
+                self._remove_model_form(model_id)
             self.refresh_model_list()
             for row in range(self.model_list.count()):
                 item = self.model_list.item(row)
@@ -6771,22 +6717,7 @@ class ModelChannelEditor(QFrame):
             return
         index = indexes[0]
         current = self._models()[index]
-        current_id = str(current.get("id") or "")
-        dialog = ModelEditDialog(
-            self._provider_type(),
-            current,
-            self,
-            base_url=self.base_url_input.text().strip(),
-        )
-        if dialog.exec() == QDialog.Accepted:
-            self._models()[index] = dialog.get_model(existing_id=current.get("id"))
-            self.refresh_model_list()
-            for row in range(self.model_list.count()):
-                if str(self.model_list.item(row).data(Qt.UserRole) or "") == current_id:
-                    self.model_list.setCurrentRow(row)
-                    break
-            self.clear_test_result()
-            self.changed.emit()
+        self.open_model_form(str(current.get("id") or ""))
 
     def fetch_models(self):
         if self.fetch_worker and self.fetch_worker.isRunning():
@@ -6809,8 +6740,9 @@ class ModelChannelEditor(QFrame):
         self.test_status_label.setText("正在读取接口模型列表…")
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         self.fetch_worker = ModelCatalogFetchWorker(
-            self._provider_type(), base_url, api_key, self
+            self._provider_type(), base_url, api_key, QApplication.instance()
         )
+        self.fetch_worker.finished.connect(self.fetch_worker.deleteLater)
         self.fetch_worker.finished_signal.connect(self.handle_fetch_result)
         self.fetch_worker.start()
         self._refresh_fetch_button()
@@ -6920,12 +6852,26 @@ class ModelChannelEditor(QFrame):
             imported_count=len(imported_ids),
         )
 
+    def _remove_model_form(self, model_id):
+        form = self.model_forms.pop(model_id, None)
+        self._edited_model_ids.discard(model_id)
+        if form is not None:
+            form.hide()
+            self.model_form_stack.removeWidget(form)
+            form.deleteLater()
+        if self._active_form_id == model_id:
+            self.show_model_list()
+
     def delete_model(self):
         index = self._current_model_index()
         if index < 0:
             return
         visible_row = self.model_list.currentRow()
+        model_id = str(self._models()[index].get("id") or "")
         del self._models()[index]
+        self._remove_model_form(model_id)
+        if self._new_model_id == model_id:
+            self._new_model_id = ""
         self.refresh_model_list()
         if self.model_list.count():
             self.model_list.setCurrentRow(min(visible_row, self.model_list.count() - 1))
@@ -6936,12 +6882,15 @@ class ModelChannelEditor(QFrame):
         if self.test_worker and self.test_worker.isRunning():
             return
         index = self._current_model_index()
-        if index < 0:
+        if index < 0 and not self._active_form_id:
             QMessageBox.warning(self, "模型测试", "请先选择一个模型。")
             return
         api_key = self.api_key_input.text().strip()
         base_url = self.base_url_input.text().strip()
-        model = dict(self._models()[index])
+        form = self.model_forms.get(self._active_form_id)
+        if form and not form.validate():
+            return
+        model = form.get_model(self._active_form_id) if form else dict(self._models()[index])
         if not api_key:
             QMessageBox.warning(self, "模型测试", "请填写访问密钥。")
             return
@@ -6957,34 +6906,44 @@ class ModelChannelEditor(QFrame):
             "base_url": base_url,
         })
         self._tested_signature = json.dumps(model, ensure_ascii=False, sort_keys=True)
+        self._testing_model_id = model.get("id")
         self.test_btn.setEnabled(False)
+        self.form_test_btn.setEnabled(False)
+        log_model_service_event("connection_test_start", model_id=model.get("id"), provider_type=self._provider_type())
         self.test_btn.setText("测试中…")
         self.test_status_label.setText(f"正在测试 {model.get('display_name') or model.get('model_name')}…")
-        self.test_worker = ModelConnectionTestWorker(model, self)
+        self.test_worker = ModelConnectionTestWorker(model, QApplication.instance())
+        self.test_worker.finished.connect(self.test_worker.deleteLater)
         self.test_worker.finished_signal.connect(self.handle_test_result)
         self.test_worker.start()
+        self._refresh_model_actions()
 
     def handle_test_result(self, result):
         self.test_btn.setText("测试")
+        self.form_test_btn.setEnabled(True)
         index = self._current_model_index()
-        current_model = dict(self._models()[index]) if index >= 0 else {}
+        form = self.model_forms.get(self._active_form_id)
+        current_model = form.get_model(self._active_form_id) if form else (dict(self._models()[index]) if index >= 0 else {})
         current_model.update({
             "provider_type": self._provider_type(),
             "api_key": self.api_key_input.text().strip(),
             "base_url": self.base_url_input.text().strip(),
         })
         if json.dumps(current_model, ensure_ascii=False, sort_keys=True) != self._tested_signature:
+            log_model_service_event("connection_test_discarded", reason="configuration_changed")
             self.test_status_label.setText("配置已变化，请重新测试。")
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
             self.test_worker = None
             self._refresh_model_actions()
             return
+        log_model_service_event("connection_test_complete" if result.get("ok") else "connection_test_failed",
+                                model_id=current_model.get("id"))
         elapsed = float(result.get("elapsed") or 0)
         if result.get("ok"):
             self.test_status_label.setText(f"测试通过 · {elapsed:.1f} 秒")
             self.test_status_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-size: 12px;")
         else:
-            message = result.get("error") or "未知错误"
+            message = str(result.get("error") or "未知错误").replace(self.api_key_input.text().strip(), "***") if self.api_key_input.text().strip() else str(result.get("error") or "未知错误")
             self.test_status_label.setText(f"测试失败 · {message}")
             self.test_status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
             QMessageBox.warning(self, "模型测试失败", message)
@@ -7004,66 +6963,119 @@ class ModelChannelEditor(QFrame):
 
 class ModelChannelManager(QWidget):
     changed = Signal()
+    useModelRequested = Signal(str)
 
     def __init__(self, channels, parent=None, selected_model_id=""):
         super().__init__(parent)
         self.editors = []
+        self.last_edited_model_id = ""
+        self.saved_model_id = ""
+        self.origin_session_id = ""
         self._default_model_id = str(selected_model_id or "")
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(14)
+        self.layout.setSpacing(20)
 
-        toolbar = QHBoxLayout()
+        self.service_toolbar = QWidget(self)
+        toolbar = QHBoxLayout(self.service_toolbar)
         toolbar.setContentsMargins(0, 0, 0, 0)
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(4)
-        title = QLabel("模型与服务")
+        title = QLabel("服务", self)
         self.channel_heading = title
         title.setStyleSheet(apple_settings_section_title_style())
         title_box.addWidget(title)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
-        add_channel_btn = QPushButton("添加服务")
+        add_channel_btn = QPushButton("添加服务", self)
+        self.compact_add_channel_btn = add_channel_btn
         add_channel_btn.setObjectName("SecondaryBtn")
         add_channel_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         add_channel_btn.clicked.connect(self.add_channel)
         toolbar.addWidget(add_channel_btn)
-        self.delete_selected_channel_btn = QPushButton("删除服务")
+        self.delete_selected_channel_btn = QPushButton("删除服务", self)
         self.delete_selected_channel_btn.setObjectName("SecondaryBtn")
         self.delete_selected_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
         self.delete_selected_channel_btn.setEnabled(False)
         self.delete_selected_channel_btn.clicked.connect(self.delete_selected_channel)
         toolbar.addWidget(self.delete_selected_channel_btn)
-        self.layout.addLayout(toolbar)
+        self.layout.addWidget(self.service_toolbar)
 
-        self.layout.addWidget(QLabel("默认模型"))
-        self.default_model_combo = QComboBox()
+        self.default_model_label = QLabel("新对话默认模型", self)
+        self.default_model_row = QWidget(self)
+        self.default_model_row.setObjectName("ModelDefaultRow")
+        self.default_model_layout = QGridLayout(self.default_model_row)
+        self.default_model_layout.setContentsMargins(0, 0, 0, 18)
+        self.default_model_layout.setHorizontalSpacing(24)
+        self.default_model_layout.setVerticalSpacing(4)
+        self.default_model_layout.addWidget(self.default_model_label, 0, 0)
+        self.default_model_combo = ModelFieldCombo(self)
         self.default_model_combo.setObjectName("DefaultModelCombo")
         self.default_model_combo.setMinimumWidth(0)
         self.default_model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.default_model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        apply_settings_combo_style(self.default_model_combo)
-        self.layout.addWidget(self.default_model_combo)
-        self.default_model_hint = QLabel("仅用于新建对话；已有对话保留自己的模型。")
+        apply_settings_combo_style(self.default_model_combo, popup_selection=DesignTokens.primary_soft)
+        self.default_model_hint = QLabel("仅用于新建对话；已有对话保留自己的模型。", self)
         self.default_model_hint.setWordWrap(True)
-        self.layout.addWidget(self.default_model_hint)
+        self.default_model_layout.addWidget(self.default_model_hint, 1, 0)
+        self.default_model_layout.addWidget(self.default_model_combo, 0, 1, 2, 1)
+        self.default_model_layout.setColumnStretch(0, 1)
+        self.default_model_layout.setColumnStretch(1, 1)
+        self.layout.insertWidget(0, self.default_model_row)
 
-        self.channel_splitter = QSplitter(Qt.Horizontal)
-        self.channel_splitter.setChildrenCollapsible(False)
-        self.channel_splitter.setHandleWidth(1)
-        self.channel_list = QListWidget()
+        self.channel_combo = ModelFieldCombo(self)
+        self.channel_combo.setAccessibleName("所属服务")
+        self.channel_combo.currentIndexChanged.connect(lambda index: self.channel_list.setCurrentRow(index))
+        self.layout.addWidget(self.channel_combo)
+        self.channel_combo.hide()
+        self.channel_body = QWidget(self)
+        channel_body_layout = QHBoxLayout(self.channel_body)
+        channel_body_layout.setContentsMargins(0, 0, 0, 0)
+        channel_body_layout.setSpacing(0)
+        self.service_navigation_host = QWidget(self.channel_body)
+        self.service_navigation_host.setFixedWidth(176)
+        service_host_layout = QVBoxLayout(self.service_navigation_host)
+        service_host_layout.setContentsMargins(0, 0, 0, 0)
+        service_host_layout.setSpacing(0)
+        self.service_navigation = QWidget(self.service_navigation_host)
+        self.service_navigation.setObjectName("ModelServiceNavigation")
+        self.service_navigation.setFixedWidth(176)
+        service_nav_layout = QVBoxLayout(self.service_navigation)
+        service_nav_layout.setContentsMargins(8, 12, 8, 8)
+        service_nav_layout.setSpacing(8)
+        self.service_nav_label = QLabel("服务", self.service_navigation)
+        service_nav_layout.addWidget(self.service_nav_label)
+        self.channel_list = QListWidget(self.service_navigation)
         self.channel_list.setObjectName("ModelChannelNavigation")
-        self.channel_list.setFixedWidth(220)
-        self.channel_list.setSpacing(2)
+        self.channel_list.setMinimumWidth(0)
+        self.channel_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.channel_list.setSpacing(0)
         self.channel_list.setStyleSheet(apple_settings_nav_style())
-        self.channel_detail_stack = QStackedWidget()
+        service_nav_layout.addWidget(self.channel_list)
+        self.add_channel_btn = QPushButton("＋ 添加服务", self.service_navigation)
+        self.add_channel_btn.clicked.connect(self.add_channel)
+        service_nav_layout.addWidget(self.add_channel_btn)
+        self.service_navigation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        service_host_layout.addWidget(self.service_navigation)
+        service_host_layout.addStretch()
+        self.channel_detail_stack = ModelPageStack(self.channel_body)
+        self.channel_detail_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.channel_detail_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
-        self.channel_splitter.addWidget(self.channel_list)
-        self.channel_splitter.addWidget(self.channel_detail_stack)
-        self.channel_splitter.setStretchFactor(0, 0)
-        self.channel_splitter.setStretchFactor(1, 1)
-        self.layout.addWidget(self.channel_splitter)
+        channel_body_layout.addWidget(self.service_navigation_host)
+        channel_body_layout.addWidget(self.channel_detail_stack, 1)
+        self.layout.addWidget(self.channel_body)
+        self.saved_notice = QWidget(self)
+        saved_layout = QHBoxLayout(self.saved_notice)
+        saved_layout.setContentsMargins(0, 8, 0, 0)
+        self.saved_label = QLabel("模型已保存，可以返回对话使用。", self.saved_notice)
+        self.saved_label.setWordWrap(True)
+        self.use_model_btn = QPushButton("返回对话并使用", self.saved_notice)
+        self.use_model_btn.clicked.connect(lambda: self.useModelRequested.emit(self.saved_model_id))
+        saved_layout.addWidget(self.saved_label, 1)
+        saved_layout.addWidget(self.use_model_btn)
+        self.layout.addWidget(self.saved_notice)
+        self.saved_notice.hide()
         self.channel_list.currentRowChanged.connect(self._on_channel_selection_changed)
 
         for index, channel in enumerate(channels or []):
@@ -7071,13 +7083,72 @@ class ModelChannelManager(QWidget):
         self._refresh_default_models()
         self.default_model_combo.currentIndexChanged.connect(self._on_default_model_changed)
         self.changed.connect(self._refresh_default_models)
+        self.changed.connect(self.saved_notice.hide)
+        self.changed.connect(self._refresh_channel_choices)
+        self._refresh_channel_choices()
         bind_theme(self, self._refresh_default_model_theme, surface="dialogs")
 
     def _refresh_default_model_theme(self, _resolved=None):
-        apply_settings_combo_style(self.default_model_combo)
-        self.channel_list.setStyleSheet(apple_settings_nav_style())
+        self.default_model_combo.setStyleSheet(model_field_style())
+        apply_settings_combo_style(self.default_model_combo, popup_selection=DesignTokens.primary_soft)
+        self.default_model_row.setStyleSheet(f"QWidget#ModelDefaultRow {{ border-bottom: 1px solid {DesignTokens.separator}; }}")
+        self.service_navigation.setStyleSheet(f"QWidget#ModelServiceNavigation {{ background: {DesignTokens.bg_settings_nav}; border-radius: 8px; }}")
+        self.channel_list.setStyleSheet(apple_settings_nav_style() +
+            "QListWidget#ModelChannelNavigation { background: transparent; padding: 0; border: none; }"
+            "QListWidget#ModelChannelNavigation::item { padding: 10px 8px; margin: 0; border-radius: 6px; }")
+        self.service_nav_label.setStyleSheet(apple_caption_style() + "padding: 0 8px;")
+        self.add_channel_btn.setStyleSheet(product_button_style("ghost"))
+        self.compact_add_channel_btn.setStyleSheet(product_button_style("ghost"))
         self.channel_heading.setStyleSheet(apple_settings_section_title_style())
         self.default_model_hint.setStyleSheet(apple_settings_inline_note_style())
+        self.channel_combo.setStyleSheet(model_field_style())
+        apply_settings_combo_style(self.channel_combo, popup_selection=DesignTokens.primary_soft)
+        self.use_model_btn.setStyleSheet(product_button_style("secondary"))
+        self.saved_label.setStyleSheet(apple_settings_inline_note_style())
+
+    def _refresh_channel_choices(self):
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.clear()
+        for editor in self.editors:
+            self.channel_combo.addItem(f"{editor._channel_name()}  ·  {len(editor._models())} 个模型")
+        for index, editor in enumerate(self.editors):
+            item = self.channel_list.item(index)
+            if item:
+                item.setText(f"{editor._channel_name()}    {len(editor._models())}")
+                item.setToolTip(editor._channel_name())
+        self.channel_list.setFixedHeight(max(44, min(7, len(self.editors)) * 48 + 2))
+        self.channel_list.scrollToTop()
+        self.service_navigation.adjustSize()
+        self.channel_combo.setCurrentIndex(self.channel_list.currentRow())
+        self.channel_combo.blockSignals(False)
+
+    def open_new_model(self, channel_id=""):
+        if not self.editors:
+            self.add_channel()
+        editor = next((item for item in self.editors if item.channel_config.get("channel_id") == channel_id), None)
+        if editor is None:
+            editor = self.editors[max(0, self.channel_list.currentRow())]
+        self.channel_list.setCurrentRow(self.editors.index(editor))
+        editor.add_model()
+        return editor
+
+    def validate_models(self):
+        for index, editor in enumerate(self.editors):
+            if not editor.validate_model_forms():
+                self.channel_list.setCurrentRow(index)
+                return False
+        return True
+
+    def _model_edited(self, model_id):
+        self.last_edited_model_id = model_id
+
+    def mark_saved(self):
+        ids = {model.get("id") for editor in self.editors for model in editor._models()}
+        self.saved_model_id = self.last_edited_model_id if self.last_edited_model_id in ids else ""
+        for editor in self.editors:
+            editor.mark_models_saved()
+        self._sync_editor_route()
+        self.saved_notice.setVisible(bool(self.saved_model_id and self.origin_session_id))
 
     def _refresh_default_models(self):
         combo = self.default_model_combo
@@ -7104,6 +7175,10 @@ class ModelChannelManager(QWidget):
             combo.setToolTip(combo.currentText())
         finally:
             combo.blockSignals(blocked)
+        for editor in self.editors:
+            editor._default_model_id = self._default_model_id
+            for model_id, row in editor._model_rows.items():
+                row.default_badge.setVisible(model_id == self._default_model_id)
 
     def _on_default_model_changed(self, _index):
         self._default_model_id = str(self.default_model_combo.currentData() or "")
@@ -7114,15 +7189,10 @@ class ModelChannelManager(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        available_width = max(0, self.width())
-        if available_width < 760:
-            target_width = 150
-        elif available_width < 920:
-            target_width = 180
-        else:
-            target_width = 220
-        if self.channel_list.width() != target_width:
-            self.channel_list.setFixedWidth(target_width)
+        self._sync_editor_route()
+        narrow = self.width() < 620
+        self.default_model_layout.addWidget(self.default_model_combo, 2 if narrow else 0, 0 if narrow else 1, 1 if narrow else 2, 1)
+        self.default_model_combo.setMaximumWidth(16777215 if narrow else 380)
 
     def _add_editor(self, channel, expanded=False):
         editor = ModelChannelEditor(
@@ -7142,6 +7212,8 @@ class ModelChannelManager(QWidget):
             lambda text, target=item: target.setText(text.strip() or "未命名服务")
         )
         editor.changed.connect(self.changed.emit)
+        editor.modelEdited.connect(self._model_edited)
+        editor.formRouteChanged.connect(self._sync_editor_route)
         if self.channel_list.currentRow() < 0:
             self.channel_list.setCurrentRow(0)
         return editor
@@ -7149,6 +7221,25 @@ class ModelChannelManager(QWidget):
     def _on_channel_selection_changed(self, index):
         self.channel_detail_stack.setCurrentIndex(index)
         self.delete_selected_channel_btn.setEnabled(0 <= index < len(self.editors))
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.setCurrentIndex(index)
+        self.channel_combo.blockSignals(False)
+        self._sync_editor_route()
+
+    def _sync_editor_route(self, *_args):
+        editor = self.channel_detail_stack.currentWidget()
+        editing = bool(editor and editor._active_form_id)
+        self.default_model_row.setVisible(not editing)
+        self.delete_selected_channel_btn.hide()
+        self.channel_heading.setText("服务")
+        compact = self.width() < 660
+        self.service_navigation_host.setVisible(not compact)
+        self.service_toolbar.setVisible(compact)
+        self.channel_combo.setVisible(compact)
+        for item in self.editors:
+            item.body.layout().setContentsMargins(0 if compact else 24, 0, 0, 0)
+            item.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred if item is editor else QSizePolicy.Ignored)
+        self.channel_detail_stack.updateGeometry()
 
     def delete_selected_channel(self):
         index = self.channel_list.currentRow()
@@ -7160,6 +7251,8 @@ class ModelChannelManager(QWidget):
             self.channel_list.setCurrentRow(self.editors.index(active_editor))
 
     def add_channel(self):
+        current = self.channel_detail_stack.currentWidget()
+        editing = bool(current and current._active_form_id)
         channel = {
             "channel_id": f"openai-custom-{uuid.uuid4().hex[:8]}",
             "display_name": "新服务",
@@ -7170,9 +7263,14 @@ class ModelChannelManager(QWidget):
         }
         editor = self._add_editor(channel, expanded=True)
         self.channel_list.setCurrentRow(self.editors.index(editor))
+        if editing:
+            editor.add_model()
         self.changed.emit()
 
     def delete_channel(self, editor):
+        if any(worker is not None and worker.isRunning() for worker in (editor.fetch_worker, editor.test_worker)):
+            QMessageBox.information(self, "服务正在使用", "模型拉取或测试正在进行，请完成后再删除此服务。")
+            return
         reply = QMessageBox.question(
             self,
             "删除模型服务",
@@ -7187,7 +7285,7 @@ class ModelChannelManager(QWidget):
             self.editors.remove(editor)
             self.channel_detail_stack.removeWidget(editor)
             self.channel_list.takeItem(index)
-            editor.setParent(None)
+            editor.hide()
             editor.deleteLater()
         if self.editors:
             self.channel_list.setCurrentRow(min(index, len(self.editors) - 1))
@@ -12127,11 +12225,12 @@ class SettingsDialog(QDialog):
 
         model_page, model_layout = make_scroll_page(
             "模型与服务",
-            "把常用 provider、代理服务或特定用途模型整理成稳定的服务入口。",
+            "管理服务连接和可用模型，选择新对话的默认模型。",
         )
 
         self.model_channel_manager = ModelChannelManager(
             self.config_manager.get_model_channels(),
+            parent=model_layout.parentWidget(),
             selected_model_id=self.config_manager.get_selected_model_id(),
         )
 
@@ -13120,14 +13219,19 @@ class SettingsDialog(QDialog):
 
     def _restore_configuration_editors(self, config):
         manager = self.model_channel_manager
-        if manager.get_channels() != config["model_channels"]:
+        if manager.get_channels() != config["model_channels"] or any(editor.model_forms for editor in manager.editors):
             for editor in manager.editors:
                 manager.channel_detail_stack.removeWidget(editor)
+                editor.hide()
                 editor.deleteLater()
             manager.editors = []
             manager.channel_list.clear()
             for channel in config["model_channels"]:
                 manager._add_editor(channel)
+        manager.last_edited_model_id = ""
+        manager.saved_model_id = ""
+        manager.saved_notice.hide()
+        manager._refresh_channel_choices()
         manager._default_model_id = config["selected_model_id"]
         manager._refresh_default_models()
         for kind, value in config["download_sources"].items():
@@ -14316,6 +14420,9 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         self.requires_skill_reload = False
+        if not self.model_channel_manager.validate_models():
+            self.select_initial_page("模型与服务")
+            return
         selected_model_id = self.model_channel_manager.get_default_model_id()
         model_channels = self.model_channel_manager.get_channels()
         mcp_servers = normalize_mcp_servers(self.mcp_server_manager.get_servers())
@@ -14331,6 +14438,11 @@ class SettingsDialog(QDialog):
                          selected_model_id != self._settings_baseline_state["config"]["selected_model_id"])
         if (page_label == "模型与服务" or model_changed) and all_model_ids and selected_model_id not in all_model_ids:
             log_model_service_event("default_model_save_rejected", reason="selection_required")
+            self.select_initial_page("模型与服务")
+            editor = self.model_channel_manager.channel_detail_stack.currentWidget()
+            if editor is not None:
+                editor.show_model_list()
+            self.model_channel_manager.default_model_combo.setFocus()
             QMessageBox.warning(self, "请选择默认模型", "默认模型未选择或已删除，请在“模型与服务”重新选择后保存。")
             return
         if page_label == "权限" and self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -14538,6 +14650,7 @@ class SettingsDialog(QDialog):
         )
         self._clear_settings_dirty()
         self._allow_close_without_prompt = False
+        self.model_channel_manager.mark_saved()
         if self.property("embeddedProductPage"):
             if self._main and hasattr(self._main, "add_system_toast"):
                 if theme_commit_warning:
@@ -17327,6 +17440,7 @@ class ModelSelectorPopover(ProductPopover):
 
     modelSelected = Signal(str)
     effortSelected = Signal(str)
+    configureRequested = Signal()
 
     EFFORT_LABELS = {
         "low": "low",
@@ -17355,17 +17469,18 @@ class ModelSelectorPopover(ProductPopover):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
-        title = QLabel("选择模型")
+        title = QLabel("选择模型", self)
+        self.title_label = title
         title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
         layout.addWidget(title)
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索渠道或 Model")
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("搜索服务或模型")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setFixedHeight(32)
         self.search_input.setStyleSheet(product_field_style())
         self.search_input.textChanged.connect(self._filter)
         layout.addWidget(self.search_input)
-        self.model_list = QListWidget()
+        self.model_list = QListWidget(self)
         self.model_list.setMinimumHeight(200)
         self.model_list.setMaximumHeight(320)
         self.model_list.setStyleSheet(
@@ -17400,12 +17515,16 @@ class ModelSelectorPopover(ProductPopover):
         self.model_list.itemActivated.connect(self._activate_item)
         self.model_list.itemClicked.connect(self._activate_item)
         layout.addWidget(self.model_list, 1)
+        self.empty_label = QLabel("", self)
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
 
-        divider = QFrame()
+        divider = QFrame(self)
+        self.effort_divider = divider
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none;")
         layout.addWidget(divider)
-        self.effort_title = QLabel("思考强度")
+        self.effort_title = QLabel("思考强度", self)
         self.effort_title.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; font-weight: 600;")
         layout.addWidget(self.effort_title)
         self.effort_row = QHBoxLayout()
@@ -17413,6 +17532,33 @@ class ModelSelectorPopover(ProductPopover):
         self.effort_row.setSpacing(4)
         layout.addLayout(self.effort_row)
         self.refresh_efforts()
+        self.configure_btn = QPushButton("＋  配置新模型    →", self)
+        self.configure_btn.setMinimumHeight(36)
+        self.configure_btn.setCursor(Qt.PointingHandCursor)
+        self.configure_btn.clicked.connect(self._configure)
+        layout.addWidget(self.configure_btn)
+        self._filter("")
+        self.refresh_theme()
+
+    def refresh_theme(self, _resolved=None):
+        super().refresh_theme(_resolved)
+        if not hasattr(self, "configure_btn"):
+            return
+        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 600;")
+        for label in (self.empty_label, self.effort_title):
+            label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
+        self.search_input.setStyleSheet(product_field_style())
+        self.model_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=6, padding=4))
+        self.effort_divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none;")
+        self.configure_btn.setStyleSheet(product_button_style("ghost") + "QPushButton { text-align: left; }")
+        for index in range(self.effort_row.count()):
+            widget = self.effort_row.itemAt(index).widget()
+            if widget:
+                widget.setStyleSheet(product_segmented_style())
+
+    def _configure(self):
+        self.close()
+        self.configureRequested.emit()
 
     def _selected_profile(self):
         return next((item for item in self.profiles if str(item.get("id") or "") == self.selected_id), None)
@@ -17426,8 +17572,9 @@ class ModelSelectorPopover(ProductPopover):
         efforts = normalize_reasoning_efforts(profile.get("reasoning_efforts"))
         current = normalize_reasoning_effort(profile.get("reasoning_effort"), efforts)
         self.effort_title.setVisible(bool(efforts))
+        self.effort_divider.setVisible(bool(efforts))
         for effort in efforts:
-            button = QPushButton(self.EFFORT_LABELS.get(effort, effort))
+            button = QPushButton(self.EFFORT_LABELS.get(effort, effort), self)
             button.setCheckable(True)
             button.setChecked(effort == current)
             button.setFixedHeight(30)
@@ -17455,6 +17602,12 @@ class ModelSelectorPopover(ProductPopover):
         query = str(text or "").strip().casefold()
         for item in self._items:
             item.setHidden(bool(query and query not in str(item.data(Qt.UserRole + 1) or "")))
+        visible = any(not item.isHidden() for item in self._items)
+        self.model_list.setVisible(visible)
+        self.empty_label.setText("没有匹配的模型，可清空搜索或配置新模型。" if self.profiles else "尚未配置模型，从下方添加第一个模型。")
+        self.empty_label.setVisible(not visible)
+        if self.isVisible():
+            self._position_timer.start(0)
 
 
 class SearchableSkillPickerButton(QPushButton):
@@ -35816,9 +35969,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def show_model_selector_popover(self):
         profiles = list(self.config_manager.iter_model_profiles() or [])
-        if not profiles:
-            self.add_system_toast("还没有可用模型，请先在设置中添加。", "warning", auto_close_ms=4000)
-            return
         existing = getattr(self, "model_selector_popover", None)
         if existing and _qt_object_alive(existing) and existing.isVisible():
             existing.close()
@@ -35838,9 +35988,41 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         popover.modelSelected.connect(select_model)
         popover.effortSelected.connect(select_effort)
-        popover.closed.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
+        popover.configureRequested.connect(self.open_model_configuration)
         popover.show_for(self.model_select_btn, align_right=True, prefer_above=True)
-        QTimer.singleShot(0, popover.search_input.setFocus)
+        QTimer.singleShot(0, popover.search_input, popover.search_input.setFocus)
+
+    def open_model_configuration(self):
+        origin_session_id = self.current_session_id
+        profile = self.config_manager.get_model_profile(self._model_id_for_state(self.get_current_session())) or {}
+        if not self.open_settings("模型与服务"):
+            return False
+        manager = self.product_pages[self.PAGE_SETTINGS].model_channel_manager
+        manager.origin_session_id = origin_session_id
+        manager.open_new_model(str(profile.get("channel_id") or ""))
+        log_ui_navigation("model_configuration_open", session_id=origin_session_id)
+        return True
+
+    def use_configured_model(self, model_id):
+        page = self.product_pages.get(self.PAGE_SETTINGS)
+        manager = getattr(page, "model_channel_manager", None)
+        origin = getattr(manager, "origin_session_id", "")
+        profile = self.config_manager.get_model_profile(model_id) or {}
+        if not origin or origin not in self.sessions or profile.get("id") != model_id:
+            self.add_system_toast("模型已保存，但原对话或模型已不可用。请返回对话后重新选择。", "warning")
+            log_ui_navigation("configured_model_use_failed", session_id=origin, model_id=model_id)
+            return False
+        if not self.show_conversation_page():
+            return False
+        self.activate_session(origin)
+        if self.current_session_id != origin:
+            return False
+        result = self.on_model_selection_changed(model_id)
+        if result:
+            manager.origin_session_id = ""
+            manager.saved_notice.hide()
+        log_ui_navigation("configured_model_use", session_id=origin, model_id=model_id, applied=bool(result))
+        return result
 
     def on_model_selection_changed(self, model_id):
         state = self.get_current_session()
@@ -48557,6 +48739,7 @@ a {{ overflow-wrap: anywhere; }}
             page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain="projects")
         elif route == self.PAGE_SETTINGS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section)
+            page.model_channel_manager.useModelRequested.connect(self.use_configured_model)
         else:
             return self.conversation_page
         return self._prepare_embedded_product_page(page, route)

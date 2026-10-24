@@ -18,6 +18,7 @@ DEEPSEEK_RECOMMENDATION_KEY = "deepseek_official"
 DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp"
 DEEPSEEK_NEW_MODEL_REASONING_EFFORTS = ("high", "max")
 DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT = "max"
+DEEPSEEK_MINIMAL_BOOTSTRAP_PLUGIN = "deepseek_flash_minimal"
 
 # Product-owned configuration. Recommendation decisions elsewhere must read
 # this registry instead of hard-coding a model name.
@@ -56,12 +57,13 @@ def is_deepseek_official_base_url(base_url):
 
     try:
         parsed = urlparse(str(base_url or "").strip())
-    except Exception:
+        port = parsed.port
+    except ValueError:
         return False
     if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "api.deepseek.com":
         return False
     if (
-        parsed.port not in (None, 443)
+        port not in (None, 443)
         or parsed.username
         or parsed.password
         or parsed.query
@@ -69,6 +71,17 @@ def is_deepseek_official_base_url(base_url):
     ):
         return False
     return (parsed.path or "").rstrip("/").lower() in {"", "/v1"}
+
+
+def get_default_bootstrap_plugin(provider_type, base_url, model_name):
+    """Official DeepSeek models start minimally unless explicitly disabled."""
+    if (
+        _normalized_provider_type(provider_type) == "openai"
+        and is_deepseek_official_base_url(base_url)
+        and str(model_name or "").strip()
+    ):
+        return DEEPSEEK_MINIMAL_BOOTSTRAP_PLUGIN
+    return ""
 
 
 def get_recommended_model(provider_type="openai", base_url=DEEPSEEK_OFFICIAL_BASE_URL):
@@ -109,6 +122,7 @@ def build_new_model_defaults(provider_type, base_url, model_name):
     return {
         "supports_vision": True,
         "supports_image_generation": False,
+        "bootstrap_plugin": get_default_bootstrap_plugin(provider, base_url, model_name),
         "api_protocol": API_PROTOCOL_RESPONSES,
         "deepseek_thinking_enabled": True,
         "deepseek_reasoning_effort": DEEPSEEK_NEW_MODEL_DEFAULT_REASONING_EFFORT,

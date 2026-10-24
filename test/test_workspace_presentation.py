@@ -68,6 +68,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         first = window.get_current_session()
         original_input = window.input_field
         self.assertTrue(window._home_presentation_active)
+        self.assertFalse(window.workspace_title_label.isVisible())
         window.input_field.setPlainText("第一段未发送输入")
         window.create_new_session()
         second = window.get_current_session()
@@ -80,6 +81,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         self.assertIs(window.input_field, original_input)
         self.assertIs(window.input_row.parentWidget(), window.conversation_column)
         self.assertFalse(window._home_presentation_active)
+        self.assertTrue(window.workspace_title_label.isVisible())
         saved_path = Path(self.repository.store_path)
         saved_before = saved_path.read_bytes() if saved_path.exists() else None
         self.assertTrue(self.manager.apply_profile(builtin_theme("default", dark=True), preview=True), self.manager.last_error)
@@ -92,6 +94,7 @@ class WorkspacePresentationTests(unittest.TestCase):
     def test_header_rename_reuses_persistence_and_recovers_from_cancel_and_failure(self):
         window = self.window
         state = window.get_current_session()
+        window.add_chat_bubble("User", "已开始的对话", animate=False)
 
         def edit(value, key):
             window._edit_current_conversation_title()

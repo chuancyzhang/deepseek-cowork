@@ -74,7 +74,7 @@ class FileTableRow(QPushButton):
 
 class ConversationFileTable(QFrame):
     fileActivated = Signal(str)
-    PREVIEW_ROWS = 5
+    PREVIEW_ROWS = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,8 +108,8 @@ class ConversationFileTable(QFrame):
             return
         self._paths = list(paths)
         self._workspace_dir = workspace_dir
-        self.heading.setText(f"文件 · {len(paths)}")
-        self.heading.setVisible(len(paths) > 1)
+        self.heading.setText(f"共 {len(paths)} 个文件")
+        self.heading.setVisible(bool(paths))
         self._rebuild_rows()
         self.setVisible(bool(paths))
 
@@ -124,7 +124,7 @@ class ConversationFileTable(QFrame):
             row.clicked.connect(lambda checked=False, value=path: self.fileActivated.emit(value))
             self.rows_layout.addWidget(row)
         self.toggle.setVisible(len(self._paths) > self.PREVIEW_ROWS)
-        self.toggle.setText("收起文件" if self._expanded else f"展开其余 {len(self._paths) - self.PREVIEW_ROWS} 个文件")
+        self.toggle.setText("收起文件列表" if self._expanded else f"再显示 {len(self._paths) - self.PREVIEW_ROWS} 个文件")
 
     def _toggle(self):
         self._expanded = not self._expanded
@@ -133,7 +133,7 @@ class ConversationFileTable(QFrame):
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
             f"QFrame#ConversationFileTable {{ background: {DesignTokens.bg_main}; "
-            "border: none; border-radius: 0; }")
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: {DesignTokens.radius_md}px; }}")
         self.heading.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px; font-weight: 600; padding: 10px 12px;")
         self.toggle.setStyleSheet(
             f"QPushButton#ConversationFilesToggle {{ background: transparent; border: none; "

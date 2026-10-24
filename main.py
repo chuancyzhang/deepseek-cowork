@@ -185,7 +185,10 @@ from core.theme import (
 )
 from core.theme_service import ThemeRepository
 from ui.conversation_files import ConversationFileTable
-from ui.workspace_presentation import ComposerFlowLayout, ComposerSubmitButton, EditableConversationTitle, context_action_style
+from ui.workspace_presentation import (
+    ComposerFlowLayout, ComposerSubmitButton, EditableConversationTitle,
+    HomeRecentButton, ConversationRunNotice, ConversationIdentityHeader, context_action_style,
+)
 from ui.primitives import (
     ProductActionBar,
     ProductCodeViewer,
@@ -12072,7 +12075,10 @@ class SettingsDialog(QDialog):
         layout.addLayout(body_layout, 1)
 
         self.nav_list = QListWidget()
-        self.nav_list.setFixedWidth(196)
+        self.nav_list.setFixedWidth(176 if domain == "settings" else 196)
+        if domain == "settings":
+            self.nav_list.setObjectName("WorkspaceSettingsNavigation")
+            self.nav_list.setIconSize(QSize(16, 16))
         self.nav_list.setSpacing(2)
         self.nav_list.setStyleSheet(apple_settings_nav_style())
         body_layout.addWidget(self.nav_list)
@@ -12840,6 +12846,18 @@ class SettingsDialog(QDialog):
         if domain == "settings":
             self.settings_search.setPlaceholderText("搜索设置，例如字体、凭据、日志…")
             self.settings_search.setMaximumWidth(600)
+            self.settings_search_results = QListWidget()
+            self.settings_search_results.setObjectName("SettingsSearchResults")
+            self.settings_search_results.setAccessibleName("设置搜索结果")
+            self.settings_search.installEventFilter(self)
+            self.settings_search_results.installEventFilter(self)
+            self.settings_search_results.setMaximumHeight(240)
+            self.settings_search_results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.settings_search_results.itemClicked.connect(self._open_settings_search_result)
+            self.settings_search_results.itemActivated.connect(self._open_settings_search_result)
+            self.settings_search_results.hide()
+            self._settings_search_matches = []
+            layout.insertWidget(2, self.settings_search_results)
             self.privacy_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
             self.advanced_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
             self.theme_settings_panel.selectionCommitted.connect(self._theme_selection_committed)
@@ -12849,11 +12867,22 @@ class SettingsDialog(QDialog):
         if self.domain != "capabilities":
             apply_product_dialog(self, "SettingsDialog")
         self.nav_list.setStyleSheet(apple_settings_nav_style())
+        if self.domain == "settings":
+            self.setStyleSheet(self.styleSheet() + f"QDialog#SettingsDialog {{ background: {DesignTokens.bg_main}; }}")
+            self.nav_list.setStyleSheet(apple_settings_nav_style() +
+                f"QListWidget#WorkspaceSettingsNavigation {{ background: {DesignTokens.bg_settings_nav}; border: none; padding: 6px; }}"
+                "QListWidget#WorkspaceSettingsNavigation::item { padding: 10px 8px; margin: 1px 0; }")
+            if hasattr(self, "settings_search_results"):
+                self.settings_search_results.setStyleSheet(
+                    f"QListWidget#SettingsSearchResults {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; border-radius: 6px; padding: 4px; }}"
+                    f"QListWidget#SettingsSearchResults::item {{ color: {DesignTokens.text_primary}; padding: 9px 12px; border-radius: 4px; }}"
+                    f"QListWidget#SettingsSearchResults::item:selected {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}")
         self.nav_combo.setStyleSheet(apple_combo_style())
         if hasattr(self, "settings_search"):
             self.settings_search.setStyleSheet(apple_search_field_style())
         for page in self.findChildren(QWidget, "SettingsPageContent"):
-            set_stylesheet_if_changed(page, "QWidget#SettingsPageContent { background: palette(window); }")
+            background = DesignTokens.bg_main if self.domain == "settings" else "palette(window)"
+            set_stylesheet_if_changed(page, f"QWidget#SettingsPageContent {{ background: {background}; }}")
         for label in self.findChildren(QLabel, "SettingsPageIntro"):
             label.setStyleSheet(apple_settings_inline_note_style())
         if hasattr(self, "settings_dirty_label"):
@@ -12876,6 +12905,10 @@ class SettingsDialog(QDialog):
             self.settings_action_bar.setVisible((self.domain != "capabilities" or self._settings_dirty) and self._page_labels[self._active_settings_row] not in {"项目", "对话", "归档"})
 
     def _activate_settings_search(self):
+        if self.domain == "settings":
+            if self._settings_search_matches:
+                self._open_settings_search_result(self.settings_search_results.currentItem() or self.settings_search_results.item(0))
+            return
         from ui.settings_sections import SettingsSection
         query = self.settings_search.text().strip().casefold()
         def title_match(item):
@@ -12910,6 +12943,96 @@ class SettingsDialog(QDialog):
                 words.extend(page.pages)
             words.extend(label.text() for label in page.findChildren(QLabel))
             self.nav_list.item(row).setHidden(bool(query) and query not in " ".join(words).casefold())
+        if self.domain == "settings" and hasattr(self, "settings_search_results"):
+            self._update_settings_search_results(query)
+
+    def _update_settings_search_results(self, query):
+        from ui.settings_sections import SettingsSection
+        self.settings_search_results.clear()
+        self._settings_search_matches = []
+        if not query:
+            self.settings_search_results.hide()
+            return
+        matches = []
+        for row, page in enumerate(self._settings_pages):
+            sections = page.pages.items() if isinstance(page, SettingsSection) else [("", page)]
+            for section, child in sections:
+                category = self._page_labels[row]
+                path = " › ".join(part for part in (category, section) if part)
+                if query in (section or category).casefold():
+                    matches.append((0, path, row, section, child, None))
+                seen = set()
+                description_match = False
+                field_match = False
+                for label in child.findChildren(QLabel):
+                    ancestor = label
+                    while ancestor is not child and ancestor is not None and not ancestor.isHidden():
+                        ancestor = ancestor.parentWidget()
+                    if ancestor is not child:
+                        continue
+                    title = re.sub(r"<[^>]+>", "", label.text()).strip().replace("\n", " ")
+                    if not title or query not in title.casefold() or title in seen:
+                        continue
+                    if len(title) > 48:
+                        description_match = True
+                        continue
+                    seen.add(title)
+                    field_match = True
+                    matches.append((1, f"{title}  ·  {path}", row, section, child, label))
+                if description_match and not field_match and query not in (section or category).casefold():
+                    matches.append((2, path, row, section, child, None))
+        self._settings_search_matches = sorted(matches, key=lambda item: (item[0], len(item[1])))[:8]
+        for match in self._settings_search_matches:
+            self.settings_search_results.addItem(match[1])
+        if not self._settings_search_matches:
+            item = QListWidgetItem("没有找到相关设置，请换个关键词。")
+            item.setFlags(Qt.NoItemFlags)
+            self.settings_search_results.addItem(item)
+        else:
+            self.settings_search_results.setCurrentRow(0)
+        self.settings_search_results.setFixedHeight(min(240, 12 + self.settings_search_results.count() * max(40, self.settings_search_results.fontMetrics().height() + 18)))
+        self.settings_search_results.show()
+
+    def _open_settings_search_result(self, item):
+        index = self.settings_search_results.row(item)
+        if not 0 <= index < len(self._settings_search_matches):
+            return
+        _, _, row, section, page, label = self._settings_search_matches[index]
+        self.nav_list.setCurrentRow(row)
+        if section:
+            self._settings_pages[row].select(section)
+        self.settings_search_results.hide()
+        if label is not None:
+            def reveal():
+                if not _qt_object_alive(self) or not _qt_object_alive(label):
+                    return
+                ancestor = label.parentWidget()
+                while ancestor is not None and ancestor is not self:
+                    if isinstance(ancestor, QScrollArea):
+                        ancestor.ensureWidgetVisible(label, 20, 40)
+                        break
+                    ancestor = ancestor.parentWidget()
+                buddy = label.buddy()
+                if buddy is not None:
+                    buddy.setFocus(Qt.OtherFocusReason)
+            QTimer.singleShot(0, reveal)
+        log_ui_navigation("settings_search_navigate", page=self._page_labels[row], section=section)
+
+    def eventFilter(self, watched, event):
+        if self.domain == "settings" and event.type() == QEvent.KeyPress and watched in (
+                getattr(self, "settings_search", None), getattr(self, "settings_search_results", None)):
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._activate_settings_search()
+                return True
+            if event.key() == Qt.Key_Escape:
+                self.settings_search.clear()
+                self.settings_search.setFocus()
+                return True
+            if event.key() == Qt.Key_Down and watched is self.settings_search and self._settings_search_matches:
+                self.settings_search_results.show()
+                self.settings_search_results.setFocus()
+                return True
+        return super().eventFilter(watched, event)
 
     def select_memory_workspace(self, path):
         if path == self.memory_workspace_dir:
@@ -15431,7 +15554,10 @@ class SkillsCenterDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 12, 24, 20)
-        root.setSpacing(20)
+        root.setSpacing(16)
+        self.capability_header = ProductPageHeader("让工作多一种可能", "找到合适的技能、连接器和专家，在对话中一起使用。")
+        self.capability_header.title_label.setProperty("roleTitle", False)
+        root.addWidget(self.capability_header)
         self.section_control = CapabilityTabs([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "专家")], current="skills")
         self.section_control.currentChanged.connect(self.select_section)
         root.addWidget(self.section_control)
@@ -15448,9 +15574,7 @@ class SkillsCenterDialog(QDialog):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(12)
-        header = ProductPageHeader("技能", "找到能帮你完成任务的技能，开启后在对话中使用。")
-        header.title_label.setProperty("roleTitle", False)
-        header_row.addWidget(header, 1, Qt.AlignTop)
+        header_row.addStretch()
         self.import_skill_btn = QPushButton("添加技能")
         self.import_skill_btn.setObjectName("CapabilityImportSkill")
         self.import_skill_btn.setStyleSheet(product_button_style("primary"))
@@ -15464,7 +15588,7 @@ class SkillsCenterDialog(QDialog):
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self.advanced_btn.clicked.connect(self._open_advanced_management)
         self.advanced_btn.hide()
-        layout.addLayout(header_row)
+        self.capability_header.layout().addLayout(header_row)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("CapabilityLibrarySearch")
@@ -15500,7 +15624,7 @@ class SkillsCenterDialog(QDialog):
         self.hub_refresh_btn.clicked.connect(self._refresh_hub_catalog)
         self.hub_refresh_btn.hide()
         browse_bar.addWidget(self.hub_refresh_btn)
-        layout.insertLayout(1, browse_bar)
+        layout.insertLayout(0, browse_bar)
         self.builtin_back = QPushButton("返回技能")
         self.builtin_back.clicked.connect(lambda: self._set_mode(getattr(self, "_before_builtin", "library") if self.current_mode == "builtin" else "library"))
         self.builtin_back.hide()
@@ -15584,6 +15708,7 @@ class SkillsCenterDialog(QDialog):
             self.management_page.select_initial_page("MCP 服务" if section == "mcp" else "专家")
             self.section_stack.setCurrentWidget(self.management_page)
         self.current_section = section
+        self.import_skill_btn.setVisible(section == "skills")
         self.section_control.set_current(section)
         return True
 
@@ -20207,14 +20332,14 @@ class EmptyStateWidget(QWidget):
         super().__init__()
         self.main_window = main_window
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 24, 0, 24)
+        layout.setContentsMargins(0, 56, 0, 24)
         layout.setSpacing(12)
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignTop)
         
         # Title
-        self.eyebrow_label = QLabel("开始一件有价值的事", self)
+        self.eyebrow_label = QLabel("从一个想法，开始今天的工作", self)
         self.title_label = QLabel("今天，想一起完成什么？", self)
-        self.title_label.setStyleSheet(f"font-size: 28px; font-weight: 600; color: {DesignTokens.text_primary};")
+        self.title_label.setStyleSheet(f"font-size: 28px; font-weight: 500; color: {DesignTokens.text_primary};")
         self.title_label.setWordWrap(True)
         self.title_label.setAlignment(Qt.AlignLeft)
         self.subtitle_label = QLabel("整理资料、分析数据，或把一个想法做出来。", self)
@@ -20276,7 +20401,6 @@ class EmptyStateWidget(QWidget):
             btn = self.create_action_card(action)
             self.action_cards.append(btn)
             
-        layout.addStretch()
         layout.addWidget(self.eyebrow_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
@@ -20291,10 +20415,17 @@ class EmptyStateWidget(QWidget):
         recent_layout.setContentsMargins(0, 0, 0, 0)
         recent_layout.setSpacing(4)
         self.recent_label = QLabel("继续最近的任务", self.recent_section)
-        recent_layout.addWidget(self.recent_label)
+        recent_header = QHBoxLayout()
+        recent_header.addWidget(self.recent_label)
+        recent_header.addStretch()
+        self.recent_all_btn = QPushButton("查看全部", self.recent_section)
+        self.recent_all_btn.setCursor(Qt.PointingHandCursor)
+        self.recent_all_btn.clicked.connect(lambda: self.main_window.open_project_management("对话"))
+        recent_header.addWidget(self.recent_all_btn)
+        recent_layout.addLayout(recent_header)
         self.recent_buttons = []
         for _ in range(2):
-            button = QPushButton(self.recent_section)
+            button = HomeRecentButton(self.recent_section)
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, target=button: self.main_window.load_session(target.property("sessionId")))
             recent_layout.addWidget(button)
@@ -20647,11 +20778,12 @@ class EmptyStateWidget(QWidget):
         self.title_label.setText(content.get("home.title", "今天，想一起完成什么？"))
         for label in (self.eyebrow_label, self.subtitle_label, self.recent_label):
             label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px; background: transparent;")
-        self._theme_component_bases["home.title"] = f"font-size: 28px; font-weight: 600; color: {DesignTokens.text_primary};"
+        self._theme_component_bases["home.title"] = f"font-size: 28px; font-weight: 500; color: {DesignTokens.text_primary};"
         self.home_options.setStyleSheet(apple_button_style("ghost", radius=6))
         self.home_options.setIcon(qta.icon("fa5s.chevron-down" if self.home_options.isChecked() else "fa5s.chevron-right", color=DesignTokens.text_secondary))
+        self.recent_all_btn.setStyleSheet(apple_button_style("ghost", radius=6))
         for button in self.recent_buttons:
-            button.setStyleSheet(apple_button_style("ghost", radius=6) + "QPushButton { text-align: left; padding: 10px 0; }")
+            button.refresh_theme()
         defaults = {
             "ppt": ("PPT 助手", "创建或整理演示文稿"),
             "finance": ("进行金融分析", "万得 + 东方财富（需配置 Key）"),
@@ -23107,8 +23239,9 @@ class AssistantTurnGroup(QFrame):
         self.group_layout.setContentsMargins(0, 0, 0, 0)
         self.group_layout.setSpacing(0)
         self.group_layout.setAlignment(Qt.AlignTop)
-        self.agent_name_label = agent_identity_label(None, self)
-        self.group_layout.addWidget(self.agent_name_label)
+        self.identity_header = ConversationIdentityHeader(self)
+        self.agent_name_label = self.identity_header.name_label
+        self.group_layout.addWidget(self.identity_header)
         self.process_disclosure = QPushButton(self)
         self.process_disclosure.setObjectName("HistoricalProcessDisclosure")
         self.process_disclosure.setCheckable(True)
@@ -23139,9 +23272,8 @@ class AssistantTurnGroup(QFrame):
                 )
 
     def set_agent_identity(self, identity):
-        name = str((identity or {}).get("name") or "")
+        name = str((identity or {}).get("name") or "Cowork")
         self.agent_name_label.setText(name)
-        self.agent_name_label.setVisible(bool(name))
 
     def add_stage(self, bubble, stage_id=None):
         if bubble is None:
@@ -23170,6 +23302,8 @@ class AssistantTurnGroup(QFrame):
         bubble.ui_turn_group_id = self.group_id
         bubble.ui_stage_id = str(stage_id or f"{self.group_id}:stage-{len(self.stage_bubbles) + 1}")
         self.stage_bubbles.append(bubble)
+        if getattr(bubble, "identity_header", None) is not None:
+            bubble.identity_header.hide()
         self.group_layout.addWidget(bubble)
         self.sync_stage_visibility()
         return bubble
@@ -23432,6 +23566,7 @@ class SummonedAgentProcessBlock(QFrame):
         layout.addLayout(header)
 
         self.turn_group = AssistantTurnGroup(group_id or f"summoned-agent-{self.agent_id}", self)
+        self.turn_group.identity_header.hide()
         layout.addWidget(self.turn_group)
         bind_theme(self, self.refresh_theme, surface="conversation")
         self.refresh_theme()
@@ -23705,7 +23840,7 @@ class ChatBubble(QFrame):
                 bubble_frame.setStyleSheet(f"""
                     QFrame#UserBubbleFrame {{
                         background: {DesignTokens.bg_user_bubble};
-                        border: 1px solid {DesignTokens.border_settings_summary};
+                        border: none;
                         border-radius: 8px;
                     }}
                 """)
@@ -23814,6 +23949,8 @@ class ChatBubble(QFrame):
             col_layout.setContentsMargins(0, 0, 0, 0)
             col_layout.setSpacing(DesignTokens.assistant_stage_content_gap)
             col_layout.setAlignment(Qt.AlignTop)
+            self.identity_header = ConversationIdentityHeader(content_col)
+            col_layout.addWidget(self.identity_header)
             
             # One conversational deep-thinking segment. Tools triggered by
             # this segment live inside the same foldable container.
@@ -23888,6 +24025,8 @@ class ChatBubble(QFrame):
             
             # 2. Main Content
             self.content_rich_edit = AutoResizingTextEdit()
+            self.content_rich_edit.document().setDefaultStyleSheet(
+                "p, li { line-height: 150%; } li { margin-bottom: 6px; }")
             self.content_rich_edit.linkActivated.connect(self._handle_content_link)
             self.content_plain_edit = AutoResizingPlainTextEdit()
             self.content_rich_edit.heightChanged.connect(self._refresh_conversation_geometry)
@@ -24004,7 +24143,7 @@ class ChatBubble(QFrame):
             self.user_bubble_frame.setMaximumWidth(DesignTokens.user_bubble_max_width)
             self.user_bubble_frame.setStyleSheet(
                 f"QFrame#UserBubbleFrame {{ background: {DesignTokens.bg_user_bubble}; "
-                f"border: 1px solid {DesignTokens.chat_border}; "
+                "border: none; "
                 f"border-radius: {DesignTokens.radius_md}px; }}"
             )
         if self.user_content_edit is not None:
@@ -24334,7 +24473,7 @@ class ChatBubble(QFrame):
             self.user_bubble_frame.setStyleSheet(f"""
                 QFrame#UserBubbleFrame {{
                     background: {DesignTokens.bg_user_bubble};
-                    border: 1px solid {DesignTokens.border_settings_summary};
+                    border: none;
                     border-radius: 8px;
                 }}
             """)
@@ -25076,7 +25215,7 @@ class OfficeDraftTaskCard(QFrame):
         header_layout.addWidget(self.toggle_btn)
         layout.addWidget(header)
 
-        self.retry_failure_notice = ProductInlineNotice("", "error", self)
+        self.retry_failure_notice = ConversationRunNotice("", "error", self)
         self.retry_failure_notice.setProperty("officeRetryFailure", True)
         self.retry_failure_notice.setAccessibleName("任务失败与重试")
         self.retry_failure_notice.setMinimumWidth(300)
@@ -31098,9 +31237,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def _refresh_home_recent(self):
         if not hasattr(self, "home_page"):
             return
+        projects = self.config_manager.get_projects(include_hidden=True)
         hidden_projects = {
             self._project_key(item.get("path"))
-            for item in self.config_manager.get_projects(include_hidden=True)
+            for item in projects
             if item.get("hidden") or item.get("archived")
         }
         recent = []
@@ -31119,8 +31259,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 record = recent[index]
                 button.setProperty("sessionId", record["id"])
                 title = str(record.get("title") or "新任务")
-                button.setText(button.fontMetrics().elidedText(title, Qt.ElideRight, max(160, self.conversation_column.width() - 60)))
-                button.setToolTip(title)
+                workspace = self._conversation_workspace_path(record)
+                meta = record.get("meta") or {}
+                project_meta = next((item for item in projects if self._project_key(item.get("path")) == self._project_key(workspace)), None)
+                project = self._project_display_name(workspace, project_meta) if meta.get("workspace_source") == "project" else "独立聊天"
+                age = self._format_project_session_age(record.get("updated_at"))
+                button.set_record(title, " · ".join(part for part in (project, age) if part))
         self.home_page.recent_section.setVisible(bool(recent))
 
     def _sync_home_presentation(self):
@@ -31129,6 +31273,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state = self.get_current_session()
         show_home = bool(state and state.empty_state is not None and session_history_ready(state)
                          and not self._session_has_live_activity(state.session_id))
+        if getattr(self, "current_product_route", self.PAGE_CONVERSATION) == self.PAGE_CONVERSATION:
+            self.workspace_title_label.setVisible(not show_home)
         if self._home_presentation_active != show_home:
             self._home_presentation_active = show_home
             source = self.main_content_layout if show_home else self.home_page.composer_layout
@@ -32722,6 +32868,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 min(DesignTokens.conversation_closed_max_width, shell_width),
             )
         conversation_width = min(conversation_width, max_conversation_width)
+        if not drawer_open and getattr(self, "_home_presentation_active", False):
+            conversation_width = min(conversation_width, 840)
         if not drawer_open and shell_width >= DesignTokens.conversation_min_width:
             conversation_width = max(conversation_width, min_conversation_width)
         else:
@@ -43608,7 +43756,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if notice is not None and _qt_object_alive(notice):
             notice.set_text(text, tone)
         else:
-            notice = ProductInlineNotice(text, tone)
+            notice = ConversationRunNotice(text, tone)
             state.conversation_notice = notice
             state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
         previous_callback = getattr(notice, "_conversation_action_callback", None)
@@ -48797,6 +48945,7 @@ a {{ overflow-wrap: anywhere; }}
             self.PAGE_SETTINGS: ("设置", "配置应用偏好、模型连接与运行环境。"),
         }
         title, subtitle = titles[route]
+        self.workspace_title_label.show()
         self.workspace_title_label.setText(title)
         self.workspace_title_label.setCursor(Qt.ArrowCursor)
         self.workspace_title_label.setFocusPolicy(Qt.NoFocus)

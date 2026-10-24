@@ -4,9 +4,9 @@
 
 ## 开始和继续任务
 
-新对话的输入区位于首页标题下方。可以直接描述任务，使用四个快捷入口，或继续最近的两项任务。“工作台选项”保留主题定制和工具箱入口。
+新对话的输入区位于首页标题下方，尚未开始对话时不显示左上角的“新对话”标题。可以直接描述任务，使用四个快捷入口，或继续最近的两项任务。最近任务显示名称、所属项目和更新时间；“查看全部”进入现有对话管理页。“工作台选项”保留主题定制和工具箱入口。
 
-![首页](images/workspace-redesign/home-light-100.png)
+![首页](images/focused-workspace/home-light-100.png)
 
 进入对话后，输入区固定在底部，消息在中间独立滚动。切换对话保留各自草稿。点击顶部标题或聚焦后按 `F2` 可改名，`Enter` 或鼠标左键点击别处保存、`Esc` 取消；没有修改时直接退出编辑，保存失败会保留原名称并提示原因。
 
@@ -24,7 +24,13 @@
 
 “用量”保留完整用量浮窗；时钟图标“历史提问”可以跳到某次提问。搜索图标或 `Ctrl+F` 打开当前对话搜索，包含尚未展开的历史消息；每条命中消息记一项，`Enter / Shift+Enter` 切换下一条 / 上一条，`Esc` 关闭，切换会话清空搜索。链接使用可区分的颜色、下划线与加粗。回答末尾保留复制、重新生成、分支和更多操作，悬停图标可查看说明。
 
-![对话](screenshots/chat-experience/conversation-1x.png)
+用户提问的时间、编辑和复制在鼠标悬停时显示，移开后隐藏。回答显示 Cowork 或当前专家名称，思考过程继续使用现有折叠方式。多文件回复默认显示 3 项及总数量，可展开、收起，点击文件沿用现有预览。失败提示集中展示实际原因，以及当前可用的重试和错误详情入口。
+
+![对话](images/focused-workspace/conversation-light-100.png)
+
+![多文件回复](images/focused-workspace/conversation-files-light-100.png)
+
+![失败与恢复入口](images/focused-workspace/conversation-failure-light-100.png)
 
 ![技能、附件与单行工具栏](screenshots/chat-experience/small-1x.png)
 
@@ -52,16 +58,22 @@
 
 团队空间、能力、常用任务、资料库和设置保留原有信息结构及操作，使用统一主题。设置页复用已打开页面；配置发生变化后重新加载，未保存内容仍按原流程确认。输入区操作统一从“+”进入，右侧面板内容可滚动，深色主题也使用同一套布局。
 
+能力页将标题与添加入口集中在顶部，技能、MCP 服务和专家沿用原有切换与配置流程。卡片收紧留白，按窗口宽度重排。
+
+设置页采用白色内容区和浅灰分类导航，具体颜色服从当前主题。搜索显示可点击的设置项与所在分类，点击或按 `Enter` 定位；向下键进入结果列表，`Esc` 清空搜索。主题风格之后直接展示字体、文字大小和密度，效果示例放在阅读设置后面。即时切换主题、保存阅读偏好及取消 AI 主题预览继续沿用各自的保存边界。
+
+![设置搜索](images/focused-workspace/settings-search-light-100.png)
+
 切换技能、专家、历史对话或资料库来源时，选择列表和连接表单保持在主窗口内。相关控件在构造时就归属于页面，避免短暂闪出带系统标题栏的空白小窗口。检查范围和 Windows 原生窗口验证记录见[子控件窗口检查](screenshots/child-window-audit/README.md)。
 
 | 页面 | 浅色截图 | 深色与 150% 缩放截图 |
 | --- | --- | --- |
-| 首页 | [查看](images/workspace-redesign/home-light-100.png) | [查看](images/workspace-redesign/home-dark-150-compact.png) |
+| 首页 | [查看](images/focused-workspace/home-light-100.png) | [查看](images/focused-workspace/home-dark-150-compact.png) |
 | 团队空间 | [查看](images/workspace-redesign/team_spaces-light-100.png) | [查看](images/workspace-redesign/team_spaces-dark-150-compact.png) |
-| 能力 | [查看](images/workspace-redesign/capabilities-light-100.png) | [查看](images/workspace-redesign/capabilities-dark-150-compact.png) |
+| 能力 | [查看](images/focused-workspace/capabilities-light-100.png) | [查看](images/focused-workspace/capabilities-dark-150-compact.png) |
 | 常用任务 | [查看](images/workspace-redesign/favorites-light-100.png) | [查看](images/workspace-redesign/favorites-dark-150-compact.png) |
 | 资料库 | [查看](images/workspace-redesign/knowledge-light-100.png) | [查看](images/workspace-redesign/knowledge-dark-150-compact.png) |
-| 设置 | [查看](images/workspace-redesign/settings-light-100.png) | [查看](images/workspace-redesign/settings-dark-150-compact.png) |
+| 设置 | [查看](images/focused-workspace/settings-light-100.png) | [查看](images/focused-workspace/settings-dark-150-compact.png) |
 
 截图使用隔离的示例数据；团队空间、资料库展示未连接状态。它们验证界面布局，不代表已验证外部账号登录、网络服务或真实模型运行。
 
@@ -75,3 +87,16 @@
 ```
 
 脚本使用临时配置和 Qt 离屏窗口，不读取个人会话、不调用模型；结束时检查主题预览未写入已保存配置。
+
+仅复查首页、聊天展示、能力和设置的本轮调整：
+
+```powershell
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --focused
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --focused --scale 1.5 --compact
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --focused --mode dark --scale 1.5 --compact
+.venv/Scripts/python.exe -X utf8 -B -m pytest -q -s test/test_workspace_presentation.py test/test_conversation_runtime_fixes.py test/test_settings_redesign.py test/test_chat_experience.py test/test_settings_ui_styles.py test/test_theme_settings_ui.py test/test_capability_cards.py
+```
+
+`--focused` 将截图保存到 `images/focused-workspace/`，覆盖默认、用户消息悬停、多文件、失败和设置搜索状态；普通窗口为 1440×900，紧凑窗口为 760×760。故障截图使用隔离的模拟错误，不代表真实模型请求失败。
+
+本轮相关测试 75 项及 9 个子测试通过；补充检查中，用户消息悬停、失败重试及既有思考展示等 7 项通过。`test_completed_live_turn_folds_process_and_can_expand_it_again` 仍有一处旧断言失败：它要求展开执行过程时同时展开各阶段的思考详情，而当前实现保留各阶段的折叠状态。使用 `HEAD:main.py` 的原始 `AssistantTurnGroup` 与 `ChatBubble` 复现了同一失败，本轮按要求保留现有思考交互。

@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest, QSignalSpy
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
@@ -67,7 +68,8 @@ class SettingsRedesignTests(unittest.TestCase):
     def wait_for(self, predicate):
         deadline = time.monotonic() + 3
         while not predicate() and time.monotonic() < deadline:
-            QTest.qWait(10)
+            self.app.processEvents()
+            time.sleep(.01)
         self.assertTrue(predicate())
 
     def panel(self):
@@ -104,7 +106,7 @@ class SettingsRedesignTests(unittest.TestCase):
         self.assertEqual(self.app.styleSheet(), stylesheet)
         from PySide6.QtGui import QPalette
         self.assertEqual(parent.main_container.palette().color(QPalette.Base).name(), DesignTokens.overlay_bg)
-        self.assertEqual(page.grab().toImage().pixelColor(2, 2).name(), DesignTokens.bg_app)
+        self.assertEqual(page.grab().toImage().pixelColor(2, 2).name(), DesignTokens.bg_main)
 
     def test_quick_switch_alone_does_not_mark_settings_dirty(self):
         _parent, page = self.panel()
@@ -116,9 +118,29 @@ class SettingsRedesignTests(unittest.TestCase):
     def test_search_opens_matching_nested_section(self):
         _parent, page = self.panel()
         page.settings_search.setText("日志")
-        page._activate_settings_search()
+        save_clicks = QSignalSpy(page.save_settings_btn.clicked)
+        QTest.keyClick(page.settings_search, Qt.Key_Return)
         self.assertEqual(page._page_labels[page._active_settings_row], "高级与维护")
         self.assertEqual(page.advanced_section.current_label, "运行日志")
+        self.assertEqual(save_clicks.count(), 0)
+
+    def test_search_results_navigate_without_discarding_drafts(self):
+        _parent, page = self.panel()
+        page.theme_settings_panel.reading_scale.setValue(1.2)
+        page.settings_search.setText("字体")
+        self.assertTrue(page._settings_search_matches)
+        self.assertFalse(any("等宽字体" in match[1] for match in page._settings_search_matches))
+        field_index = next(index for index, match in enumerate(page._settings_search_matches) if match[-1] is not None and match[-1].text() == "界面字体")
+        page._open_settings_search_result(page.settings_search_results.item(field_index))
+        self.assertEqual(page._page_labels[page._active_settings_row], "外观与阅读")
+        self.assertEqual(page.theme_settings_panel.reading_scale.value(), 1.2)
+        self.assertTrue(page._settings_dirty)
+        page.settings_search.setText("没有这项设置_xyz")
+        self.assertFalse(page._settings_search_matches)
+        self.assertIn("没有找到", page.settings_search_results.item(0).text())
+        page.settings_search.clear()
+        self.assertTrue(page.settings_search_results.isHidden())
+        self.assertTrue(all(not page.nav_list.item(index).isHidden() for index in range(page.nav_list.count())))
 
     def test_failed_settings_save_preserves_theme_and_reading_drafts(self):
         _parent, page = self.panel()

@@ -218,6 +218,7 @@ class ThemeSettingsPanel(QWidget):
         box.addWidget(self.mode_hint)
         self.selection_status = QLabel()
         self.selection_status.setWordWrap(True)
+        self.selection_status.hide()
         box.addWidget(self.selection_status)
         library = QHBoxLayout()
         self.saved_theme_combo = _ClickActivatedComboBox()
@@ -233,7 +234,6 @@ class ThemeSettingsPanel(QWidget):
         layout.addWidget(frame)
 
         self.sample = ThemePreviewSample()
-        layout.addWidget(self.sample)
         frame, box = self._section("阅读体验", "调整只影响阅读，保存后应用；更换主题会保留这些偏好。")
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -258,6 +258,8 @@ class ThemeSettingsPanel(QWidget):
         self._load_reading()
         for signal in (self.reading_font.currentFontChanged, self.reading_scale.valueChanged, self.reading_density.currentIndexChanged):
             signal.connect(self._reading_changed)
+
+        layout.addWidget(self.sample)
 
         frame, box = self._section("用 AI 设计主题", "描述喜欢的颜色、氛围和阅读感受。生成过程可继续使用应用，候选主题确认后才会应用。")
         self.ai_description = QPlainTextEdit()
@@ -431,6 +433,7 @@ class ThemeSettingsPanel(QWidget):
             self.selection_status.setText("已切换。可使用“撤销切换”恢复。")
         except Exception as exc:
             self.selection_status.setText(f"切换失败，原主题已保留：{exc}")
+        self.selection_status.show()
         self._sync_hub_selection()
 
     def _selection_updated(self, _selection):
@@ -509,6 +512,7 @@ class ThemeSettingsPanel(QWidget):
                     reason="settings_candidate_apply")
             self._selection_updated(None)
             self.selection_status.setText("主题已应用。")
+            self.selection_status.show()
         except Exception as exc:
             self.ai_status.setText(f"应用未完成，输入已保留：{exc}")
 

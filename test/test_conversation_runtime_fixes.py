@@ -144,9 +144,9 @@ class ConversationRuntimeFixTests(unittest.TestCase):
             host.resize(360, 350)
             host.show()
             self.app.processEvents()
-            self.assertEqual(table.heading.text(), "文件 · 12")
-            self.assertEqual(table.rows_layout.count(), 5)
-            for index in range(5):
+            self.assertEqual(table.heading.text(), "共 12 个文件")
+            self.assertEqual(table.rows_layout.count(), 3)
+            for index in range(3):
                 row = table.rows_layout.itemAt(index).widget()
                 self.assertLessEqual(row.geometry().right(), table.width())
                 self.assertTrue(row.path_label.text().endswith(".py"))
@@ -162,7 +162,7 @@ class ConversationRuntimeFixTests(unittest.TestCase):
             QTest.keyClick(last, Qt.Key_Space)
             self.assertEqual(opened[-1], paths[-1])
             QTest.mouseClick(table.toggle, Qt.LeftButton)
-            self.assertEqual(table.rows_layout.count(), 5)
+            self.assertEqual(table.rows_layout.count(), 3)
             host.close()
             host.deleteLater()
 
@@ -177,7 +177,7 @@ class ConversationRuntimeFixTests(unittest.TestCase):
             bubble.set_main_content(text, final=True)
             self.app.processEvents()
             self.assertEqual(len(bubble._deliverable_paths), 8)
-            self.assertEqual(bubble.deliverable_cards_layout.count(), 5)
+            self.assertEqual(bubble.deliverable_cards_layout.count(), 3)
             bubble.deleteLater()
 
     @unittest.skipUnless(os.name == "nt", "Windows drive paths")

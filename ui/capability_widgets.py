@@ -135,7 +135,7 @@ class CapabilityCard(QFrame):
         bind_theme(self, self.refresh_theme, surface="management")
 
     def refresh_theme(self, _resolved=None):
-        self.setFixedHeight(max(188, 2 * T.spacing_md + 3 * T.spacing_sm + T.font_size_meta * 7 + 40))
+        self.setFixedHeight(max(166, 2 * T.spacing_md + 3 * T.spacing_sm + T.font_size_meta * 5 + 40))
         self.setStyleSheet(
             f"QFrame#{self.objectName()} {{background: {T.bg_main}; border: 1px solid {T.border_subtle}; border-radius: {T.radius_md}px;}}"
             f"QLabel#CapabilityIcon {{background: {T.bg_secondary}; color: {T.text_secondary}; border: none; border-radius: {T.radius_sm}px;}}"

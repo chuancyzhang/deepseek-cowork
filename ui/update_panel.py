@@ -106,12 +106,7 @@ class UpdatePanel(QWidget):
         self.local.setVisible(not (phase == "error" and state.get("source") == "local"))
         if not self.coordinator.install_enabled and available:
             self.primary.setText("查看新版")
-        if self.coordinator.enterprise_download_url() and not ready:
-            self.primary.setText("打开企业下载页")
         self.primary.setEnabled(phase != "installing" and (not busy or ready or available) and not state.get("install_requested"))
-        if getattr(self.coordinator, "enterprise_connection_error", ""):
-            self.status.setText(self.coordinator.enterprise_connection_error)
-            self.primary.setEnabled(False)
         self.local.setEnabled(self.coordinator.install_enabled and phase != "installing")
         self.cancel_button.setVisible((busy and phase != "installing") or bool(state.get("can_cancel_install")))
         self.cancel_button.setText("取消更新" if state.get("install_requested") or phase == "installing" else "取消下载")
@@ -127,7 +122,12 @@ class UpdatePanel(QWidget):
         self.notes.setText(text if self.notes_expanded else "\n".join(lines[:6]))
         self.expand.setVisible(len(lines) > 6)
         self.expand.setText("收起" if self.notes_expanded else "展开阅读")
-        details = [state.get("error") or "", f"更新文件：{result.get('zip_path', '尚未下载')}",
+        connection = result.get("connection") or self.coordinator.connection
+        if self.coordinator.install_enabled:
+            self.hint.setText((f"从{connection['platform_name']}获取更新。" if connection else "从 GitHub Releases 获取更新。")
+                              + "更新时应用会短暂关闭，完成后自动重新打开。")
+        details = [state.get("error") or "", "更新来源：" + (connection["platform_name"] if connection else "GitHub Releases"),
+                   f"更新文件：{result.get('zip_path', '尚未下载')}",
                    f"诊断记录：{runtime_log_path('app_update', update_log_directory(self.coordinator.root))}"]
         self.details.setPlainText("\n".join(line for line in details if line))
         # Keep all actions reachable at small window widths / high Windows scaling.
@@ -140,10 +140,7 @@ class UpdatePanel(QWidget):
     def act(self):
         state = self.coordinator.snapshot()
         result = state.get("result") or {}
-        enterprise_url = self.coordinator.enterprise_download_url()
-        if enterprise_url and not self.coordinator.prepared:
-            QDesktopServices.openUrl(QUrl(enterprise_url))
-        elif not self.coordinator.install_enabled and result.get("update_available"):
+        if not self.coordinator.install_enabled and result.get("update_available"):
             QDesktopServices.openUrl(QUrl(result["release"]["html_url"]))
         elif state.get("phase") == "error":
             if state.get("source") == "local":

@@ -1,5 +1,6 @@
 """Application-owned update preparation. No widget owns a download or retry timer."""
 import copy
+import hashlib
 import json
 import os
 import threading
@@ -42,6 +43,10 @@ def update_log_directory(root):
     # Production uses data_dir/updates; explicitly supplied test/cache roots
     # remain isolated instead of writing to the current user's app data.
     root = os.path.normpath(root)
+    # Only package caches are channel-scoped; logs and installer transactions
+    # stay at the stable application root, including after an app restart.
+    if os.path.basename(os.path.dirname(root)) == "channels" and len(os.path.basename(root)) == 64:
+        root = os.path.dirname(os.path.dirname(root))
     return os.path.dirname(root) if os.path.basename(root) == "updates" else root
 
 
@@ -50,12 +55,14 @@ def update_log(root, phase, **fields):
                "phase": phase, **fields}, ensure_ascii=False), update_log_directory(root))
 
 
-def load_prepared(root, current_version):
+def load_prepared(root, current_version, connection=None):
     manifest = os.path.join(root, "prepared.json")
     if not os.path.isfile(manifest):
         return None
     with open(manifest, encoding="utf-8") as handle:
         result = json.load(handle)
+    if result.get("connection") != connection:
+        return None
     if not is_newer_version(result["release"]["tag_name"], current_version):
         return None
     zip_path = result.get("zip_path", "")
@@ -69,10 +76,11 @@ def load_prepared(root, current_version):
         return None
     # The ZIP is verified; staging may have been modified since the previous run.
     result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
+    backend.validate_online_package(result["staged_app_dir"], connection)
     return result
 
 
-def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id=""):
+def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id="", connection=None):
     """One retry budget across check and download; successful checks do not reset it."""
     result = None
     downloads = os.path.join(root, "downloads")
@@ -81,12 +89,16 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
         try:
             if result is None:
                 emit("checking", message="正在检查更新…", attempt=attempt)
-                release = backend.fetch_latest_release()
+                release = backend.fetch_enterprise_release(connection) if connection else backend.fetch_latest_release()
                 backend.check_cancel(cancel)
+                if release is None:
+                    return {"release": {}, "current_version": current_version, "update_available": False,
+                            "update_source": "online", "connection": connection, "install_enabled": install_enabled,
+                            "updates_dir": root, "message": "企业平台暂无推荐版本，请联系管理员发布并推荐客户端。"}
                 version = str(release.get("tag_name") or release.get("name") or "")
                 result = {"release": {"tag_name": version, "body": release.get("body") or "", "html_url": release.get("html_url") or backend.GITHUB_RELEASES_URL},
                           "current_version": current_version, "update_available": is_newer_version(version, current_version),
-                          "update_source": "online", "install_enabled": install_enabled, "updates_dir": root}
+                          "update_source": "online", "connection": connection, "install_enabled": install_enabled, "updates_dir": root}
                 if not result["update_available"]:
                     return result
                 result["asset"] = backend.select_release_asset(release).as_dict()
@@ -105,11 +117,13 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                 matches = identity.get("sha256") == backend._hash_file(expected)
             backend.cleanup_update_artifacts(downloads, keep_paths=[expected] if matches else [])
             progress = lambda message, percent: emit("downloading", message="正在下载更新…", percent=percent if percent is not None else -1, attempt=attempt)
-            zip_path = backend.download_asset(result["asset"], target_dir=downloads, progress_callback=progress, cancel_event=cancel)
+            zip_path = backend.download_asset(result["asset"], target_dir=downloads, progress_callback=progress, cancel_event=cancel,
+                                              **({"connection": connection} if connection else {}))
             atomic_json(identity_path, {"asset": result["asset"], "sha256": backend._hash_file(zip_path)})
             backend.check_cancel(cancel)
             emit("validating", message="正在准备安装包…", percent=-1)
             staged = backend.extract_update_zip(zip_path, target_dir=root)
+            backend.validate_online_package(staged, connection)
             backend.check_cancel(cancel)
             result.update(zip_path=zip_path, staged_app_dir=staged, sha256=backend._hash_file(zip_path))
             atomic_json(os.path.join(root, "prepared.json"), result)
@@ -127,11 +141,12 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
 class UpdateWorker(QThread):
     event = Signal(object)
 
-    def __init__(self, operation, root, install_dir, current_version, install_enabled, payload=None, parent=None):
+    def __init__(self, operation, root, install_dir, current_version, install_enabled, payload=None, parent=None, connection=None):
         super().__init__(parent)
         self.operation, self.root, self.install_dir = operation, root, install_dir
         self.current_version, self.install_enabled = current_version, install_enabled
         self.payload = payload
+        self.connection = copy.deepcopy(connection)
         self.cancel = threading.Event()
         self.result = None
         self.error = None
@@ -146,15 +161,19 @@ class UpdateWorker(QThread):
 
     def run(self):
         try:
-            update_log(self.root, "start", update_id=self.update_id, operation=self.operation)
+            update_log(self.root, "start", update_id=self.update_id, operation=self.operation,
+                       channel="enterprise" if self.connection else "community",
+                       platform_id=(self.connection or {}).get("platform_id"))
             if self.operation == "online":
                 try:
-                    cached = load_prepared(self.root, self.current_version)
+                    # Enterprise caches are reused only after checking the current recommendation.
+                    cached = None if self.connection else load_prepared(self.root, self.current_version)
                     if cached:
                         self.emit_state("ready", message="更新已准备好", result=cached)
                 except (ValueError, KeyError, OSError, backend.UpdaterError) as exc:
                     update_log(self.root, "cache_invalid", error=str(exc))
-                self.result = prepare_online(self.root, self.current_version, self.install_enabled, self.cancel, self.emit_state, update_id=self.update_id)
+                self.result = prepare_online(self.root, self.current_version, self.install_enabled, self.cancel, self.emit_state,
+                                             update_id=self.update_id, connection=self.connection)
             elif self.operation == "local":
                 path = self.payload
                 version = backend.local_update_package_version(path)
@@ -170,9 +189,15 @@ class UpdateWorker(QThread):
                 self.emit_state("planning", message="正在准备安装…", percent=-1)
                 self.result = copy.deepcopy(self.payload)
                 backend.check_cancel(self.cancel)
+                if (self.result.get("update_source") == "online"
+                        and self.result.get("connection") != backend.update_connection(self.install_dir)):
+                    raise backend.UpdaterError("更新来源已改变，请重新检查更新。")
+                if self.result.get("update_source") == "online":
+                    backend.validate_online_package(self.result["staged_app_dir"], self.result.get("connection"))
                 plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"])
                 backend.check_cancel(self.cancel)
                 self.result.update(change_plan=plan, change_summary=plan["summary"], change_plan_path=backend.write_update_plan(plan, self.root))
+                self.result["updates_dir"] = self.root
             self.result["update_id"] = self.update_id
             update_log(self.root, "prepared", update_id=self.update_id, operation=self.operation)
         except Exception as exc:
@@ -190,12 +215,18 @@ class UpdateCoordinator(QObject):
         self.install_dir, self.install_enabled = install_dir, install_enabled
         self.current_version = current_version
         self.root = root or backend.updates_dir()
+        self.cache_root = self.root
+        self.connection = None
         self.worker = None
         self.prepared = None
         self.pending = None
         self.install_requested = False
         self.automatic_started = False
         self.state = {"phase": "idle", "message": "检查是否有可用更新", "percent": -1, "result": {}, "error": ""}
+        try:
+            self.connection = backend.update_connection(self.install_dir)
+        except backend.UpdaterError as exc:
+            self.state.update(phase="error", message=str(exc), error=str(exc), source="online")
 
     def snapshot(self):
         return copy.deepcopy({**self.state, "busy": self.worker is not None, "install_requested": self.install_requested})
@@ -208,38 +239,35 @@ class UpdateCoordinator(QObject):
         if self.automatic_started:
             return
         self.automatic_started = True
-        if self.enterprise_download_url():
-            self.publish(message="企业客户端请从企业平台下载更新，再选择本地安装包。")
-            return
         if self.worker is None:
             self.check()
 
     def check(self):
         self.automatic_started = True
-        enterprise_url = self.enterprise_download_url()
-        if getattr(self, "enterprise_connection_error", ""):
-            self.publish(phase="error", message=self.enterprise_connection_error, error=self.enterprise_connection_error)
-            return
-        if enterprise_url:
-            self.publish(message="请在企业平台下载更新，再选择本地安装包。")
-            return
         if self.worker is None:
+            try:
+                connection = backend.update_connection(self.install_dir)
+            except backend.UpdaterError as exc:
+                self.install_requested = False
+                self.prepared = None
+                update_log(self.root, "source_error", error=str(exc))
+                self.publish(phase="error", message=str(exc), error=str(exc), result={}, source="online")
+                return
+            if connection != self.connection:
+                self.prepared = None
+                self.state["result"] = {}
+            self.connection = connection
+            if connection:
+                key = hashlib.sha256(json.dumps(connection, sort_keys=True).encode("utf-8")).hexdigest()
+                self.cache_root = os.path.join(self.root, "channels", key)
+            else:
+                self.cache_root = self.root
             self._start("online")
 
-    def enterprise_download_url(self):
-        from core.enterprise_connection import read_connection
-        from core.enterprise_client import EnterpriseStore
-        import sqlite3
-        self.enterprise_connection_error = ""
-        try:
-            connection = EnterpriseStore().read().get("connection") or read_connection(self.install_dir)
-            return connection["platform_url"] + "/downloads" if connection else ""
-        except (ValueError, OSError, sqlite3.DatabaseError, TypeError, KeyError):
-            self.enterprise_connection_error = "企业连接文件或本机状态无法读取，请在企业账号中检查后再更新。"
-            return ""
-
     def _start(self, operation, payload=None):
-        self.worker = UpdateWorker(operation, self.root, self.install_dir, self.current_version, self.install_enabled, payload, self)
+        work_root = self.cache_root if operation == "online" else self.root
+        self.worker = UpdateWorker(operation, work_root, self.install_dir, self.current_version, self.install_enabled, payload, self,
+                                   connection=self.connection)
         self.worker.event.connect(self._event)
         self.worker.finished.connect(self._finished)
         self.publish(error="", source="local" if operation == "local" else "online" if operation == "online" else self.state.get("source", "online"))
@@ -314,8 +342,12 @@ class UpdateCoordinator(QObject):
                 return
             self.install_requested = False
             message = "暂时无法下载更新，可重试或选择本地安装包" if isinstance(worker.error, backend.UpdateNetworkError) else str(worker.error)
-            if self.prepared:
+            cached_available = (self.prepared and worker.operation == "online" and not self.connection
+                                and isinstance(worker.error, backend.UpdateNetworkError))
+            if cached_available:
                 message = "更新已准备好，可直接安装；暂时无法检查其他更新"
+            else:
+                self.prepared = None
             self.publish(phase="ready" if self.prepared else "error", message=message, error=str(worker.error), percent=-1)
             return
         result = worker.result
@@ -331,7 +363,8 @@ class UpdateCoordinator(QObject):
         else:
             self.prepared = None
             self.install_requested = False
-            self.publish(phase="available" if result["update_available"] else "current", message="发现新版本" if result["update_available"] else "当前已是最新版本", result=result, percent=-1)
+            self.publish(phase="available" if result["update_available"] else "current",
+                         message=result.get("message") or ("发现新版本" if result["update_available"] else "当前已是最新版本"), result=result, percent=-1)
 
     def install_aborted(self, message="更新已准备好，尚未安装"):
         self.install_requested = False

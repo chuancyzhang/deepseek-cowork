@@ -9,6 +9,8 @@ import time
 import zipfile
 import uuid
 from dataclasses import dataclass
+from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import requests
 
@@ -96,6 +98,91 @@ def fetch_latest_release(timeout=12):
     if data.get("draft") or data.get("prerelease"):
         raise UpdaterError("最新 Release 不是正式版本。")
     return data
+
+
+def update_connection(install_dir):
+    """The installed distribution chooses the channel, not a past account login."""
+    from core.enterprise_connection import read_connection, validate_connection
+    from core.enterprise_client import EnterpriseStore
+    import sqlite3
+    try:
+        packaged = read_connection(install_dir)
+        if packaged is None:
+            return None
+        return validate_connection(EnterpriseStore().read().get("connection") or packaged)
+    except (ValueError, OSError, sqlite3.DatabaseError, TypeError, KeyError) as exc:
+        raise UpdaterError("企业连接文件或本机状态无法读取，请在企业账号中检查后再更新。") from exc
+
+
+def validate_online_package(staged_app_dir, connection):
+    from core.enterprise_connection import read_connection, check_update_connection, EnterpriseConfigurationError
+    try:
+        candidate = read_connection(staged_app_dir)
+        check_update_connection(connection, candidate)
+        if connection is None and candidate is not None:
+            raise UpdaterError("社区更新服务返回了企业安装包，请检查发布文件。")
+    except EnterpriseConfigurationError as exc:
+        raise UpdaterError(str(exc)) from None
+
+
+@contextmanager
+def _update_response(url, *, connection=None, **kwargs):
+    if connection is None:
+        with requests.get(url, **kwargs) as response:
+            yield response
+        return
+    base = connection["platform_url"]
+    if not url.startswith(base + "/api/v1/"):
+        raise UpdaterError("企业更新地址不属于当前平台。")
+    with requests.Session() as session:
+        # Windows system proxies may intercept local development deployments.
+        session.trust_env = urlsplit(base).hostname not in {"localhost", "127.0.0.1", "::1"}
+        with session.get(url, allow_redirects=False, **kwargs) as response:
+            if 300 <= response.status_code < 400:
+                raise UpdaterError("企业更新服务发生重定向，请检查企业平台地址。")
+            if url.endswith("/download") and response.status_code in {404, 410}:
+                raise UpdaterError("企业安装包已撤回或不可用，请重新检查更新或联系管理员。")
+            yield response
+
+
+def fetch_enterprise_release(connection, timeout=12):
+    base = connection["platform_url"]
+    def read(path):
+        try:
+            with _update_response(base + path, connection=connection, timeout=timeout) as response:
+                response.raise_for_status()
+                data = response.json()
+        except UpdaterError:
+            raise
+        except Exception as exc:
+            raise _network_error(exc, "无法读取企业更新服务") from exc
+        if not isinstance(data, dict):
+            raise UpdaterError("企业更新服务返回格式无效。")
+        return data
+    info = read("/api/v1/platform-info")
+    if info.get("platform_id") != connection["platform_id"]:
+        raise UpdaterError("企业更新服务的平台标识与当前连接不一致。")
+    if not isinstance(info.get("supported_api_versions"), list) or 1 not in info["supported_api_versions"]:
+        raise UpdaterError("企业更新服务协议不兼容，请联系管理员。")
+    response = read("/api/v1/client-releases/recommended?target_os=windows&arch=x64")
+    if "release" not in response:
+        raise UpdaterError("企业更新服务缺少推荐版本信息。")
+    release = response["release"]
+    if release is None:
+        return None
+    if (not isinstance(release, dict) or release.get("state") != "published"
+            or release.get("recommended") is not True or release.get("target_os") != "windows"
+            or release.get("arch") != "x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(release.get("app_version", "")))
+            or not isinstance(release.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", release["id"])
+            or not re.fullmatch(r"[a-fA-F0-9]{64}", str(release.get("sha256", "")))
+            or type(release.get("bytes")) is not int or release["bytes"] <= 0):
+        raise UpdaterError("企业推荐版本的发布状态或安装包信息无效。")
+    version = release["app_version"]
+    asset = ReleaseAsset(f"deepseek-cowork-v{version}.zip",
+                         base + f"/api/v1/client-releases/{release['id']}/download",
+                         release["bytes"], release["id"], "sha256:" + release["sha256"].lower())
+    return {"tag_name": version, "body": release.get("notes") or "", "html_url": base + "/downloads",
+            "assets": [asset.as_dict()]}
 
 
 def select_release_asset(release):
@@ -195,10 +282,8 @@ def build_update_plan(install_dir, staged_app_dir, progress_callback=None):
         raise UpdaterError("当前安装目录不存在。")
 
     from core.enterprise_connection import read_connection, check_update_connection, EnterpriseConfigurationError
-    from core.enterprise_client import EnterpriseStore
     try:
-        # A confirmed connection takes precedence over package defaults.
-        current = EnterpriseStore().read().get("connection") or read_connection(install_dir)
+        current = update_connection(install_dir)
         check_update_connection(current, read_connection(staged_app_dir))
     except EnterpriseConfigurationError as exc:
         raise UpdaterError(str(exc)) from None
@@ -322,7 +407,7 @@ def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback
     return removed
 
 
-def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None):
+def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None, connection=None):
     if isinstance(asset, dict):
         asset = ReleaseAsset(
             name=str(asset.get("name") or ""),
@@ -345,7 +430,7 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
     temp_path = zip_path + ".download"
     _emit(progress_callback, f"正在下载 {asset.name}", 0)
     try:
-        with requests.get(asset.download_url, stream=True, timeout=timeout) as response:
+        with _update_response(asset.download_url, connection=connection, stream=True, timeout=timeout) as response:
             response.raise_for_status()
             expected = asset.size or int(response.headers.get("content-length") or 0)
             downloaded = 0

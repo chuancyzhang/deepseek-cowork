@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT))
 OUTPUT = ROOT / "docs" / "guides" / "update-ui"
 
 
-def panel(theme, scale, failure, waiting=False):
+def panel(theme, scale, failure, waiting=False, enterprise=False):
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QScrollArea, QLabel
@@ -32,6 +32,9 @@ def panel(theme, scale, failure, waiting=False):
         assert manager.apply_profile({"id": "update_qa", "name": "更新界面验证", "overrides": {"tokens": colors}}, preview=True), manager.last_error
         coordinator = UpdateCoordinator(directory, True, root=directory)
         result = {"release": {"tag_name": "v9.0.0", "body": "## 更新体验\n\n- 启动后提前准备安装包\n- 更新时保留已完成内容和输入草稿\n- 完成后自动重新打开应用\n\n![不加载外部图片](https://example.invalid/image.png)"}, "update_available": True}
+        if enterprise:
+            coordinator.connection = {"platform_name": "示例企业"}
+            result["connection"] = coordinator.connection
         if not failure:
             coordinator.prepared = result
         coordinator.publish(phase="error" if failure else "ready", message="暂时无法下载更新，可重试或选择本地安装包" if failure else "更新已准备好", result=result, error="更新服务连接超时，已尝试 5 次。" if failure else "")
@@ -55,7 +58,7 @@ def panel(theme, scale, failure, waiting=False):
             assert control.cancel_button.isVisible()
             assert control.cancel_button.isEnabled()
             assert not control.primary.isEnabled()
-        name = f"{'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
+        name = f"{'enterprise-' if enterprise else ''}{'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
         assert shell.grab().save(str(OUTPUT / name))
         shell.close(); shell.deleteLater(); app.processEvents()
 
@@ -80,10 +83,11 @@ if __name__ == "__main__":
     parser.add_argument("--scale", type=float, default=1.25)
     parser.add_argument("--failure", action="store_true")
     parser.add_argument("--waiting", action="store_true")
+    parser.add_argument("--enterprise", action="store_true")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.panel:
-        panel(args.theme, args.scale, args.failure, args.waiting)
+        panel(args.theme, args.scale, args.failure, args.waiting, args.enterprise)
     else:
         for theme, scale, failure in [("light", 1.25, False), ("dark", 1.5, False), ("light", 2, False), ("dark", 2, True)]:
             command = [sys.executable, __file__, "--panel", "--theme", theme, "--scale", str(scale)]

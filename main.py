@@ -95,7 +95,7 @@ from core.chat_storage import ChatStorage
 from core.theme_package import CONTENT_DEFAULTS
 from core.conversation_actions import append_reference_context, branch_display_text
 from ui.conversation_actions import ConversationActionsMixin, reference_button
-from ui.conversation_agents import ConversationAgentsMixin, agent_identity_label
+from ui.conversation_agents import ConversationAgentsMixin
 from core.conversation_agents import builtin_agent_profiles, extract_agent_mentions, normalize_agent_selection, message_agent_identity
 from core.sidebar_projects import SIDEBAR_SEARCH_PAGE_SIZE, page_sidebar_search, visible_sidebar_projects
 from ui.history_search import HistorySearchController
@@ -23346,8 +23346,7 @@ class AssistantTurnGroup(QFrame):
             self._refresh_process_disclosure_text(*self._process_counts(self.process_result_bubble))
 
     def set_agent_identity(self, identity):
-        name = str((identity or {}).get("name") or "Cowork")
-        self.agent_name_label.setText(name)
+        self.identity_header.set_identity(identity)
 
     def add_stage(self, bubble, stage_id=None):
         if bubble is None:
@@ -23701,6 +23700,8 @@ class HistoricalAssistantSummary(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        self.identity_header = ConversationIdentityHeader(self)
+        layout.addWidget(self.identity_header)
         self.detail_button = QPushButton()
         self.detail_button.setObjectName("HistoricalProcessDisclosure")
         self.detail_button.setCheckable(True)
@@ -23906,7 +23907,7 @@ class ChatBubble(QFrame):
                 )
                 self.user_bubble_layout = bubble_layout
                 bubble_layout.setSpacing(8)
-                self.user_context_container = QWidget()
+                self.user_context_container = QWidget(bubble_frame)
                 self.user_context_container.setObjectName("UserMessageContext")
                 self.user_context_container.setAccessibleName(attachment_hint)
                 self.user_context_layout = ComposerFlowLayout(self.user_context_container)
@@ -23916,7 +23917,7 @@ class ChatBubble(QFrame):
                 self.user_context_container.setVisible(bool(attachments))
                 bubble_layout.addWidget(self.user_context_container)
 
-                content_edit = AutoResizingTextEdit()
+                content_edit = AutoResizingTextEdit(bubble_frame)
                 self.user_content_edit = content_edit
                 content_edit.installEventFilter(self)
                 content_edit.setPlainText(text)
@@ -40057,10 +40058,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             or message.get("reasoning")
             or message.get("tool_calls")
         )
-        summary = HistoricalAssistantSummary(process_stage_count, tool_count)
+        summary = HistoricalAssistantSummary(process_stage_count, tool_count, state.chat_layout.parentWidget())
         identity = message_agent_identity(state.messages, final_message or next(iter(assistant_messages), {}))
-        if identity:
-            summary.layout().insertWidget(0, agent_identity_label(identity, summary))
+        summary.identity_header.set_identity(identity)
         summary.span_start = int(start)
         summary.span_end = int(end)
         summary.message_ids = [str(message.get("id") or "") for message in messages if message.get("id")]
@@ -40100,6 +40100,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             target_layout=summary.body_layout,
         )
         if final_bubble is not None:
+            final_bubble.identity_header.hide()
             final_bubble.set_main_content(
                 final_content,
                 content_parts=final_content_parts,
@@ -40323,6 +40324,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 item = state.chat_layout.takeAt(insert_index)
                 widget = item.widget() if item is not None else None
                 if widget is not None:
+                    if isinstance(widget, AssistantTurnGroup):
+                        widget.identity_header.hide()
                     summary.details_layout.addWidget(widget)
                     summary.detail_groups.append(widget)
             summary.detail_batch_index += 1
@@ -54837,6 +54840,11 @@ a {{ overflow-wrap: anywhere; }}
         bubble._notify_deliverable_changes = not bool(
             getattr(state, "rendering_history_bubbles", False)
         )
+        if hasattr(bubble, "identity_header"):
+            source_message = self._find_message_by_id(state.messages, source_message_id) if source_message_id else None
+            identity = (message_agent_identity(state.messages, source_message)
+                        if source_message is not None else getattr(state, "active_turn_agent", None))
+            bubble.identity_header.set_identity(identity)
         self._connect_chat_bubble_actions(bubble, state)
         if str(role or "").strip().lower() in {"agent", "assistant"} and getattr(bubble, "_deliverable_paths", None):
             self.register_deliverable_paths(
@@ -55787,6 +55795,8 @@ a {{ overflow-wrap: anywhere; }}
         if bubble is None:
             bubble = ChatBubble("User" if role == "user" else "agent", content, thinking=reasoning, parent=parent)
             if role == "assistant":
+                # The subtask pane already owns the expert's identity heading.
+                bubble.identity_header.hide()
                 bubble.set_message_actions_enabled(False)
             else:
                 if bubble.user_action_bar is not None:

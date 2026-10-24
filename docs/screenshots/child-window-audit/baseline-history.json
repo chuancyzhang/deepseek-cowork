@@ -1,0 +1,204 @@
+{
+  "platform": "windows",
+  "im_provider_count": 5,
+  "stages": [
+    {
+      "stage": "history-expert-final",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "conversation-switch-away",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "conversation-switch-back",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-reload",
+      "unexpected_windows": 1
+    },
+    {
+      "stage": "user-message-attachment",
+      "unexpected_windows": 2
+    },
+    {
+      "stage": "composer-plus",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-模式",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-连接器",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-对话",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "model-picker",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-knowledge",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-weknora",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-tencent-docs",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-lexiang",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-capabilities",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-favorites",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-settings",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-projects",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-team_spaces",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-conversation",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "editable-skill-files",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "favorite-schedule",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "mcp-new",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-text",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-multi_choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "subagent-details",
+      "unexpected_windows": 0
+    }
+  ],
+  "unexpected": [
+    {
+      "stage": "history-expert-final",
+      "class": "AutoResizingTextEdit",
+      "object": "",
+      "window_type": 1,
+      "text": "",
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:111 run: stage(\"history-expert-final\", lambda: window._render_session_history_spans(",
+        "verify_child_window_lifecycle.py:90 stage: action()",
+        "verify_child_window_lifecycle.py:111 <lambda>: stage(\"history-expert-final\", lambda: window._render_session_history_spans(",
+        "main.py:40484 _render_session_history_spans: inserted = self._render_history_span(state, span, insert_index=current_index)",
+        "main.py:40453 _render_history_span: inserted = self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)",
+        "main.py:44640 render_message_batch: self.add_chat_bubble(",
+        "main.py:54823 add_chat_bubble: bubble = ChatBubble(",
+        "main.py:23923 __init__: content_edit.setVisible(bool(text))"
+      ]
+    },
+    {
+      "stage": "history-reload",
+      "class": "AutoResizingTextEdit",
+      "object": "",
+      "window_type": 1,
+      "text": "",
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:116 run: stage(\"history-reload\", lambda: (",
+        "verify_child_window_lifecycle.py:90 stage: action()",
+        "verify_child_window_lifecycle.py:118 <lambda>: window._render_session_history_spans(state, [{\"start\": 0, \"end\": 1}, {\"start\": 1, \"end\": 2}]),",
+        "main.py:40484 _render_session_history_spans: inserted = self._render_history_span(state, span, insert_index=current_index)",
+        "main.py:40453 _render_history_span: inserted = self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)",
+        "main.py:44640 render_message_batch: self.add_chat_bubble(",
+        "main.py:54823 add_chat_bubble: bubble = ChatBubble(",
+        "main.py:23923 __init__: content_edit.setVisible(bool(text))"
+      ]
+    },
+    {
+      "stage": "user-message-attachment",
+      "class": "QWidget",
+      "object": "UserMessageContext",
+      "window_type": 1,
+      "text": "",
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:195 <module>: raise SystemExit(0 if run(args.output, args.screenshots) else 1)",
+        "verify_child_window_lifecycle.py:120 run: stage(\"user-message-attachment\", lambda: window.add_chat_bubble(",
+        "verify_child_window_lifecycle.py:90 stage: action()",
+        "verify_child_window_lifecycle.py:120 <lambda>: stage(\"user-message-attachment\", lambda: window.add_chat_bubble(",
+        "main.py:54823 add_chat_bubble: bubble = ChatBubble(",
+        "main.py:23916 __init__: self.user_context_container.setVisible(bool(attachments))"
+      ]
+    },
+    {
+      "stage": "user-message-attachment",
+      "class": "AutoResizingTextEdit",
+      "object": "",
+      "window_type": 1,
+      "text": "",
+      "parent": null,
+      "stack": [
+        "verify_child_window_lifecycle.py:195 <module>: raise SystemExit(0 if run(args.output, args.screenshots) else 1)",
+        "verify_child_window_lifecycle.py:120 run: stage(\"user-message-attachment\", lambda: window.add_chat_bubble(",
+        "verify_child_window_lifecycle.py:90 stage: action()",
+        "verify_child_window_lifecycle.py:120 <lambda>: stage(\"user-message-attachment\", lambda: window.add_chat_bubble(",
+        "main.py:54823 add_chat_bubble: bubble = ChatBubble(",
+        "main.py:23923 __init__: content_edit.setVisible(bool(text))"
+      ]
+    }
+  ]
+}

@@ -6,29 +6,16 @@ import os
 from urllib.parse import unquote
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLabel
+from PySide6.QtWidgets import QHBoxLayout, QPushButton
 
 from core.conversation_agents import agent_role_context, normalize_agent_selection
 from core.deliverable_preview import iter_local_file_references, iter_workspace_file_paths, normalize_workspace_file
-from core.theme import DesignTokens, bind_theme
+from core.theme import bind_theme
 from ui.conversation_actions import ConversationMentionPopover
 from ui.primitives import product_button_style
 
 
 logger = logging.getLogger(__name__)
-
-
-def agent_identity_label(identity, parent=None):
-    label = QLabel(str((identity or {}).get("name") or ""), parent)
-    label.setObjectName("ConversationAgentName")
-    label.setTextFormat(Qt.PlainText)
-    label.setWordWrap(True)
-    label.setVisible(bool(label.text()))
-    bind_theme(label, lambda _=None: label.setStyleSheet(
-        f"QLabel#ConversationAgentName {{ color: {DesignTokens.text_secondary}; "
-        f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; padding: 6px 0; }}"
-    ), surface="conversation")
-    return label
 
 
 class ConversationAgentsMixin:

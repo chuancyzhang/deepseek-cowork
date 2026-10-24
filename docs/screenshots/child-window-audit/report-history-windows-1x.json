@@ -1,0 +1,167 @@
+{
+  "platform": "windows",
+  "im_provider_count": 5,
+  "stages": [
+    {
+      "stage": "history-expert-final",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "conversation-switch-away",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "conversation-switch-back",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-reload",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-details",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-details-collapse",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "expert-selection-clear",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "expert-selection-restore",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-theme-dark-narrow",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "history-theme-restore",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "user-message-attachment",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "user-message-attachment-only",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "subtask-reply",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-plus",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-模式",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-连接器",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-对话",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-技能",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "composer-专家",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "skill-picker-transactional",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "model-picker",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-knowledge",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-weknora",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-tencent-docs",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "library-lexiang",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-capabilities",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-favorites",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-settings",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-projects",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-team_spaces",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "route-conversation",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "editable-skill-files",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "favorite-schedule",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "mcp-new",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-text",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "inline-multi_choice",
+      "unexpected_windows": 0
+    },
+    {
+      "stage": "subagent-details",
+      "unexpected_windows": 0
+    }
+  ],
+  "unexpected": []
+}

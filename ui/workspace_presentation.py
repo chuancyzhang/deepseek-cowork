@@ -123,6 +123,9 @@ class ConversationIdentityHeader(QWidget):
         bind_theme(self, self.refresh_theme, surface="conversation")
         self.refresh_theme()
 
+    def set_identity(self, identity):
+        self.name_label.setText(str((identity or {}).get("name") or "Cowork"))
+
     def refresh_theme(self, _resolved=None):
         self.icon_label.setPixmap(qta.icon("fa5s.magic", color=DesignTokens.icon_primary).pixmap(18, 18))
         self.name_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px; font-weight: 600; background: transparent; border: none;")

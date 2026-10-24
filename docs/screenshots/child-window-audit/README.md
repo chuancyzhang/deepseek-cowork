@@ -1,5 +1,43 @@
 # 瞬时系统小窗口检查
 
+## 2026-10-24：历史对话与附件展示回归
+
+修复后，在 Windows 原生平台以 `QT_SCALE_FACTOR=1` 和 `1.5` 分别检查 40 个阶段，异常顶层窗口均为 **0**。专家回复现在只保留一个专家名称标题；普通助手显示 Cowork，旧回复不会跟随当前专家选择改名。
+
+本次定位到的引入位置：
+
+- `96d03f54`（统一消息附件与对话引用的气泡内展示）新增了用户正文和附件区域的 `setVisible(condition)`，但两个控件在调用时尚无父级。[修复前事件记录](baseline-history.json)在历史渲染、重载和附件消息中捕获到 4 次原生窗口显示，分别指向 `AutoResizingTextEdit` 和 `UserMessageContext`。修复为构造时即绑定消息气泡父级。
+- `2b6ee8be`（首页、聊天等页面展示调整）给助手气泡新增 Cowork 标题，但历史摘要仍保留旧的专家标签，造成两套身份标题。历史摘要、实时轮次及单独回复现共用 `ConversationIdentityHeader`；历史摘要的正文和展开阶段不再重复标题，子任务回复沿用面板的专家标题。旧专家标签工厂已移除，历史摘要也在构造时绑定聊天容器。
+- 昨天 `ded91baa` 修过的入口仍通过。此前检查集中在菜单和页面构造，本次补充历史重载、实际对话切换、纯附件消息、详情展开、专家切换及深色主题预览。上次思考时间线验证没有覆盖消息构造期间的原生窗口事件。
+
+验证范围与结果：
+
+- [Windows 倍率 1](report-history-windows-1x.json)、[倍率 1.5](report-history-windows-1.5x.json)：每次 40 阶段，零异常窗口。倍率会叠加系统 DPI，不等同于 Windows 显示设置百分比。
+- `test_child_window_lifecycle.py`、`test_conversation_agents.py`、`test_workspace_presentation.py`：31 项通过，8 个子测试通过。
+- `test_theme_runtime_coverage.py` 中原生窗口、未挂载消息和可见消息布局的 3 项回归通过。共 34 项测试，8 个子测试通过。
+- 扫描 `main.py` 和 `ui/*.py` 的标准 Qt 控件及派生控件构造路径，修复后没有发现直接“无父级构造 → 显示 → 加入布局”的剩余命中。
+- 使用隔离配置和示例数据。未执行真实模型请求、外部服务授权或打包版本测试；消息保存、模型请求及 prompt prefix 未变。
+
+| 场景 | 倍率 1 | 倍率 1.5 |
+| --- | --- | --- |
+| 专家历史回复 | [查看](history-expert-1x.png) | [查看](history-expert-1.5x.png) |
+| 展开详情与普通助手回复 | [查看](history-details-1x.png) | [查看](history-details-1.5x.png) |
+| 深色主题与窄窗口 | [查看](history-dark-narrow-1x.png) | [查看](history-dark-narrow-1.5x.png) |
+
+```powershell
+$env:QT_QPA_PLATFORM='windows'
+$env:QT_SCALE_FACTOR='1'
+.\.venv\Scripts\python.exe scripts/verify_child_window_lifecycle.py --history-screenshots --output docs/screenshots/child-window-audit/report-history-windows-1x.json
+$env:QT_SCALE_FACTOR='1.5'
+.\.venv\Scripts\python.exe scripts/verify_child_window_lifecycle.py --history-screenshots --output docs/screenshots/child-window-audit/report-history-windows-1.5x.json
+$env:QT_QPA_PLATFORM='offscreen'
+$env:COWORK_EXTERNAL_BACKGROUND_SERVICES='0'
+.\.venv\Scripts\python.exe -m pytest test/test_child_window_lifecycle.py test/test_conversation_agents.py test/test_workspace_presentation.py -q
+.\.venv\Scripts\python.exe -m pytest test/test_theme_runtime_coverage.py -q -k 'active_theme_does_not_flash or detached_message_theme_visibility or visible_chat_layout_keeps'
+```
+
+## 2026-10-23：首次排查
+
 2026-10-23：修复子控件在加入页面前执行 `setVisible(True)`，短暂弹出带系统标题栏小窗口的问题。修复只调整控件父级和构造顺序。
 
 ## 已确认的触发位置

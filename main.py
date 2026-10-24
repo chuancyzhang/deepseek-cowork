@@ -19049,7 +19049,7 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         self.setFixedHeight(24)
         self._height_adjust_pending = False
         self._adjusting_height = False
-        self._height_line_prefix = [0]
+        self._height_block_prefix = [0.0]
         self._height_dirty_block = 0
         self._height_last_changed_block = 0
         self._height_layout_key = None
@@ -19085,7 +19085,7 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
 
     def changeEvent(self, event):
         super().changeEvent(event)
-        if hasattr(self, "_height_line_prefix"):
+        if hasattr(self, "_height_block_prefix"):
             self._height_layout_key = None
             self._height_dirty_block = 0
             self._height_last_changed_block = 0
@@ -19120,25 +19120,26 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
                 text_option.wrapMode(), self.tabStopDistance(),
             )
             if key != self._height_layout_key:
-                self._height_line_prefix = [0]
+                self._height_block_prefix = [0.0]
                 self._height_dirty_block = 0
                 self._height_last_changed_block = 0
                 self._height_layout_key = key
             if document.textWidth() != width:
                 document.setTextWidth(width)
-            prefix = self._height_line_prefix
+            prefix = self._height_block_prefix
             dirty = self._height_dirty_block
             if dirty is not None:
                 start = min(dirty, len(prefix) - 1, max(0, document.blockCount() - 1))
                 del prefix[start + 1:]
                 block = document.findBlockByNumber(start)
                 while block.isValid():
-                    layout = block.layout()
-                    lines = max(1, layout.lineCount() if layout is not None else 1)
-                    prefix.append(prefix[-1] + lines)
+                    # Resolve lazy wrapping and measure actual glyph heights;
+                    # fallback fonts can exceed the editor's lineSpacing().
+                    block_height = document.documentLayout().blockBoundingRect(block).height()
+                    prefix.append(prefix[-1] + block_height)
                     block = block.next()
                 self._height_dirty_block = None
-            doc_height = prefix[-1] * self.fontMetrics().lineSpacing()
+            doc_height = prefix[-1]
             margins = self.contentsMargins()
             doc_margin = int(document.documentMargin() * 2)
             frame = self.frameWidth() * 2
@@ -19209,7 +19210,25 @@ class ThinkingTextView(QWidget):
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_pending_text)
+        self.copy_button = QToolButton(self)
+        self.copy_button.setObjectName("ThinkingCopy")
+        self.copy_button.setToolTip("复制思考原文")
+        self.copy_button.setAccessibleName("复制思考原文")
+        self.copy_button.setCursor(Qt.PointingHandCursor)
+        self.copy_button.clicked.connect(self._copy_text)
+        layout.addWidget(self.copy_button, 0, Qt.AlignRight)
         bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def _copy_text(self):
+        QApplication.clipboard().setText(self.text())
+        self.copy_button.setToolTip("已复制")
+        self.copy_button.setIcon(qta.icon("fa5s.check", color=DesignTokens.icon_secondary))
+        QTimer.singleShot(1200, self._reset_copy_button)
+
+    def _reset_copy_button(self):
+        if _qt_object_alive(self):
+            self.copy_button.setToolTip("复制思考原文")
+            self.copy_button.setIcon(qta.icon("fa5s.copy", color=DesignTokens.icon_secondary))
 
     def text(self):
         return self._source.text()
@@ -19243,6 +19262,14 @@ class ThinkingTextView(QWidget):
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet("QWidget#ThinkingTextView { background: transparent; border: none; }")
+        self.copy_button.setIcon(qta.icon("fa5s.copy", color=DesignTokens.icon_secondary))
+        self.copy_button.setIconSize(QSize(12, 12))
+        self.copy_button.setFixedSize(26, 26)
+        self.copy_button.setStyleSheet(
+            f"QToolButton#ThinkingCopy {{ background: transparent; border: none; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QToolButton#ThinkingCopy:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QToolButton#ThinkingCopy:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
+        )
         for widget, selector in (
             (self._plain_edit, "QPlainTextEdit#ThinkingPlainText"),
             (self._rich_label, "QLabel#ThinkingRichText"),
@@ -19250,7 +19277,7 @@ class ThinkingTextView(QWidget):
             if widget is None:
                 continue
             widget.setStyleSheet(
-                f"{selector} {{ color: {DesignTokens.text_secondary}; font-size: 12px; "
+                f"{selector} {{ color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta + 1}px; "
                 "line-height: 1.5; background: transparent; border: none; padding: 0; "
                 f"selection-background-color: {DesignTokens.selection_bg}; "
                 f"selection-color: {DesignTokens.selection_text}; }}"
@@ -19270,7 +19297,7 @@ class ThinkingTextView(QWidget):
                 if self._rich_label is None:
                     self._rich_label = AutoResizingLabel(self)
                     self._rich_label.setObjectName("ThinkingRichText")
-                    self.layout().addWidget(self._rich_label)
+                    self.layout().insertWidget(0, self._rich_label)
                     self.refresh_theme()
                 if self._plain_edit is not None:
                     self._plain_edit.hide()
@@ -19280,7 +19307,7 @@ class ThinkingTextView(QWidget):
                 if self._plain_edit is None:
                     self._plain_edit = ThinkingPlainTextEdit(self)
                     self._plain_edit.heightChanged.connect(self.heightChanged.emit)
-                    self.layout().addWidget(self._plain_edit)
+                    self.layout().insertWidget(0, self._plain_edit)
                     self.refresh_theme()
                 self._plain_edit.show()
                 # An independent cursor preserves the user's active selection.
@@ -23264,7 +23291,14 @@ class AssistantTurnGroup(QFrame):
         self.setStyleSheet(
             "QFrame#AssistantTurnGroup { background: transparent; border: none; }"
         )
-        self.process_disclosure.setStyleSheet(apple_disclosure_button_style())
+        self.process_disclosure.setStyleSheet(
+            f"QPushButton#HistoricalProcessDisclosure {{ background: transparent; border: none; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 6px 4px; text-align: left; "
+            f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_medium}; }}"
+            f"QPushButton#HistoricalProcessDisclosure:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QPushButton#HistoricalProcessDisclosure:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
+        )
         for separator in self.stage_separators:
             separator_layout = separator.layout()
             if separator_layout is not None:
@@ -23274,11 +23308,42 @@ class AssistantTurnGroup(QFrame):
                     DesignTokens.assistant_stage_separator_right_margin,
                     DesignTokens.assistant_stage_separator_vertical_margin,
                 )
-            line = separator.findChild(QFrame, "AssistantStageSeparator")
-            if line is not None:
-                line.setStyleSheet(
-                    f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.chat_border}; border: none; }}"
-                )
+        for bubble in self.stage_bubbles:
+            self._style_stage(bubble)
+        self.update()
+
+    def _style_stage(self, bubble):
+        # Only presentation changes: retain the original bubbles and event order.
+        result = bubble is self.process_result_bubble
+        indent = DesignTokens.spacing_lg
+        bubble.content_col_layout.setContentsMargins(0 if result else indent, 0, 0, 0)
+        bubble.thinking_widget.layout().setContentsMargins(indent if result else 0, 0, 0, 0)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        stages = [bubble for bubble in self.stage_bubbles
+                  if not bubble.isHidden() and not bubble.thinking_widget.isHidden()]
+        if not stages:
+            return
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(DesignTokens.chat_border), 1))
+        x = DesignTokens.assistant_thinking_timeline_indent
+        nodes = [bubble.think_toggle_btn.mapTo(self, bubble.think_toggle_btn.rect().center()).y()
+                 for bubble in stages]
+        for index, bubble in enumerate(stages):
+            y = nodes[index]
+            bottom = (nodes[index + 1] - 10 if index + 1 < len(nodes)
+                      else bubble.thinking_widget.mapTo(self, bubble.thinking_widget.rect().bottomLeft()).y())
+            if bottom > y + 10:
+                painter.drawLine(x, y + 10, x, bottom)
+            icon = ("fa5s.ellipsis-h" if bubble.think_timer.isActive() else
+                    "fa5s.stop" if "已停止" in bubble.think_toggle_btn.text() else "fa5s.check")
+            painter.drawPixmap(x - 6, y - 6, qta.icon(icon, color=DesignTokens.chat_text_muted).pixmap(12, 12))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.process_finalized:
+            self._refresh_process_disclosure_text(*self._process_counts(self.process_result_bubble))
 
     def set_agent_identity(self, identity):
         name = str((identity or {}).get("name") or "Cowork")
@@ -23299,18 +23364,12 @@ class AssistantTurnGroup(QFrame):
                 DesignTokens.assistant_stage_separator_vertical_margin,
             )
             separator_layout.setSpacing(0)
-            line = QFrame(separator)
-            line.setObjectName("AssistantStageSeparator")
-            line.setFixedHeight(1)
-            line.setStyleSheet(
-                f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.border_subtle}; border: none; }}"
-            )
-            separator_layout.addWidget(line)
             self.stage_separators.append(separator)
             self.group_layout.addWidget(separator)
         bubble.ui_turn_group_id = self.group_id
         bubble.ui_stage_id = str(stage_id or f"{self.group_id}:stage-{len(self.stage_bubbles) + 1}")
         self.stage_bubbles.append(bubble)
+        self._style_stage(bubble)
         if getattr(bubble, "identity_header", None) is not None:
             bubble.identity_header.hide()
         self.group_layout.addWidget(bubble)
@@ -23320,6 +23379,9 @@ class AssistantTurnGroup(QFrame):
     def sync_stage_visibility(self):
         """Hide semantically empty stages and separators without changing stage order."""
         changed = False
+        for bubble in self.stage_bubbles:
+            self._style_stage(bubble)
+        self.update()
 
         def set_visible(widget, visible):
             nonlocal changed
@@ -23386,8 +23448,11 @@ class AssistantTurnGroup(QFrame):
                 duration = f"{seconds} 秒"
             parts.append(f"耗时 {duration}")
         summary = " · ".join(parts) or "执行详情"
-        arrow = "▴" if self.process_disclosure.isChecked() else "▾"
-        self.process_disclosure.setText(f" 执行过程 · {summary}  {arrow}")
+        arrow = "fa5s.chevron-down" if self.process_disclosure.isChecked() else "fa5s.chevron-right"
+        self.process_disclosure.setIcon(qta.icon(arrow, color=DesignTokens.chat_text_muted))
+        self.process_disclosure.setIconSize(QSize(10, 10))
+        joiner = "\n" if self.width() < 460 else "  "
+        self.process_disclosure.setText(f"执行过程{joiner}{summary}")
         self.process_disclosure.setAccessibleName(
             f"执行过程，{summary}，{'已展开' if self.process_disclosure.isChecked() else '已折叠'}"
         )
@@ -23500,7 +23565,6 @@ class AssistantTurnGroup(QFrame):
             for bubble in self.stage_bubbles:
                 if bubble._has_thinking_details():
                     bubble.thinking_widget.setVisible(True)
-                    #bubble.think_toggle_btn.setChecked(True)
         self._refresh_process_disclosure_text(*self._process_counts(self.process_result_bubble))
         self.sync_stage_visibility()
         log_sub_agent_runtime(
@@ -23952,8 +24016,7 @@ class ChatBubble(QFrame):
             self.identity_header = ConversationIdentityHeader(content_col)
             col_layout.addWidget(self.identity_header)
             
-            # One conversational deep-thinking segment. Tools triggered by
-            # this segment live inside the same foldable container.
+            # Keep the ordered stream in place; folding affects thought text only.
             self.thinking_widget = QWidget()
             self.thinking_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             think_layout = QVBoxLayout(self.thinking_widget)
@@ -23962,49 +24025,24 @@ class ChatBubble(QFrame):
             think_layout.setAlignment(Qt.AlignTop)
             
             # Toggle Header
-            self.think_toggle_btn = QPushButton(" 深度思考  ▾")
-            self.think_toggle_btn.setIcon(qta.icon('fa5s.lightbulb', color=DesignTokens.accent_tool))
+            self.think_toggle_btn = QPushButton("深度思考")
+            self.think_toggle_btn.setObjectName("ThinkingDisclosure")
+            self.think_toggle_btn.setIcon(qta.icon('fa5s.chevron-right', color=DesignTokens.chat_text_muted))
+            self.think_toggle_btn.setIconSize(QSize(10, 10))
             self.think_toggle_btn.setCursor(Qt.PointingHandCursor)
             self.think_toggle_btn.setCheckable(True)
             self.think_toggle_btn.setChecked(False)
-            self.think_toggle_btn.setStyleSheet(f"""
-                QPushButton {{
-                    text-align: left;
-                    min-height: {DesignTokens.assistant_stage_header_height}px;
-                    max-height: {DesignTokens.assistant_stage_header_height}px;
-                    background-color: transparent;
-                    color: {DesignTokens.text_secondary};
-                    border: none;
-                    border-radius: 6px;
-                    padding: 0 4px;
-                    font-size: 12px;
-                    font-weight: 600;
-                }}
-                QPushButton:hover {{ background-color: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}
-                QPushButton:checked {{ 
-                    background-color: transparent;
-                    color: {DesignTokens.text_primary}; 
-                }}
-            """)
             self.think_toggle_btn.toggled.connect(self.toggle_thinking)
-            think_layout.addWidget(self.think_toggle_btn)
+            think_layout.addWidget(self.think_toggle_btn, 0, Qt.AlignLeft)
 
             # Container for Thinking Stream
             self.think_container = QWidget()
             self.think_container.setObjectName("ThinkingContainer")
             self.think_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             self.think_container.setVisible(False)
-            self.think_container.setStyleSheet(f"""
-                QWidget#ThinkingContainer {{
-                    background: transparent;
-                    border: none;
-                    border-left: 2px solid {DesignTokens.border_strong};
-                    margin-left: {DesignTokens.assistant_thinking_timeline_indent}px;
-                }}
-            """)
             self.think_container_layout = QVBoxLayout(self.think_container)
             self.think_container_layout.setContentsMargins(
-                DesignTokens.assistant_thinking_content_indent,
+                0,
                 0,
                 4,
                 4,
@@ -24160,22 +24198,21 @@ class ChatBubble(QFrame):
             )
         if getattr(self, "think_toggle_btn", None) is not None:
             self.think_toggle_btn.setIcon(
-                qta.icon("fa5s.lightbulb", color=DesignTokens.accent_tool)
+                qta.icon("fa5s.chevron-down" if self.think_toggle_btn.isChecked() else "fa5s.chevron-right",
+                         color=DesignTokens.chat_text_muted)
             )
             self.think_toggle_btn.setStyleSheet(
-                f"QPushButton {{ text-align: left; min-height: {DesignTokens.assistant_stage_header_height}px; "
+                f"QPushButton#ThinkingDisclosure {{ text-align: left; min-height: {DesignTokens.assistant_stage_header_height}px; "
                 f"max-height: {DesignTokens.assistant_stage_header_height}px; background: transparent; "
                 f"color: {DesignTokens.chat_text_muted}; border: none; "
                 f"border-radius: {DesignTokens.radius_sm}px; padding: 0 {DesignTokens.spacing_xs}px; "
-                f"font-size: {DesignTokens.font_size_meta}px; font-weight: {DesignTokens.font_weight_semibold}; }}"
-                f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.chat_text}; }}"
-                f"QPushButton:checked {{ background: transparent; color: {DesignTokens.chat_text}; }}"
+                f"font-size: {DesignTokens.font_size_meta + 1}px; font-weight: {DesignTokens.font_weight_medium}; }}"
+                f"QPushButton#ThinkingDisclosure:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.chat_text}; }}"
+                f"QPushButton#ThinkingDisclosure:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
             )
         if getattr(self, "think_container", None) is not None:
             self.think_container.setStyleSheet(
-                f"QWidget#ThinkingContainer {{ background: transparent; border: none; "
-                f"border-left: 2px solid {DesignTokens.chat_border}; "
-                f"margin-left: {DesignTokens.assistant_thinking_timeline_indent}px; }}"
+                "QWidget#ThinkingContainer { background: transparent; border: none; }"
             )
         for editor in (
             getattr(self, "content_rich_edit", None),
@@ -24642,10 +24679,21 @@ class ChatBubble(QFrame):
         return False
 
     def _sync_thinking_container_visibility(self):
-        visible = bool(self.think_toggle_btn.isChecked() and self._has_thinking_details())
-        changed = self.think_container.isHidden() == visible
-        if changed:
+        expanded = self.think_toggle_btn.isChecked()
+        visible = False
+        changed = False
+        for index in range(self.think_container_layout.count()):
+            widget = self.think_container_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            show = bool(expanded and widget.has_text()) if isinstance(widget, ThinkingTextView) else True
+            visible = visible or show
+            if widget.isHidden() == show:
+                widget.setVisible(show)
+                changed = True
+        if self.think_container.isHidden() == visible:
             self.think_container.setVisible(visible)
+            changed = True
         if changed and self.isVisible():
             self._refresh_conversation_geometry()
 
@@ -24668,13 +24716,13 @@ class ChatBubble(QFrame):
         elapsed = time.monotonic() - self.think_start_time
         current_total = self.think_duration + elapsed
         
-        arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-        self.think_toggle_btn.setText(f" 深度思考中 · {current_total:.1f} 秒  {arrow}")
+        self.think_toggle_btn.setText(f"深度思考中 · {current_total:.1f} 秒")
 
     def toggle_thinking(self, checked):
         self._sync_thinking_container_visibility()
-        text = re.sub(r"\s+[▴▾]\s*$", "", self.think_toggle_btn.text())
-        self.think_toggle_btn.setText(f"{text}  {'▴' if checked else '▾'}")
+        self.think_toggle_btn.setIcon(qta.icon(
+            "fa5s.chevron-down" if checked else "fa5s.chevron-right", color=DesignTokens.chat_text_muted))
+        self.think_toggle_btn.setAccessibleDescription("已展开原文" if checked else "已收起原文")
         log_sub_agent_runtime(
             "ui_thinking_toggled",
             session_id=self.session_id,
@@ -24685,13 +24733,13 @@ class ChatBubble(QFrame):
         )
 
     def set_thinking_state(self, is_thinking):
+        was_thinking = self.think_timer.isActive()
         if is_thinking:
             if not self.think_timer.isActive():
                 self.think_start_time = time.monotonic()
                 self.think_timer.start()
                 
-            arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-            self.think_toggle_btn.setText(f" 深度思考中 · {self.think_duration:.1f} 秒  {arrow}")
+            self.think_toggle_btn.setText(f"深度思考中 · {self.think_duration:.1f} 秒")
             self.thinking_widget.setVisible(True)
             self._notify_stage_visibility_changed()
         else:
@@ -24700,6 +24748,8 @@ class ChatBubble(QFrame):
                 if self.think_start_time:
                     self.think_duration += time.monotonic() - self.think_start_time
                     self.think_start_time = None
+        if was_thinking != self.think_timer.isActive() and isinstance(self.parentWidget(), AssistantTurnGroup):
+            self.parentWidget().update()
 
     def get_active_think_widget(self, force_new=False):
         if not force_new:
@@ -24751,8 +24801,9 @@ class ChatBubble(QFrame):
             self.set_thinking_state(False)
             self.timeline_finished_at = time.monotonic()
             total = self.think_duration
-            arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-            self.think_toggle_btn.setText(f" 深度思考 · {total:.1f} 秒  {arrow}")
+            self.think_toggle_btn.setText(f"深度思考 · {total:.1f} 秒")
+        if is_final and isinstance(self.parentWidget(), AssistantTurnGroup):
+            self.parentWidget().update()
         self._notify_stage_visibility_changed()
 
     def stop_thinking_timers(self):
@@ -24765,8 +24816,9 @@ class ChatBubble(QFrame):
         if timer and timer.isActive():
             timer.stop()
         self.timeline_finished_at = time.monotonic()
-        arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-        self.think_toggle_btn.setText(f" 深度思考已停止 · {self.think_duration:.1f} 秒  {arrow}")
+        self.think_toggle_btn.setText(f"深度思考已停止 · {self.think_duration:.1f} 秒")
+        if isinstance(self.parentWidget(), AssistantTurnGroup):
+            self.parentWidget().update()
 
     def _set_main_content_view_mode(self, mode):
         target_mode = "plain" if mode == "plain" else "rich"
@@ -25474,20 +25526,14 @@ class ToolCallCard(QFrame):
         self.meta = meta or {}
         self.tool_name = tool_name
         self.is_selected = False
+        self.setObjectName("ToolCallCard")
         
         self.setFocusPolicy(Qt.StrongFocus)
         
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         # Timeline "Step" Style
-        self.setStyleSheet("""
-            ToolCallCard {
-                background-color: transparent;
-                border: none;
-                margin: 0;
-                padding-left: 10px; /* Space for timeline line if we want to draw it externally, or just indent */
-            }
-        """)
+        self.setStyleSheet("QFrame#ToolCallCard { background: transparent; border: none; }")
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -25495,18 +25541,9 @@ class ToolCallCard(QFrame):
         
         # --- Main Row Container (The "Timeline Node") ---
         self.main_row = QFrame()
+        self.main_row.setObjectName("ToolCallRow")
         self.main_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.main_row.setCursor(Qt.PointingHandCursor)
-        self.main_row.setStyleSheet(f"""
-            QFrame {{
-                background-color: transparent;
-                border: none;
-                border-radius: 6px;
-            }}
-            QFrame:hover {{
-                background-color: {DesignTokens.bg_hover};
-            }}
-        """)
         # Make the whole card clickable
         self.main_row.mousePressEvent = self.on_card_clicked
         
@@ -25527,7 +25564,7 @@ class ToolCallCard(QFrame):
         
         # Icon with base
         self.icon_label = QLabel()
-        self.icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.accent_tool).pixmap(14, 14))
+        self.icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.icon_secondary).pixmap(14, 14))
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.icon_label.setStyleSheet(f"""
@@ -25548,46 +25585,43 @@ class ToolCallCard(QFrame):
         display_title, display_summary = summarize_tool_action(tool_name, args_obj)
         name_label = QLabel(display_title or f"{tool_name}")
         self.name_label = name_label
-        name_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px; border: none;")
+        name_label.setObjectName("ToolCallTitle")
+        name_label.setWordWrap(True)
+        name_label.setMinimumWidth(0)
+        name_label.setToolTip(display_summary or tool_name)
         
         # Subtitle (Short Args Summary)
         args_preview = QLabel(display_summary or "查看调用详情")
         self.args_preview_label = args_preview
-        args_preview.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px; border: none;")
+        args_preview.setObjectName("ToolCallSummary")
+        args_preview.setWordWrap(True)
+        args_preview.setMinimumWidth(0)
+        args_preview.hide()
         
         text_layout.addWidget(name_label)
-        text_layout.addWidget(args_preview)
         
         # 3. Right Side Controls
         self.status_icon = QLabel() # Default running
         self.status_icon.setPixmap(qta.icon('fa5s.spinner', color=DesignTokens.text_secondary, animation=qta.Spin(self.status_icon)).pixmap(14, 14))
         self.status_icon.setStyleSheet("border: none; background: transparent;")
+        self.status_label = QLabel("运行中")
+        self.status_label.setObjectName("ToolCallStatus")
         
         self.view_btn = QPushButton("详情") # Minimalist text
+        self.view_btn.setObjectName("ToolCallDetails")
         self.view_btn.setCursor(Qt.PointingHandCursor)
-        self.view_btn.setFixedWidth(36)
-        self.view_btn.setToolTip("查看详情")
-        self.view_btn.setStyleSheet(f"""
-            QPushButton {{
-                border: none;
-                border-radius: 10px;
-                color: {DesignTokens.text_tertiary};
-                font-size: 11px;
-                padding: 3px 6px;
-            }}
-            QPushButton:hover {{
-                color: {DesignTokens.primary};
-                background: {DesignTokens.primary_soft};
-            }}
-        """)
+        self.view_btn.setToolTip("在右侧任务详情中查看")
+        self.view_btn.setAccessibleName("在右侧任务详情中查看工具调用")
         self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta))
 
         row_layout.addWidget(self.icon_label)
         row_layout.addWidget(text_container, 1) # Expand
         row_layout.addWidget(self.status_icon)
+        row_layout.addWidget(self.status_label)
         row_layout.addWidget(self.view_btn)
         
         layout.addWidget(self.main_row)
+        layout.addWidget(args_preview)
 
         # 4. Sub-agents Container (Hidden by default)
         self.sub_agents_container = QWidget()
@@ -25602,32 +25636,34 @@ class ToolCallCard(QFrame):
 
     def refresh_theme(self, _resolved=None):
         self.icon_label.setPixmap(
-            qta.icon(self.tool_icon_name, color=DesignTokens.accent_tool).pixmap(
+            qta.icon(self.tool_icon_name, color=DesignTokens.icon_secondary).pixmap(
                 DesignTokens.icon_size_sm,
                 DesignTokens.icon_size_sm,
             )
         )
         self.name_label.setStyleSheet(
-            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"QLabel#ToolCallTitle {{ font-weight: {DesignTokens.font_weight_medium}; "
             f"color: {DesignTokens.chat_text}; "
-            f"font-size: {DesignTokens.font_size_meta}px; border: none;"
+            f"font-size: {DesignTokens.font_size_meta + 1}px; background: transparent; border: none; }}"
         )
         self.args_preview_label.setStyleSheet(
-            f"color: {DesignTokens.chat_text_muted}; "
-            f"font-size: {DesignTokens.font_size_caption}px; border: none;"
+            f"QLabel#ToolCallSummary {{ color: {DesignTokens.chat_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; background: transparent; border: none; }}"
         )
         self.view_btn.setStyleSheet(
-            f"QPushButton {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
+            f"QPushButton#ToolCallDetails {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
             f"color: {DesignTokens.chat_text_muted}; "
-            f"font-size: {DesignTokens.font_size_caption}px; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
             f"padding: 3px {DesignTokens.spacing_sm}px; background: transparent; }}"
-            f"QPushButton:hover {{ color: {DesignTokens.primary}; "
-            f"background: {DesignTokens.primary_soft}; }}"
+            f"QPushButton#ToolCallDetails:hover {{ color: {DesignTokens.chat_text}; "
+            f"background: {DesignTokens.bg_hover}; }}"
+            f"QPushButton#ToolCallDetails:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
         )
+        self._refresh_status_label()
         if self.is_finished:
             self.status_icon.setPixmap(
-                qta.icon("fa5s.exclamation-circle" if self.failed else "fa5s.check-circle",
-                         color=DesignTokens.error_text if self.failed else DesignTokens.success_accent).pixmap(
+                qta.icon("fa5s.exclamation-circle" if self.failed else "fa5s.check",
+                         color=DesignTokens.error_text if self.failed else DesignTokens.icon_secondary).pixmap(
                     DesignTokens.icon_size_sm,
                     DesignTokens.icon_size_sm,
                 )
@@ -25654,6 +25690,26 @@ class ToolCallCard(QFrame):
                 f"color: {DesignTokens.chat_text_muted}; "
                 f"font-size: {max(9, DesignTokens.font_size_caption - 1)}px;"
             )
+
+    def _refresh_status_label(self):
+        status = str((self.result_obj or {}).get("status") or "") if isinstance(self.result_obj, dict) else ""
+        if status == "cancelled":
+            label = "已取消"
+        elif status == "unknown":
+            label = "待确认"
+        elif getattr(self, "_background_pending", False):
+            label = "排队中" if status == "queued" else "运行中"
+        elif self.failed:
+            label = "调用失败"
+        else:
+            label = "已完成" if self.is_finished else "运行中"
+        self.status_label.setText(label)
+        self.status_label.setStyleSheet(
+            f"QLabel#ToolCallStatus {{ background: transparent; border: none; "
+            f"color: {DesignTokens.error_text if self.failed else DesignTokens.chat_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; }}"
+        )
+        self.setAccessibleName(f"{self.name_label.text()}，{label}，查看任务详情")
 
     def update_agent_state(self, state):
         agent_id = state.get("agent_id")
@@ -25821,8 +25877,8 @@ class ToolCallCard(QFrame):
     def focusInEvent(self, event):
         if not self.is_selected:
             set_stylesheet_if_changed(self.main_row, f"""
-                QFrame {{
-                    background-color: {DesignTokens.primary_soft};
+                QFrame#ToolCallRow {{
+                    background-color: {DesignTokens.bg_hover};
                     border: 1px solid {DesignTokens.primary_focus};
                     border-radius: 6px;
                 }}
@@ -25846,20 +25902,20 @@ class ToolCallCard(QFrame):
         self.is_selected = selected
         if selected:
             set_stylesheet_if_changed(self.main_row, f"""
-                QFrame {{
-                    background-color: {DesignTokens.primary_soft};
+                QFrame#ToolCallRow {{
+                    background-color: {DesignTokens.bg_hover};
                     border: none;
                     border-radius: 6px;
                 }}
             """)
         else:
             set_stylesheet_if_changed(self.main_row, f"""
-                QFrame {{
+                QFrame#ToolCallRow {{
                     background-color: transparent;
                     border: none;
                     border-radius: 6px;
                 }}
-                QFrame:hover {{
+                QFrame#ToolCallRow:hover {{
                     background-color: {DesignTokens.bg_hover};
                 }}
             """)
@@ -25879,18 +25935,21 @@ class ToolCallCard(QFrame):
             self.args_preview_label.setText("执行失败 · " + tool_result_summary(result_obj if result_obj is not None else result_text))
             self.args_preview_label.setWordWrap(True)
         else:
-            self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
+            self.status_icon.setPixmap(qta.icon('fa5s.check', color=DesignTokens.icon_secondary).pixmap(14, 14))
         if not pending and getattr(self, "_background_pending", False):
             self.args_preview_label.setText("执行失败，查看详情" if failed else "工具已完成，结果已返回")
         if isinstance(result_obj, dict) and result_obj.get("status") == "unknown":
             self.args_preview_label.setText("执行已中断，结果尚未确认")
         elif isinstance(result_obj, dict) and result_obj.get("status") == "cancelled":
             self.args_preview_label.setText("已取消，未执行" if result_obj.get("not_executed") else "已取消，查看详情")
+        self.args_preview_label.setVisible(bool(pending or failed or getattr(self, "_background_pending", False)
+                                               or (isinstance(result_obj, dict) and result_obj.get("status") in {"unknown", "cancelled"})))
         self._background_pending = pending
         self.result = result_text
         self.result_obj = result_obj
         self.failed = failed
         self.is_finished = not pending
+        self._refresh_status_label()
         
         if not self.is_selected:
             self.set_selected(False)

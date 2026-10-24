@@ -22,7 +22,7 @@ from PySide6.QtCore import (
     QThread,
     Signal,
 )
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
@@ -849,6 +849,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertFalse(first.isHidden())
         self.assertFalse(final.thinking_widget.isHidden())
         self.assertFalse(first.think_container.isHidden())
+        self.assertTrue(final.think_container.isHidden())
+        final.think_toggle_btn.setChecked(True)
         self.assertFalse(final.think_container.isHidden())
 
         group.process_disclosure.setChecked(False)
@@ -2263,19 +2265,86 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertTrue(window.skill_manager_ready)
         self.assertEqual(notices, [filesystem_event])
 
-    def test_deep_thinking_fold_hides_reasoning_and_tools_together(self):
+    def test_deep_thinking_fold_keeps_tool_details_available(self):
         bubble = ChatBubble("Agent", "")
         bubble.update_thinking("先检查环境")
         tool = ToolCallCard("run_command", {"command": "pytest"}, "tool-1")
         bubble.add_tool_card(tool)
         self.assertFalse(bubble.think_toggle_btn.isChecked())
-        self.assertTrue(bubble.think_container.isHidden())
+        self.assertFalse(bubble.think_container.isHidden())
+        self.assertTrue(bubble.timeline_events[0].isHidden())
+        self.assertFalse(tool.isHidden())
         bubble.think_toggle_btn.setChecked(True)
         self.assertFalse(bubble.think_container.isHidden())
         self.assertIn(tool, bubble.timeline_events)
         bubble.think_toggle_btn.setChecked(False)
-        self.assertTrue(bubble.think_container.isHidden())
+        self.assertFalse(bubble.think_container.isHidden())
+        self.assertTrue(bubble.timeline_events[0].isHidden())
+        self.assertFalse(tool.isHidden())
         bubble.deleteLater()
+
+    def test_thinking_stream_fold_stop_and_copy_preserve_exact_order(self):
+        bubble = ChatBubble("Agent", "", thinking="...")
+        bubble.resize(380, 500)
+        bubble.show()
+        self.addCleanup(bubble.deleteLater)
+        bubble.update_thinking("First paragraph.\n\n")
+        original = bubble.timeline_events[0]
+        QTest.keyClick(bubble.think_toggle_btn, Qt.Key_Space)
+        QTest.qWait(20)
+        editor = original._plain_edit
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(5, QTextCursor.KeepAnchor)
+        editor.setTextCursor(cursor)
+        bubble.update_thinking("Second paragraph.")
+        QTest.qWait(20)
+        self.assertEqual(editor.textCursor().selectedText(), "First")
+        self.assertEqual(editor.toPlainText(), "First paragraph.\n\nSecond paragraph.")
+
+        tool = ToolCallCard("run_command", {"command": "example"}, "ordered-tool")
+        bubble.add_tool_card(tool)
+        received = []
+        tool.clicked.connect(lambda *args: received.append(args))
+        bubble.think_toggle_btn.click()
+        bubble.update_thinking("After the tool.")
+        following = bubble.timeline_events[-1]
+        bubble.update_thinking(" Additional text.")
+        bubble.stop_thinking_timers()
+        self.assertTrue(original.isHidden())
+        self.assertTrue(following.isHidden())
+        self.assertTrue(tool.isVisible())
+        tool.view_btn.click()
+        self.assertEqual(received[0][0], "ordered-tool")
+        bubble.think_toggle_btn.click()
+        QTest.qWait(20)
+        self.assertEqual(bubble.timeline_events, [original, tool, following])
+        self.assertEqual(following._plain_edit.toPlainText(), "After the tool. Additional text.")
+        following.copy_button.click()
+        self.assertEqual(self.app.clipboard().text(), following.text())
+        self.assertFalse(bubble.think_timer.isActive())
+        self.assertTrue(bubble.think_toggle_btn.isChecked())
+        bubble.hide()
+
+    def test_thinking_wrapped_text_fits_after_resize_and_stream_append(self):
+        bubble = ChatBubble("Agent", "", thinking="...")
+        self.addCleanup(bubble.deleteLater)
+        bubble.think_toggle_btn.setChecked(True)
+        bubble.update_thinking("Source records include dates and links.\n\n" +
+                               "Keep direct quotations separate from interpretation. " * 12)
+        bubble.show()
+        for width in (736, 380, 320, 736):
+            bubble.setFixedWidth(width)
+            bubble.update_thinking(" Additional streamed words.")
+            QTest.qWait(40)
+            editor = bubble.timeline_events[0]._plain_edit
+            cursor = editor.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.assertLessEqual(editor.cursorRect(cursor).bottom(), editor.viewport().height(),
+                                 (width, editor._height_block_prefix, editor.fontMetrics().lineSpacing(),
+                                  editor.document().defaultFont().toString(), editor.font().toString()))
+        bubble.stop_thinking_timers()
+        bubble.hide()
 
     def test_apply_patch_card_uses_multi_path_summary_and_error_state(self):
         patch_text = (
@@ -2312,12 +2381,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_empty_thinking_expansion_does_not_create_timeline_height(self):
         bubble = ChatBubble("Agent", "", thinking="...")
+        bubble.show()
         bubble.think_toggle_btn.setChecked(True)
         self.app.processEvents()
         self.assertTrue(bubble.think_container.isHidden())
 
         bubble.update_thinking("正在检查")
-        self.app.processEvents()
+        QTest.qWait(20)
         self.assertFalse(bubble.think_container.isHidden())
 
         expanded_height = bubble.sizeHint().height()
@@ -2445,11 +2515,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_stage_without_reply_does_not_reserve_text_editor_height(self):
         bubble = ChatBubble("Agent", "", thinking="只显示思考标题")
+        bubble.show()
         self.assertTrue(bubble.content_rich_edit.isHidden())
         self.assertTrue(bubble.content_plain_edit.isHidden())
 
         bubble.set_main_content("阶段回复", final=True)
-        self.app.processEvents()
+        QTest.qWait(20)
         self.assertFalse(bubble.content_edit.isHidden())
 
         bubble.set_main_content("", final=True)
@@ -2459,7 +2530,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_stage_reply_remains_visible_when_thinking_segment_finishes(self):
         bubble = ChatBubble("Agent", "")
+        bubble.show()
         bubble.set_main_content("阶段性文字", final=True)
+        QTest.qWait(20)
         self.assertEqual(bubble.freeze_content_fragment(), "阶段性文字")
         self.assertEqual(bubble.main_content_text, "阶段性文字")
         self.assertIn("阶段性文字", bubble.content_edit.toPlainText())

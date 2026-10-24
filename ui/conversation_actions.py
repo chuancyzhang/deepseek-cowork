@@ -24,6 +24,7 @@ from ui.primitives import (
     ProductInlineNotice, ProductPopover, ProductSegmentedControl,
     product_button_style, product_field_style,
 )
+from ui.workspace_presentation import MessageReferenceChip
 
 
 logger = logging.getLogger(__name__)
@@ -462,29 +463,11 @@ class ConversationActionsMixin:
         refs = meta.get("conversation_refs") or []
         if not refs:
             return
-        row = QWidget(bubble)
-        layout = QVBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
         for ref in refs:
-            buttons = QHBoxLayout()
-            if ref.get("history_only"):
-                source = reference_button("历史引用：" + ref["title"] + " · 打开来源")
-                source.setToolTip("原对话的引用记录；快照文件未带入此分支。如需使用，请重新 @ 引用。")
-                source.clicked.connect(lambda checked=False, sid=ref["session_id"]: self.open_conversation_source(sid))
-                buttons.addWidget(source)
-                buttons.addStretch()
-                layout.addLayout(buttons)
-                continue
-            snapshot = reference_button("@" + ref["title"] + " · 查看引用快照")
-            snapshot.setToolTip("引用时间：" + ref.get("captured_at", ""))
-            snapshot.clicked.connect(lambda checked=False, r=copy.deepcopy(ref): self.show_conversation_reference(r))
-            source = reference_button("打开来源")
-            source.clicked.connect(lambda checked=False, sid=ref["session_id"]: self.open_conversation_source(sid))
-            buttons.addWidget(snapshot)
-            buttons.addWidget(source)
-            buttons.addStretch()
-            layout.addLayout(buttons)
-        (bubble.user_wrapper_layout or bubble.layout()).addWidget(row)
+            chip = MessageReferenceChip(ref["title"], history_only=bool(ref.get("history_only")), captured_at=ref.get("captured_at", ""))
+            chip.snapshotRequested.connect(lambda r=copy.deepcopy(ref): self.show_conversation_reference(r))
+            chip.sourceRequested.connect(lambda sid=ref["session_id"]: self.open_conversation_source(sid))
+            bubble.add_user_context_widget(chip)
 
     def regenerate_conversation_answer(self, session_id, message_id):
         state = self.get_session(session_id)

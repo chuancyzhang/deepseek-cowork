@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
 from core.chat_storage import ChatStorage
 from core.conversation_actions import (
@@ -21,13 +22,78 @@ from core.conversation_actions import (
 from core.filesystem_ops import read_text_file
 from core.runtime_journal import RuntimeJournal
 from ui.conversation_actions import BranchWorker, ConversationActionsMixin, ConversationMentionPopover
-from main import MainWindow
+from main import ChatBubble, FileChip, MainWindow
+from ui.workspace_presentation import MessageReferenceChip
 
 
 class ConversationActionsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_message_context_wraps_and_preserves_file_snapshot_source_and_edit_actions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = [Path(temporary, "gaic_kuaidi100_agent_symbiosis_from_html_" + str(index) + ".pptx") for index in range(3)]
+            for path in paths:
+                path.write_text("fixture", encoding="utf-8")
+            refs = [
+                {"session_id": "source", "title": "看看今天的 A 股情况", "snapshot_path": str(Path(temporary, "snapshot.md"))},
+                {"session_id": "historical", "title": "原分支的研究记录", "history_only": True},
+            ]
+            message = {"id": "user", "role": "user", "content": "etf 为什么回涨", "meta": {"conversation_refs": refs}}
+            state = SimpleNamespace(messages=[message])
+            original_messages = copy.deepcopy(state.messages)
+            window = SimpleNamespace(_find_message_by_id=lambda messages, mid: message,
+                show_conversation_reference=MagicMock(), open_conversation_source=MagicMock())
+            bubble = ChatBubble("User", message["content"], attachments=[{"path": str(path)} for path in paths], source_message_id="user")
+            ConversationActionsMixin.attach_conversation_reference_actions(window, bubble, state)
+            bubble.show()
+            try:
+                for width in (640, 260, 420):
+                    bubble.apply_dynamic_widths(width + 40, width)
+                    bubble.resize(width + 40, bubble.sizeHint().height())
+                    self.app.processEvents()
+                    context = bubble.user_context_container
+                    rectangles = [context.layout().itemAt(index).geometry() for index in range(context.layout().count())]
+                    self.assertTrue(all(context.rect().contains(rect) for rect in rectangles))
+                    self.assertTrue(all(not rect.intersects(other) for index, rect in enumerate(rectangles) for other in rectangles[index + 1:]))
+                    self.assertIs(context.parentWidget(), bubble.user_bubble_frame)
+                chips = bubble.findChildren(FileChip)
+                self.assertTrue(all(chip.text_label.text().endswith(".pptx") for chip in chips))
+                with patch("main.QDesktopServices.openUrl", return_value=True) as opened:
+                    QTest.mouseClick(chips[0].text_label, Qt.LeftButton)
+                self.assertEqual(opened.call_args.args[0].toLocalFile(), str(paths[0]).replace("\\", "/"))
+                reference_chips = bubble.findChildren(MessageReferenceChip)
+                self.assertIn("A 股", reference_chips[0].title_label.text())
+                QTest.mouseClick(reference_chips[0].snapshot_button, Qt.LeftButton)
+                window.show_conversation_reference.assert_called_once_with(refs[0])
+                QTest.keyClick(reference_chips[0].source_button, Qt.Key_Space)
+                window.open_conversation_source.assert_called_with("source")
+                QTest.mouseClick(reference_chips[1].snapshot_button, Qt.LeftButton)
+                window.open_conversation_source.assert_called_with("historical")
+                self.assertIsNone(reference_chips[1].source_button)
+                bubble.begin_inline_edit()
+                bubble.user_content_edit.setPlainText("修改中的文字")
+                bubble.cancel_inline_edit()
+                self.assertEqual(bubble.user_content_edit.toPlainText(), message["content"])
+                self.assertEqual(bubble.user_context_layout.count(), 5)
+                self.assertEqual(state.messages, original_messages)
+            finally:
+                bubble.close()
+                bubble.deleteLater()
+
+    def test_attachment_only_message_can_edit_and_cancel_without_blank_body(self):
+        bubble = ChatBubble("User", "", attachments=[{"path": "材料.pdf"}], source_message_id="file-only")
+        try:
+            self.assertTrue(bubble.user_content_edit.isHidden())
+            bubble.begin_inline_edit()
+            self.assertFalse(bubble.user_content_edit.isHidden())
+            bubble.user_content_edit.setPlainText("补充说明")
+            bubble.cancel_inline_edit()
+            self.assertTrue(bubble.user_content_edit.isHidden())
+            self.assertEqual(bubble.user_attachments, [{"path": "材料.pdf"}])
+        finally:
+            bubble.deleteLater()
 
     def test_branch_progress_is_removed_on_success_and_failure(self):
         class Worker(QObject):

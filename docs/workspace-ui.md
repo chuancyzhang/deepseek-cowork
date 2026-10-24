@@ -26,6 +26,10 @@
 
 用户提问的时间、编辑和复制在鼠标悬停时显示，移开后隐藏。回答显示 Cowork 或当前专家名称，思考过程继续使用现有折叠方式。多文件回复默认显示 3 项及总数量，可展开、收起，点击文件沿用现有预览。失败提示集中展示实际原因，以及当前可用的重试和错误详情入口。
 
+已发送消息的附件和引用对话显示在气泡顶部，使用带图标的标签，多项自动换行。长文件名从中间省略并保留扩展名，悬停查看完整名称与路径。点击文件继续使用原有打开或图片预览方式；点击对话标签查看发送时的引用快照，旁边的跳转图标打开来源对话。分支中的历史引用保留“历史引用”提示，只打开来源，不代表已带入快照。编辑消息时标签保持可见，输入区的添加、移除和发送操作不变。
+
+![消息中的附件与引用对话](images/message-context/message-context-light-100.png)
+
 ![对话](images/focused-workspace/conversation-light-100.png)
 
 ![多文件回复](images/focused-workspace/conversation-files-light-100.png)
@@ -84,6 +88,8 @@
 ```powershell
 .venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --mode light
 .venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --mode dark --scale 1.5 --compact
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --message-context
+.venv/Scripts/python.exe -X utf8 -B scripts/render_workspace_ui_screenshots.py --message-context --mode dark --scale 1.5 --compact
 ```
 
 脚本使用临时配置和 Qt 离屏窗口，不读取个人会话、不调用模型；结束时检查主题预览未写入已保存配置。

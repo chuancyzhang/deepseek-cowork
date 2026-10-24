@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False):
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -51,7 +51,7 @@ def render(mode="light", scale=1, compact=False, focused=False):
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = ROOT / "docs" / "images" / ("focused-workspace" if focused else "workspace-redesign")
+        output = ROOT / "docs" / "images" / ("message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -60,9 +60,15 @@ def render(mode="light", scale=1, compact=False, focused=False):
             QTest.qWait(100)
 
         def capture(name):
-            if focused and name not in {"home-empty", "home", "conversation", "conversation-hover", "conversation-files", "conversation-failure", "capabilities", "settings", "settings-search"}:
+            if message_context and not name.startswith("message-context"):
+                return
+            if focused and not message_context and name not in {"home-empty", "home", "conversation", "conversation-hover", "conversation-files", "conversation-failure", "capabilities", "settings", "settings-search"}:
                 return
             settle()
+            if message_context and name.startswith("message-context"):
+                scroll = window.get_current_session().chat_scroll.verticalScrollBar()
+                scroll.setValue(scroll.minimum())
+                QTest.qWait(40)
             destination = output / f"{name}-{mode}-{int(scale * 100)}{'-compact' if compact else ''}.png"
             assert window.grab().save(str(destination))
             print(destination, flush=True)
@@ -80,12 +86,24 @@ def render(mode="light", scale=1, compact=False, focused=False):
             {"id": "preview-user", "role": "user", "content": "请整理本次产品讨论，给出结论和下一步建议。"},
             {"id": "preview-answer", "role": "assistant", "content": "已整理讨论记录。优先统一任务入口，让项目、资料与产物之间的关系更清楚。\n\n### 建议按以下顺序推进\n\n1. 明确用户进入页面后的第一步操作。\n2. 将低频配置放入就近的选项菜单。\n3. 保留执行过程、文件预览与错误恢复入口。\n\n下一轮可以用一个真实任务验证完整流程。", "meta": {"ui_reply_kind": "final"}},
         ]
-        user_bubble = window.add_chat_bubble("User", current.messages[0]["content"], source_message_id="preview-user", animate=False)
+        attachments = []
+        if message_context:
+            for name in ("产品介绍.pdf", "访谈纪要.md", "gaic_kuaidi100_agent_symbiosis_from_html_final.pptx"):
+                path = Path(temporary, name)
+                path.write_text("附件布局示例，不用于文件内容预览。", encoding="utf-8")
+                attachments.append({"path": str(path)})
+            current.messages[0]["meta"] = {"conversation_refs": [{"session_id": "reference-preview", "title": "产品讨论与需求梳理", "snapshot_path": str(Path(temporary, "引用快照.md")), "captured_at": "2026-10-24 09:00"}]}
+        user_bubble = window.add_chat_bubble("User", current.messages[0]["content"], source_message_id="preview-user", animate=False, attachments=attachments)
         answer_bubble = window.add_chat_bubble("Agent", current.messages[1]["content"], source_message_id="preview-answer", animate=False)
         window.normalize_session_ui(current)
         assert window.input_field.toPlainText().startswith("保留的草稿")
         assert window.input_row.parentWidget() is window.conversation_column
         capture("conversation")
+        if message_context:
+            capture("message-context")
+            user_bubble.begin_inline_edit()
+            capture("message-context-edit")
+            user_bubble.cancel_inline_edit()
         if focused:
             QTest.mouseMove(user_bubble, user_bubble.rect().center())
             capture("conversation-hover")
@@ -162,5 +180,6 @@ if __name__ == "__main__":
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--focused", action="store_true", help="Capture only the home, conversation, capabilities and settings changes")
+    parser.add_argument("--message-context", action="store_true", help="Capture sent attachments and conversation references inside the user message")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context)

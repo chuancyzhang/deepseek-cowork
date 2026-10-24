@@ -3,11 +3,108 @@
 from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QLabel, QLayout, QPushButton, QStyle, QStyleOptionButton, QStylePainter,
-    QHBoxLayout, QVBoxLayout, QSizePolicy, QWidget,
+    QFrame, QHBoxLayout, QToolButton, QVBoxLayout, QSizePolicy, QWidget,
 )
 import qtawesome as qta
 from core.theme import DesignTokens, bind_theme
 from ui.primitives import ProductInlineNotice
+
+
+class MessageContextLabel(QLabel):
+    """Keep a stable preferred width while eliding long context names."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.full_text = str(text)
+        self.setTextFormat(Qt.PlainText)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setToolTip(self.full_text)
+        self._elide()
+
+    def sizeHint(self):
+        return QSize(min(220, self.fontMetrics().horizontalAdvance(self.full_text)), self.fontMetrics().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self.fontMetrics().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        self.setText(self.fontMetrics().elidedText(self.full_text, Qt.ElideMiddle, max(0, self.width())))
+
+
+class MessageReferenceButton(QPushButton):
+    def sizeHint(self):
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self):
+        return self.layout().minimumSize()
+
+
+class MessageReferenceChip(QFrame):
+    snapshotRequested = Signal()
+    sourceRequested = Signal()
+
+    def __init__(self, title, *, history_only=False, captured_at="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("MessageReferenceChip")
+        self.setMaximumWidth(290)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 2, 0)
+        layout.setSpacing(0)
+        self.snapshot_button = MessageReferenceButton()
+        self.snapshot_button.setObjectName("MessageReferenceTitle")
+        self.snapshot_button.setMinimumWidth(0)
+        self.snapshot_button.setCursor(Qt.PointingHandCursor)
+        self.snapshot_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        title_layout = QHBoxLayout(self.snapshot_button)
+        title_layout.setContentsMargins(9, 6, 9, 6)
+        title_layout.setSpacing(6)
+        self.icon_label = QLabel()
+        self.title_label = MessageContextLabel(("历史引用 · " if history_only else "") + title)
+        for label in (self.icon_label, self.title_label):
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        title_layout.addWidget(self.icon_label)
+        title_layout.addWidget(self.title_label, 1)
+        layout.addWidget(self.snapshot_button, 1)
+        self.source_button = None
+        if history_only:
+            self.snapshot_button.setToolTip(title + "\n打开来源对话。原引用快照未带入此分支，如需使用请重新 @ 引用。")
+            self.snapshot_button.setAccessibleName("打开历史引用来源：" + title)
+            self.snapshot_button.clicked.connect(self.sourceRequested)
+        else:
+            self.snapshot_button.setToolTip(title + "\n查看引用快照" + (" · " + captured_at if captured_at else ""))
+            self.snapshot_button.setAccessibleName("查看引用快照：" + title)
+            self.snapshot_button.clicked.connect(self.snapshotRequested)
+            self.source_button = QToolButton()
+            self.source_button.setObjectName("MessageReferenceSource")
+            self.source_button.setCursor(Qt.PointingHandCursor)
+            self.source_button.setToolTip("打开来源对话：" + title)
+            self.source_button.setAccessibleName("打开来源对话：" + title)
+            self.source_button.clicked.connect(self.sourceRequested)
+            layout.addWidget(self.source_button)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+        self.refresh_theme()
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#MessageReferenceChip {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.chat_border}; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QPushButton#MessageReferenceTitle, QToolButton#MessageReferenceSource {{ background: transparent; border: none; border-radius: {DesignTokens.radius_sm}px; padding: 0; }}"
+            f"QPushButton#MessageReferenceTitle:hover, QToolButton#MessageReferenceSource:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QPushButton#MessageReferenceTitle:focus, QToolButton#MessageReferenceSource:focus {{ background: {DesignTokens.primary_soft}; }}"
+        )
+        self.title_label.setStyleSheet(f"color: {DesignTokens.chat_text}; font-size: {DesignTokens.font_size_meta}px; font-weight: {DesignTokens.font_weight_medium}; background: transparent; border: none;")
+        self.title_label._elide()
+        self.icon_label.setPixmap(qta.icon("fa5s.comment-alt", color=DesignTokens.icon_primary).pixmap(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm))
+        self.snapshot_button.setFixedHeight(max(DesignTokens.icon_size_sm, self.title_label.fontMetrics().height()) + 12)
+        if self.source_button is not None:
+            self.source_button.setIcon(qta.icon("fa5s.external-link-alt", color=DesignTokens.icon_secondary))
+            self.source_button.setIconSize(QSize(12, 12))
+            self.source_button.setFixedSize(26, 26)
 
 
 class ConversationIdentityHeader(QWidget):

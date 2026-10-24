@@ -187,7 +187,7 @@ from core.theme_service import ThemeRepository
 from ui.conversation_files import ConversationFileTable
 from ui.workspace_presentation import (
     ComposerFlowLayout, ComposerSubmitButton, EditableConversationTitle,
-    HomeRecentButton, ConversationRunNotice, ConversationIdentityHeader, context_action_style,
+    HomeRecentButton, ConversationRunNotice, ConversationIdentityHeader, MessageContextLabel, context_action_style,
 )
 from ui.primitives import (
     ProductActionBar,
@@ -22325,10 +22325,11 @@ class FileChip(QFrame):
     previewRequested = Signal(str)
     activated = Signal(str)
 
-    def __init__(self, path, removable=False, parent=None):
+    def __init__(self, path, removable=False, parent=None, *, compact=False):
         super().__init__(parent)
         self.path = os.path.normpath(str(path or ""))
         self._preview_dialog = None
+        self._compact = compact
         self.setObjectName("FileChip")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
@@ -22366,10 +22367,16 @@ class FileChip(QFrame):
         layout.addWidget(icon_label)
 
         name = os.path.basename(self.path) or self.path
-        text_label = QLabel(name)
+        text_label = MessageContextLabel(name) if compact else QLabel(name)
         self.text_label = text_label
         text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
-        text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        if compact:
+            self.setMaximumWidth(270)
+            self.setMinimumWidth(0)
+            self.setAccessibleName("打开附件：" + name)
+            text_label.setToolTip(self.path)
+        else:
+            text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         layout.addWidget(text_label)
 
         self.copy_btn = None
@@ -22494,6 +22501,8 @@ class FileChip(QFrame):
             f"font-size: {DesignTokens.font_size_meta}px; "
             f"font-weight: {DesignTokens.font_weight_medium};"
         )
+        if self._compact:
+            self.text_label._elide()
         if self._uses_file_icon:
             self.icon_label.setPixmap(
                 qta.icon(
@@ -23757,6 +23766,9 @@ class ChatBubble(QFrame):
         self.user_bubble_frame = None
         self.user_content_edit = None
         self.user_wrapper_layout = None
+        self.user_context_container = None
+        self.user_context_layout = None
+        self._user_message_widths = (DesignTokens.message_max_width, DesignTokens.user_bubble_max_width)
         self.edited_label = None
         self.content_edit = None
         self.content_col = None
@@ -23806,33 +23818,10 @@ class ChatBubble(QFrame):
             cw_layout = QVBoxLayout(content_wrapper)
             self.user_wrapper_layout = cw_layout
             cw_layout.setContentsMargins(0, 0, 0, 0)
-            cw_layout.setSpacing(8 if attachments and text else 5)
-
-            if attachments:
-                attachment_group = QWidget()
-                attachment_group_layout = QVBoxLayout(attachment_group)
-                attachment_group_layout.setContentsMargins(0, 0, 0, 0)
-                attachment_group_layout.setSpacing(4)
-
-                attachment_hint_label = QLabel(attachment_hint)
-                attachment_hint_label.setAlignment(Qt.AlignRight)
-                attachment_hint_label.setStyleSheet(
-                    f"color: {DesignTokens.info_text}; font-size: 11px; font-weight: 600; padding-right: 2px;"
-                )
-                attachment_group_layout.addWidget(attachment_hint_label)
-
-                chip_row = QWidget()
-                chip_row_layout = QHBoxLayout(chip_row)
-                chip_row_layout.setContentsMargins(0, 0, 0, 0)
-                chip_row_layout.setSpacing(8)
-                chip_row_layout.addStretch()
-                for attachment in attachments:
-                    chip_row_layout.addWidget(FileChip(attachment.get("path") or "", removable=False))
-                attachment_group_layout.addWidget(chip_row)
-                cw_layout.addWidget(attachment_group, 0, Qt.AlignRight)
+            cw_layout.setSpacing(5)
 
             # Bubble Frame
-            if text or attachments:
+            if text or attachments or self.source_message_id:
                 bubble_frame = QFrame()
                 self.user_bubble_frame = bubble_frame
                 bubble_frame.setObjectName("UserBubbleFrame")
@@ -23852,11 +23841,22 @@ class ChatBubble(QFrame):
                     DesignTokens.user_message_padding_vertical,
                 )
                 self.user_bubble_layout = bubble_layout
+                bubble_layout.setSpacing(8)
+                self.user_context_container = QWidget()
+                self.user_context_container.setObjectName("UserMessageContext")
+                self.user_context_container.setAccessibleName(attachment_hint)
+                self.user_context_layout = ComposerFlowLayout(self.user_context_container)
+                self.user_context_layout.setSpacing(6)
+                for attachment in attachments:
+                    self.user_context_layout.addWidget(FileChip(attachment.get("path") or "", removable=False, compact=True))
+                self.user_context_container.setVisible(bool(attachments))
+                bubble_layout.addWidget(self.user_context_container)
 
                 content_edit = AutoResizingTextEdit()
                 self.user_content_edit = content_edit
                 content_edit.installEventFilter(self)
                 content_edit.setPlainText(text)
+                content_edit.setVisible(bool(text))
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 content_edit.setStyleSheet(
                     f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
@@ -24413,6 +24413,7 @@ class ChatBubble(QFrame):
         if not self.source_message_id or self.role != "User" or self.user_content_edit is None:
             return
         self.edit_original_text = self.user_content_edit.toPlainText()
+        self.user_content_edit.show()
         self.user_content_edit.setReadOnly(False)
         self.user_content_edit.setFocus()
         self.user_content_edit.selectAll()
@@ -24464,6 +24465,7 @@ class ChatBubble(QFrame):
 
     def _finish_inline_edit(self):
         if self.user_content_edit is not None:
+            self.user_content_edit.setVisible(bool(self.user_content_edit.toPlainText()))
             self.user_content_edit.setReadOnly(True)
             self.user_content_edit.setStyleSheet(
                 f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
@@ -24524,16 +24526,29 @@ class ChatBubble(QFrame):
         if self.delete_btn is not None:
             self.delete_btn.setVisible(self.role == "User")
 
+    def add_user_context_widget(self, widget):
+        if self.user_context_layout is None:
+            return
+        self.user_context_layout.addWidget(widget)
+        self.user_context_container.show()
+        self.apply_dynamic_widths(*self._user_message_widths)
+
     def apply_dynamic_widths(self, message_width, user_bubble_width):
+        self._user_message_widths = (message_width, user_bubble_width)
         if self.content_wrapper is not None:
             self.content_wrapper.setMaximumWidth(max(0, int(message_width)))
         if self.user_bubble_frame is not None:
             self.user_bubble_frame.setMaximumWidth(max(0, int(user_bubble_width)))
         if self.user_content_edit is not None:
-            max_content_width = max(80, int(user_bubble_width) - 30)
+            margins = self.user_bubble_layout.contentsMargins()
+            max_content_width = max(80, int(user_bubble_width) - margins.left() - margins.right())
             lines = self.user_content_edit.toPlainText().splitlines() or [""]
             natural_width = max(self.user_content_edit.fontMetrics().horizontalAdvance(line) for line in lines) + 12
             content_width = max(80, min(max_content_width, natural_width))
+            if self.user_context_layout is not None and self.user_context_layout.count():
+                content_width = max(content_width, min(max_content_width, self.user_context_layout.sizeHint().width()))
+                self.user_context_container.setFixedWidth(content_width)
+                self.user_context_container.setFixedHeight(self.user_context_layout.heightForWidth(content_width))
             self.user_content_edit.setFixedWidth(content_width)
             self.user_content_edit.scheduleAdjustHeight()
         if self.content_col is not None:

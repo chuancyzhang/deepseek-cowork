@@ -61,16 +61,22 @@ class UnifiedManagementTests(unittest.TestCase):
         self.assertEqual(self.config.get_agent_profiles()[0]["id"], "external")
         self.assertFalse(page._settings_dirty)
 
-    def test_switch_cancel_retains_input_and_selected_page(self):
+    def test_switch_retains_draft_and_leaving_requires_explicit_choice(self):
         page = self.page(section="回答偏好")
         page.memory_soul_edit.setPlainText("草稿")
-        with patch("main.ProductMessageDialog.exec_result", return_value="stay"):
+        with patch("main.ProductMessageDialog.exec_result") as confirm:
             page.select_initial_page("外观")
+            confirm.assert_not_called()
+        self.assertEqual(page.nav_list.currentItem().text(), "外观与阅读")
+        self.assertEqual(page.memory_soul_edit.toPlainText(), "草稿")
+        self.assertTrue(page._settings_dirty)
+        page.select_initial_page("回答偏好")
+        with patch("main.ProductMessageDialog.exec_result", return_value="stay"):
+            self.assertFalse(page._confirm_discard_settings())
         self.assertEqual(page.nav_list.currentItem().text(), "回答偏好")
         self.assertEqual(page.memory_soul_edit.toPlainText(), "草稿")
         with patch("main.ProductMessageDialog.exec_result", return_value="discard"):
-            page.select_initial_page("外观")
-        self.assertEqual(page.nav_list.currentItem().text(), "外观")
+            self.assertTrue(page._confirm_discard_settings())
         self.assertFalse(page._settings_dirty)
 
     def test_workspace_memory_does_not_cross_projects(self):

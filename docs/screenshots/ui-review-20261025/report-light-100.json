@@ -1,0 +1,37 @@
+{
+  "platform": "offscreen",
+  "dark": false,
+  "qt_scale_factor": 1,
+  "display": {
+    "logical_dpi": 96.0,
+    "device_pixel_ratio": 1.0,
+    "font_family": "Microsoft YaHei UI",
+    "style": ""
+  },
+  "compact": false,
+  "captures": [
+    "home-light-100.png",
+    "home-options-light-100.png",
+    "favorites-light-100.png",
+    "favorite-editor-light-100.png",
+    "favorite-schedule-light-100.png",
+    "favorite-delivery-light-100.png",
+    "capabilities-light-100.png",
+    "capabilities-mcp-light-100.png",
+    "capabilities-agents-light-100.png",
+    "settings-light-100.png",
+    "details-empty-light-100.png",
+    "details-light-100.png",
+    "failure-light-100.png",
+    "usage-light-100.png"
+  ],
+  "checks": [
+    "favorite_payload_preserved",
+    "full_width_schedule",
+    "draft_preserved",
+    "empty_details_and_selected_details",
+    "usage_within_window",
+    "full_usage_copy",
+    "theme_preview_did_not_write_saved_state"
+  ]
+}

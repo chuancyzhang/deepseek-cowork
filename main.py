@@ -2334,11 +2334,11 @@ def build_settings_page_header(title, intro=None):
     header_layout = QVBoxLayout(header_widget)
     header_layout.setContentsMargins(0, 0, 0, 0)
     header_layout.setSpacing(4)
-    header = QLabel(str(title or ""))
+    header = QLabel(str(title or ""), header_widget)
     header.setProperty("roleTitle", True)
     header_layout.addWidget(header)
     if intro:
-        intro_label = QLabel(str(intro))
+        intro_label = QLabel(str(intro), header_widget)
         intro_label.setObjectName("SettingsPageIntro")
         intro_label.setWordWrap(True)
         intro_label.setStyleSheet(apple_settings_inline_note_style())
@@ -7315,7 +7315,7 @@ class AgentProfileManager(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
-        self.profile_header = ProductPageHeader("专家", "把常用的角色和工作方式保存下来，下次直接使用。", primary_text="新增专家")
+        self.profile_header = ProductPageHeader("专家", primary_text="新增专家", parent=self)
         self.profile_header.primaryRequested.connect(self.add_profile)
         layout.addWidget(self.profile_header)
         self.profile_editor_actions = QWidget()
@@ -7892,7 +7892,7 @@ class FavoriteEditorPage(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.editor_header = QFrame()
+        self.editor_header = QFrame(self)
         self.editor_header.setObjectName("FavoriteEditorHeader")
         header = QHBoxLayout(self.editor_header)
         header.setContentsMargins(24, 16, 24, 16)
@@ -7901,7 +7901,7 @@ class FavoriteEditorPage(QDialog):
         heading.setSpacing(4)
         header.addLayout(heading, 1)
         root.addWidget(self.editor_header)
-        scroll = QScrollArea()
+        scroll = QScrollArea(self)
         self.scroll = scroll
         scroll.setObjectName("FavoriteEditorScroll")
         scroll.setWidgetResizable(True)
@@ -7911,17 +7911,17 @@ class FavoriteEditorPage(QDialog):
         content = QWidget()
         content.setObjectName("FavoriteEditorContent")
         scroll.setWidget(content)
-        self.editor_columns = QBoxLayout(QBoxLayout.LeftToRight, content)
+        self.editor_columns = QBoxLayout(QBoxLayout.TopToBottom, content)
         self.editor_columns.setContentsMargins(24, 24, 24, 24)
         self.editor_columns.setSpacing(32)
-        self.task_column = QWidget()
+        self.task_column = QWidget(content)
         self.task_column.setMinimumWidth(0)
         self.task_column.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(self.task_column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(24)
         layout.setAlignment(Qt.AlignTop)
-        self.settings_column = QFrame()
+        self.settings_column = QFrame(content)
         self.settings_column.setObjectName("FavoriteSettingsColumn")
         self.settings_layout = QVBoxLayout(self.settings_column)
         self.settings_layout.setContentsMargins(24, 0, 0, 0)
@@ -7932,13 +7932,9 @@ class FavoriteEditorPage(QDialog):
         self.editor_columns.addWidget(self.settings_column, 0, Qt.AlignTop)
         self._editor_compact = None
 
-        title = QLabel("编辑常用" if favorite else "新建常用")
+        title = QLabel("编辑常用任务" if favorite else "新建常用任务", self.editor_header)
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("保存任务内容和能力，下次直接开始。")
-        subtitle.setProperty("favoriteCaption", True)
-        subtitle.setWordWrap(True)
         heading.addWidget(title)
-        heading.addWidget(subtitle)
 
         basics = QFrame()
         basics.setProperty("uiSurface", True)
@@ -8154,8 +8150,7 @@ class FavoriteEditorPage(QDialog):
         auto_run_hint.setProperty("favoriteCaption", True)
         auto_run_hint.setStyleSheet(apple_caption_style())
         state_text_box.addWidget(auto_run_hint)
-        state_row.addLayout(state_text_box)
-        state_row.addStretch()
+        state_row.addLayout(state_text_box, 1)
         self.schedule_enabled_check = AppleSwitch()
         state_row.addWidget(self.schedule_enabled_check)
         schedule_layout.addLayout(state_row)
@@ -8424,7 +8419,7 @@ class FavoriteEditorPage(QDialog):
         self._refresh_delivery_binding_status()
 
     def _kicker(self, text):
-        label = QLabel(text)
+        label = QLabel(text, self)
         label.setProperty("favoriteKicker", True)
         label.setStyleSheet(apple_section_title_style(size=DesignTokens.font_size_body))
         return label
@@ -8468,19 +8463,20 @@ class FavoriteEditorPage(QDialog):
     def _update_editor_layout(self):
         if not hasattr(self, "editor_columns"):
             return
-        compact = self.scroll.viewport().width() < DesignTokens.management_split_threshold
-        self.editor_columns.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
-        self.editor_columns.setStretch(0, 0 if compact else 1)
-        self.settings_column.setMinimumWidth(0 if compact else 320)
-        self.settings_column.setMaximumWidth(16777215 if compact else 320)
-        self.settings_layout.setContentsMargins(0 if compact else 24, 20 if compact else 0, 0, 0)
-        edge = "top" if compact else "left"
+        # Task, execution and schedule form one reading path. A fixed side rail
+        # made schedule fields and delivery recovery unreadable at normal DPI.
+        compact = True
+        self.editor_columns.setDirection(QBoxLayout.TopToBottom)
+        self.editor_columns.setStretch(0, 0)
+        self.settings_column.setMinimumWidth(0)
+        self.settings_column.setMaximumWidth(16777215)
+        self.settings_layout.setContentsMargins(0, 24, 0, 0)
         self.settings_column.setStyleSheet(
             f"QFrame#FavoriteSettingsColumn {{ background: transparent; border: none; "
-            f"border-{edge}: 1px solid {DesignTokens.separator}; }}"
+            f"border-top: 1px solid {DesignTokens.separator}; }}"
         )
         # Two short fields share a line only when their editable text still fits.
-        narrow_fields = (self.scroll.viewport().width() - 48 if compact else self.scroll.viewport().width() - 400) < 480
+        narrow_fields = self.scroll.viewport().width() - 48 < 480
         if getattr(self, "_basics_narrow", None) != narrow_fields:
             for widget in (self.name_label, self.name_input, self.description_label, self.description_input):
                 self.basics_grid.removeWidget(widget)
@@ -9046,15 +9042,11 @@ class FavoritesPage(QDialog):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("常用")
+        title = QLabel("常用任务", self)
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("保存常做的任务，需要时直接开始。")
-        subtitle.setProperty("favoriteCaption", True)
-        subtitle.setWordWrap(True)
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        self.create_btn = QPushButton("新建常用")
+        self.create_btn = QPushButton("新建常用任务", self)
         self.create_btn.setObjectName("PrimaryBtn")
         self.create_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_inverse))
         self.create_btn.clicked.connect(self.create_favorite)
@@ -10100,7 +10092,7 @@ class McpServerManager(QWidget):
         toolbar_host = QWidget()
         toolbar = QHBoxLayout(toolbar_host)
         toolbar.setContentsMargins(0, 0, 0, 0)
-        header = ProductPageHeader("MCP 服务", "连接外部工具与数据，让 AI 在对话中调用。", primary_text="添加服务")
+        header = ProductPageHeader("MCP 服务", primary_text="添加服务", parent=self)
         header.primaryRequested.connect(self.add_server)
         toolbar.addWidget(header)
         layout.addWidget(toolbar_host)
@@ -12201,7 +12193,9 @@ class SettingsDialog(QDialog):
             page_layout.setContentsMargins(6, 4, 6, 18)
             page_layout.setSpacing(16)
 
-            page_layout.addWidget(build_settings_page_header(title, intro))
+            # Capability managers already own their title and primary action.
+            if self.domain != "capabilities":
+                page_layout.addWidget(build_settings_page_header(title, intro))
 
             scroll_area.setWidget(content)
             return scroll_area, page_layout
@@ -12225,7 +12219,6 @@ class SettingsDialog(QDialog):
 
         model_page, model_layout = make_scroll_page(
             "模型与服务",
-            "管理服务连接和可用模型，选择新对话的默认模型。",
         )
 
         self.model_channel_manager = ModelChannelManager(
@@ -12236,7 +12229,6 @@ class SettingsDialog(QDialog):
 
         appearance_page, appearance_layout = make_scroll_page(
             "外观与阅读",
-            "选择喜欢的工作台风格，按自己的习惯调整阅读体验。",
         )
         theme_repository = (
             self._main.theme_manager.repository
@@ -12270,7 +12262,6 @@ class SettingsDialog(QDialog):
         )
         workspace_page, workspace_layout = make_scroll_page(
             "文件与存储",
-            "把默认落点和聊天存储位置整理好，减少每次启动后的重复调整。",
         )
         archive_page, archive_layout = make_scroll_page(
             "归档",
@@ -12808,7 +12799,6 @@ class SettingsDialog(QDialog):
 
         im_page, im_layout = make_scroll_page(
             "消息连接",
-            "把助手连接到常用聊天软件，直接发消息安排任务，并沿用同一套工作区边界。",
         )
 
         im_cfg = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
@@ -15668,12 +15658,13 @@ class SkillsCenterDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 12, 24, 20)
         root.setSpacing(16)
-        self.capability_header = ProductPageHeader("让工作多一种可能", "找到合适的技能、连接器和专家，在对话中一起使用。")
-        self.capability_header.title_label.setProperty("roleTitle", False)
+        self.capability_header = ProductPageHeader("能力", parent=self)
         root.addWidget(self.capability_header)
         self.section_control = CapabilityTabs([("skills", "技能"), ("mcp", "MCP 服务"), ("agents", "专家")], current="skills")
         self.section_control.currentChanged.connect(self.select_section)
-        root.addWidget(self.section_control)
+        section_row = QHBoxLayout()
+        section_row.addWidget(self.section_control, 1)
+        root.addLayout(section_row)
         self.section_stack = QStackedWidget()
         root.addWidget(self.section_stack, 1)
         self.skill_page = QWidget()
@@ -15684,15 +15675,11 @@ class SkillsCenterDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(12)
-        header_row.addStretch()
-        self.import_skill_btn = QPushButton("添加技能")
+        self.import_skill_btn = QPushButton("添加技能", self)
         self.import_skill_btn.setObjectName("CapabilityImportSkill")
         self.import_skill_btn.setStyleSheet(product_button_style("primary"))
         self.import_skill_btn.clicked.connect(self._import_skill_zip)
-        header_row.addWidget(self.import_skill_btn, 0, Qt.AlignTop)
+        section_row.addWidget(self.import_skill_btn, 0, Qt.AlignVCenter)
         self.builtin_btn = QPushButton("内置技能")
         self.builtin_btn.setStyleSheet(product_button_style("ghost"))
         self.builtin_btn.clicked.connect(lambda: self._set_mode("builtin"))
@@ -15701,7 +15688,6 @@ class SkillsCenterDialog(QDialog):
         self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self.advanced_btn.clicked.connect(self._open_advanced_management)
         self.advanced_btn.hide()
-        self.capability_header.layout().addLayout(header_row)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("CapabilityLibrarySearch")
@@ -20584,6 +20570,8 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self.eyebrow_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
+        self.eyebrow_label.hide()
+        self.subtitle_label.hide()
         layout.addSpacing(12)
         self.composer_layout = QVBoxLayout()
         self.composer_layout.setContentsMargins(0, 0, 0, 0)
@@ -20713,7 +20701,7 @@ class EmptyStateWidget(QWidget):
                 hint._theme_action_button,
                 (Qt.AlignLeft | Qt.AlignVCenter) if compact else Qt.AlignVCenter,
             )
-            hint.setMinimumHeight(0 if compact else 72)
+            hint.setMinimumHeight(0)
             
     def create_action_card(self, action):
         action_id = str(action.get("id") or "").strip()
@@ -20748,17 +20736,17 @@ class EmptyStateWidget(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
         default_icon_name = icon_name
-        icon_label = QLabel()
+        icon_label = QLabel(btn)
         icon_label.setPixmap(qta.icon(default_icon_name, color=DesignTokens.primary).pixmap(20, 20))
         icon_label.setStyleSheet("background: transparent; border: none;")
         title_row.addWidget(icon_label, 0, Qt.AlignVCenter)
 
         display_title = re.sub(r"^[^\w\u4e00-\u9fff]+\s*", "", title)
-        t_label = QLabel(display_title)
+        t_label = QLabel(display_title, btn)
         t_label.setStyleSheet(f"font-size: 12px; font-weight: 500; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
         title_row.addWidget(t_label, 1)
         
-        d_label = QLabel(desc)
+        d_label = QLabel(desc, btn)
         d_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
         d_label.setWordWrap(True) # Ensure text is fully visible
         d_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -20767,6 +20755,7 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(d_label)
         d_label.hide()
         btn.setToolTip(desc)
+        btn.setAccessibleName(display_title)
         
         btn.clicked.connect(
             lambda _checked=False, current_id=action_id, current_prompt=prompt: self.activate_action_prompt(
@@ -20792,9 +20781,9 @@ class EmptyStateWidget(QWidget):
     def _home_hint_base_style(object_name):
         return f"""
             QFrame#{object_name} {{
-                background: {DesignTokens.bg_panel_strong};
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 18px;
+                background: transparent;
+                border: none;
+                border-top: 1px solid {DesignTokens.separator};
             }}
             """
 
@@ -20802,11 +20791,11 @@ class EmptyStateWidget(QWidget):
         hint = QFrame(self)
         hint.setObjectName(object_name)
         hint.setMaximumWidth(820)
-        hint.setMinimumHeight(72)
+        hint.setMinimumHeight(0)
         hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         hint.setStyleSheet(self._home_hint_base_style(object_name))
         hint_layout = QBoxLayout(QBoxLayout.LeftToRight, hint)
-        hint_layout.setContentsMargins(16, 12, 14, 12)
+        hint_layout.setContentsMargins(0, 12, 0, 12)
         hint_layout.setSpacing(12)
 
         content_row = QWidget(hint)
@@ -20822,12 +20811,12 @@ class EmptyStateWidget(QWidget):
 
         text_box = QVBoxLayout()
         text_box.setSpacing(3)
-        title_label = QLabel(title)
+        title_label = QLabel(title, content_row)
         title_label.setStyleSheet(
             f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
             "background: transparent; border: none;"
         )
-        description_label = QLabel(description)
+        description_label = QLabel(description, content_row)
         description_label.setWordWrap(True)
         description_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         description_label.setStyleSheet(
@@ -20839,11 +20828,11 @@ class EmptyStateWidget(QWidget):
         content_layout.addLayout(text_box, 1)
         hint_layout.addWidget(content_row, 1)
 
-        open_btn = QPushButton(button_text)
+        open_btn = QPushButton(button_text, hint)
         open_btn.setObjectName("SecondaryBtn")
         open_btn.setCursor(Qt.PointingHandCursor)
         open_btn.setFixedHeight(32)
-        open_btn.setStyleSheet(apple_button_style("secondary", radius=16))
+        open_btn.setStyleSheet(apple_button_style("secondary", radius=DesignTokens.radius_sm))
         open_btn.clicked.connect(callback)
         hint_layout.addWidget(open_btn, 0, Qt.AlignVCenter)
         hint._theme_icon_label = icon
@@ -20859,8 +20848,8 @@ class EmptyStateWidget(QWidget):
         hint = self._create_home_hint(
             "ThemeCustomizerHint",
             "fa5s.palette",
-            "想换一种工作台风格？",
-            "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；先预览，确认后再保存。",
+            "工作台主题",
+            "用自然语言调整外观，预览后保存。",
             "用 AI 设计主题",
             self.activate_theme_customizer,
         )
@@ -20873,7 +20862,7 @@ class EmptyStateWidget(QWidget):
         hint = self._create_home_hint(
             "ToolkitInstallHint",
             "fa5s.puzzle-piece",
-            "需要处理文档或数据？",
+            "工具包",
             "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
             "打开设置",
             self.open_toolkit_settings,
@@ -20910,7 +20899,7 @@ class EmptyStateWidget(QWidget):
             f"font-size: 12px; color: {DesignTokens.text_secondary}; "
             "background: transparent; border: none;"
         )
-        hint._theme_action_button.setStyleSheet(apple_button_style("secondary", radius=16))
+        hint._theme_action_button.setStyleSheet(apple_button_style("secondary", radius=DesignTokens.radius_sm))
         icon = spec.get("icon") or {}
         if icon.get("source") == "builtin":
             hint._theme_icon_label.setPixmap(
@@ -21004,16 +20993,15 @@ class EmptyStateWidget(QWidget):
                     qta.icon(button._theme_default_icon, color=DesignTokens.primary).pixmap(20, 20)
                 )
         self.theme_title_label.setText(
-            content.get("home.theme_reminder.title", "想换一种工作台风格？")
+            content.get("home.theme_reminder.title", CONTENT_DEFAULTS["home.theme_reminder.title"])
         )
         self.theme_desc_label.setText(
             content.get(
                 "home.theme_reminder.description",
-                "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"
-                "先预览，确认后再保存。",
+                CONTENT_DEFAULTS["home.theme_reminder.description"],
             )
         )
-        self.toolkit_title_label.setText(content.get("home.reminder.title", "需要处理文档或数据？"))
+        self.toolkit_title_label.setText(content.get("home.reminder.title", CONTENT_DEFAULTS["home.reminder.title"]))
         self.toolkit_desc_label.setText(
             content.get(
                 "home.reminder.description",
@@ -30710,6 +30698,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.td_meta_label.setWordWrap(True)
         details_info_layout.addWidget(self.td_meta_label)
         details_layout.addWidget(details_info_bar)
+        details_info_bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.td_empty_action = QPushButton("查看调用记录", details_page)
+        bind_theme(self.td_empty_action, lambda _=None: self.td_empty_action.setStyleSheet(apple_button_style("secondary")), surface="right_sidebar")
+        self.td_empty_action.clicked.connect(lambda: self.set_observability_section(self.OBS_SECTION_LOG))
+        details_layout.addWidget(self.td_empty_action, 0, Qt.AlignLeft | Qt.AlignTop)
+        details_layout.setAlignment(Qt.AlignTop)
 
         self.td_detail_splitter = SmartSplitter(Qt.Vertical)
         self.td_detail_splitter.setChildrenCollapsible(False)
@@ -30765,6 +30759,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.td_detail_splitter.setStretchFactor(1, 1)
         self.td_detail_splitter.setSizes([110, 330])
         details_layout.addWidget(self.td_detail_splitter, 1)
+        self.td_detail_splitter.hide()
         self.observability_content_stack.addWidget(details_page)
         td_layout.addWidget(self.observability_content_stack, 1)
         self.set_observability_section(self.OBS_SECTION_LOG)
@@ -33761,6 +33756,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         title, description = page_titles.get(tab_index, ("任务上下文", "查看文件与执行步骤"))
         self.right_title_label.setText(title)
         self.right_desc_label.setText(description)
+        self.right_desc_label.hide()
         files_active = tab_index == self.RIGHT_TAB_FILES
         title_block = getattr(self, "right_title_block", None)
         if title_block is not None:
@@ -37540,6 +37536,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self.td_args_meta_edit.hide()
                 self.td_args_meta_label.hide()
                 self.td_result_edit.set_result("")
+                self.td_detail_splitter.hide()
+                self.td_empty_action.show()
                 self._tool_detail_session_id = state.session_id
             self.step_list.clear()
             if not state.step_records:
@@ -44451,6 +44449,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
         self.set_observability_section(self.OBS_SECTION_DETAILS)
         self.current_selected_tool_id = None
+        self.td_detail_splitter.show()
+        self.td_empty_action.hide()
         self.td_info_label.setText(str(event.get("summary") or "运行失败"))
         self.td_meta_label.setText(
             f"会话 {session_id} · 轮次 {event.get('turn_id') or '-'} · 运行 {event.get('run_id') or '-'}"
@@ -48470,6 +48470,8 @@ a {{ overflow-wrap: anywhere; }}
         page.setProperty("embeddedProductPage", True)
         page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         page.setMinimumSize(0, 0)
+        if route == self.PAGE_CAPABILITIES:
+            page.capability_header.hide()
         for label in page.findChildren(QLabel):
             if label.property("roleTitle") or label.property("roleSubtitle"):
                 if isinstance(page, SettingsDialog) and label is not page.settings_title:
@@ -48843,7 +48845,7 @@ a {{ overflow-wrap: anywhere; }}
             self.current_product_route = self.PAGE_FAVORITES
             self.current_product_subroute = "favorite_editor"
             self.main_page_stack.setCurrentWidget(editor)
-            self.workspace_title_label.setText("编辑常用")
+            self.workspace_title_label.setText("编辑常用任务")
             self.workspace_subtitle_label.setText("说明要完成的任务；需要时再选择项目、能力和定时计划。")
             for key, button in self.product_nav_buttons.items():
                 button.setChecked(key == self.PAGE_FAVORITES)
@@ -48934,7 +48936,7 @@ a {{ overflow-wrap: anywhere; }}
         if page is not None:
             page.refresh()
             self.main_page_stack.setCurrentWidget(page)
-        self.workspace_title_label.setText("常用")
+        self.workspace_title_label.setText("常用任务")
         self.workspace_subtitle_label.setText("保存经常重复的任务，下次直接开始或按时自动运行。")
 
     def show_favorite_editor(self, favorite_id=None, prefill=None):
@@ -49012,7 +49014,7 @@ a {{ overflow-wrap: anywhere; }}
         self.main_page_stack.addWidget(editor)
         self.product_pages["favorite_editor"] = editor
         self.current_product_subroute = "favorite_editor"
-        self.workspace_title_label.setText("编辑常用" if favorite else "新建常用")
+        self.workspace_title_label.setText("编辑常用任务" if favorite else "新建常用任务")
         self.workspace_subtitle_label.setText("说明要完成的任务；需要时再选择项目、能力和定时计划。")
         self.main_page_stack.setCurrentWidget(editor)
         return True
@@ -49197,21 +49199,22 @@ a {{ overflow-wrap: anywhere; }}
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
-            self.PAGE_TEAM_SPACES: ("团队空间", "共享分工和成果，在自己的电脑执行。"),
-            self.PAGE_CAPABILITIES: ("能力", "技能、MCP 服务与专家。"),
-            self.PAGE_PROJECTS: ("项目与对话", "管理项目、历史、记忆和归档。"),
-            self.PAGE_FAVORITES: ("常用", "保存经常重复的任务，下次直接开始或按时自动运行。"),
-            self.PAGE_KNOWLEDGE: ("资料库", "使用已有知识完成工作，再将有价值的产物保存回来。"),
-            self.PAGE_SETTINGS: ("设置", "配置应用偏好、模型连接与运行环境。"),
+            self.PAGE_TEAM_SPACES: "团队空间",
+            self.PAGE_CAPABILITIES: "能力",
+            self.PAGE_PROJECTS: "项目与对话",
+            self.PAGE_FAVORITES: "常用任务",
+            self.PAGE_KNOWLEDGE: "资料库",
+            self.PAGE_SETTINGS: "设置",
         }
-        title, subtitle = titles[route]
+        title = titles[route]
         self.workspace_title_label.show()
         self.workspace_title_label.setText(title)
         self.workspace_title_label.setCursor(Qt.ArrowCursor)
         self.workspace_title_label.setFocusPolicy(Qt.NoFocus)
         self.workspace_title_label.setAccessibleDescription("")
         self.workspace_title_label.setToolTip("")
-        self.workspace_subtitle_label.setText(subtitle)
+        self.workspace_subtitle_label.clear()
+        self.workspace_subtitle_label.hide()
         self.product_back_btn.show()
         self.ws_container.hide()
         self.context_rail.hide()
@@ -54542,6 +54545,8 @@ a {{ overflow-wrap: anywhere; }}
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         
         # 3. Update Content
+        self.td_detail_splitter.show()
+        self.td_empty_action.hide()
         self.td_info_label.setText(f"工具 ID: {tool_id}")
         
         # Update Meta Label
@@ -54553,13 +54558,13 @@ a {{ overflow-wrap: anywhere; }}
                 if start_time is not None and start_time != "":
                     start_ts = float(start_time)
                     st_str = datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')
-                    meta_text += f"Time: {st_str}  "
+                    meta_text += f"开始于 {st_str}  "
             except Exception:
                 pass
             try:
                 if duration is not None and duration != "":
                     duration_sec = float(duration)
-                    meta_text += f"Duration: {duration_sec:.2f}s"
+                    meta_text += f"用时 {duration_sec:.2f} 秒"
             except Exception:
                 pass
         self.td_meta_label.setText(meta_text)

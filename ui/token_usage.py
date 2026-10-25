@@ -1,9 +1,9 @@
 """Compact usage overview; technical detail stays behind a disclosure."""
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
+    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -56,7 +56,7 @@ class TokenUsagePopover(QFrame):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.NoFrame)
         outer.addWidget(self.scroll)
-        body = QWidget()
+        body = QWidget(self.scroll)
         body.setObjectName("UsageBody")
         self.scroll.setWidget(body)
         layout = QVBoxLayout(body)
@@ -66,7 +66,7 @@ class TokenUsagePopover(QFrame):
         heading = QHBoxLayout()
         heading.addWidget(self._label("用量概览", "title"))
         heading.addStretch()
-        close = QPushButton("×")
+        close = QPushButton("×", body)
         close.setObjectName("UsageClose")
         close.setFixedSize(26, 26)
         close.setAccessibleName("关闭用量概览")
@@ -77,14 +77,14 @@ class TokenUsagePopover(QFrame):
         self.scope = self._label("当前会话 · 当前模型", "muted")
         layout.addWidget(self.scope)
 
-        self.capacity_box = QWidget()
+        self.capacity_box = QWidget(body)
         capacity_layout = QVBoxLayout(self.capacity_box)
         capacity_layout.setContentsMargins(0, 0, 0, 8)
         capacity_layout.setSpacing(7)
         capacity_layout.addWidget(self._label("当前上下文", "section"))
         self.capacity_value = self._label("待统计", "section")
         capacity_layout.addWidget(self.capacity_value)
-        self.capacity_bar = UsageProportionBar()
+        self.capacity_bar = UsageProportionBar(self.capacity_box)
         capacity_layout.addWidget(self.capacity_bar)
         self.capacity_note = self._label("", "note")
         capacity_layout.addWidget(self.capacity_note)
@@ -108,13 +108,13 @@ class TokenUsagePopover(QFrame):
             grid.setColumnStretch(index % 3, 1)
             self.metrics[key] = (title, value, note)
         layout.addLayout(grid)
-        self.cache_bar = UsageProportionBar()
+        self.cache_bar = UsageProportionBar(body)
         self.cache_bar.setFixedHeight(5)
         layout.addWidget(self.cache_bar)
         self.cache_note = self._label("等待用量数据", "note")
         layout.addWidget(self.cache_note)
 
-        line = QFrame()
+        line = QFrame(body)
         line.setObjectName("UsageSeparator")
         line.setFixedHeight(1)
         layout.addWidget(line)
@@ -124,7 +124,7 @@ class TokenUsagePopover(QFrame):
         self.context_total = self._label("待统计", "muted")
         row.addWidget(self.context_total)
         layout.addLayout(row)
-        self.context_bar = UsageProportionBar()
+        self.context_bar = UsageProportionBar(body)
         layout.addWidget(self.context_bar)
         legend = QGridLayout()
         legend.setHorizontalSpacing(16)
@@ -133,7 +133,7 @@ class TokenUsagePopover(QFrame):
         for index, (key, label, _token) in enumerate(CONTEXT_CATEGORIES):
             row = QHBoxLayout()
             row.setSpacing(5)
-            dot = QFrame()
+            dot = QFrame(body)
             dot.setObjectName("UsageDot_" + key)
             dot.setFixedSize(7, 7)
             row.addWidget(dot)
@@ -148,13 +148,24 @@ class TokenUsagePopover(QFrame):
         self.context_note = self._label("下一次模型请求后显示组成。", "note")
         layout.addWidget(self.context_note)
 
-        self.details_button = QPushButton("统计详情 ›")
+        detail_actions = QHBoxLayout()
+        self.details_button = QPushButton("统计详情 ›", body)
         self.details_button.setObjectName("UsageDisclosure")
         self.details_button.setCheckable(True)
         self.details_button.setCursor(Qt.PointingHandCursor)
         self.details_button.toggled.connect(self._toggle_details)
-        layout.addWidget(self.details_button, 0, Qt.AlignLeft)
-        self.details = QPlainTextEdit()
+        detail_actions.addWidget(self.details_button)
+        detail_actions.addStretch()
+        self.copy_button = QPushButton("复制全部统计", body)
+        self.copy_button.setObjectName("UsageDisclosure")
+        self.copy_button.setAccessibleName("复制全部用量统计")
+        self.copy_button.clicked.connect(self._copy_details)
+        self.copy_reset_timer = QTimer(self)
+        self.copy_reset_timer.setSingleShot(True)
+        self.copy_reset_timer.timeout.connect(lambda: self.copy_button.setText("复制全部统计"))
+        detail_actions.addWidget(self.copy_button)
+        layout.addLayout(detail_actions)
+        self.details = QPlainTextEdit(body)
         self.details.setObjectName("UsageDetails")
         self.details.setReadOnly(True)
         self.details.setFixedHeight(150)
@@ -164,9 +175,8 @@ class TokenUsagePopover(QFrame):
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="feedback")
 
-    @staticmethod
-    def _label(text, role):
-        label = QLabel(text)
+    def _label(self, text, role):
+        label = QLabel(text, self.scroll.widget())
         label.setTextFormat(Qt.PlainText)
         label.setProperty("usageRole", role)
         label.setWordWrap(True)
@@ -236,6 +246,11 @@ class TokenUsagePopover(QFrame):
             self.details.setPlainText(self._detail_text)
             bar.setValue(position)
 
+    def _copy_details(self):
+        QApplication.clipboard().setText(self._detail_text)
+        self.copy_button.setText("已复制")
+        self.copy_reset_timer.start(1500)
+
     def _toggle_details(self, expanded):
         self.details.setVisible(expanded)
         self.details_button.setText("收起详情 ⌃" if expanded else "统计详情 ›")
@@ -248,13 +263,20 @@ class TokenUsagePopover(QFrame):
         anchor = self._anchor
         screen = anchor.screen() or QGuiApplication.primaryScreen()
         available = screen.availableGeometry()
-        self.setFixedWidth(min(420, available.width() - 16))
+        host = anchor.window()
+        if host is not None:
+            available = available.intersected(QRect(host.mapToGlobal(QPoint()), host.size()))
+        available = available.adjusted(8, 8, -8, -8)
+        self.setFixedWidth(max(1, min(420, available.width())))
         self.scroll.widget().layout().activate()
         natural_height = self.scroll.widget().sizeHint().height() + 4
-        self.setFixedHeight(min(max(440, natural_height), 660, available.height() - 16))
+        self.setFixedHeight(max(1, min(natural_height, 660, available.height())))
         point = anchor.mapToGlobal(anchor.rect().bottomLeft())
-        x = max(available.left() + 8, min(point.x(), available.right() - self.width() - 8))
-        y = max(available.top() + 8, min(point.y() + 6, available.bottom() - self.height() - 8))
+        x = max(available.left(), min(point.x(), available.right() - self.width() + 1))
+        y = point.y() + 6
+        if y + self.height() > available.bottom() + 1:
+            y = anchor.mapToGlobal(QPoint()).y() - self.height() - 6
+        y = max(available.top(), min(y, available.bottom() - self.height() + 1))
         self.move(x, y)
 
     def show_for(self, anchor):

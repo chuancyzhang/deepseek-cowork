@@ -1289,7 +1289,7 @@ class ProductPageHeader(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         if back_text:
-            self.back_button = QPushButton(back_text)
+            self.back_button = QPushButton(back_text, self)
             self.back_button.setObjectName("ProductBackButton")
             self.back_button.setToolTip("返回会话 (Alt+Left)")
             self.back_button.setFixedHeight(DesignTokens.control_height)
@@ -1301,16 +1301,18 @@ class ProductPageHeader(QWidget):
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(4)
-        title_label = QLabel(str(title or ""))
+        title_label = QLabel(str(title or ""), self)
+        title_label.setWordWrap(True)
+        title_label.setMinimumWidth(0)
         self.title_label = title_label
         title_label.setProperty("roleTitle", True)
         title_label.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_page}px; font-weight: 700; color: {DesignTokens.text_primary};"
+            f"font-size: {DesignTokens.font_size_page}px; font-weight: {DesignTokens.font_weight_semibold}; color: {DesignTokens.text_primary};"
         )
         text_layout.addWidget(title_label)
         self.subtitle_label = None
         if subtitle:
-            self.subtitle_label = QLabel(str(subtitle))
+            self.subtitle_label = QLabel(str(subtitle), self)
             self.subtitle_label.setWordWrap(True)
             self.subtitle_label.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
@@ -1319,7 +1321,7 @@ class ProductPageHeader(QWidget):
         layout.addLayout(text_layout, 1)
         self.primary_button = None
         if primary_text:
-            self.primary_button = QPushButton(primary_text)
+            self.primary_button = QPushButton(primary_text, self)
             self.primary_button.setObjectName("PrimaryBtn")
             self.primary_button.setFixedHeight(DesignTokens.control_height)
             self.primary_button.setStyleSheet(product_button_style("primary"))
@@ -1330,7 +1332,7 @@ class ProductPageHeader(QWidget):
     def refresh_theme(self, _resolved=None):
         self.title_label.setStyleSheet(
             f"font-size: {DesignTokens.font_size_page}px; "
-            f"font-weight: {DesignTokens.font_weight_bold}; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
             f"color: {DesignTokens.text_primary};"
         )
         if self.subtitle_label is not None:
@@ -1547,7 +1549,7 @@ class ProductInlineNotice(QFrame):
     def __init__(self, text="", tone="neutral", parent=None):
         super().__init__(parent)
         self.setObjectName("ProductInlineNotice")
-        self.label = QLabel(str(text or ""))
+        self.label = QLabel(str(text or ""), self)
         self.label.setTextFormat(Qt.PlainText)
         self.label.setWordWrap(True)
         layout = QHBoxLayout(self)
@@ -1619,14 +1621,14 @@ class ProductSection(QFrame):
         self.title_label = None
         self.subtitle_label = None
         if title:
-            title_label = QLabel(title)
+            title_label = QLabel(title, self)
             self.title_label = title_label
             title_label.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_section}px; font-weight: 600; color: {DesignTokens.text_primary};"
             )
             self.layout.addWidget(title_label)
         if subtitle:
-            subtitle_label = QLabel(subtitle)
+            subtitle_label = QLabel(subtitle, self)
             self.subtitle_label = subtitle_label
             subtitle_label.setWordWrap(True)
             subtitle_label.setStyleSheet(

@@ -203,13 +203,11 @@ class ConversationRunNotice(ProductInlineNotice):
         layout = self.layout()
         for widget in (self.label, self.action_button, self.details_button):
             layout.removeWidget(widget)
-        layout.setContentsMargins(16, 14, 16, 14)
-        self.notice_icon = QLabel()
+        layout.setContentsMargins(12, 10, 12, 10)
+        self.notice_icon = QLabel(self)
         layout.addWidget(self.notice_icon, 0, Qt.AlignTop)
         column = QVBoxLayout()
-        column.setSpacing(8)
-        self.notice_title = QLabel()
-        column.addWidget(self.notice_title)
+        column.setSpacing(4)
         column.addWidget(self.label)
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -222,15 +220,12 @@ class ConversationRunNotice(ProductInlineNotice):
 
     def set_tone(self, tone):
         super().set_tone(tone)
-        if not hasattr(self, "notice_title"):
+        if not hasattr(self, "notice_icon"):
             return
         attention = self._tone in {"error", "warning"}
-        self.notice_title.setVisible(attention)
-        self.notice_title.setText("任务未完成" if self._tone == "error" else "需要处理")
-        self.notice_title.setStyleSheet(f"font-size: {DesignTokens.font_size_body}px; font-weight: 600;")
         self.label.setStyleSheet(f"font-size: {DesignTokens.font_size_body}px; color: {DesignTokens.text_secondary};")
         color = DesignTokens.error_text if self._tone == "error" else DesignTokens.warning_text if attention else DesignTokens.info_text
-        self.notice_icon.setPixmap(qta.icon("fa5s.exclamation-circle" if attention else "fa5s.info-circle", color=color).pixmap(18, 18))
+        self.notice_icon.setPixmap(qta.icon("fa5s.exclamation-circle" if attention else "fa5s.info-circle", color=color).pixmap(16, 16))
 
 
 def context_action_style(active=False):

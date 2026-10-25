@@ -20,6 +20,7 @@ from core.request_snapshot import RequestSnapshotStore
 from main import MainWindow, SystemToast
 from ui.chat_log_export import ConversationExportController, ChatLogExportWorker
 from ui.primitives import ProductInlineNotice
+from ui_window_cleanup import close_test_window
 
 
 class TaskDetailsTests(unittest.TestCase):
@@ -177,15 +178,20 @@ class TaskDetailsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with patch("core.config_manager.get_app_data_dir", return_value=root), \
                  patch("core.config_manager.get_base_dir", return_value=root), \
+                 patch("main.get_app_data_dir", return_value=root), \
                  patch.object(MainWindow, "start_background_services", new=lambda self: None):
                 window = MainWindow(ConfigManager())
+                window._startup_hydration_scheduled = True
+                window._background_services_scheduled = True
                 try:
                     self.assertEqual([button.text() for button in window.observability_segment_buttons],
                                      ["执行上下文", "调用记录", "技术详情"])
                     self.assertFalse(hasattr(window, "chat_log_export_btn"))
                     self.assertFalse(hasattr(window, "td_raw_details"))
                     self.assertFalse(hasattr(window, "td_exported_files"))
+                    self.assertTrue(window.td_detail_splitter.isHidden())
                     window.show_tool_details("test-tool", '{"query":"行情"}', '{"ok":false,"error":"domain required"}')
+                    self.assertFalse(window.td_detail_splitter.isHidden())
                     self.assertEqual(json.loads(window.td_result_edit.toPlainText())["ok"], False)
                     payload = {"content": "正文" * 10000}
                     window.show_tool_details("long-tool", '{"query":"行情"}', payload)
@@ -204,12 +210,10 @@ class TaskDetailsTests(unittest.TestCase):
                     window.refresh_step_list(window.current_session_id)
                     self.assertEqual(window.td_result_edit.toPlainText(), "")
                     self.assertEqual(window._detail_full_result, "")
+                    self.assertTrue(window.td_detail_splitter.isHidden())
+                    self.assertFalse(window.td_empty_action.isHidden())
                 finally:
-                    self.app.processEvents()
-                    window.file_model.directoryLoaded.disconnect()
-                    window.close()
-                    window.deleteLater()
-                    self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+                    close_test_window(window)
 
 
 if __name__ == "__main__":

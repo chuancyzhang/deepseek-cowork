@@ -103,13 +103,10 @@ CONTENT_DEFAULTS = {
     "home.card.data.description": "分析工作区数据，可构建机器学习模型",
     "home.card.browser.title": "浏览器自动化",
     "home.card.browser.description": "读取网页、提取数据和填写表单",
-    "home.reminder.title": "需要处理文档或数据？",
+    "home.reminder.title": "工具包",
     "home.reminder.description": "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
-    "home.theme_reminder.title": "想换一种工作台风格？",
-    "home.theme_reminder.description": (
-        "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"
-        "先预览，确认后再保存。"
-    ),
+    "home.theme_reminder.title": "工作台主题",
+    "home.theme_reminder.description": "用自然语言调整外观，预览后保存。",
     "composer.placeholder": "描述任务，输入 @ 引用会话或选择专家",
 }
 

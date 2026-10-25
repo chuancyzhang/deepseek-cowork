@@ -6,6 +6,12 @@
   "captures": [
     "home-context-dark-1.5x-compact.png",
     "skill-cascade-dark-1.5x-compact.png",
+    "expert-cascade-dark-1.5x-compact.png",
+    "mode-cascade-dark-1.5x-compact.png",
+    "connector-cascade-dark-1.5x-compact.png",
+    "conversation-cascade-dark-1.5x-compact.png",
+    "running-stop-dark-1.5x-compact.png",
+    "running-send-dark-1.5x-compact.png",
     "history-collapsed-dark-1.5x-compact.png",
     "history-expanded-dark-1.5x-compact.png",
     "history-failure-dark-1.5x-compact.png",
@@ -18,6 +24,7 @@
   "checks": [
     "shared_context_and_editing_space",
     "cascade_preserved",
+    "consistent_pickers_and_single_primary_action",
     "draft_preserved",
     "tool_text_and_failure_do_not_overlap",
     "thinking_uses_only_known_durations",

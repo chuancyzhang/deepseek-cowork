@@ -17082,7 +17082,8 @@ class SessionSkillPickerPopover(ProductPopover):
 
         self.skill_list = QListWidget(self)
         self.skill_list.setObjectName("ContextChoiceList")
-        self.skill_list.setItemDelegate(ContextChoiceDelegate(self.skill_list))
+        self.skill_list.setItemDelegate(ContextChoiceDelegate(
+            self.skill_list, icon_name="fa5s.link" if noun == "连接器" else "fa5s.puzzle-piece"))
         self.skill_list.setMinimumHeight(260)
         self.skill_list.setMaximumHeight(360)
         if immediate:
@@ -17306,6 +17307,10 @@ class ComposerActionPopover(ProductPopover):
         layout.addWidget(self._divider())
         self._add_row(layout, "添加文件", "图片、文档或其他工作资料",
                       qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary), window.select_files_for_prompt)
+        if busy:
+            self._add_row(layout, "停止当前任务", "保留已完成内容和当前输入",
+                          qta.icon("fa5s.stop", color=DesignTokens.text_secondary), window.stop_agent,
+                          enabled=not bool(getattr(state, "stop_pending", False)))
         try:
             text_variable_count = len(window.config_manager.list_app_variables(kind=VARIABLE_KIND_TEXT))
             variable_error = ""
@@ -31179,17 +31184,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
         self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-        self.action_btn.clicked.connect(self.on_action_clicked)
+        self.action_btn.clicked.connect(self._on_composer_primary_clicked)
 
-        self.stop_btn = QPushButton()
-        self.stop_btn.setIcon(qta.icon('fa5s.stop', color=DesignTokens.status_error))
-        self.stop_btn.setToolTip("停止当前任务")
-        self.stop_btn.setCursor(Qt.PointingHandCursor)
-        self.stop_btn.setFixedSize(34, 34)
-        self.stop_btn.setStyleSheet(apple_button_style("secondary", radius=8))
-        self.stop_btn.clicked.connect(self.stop_agent)
-        self.stop_btn.setVisible(False)
-        
         self.loop_hint = StatusPill("处理中")
         self.loop_hint.setVisible(False)
 
@@ -31283,7 +31279,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         prompt_action_layout.setSpacing(8)
         prompt_action_layout.addStretch(1)
         prompt_action_layout.addWidget(self.model_select_btn)
-        prompt_action_layout.addWidget(self.stop_btn)
         prompt_action_layout.addWidget(self.action_btn)
 
         self.prompt_toolbar.addWidget(self.prompt_context_group, 1)
@@ -31563,7 +31558,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.input_field.max_height = 240 if show_home else 180
         self.input_field.scheduleAdjustHeight()
         self.action_btn.setCompact(True)
-        self.action_btn.setIcon(qta.icon("fa5s.arrow-up", color=DesignTokens.text_inverse))
+        self.refresh_composer_action_state()
         if show_home:
             self._refresh_home_recent()
 
@@ -31840,17 +31835,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.model_select_btn.setStyleSheet(model_style)
         self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
         self.knowledge_refs_button.setIcon(qta.icon("fa5s.book-open", color=DesignTokens.icon_secondary))
-        self.action_btn.setIcon(
-            qta.icon("fa5s.arrow-up", color=DesignTokens.text_inverse)
-        )
+        self.refresh_composer_action_state()
         self.action_btn.setStyleSheet(
             apple_button_style("primary", radius=DesignTokens.radius_sm)
-        )
-        self.stop_btn.setIcon(
-            qta.icon("fa5s.stop", color=DesignTokens.error_icon)
-        )
-        self.stop_btn.setStyleSheet(
-            apple_button_style("secondary", radius=DesignTokens.radius_sm)
         )
         self.project_selector_btn.setIcon(
             sidebar_symbol_icon(
@@ -34574,6 +34561,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             chip.removeRequested.connect(self._remove_prompt_file)
             chips.append(chip)
         self.composer_context_tags.set_chips("files", chips)
+        self.refresh_composer_action_state()
 
     def _token_speed_snapshot(self, state):
         tracker = getattr(state, "token_speed_tracker", None) if state else None
@@ -37177,47 +37165,46 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.grill_mode_badge.setVisible(visible)
 
     def show_composer_mode_picker(self, *, anchor=None, parent_menu=None):
-        from ui.capability_widgets import CapabilitySwitch
         state = self.get_current_session()
         if state is None:
             return
-        popover = ProductPopover(self, width=320)
+        popover = ProductPopover(self, width=400)
         self.composer_mode_popover = popover
         layout = QVBoxLayout(popover)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
-        description = QLabel()
-        description.setWordWrap(True)
-        layout.addWidget(description)
-        divider = QFrame()
-        divider.setFixedHeight(1)
-        layout.addWidget(divider)
-        row = QHBoxLayout()
-        title = QLabel("拷问模式")
-        row.addWidget(title, 1)
-        toggle = CapabilitySwitch("拷问模式", False)
-        toggle.setAccessibleName("拷问模式")
-        self.composer_grill_switch = toggle
-        row.addWidget(toggle)
-        layout.addLayout(row)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+        title = QLabel("模式", popover)
+        layout.addWidget(title)
+        choices = QListWidget(popover)
+        choices.setItemDelegate(ContextChoiceDelegate(choices, icon_name="fa5s.sliders-h"))
+        choices.setSelectionMode(QAbstractItemView.NoSelection)
+        choices.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        choices.setFixedHeight(124)
+        self.composer_mode_choices = choices
+        for text, armed in (("默认模式\n直接处理任务", False),
+                            ("拷问模式\n先澄清关键决策，仅作用于下一项任务", True)):
+            item = QListWidgetItem(text, choices)
+            item.setData(Qt.UserRole, armed)
+        layout.addWidget(choices)
         def refresh(_=None):
             armed = normalize_grill_mode_state(state.grill_mode_state) == GRILL_MODE_ARMED
-            toggle.blockSignals(True)
-            toggle.setChecked(armed)
-            toggle.blockSignals(False)
-            toggle.setEnabled(not self._session_has_current_execution(state))
-            description.setText("已开启拷问模式：先澄清关键决策，仅作用于下一项任务。" if armed
-                                else "当前为默认模式，直接处理任务；可开启拷问模式，先澄清关键决策。")
-            description.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_body}px;")
-            title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px;")
-            divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none;")
-        def change(_checked):
+            choices.setEnabled(not self._session_has_current_execution(state))
+            for index in range(choices.count()):
+                item = choices.item(index)
+                item.setCheckState(Qt.Checked if item.data(Qt.UserRole) == armed else Qt.Unchecked)
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+            title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px; font-weight: 600;")
+            choices.setStyleSheet(f"QListWidget {{ background: {DesignTokens.bg_main}; border: none; padding: 0; outline: none; }}")
+        def change(item):
             if self.current_session_id != state.session_id:
                 popover.close()
                 return
-            self.toggle_grill_mode()
+            armed = normalize_grill_mode_state(state.grill_mode_state) == GRILL_MODE_ARMED
+            if item.data(Qt.UserRole) != armed:
+                self.toggle_grill_mode()
             refresh()
-        toggle.toggled.connect(change)
+        choices.itemClicked.connect(change)
+        choices.itemActivated.connect(change)
         bind_theme(popover, lambda resolved=None: (popover.refresh_theme(resolved), refresh(resolved)), surface="composer")
         refresh()
         popover.show_for(anchor or self.tool_menu_btn, prefer_above=True, parent_popover=parent_menu)
@@ -39713,13 +39700,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         if running or running_daemon:
             steerable = bool(getattr(state, "turn_steerable", False))
-            self.action_btn.setText("调整方向" if steerable else "运行中")
-            self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-            self.action_btn.setEnabled(steerable)
             self.input_field.setEnabled(steerable)
             self.tool_menu_btn.setEnabled(steerable)
-            self.stop_btn.setVisible(True)
             if steerable:
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             if int(getattr(state, "provider_retry_attempt", 0) or 0) > 0:
@@ -39736,24 +39718,16 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.loop_hint.setToolTip(loop_text or "处理中")
             self.loop_hint.setVisible(bool(running_daemon or loop_text))
         else:
-            grill_armed = normalize_grill_mode_state(
-                getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
-            ) == GRILL_MODE_ARMED
-            self.action_btn.setText("开始拷问" if grill_armed else "开始")
-            self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-            self.action_btn.setEnabled(history_ready)
             self.input_field.setEnabled(history_ready)
             self.tool_menu_btn.setEnabled(history_ready)
             self.tool_menu_btn.setToolTip("添加上下文" if history_ready else "历史会话仍在加载")
-            self.stop_btn.setVisible(False)
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
-                self.action_btn.setText("加载中")
                 self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             else:
                 self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             self.loop_hint.setVisible(False)
+        self.refresh_composer_action_state()
         self.refresh_selected_skill_controls(state.session_id)
         self.refresh_grill_mode_controls(state.session_id)
         self.refresh_conversation_agent_controls(state.session_id)
@@ -50901,19 +50875,35 @@ a {{ overflow-wrap: anywhere; }}
             return
         running = bool(
             self._session_has_live_activity(state.session_id)
-            or (state.llm_worker and state.llm_worker.isRunning())
-            or getattr(state, "daemon_running", False)
+            or getattr(state, "stop_pending", False)
         )
-        if running:
-            steerable = bool(getattr(state, "turn_steerable", False))
-            self.action_btn.setText("调整方向" if steerable else "运行中")
-            self.action_btn.setEnabled(steerable)
-            return
+        draft = bool(self.input_field.toPlainText().strip() or self._current_prompt_files())
+        stopping = bool(getattr(state, "stop_pending", False))
+        stop_action = running and (stopping or not draft or not getattr(state, "turn_steerable", False))
         grill_armed = normalize_grill_mode_state(
             getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
         ) == GRILL_MODE_ARMED
-        self.action_btn.setText("开始拷问" if grill_armed else "开始")
-        self.action_btn.setEnabled(session_history_ready(state))
+        ready = session_history_ready(state)
+        self.action_btn.setProperty("composerAction", "stop" if stop_action else "send")
+        self.action_btn.setText("正在停止" if stopping else "停止当前任务" if stop_action else
+                               "发送补充" if running else "加载中" if not ready else
+                               "开始拷问" if grill_armed else "开始")
+        self.action_btn.setIcon(qta.icon("fa5s.stop" if stop_action else "fa5s.arrow-up",
+                                        color=DesignTokens.text_inverse))
+        self.action_btn.setEnabled(not stopping if running else ready)
+
+    def _on_composer_primary_clicked(self):
+        # Enter always submits through on_action_clicked. Only this button can
+        # turn into stop, so pressing Enter on an empty draft never stops a run.
+        self.refresh_composer_action_state()
+        if not self.action_btn.isEnabled():
+            return
+        log_ui_navigation("composer_primary_action", session_id=self.current_session_id,
+                          action=self.action_btn.property("composerAction"))
+        if self.action_btn.property("composerAction") == "stop":
+            self.stop_agent()
+        else:
+            self.on_action_clicked()
 
     def review_pending_conversation_skill_draft(self, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()

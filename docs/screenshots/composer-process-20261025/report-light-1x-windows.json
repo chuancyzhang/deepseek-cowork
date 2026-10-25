@@ -6,6 +6,12 @@
   "captures": [
     "home-context-light-1x-windows.png",
     "skill-cascade-light-1x-windows.png",
+    "expert-cascade-light-1x-windows.png",
+    "mode-cascade-light-1x-windows.png",
+    "connector-cascade-light-1x-windows.png",
+    "conversation-cascade-light-1x-windows.png",
+    "running-stop-light-1x-windows.png",
+    "running-send-light-1x-windows.png",
     "history-collapsed-light-1x-windows.png",
     "history-expanded-light-1x-windows.png",
     "history-failure-light-1x-windows.png",
@@ -18,6 +24,7 @@
   "checks": [
     "shared_context_and_editing_space",
     "cascade_preserved",
+    "consistent_pickers_and_single_primary_action",
     "draft_preserved",
     "tool_text_and_failure_do_not_overlap",
     "thinking_uses_only_known_durations",

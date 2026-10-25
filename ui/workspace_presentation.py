@@ -418,7 +418,15 @@ class ComposerContextStrip(QScrollArea):
 
 
 class ContextChoiceDelegate(QStyledItemDelegate):
-    """Two readable text levels with one trailing selection mark."""
+    """Shared picker row: category icon, two text levels and a selection mark."""
+
+    def __init__(self, parent=None, *, icon_name="fa5s.puzzle-piece"):
+        super().__init__(parent)
+        self.icon_name = icon_name
+        if parent is not None:
+            parent.setMouseTracking(True)
+            parent.viewport().setAttribute(Qt.WA_Hover, True)
+            parent.setCursor(Qt.PointingHandCursor)
 
     def sizeHint(self, option, index):
         title_font = QFont(option.font)
@@ -434,6 +442,7 @@ class ContextChoiceDelegate(QStyledItemDelegate):
         checked = index.data(Qt.CheckStateRole) in (Qt.Checked, Qt.Checked.value)
         hovered = bool(option.state & QStyle.State_MouseOver)
         focused = bool(option.state & QStyle.State_HasFocus)
+        hovered = hovered or bool(option.state & QStyle.State_Selected)
         painter.setPen(QPen(QColor(DesignTokens.primary_focus), 1) if focused else Qt.NoPen)
         painter.setBrush(QColor(DesignTokens.bg_hover if hovered else DesignTokens.bg_secondary) if checked or hovered else Qt.NoBrush)
         painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), DesignTokens.radius_sm, DesignTokens.radius_sm)
@@ -442,7 +451,11 @@ class ContextChoiceDelegate(QStyledItemDelegate):
         font.setPixelSize(DesignTokens.font_size_body)
         painter.setFont(font)
         metrics = QFontMetrics(font)
-        text_rect = rect.adjusted(12, 7, -36, -7)
+        painter.drawPixmap(rect.left() + 12, rect.center().y() - 8,
+                           qta.icon(self.icon_name, color=DesignTokens.text_secondary).pixmap(16, 16))
+        text_rect = rect.adjusted(40, 7, -36, -7)
+        if not detail:
+            text_rect.setTop(rect.center().y() - metrics.height() // 2)
         title_rect = QRect(text_rect.x(), text_rect.y(), text_rect.width(), metrics.height())
         painter.setPen(QColor(DesignTokens.text_primary))
         painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, metrics.elidedText(title, Qt.ElideRight, text_rect.width()))

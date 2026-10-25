@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, QSignalBlocker
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QSignalBlocker, QEvent
 from shiboken6 import isValid
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
@@ -24,7 +24,7 @@ from ui.primitives import (
     ProductInlineNotice, ProductPopover, ProductSegmentedControl,
     product_button_style, product_field_style,
 )
-from ui.workspace_presentation import MessageReferenceChip, ComposerContextChip
+from ui.workspace_presentation import MessageReferenceChip, ComposerContextChip, ContextChoiceDelegate
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,8 @@ class ConversationMentionPopover(ProductPopover):
         self.conversations = conversations
         self.conversations_only = conversations_only
         self.agents_only = agents_only
+        self.immediate = agents_only
+        self.compact = agents_only or conversations_only
         self.profiles = profiles
         self.workspace = workspace
         self.selected_agent_id = selected_agent_id
@@ -64,9 +66,12 @@ class ConversationMentionPopover(ProductPopover):
         self.tabs = ProductSegmentedControl([("会话", "引用会话"), ("智能体", "选择专家")], current=self.kind)
         layout.addWidget(self.tabs)
         self.tabs.setVisible(not (agents_only or conversations_only))
-        self.title = QLabel("引用对话" if conversations_only else "选择专家", self)
+        self.title = QLabel("对话" if conversations_only else "专家", self)
         self.title.setVisible(agents_only or conversations_only)
-        layout.addWidget(self.title)
+        heading = QHBoxLayout()
+        heading.addWidget(self.title)
+        heading.addStretch()
+        layout.addLayout(heading)
         self.hint = QLabel("把其他会话作为参考资料，在当前会话回答")
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -87,17 +92,24 @@ class ConversationMentionPopover(ProductPopover):
         self.selection_chip.clicked.connect(self.clear_agent_selection)
         summary_layout.addWidget(self.selection_chip)
         layout.addWidget(self.agent_summary)
+        if self.immediate:
+            heading.addWidget(self.selection_summary)
+            self.agent_summary.hide()
         self.items = QListWidget()
+        self.items.setObjectName("ContextChoiceList")
+        self.choice_delegate = ContextChoiceDelegate(self.items)
+        self.items.setItemDelegate(self.choice_delegate)
+        self.items.installEventFilter(self)
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.items.setTextElideMode(Qt.ElideRight)
-        self.items.setMinimumHeight(80 if conversations_only or agents_only else 250)
+        self.items.setMinimumHeight(56 if self.compact else 250)
         if conversations_only or agents_only:
             self.items.setMaximumHeight(280)
         layout.addWidget(self.items)
         self.empty = QLabel("没有匹配的会话")
         layout.addWidget(self.empty)
         self.search.textChanged.connect(self.refresh_items)
-        self.items.itemClicked.connect(lambda item: self.choose(item) if self.kind == "会话" else None)
+        self.items.itemClicked.connect(lambda item: self.choose(item) if self.kind == "会话" or self.immediate else None)
         self.items.itemActivated.connect(self.choose)
         self.items.itemChanged.connect(self._agent_item_changed)
         self.search.returnPressed.connect(lambda: self.choose(self.items.currentItem()))
@@ -115,19 +127,19 @@ class ConversationMentionPopover(ProductPopover):
         actions.addWidget(self.cancel_btn)
         actions.addWidget(self.apply_btn)
         layout.addWidget(self.agent_actions)
+        if self.immediate:
+            self.clear_btn.setText("取消专家")
+            self.cancel_btn.hide()
+            self.apply_btn.hide()
         bind_theme(self, self.refresh_picker_theme, surface="composer")
         self.change_kind(self.kind)
 
     def refresh_picker_theme(self, _=None):
         super().refresh_theme()
         self.search.setStyleSheet(product_field_style())
-        selection_bg = DesignTokens.bg_hover if self.conversations_only else DesignTokens.primary_soft
         self.items.setStyleSheet(
             f"QListWidget {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; padding: 4px; outline: none; }} "
-            "QListWidget::item { border: none; border-radius: 6px; padding: 7px 8px; margin: 1px 0; } "
-            f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }} "
-            f"QListWidget::item:selected {{ background: {selection_bg}; color: {DesignTokens.text_primary}; }}")
+            "border: none; padding: 0; outline: none; }")
         self.empty.setStyleSheet(f"color: {DesignTokens.text_secondary};")
         self.hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px;")
         self.title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
@@ -141,12 +153,14 @@ class ConversationMentionPopover(ProductPopover):
 
     def change_kind(self, kind):
         self.kind = kind
+        self.choice_delegate.icon_name = "fa5s.comments" if kind == "会话" else "fa5s.user-tie"
         self.search.setPlaceholderText("搜索会话标题或项目" if kind == "会话" else "搜索专家名称或用途")
         self.hint.setText("把其他会话作为参考资料，在当前会话回答" if kind == "会话" else "每次选择一位专家；点击应用后，本会话后续消息继续使用")
         if self.conversations_only:
             self.search.setPlaceholderText("搜索对话标题或项目")
             self.hint.setText("选择历史对话作为参考，添加后可在输入框上方查看或移除。")
-        self.agent_summary.setVisible(kind == "智能体")
+        self.hint.setVisible(not self.compact)
+        self.agent_summary.setVisible(kind == "智能体" and not self.immediate)
         self.agent_actions.setVisible(kind == "智能体")
         self.items.setSelectionMode(QAbstractItemView.NoSelection if kind == "智能体" else QAbstractItemView.SingleSelection)
         self.empty.setText("没有匹配的" + ("会话" if kind == "会话" else "专家"))
@@ -184,12 +198,15 @@ class ConversationMentionPopover(ProductPopover):
                 item.setData(Qt.UserRole, (kind, record))
                 if kind == "智能体":
                     item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    if self.immediate:
+                        item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
                     item.setCheckState(Qt.Checked if record.get("id") == self.pending_agent_id else Qt.Unchecked)
+                item.setToolTip(text)
                 first = first or item
         self.empty.setVisible(first is None)
         if self.conversations_only or self.agents_only:
             self.items.setVisible(first is not None)
-            self.items.setFixedHeight(min(280, max(80, self.items.count() * 56 + 12)))
+            self.items.setFixedHeight(min(280, max(56, self.items.count() * 56)))
         if self.conversations_only:
             self.empty.setAlignment(Qt.AlignCenter)
             self.empty.setText("没有匹配的对话，请尝试其他关键词" if query else "暂无其他历史对话")
@@ -232,10 +249,16 @@ class ConversationMentionPopover(ProductPopover):
         else:
             self.selection_summary.setText("当前专家不可用，请重新选择或清除" if self.pending_agent_id else "未选择专家，将使用普通助手")
         self.apply_btn.setEnabled(self.pending_agent_id != self.selected_agent_id)
+        if self.immediate:
+            self.selection_summary.setText("已选 1 位" if profile else "专家不可用" if self.pending_agent_id else "普通助手")
+            self.clear_btn.setEnabled(bool(self.pending_agent_id))
+            self.clear_btn.setVisible(bool(self.pending_agent_id))
 
     def clear_agent_selection(self):
         self.pending_agent_id = None
         self._sync_agent_checks()
+        if self.immediate:
+            self.apply_agent_selection()
 
     def apply_agent_selection(self):
         if not self.apply_btn.isEnabled():
@@ -248,10 +271,23 @@ class ConversationMentionPopover(ProductPopover):
         data = item.data(Qt.UserRole) if item is not None else None
         if data:
             if data[0] == "智能体":
+                if self.immediate:
+                    self.pending_agent_id = data[1]["id"]
+                    self._sync_agent_checks()
+                    self.apply_agent_selection()
+                    self.close_chain()
+                    return
                 item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
                 return
             self.selected.emit(*data)
             self.close_chain()
+
+    def eventFilter(self, obj, event):
+        if (obj is self.items and self.immediate and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter)):
+            self.choose(self.items.currentItem())
+            return True
+        return super().eventFilter(obj, event)
 
 
 class BranchWorker(QThread):

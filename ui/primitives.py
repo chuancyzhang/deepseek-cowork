@@ -527,6 +527,10 @@ class ProductPopover(QFrame):
         self._root_popover().close()
 
     def eventFilter(self, obj, event):
+        if (self.isVisible() and event.type() == QEvent.WindowDeactivate
+                and obj is QWidget.window(self)):
+            self.close_chain()
+            return False
         if self.isVisible() and obj is self.parentWidget() and event.type() == QEvent.Resize:
             # Let the host layout move its anchors before clamping the chain.
             self._position_timer.start(0)
@@ -552,7 +556,12 @@ class ProductPopover(QFrame):
                 except (AttributeError, RuntimeError, TypeError):
                     global_position = None
 
-            if global_position is not None:
+            # QWidget receivers already identify the actual hit target. Prefer
+            # them over global coordinates, especially with scaled/native views.
+            if isinstance(obj, QWidget) and not obj.isAncestorOf(root):
+                inside_popover = any(obj is p or p.isAncestorOf(obj) for p in chain)
+                inside_anchor = obj is anchor or bool(anchor and anchor.isAncestorOf(obj))
+            elif global_position is not None:
                 try:
                     inside_popover = any(p.isVisible() and p.rect().contains(p.mapFromGlobal(global_position)) for p in chain)
                     inside_anchor = bool(

@@ -21,7 +21,7 @@ from core.theme import DesignTokens, default_design_tokens
 from core.theme_service import resolve_theme
 from main import MainWindow, ComposerContextChip, render_markdown_or_html_with_cache
 from ui.conversation_search import find_conversation_messages
-from ui.primitives import ProductActionRow, SidebarInlineNameEditor
+from ui.primitives import ProductActionRow, ProductPopover, SidebarInlineNameEditor
 
 
 class ChatExperienceTests(unittest.TestCase):
@@ -259,6 +259,35 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertIsNotNone(menu._child_popover)
         QTest.mouseClick(self.window.input_field.viewport(), Qt.LeftButton)
         self.assertFalse(menu.isVisible())
+        self.window.show_prompt_tool_menu()
+        menu = self.window.composer_action_popover
+        rows = {row.title_label.text(): row for row in menu.findChildren(ProductActionRow)}
+        QTest.keyClick(rows["模式"], Qt.Key_Right)
+        child = menu._child_popover
+        self.app.sendEvent(self.window, QEvent(QEvent.WindowDeactivate))
+        self.assertFalse(menu.isVisible())
+        self.assertFalse(child.isVisible())
+
+    def test_composer_menu_reopens_and_releases_closed_popovers(self):
+        self.window.show()
+        self.app.processEvents()
+        persistent_popovers = self.window.findChildren(ProductPopover)
+        for _ in range(3):
+            QTest.mouseClick(self.window.tool_menu_btn, Qt.LeftButton)
+            menu = self.window.composer_action_popover
+            self.assertTrue(menu.isVisible())
+            rows = {row.title_label.text(): row for row in menu.findChildren(ProductActionRow)}
+            QTest.keyClick(rows["模式"], Qt.Key_Right)
+            self.assertIsNotNone(menu._child_popover)
+            QTest.mouseClick(self.window.input_field.viewport(), Qt.LeftButton)
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            self.app.processEvents()
+            self.assertIsNone(self.window.composer_action_popover)
+            self.assertEqual(self.window.findChildren(ProductPopover), persistent_popovers)
+        self.window.show_prompt_tool_menu()
+        menu = self.window.composer_action_popover
+        self.app.sendEvent(self.window, QEvent(QEvent.WindowDeactivate))
+        self.assertFalse(menu.isVisible())
 
     def test_selected_expert_chip_is_visible_removable_and_session_local(self):
         profile = {"id": "qa-expert", "name": "产品规划与需求分析专家", "description": "规划产品"}
@@ -298,6 +327,72 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertFalse(state.conversation_agent)
         self.assertTrue(chip.isVisible())
         self.assertFalse(chip.close_btn.isVisible())
+
+    def test_expert_row_applies_immediately_and_reopens_checked(self):
+        profile = {"id": "qa", "name": "需求分析", "description": "整理目标与验收条件"}
+        self.window._available_agent_profiles = lambda: [profile]
+        self.window.show()
+        self.app.processEvents()
+        state = self.window.get_current_session()
+        self.window.show_conversation_agent_picker()
+        picker = self.window.conversation_agent_popover
+        self.assertTrue(picker.apply_btn.isHidden())
+        QTest.mouseClick(picker.items.viewport(), Qt.LeftButton,
+                         pos=picker.items.visualItemRect(picker.items.item(0)).center())
+        self.assertEqual(state.conversation_agent["id"], "qa")
+        self.assertFalse(picker.isVisible())
+        self.window.show_conversation_agent_picker()
+        picker = self.window.conversation_agent_popover
+        self.assertEqual(picker.items.item(0).checkState(), Qt.Checked)
+        QTest.mouseClick(picker.clear_btn, Qt.LeftButton)
+        self.assertFalse(state.conversation_agent)
+
+    def test_running_primary_action_tracks_text_paste_files_and_stop(self):
+        state = self.window.get_current_session()
+        state.session_status = "running"
+        state.turn_steerable = True
+        try:
+            self.window.show()
+            self.window.normalize_session_ui(state)
+            self.assertEqual(self.window.action_btn.property("composerAction"), "stop")
+            with patch.object(self.window, "stop_agent") as stop, patch.object(self.window, "handle_send") as send:
+                self.window.action_btn.click()
+                stop.assert_called_once()
+                send.assert_not_called()
+                self.window.on_action_clicked()
+                self.assertEqual(stop.call_count, 1)  # Enter never becomes stop.
+                send.reset_mock()
+                self.window.input_field.setPlainText("补充验收条件")
+                self.assertEqual(self.window.action_btn.text(), "发送补充")
+                self.window.action_btn.click()
+                send.assert_called_once()
+                self.window.input_field.clear()
+                self.assertEqual(self.window.action_btn.property("composerAction"), "stop")
+                mime = QMimeData()
+                mime.setText("长文本附件\n" * 1000)
+                self.window.input_field.insertFromMimeData(mime)
+                self.assertEqual(self.window.action_btn.property("composerAction"), "send")
+                self.window._apply_runtime_theme()
+                self.assertEqual(self.window.action_btn.property("composerAction"), "send")
+                self.window._remove_prompt_file(state.prompt_files[0])
+                self.assertEqual(self.window.action_btn.property("composerAction"), "stop")
+                self.window.input_field.setPlainText("保留的草稿")
+                self.window.show_prompt_tool_menu()
+                menu = self.window.composer_action_popover
+                row = next(row for row in menu.findChildren(ProductActionRow) if row.title_label.text() == "停止当前任务")
+                QTest.mouseClick(row, Qt.LeftButton)
+                self.app.processEvents()
+                self.assertEqual(stop.call_count, 2)
+                self.assertEqual(self.window.input_field.toPlainText(), "保留的草稿")
+            state.stop_pending = True
+            self.window.refresh_composer_action_state()
+            self.assertFalse(self.window.action_btn.isEnabled())
+            self.assertEqual(self.window.action_btn.text(), "正在停止")
+        finally:
+            state.stop_pending = False
+            state.session_status = "idle"
+            state.turn_steerable = False
+            self.window.normalize_session_ui(state)
 
     def test_conversation_picker_ignores_stale_session_and_can_retry_load_failure(self):
         self.window.chat_storage.upsert_conversation("source", title="已有对话")
@@ -368,11 +463,11 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.show()
         state = self.window.get_current_session()
         self.window.show_composer_mode_picker()
-        toggle = self.window.composer_grill_switch
-        QTest.mouseClick(toggle, Qt.LeftButton)
+        choices = self.window.composer_mode_choices
+        QTest.mouseClick(choices.viewport(), Qt.LeftButton, pos=choices.visualItemRect(choices.item(1)).center())
         self.assertEqual(state.grill_mode_state, "armed")
         self.window.create_new_session()
-        toggle.setChecked(False)
+        choices.itemClicked.emit(choices.item(0))
         self.assertEqual(state.grill_mode_state, "armed")
         self.assertEqual(self.window.get_current_session().grill_mode_state, "disabled")
 

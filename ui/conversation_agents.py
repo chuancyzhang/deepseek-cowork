@@ -6,7 +6,7 @@ import os
 from urllib.parse import unquote
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QPushButton
 
 from core.conversation_agents import agent_role_context, normalize_agent_selection
 from core.deliverable_preview import iter_local_file_references, iter_workspace_file_paths, normalize_workspace_file
@@ -71,7 +71,7 @@ class ConversationAgentsMixin:
         # Reserve the model, submit/stop buttons and toolbar spacing first.
         margins = self.input_card.layout().contentsMargins()
         available = self.input_card.contentsRect().width() - margins.left() - margins.right()
-        for name in ("tool_menu_btn", "permission_button", "action_btn", "stop_btn"):
+        for name in ("tool_menu_btn", "permission_button", "action_btn"):
             control = getattr(self, name, None)
             if control is not None and not control.isHidden():
                 available -= (control.minimumWidth() if control.minimumWidth() == control.maximumWidth()
@@ -99,14 +99,13 @@ class ConversationAgentsMixin:
             selected_agent_id=(getattr(state, "conversation_agent", None) or {}).get("id"))
         self.conversation_agent_popover = popover
         popover.selected.connect(lambda _kind, profile: self.select_conversation_agent(profile, state.session_id))
-        footer = QHBoxLayout()
-        for title, callback in (("PPT 助手…", self.open_ppt_agent_mode), ("管理专家…", lambda: self.open_settings("专家"))):
-            button = QPushButton(title)
+        footer = popover.agent_actions.layout()
+        for title, callback in (("PPT 助手", self.open_ppt_agent_mode), ("管理专家", lambda: self.open_settings("专家"))):
+            button = QPushButton(title, popover)
             button.setCursor(Qt.PointingHandCursor)
-            bind_theme(button, lambda _=None, target=button: target.setStyleSheet(product_button_style("secondary")), surface="composer")
+            bind_theme(button, lambda _=None, target=button: target.setStyleSheet(product_button_style("ghost")), surface="composer")
             button.clicked.connect(lambda _checked=False, action=callback: (popover.close_chain(), action()))
             footer.addWidget(button)
-        popover.layout().insertLayout(popover.layout().count() - 1, footer)
         anchor = anchor or (self.agent_picker_btn if self.agent_picker_btn.isVisible() else self.tool_menu_btn)
         popover.show_for(anchor, prefer_above=True, parent_popover=parent_menu)
         popover.search.setFocus()

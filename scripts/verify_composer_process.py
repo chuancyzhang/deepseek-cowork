@@ -25,6 +25,7 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
         core.env_utils.get_app_data_dir = lambda: temporary
         from PySide6.QtCore import QPoint, Qt
         from PySide6.QtGui import QFontDatabase
+        from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication
         from core.config_manager import ConfigManager
         from core.theme import ThemeRuntimeManager
@@ -103,10 +104,35 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
             menu = window.composer_action_popover
             row = next(row for row in menu.findChildren(ProductActionRow) if row.title_label.text() == "技能")
             menu._open_submenu(row)
+            picker = menu._child_popover
+            QTest.mouseMove(picker.skill_list.viewport(), picker.skill_list.visualItemRect(picker.skill_list.item(0)).center())
             capture("skill-cascade")
             assert menu.isVisible() and menu._child_popover.isVisible()
             menu.close()
             report["checks"].append("cascade_preserved")
+            for category, filename in (("专家", "expert-cascade"), ("模式", "mode-cascade"), ("连接器", "connector-cascade"), ("对话", "conversation-cascade")):
+                window.show_prompt_tool_menu()
+                menu = window.composer_action_popover
+                row = next(row for row in menu.findChildren(ProductActionRow) if row.title_label.text() == category)
+                menu._open_submenu(row)
+                capture(filename)
+                menu.close()
+                settle()
+            window._set_prompt_files([], state.session_id)
+            window.input_field.clear()
+            state.session_status = "running"
+            state.turn_steerable = True
+            window.normalize_session_ui(state)
+            capture("running-stop")
+            assert window.action_btn.property("composerAction") == "stop"
+            window.input_field.setPlainText("补充：请保留资料来源。")
+            capture("running-send")
+            assert window.action_btn.property("composerAction") == "send"
+            state.session_status = "idle"
+            state.turn_steerable = False
+            window.normalize_session_ui(state)
+            window.input_field.setPlainText("保留这段草稿，切换后继续编辑。")
+            report["checks"].append("consistent_pickers_and_single_primary_action")
             window.show_product_page(window.PAGE_FAVORITES)
             window.show_conversation_page()
             assert window.input_field.toPlainText() == "保留这段草稿，切换后继续编辑。"
@@ -249,10 +275,10 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
             if sys.exc_info()[0] is not None:
                 import traceback
                 traceback.print_exc()
-            window.save_chat_history(session_id=state.session_id)
-            assert window.wait_for_chat_save_revision(state.session_id, state.chat_save_revision, timeout_ms=8000)
-            settle()
             if not getattr(window, "_checkpoint_close_ready", False):
+                window.save_chat_history(session_id=state.session_id)
+                assert window.wait_for_chat_save_revision(state.session_id, state.chat_save_revision, timeout_ms=8000)
+                settle()
                 close_test_window(window)
             manager.stop()
         (output / f"report-{suffix}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

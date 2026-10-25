@@ -157,7 +157,8 @@ class ConversationActionsTests(unittest.TestCase):
 
     def test_expert_checks_are_single_selection_and_survive_search_until_apply(self):
         profiles = [{"id": "a", "name": "甲专家"}, {"id": "b", "name": "乙专家"}]
-        picker = ConversationMentionPopover([], profiles, "", None, agents_only=True, selected_agent_id="a")
+        picker = ConversationMentionPopover([], profiles, "", None, selected_agent_id="a")
+        picker.change_kind("智能体")
         selected = []
         picker.selected.connect(lambda kind, record: selected.append(record))
         self.assertEqual(picker.items.item(0).checkState(), Qt.Checked)
@@ -200,7 +201,8 @@ class ConversationActionsTests(unittest.TestCase):
         profiles = [{"id": "a", "name": "甲专家"}]
         selected = []
         for apply in (False, True):
-            picker = ConversationMentionPopover([], profiles, "", None, agents_only=True, selected_agent_id="a")
+            picker = ConversationMentionPopover([], profiles, "", None, selected_agent_id="a")
+            picker.change_kind("智能体")
             picker.selected.connect(lambda kind, record: selected.append(record))
             picker.clear_btn.click()
             self.assertEqual(picker.items.item(0).checkState(), Qt.Unchecked)

@@ -922,14 +922,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertFalse(state.daemon_running)
             self.assertFalse(state.turn_steerable)
-            self.assertFalse(window.stop_btn.isVisible())
+            self.assertEqual(window.action_btn.property("composerAction"), "send")
             self.assertEqual(window.action_btn.text(), "开始")
         finally:
             state.llm_worker = None
             window.close()
             window.deleteLater()
 
-    def test_steerable_running_composer_keeps_direction_action_enabled_without_text(self):
+    def test_steerable_running_composer_shows_stop_without_text(self):
         window = MainWindow()
         try:
             state = window.get_current_session()
@@ -938,7 +938,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             with patch.object(window, "_session_has_live_activity", return_value=True):
                 window.refresh_composer_action_state()
 
-            self.assertEqual(window.action_btn.text(), "调整方向")
+            self.assertEqual(window.action_btn.text(), "停止当前任务")
             self.assertTrue(window.action_btn.isEnabled())
         finally:
             from ui_window_cleanup import close_test_window
@@ -1281,7 +1281,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     window.set_current_session(state.session_id)
                     window.normalize_session_ui(state)
                     self.assertEqual(window.action_btn.text(), "开始")
-                    self.assertTrue(window.stop_btn.isHidden())
+                    self.assertEqual(window.action_btn.property("composerAction"), "send")
                 finally:
                     window.close()
                     window.deleteLater()

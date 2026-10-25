@@ -1,0 +1,173 @@
+{
+  "platform": "windows",
+  "qt_scale_factor": 1,
+  "device_pixel_ratio": 1.5,
+  "logical_dpi": 96.0,
+  "captures": [
+    "home-context-light-1x-windows.png",
+    "skill-cascade-light-1x-windows.png",
+    "history-collapsed-light-1x-windows.png",
+    "history-expanded-light-1x-windows.png",
+    "history-failure-light-1x-windows.png",
+    "history-thought-light-1x-windows.png",
+    "history-tool-details-light-1x-windows.png",
+    "conversation-recovery-light-1x-windows.png",
+    "toast-chat-light-1x-windows.png",
+    "toast-page-light-1x-windows.png"
+  ],
+  "checks": [
+    "shared_context_and_editing_space",
+    "cascade_preserved",
+    "draft_preserved",
+    "tool_text_and_failure_do_not_overlap",
+    "thinking_uses_only_known_durations",
+    "history_does_not_mutate_messages",
+    "fold_keeps_final_and_materialized_details",
+    "tool_details_target_correct",
+    "history_reload_no_duplicate_tools",
+    "notification_position_and_recovery_actions",
+    "theme_preview_does_not_write_saved_state"
+  ],
+  "tool_geometry": [
+    {
+      "id": "tool-0",
+      "card": [
+        774,
+        67
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        613,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-1",
+      "card": [
+        774,
+        67
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        613,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-2",
+      "card": [
+        774,
+        67
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        613,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-3",
+      "card": [
+        774,
+        90
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        601,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-4",
+      "card": [
+        774,
+        90
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        601,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-5",
+      "card": [
+        774,
+        67
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        613,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    },
+    {
+      "id": "tool-6",
+      "card": [
+        774,
+        67
+      ],
+      "row": [
+        770,
+        28
+      ],
+      "title": [
+        613,
+        28
+      ],
+      "font_height": 18,
+      "details": [
+        40,
+        28
+      ]
+    }
+  ]
+}

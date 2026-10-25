@@ -186,7 +186,7 @@ from core.theme import (
 from core.theme_service import ThemeRepository
 from ui.conversation_files import ConversationFileTable
 from ui.workspace_presentation import (
-    ComposerFlowLayout, ComposerSubmitButton, EditableConversationTitle,
+    ComposerFlowLayout, ComposerSubmitButton, ComposerContextChip, ComposerContextStrip, ContextChoiceDelegate, EditableConversationTitle,
     HomeRecentButton, ConversationRunNotice, ConversationIdentityHeader, MessageContextLabel, context_action_style,
 )
 from ui.primitives import (
@@ -3359,27 +3359,29 @@ def summarize_tool_action(tool_name, args):
             path = value.strip()
             break
     if name in {"text_file_read", "document_read"}:
-        return "Read File", path or "Read file contents"
+        return "读取文件", path or "读取文件内容"
     if name == "apply_patch":
         related = extract_related_paths(name, args)
         detail = f"处理 {len(related)} 个文本路径" if related else "创建、更新、移动或删除文本文件"
         return "应用文本补丁", detail
     if name in {"workspace_rename_path"}:
-        return "Rename File", path or "Move or rename item"
+        return "重命名文件", path or "移动或重命名文件"
     if name in {"workspace_delete_path"}:
-        return "Delete File", path or "Remove item"
+        return "删除文件", path or "移除文件"
     if name in {"workspace_list_files", "search_files", "glob", "grep", "search_codebase"}:
-        return "Scan Workspace", path or "Search related files"
+        return "检索工作区", path or "查找相关文件"
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
-        return "Run Command", cmd[:48] if cmd else "Execute a shell command"
+        return "执行命令", cmd[:48] if cmd else "执行终端命令"
     if name in {"request_user_approval"}:
-        return "Await Approval", "Need user confirmation for the next step"
+        return "等待批准", "需要批准后继续"
     if name in {"request_user_input"}:
-        return "Await Input", "Need user input before continuing"
+        return "等待补充", "需要补充信息后继续"
     if name in {"publish_artifacts"}:
-        return "Deliver Artifacts", "Prepare files or images for delivery"
-    return name.replace("_", " ").title(), path or "Execution step"
+        return "准备交付", "整理可交付的文件或图片"
+    if name == "run_skill_script":
+        return "运行技能脚本", str(args.get("script_name") or args.get("skill_name") or "")
+    return name, path
 
 
 # --- Helper Classes for UI ---
@@ -4588,8 +4590,6 @@ class CapabilityWorkbenchDialog(QDialog):
                     raise RuntimeError("能力目录刷新失败")
                 self.skill_manager = window.skill_manager
             self.skill["enabled"] = bool(enabled)
-            if hasattr(window, "add_system_toast"):
-                window.add_system_toast("能力已开启" if enabled else "能力已关闭", "success", auto_close_ms=3200)
             log_ui_navigation("capability_enable_done", skill_name=name, enabled=bool(enabled))
             if hasattr(window, "handle_product_back"):
                 window.handle_product_back()
@@ -16647,8 +16647,6 @@ class SkillsCenterDialog(QDialog):
                     raise RuntimeError("能力目录刷新失败")
                 self.skill_manager = window.skill_manager
             self.refresh_list()
-            if hasattr(window, "add_system_toast"):
-                window.add_system_toast("能力已开启" if enabled else "能力已关闭", "success", auto_close_ms=3200)
             log_ui_navigation("capability_enable_done", skill_name=name, enabled=bool(enabled))
             return True
         except Exception as exc:
@@ -17023,17 +17021,23 @@ class SessionSkillPickerPopover(ProductPopover):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
-        title = QLabel("指定能力")
+        title = QLabel("指定能力", self)
+        self.title_label = title
         title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
-        subtitle = QLabel("仅展示可指定的非内置能力；所选能力会在后续轮次中优先使用")
+        subtitle = QLabel("仅展示可指定的非内置能力；所选能力会在后续轮次中优先使用", self)
         if immediate:
-            title.setText(f"添加{noun}")
-            subtitle.setText("点击加入输入框；本会话后续轮次继续使用，可随时移除。")
+            title.setText(noun)
         subtitle.setStyleSheet(apple_caption_style())
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+        heading = QHBoxLayout()
+        heading.addWidget(title)
+        heading.addStretch()
+        layout.addLayout(heading)
+        if not immediate:
+            layout.addWidget(subtitle)
+        else:
+            subtitle.hide()
 
-        self.search_input = QLineEdit()
+        self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("搜索名称、说明或关联工具")
         if immediate:
             self.search_input.setPlaceholderText(f"搜索{noun}")
@@ -17043,7 +17047,7 @@ class SessionSkillPickerPopover(ProductPopover):
         self.search_input.textChanged.connect(self._filter_items)
         layout.addWidget(self.search_input)
 
-        summary_frame = QFrame()
+        summary_frame = QFrame(self)
         summary_frame.setObjectName("AbilitySelectionSummary")
         summary_frame.setStyleSheet(
             f"QFrame#AbilitySelectionSummary {{ background: {DesignTokens.bg_secondary}; "
@@ -17052,27 +17056,33 @@ class SessionSkillPickerPopover(ProductPopover):
         summary_layout = QHBoxLayout(summary_frame)
         summary_layout.setContentsMargins(8, 4, 6, 4)
         summary_layout.setSpacing(6)
-        self.selection_summary = QLabel()
+        self.selection_summary = QLabel(summary_frame)
         self.selection_summary.setWordWrap(False)
         self.selection_summary.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
         summary_layout.addWidget(self.selection_summary)
-        self.selection_chip_scroll = QScrollArea()
+        self.selection_chip_scroll = QScrollArea(summary_frame)
         self.selection_chip_scroll.setWidgetResizable(True)
         self.selection_chip_scroll.setFrameShape(QFrame.NoFrame)
         self.selection_chip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.selection_chip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.selection_chip_scroll.setFixedHeight(28)
         self.selection_chip_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        self.selection_chip_widget = QWidget()
+        self.selection_chip_widget = QWidget(self.selection_chip_scroll)
         self.selection_chip_layout = QHBoxLayout(self.selection_chip_widget)
         self.selection_chip_layout.setContentsMargins(0, 0, 0, 0)
         self.selection_chip_layout.setSpacing(4)
         self.selection_chip_layout.addStretch()
         self.selection_chip_scroll.setWidget(self.selection_chip_widget)
         summary_layout.addWidget(self.selection_chip_scroll, 1)
-        layout.addWidget(summary_frame)
+        if immediate:
+            heading.addWidget(self.selection_summary)
+            summary_frame.hide()
+        else:
+            layout.addWidget(summary_frame)
 
-        self.skill_list = QListWidget()
+        self.skill_list = QListWidget(self)
+        self.skill_list.setObjectName("ContextChoiceList")
+        self.skill_list.setItemDelegate(ContextChoiceDelegate(self.skill_list))
         self.skill_list.setMinimumHeight(260)
         self.skill_list.setMaximumHeight(360)
         if immediate:
@@ -17082,11 +17092,7 @@ class SessionSkillPickerPopover(ProductPopover):
         self.skill_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.skill_list.setTextElideMode(Qt.ElideRight)
         self.skill_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 7px; padding: 4px; outline: none; }}"
-            f"QListWidget::item {{ color: {DesignTokens.text_primary}; border: none; border-radius: 6px; "
-            "padding: 7px 8px; margin: 1px 0; }}"
-            f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QListWidget#ContextChoiceList {{ background: {DesignTokens.bg_main}; border: none; padding: 0; outline: none; }}"
         )
         for skill in sorted(self.skills, key=lambda item: (readable_skill_name(item) or item.get("name") or "").casefold()):
             name = str(skill.get("name") or "").strip()
@@ -17095,7 +17101,8 @@ class SessionSkillPickerPopover(ProductPopover):
             tools = skill.get("tools") or []
             detail_parts = []
             if description:
-                detail_parts.append(re.sub(r"\s+", " ", description)[:72])
+                clean_description = re.sub(r"^[>#*\s]+", "", description)
+                detail_parts.append(re.sub(r"\s+", " ", clean_description))
             if tools:
                 detail_parts.append(f"{len(tools)} 个关联工具")
             item = QListWidgetItem(display + (f"\n{' · '.join(detail_parts)}" if detail_parts else ""))
@@ -17115,21 +17122,21 @@ class SessionSkillPickerPopover(ProductPopover):
         self.skill_list.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.skill_list, 1)
 
-        self.empty_label = QLabel("没有匹配的能力")
+        self.empty_label = QLabel("没有匹配的能力", self)
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setStyleSheet(apple_caption_style())
         self.empty_label.hide()
         layout.addWidget(self.empty_label)
 
         actions = QHBoxLayout()
-        clear_btn = QPushButton("清除")
+        clear_btn = QPushButton("清除", self)
         clear_btn.setStyleSheet(product_button_style("ghost", radius=7))
         clear_btn.clicked.connect(self.clear_selection)
         cancel_btn = QPushButton("取消", self)
         cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
         cancel_btn.clicked.connect(self.close)
         cancel_btn.setVisible(not immediate)
-        self.apply_btn = QPushButton("应用")
+        self.apply_btn = QPushButton("应用", self)
         self.apply_btn.setStyleSheet(product_button_style("primary", radius=7))
         self.apply_btn.clicked.connect(self._apply)
         if immediate:
@@ -17137,12 +17144,29 @@ class SessionSkillPickerPopover(ProductPopover):
             self.skill_list.itemClicked.connect(lambda item: item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked))
             self.skill_list.installEventFilter(self)
         actions.addWidget(clear_btn)
+        if immediate:
+            scope_hint = QLabel("本会话持续使用", self)
+            scope_hint.setStyleSheet(apple_caption_style())
+            scope_hint.setToolTip("选择后立即生效，本会话后续轮次继续使用；可随时从输入框移除。")
+            actions.addWidget(scope_hint)
         actions.addStretch()
         actions.addWidget(cancel_btn)
         actions.addWidget(self.apply_btn)
         layout.addLayout(actions)
         self._refresh_summary()
         self._filter_items(self.search_input.text())
+        self.refresh_theme()
+
+    def refresh_theme(self, resolved=None):
+        super().refresh_theme(resolved)
+        if not hasattr(self, "skill_list"):
+            return
+        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_body}px; font-weight: 600;")
+        self.search_input.setStyleSheet(product_field_style())
+        self.selection_summary.setStyleSheet(apple_caption_style())
+        self.skill_list.setStyleSheet(
+            f"QListWidget#ContextChoiceList {{ background: {DesignTokens.bg_main}; border: none; padding: 0; outline: none; }}")
+        self.skill_list.viewport().update()
 
     def eventFilter(self, watched, event):
         if (self.immediate and watched is self.skill_list
@@ -17178,9 +17202,9 @@ class SessionSkillPickerPopover(ProductPopover):
                 item.widget().deleteLater()
         if ordered:
             self.selection_summary.setText(f"已选 {len(ordered)} 个{self.noun if self.immediate else '能力'}")
-            self.selection_chip_scroll.show()
-            for name, display in ordered:
-                chip = QPushButton(f"{display}  ×")
+            self.selection_chip_scroll.setVisible(not self.immediate)
+            for name, display in ([] if self.immediate else ordered):
+                chip = QPushButton(f"{display}  ×", self.selection_chip_widget)
                 chip.setCursor(Qt.PointingHandCursor)
                 chip.setToolTip(f"移除 {display}")
                 chip.setStyleSheet(
@@ -17191,7 +17215,7 @@ class SessionSkillPickerPopover(ProductPopover):
                 chip.clicked.connect(lambda _checked=False, value=name: self._remove_selected_name(value))
                 self.selection_chip_layout.insertWidget(self.selection_chip_layout.count() - 1, chip)
         else:
-            self.selection_summary.setText("未指定额外能力，将继续使用默认自动匹配")
+            self.selection_summary.setText("自动匹配" if self.immediate else "未指定额外能力，将继续使用默认自动匹配")
             self.selection_chip_scroll.hide()
         self.apply_btn.setEnabled(self.immediate or set(self.selected_values()) != set(self.initial_names))
 
@@ -21893,7 +21917,7 @@ class SystemToast(QFrame):
         layout.setContentsMargins(10, 9, 8, 9)
         layout.setSpacing(8)
 
-        icon_badge = QLabel()
+        icon_badge = QLabel(surface)
         icon_badge.setObjectName("SystemToastIconBadge")
         icon_badge.setAlignment(Qt.AlignCenter)
         icon_badge.setFixedSize(20, 20)
@@ -21901,7 +21925,7 @@ class SystemToast(QFrame):
 
         layout.addWidget(icon_badge, 0, Qt.AlignVCenter)
 
-        msg_label = QLabel(text)
+        msg_label = QLabel(text, surface)
         msg_label.setTextFormat(Qt.PlainText)
         msg_label.setObjectName("SystemToastText")
         msg_label.setWordWrap(True)
@@ -21910,7 +21934,7 @@ class SystemToast(QFrame):
         msg_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         layout.addWidget(msg_label, 1)
 
-        close_btn = QToolButton()
+        close_btn = QToolButton(surface)
         close_btn.setObjectName("SystemToastClose")
         close_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_tertiary))
         close_btn.setToolTip("关闭提示")
@@ -21959,7 +21983,7 @@ class SystemToast(QFrame):
             action_row = QHBoxLayout()
             action_row.setContentsMargins(10, 0, 8, 6)
             for label, callback in actions:
-                button = QPushButton(label)
+                button = QPushButton(label, surface)
                 button.setStyleSheet(product_button_style("ghost"))
                 button.setCursor(Qt.PointingHandCursor)
                 button.clicked.connect(lambda _checked=False, cb=callback: cb())
@@ -22511,10 +22535,10 @@ class FileChip(QFrame):
         is_image = DELIVERABLE_TYPES.get(os.path.splitext(self.path)[1].lower(), ("",))[0] == "image"
         self._is_image = is_image
         self._uses_file_icon = not is_image
-        layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
+        layout.setContentsMargins(8, 4, 4, 4) if compact else layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
         layout.setSpacing(6)
 
-        icon_label = ClickableImageLabel() if is_image else QLabel()
+        icon_label = ClickableImageLabel(self) if is_image else QLabel(self)
         self.icon_label = icon_label
         if is_image:
             pixmap = QPixmap(self.path)
@@ -22535,7 +22559,7 @@ class FileChip(QFrame):
         layout.addWidget(icon_label)
 
         name = os.path.basename(self.path) or self.path
-        text_label = MessageContextLabel(name) if compact else QLabel(name)
+        text_label = MessageContextLabel(name, self) if compact else QLabel(name, self)
         self.text_label = text_label
         text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
         if compact:
@@ -22560,12 +22584,15 @@ class FileChip(QFrame):
 
         self.remove_btn = None
         if removable:
-            remove_btn = QToolButton()
+            remove_btn = QToolButton(self)
             self.remove_btn = remove_btn
             remove_btn.setCursor(Qt.PointingHandCursor)
             remove_btn.setAutoRaise(True)
             remove_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_tertiary))
             remove_btn.setIconSize(QSize(10, 10))
+            remove_btn.setFixedSize(28, 28)
+            remove_btn.setToolTip("移除 " + name)
+            remove_btn.setAccessibleName("移除 " + name)
             remove_btn.setStyleSheet(
                 f"QToolButton {{ border: none; padding: 0; color: {DesignTokens.text_tertiary}; }}"
                 f"QToolButton:hover {{ color: {DesignTokens.text_primary}; }}"
@@ -22656,7 +22683,7 @@ class FileChip(QFrame):
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
-            f"QFrame#FileChip {{ background: {DesignTokens.bg_main}; "
+            f"QFrame#FileChip {{ background: {DesignTokens.bg_secondary if self._compact else DesignTokens.bg_main}; "
             f"border: 1px solid {DesignTokens.chat_border}; "
             f"border-radius: {DesignTokens.radius_sm}px; }}"
             f"QFrame#FileChip:hover {{ background: {DesignTokens.bg_hover}; "
@@ -22666,7 +22693,7 @@ class FileChip(QFrame):
         )
         self.text_label.setStyleSheet(
             f"color: {DesignTokens.chat_text}; "
-            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-size: {DesignTokens.font_size_body if self._compact else DesignTokens.font_size_meta}px; "
             f"font-weight: {DesignTokens.font_weight_medium};"
         )
         if self._compact:
@@ -23459,27 +23486,37 @@ class AssistantTurnGroup(QFrame):
         indent = DesignTokens.spacing_lg
         bubble.content_col_layout.setContentsMargins(0 if result else indent, 0, 0, 0)
         bubble.thinking_widget.layout().setContentsMargins(indent if result else 0, 0, 0, 0)
+        for item in bubble.timeline_events:
+            if isinstance(item, ToolCallCard):
+                item.icon_label.hide()
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        stages = [bubble for bubble in self.stage_bubbles
-                  if not bubble.isHidden() and not bubble.thinking_widget.isHidden()]
-        if not stages:
+        nodes = []
+        for bubble in self.stage_bubbles:
+            if bubble.isHidden() or bubble.is_virtualized():
+                continue
+            if not bubble.thinking_widget.isHidden() and not bubble.think_toggle_btn.isHidden():
+                y = bubble.think_toggle_btn.mapTo(self, bubble.think_toggle_btn.rect().center()).y()
+                nodes.append((y, "fa5s.brain", DesignTokens.chat_text_muted))
+            if bubble is not self.process_result_bubble and bubble.content_edit.isVisible():
+                y = bubble.content_edit.mapTo(self, QPoint(0, 12)).y()
+                nodes.append((y, "fa5s.comment", DesignTokens.chat_text_muted))
+            for item in bubble.timeline_events:
+                if isinstance(item, ToolCallCard) and item.isVisible():
+                    y = item.name_label.mapTo(self, item.name_label.rect().center()).y()
+                    nodes.append((y, item.tool_icon_name, DesignTokens.error_text if item.failed else DesignTokens.chat_text_muted))
+        if not nodes:
             return
+        nodes.sort(key=lambda node: node[0])
         painter = QPainter(self)
         painter.setPen(QPen(QColor(DesignTokens.chat_border), 1))
         x = DesignTokens.assistant_thinking_timeline_indent
-        nodes = [bubble.think_toggle_btn.mapTo(self, bubble.think_toggle_btn.rect().center()).y()
-                 for bubble in stages]
-        for index, bubble in enumerate(stages):
-            y = nodes[index]
-            bottom = (nodes[index + 1] - 10 if index + 1 < len(nodes)
-                      else bubble.thinking_widget.mapTo(self, bubble.thinking_widget.rect().bottomLeft()).y())
+        for index, (y, icon, color) in enumerate(nodes):
+            bottom = nodes[index + 1][0] - 12 if index + 1 < len(nodes) else y
             if bottom > y + 10:
                 painter.drawLine(x, y + 10, x, bottom)
-            icon = ("fa5s.ellipsis-h" if bubble.think_timer.isActive() else
-                    "fa5s.stop" if "已停止" in bubble.think_toggle_btn.text() else "fa5s.check")
-            painter.drawPixmap(x - 6, y - 6, qta.icon(icon, color=DesignTokens.chat_text_muted).pixmap(12, 12))
+            painter.drawPixmap(x - 7, y - 7, qta.icon(icon, color=color).pixmap(14, 14))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -23843,14 +23880,14 @@ class HistoricalAssistantSummary(QFrame):
         layout.setSpacing(4)
         self.identity_header = ConversationIdentityHeader(self)
         layout.addWidget(self.identity_header)
-        self.detail_button = QPushButton()
+        self.detail_button = QPushButton(self)
         self.detail_button.setObjectName("HistoricalProcessDisclosure")
         self.detail_button.setCheckable(True)
         self.detail_button.setCursor(Qt.PointingHandCursor)
         self.detail_button.setStyleSheet(apple_disclosure_button_style())
         self.detail_button.toggled.connect(self._on_toggled)
         layout.addWidget(self.detail_button)
-        self.retry_button = QPushButton("重试恢复")
+        self.retry_button = QPushButton("重试恢复", self)
         self.retry_button.setObjectName("HistoricalProcessRetryButton")
         self.retry_button.setCursor(Qt.PointingHandCursor)
         self.retry_button.setStyleSheet(apple_button_style("secondary"))
@@ -23869,17 +23906,32 @@ class HistoricalAssistantSummary(QFrame):
         self.body_layout.setSpacing(0)
         layout.addWidget(self.body)
         self._refresh_button_text()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.detail_button.setStyleSheet(
+            f"QPushButton#HistoricalProcessDisclosure {{ background: transparent; border: none; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 8px 0; text-align: left; "
+            f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_body}px; }}"
+            f"QPushButton#HistoricalProcessDisclosure:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QPushButton#HistoricalProcessDisclosure:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
+        )
+        self.retry_button.setStyleSheet(product_button_style("secondary"))
+        self._refresh_button_text()
 
     def _refresh_button_text(self, progress_text=""):
         parts = []
         if self.stage_count:
             parts.append(f"{self.stage_count} 个阶段")
         if self.tool_count:
-            parts.append(f"{self.tool_count} 次 Tool 调用")
+            parts.append(f"{self.tool_count} 次工具调用")
         summary = " · ".join(parts) or "执行详情"
-        arrow = "▴" if self.detail_button.isChecked() else "▾"
+        arrow = "fa5s.chevron-down" if self.detail_button.isChecked() else "fa5s.chevron-right"
         suffix = f" · {progress_text}" if progress_text else ""
-        self.detail_button.setText(f" 执行过程 · {summary}{suffix}  {arrow}")
+        self.detail_button.setIcon(qta.icon(arrow, color=DesignTokens.chat_text_muted))
+        self.detail_button.setIconSize(QSize(10, 10))
+        joiner = "\n" if self.width() < 460 else "  "
+        self.detail_button.setText(f"执行过程{joiner}{summary}{suffix}")
         self.detail_button.setVisible(bool(self.stage_count or self.tool_count))
 
     def _on_toggled(self, checked):
@@ -23904,7 +23956,11 @@ class HistoricalAssistantSummary(QFrame):
     def set_complete(self):
         self.detail_loading = False
         self.retry_button.hide()
-        self._refresh_button_text("已加载")
+        self._refresh_button_text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_button_text()
 
 
 class ChatBubble(QFrame):
@@ -24159,7 +24215,7 @@ class ChatBubble(QFrame):
             col_layout.addWidget(self.identity_header)
             
             # Keep the ordered stream in place; folding affects thought text only.
-            self.thinking_widget = QWidget()
+            self.thinking_widget = QWidget(content_col)
             self.thinking_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             think_layout = QVBoxLayout(self.thinking_widget)
             think_layout.setContentsMargins(0, 0, 0, 0)
@@ -24167,7 +24223,7 @@ class ChatBubble(QFrame):
             think_layout.setAlignment(Qt.AlignTop)
             
             # Toggle Header
-            self.think_toggle_btn = QPushButton("深度思考")
+            self.think_toggle_btn = QPushButton("深度思考", self.thinking_widget)
             self.think_toggle_btn.setObjectName("ThinkingDisclosure")
             self.think_toggle_btn.setIcon(qta.icon('fa5s.chevron-right', color=DesignTokens.chat_text_muted))
             self.think_toggle_btn.setIconSize(QSize(10, 10))
@@ -24178,7 +24234,7 @@ class ChatBubble(QFrame):
             think_layout.addWidget(self.think_toggle_btn, 0, Qt.AlignLeft)
 
             # Container for Thinking Stream
-            self.think_container = QWidget()
+            self.think_container = QWidget(self.thinking_widget)
             self.think_container.setObjectName("ThinkingContainer")
             self.think_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             self.think_container.setVisible(False)
@@ -24191,6 +24247,7 @@ class ChatBubble(QFrame):
             )
             self.think_container_layout.setSpacing(8)
             self.think_duration = 0.0 # Store duration
+            self._think_duration_known = False
             self.think_start_time = None
             self.think_timer = QTimer(self)
             self.think_timer.setInterval(100) # Update every 100ms
@@ -24822,13 +24879,20 @@ class ChatBubble(QFrame):
 
     def _sync_thinking_container_visibility(self):
         expanded = self.think_toggle_btn.isChecked()
+        has_text = any(isinstance(event, ThinkingTextView) and event.has_text() for event in self.timeline_events)
+        self.think_toggle_btn.setVisible(has_text or self.think_timer.isActive())
         visible = False
         changed = False
         for index in range(self.think_container_layout.count()):
             widget = self.think_container_layout.itemAt(index).widget()
             if widget is None:
                 continue
-            show = bool(expanded and widget.has_text()) if isinstance(widget, ThinkingTextView) else True
+            if isinstance(widget, ThinkingTextView):
+                show = bool(expanded and widget.has_text())
+            elif widget in (self.content_rich_edit, self.content_plain_edit):
+                show = widget is self.content_edit and bool(self.main_content_text.strip())
+            else:
+                show = True
             visible = visible or show
             if widget.isHidden() == show:
                 widget.setVisible(show)
@@ -24877,6 +24941,8 @@ class ChatBubble(QFrame):
     def set_thinking_state(self, is_thinking):
         was_thinking = self.think_timer.isActive()
         if is_thinking:
+            self._think_duration_known = True
+            self.think_toggle_btn.show()
             if not self.think_timer.isActive():
                 self.think_start_time = time.monotonic()
                 self.think_timer.start()
@@ -24900,7 +24966,7 @@ class ChatBubble(QFrame):
                 widget = self.think_container_layout.itemAt(count - 1).widget()
                 if isinstance(widget, ThinkingTextView):
                     return widget
-        widget = ThinkingTextView()
+        widget = ThinkingTextView(self.think_container)
         widget.heightChanged.connect(self._on_thinking_height_changed)
         widget.renderMeasured.connect(lambda started: self._record_ui_cost("thinking_render", started))
         widget.renderFailed.connect(self._on_thinking_render_failed)
@@ -24936,14 +25002,17 @@ class ChatBubble(QFrame):
             self._thinking_text_length = getattr(self, "_thinking_text_length", 0) + len(delta)
             self._sync_thinking_container_visibility()
         
-        if duration:
-            self.think_duration = duration
+        if duration is not None and duration > 0:
+            self.think_duration = float(duration)
+            self._think_duration_known = True
         
         if is_final:
             self.set_thinking_state(False)
             self.timeline_finished_at = time.monotonic()
             total = self.think_duration
-            self.think_toggle_btn.setText(f"深度思考 · {total:.1f} 秒")
+            suffix = f" · {total:.1f} 秒" if self._think_duration_known else ""
+            self.think_toggle_btn.setText(f"深度思考{suffix}")
+            self._sync_thinking_container_visibility()
         if is_final and isinstance(self.parentWidget(), AssistantTurnGroup):
             self.parentWidget().update()
         self._notify_stage_visibility_changed()
@@ -24958,7 +25027,9 @@ class ChatBubble(QFrame):
         if timer and timer.isActive():
             timer.stop()
         self.timeline_finished_at = time.monotonic()
-        self.think_toggle_btn.setText(f"深度思考已停止 · {self.think_duration:.1f} 秒")
+        suffix = f" · {self.think_duration:.1f} 秒" if self._think_duration_known else ""
+        self.think_toggle_btn.setText(f"深度思考已停止{suffix}")
+        self._sync_thinking_container_visibility()
         if isinstance(self.parentWidget(), AssistantTurnGroup):
             self.parentWidget().update()
 
@@ -25340,7 +25411,17 @@ class ChatBubble(QFrame):
             button.setToolTip("复制结果")
         
     def add_tool_card(self, card_widget, session_id=None):
+        # A stage's explanation precedes the tool it introduced. Keep the same
+        # editors and text; only move their presentation into the ordered stream.
+        if self.main_content_text.strip() and not getattr(self, "_content_in_process", False):
+            for editor in (self.content_rich_edit, self.content_plain_edit):
+                self.content_col_layout.removeWidget(editor)
+                self.think_container_layout.addWidget(editor)
+            self._content_in_process = True
         self.think_container_layout.addWidget(card_widget)
+        if isinstance(self.parentWidget(), AssistantTurnGroup):
+            card_widget.icon_label.hide()
+        card_widget.geometryChanged.connect(self._refresh_conversation_geometry)
         self.timeline_events.append(card_widget)
         self._start_new_think_segment = True
         self.thinking_widget.setVisible(True)
@@ -25656,6 +25737,7 @@ class OfficeDraftTaskCard(QFrame):
 class ToolCallCard(QFrame):
     agent_open_requested = Signal(str)
     clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
+    geometryChanged = Signal()
 
     def __init__(self, tool_name, args, tool_id, meta=None, parent=None):
         super().__init__(parent)
@@ -25678,19 +25760,20 @@ class ToolCallCard(QFrame):
         self.setStyleSheet("QFrame#ToolCallCard { background: transparent; border: none; }")
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(0, 6, 4, 10)
+        layout.setSpacing(5)
         
         # --- Main Row Container (The "Timeline Node") ---
-        self.main_row = QFrame()
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
+        self.main_row = QFrame(self)
         self.main_row.setObjectName("ToolCallRow")
-        self.main_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.main_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.main_row.setCursor(Qt.PointingHandCursor)
         # Make the whole card clickable
         self.main_row.mousePressEvent = self.on_card_clicked
         
         row_layout = QHBoxLayout(self.main_row)
-        row_layout.setContentsMargins(4, 3, 4, 3)
+        row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(8)
         
         # 1. Icon Area (Timeline Dot)
@@ -25705,7 +25788,7 @@ class ToolCallCard(QFrame):
         self.tool_icon_name = icon_name
         
         # Icon with base
-        self.icon_label = QLabel()
+        self.icon_label = QLabel(self.main_row)
         self.icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.icon_secondary).pixmap(14, 14))
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
@@ -25714,18 +25797,10 @@ class ToolCallCard(QFrame):
             border: none;
         """)
         
-        # 2. Text Content
-        text_container = QWidget()
-        text_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        text_container.setStyleSheet("background: transparent; border: none;")
-        text_layout = QVBoxLayout(text_container)
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(2)
-        
         # Title
         args_obj = args if isinstance(args, dict) else {}
         display_title, display_summary = summarize_tool_action(tool_name, args_obj)
-        name_label = QLabel(display_title or f"{tool_name}")
+        name_label = QLabel(display_title or f"{tool_name}", self.main_row)
         self.name_label = name_label
         name_label.setObjectName("ToolCallTitle")
         name_label.setWordWrap(True)
@@ -25733,23 +25808,26 @@ class ToolCallCard(QFrame):
         name_label.setToolTip(display_summary or tool_name)
         
         # Subtitle (Short Args Summary)
-        args_preview = QLabel(display_summary or "查看调用详情")
+        args_preview = QLabel(display_summary or "查看调用详情", self)
         self.args_preview_label = args_preview
         args_preview.setObjectName("ToolCallSummary")
         args_preview.setWordWrap(True)
         args_preview.setMinimumWidth(0)
         args_preview.hide()
         
-        text_layout.addWidget(name_label)
+        self.tool_context_label = QLabel(f"{tool_name} · {display_summary}" if display_summary else tool_name, self)
+        self.tool_context_label.setObjectName("ToolCallContext")
+        self.tool_context_label.setWordWrap(True)
+        self.tool_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         
         # 3. Right Side Controls
-        self.status_icon = QLabel() # Default running
+        self.status_icon = QLabel(self.main_row) # Default running
         self.status_icon.setPixmap(qta.icon('fa5s.spinner', color=DesignTokens.text_secondary, animation=qta.Spin(self.status_icon)).pixmap(14, 14))
         self.status_icon.setStyleSheet("border: none; background: transparent;")
-        self.status_label = QLabel("运行中")
+        self.status_label = QLabel("运行中", self.main_row)
         self.status_label.setObjectName("ToolCallStatus")
         
-        self.view_btn = QPushButton("详情") # Minimalist text
+        self.view_btn = QPushButton("详情", self.main_row)
         self.view_btn.setObjectName("ToolCallDetails")
         self.view_btn.setCursor(Qt.PointingHandCursor)
         self.view_btn.setToolTip("在右侧任务详情中查看")
@@ -25757,16 +25835,17 @@ class ToolCallCard(QFrame):
         self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta))
 
         row_layout.addWidget(self.icon_label)
-        row_layout.addWidget(text_container, 1) # Expand
+        row_layout.addWidget(name_label, 1)
         row_layout.addWidget(self.status_icon)
         row_layout.addWidget(self.status_label)
         row_layout.addWidget(self.view_btn)
         
         layout.addWidget(self.main_row)
+        layout.addWidget(self.tool_context_label)
         layout.addWidget(args_preview)
 
         # 4. Sub-agents Container (Hidden by default)
-        self.sub_agents_container = QWidget()
+        self.sub_agents_container = QWidget(self)
         self.sub_agents_layout = QVBoxLayout(self.sub_agents_container)
         self.sub_agents_layout.setContentsMargins(32, 4, 4, 4) # Indent
         self.sub_agents_layout.setSpacing(4)
@@ -25774,6 +25853,7 @@ class ToolCallCard(QFrame):
         layout.addWidget(self.sub_agents_container)
         
         self.sub_agent_widgets = {}
+        self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="conversation")
 
     def refresh_theme(self, _resolved=None):
@@ -25786,12 +25866,21 @@ class ToolCallCard(QFrame):
         self.name_label.setStyleSheet(
             f"QLabel#ToolCallTitle {{ font-weight: {DesignTokens.font_weight_medium}; "
             f"color: {DesignTokens.chat_text}; "
-            f"font-size: {DesignTokens.font_size_meta + 1}px; background: transparent; border: none; }}"
+            f"font-size: {DesignTokens.font_size_body}px; background: transparent; border: none; }}"
         )
         self.args_preview_label.setStyleSheet(
             f"QLabel#ToolCallSummary {{ color: {DesignTokens.chat_text_muted}; "
             f"font-size: {DesignTokens.font_size_meta}px; background: transparent; border: none; }}"
         )
+        self.tool_context_label.setStyleSheet(
+            f"QLabel#ToolCallContext {{ color: {DesignTokens.chat_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; background: transparent; border: none; }}"
+        )
+        self.name_label.setMinimumHeight(self.name_label.fontMetrics().height())
+        self.tool_context_label.setMinimumHeight(self.tool_context_label.fontMetrics().height())
+        self.args_preview_label.setMinimumHeight(self.args_preview_label.fontMetrics().height())
+        self.view_btn.setMinimumHeight(28)
+        self.main_row.setMinimumHeight(max(28, self.name_label.fontMetrics().height()))
         self.view_btn.setStyleSheet(
             f"QPushButton#ToolCallDetails {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
             f"color: {DesignTokens.chat_text_muted}; "
@@ -25845,6 +25934,9 @@ class ToolCallCard(QFrame):
             label = "调用失败"
         else:
             label = "已完成" if self.is_finished else "运行中"
+        duration = self.meta.get("duration")
+        if self.is_finished and isinstance(duration, (int, float)) and duration >= 0:
+            label += f" · {duration:.1f} 秒"
         self.status_label.setText(label)
         self.status_label.setStyleSheet(
             f"QLabel#ToolCallStatus {{ background: transparent; border: none; "
@@ -26092,6 +26184,9 @@ class ToolCallCard(QFrame):
         self.failed = failed
         self.is_finished = not pending
         self._refresh_status_label()
+        self.layout().invalidate()
+        self.updateGeometry()
+        self.geometryChanged.emit()
         
         if not self.is_selected:
             self.set_selected(False)
@@ -31114,54 +31209,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         branch_origin_layout.addWidget(self.branch_origin_button)
         branch_origin_layout.addStretch()
         input_card_layout.addWidget(self.branch_origin_row)
-        self.conversation_reference_chips = QWidget(self.input_card)
-        reference_layout = QVBoxLayout(self.conversation_reference_chips)
-        reference_layout.setContentsMargins(0, 0, 0, 0)
-        reference_layout.setSpacing(2)
-        self.conversation_reference_chips.hide()
-        input_card_layout.addWidget(self.conversation_reference_chips)
-        self.prompt_files_section = QWidget()
-        prompt_files_section_layout = QVBoxLayout(self.prompt_files_section)
-        prompt_files_section_layout.setContentsMargins(0, 0, 0, 0)
-        prompt_files_section_layout.setSpacing(4)
-        self.prompt_files_hint = QLabel("用户添加的文件")
-        self.prompt_files_hint.setStyleSheet(
-            f"color: {DesignTokens.info_text}; font-size: 11px; font-weight: 600; padding-left: 2px;"
-        )
-        prompt_files_section_layout.addWidget(self.prompt_files_hint)
-        self.prompt_files_scroll = QScrollArea()
-        self.prompt_files_scroll.setWidgetResizable(True)
-        self.prompt_files_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.prompt_files_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.prompt_files_scroll.setFixedHeight(40)
-        self.prompt_files_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self.prompt_files_container = QWidget()
-        self.prompt_files_row = QHBoxLayout(self.prompt_files_container)
-        self.prompt_files_row.setContentsMargins(0, 0, 0, 0)
-        self.prompt_files_row.setSpacing(8)
-        self.prompt_files_scroll.setWidget(self.prompt_files_container)
-        prompt_files_section_layout.addWidget(self.prompt_files_scroll)
-        self.prompt_files_section.setVisible(False)
-        input_card_layout.addWidget(self.prompt_files_section)
-        self.composer_skill_tags = QScrollArea()
-        self.composer_skill_tags.setObjectName("ComposerSkillTags")
-        self.composer_skill_tags.setWidgetResizable(True)
-        self.composer_skill_tags.setFrameShape(QFrame.NoFrame)
-        self.composer_skill_tags.setFixedHeight(36)
-        self.composer_skill_tags.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.composer_skill_tags.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.composer_skill_tags.setStyleSheet("QScrollArea#ComposerSkillTags { background: transparent; border: none; }")
-        self.composer_skill_tags.viewport().setAutoFillBackground(False)
-        self.composer_skill_tag_contents = QWidget()
-        self.composer_skill_tag_layout = QHBoxLayout(self.composer_skill_tag_contents)
-        self.composer_skill_tag_layout.setContentsMargins(0, 0, 0, 0)
-        self.composer_skill_tag_layout.setSpacing(6)
-        self.composer_skill_tag_layout.addStretch()
-        self.composer_skill_tags.setWidget(self.composer_skill_tag_contents)
-        self.composer_skill_tag_contents.setAutoFillBackground(False)
-        self.composer_skill_tags.hide()
+        self.composer_context_tags = ComposerContextStrip(self.input_card)
+        input_card_layout.addWidget(self.composer_context_tags)
         self._composer_skill_tag_signature = None
-        input_card_layout.addWidget(self.composer_skill_tags)
         input_card_layout.addWidget(self.input_field)
 
         self.composer_workspace_row = QWidget(self.input_card)
@@ -31509,7 +31559,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.chat_row.setVisible(not show_home)
             self.input_card.setFixedWidth(max(280, self.conversation_column.width()))
             log_ui_navigation("conversation_home_presentation", session_id=getattr(state, "session_id", ""), home=show_home)
-        self.action_btn.setCompact(not show_home or self.input_card.width() < 620)
+        self.input_field.min_height = 104 if show_home else 64
+        self.input_field.max_height = 240 if show_home else 180
+        self.input_field.scheduleAdjustHeight()
+        self.action_btn.setCompact(True)
         self.action_btn.setIcon(qta.icon("fa5s.arrow-up", color=DesignTokens.text_inverse))
         if show_home:
             self._refresh_home_recent()
@@ -31517,7 +31570,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def _apply_composer_toolbar_layout(self, compact):
         self.prompt_context_layout.setDirection(QBoxLayout.LeftToRight)
         self._fit_project_selector()
-        self.action_btn.setCompact(not getattr(self, "_home_presentation_active", False) or self.input_card.width() < 620)
+        self.action_btn.setCompact(True)
         self._fit_conversation_agent_chip()
         compact = self.input_card.width() < 820
         agent = self.agent_picker_btn
@@ -31819,12 +31872,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             f"QToolButton#ComposerWorkspaceButton:focus {{ border-color: {DesignTokens.primary_focus}; }}"
             f"QToolButton#ComposerWorkspaceButton:disabled {{ color: {DesignTokens.composer_text_muted}; "
             "background: transparent; }"
-        )
-        self.prompt_files_hint.setStyleSheet(
-            f"color: {DesignTokens.info_text}; "
-            f"font-size: {DesignTokens.font_size_caption}px; "
-            f"font-weight: {DesignTokens.font_weight_semibold}; "
-            f"padding-left: {max(1, DesignTokens.spacing_xs // 2)}px;"
         )
         self.right_sidebar.setStyleSheet(
             f"QFrame#RightSidebar {{ background: {DesignTokens.right_sidebar_bg}; "
@@ -34518,24 +34565,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return normalized
 
     def refresh_prompt_file_chips(self, session_id=None):
-        if not hasattr(self, "prompt_files_section") or not hasattr(self, "prompt_files_row"):
+        if not hasattr(self, "composer_context_tags"):
             return
         files = self._current_prompt_files(session_id)
-        while self.prompt_files_row.count():
-            item = self.prompt_files_row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not files:
-            self.prompt_files_section.setVisible(False)
-            return
-        self.prompt_files_hint.setText(f"用户添加的文件 ({len(files)})")
+        chips = []
         for path in files:
-            chip = FileChip(path, removable=True)
+            chip = FileChip(path, removable=True, parent=self.composer_context_tags.contents, compact=True)
             chip.removeRequested.connect(self._remove_prompt_file)
-            self.prompt_files_row.addWidget(chip)
-        self.prompt_files_row.addStretch()
-        self.prompt_files_section.setVisible(True)
+            chips.append(chip)
+        self.composer_context_tags.set_chips("files", chips)
 
     def _token_speed_snapshot(self, state):
         tracker = getattr(state, "token_speed_tracker", None) if state else None
@@ -38300,7 +38338,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 ok=True,
                 skill_count=len(getattr(self.skill_manager, "skill_records", {}) or {}),
             )
-            self.add_system_toast("能力已加载完成", "success", auto_close_ms=2600)
         else:
             self.skill_manager_ready = False
             self.skill_load_error = payload.get("error") or "未知错误"
@@ -42712,7 +42749,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self.add_system_toast(f"项目名称保存失败：{exc}", "error", auto_close_ms=6000)
                 return
             self.refresh_history_list()
-            self.add_system_toast("名称已更新", "success", auto_close_ms=2200)
 
         editor.commitRequested.connect(commit)
         editor.cancelRequested.connect(lambda: self._restore_inline_editor(layout, original, editor))
@@ -43286,7 +43322,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self.add_system_toast(f"对话名称保存失败：{exc}", "error", auto_close_ms=6000)
                 return
             self.refresh_history_list()
-            self.add_system_toast("名称已更新", "success", auto_close_ms=2200)
             if header_edit:
                 self._restore_inline_editor(layout, original, editor)
 
@@ -44013,7 +44048,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if notice is not None and _qt_object_alive(notice):
             notice.set_text(text, tone)
         else:
-            notice = ConversationRunNotice(text, tone)
+            notice = ConversationRunNotice(text, tone, state.chat_layout.parentWidget())
             state.conversation_notice = notice
             state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
         previous_callback = getattr(notice, "_conversation_action_callback", None)
@@ -44595,7 +44630,18 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                             session_id=state.session_id,
                             animate=animate,
                         )
-                    active_bubble.update_thinking(duration=None, is_final=True)
+                    thinking_events = [event for event in getattr(state, "ui_timeline_events", [])
+                                       if event.get("kind") == "thinking"
+                                       and event.get("group_id") == group_id and event.get("stage_id") == stage_id
+                                       and str(event.get("turn_id") or "") == str(meta.get("ui_turn_id") or "")]
+                    durations = []
+                    for event in thinking_events:
+                        start, finish = event.get("started_at"), event.get("finished_at")
+                        if not isinstance(start, (int, float)) or not isinstance(finish, (int, float)) or finish < start:
+                            durations = []
+                            break
+                        durations.append(finish - start)
+                    active_bubble.update_thinking(duration=sum(durations) if durations else None, is_final=True)
                     continue
                 if role == "tool" and message.get("tool_call_id"):
                     tool_id = str(message.get("tool_call_id"))
@@ -50181,35 +50227,18 @@ a {{ overflow-wrap: anywhere; }}
         if self._composer_skill_tag_signature == signature:
             return
         self._composer_skill_tag_signature = signature
-        while self.composer_skill_tag_layout.count() > 1:
-            item = self.composer_skill_tag_layout.takeAt(0)
-            item.widget().deleteLater()
-        self.composer_skill_tags.setVisible(bool(selected))
+        chips = []
         skill_records = {skill.get("name"): skill for skill in self._available_session_skills()}
         for name, display in zip(selected, names):
             category = "connectors" if skill_center_tab_key(skill_records.get(name, {})) == "mcp" else "skills"
-            chip = SessionContextChip(display)
-            chip.setObjectName("ComposerSkillTag")
-            chip.setMenuIndicatorVisible(False)
-            chip.setRemovable(True)
+            chip = ComposerContextChip(display, "fa5s.plug" if category == "connectors" else "fa5s.puzzle-piece",
+                                       self.composer_context_tags.contents)
             chip.setToolTip(f"{display} · 本会话持续使用，点击调整")
-            chip.setCloseToolTip(f"移除 {display}")
             chip.setEnabled(enabled)
-            chip.setText(chip.main_btn.fontMetrics().elidedText(display, Qt.ElideRight, 140))
-            def style(_=None, target=chip, icon="fa5s.link" if category == "connectors" else "fa5s.puzzle-piece"):
-                target.refresh_theme(_)
-                target.setStyleSheet(target.styleSheet() +
-                                    f"QWidget#ComposerSkillTag {{ background: {DesignTokens.bg_secondary}; border-radius: 6px; }}")
-                target.setIcon(qta.icon(icon, color=DesignTokens.text_secondary))
-                target.main_btn.setStyleSheet(
-                    f"QPushButton#ChipMainButton {{ color: {DesignTokens.text_secondary}; background: transparent; border: none; "
-                    f"font-size: {DesignTokens.font_size_body}px; font-weight: 400; padding: 2px 4px; }}"
-                    f"QPushButton#ChipMainButton:hover {{ background: {DesignTokens.bg_hover}; border-radius: 4px; }}")
-            style()
-            bind_theme(chip, style, surface="composer")
             chip.clicked.connect(lambda selected_category=category: self.open_session_skill_picker(category=selected_category))
             chip.closeClicked.connect(lambda value=name, sid=state.session_id: self._remove_composer_skill(sid, value))
-            self.composer_skill_tag_layout.insertWidget(self.composer_skill_tag_layout.count() - 1, chip)
+            chips.append(chip)
+        self.composer_context_tags.set_chips("skills", chips)
 
     def _remove_composer_skill(self, session_id, name):
         state = self.get_session(session_id)
@@ -50231,7 +50260,6 @@ a {{ overflow-wrap: anywhere; }}
             return
         self.set_session_selected_skills([], session_id=state.session_id)
         self.refresh_context_badges(state.session_id)
-        self.add_system_toast("已移除指定能力", "info", session_id=state.session_id, auto_close_ms=2600)
 
     def open_session_skill_picker(self, *, category="skills", anchor=None, parent_menu=None):
         state = self.get_current_session()
@@ -54814,6 +54842,7 @@ a {{ overflow-wrap: anywhere; }}
                 timeline_event["finished_at"] = time.time()
         if meta:
             card.meta.update(meta)
+            card._refresh_status_label()
         result_obj = data.get("result_obj")
         response = result_obj.get("interaction_response") if isinstance(result_obj, dict) else None
         if isinstance(response, dict):
@@ -55175,20 +55204,29 @@ a {{ overflow-wrap: anywhere; }}
         parent = getattr(self, "main_container", None)
         if parent is None:
             raise RuntimeError("SystemToast requires an initialized main container.")
-        available_width = max(1, min(parent.width() - 32, DesignTokens.toast_max_width))
-        toast.apply_dynamic_width(available_width)
-        toast.adjustSize()
-        toast_width = min(toast.width(), available_width)
-        toast.resize(toast_width, toast.sizeHint().height())
+        # Align feedback with the task area and keep the input and preview toolbar clear.
+        host = getattr(self, "main_page_stack", None)
+        bounds = QRect(host.mapTo(parent, QPoint()), host.size()) if host is not None and host.isVisible() else parent.rect()
         margin = DesignTokens.toast_edge_margin
+        composer = getattr(self, "input_card", None)
+        if composer is not None and composer.isVisible() and not getattr(self, "_home_presentation_active", False):
+            origin = composer.mapTo(parent, QPoint())
+            bounds = QRect(origin.x(), bounds.top(), composer.width(), max(1, origin.y() - bounds.top()))
+        available_width = max(1, min(bounds.width() - 2 * margin, DesignTokens.toast_max_width))
+        toast.apply_dynamic_width(available_width)
+        toast.ensurePolished()
+        natural_width = max((toast.message_label.fontMetrics().horizontalAdvance(line) for line in toast.message_label.text().splitlines()), default=0) + 80
+        toast_width = min(available_width, max(DesignTokens.toast_min_width, natural_width, toast.layout().minimumSize().width()))
+        toast.setFixedWidth(toast_width)
+        toast_height = toast.layout().totalHeightForWidth(toast_width)
+        toast.resize(toast_width, max(toast.minimumSizeHint().height(), toast_height))
         gap = DesignTokens.toast_stack_gap
-        x = max(margin, parent.width() - toast.width() - margin)
+        x = max(margin, bounds.center().x() - toast.width() // 2)
         visible = [item for item in getattr(self, "_visible_system_toasts", []) if _qt_object_alive(item)]
         above = visible[:stack_index] if stack_index > 0 else []
         occupied = sum(item.height() for item in above) + gap * len(above)
-        desired_y = max(margin, DesignTokens.toast_top_margin) + occupied
-        max_y = max(margin, parent.height() - toast.height() - margin)
-        y = min(desired_y, max_y)
+        desired_y = bounds.bottom() - margin - toast.height() - occupied
+        y = max(bounds.top() + margin, desired_y)
         return QPoint(x, y)
 
     def _position_active_system_toast(self):
@@ -55204,6 +55242,7 @@ a {{ overflow-wrap: anywhere; }}
             payload = self._system_toast_queue.pop(0)
             toast = SystemToast(payload["text"], payload["type"], self.main_container, actions=payload.get("actions", ()))
             toast.interaction_request_id = payload.get("request_id")
+            toast.session_id = payload.get("session_id")
             toast.set_repeat_count(payload.get("count", 1))
             toast.closeRequested.connect(self._dismiss_system_toast)
             self._visible_system_toasts.append(toast)
@@ -55248,6 +55287,7 @@ a {{ overflow-wrap: anywhere; }}
         if visible and not actions:
             latest = visible[-1]
             if (latest.base_text == message and latest.toast_type == type
+                    and getattr(latest, "session_id", None) == session_id
                     and getattr(latest, "interaction_request_id", None) == request_id):
                 latest.set_repeat_count(latest.repeat_count + 1)
                 latest.start_auto_close(self._system_toast_duration(type, auto_close_ms))
@@ -55256,6 +55296,7 @@ a {{ overflow-wrap: anywhere; }}
         if self._system_toast_queue and not actions:
             latest_payload = self._system_toast_queue[-1]
             if (latest_payload["text"] == message and latest_payload["type"] == type
+                    and latest_payload.get("session_id") == session_id
                     and latest_payload.get("request_id") == request_id):
                 latest_payload["count"] = int(latest_payload.get("count", 1)) + 1
                 return
@@ -56118,11 +56159,13 @@ a {{ overflow-wrap: anywhere; }}
             raise ValueError(f"Unsupported Skill change action for notice: {action}")
 
         text, tone = notice
-        self.add_system_toast(text, tone)
+        redundant_toggle = str(payload.get("source") or "").lower() == "ui" and action in {"enabled", "disabled"}
+        if not redundant_toggle:
+            self.add_system_toast(text, tone)
         shown_event_ids[event_id] = None
         while len(shown_event_ids) > 2048:
             shown_event_ids.popitem(last=False)
-        return True
+        return not redundant_toggle
 
     def _relay_local_skill_catalog_changed(self, event, snapshot):
         self.skill_catalog_changed_ui_signal.emit(event, snapshot)

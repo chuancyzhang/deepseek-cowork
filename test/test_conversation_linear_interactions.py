@@ -2201,6 +2201,11 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(window.toasts), len(cases))
+        for action in ("enabled", "disabled"):
+            self.assertFalse(MainWindow._show_skill_change_system_notice(window, {
+                "event_id": "local-" + action, "source": "ui", "action": action, "skill_names": ["demo"],
+            }))
+        self.assertEqual(len(window.toasts), len(cases))
 
         original_messages = [enabled, created]
         render_stub = SimpleNamespace(get_session=lambda _session_id: SimpleNamespace())
@@ -2487,7 +2492,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(group.y(), initial_top)
         self.assertGreater(len(geometry_updates), 0)
         self.assertEqual(first_tool.sizePolicy().verticalPolicy(), QSizePolicy.Maximum)
-        self.assertEqual(first_tool.main_row.sizePolicy().verticalPolicy(), QSizePolicy.Fixed)
+        self.assertGreaterEqual(first_tool.name_label.height(), first_tool.name_label.fontMetrics().height())
+        self.assertGreaterEqual(first_tool.view_btn.height(), 28)
         self.assertLessEqual(first_tool_height, first_tool.sizeHint().height() + 2)
         self.assertLessEqual(first_row_height, first_tool.main_row.sizeHint().height() + 2)
         self.assertGreater(first_tool_with_agent_height, first_tool_height)

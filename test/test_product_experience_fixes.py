@@ -1184,14 +1184,14 @@ class ProductExperienceFixTests(unittest.TestCase):
         positions = [toast.pos().y() for toast in stub._visible_system_toasts]
         self.assertEqual(
             positions[0],
-            max(DesignTokens.toast_top_margin, DesignTokens.toast_edge_margin),
+            stub.main_container.height() - 1 - DesignTokens.toast_edge_margin - stub._visible_system_toasts[0].height(),
         )
-        self.assertLess(positions[0], positions[1])
-        self.assertLess(positions[1], positions[2])
+        self.assertGreater(positions[0], positions[1])
+        self.assertGreater(positions[1], positions[2])
         for toast in stub._visible_system_toasts:
             self.assertEqual(
                 toast.pos().x(),
-                stub.main_container.width() - toast.width() - DesignTokens.toast_edge_margin,
+                stub.main_container.rect().center().x() - toast.width() // 2,
             )
 
         stub._dismiss_system_toast(stub._visible_system_toasts[-1])

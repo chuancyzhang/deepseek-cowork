@@ -1,9 +1,10 @@
 """Presentation-only controls for the conversation workspace."""
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal, QTimer, QEvent
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
 from PySide6.QtWidgets import (
     QLabel, QLayout, QPushButton, QStyle, QStyleOptionButton, QStylePainter,
-    QFrame, QHBoxLayout, QToolButton, QVBoxLayout, QSizePolicy, QWidget,
+    QFrame, QHBoxLayout, QToolButton, QVBoxLayout, QSizePolicy, QWidget, QScrollArea, QStyledItemDelegate,
 )
 import qtawesome as qta
 from core.theme import DesignTokens, bind_theme
@@ -223,9 +224,17 @@ class ConversationRunNotice(ProductInlineNotice):
         if not hasattr(self, "notice_icon"):
             return
         attention = self._tone in {"error", "warning"}
-        self.label.setStyleSheet(f"font-size: {DesignTokens.font_size_body}px; color: {DesignTokens.text_secondary};")
+        self.label.setStyleSheet(f"font-size: {DesignTokens.font_size_body}px; color: {DesignTokens.chat_text};")
+        self.label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         color = DesignTokens.error_text if self._tone == "error" else DesignTokens.warning_text if attention else DesignTokens.info_text
-        self.notice_icon.setPixmap(qta.icon("fa5s.exclamation-circle" if attention else "fa5s.info-circle", color=color).pixmap(16, 16))
+        icon = "fa5s.exclamation-circle" if attention else "fa5s.check" if self._tone == "success" else "fa5s.info-circle"
+        self.notice_icon.setPixmap(qta.icon(icon, color=color).pixmap(16, 16))
+        self.notice_icon.setFixedSize(20, 22)
+        self.setStyleSheet(
+            f"QFrame#ProductInlineNotice {{ background: {DesignTokens.error_bg if self._tone == 'error' else DesignTokens.warning_bg if self._tone == 'warning' else 'transparent'}; "
+            f"border: none; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QFrame#ProductInlineNotice QLabel {{ background: transparent; border: none; }}"
+        )
 
 
 def context_action_style(active=False):
@@ -299,6 +308,163 @@ class ComposerFlowLayout(QLayout):
             x += width + self.spacing()
             row_height = max(row_height, hint.height())
         return y - rect.y() + row_height
+
+
+class ComposerContextChip(QFrame):
+    """One removable context item; the full value remains accessible."""
+
+    clicked = Signal()
+    closeClicked = Signal()
+
+    def __init__(self, text, icon_name, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ComposerContextChip")
+        self.icon_name = icon_name
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setMaximumWidth(280)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 4, 4, 4)
+        row.setSpacing(4)
+        self.main_btn = MessageReferenceButton(self)
+        self.main_btn.setObjectName("ComposerContextOpen")
+        self.main_btn.setCursor(Qt.PointingHandCursor)
+        self.main_btn.setAccessibleName(text)
+        self.main_btn.clicked.connect(self.clicked.emit)
+        content = QHBoxLayout(self.main_btn)
+        content.setContentsMargins(4, 0, 4, 0)
+        content.setSpacing(6)
+        self.icon = QLabel(self.main_btn)
+        self.label = MessageContextLabel(text, self.main_btn)
+        self.label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.icon.setAttribute(Qt.WA_TransparentForMouseEvents)
+        content.addWidget(self.icon)
+        content.addWidget(self.label, 1)
+        self.close_btn = QPushButton("×", self)
+        self.close_btn.setObjectName("ComposerContextRemove")
+        self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setAccessibleName(f"移除 {text}")
+        self.close_btn.setToolTip(f"移除 {text}")
+        self.close_btn.clicked.connect(self.closeClicked.emit)
+        row.addWidget(self.main_btn, 1)
+        row.addWidget(self.close_btn)
+        self.setToolTip(text)
+        bind_theme(self, self.refresh_theme, surface="composer")
+
+    def refresh_theme(self, _resolved=None):
+        self.icon.setPixmap(qta.icon(self.icon_name, color=DesignTokens.composer_text_muted).pixmap(16, 16))
+        self.setStyleSheet(
+            f"QFrame#ComposerContextChip {{ background: {DesignTokens.bg_secondary}; "
+            f"border: 1px solid {DesignTokens.composer_border}; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QPushButton#ComposerContextOpen, QPushButton#ComposerContextRemove {{ background: transparent; "
+            f"color: {DesignTokens.composer_text}; border: 1px solid transparent; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QPushButton#ComposerContextOpen:hover, QPushButton#ComposerContextRemove:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QPushButton#ComposerContextOpen:focus, QPushButton#ComposerContextRemove:focus {{ border-color: {DesignTokens.primary_focus}; }}"
+            f"QFrame#ComposerContextChip QLabel {{ color: {DesignTokens.composer_text}; background: transparent; border: none; "
+            f"font-size: {DesignTokens.font_size_body}px; }}"
+        )
+
+
+class ComposerContextStrip(QScrollArea):
+    """Wrap all selected context together, with bounded height for large selections."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ComposerContextStrip")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.contents = QWidget(self)
+        self.flow = ComposerFlowLayout(self.contents)
+        self.flow.setSpacing(8)
+        self.setWidget(self.contents)
+        self._groups = {}
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._fit_height)
+        self.setStyleSheet("QScrollArea#ComposerContextStrip { background: transparent; border: none; }")
+        self.viewport().setAutoFillBackground(False)
+        self.contents.setAutoFillBackground(False)
+        self.hide()
+
+    def chips(self, kind):
+        return list(self._groups.get(kind, []))
+
+    def set_chips(self, kind, chips):
+        while self.flow.count():
+            self.flow.takeAt(0)
+        for chip in self._groups.get(kind, []):
+            chip.hide()
+            chip.deleteLater()
+        self._groups[kind] = list(chips)
+        for key in ("references", "files", "skills"):
+            for chip in self._groups.get(key, []):
+                chip.setProperty("composerContextKind", key)
+                self.flow.addWidget(chip)
+                chip.show()
+        self.setVisible(bool(self.flow.count()))
+        self._fit_height()
+
+    def _fit_height(self):
+        height = self.flow.heightForWidth(max(1, self.viewport().width()))
+        self.contents.setMinimumHeight(height)
+        self.setFixedHeight(min(128, max(1, height)))
+        self.flow.invalidate()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_timer.start(0)
+
+
+class ContextChoiceDelegate(QStyledItemDelegate):
+    """Two readable text levels with one trailing selection mark."""
+
+    def sizeHint(self, option, index):
+        title_font = QFont(option.font)
+        title_font.setPixelSize(DesignTokens.font_size_body)
+        detail_font = QFont(option.font)
+        detail_font.setPixelSize(DesignTokens.font_size_meta)
+        lines = QFontMetrics(title_font).height() + QFontMetrics(detail_font).height()
+        return QSize(240, max(56, lines + 20))
+
+    def paint(self, painter, option, index):
+        painter.save()
+        rect = option.rect.adjusted(0, 2, 0, -2)
+        checked = index.data(Qt.CheckStateRole) in (Qt.Checked, Qt.Checked.value)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        focused = bool(option.state & QStyle.State_HasFocus)
+        painter.setPen(QPen(QColor(DesignTokens.primary_focus), 1) if focused else Qt.NoPen)
+        painter.setBrush(QColor(DesignTokens.bg_hover if hovered else DesignTokens.bg_secondary) if checked or hovered else Qt.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), DesignTokens.radius_sm, DesignTokens.radius_sm)
+        title, _, detail = str(index.data(Qt.DisplayRole) or "").partition("\n")
+        font = QFont(option.font)
+        font.setPixelSize(DesignTokens.font_size_body)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        text_rect = rect.adjusted(12, 7, -36, -7)
+        title_rect = QRect(text_rect.x(), text_rect.y(), text_rect.width(), metrics.height())
+        painter.setPen(QColor(DesignTokens.text_primary))
+        painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, metrics.elidedText(title, Qt.ElideRight, text_rect.width()))
+        font.setPixelSize(DesignTokens.font_size_meta)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        detail_rect = QRect(text_rect.x(), title_rect.bottom() + 3, text_rect.width(), metrics.height())
+        painter.setPen(QColor(DesignTokens.text_secondary))
+        painter.drawText(detail_rect, Qt.AlignVCenter | Qt.AlignLeft, metrics.elidedText(detail, Qt.ElideRight, text_rect.width()))
+        if checked:
+            painter.drawPixmap(rect.right() - 26, rect.center().y() - 8,
+                               qta.icon("fa5s.check", color=DesignTokens.text_primary).pixmap(16, 16))
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if index.flags() & Qt.ItemIsUserCheckable:
+            activate = (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton) or (
+                event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter))
+            if activate:
+                checked = index.data(Qt.CheckStateRole) in (Qt.Checked, Qt.Checked.value)
+                return model.setData(index, Qt.Unchecked if checked else Qt.Checked, Qt.CheckStateRole)
+        return super().editorEvent(event, model, option, index)
 
 
 class EditableConversationTitle(QLabel):

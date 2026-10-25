@@ -51,7 +51,7 @@ class ConversationAgentsMixin:
         button.conversation_agent_name = name
         button.setAccessibleName("当前专家：" + name if selection else "选择专家")
         button.setRemovable(bool(selection))
-        button.setVisible(bool(selection))
+        button.show()
         ready = bool(state and getattr(state, "history_loaded", False) and not getattr(state, "history_loading", False))
         busy = bool(state and self._session_is_busy(state))
         button.setEnabled(ready and not busy)

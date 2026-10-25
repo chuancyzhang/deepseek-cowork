@@ -975,7 +975,7 @@ def main_run():
             window.resize(1280, 720)
             window.show()
             process_events(260)
-            chips = window.prompt_files_section.findChildren(main.FileChip)
+            chips = window.composer_context_tags.chips("files")
             if len(chips) != 1 or not chips[0]._is_image:
                 raise RuntimeError("Image attachment chip was not rendered.")
             save_widget(window, "s16-pasted-image.png", 180)

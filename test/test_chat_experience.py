@@ -19,7 +19,7 @@ from core.llm.providers import _build_openai_user_content
 from core.workbench_terminal import terminal_launch_args
 from core.theme import DesignTokens, default_design_tokens
 from core.theme_service import resolve_theme
-from main import MainWindow, SessionContextChip, render_markdown_or_html_with_cache
+from main import MainWindow, ComposerContextChip, render_markdown_or_html_with_cache
 from ui.conversation_search import find_conversation_messages
 from ui.primitives import ProductActionRow, SidebarInlineNameEditor
 
@@ -114,13 +114,13 @@ class ChatExperienceTests(unittest.TestCase):
         popover.close()
         self.app.processEvents()
         self.window.create_new_session()
-        self.assertTrue(self.window.composer_skill_tags.isHidden())
+        self.assertFalse(self.window.composer_context_tags.chips("skills"))
         self.window.activate_session(state.session_id)
-        chip = self.window.composer_skill_tag_layout.itemAt(0).widget()
-        self.assertIsInstance(chip, SessionContextChip)
+        chip = self.window.composer_context_tags.chips("skills")[0]
+        self.assertIsInstance(chip, ComposerContextChip)
         QTest.mouseClick(chip.close_btn, Qt.LeftButton)
         self.assertEqual(state.selected_skill_names, [])
-        self.assertTrue(self.window.composer_skill_tags.isHidden())
+        self.assertFalse(self.window.composer_context_tags.chips("skills"))
 
     def test_permission_choices_persist_and_restore_on_save_failure(self):
         initial = self.window.composer_permission.isChecked()
@@ -201,7 +201,7 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertEqual(state.conversation_refs, [{"session_id": "source", "title": "历史规划"}])
         self.assertEqual(self.window.input_field.toPlainText(), "请结合历史对话，继续补充验收标准。")
         self.assertEqual(self.window.input_field.textCursor().position(), 6)
-        self.assertTrue(self.window.conversation_reference_chips.isVisible())
+        self.assertTrue(self.window.composer_context_tags.chips("references")[0].isVisible())
         prepared = self.window.prepare_conversation_references(state, state.conversation_refs)
         self.assertIn("需要引用的规划原文", Path(prepared[0]["snapshot_path"]).read_text(encoding="utf-8"))
         self.window.show_conversation_reference_picker()
@@ -210,9 +210,9 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertEqual(len(state.conversation_refs), 1)
         self.window.create_new_session()
         self.assertEqual(self.window.get_current_session().conversation_refs, [])
-        self.assertTrue(self.window.conversation_reference_chips.isHidden())
+        self.assertFalse(self.window.composer_context_tags.chips("references"))
         self.window.activate_session(state.session_id)
-        self.assertTrue(self.window.conversation_reference_chips.isVisible())
+        self.assertTrue(self.window.composer_context_tags.chips("references")[0].isVisible())
         self.window.remove_conversation_reference(state.session_id, "source")
         self.assertEqual(state.conversation_refs, [])
 
@@ -267,7 +267,8 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
         chip = self.window.agent_picker_btn
-        self.assertTrue(chip.isHidden())
+        self.assertTrue(chip.isVisible())
+        self.assertFalse(chip.close_btn.isVisible())
         self.assertTrue(self.window.select_conversation_agent(profile))
         self.window.sync_conversation_widths()
         self.app.processEvents()
@@ -285,7 +286,8 @@ class ChatExperienceTests(unittest.TestCase):
             self.assertTrue(chip.isVisible())
             self.assertFalse(chip.isEnabled())
         self.window.create_new_session()
-        self.assertTrue(chip.isHidden())
+        self.assertTrue(chip.isVisible())
+        self.assertFalse(chip.close_btn.isVisible())
         self.window.activate_session(state.session_id)
         self.assertTrue(chip.isVisible())
         self.assertTrue(chip.isEnabled())
@@ -294,7 +296,8 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.conversation_agent_popover.close()
         QTest.mouseClick(chip.close_btn, Qt.LeftButton)
         self.assertFalse(state.conversation_agent)
-        self.assertTrue(chip.isHidden())
+        self.assertTrue(chip.isVisible())
+        self.assertFalse(chip.close_btn.isVisible())
 
     def test_conversation_picker_ignores_stale_session_and_can_retry_load_failure(self):
         self.window.chat_storage.upsert_conversation("source", title="已有对话")

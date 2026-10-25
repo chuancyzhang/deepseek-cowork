@@ -24,7 +24,7 @@ from ui.primitives import (
     ProductInlineNotice, ProductPopover, ProductSegmentedControl,
     product_button_style, product_field_style,
 )
-from ui.workspace_presentation import MessageReferenceChip
+from ui.workspace_presentation import MessageReferenceChip, ComposerContextChip
 
 
 logger = logging.getLogger(__name__)
@@ -366,34 +366,20 @@ class ConversationActionsMixin:
         timer.start(600)
 
     def refresh_conversation_reference_chips(self):
-        container = getattr(self, "conversation_reference_chips", None)
+        container = getattr(self, "composer_context_tags", None)
         if container is None:
             return
-        layout = container.layout()
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
         state = self.get_current_session()
         refs = getattr(state, "conversation_refs", []) if state else []
+        chips = []
         for ref in refs:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            button = reference_button("引用：" + ref["title"])
-            button.setText(button.fontMetrics().elidedText("引用：" + ref["title"], Qt.ElideRight, 300))
-            button.setToolTip(ref["title"] + "\n作为参考资料，发送时固定上下文。点击查看。")
-            button.clicked.connect(lambda checked=False, r=copy.deepcopy(ref): self.show_conversation_reference(r))
-            remove = reference_button("×")
-            remove.setFixedWidth(24)
-            remove.setToolTip("移除此会话引用")
-            remove.clicked.connect(lambda checked=False, sid=state.session_id, rid=ref["session_id"]: self.remove_conversation_reference(sid, rid))
-            row_layout.addWidget(button)
-            row_layout.setSpacing(0)
-            row_layout.addWidget(remove)
-            row_layout.addStretch()
-            layout.addWidget(row)
-        container.setVisible(bool(refs))
+            chip = ComposerContextChip(ref["title"], "fa5s.comment-alt", container.contents)
+            chip.setToolTip(ref["title"] + "\n作为参考资料，发送时固定上下文。点击查看。")
+            chip.main_btn.setAccessibleName("查看引用：" + ref["title"])
+            chip.clicked.connect(lambda r=copy.deepcopy(ref): self.show_conversation_reference(r))
+            chip.closeClicked.connect(lambda sid=state.session_id, rid=ref["session_id"]: self.remove_conversation_reference(sid, rid))
+            chips.append(chip)
+        container.set_chips("references", chips)
 
     def remove_conversation_reference(self, session_id, reference_session_id):
         state = self.get_session(session_id)

@@ -142,7 +142,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         QTest.qWait(180)
         window.sync_context_drawer_layout()
         QTest.qWait(60)
-        self.assertTrue(window.composer_skill_tags.isVisible())
+        self.assertTrue(window.composer_context_tags.isVisible())
         self.assertGreater(window.right_sidebar.y(), window.top_bar_widget.geometry().bottom())
         composer_position = window.input_card.mapTo(window, QPoint(0, 0))
         header_position = window.top_bar_widget.pos()
@@ -152,7 +152,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         QTest.qWait(30)
         self.assertEqual(window.input_card.mapTo(window, QPoint(0, 0)), composer_position)
         self.assertEqual(window.top_bar_widget.pos(), header_position)
-        for button in (window.tool_menu_btn, window.composer_skill_tags, window.permission_button, window.model_select_btn, window.action_btn):
+        for button in (window.tool_menu_btn, window.composer_context_tags, window.permission_button, window.model_select_btn, window.action_btn):
             bottom_right = button.mapTo(window.input_card, button.rect().bottomRight())
             self.assertTrue(window.input_card.rect().contains(bottom_right), button.objectName() or button.text())
 

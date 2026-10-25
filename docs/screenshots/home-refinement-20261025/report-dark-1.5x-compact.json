@@ -1,0 +1,26 @@
+{
+  "platform": "offscreen",
+  "qt_scale_factor": 1.5,
+  "device_pixel_ratio": 1.5,
+  "logical_dpi": 96.0,
+  "captures": [
+    "home-dark-1.5x-compact.png",
+    "home-multiline-dark-1.5x-compact.png",
+    "home-options-dark-1.5x-compact.png"
+  ],
+  "checks": [
+    "home_guidance_and_twenty_percent_height_reduction",
+    "existing_input_autogrowth_and_shrink_preserved",
+    "home_options_unchanged",
+    "theme_preview_does_not_write_saved_state"
+  ],
+  "tool_geometry": [],
+  "home_geometry": {
+    "previous_card_height": 174,
+    "card_height": 140,
+    "reduction_percent": 19.5,
+    "empty_editor_height": 70,
+    "multiline_editor_height": 222,
+    "editor_line_height": 18
+  }
+}

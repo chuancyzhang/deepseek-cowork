@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "test")]
 
 
-def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, output=None):
+def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, home_only=False, output=None):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -85,6 +85,68 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
                 {"id": "source-one", "title": "产品调研周报", "updated_at": time.time(), "meta": {}},
                 {"id": "source-two", "title": "整理本周进展", "updated_at": time.time(), "meta": {}},
             ]
+            if home_only:
+                window._sync_home_presentation()
+                # Measure the former empty-home size with the same font, theme
+                # and toolbar, then restore the current presentation settings.
+                window.input_field.min_height = 104
+                window.input_field.scheduleAdjustHeight()
+                settle()
+                previous_card_height = window.input_card.height()
+                window._sync_home_presentation()
+                settle()
+                compact_card_height = window.input_card.height()
+                compact_editor_height = window.input_field.height()
+                assert .75 <= compact_card_height / previous_card_height <= .85
+                assert window.home_page.eyebrow_label.isVisible()
+                assert window.home_page.subtitle_label.isVisible()
+                assert window.input_field.viewport().height() >= 3 * window.input_field.fontMetrics().lineSpacing()
+                capture("home")
+                report["checks"].append("home_guidance_and_twenty_percent_height_reduction")
+                draft = "\n".join((
+                    "帮我整理一份项目进展汇报。", "", "汇报对象：项目团队", "汇报时长：10 分钟", "",
+                    "请包含：", "1. 本周已完成的工作", "2. 当前进展与关键问题", "3. 下周计划和需要协调的事项",
+                    "", "风格简洁，先给出大纲，再展开内容。",
+                ))
+                window.input_field.setPlainText(draft)
+                settle()
+                expanded_editor_height = window.input_field.height()
+                assert expanded_editor_height > compact_editor_height
+                assert window.input_field.toPlainText() == draft
+                assert window.input_card.width() <= window.home_scroll.viewport().width()
+                capture("home-multiline")
+                window.input_field.clear()
+                settle()
+                assert window.input_card.height() == compact_card_height
+                report["checks"].append("existing_input_autogrowth_and_shrink_preserved")
+                window.home_page.home_options.click()
+                settle()
+                window.home_scroll.ensureWidgetVisible(window.home_page.toolkit_hint_button)
+                capture("home-options")
+                assert window.home_page.home_hints.isVisible()
+                assert window.input_card.width() <= window.home_scroll.viewport().width()
+                option_button = window.home_page.toolkit_hint_button
+                assert window.home_scroll.viewport().rect().contains(
+                    option_button.mapTo(window.home_scroll.viewport(), option_button.rect().bottomRight())
+                )
+                window.home_page.home_options.click()
+                assert not window.home_page.home_hints.isVisible()
+                assert (saved_path.read_bytes() if saved_path.exists() else None) == saved_before
+                report["checks"].extend(("home_options_unchanged", "theme_preview_does_not_write_saved_state"))
+                report["home_geometry"] = {
+                    "previous_card_height": previous_card_height,
+                    "card_height": compact_card_height,
+                    "reduction_percent": round((1 - compact_card_height / previous_card_height) * 100, 1),
+                    "empty_editor_height": compact_editor_height,
+                    "multiline_editor_height": expanded_editor_height,
+                    "editor_line_height": window.input_field.fontMetrics().lineSpacing(),
+                }
+                if interactive:
+                    window.setWindowTitle("Cowork 首页 UI 验证（隔离数据）")
+                    print("Native home preview ready", flush=True)
+                    app.exec()
+                print(json.dumps({"output": str(output), "checks": report["checks"], "geometry": report["home_geometry"]}, ensure_ascii=False), flush=True)
+                return
             state.conversation_refs = [{"session_id": "source-one", "title": "产品调研周报"},
                                        {"session_id": "source-two", "title": "整理本周进展"}]
             state.selected_skill_names = ["docs", "files"]
@@ -95,7 +157,7 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
             window.refresh_selected_skill_controls()
             window._sync_home_presentation()
             capture("home-context")
-            assert window.input_field.height() >= 104
+            assert window.input_field.viewport().height() >= 3 * window.input_field.fontMetrics().lineSpacing()
             assert len(window.composer_context_tags.chips("references")) == 2
             assert len(window.composer_context_tags.chips("skills")) == 2
             report["checks"].append("shared_context_and_editing_space")
@@ -276,9 +338,10 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
                 import traceback
                 traceback.print_exc()
             if not getattr(window, "_checkpoint_close_ready", False):
-                window.save_chat_history(session_id=state.session_id)
-                assert window.wait_for_chat_save_revision(state.session_id, state.chat_save_revision, timeout_ms=8000)
-                settle()
+                if not home_only:
+                    window.save_chat_history(session_id=state.session_id)
+                    assert window.wait_for_chat_save_revision(state.session_id, state.chat_save_revision, timeout_ms=8000)
+                    settle()
                 close_test_window(window)
             manager.stop()
         (output / f"report-{suffix}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -292,5 +355,6 @@ if __name__ == "__main__":
     parser.add_argument("--dark", action="store_true")
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--home-only", action="store_true", help="Capture only the home layout and existing editor resizing")
     parser.add_argument("--output")
     run(**vars(parser.parse_args()))

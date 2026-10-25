@@ -20533,6 +20533,7 @@ class EmptyStateWidget(QWidget):
         
         # Title
         self.eyebrow_label = QLabel("从一个想法，开始今天的工作", self)
+        self.eyebrow_label.setWordWrap(True)
         self.title_label = QLabel("今天，想一起完成什么？", self)
         self.title_label.setStyleSheet(f"font-size: 28px; font-weight: 500; color: {DesignTokens.text_primary};")
         self.title_label.setWordWrap(True)
@@ -20599,8 +20600,6 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self.eyebrow_label)
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
-        self.eyebrow_label.hide()
-        self.subtitle_label.hide()
         layout.addSpacing(12)
         self.composer_layout = QVBoxLayout()
         self.composer_layout.setContentsMargins(0, 0, 0, 0)
@@ -31447,6 +31446,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.main_splitter.sizesChanged.connect(
             lambda: self._queue_conversation_layout_sync("splitter_programmatic")
         )
+        # Growing home content can introduce a scrollbar and narrow the viewport.
+        self.home_scroll.verticalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum: self._queue_conversation_layout_sync("home_scroll_range")
+        )
         self.sync_context_drawer_layout()
         self._register_workspace_theme_components()
         bind_theme(self, self._apply_runtime_theme, surface="global")
@@ -31554,7 +31557,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.chat_row.setVisible(not show_home)
             self.input_card.setFixedWidth(max(280, self.conversation_column.width()))
             log_ui_navigation("conversation_home_presentation", session_id=getattr(state, "session_id", ""), home=show_home)
-        self.input_field.min_height = 104 if show_home else 64
+        self.input_field.min_height = 70 if show_home else 64
         self.input_field.max_height = 240 if show_home else 180
         self.input_field.scheduleAdjustHeight()
         self.action_btn.setCompact(True)

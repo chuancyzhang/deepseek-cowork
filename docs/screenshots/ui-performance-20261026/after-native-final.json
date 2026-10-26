@@ -1,0 +1,167 @@
+[
+  {
+    "name": "settings-0",
+    "action_ms": 1455.24,
+    "with_events_ms": 1529.88
+  },
+  {
+    "name": "chat-from-settings-0",
+    "action_ms": 8.22,
+    "with_events_ms": 16.43
+  },
+  {
+    "name": "knowledge-0",
+    "action_ms": 278.34,
+    "with_events_ms": 317.31
+  },
+  {
+    "name": "chat-from-knowledge-0",
+    "action_ms": 8.32,
+    "with_events_ms": 17.56
+  },
+  {
+    "name": "capabilities-0",
+    "action_ms": 438.45,
+    "with_events_ms": 655.45
+  },
+  {
+    "name": "mcp-0",
+    "action_ms": 1303.59,
+    "with_events_ms": 1347.18
+  },
+  {
+    "name": "agents-0",
+    "action_ms": 3.17,
+    "with_events_ms": 11.54
+  },
+  {
+    "name": "skills-0",
+    "action_ms": 5.17,
+    "with_events_ms": 17.03
+  },
+  {
+    "name": "chat-from-capabilities-0",
+    "action_ms": 11.67,
+    "with_events_ms": 19.94
+  },
+  {
+    "name": "settings-1",
+    "action_ms": 6.32,
+    "with_events_ms": 21.44
+  },
+  {
+    "name": "chat-from-settings-1",
+    "action_ms": 10.76,
+    "with_events_ms": 18.94
+  },
+  {
+    "name": "knowledge-1",
+    "action_ms": 4.56,
+    "with_events_ms": 11.28
+  },
+  {
+    "name": "chat-from-knowledge-1",
+    "action_ms": 7.15,
+    "with_events_ms": 14.89
+  },
+  {
+    "name": "capabilities-1",
+    "action_ms": 7.69,
+    "with_events_ms": 31.94
+  },
+  {
+    "name": "mcp-1",
+    "action_ms": 5.31,
+    "with_events_ms": 11.76
+  },
+  {
+    "name": "agents-1",
+    "action_ms": 3.21,
+    "with_events_ms": 7.62
+  },
+  {
+    "name": "skills-1",
+    "action_ms": 6.71,
+    "with_events_ms": 18.91
+  },
+  {
+    "name": "chat-from-capabilities-1",
+    "action_ms": 10.01,
+    "with_events_ms": 16.94
+  },
+  {
+    "name": "new-session",
+    "action_ms": 222.81,
+    "with_events_ms": 246.81
+  },
+  {
+    "name": "session-0",
+    "action_ms": 23.06,
+    "with_events_ms": 35.85
+  },
+  {
+    "name": "session-1",
+    "action_ms": 18.94,
+    "with_events_ms": 29.41
+  },
+  {
+    "name": "session-2",
+    "action_ms": 19.49,
+    "with_events_ms": 30.35
+  },
+  {
+    "name": "session-with-skills",
+    "action_ms": 43.72,
+    "with_events_ms": 60.45
+  },
+  {
+    "name": "idle",
+    "seconds": 15.0,
+    "max_process_events_ms": 2.35
+  },
+  {
+    "name": "settings-after-idle",
+    "action_ms": 8.36,
+    "with_events_ms": 23.14
+  },
+  {
+    "name": "chat-from-settings-after-idle",
+    "action_ms": 10.99,
+    "with_events_ms": 21.87
+  },
+  {
+    "name": "knowledge-after-idle",
+    "action_ms": 5.42,
+    "with_events_ms": 12.13
+  },
+  {
+    "name": "chat-from-knowledge-after-idle",
+    "action_ms": 8.83,
+    "with_events_ms": 17.37
+  },
+  {
+    "name": "capabilities-after-idle",
+    "action_ms": 8.63,
+    "with_events_ms": 34.35
+  },
+  {
+    "name": "chat-from-capabilities-after-idle",
+    "action_ms": 15.47,
+    "with_events_ms": 24.62
+  },
+  {
+    "name": "session-after-idle",
+    "action_ms": 22.22,
+    "with_events_ms": 37.21
+  },
+  {
+    "name": "input",
+    "action_ms": 0.54,
+    "with_events_ms": 15.39
+  },
+  {
+    "name": "send",
+    "action_ms": 97.09,
+    "with_events_ms": 124.93
+  }
+]

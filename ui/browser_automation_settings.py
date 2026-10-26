@@ -66,14 +66,27 @@ class BrowserAutomationSettings(QWidget):
         self.enabled.toggled.connect(self._refresh)
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
-        self.timer.timeout.connect(self._refresh)
-        self.timer.start()
+        self.timer.timeout.connect(self._refresh_if_visible)
         self._refresh()
         bind_theme(self, self.refresh_theme, surface="settings")
         self.refresh_theme()
 
     def has_pending_input(self):
         return self.enabled.isChecked() != self.saved
+
+    def _refresh_if_visible(self):
+        if self.isVisible():
+            self._refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.timer.start()
+        # Defer the initial status read until the show event has returned.
+        QTimer.singleShot(0, self._refresh_if_visible)
+
+    def hideEvent(self, event):
+        self.timer.stop()
+        super().hideEvent(event)
 
     def _refresh(self, *_args):
         try:

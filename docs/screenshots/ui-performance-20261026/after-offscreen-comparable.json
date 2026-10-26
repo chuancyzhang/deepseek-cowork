@@ -1,0 +1,122 @@
+[
+  {
+    "name": "settings-0",
+    "action_ms": 1214.01,
+    "with_events_ms": 1262.65
+  },
+  {
+    "name": "chat-from-settings-0",
+    "action_ms": 6.72,
+    "with_events_ms": 11.1
+  },
+  {
+    "name": "knowledge-0",
+    "action_ms": 248.96,
+    "with_events_ms": 273.59
+  },
+  {
+    "name": "chat-from-knowledge-0",
+    "action_ms": 5.99,
+    "with_events_ms": 10.22
+  },
+  {
+    "name": "capabilities-0",
+    "action_ms": 398.04,
+    "with_events_ms": 586.49
+  },
+  {
+    "name": "mcp-0",
+    "action_ms": 1100.72,
+    "with_events_ms": 1129.24
+  },
+  {
+    "name": "agents-0",
+    "action_ms": 2.49,
+    "with_events_ms": 7.04
+  },
+  {
+    "name": "skills-0",
+    "action_ms": 3.67,
+    "with_events_ms": 10.81
+  },
+  {
+    "name": "chat-from-capabilities-0",
+    "action_ms": 8.23,
+    "with_events_ms": 12.92
+  },
+  {
+    "name": "settings-1",
+    "action_ms": 4.75,
+    "with_events_ms": 14.41
+  },
+  {
+    "name": "chat-from-settings-1",
+    "action_ms": 7.08,
+    "with_events_ms": 11.24
+  },
+  {
+    "name": "knowledge-1",
+    "action_ms": 3.69,
+    "with_events_ms": 7.52
+  },
+  {
+    "name": "chat-from-knowledge-1",
+    "action_ms": 6.42,
+    "with_events_ms": 10.77
+  },
+  {
+    "name": "capabilities-1",
+    "action_ms": 6.55,
+    "with_events_ms": 25.68
+  },
+  {
+    "name": "mcp-1",
+    "action_ms": 2.88,
+    "with_events_ms": 6.01
+  },
+  {
+    "name": "agents-1",
+    "action_ms": 1.63,
+    "with_events_ms": 4.24
+  },
+  {
+    "name": "skills-1",
+    "action_ms": 3.78,
+    "with_events_ms": 11.51
+  },
+  {
+    "name": "chat-from-capabilities-1",
+    "action_ms": 8.58,
+    "with_events_ms": 14.26
+  },
+  {
+    "name": "new-session",
+    "action_ms": 171.54,
+    "with_events_ms": 185.24
+  },
+  {
+    "name": "session-0",
+    "action_ms": 19.8,
+    "with_events_ms": 29.22
+  },
+  {
+    "name": "session-1",
+    "action_ms": 19.57,
+    "with_events_ms": 28.99
+  },
+  {
+    "name": "session-2",
+    "action_ms": 18.5,
+    "with_events_ms": 28.25
+  },
+  {
+    "name": "input",
+    "action_ms": 0.45,
+    "with_events_ms": 1.56
+  },
+  {
+    "name": "send",
+    "action_ms": 77.8,
+    "with_events_ms": 92.71
+  }
+]

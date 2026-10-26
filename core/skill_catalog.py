@@ -1,3 +1,4 @@
+import copy
 import os
 import threading
 import time
@@ -39,6 +40,14 @@ class SkillCatalogSnapshot:
         self.revision = int(revision)
         self.manager = manager
         self.created_at = float(created_at or time.time())
+        # Build the presentation inventory at the catalog reload boundary. UI
+        # navigation must not rediscover disabled skills or read every config.
+        # This is separate from the runtime records/tool definitions below.
+        self._display_skills = copy.deepcopy(list(manager.get_all_skills() or []))
+
+    def display_skills(self):
+        """Return owned UI data; callers may decorate it without changing a snapshot."""
+        return copy.deepcopy(self._display_skills)
 
     def runtime(self, workspace_dir=None, config_manager=None, dependency_coordinator=None, change_publisher=None):
         return self.manager.clone_for_runtime(
@@ -118,11 +127,14 @@ class SkillCatalogService:
                         raise RuntimeError(
                             f"Skill '{skill_name}' is unavailable after validation: {record.get('load_error') or 'unknown load error'}"
                         )
+            # Filesystem work must not hold the publication lock: the UI keeps
+            # using the last complete snapshot while a replacement is prepared.
+            snapshot = SkillCatalogSnapshot(self._revision + 1, manager)
+            filesystem_signature = self._build_filesystem_signature(manager)
             with self._lock:
-                self._revision += 1
-                snapshot = SkillCatalogSnapshot(self._revision, manager)
+                self._revision = snapshot.revision
                 self._snapshot = snapshot
-                self._filesystem_signature = self._build_filesystem_signature(manager)
+                self._filesystem_signature = filesystem_signature
         self._log(
             f"skill_catalog reload_done revision={snapshot.revision} reason={reason} "
             f"skills={len(manager.skill_records)} duration={time.time() - started:.3f}s"

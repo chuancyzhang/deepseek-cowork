@@ -24,6 +24,88 @@ class _Config:
 
 
 class TestSkillCatalogService(unittest.TestCase):
+    def test_display_inventory_is_owned_and_changes_only_with_snapshot(self):
+        first = MagicMock(skill_records={"alpha": {}}, skills_dirs=[])
+        first.get_all_skills.return_value = [
+            {"name": "alpha", "enabled": True, "config_status": {"configured": True}},
+            {"name": "disabled", "enabled": False},
+        ]
+        second = MagicMock(skill_records={"alpha": {}}, skills_dirs=[])
+        second.get_all_skills.return_value = [{"name": "alpha", "enabled": False}]
+        with patch("core.skill_catalog.SkillManager", side_effect=[first, second]):
+            service = SkillCatalogService(_Config())
+            old = service.preload()
+            display = old.display_skills()
+            self.assertEqual(display, first.get_all_skills.return_value)
+            display[0]["config_status"]["configured"] = False
+            display.pop()
+            self.assertTrue(old.display_skills()[0]["config_status"]["configured"])
+            self.assertEqual(len(old.display_skills()), 2)
+            first.get_all_skills.assert_called_once()
+            runtime = old.runtime(workspace_dir="isolated")
+            self.assertIs(runtime, first.clone_for_runtime.return_value)
+            self.assertEqual(set(first.skill_records), {"alpha"})
+            service.publish_change(SkillChangeEvent.create("disabled", ["alpha"], source="ui"))
+            self.assertFalse(service.snapshot().display_skills()[0]["enabled"])
+            self.assertTrue(old.display_skills()[0]["enabled"])
+
+    def test_slow_rebuild_does_not_block_reading_last_snapshot(self):
+        first = MagicMock(skill_records={}, skills_dirs=[])
+        first.get_all_skills.return_value = []
+        replacement = MagicMock(skill_records={}, skills_dirs=[])
+        entered, release, read_done = threading.Event(), threading.Event(), threading.Event()
+        errors, observed = [], []
+
+        def slow_signature(manager):
+            if manager is replacement:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release catalog rebuild")
+            return {}
+
+        with patch("core.skill_catalog.SkillManager", side_effect=[first, replacement]), \
+                patch.object(SkillCatalogService, "_build_filesystem_signature", side_effect=slow_signature):
+            service = SkillCatalogService(_Config())
+            old = service.preload()
+
+            def rebuild():
+                try:
+                    service.reload()
+                except Exception as exc:
+                    errors.append(exc)
+
+            def read():
+                observed.append(service.snapshot())
+                read_done.set()
+
+            worker = threading.Thread(target=rebuild)
+            reader = threading.Thread(target=read)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                reader.start()
+                self.assertTrue(read_done.wait(.5), "UI snapshot read waited for filesystem work")
+                self.assertIs(observed[0], old)
+            finally:
+                release.set()
+                worker.join(3)
+                if reader.ident is not None:
+                    reader.join(3)
+            self.assertEqual(errors, [])
+            self.assertIs(service.snapshot().manager, replacement)
+
+    def test_failed_display_rebuild_preserves_snapshot_and_revision(self):
+        first = MagicMock(skill_records={}, skills_dirs=[])
+        replacement = MagicMock(skill_records={}, skills_dirs=[])
+        replacement.get_all_skills.side_effect = OSError("unreadable inventory")
+        with patch("core.skill_catalog.SkillManager", side_effect=[first, replacement, first]):
+            service = SkillCatalogService(_Config())
+            old = service.preload()
+            with self.assertRaises(OSError):
+                service.reload()
+            self.assertIs(service.snapshot(), old)
+            self.assertEqual(service.reload().revision, old.revision + 1)
+
     def test_disabled_install_refresh_stays_out_of_runtime(self):
         with tempfile.TemporaryDirectory() as root:
             config = _Config()

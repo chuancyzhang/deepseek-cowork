@@ -1257,11 +1257,11 @@ def product_code_style(selector="QPlainTextEdit, QTextEdit"):
     """
 
 
-def apply_product_dialog(dialog, object_name):
+def apply_product_dialog(dialog, object_name, *, background=None):
     dialog.setObjectName(object_name)
-    dialog.setStyleSheet(
+    stylesheet = (
         f"""
-        QDialog#{object_name} {{ background: {DesignTokens.bg_app}; }}
+        QDialog#{object_name} {{ background: {background or DesignTokens.bg_app}; }}
         QDialog#{object_name} QLabel {{ background: transparent; border: none; }}
         {product_field_style()}
         QDialog#{object_name} QPushButton#PrimaryBtn {{
@@ -1286,6 +1286,8 @@ def apply_product_dialog(dialog, object_name):
         QDialog#{object_name} QTabWidget::pane {{ border: none; background: transparent; }}
         """
     )
+    if dialog.styleSheet() != stylesheet:
+        dialog.setStyleSheet(stylesheet)
 
 
 class ProductPageHeader(QWidget):
@@ -1588,10 +1590,12 @@ class ProductInlineNotice(QFrame):
             "error": (DesignTokens.error_bg, DesignTokens.error_text),
         }
         bg, fg = tones.get(self._tone, tones["neutral"])
-        self.setStyleSheet(
+        stylesheet = (
             f"QFrame#ProductInlineNotice {{ background:{bg}; border:none; border-radius:{DesignTokens.radius_sm}px; }}"
             f"QFrame#ProductInlineNotice QLabel {{ color:{fg}; background:transparent; border:none; }}"
         )
+        if self.styleSheet() != stylesheet:
+            self.setStyleSheet(stylesheet)
 
     def refresh_theme(self, _resolved=None):
         self.set_tone(getattr(self, "_tone", "neutral"))
@@ -1608,7 +1612,9 @@ class ProductInlineNotice(QFrame):
         self.details_button.setStyleSheet(product_button_style("ghost"))
 
     def set_text(self, text, tone=None):
-        self.label.setText(str(text or ""))
+        text = str(text or "")
+        if self.label.text() != text:
+            self.label.setText(text)
         if tone is not None:
             self.set_tone(tone)
 

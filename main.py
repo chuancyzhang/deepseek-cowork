@@ -12137,7 +12137,8 @@ class SettingsDialog(QDialog):
         self._allow_close_without_prompt = False
         self._settings_baseline = ""
         self._settings_baseline_state = {}
-        apply_product_dialog(self, "SettingsDialog")
+        apply_product_dialog(self, "SettingsDialog", background=(
+            DesignTokens.bg_main if domain in {"settings", "capabilities"} else DesignTokens.bg_app))
         if domain == "capabilities":
             self._refresh_capabilities_surface()
             bind_theme(self, self._refresh_capabilities_surface, surface="management")
@@ -12807,9 +12808,9 @@ class SettingsDialog(QDialog):
         self._refresh_im_provider_states()
         self._im_gateway_status_timer = QTimer(self)
         self._im_gateway_status_timer.setInterval(1500)
-        self._im_gateway_status_timer.timeout.connect(self._refresh_im_provider_states)
-        if domain == "settings":
-            self._im_gateway_status_timer.start()
+        self._im_gateway_status_timer.timeout.connect(self._refresh_visible_im_provider_states)
+        self._im_status_page = im_page
+        im_page.installEventFilter(self)
         im_layout.addStretch()
 
         if domain == "projects":
@@ -12955,11 +12956,11 @@ class SettingsDialog(QDialog):
 
     def _refresh_settings_shell(self, _resolved=None):
         if self.domain != "capabilities":
-            apply_product_dialog(self, "SettingsDialog")
-        self.nav_list.setStyleSheet(apple_settings_nav_style())
+            apply_product_dialog(self, "SettingsDialog", background=(
+                DesignTokens.bg_main if self.domain == "settings" else DesignTokens.bg_app))
+        navigation_style = apple_settings_nav_style()
         if self.domain == "settings":
-            self.setStyleSheet(self.styleSheet() + f"QDialog#SettingsDialog {{ background: {DesignTokens.bg_main}; }}")
-            self.nav_list.setStyleSheet(apple_settings_nav_style() +
+            navigation_style += (
                 f"QListWidget#WorkspaceSettingsNavigation {{ background: {DesignTokens.bg_settings_nav}; border: none; padding: 6px; }}"
                 "QListWidget#WorkspaceSettingsNavigation::item { padding: 10px 8px; margin: 1px 0; }")
             if hasattr(self, "settings_search_results"):
@@ -12967,7 +12968,8 @@ class SettingsDialog(QDialog):
                     f"QListWidget#SettingsSearchResults {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; border-radius: 6px; padding: 4px; }}"
                     f"QListWidget#SettingsSearchResults::item {{ color: {DesignTokens.text_primary}; padding: 9px 12px; border-radius: 4px; }}"
                     f"QListWidget#SettingsSearchResults::item:selected {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}")
-        self.nav_combo.setStyleSheet(apple_combo_style())
+        set_stylesheet_if_changed(self.nav_list, navigation_style)
+        set_stylesheet_if_changed(self.nav_combo, apple_combo_style())
         if hasattr(self, "settings_search"):
             self.settings_search.setStyleSheet(apple_search_field_style())
         for page in self.findChildren(QWidget, "SettingsPageContent"):
@@ -13109,6 +13111,12 @@ class SettingsDialog(QDialog):
         log_ui_navigation("settings_search_navigate", page=self._page_labels[row], section=section)
 
     def eventFilter(self, watched, event):
+        if self.domain == "settings" and watched is getattr(self, "_im_status_page", None):
+            if event.type() == QEvent.Show:
+                self._im_gateway_status_timer.start()
+                QTimer.singleShot(0, self._refresh_visible_im_provider_states)
+            elif event.type() == QEvent.Hide:
+                self._im_gateway_status_timer.stop()
         if self.domain == "settings" and event.type() == QEvent.KeyPress and watched in (
                 getattr(self, "settings_search", None), getattr(self, "settings_search_results", None)):
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -13753,8 +13761,7 @@ class SettingsDialog(QDialog):
         scrollbar.setValue(scrollbar.maximum())
 
     def _refresh_capabilities_surface(self, _resolved=None):
-        apply_product_dialog(self, "SettingsDialog")
-        self.setStyleSheet(self.styleSheet() + f"QDialog#SettingsDialog {{background: {DesignTokens.bg_main};}}")
+        apply_product_dialog(self, "SettingsDialog", background=DesignTokens.bg_main)
 
     def refresh_current_version_label(self):
         self.update_current_label.setText(f"当前版本：{APP_VERSION}")
@@ -14097,6 +14104,11 @@ class SettingsDialog(QDialog):
         spec = get_provider_spec(provider_name)
         return bool(spec and spec.is_configured(config))
 
+    def _refresh_visible_im_provider_states(self):
+        page = getattr(self, "_im_status_page", None)
+        if page is not None and page.isVisible():
+            self._refresh_im_provider_states()
+
     def _refresh_im_provider_states(self):
         if not hasattr(self, "im_provider_rows"):
             return
@@ -14232,6 +14244,9 @@ class SettingsDialog(QDialog):
     def _order_im_channel_rows(self, active):
         order = [active] if active in IM_PROVIDER_ORDER else []
         order.extend(name for name in IM_PROVIDER_ORDER if name not in order)
+        if getattr(self, "_im_channel_order", None) == order:
+            return
+        self._im_channel_order = order
         for index, name in enumerate(order):
             row = self.im_provider_rows.get(name)
             if row is not None:
@@ -15592,7 +15607,8 @@ class SkillsCenterDialog(QDialog):
     hub_icon_ready = Signal(str, object)
 
     def __init__(self, skill_manager, config_manager, parent=None):
-        super().__init__(parent)
+        embedded = getattr(parent, "main_page_stack", None)
+        super().__init__(embedded if embedded is not None else parent, Qt.Widget if embedded is not None else Qt.Dialog)
         self._main = parent
         self.skill_manager = skill_manager
         self.config_manager = config_manager
@@ -15622,6 +15638,8 @@ class SkillsCenterDialog(QDialog):
         self.hub_timer.setInterval(300)
         self.hub_timer.timeout.connect(self._load_hub)
         self._all_skills = []
+        self._library_refresh_pending = False
+        self._library_revision = 0
         self._user_owned_names = set()
         self.current_mode = "library"
         self.current_scene = "all"
@@ -15826,8 +15844,7 @@ class SkillsCenterDialog(QDialog):
         return bool(manager.probe_component(BROWSER_SKILL_COMPONENT_ID))
 
     def refresh_theme(self, _resolved=None):
-        apply_product_dialog(self, "SkillsCenterDialog")
-        self.setStyleSheet(self.styleSheet() + f"QDialog#SkillsCenterDialog {{background: {DesignTokens.bg_main};}}")
+        apply_product_dialog(self, "SkillsCenterDialog", background=DesignTokens.bg_main)
         self.hub_sort.setStyleSheet(product_field_style())
         self.hub_category.refresh_theme()
         self.search_input.setStyleSheet(product_field_style())
@@ -15855,8 +15872,13 @@ class SkillsCenterDialog(QDialog):
             return False
 
     def refresh_list(self):
-        self._all_skills = list(self.skill_manager.get_all_skills() or [])
-        for skill in self._all_skills:
+        self._library_revision += 1
+        self._apply_library_skills(self._read_library_skills(self.skill_manager))
+
+    def _read_library_skills(self, manager):
+        provider = getattr(self._main, "_skill_display_catalog", None)
+        skills = copy.deepcopy(list(provider(manager) if callable(provider) else manager.get_all_skills() or []))
+        for skill in skills:
             if not skill.get("authorization"):
                 continue
             try:
@@ -15872,12 +15894,48 @@ class SkillsCenterDialog(QDialog):
                     "authorized": False,
                     "verified": False,
                 }
+        return skills
+
+    def _apply_library_skills(self, skills):
+        if skills == self._all_skills and getattr(self, "_library_rendered", False):
+            return
+        self._all_skills = skills
         self._user_owned_names = {
             str(skill.get("name") or "").strip()
             for skill in self._all_skills
             if self._is_user_owned(skill)
         }
         self._render_content()
+        self._library_rendered = True
+
+    def refresh_list_async(self):
+        """Keep the visible cards while checking external authorization off-thread."""
+        if self._library_refresh_pending:
+            return
+        self._library_refresh_pending = True
+        manager = self.skill_manager
+        revision = self._library_revision
+        started = time.perf_counter()
+        log_ui_navigation("capability_refresh_start", revision=revision)
+
+        def completed(result):
+            if not _qt_object_alive(self):
+                return
+            self._library_refresh_pending = False
+            if manager is not self.skill_manager or revision != self._library_revision:
+                log_ui_navigation("capability_refresh_stale", revision=revision)
+                self.refresh_list_async()
+                return
+            if result.get("ok"):
+                self._apply_library_skills(result["data"])
+                log_ui_navigation("capability_refresh_done", revision=revision,
+                                  elapsed_ms=round((time.perf_counter() - started) * 1000))
+            else:
+                log_ui_navigation("capability_refresh_error", error=str(result.get("error") or ""))
+                if self._main is not None:
+                    self._main.add_system_toast("能力状态刷新失败，已保留当前列表。重新打开能力页可重试。", "error")
+
+        self._hub_worker(lambda: self._read_library_skills(manager), completed)
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -28326,7 +28384,7 @@ class FileWorkbench(QWidget):
             )
             self.navigator.setGeometry(0, 0, nav_width, nav_height)
         bottom_border = "none" if pinned else f"1px solid {DesignTokens.separator}"
-        self.navigator.setStyleSheet(
+        set_stylesheet_if_changed(self.navigator,
             f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
             f"border: none; border-right: 1px solid {DesignTokens.separator}; "
             f"border-bottom: {bottom_border}; border-radius: 0px; }}"
@@ -48491,7 +48549,8 @@ a {{ overflow-wrap: anywhere; }}
             page.setParent(self.main_page_stack)
         if page.isWindow():
             page.setWindowFlags(Qt.Widget)
-        page.setModal(False)
+        if page.isModal():
+            page.setModal(False)
         page.setProperty("embeddedProductPage", True)
         page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         page.setMinimumSize(0, 0)
@@ -49252,7 +49311,7 @@ a {{ overflow-wrap: anywhere; }}
         if route in {self.PAGE_SETTINGS, self.PAGE_PROJECTS} and section:
             page.select_initial_page(section)
         elif route == self.PAGE_CAPABILITIES:
-            page.refresh_list()
+            page.refresh_list_async()
         elif route == self.PAGE_FAVORITES:
             page.refresh()
             QTimer.singleShot(0, page.refresh_cards)
@@ -49391,14 +49450,27 @@ a {{ overflow-wrap: anywhere; }}
     def _flush_pending_skill_runtime_reload(self):
         if not self.skill_manager_ready:
             return False
-        return flush_pending_skill_runtime_reload(self.skill_manager)
+        reloaded = flush_pending_skill_runtime_reload(self.skill_manager)
+        if reloaded:
+            self._legacy_skill_display_manager = self.skill_manager
+        return reloaded
+
+    def _skill_display_catalog(self, manager=None):
+        manager = manager or self.skill_manager
+        service = getattr(self, "skill_catalog_service", None)
+        if (service is not None and service.is_ready()
+                and manager is not getattr(self, "_legacy_skill_display_manager", None)):
+            snapshot = service.snapshot()
+            if snapshot.manager is manager:
+                return snapshot.display_skills()
+        return manager.get_all_skills()
 
     def _available_session_skills(self):
         if not self.skill_manager_ready:
             return []
         self._flush_pending_skill_runtime_reload()
         skills = []
-        for skill in self.skill_manager.get_all_skills():
+        for skill in self._skill_display_catalog():
             if skill.get("enabled") is False:
                 continue
             skills.append(skill)
@@ -49469,6 +49541,8 @@ a {{ overflow-wrap: anywhere; }}
             menu.addAction(action)
 
     def _extract_agent_mentions(self, text):
+        if "@" not in str(text or ""):
+            return [], str(text or "").strip()
         return extract_agent_mentions(text, self._available_agent_profiles())
 
     def _selected_skill_display_names(self, selected_skill_names):
@@ -50207,7 +50281,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         self._composer_skill_tag_signature = signature
         chips = []
-        skill_records = {skill.get("name"): skill for skill in self._available_session_skills()}
+        skill_records = {skill.get("name"): skill for skill in self._available_session_skills()} if selected else {}
         for name, display in zip(selected, names):
             category = "connectors" if skill_center_tab_key(skill_records.get(name, {})) == "mcp" else "skills"
             chip = ComposerContextChip(display, "fa5s.plug" if category == "connectors" else "fa5s.puzzle-piece",

@@ -2,7 +2,9 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -61,6 +63,59 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertFalse((script.parent / "ready.json").exists())
         self.assertEqual((self.install / "_internal" / "data.txt").read_text(), "old")
         self.assertFalse((self.install / "_internal" / "added.txt").exists())
+
+    def test_gui_handshake_is_hidden_until_committed_parent_exits(self):
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **subprocess_kwargs_no_window())
+        self.children.append(parent)
+        script = self.prepare()
+        config_path = script.parent / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["wait_pids"] = [parent.pid]
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        # Exercise the real WinForms message loop without a visible QA window.
+        source = script.read_text(encoding="utf-8-sig").replace(
+            "$form.MaximizeBox=$false; $form.MinimizeBox=$true",
+            "$form.MaximizeBox=$false; $form.MinimizeBox=$true; $form.Opacity=0; $form.ShowInTaskbar=$false")
+        script.write_text(source, encoding="utf-8-sig")
+        child = subprocess.Popen([self.ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", str(script)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_kwargs_no_window())
+        self.children.append(child)
+        deadline = time.monotonic() + 20
+        while not (script.parent / "ready.json").exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((script.parent / "ready.json").exists())
+        log = script.parent / "update.log"
+        self.assertNotIn("installer_window_shown", log.read_text(encoding="utf-8-sig") if log.exists() else "")
+        (script.parent / "commit.json").write_text(json.dumps({"id": script.parent.name}))
+        time.sleep(.6)
+        self.assertIsNone(child.poll())
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertNotIn("installer_window_shown", log.read_text(encoding="utf-8-sig") if log.exists() else "")
+        parent.terminate(); parent.wait(timeout=5)
+        deadline = time.monotonic() + 20
+        while not (script.parent / "transaction.json").exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        while time.monotonic() < deadline:
+            transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
+            if transaction["phase"] == "installed_not_opened":
+                break
+            time.sleep(.05)
+        self.assertEqual(transaction["phase"], "installed_not_opened")
+        self.assertIn("installer_window_shown", log.read_text(encoding="utf-8-sig"))
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "new")
+
+    def test_hidden_gui_handshake_cancels_without_showing_or_installing(self):
+        script = self.prepare()
+        child = subprocess.Popen([self.ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", str(script)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_kwargs_no_window())
+        self.children.append(child)
+        deadline = time.monotonic() + 20
+        while not (script.parent / "ready.json").exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((script.parent / "ready.json").exists())
+        (script.parent / "abort.json").write_text(json.dumps({"id": script.parent.name}))
+        self.assertEqual(child.wait(timeout=5), 0)
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
 
     def test_actual_copy_preserves_data_and_reports_relaunch_failure(self):
         script = self.prepare()

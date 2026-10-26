@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.app_version import APP_VERSION  # noqa: E402
+from core.update_manifest import validate_manifest  # noqa: E402
 from web.platform.server.package_policy import (  # noqa: E402
     DEFAULT_CONFIG_PATH, MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
 )
@@ -468,6 +469,12 @@ def package_release(
     output_path: Path,
     report_path: Path,
 ) -> dict:
+    if output_path.name != f"deepseek-cowork-v{APP_VERSION}.zip":
+        raise PackageAuditError(f"Release filename must be deepseek-cowork-v{APP_VERSION}.zip")
+    notes_path = ROOT / "docs" / "releases" / f"{APP_VERSION}.md"
+    if not notes_path.is_file():
+        raise PackageAuditError(f"Release notes are required: {notes_path}")
+    notes = notes_path.read_text(encoding="utf-8")
     report = audit_distribution(dist_dir)
     output_path = output_path.resolve()
     candidate_path = output_path.with_name(f".{output_path.name}.candidate-{os.getpid()}")
@@ -480,6 +487,21 @@ def package_release(
     finally:
         candidate_path.unlink(missing_ok=True)
     report["zip_path"] = str(output_path)
+    manifest = validate_manifest({"schema_version": 1, "version": APP_VERSION, "target_os": "windows", "arch": "x64",
+                                  "filename": output_path.name, "size": report["zip_bytes"],
+                                  "sha256": report["zip_sha256"], "notes": notes})
+    manifest_path = output_path.with_name("latest.json")
+    handle, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".tmp", dir=output_path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest_path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    report["update_manifest_path"] = str(manifest_path)
 
     report_path = report_path.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -540,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[OK] ZIP: {report['zip_mb']:.2f} MB")
         print(f"[OK] SHA-256: {report['zip_sha256']}")
         print(f"[OK] Report: {args.report.resolve()}")
+        print(f"[OK] Update manifest: {report['update_manifest_path']}")
     return 0
 
 

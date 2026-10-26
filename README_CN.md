@@ -53,6 +53,8 @@ Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观
 2. 完整解压后运行 `deepseek-cowork.exe`；不要直接在压缩包内启动。
 3. 首次启动时可直接填写 DeepSeek API Key；应用会验证官方接口、同步模型并优先选择推荐的 `deepseek-flash`。也可以稍后到“设置 → 模型与服务”手动配置。
 
+启动后会后台准备可用更新，完成后在侧栏设置入口上方提示“重启并更新”。公共地址暂空，默认从 GitHub 获取；服务器目录、清单和发布步骤见[自动更新规范](docs/app-updates.md)。
+
 基准环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
 
 ### 从源码运行
@@ -77,6 +79,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 发行包使用固定运行时、离线编辑器资源和打包审计；不设置目录或 ZIP 总体积上限，仍检查必要文件、依赖完整性及禁止混入的内容。最终体积与组件清单以本次构建生成的报告为准。
+
+打包同时生成 `dist/latest.json`，发布时与版本 ZIP 一起上传 GitHub Release；更新说明读取 `docs/releases/APP_VERSION.md` 对应文件。上传公共服务器时先上传 ZIP，再原子替换清单。
 
 发行包内置 ripgrep 15.1.0（`rg`），命令工具可直接搜索文件，无需额外安装。
 自带 Git 默认使用 Git Credential Manager（`manager`），不再要求选择凭据助手；

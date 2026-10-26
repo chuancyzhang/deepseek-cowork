@@ -21,44 +21,44 @@ class UpdatePanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
-        self.current = QLabel(f"当前版本：{APP_VERSION}")
-        self.status = QLabel()
-        self.version = QLabel()
+        self.current = QLabel(f"当前版本：{APP_VERSION}", self)
+        self.status = QLabel(self)
+        self.version = QLabel(self)
         for label in (self.current, self.status, self.version):
             label.setWordWrap(True)
             label.setTextFormat(Qt.PlainText)
             layout.addWidget(label)
-        self.progress = QProgressBar()
+        self.progress = QProgressBar(self)
         self.progress.hide()
         layout.addWidget(self.progress)
         self.actions = QHBoxLayout()
         self.actions.setSpacing(12)
-        self.primary = QPushButton("检查更新")
+        self.primary = QPushButton("检查更新", self)
         self.primary.setObjectName("PrimaryBtn")
-        self.local = QPushButton("选择本地安装包")
-        self.cancel_button = QPushButton("取消更新")
+        self.local = QPushButton("选择本地安装包", self)
+        self.cancel_button = QPushButton("取消更新", self)
         for button in (self.primary, self.local, self.cancel_button):
             self.actions.addWidget(button)
         self.actions.addStretch()
         layout.addLayout(self.actions)
-        self.hint = QLabel("更新时应用会短暂关闭，完成后自动重新打开。")
+        self.hint = QLabel("更新时应用会短暂关闭，完成后自动重新打开。", self)
         self.hint.setWordWrap(True)
         if not coordinator.install_enabled:
             self.hint.setText("当前为源码运行模式，可以检查版本；自动安装仅适用于 Windows 打包版。")
         layout.addWidget(self.hint)
-        self.notes_title = QLabel("本次更新")
-        self.notes = QLabel()
+        self.notes_title = QLabel("本次更新", self)
+        self.notes = QLabel(self)
         self.notes.setTextFormat(Qt.PlainText)
         self.notes.setWordWrap(True)
         self.notes.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        self.expand = QPushButton("展开阅读")
+        self.expand = QPushButton("展开阅读", self)
         self.expand.clicked.connect(self.toggle_notes)
         layout.addWidget(self.notes_title)
         layout.addWidget(self.notes)
         layout.addWidget(self.expand, alignment=Qt.AlignLeft)
-        self.details_button = QPushButton("查看详情")
+        self.details_button = QPushButton("查看详情", self)
         self.details_button.setCheckable(True)
-        self.details = QTextEdit()
+        self.details = QTextEdit(self)
         self.details.setReadOnly(True)
         self.details.setMinimumHeight(120)
         self.details.setMaximumHeight(240)
@@ -98,7 +98,7 @@ class UpdatePanel(QWidget):
         self.version.setVisible(bool(version) and result.get("update_available", False))
         ready = self.coordinator.prepared is not None
         available = bool(result.get("update_available"))
-        self.primary.setText("立即更新" if available else "检查更新")
+        self.primary.setText("重启并更新" if available else "检查更新")
         if result.get("update_source") == "local":
             self.primary.setText("重新安装当前版本" if compare_versions(version, APP_VERSION) == 0 else "立即安装")
         if phase == "error":
@@ -109,8 +109,8 @@ class UpdatePanel(QWidget):
         self.primary.setEnabled(phase != "installing" and (not busy or ready or available) and not state.get("install_requested"))
         self.local.setEnabled(self.coordinator.install_enabled and phase != "installing")
         self.cancel_button.setVisible((busy and phase != "installing") or bool(state.get("can_cancel_install")))
-        self.cancel_button.setText("取消更新" if state.get("install_requested") or phase == "installing" else "取消下载")
-        self.progress.setVisible(phase in {"downloading", "validating", "planning", "retrying", "installing"})
+        self.cancel_button.setText("取消更新" if state.get("install_requested") or phase == "installing" else "取消验证" if phase == "validating" else "取消下载")
+        self.progress.setVisible(phase in {"downloading", "validating", "planning", "retrying", "switching", "installing"})
         percent = state.get("percent", -1)
         self.progress.setRange(0, 0 if percent < 0 else 100)
         if percent >= 0:
@@ -123,10 +123,19 @@ class UpdatePanel(QWidget):
         self.expand.setVisible(len(lines) > 6)
         self.expand.setText("收起" if self.notes_expanded else "展开阅读")
         connection = result.get("connection") or self.coordinator.connection
+        source = result.get("source_name") or state.get("source_name") or ("public" if (self.coordinator.source_config or {}).get("public_base_url") else "github")
+        source_label = connection["platform_name"] if connection else {"public": "公共更新服务器", "github": "GitHub Releases"}.get(source, source)
+        if result.get("update_source") == "local":
+            source_label = "本地安装包"
         if self.coordinator.install_enabled:
-            self.hint.setText((f"从{connection['platform_name']}获取更新。" if connection else "从 GitHub Releases 获取更新。")
+            self.hint.setText(f"更新来源：{source_label}。"
                               + "更新时应用会短暂关闭，完成后自动重新打开。")
-        details = [state.get("error") or "", "更新来源：" + (connection["platform_name"] if connection else "GitHub Releases"),
+        fallback = result.get("fallback_reason", state.get("fallback_reason"))
+        if state.get("source") == "local":
+            fallback = ""
+        details = [state.get("error") or "", "更新来源：" + source_label,
+                   "改用 GitHub 的原因：" + fallback if fallback else "",
+                   "安装包缓存：已复用并重新校验" if result.get("cache_reused") else "",
                    f"更新文件：{result.get('zip_path', '尚未下载')}",
                    f"诊断记录：{runtime_log_path('app_update', update_log_directory(self.coordinator.root))}"]
         self.details.setPlainText("\n".join(line for line in details if line))

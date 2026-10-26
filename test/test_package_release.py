@@ -281,7 +281,7 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
-            output = root / "release.zip"
+            output = root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip"
             report_path = root / "report.json"
 
             report = package_release.package_release(
@@ -293,12 +293,18 @@ class PackageReleaseTests(unittest.TestCase):
             saved = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["zip_sha256"], report["zip_sha256"])
             self.assertEqual(saved["zip_bytes"], output.stat().st_size)
+            manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+            self.assertEqual(manifest["size"], output.stat().st_size)
+            self.assertEqual(manifest["filename"], output.name)
+            self.assertEqual(manifest["version"], package_release.APP_VERSION)
+            self.assertEqual(manifest["notes"], (ROOT / "docs/releases" / f"{package_release.APP_VERSION}.md").read_text(encoding="utf-8"))
 
     def test_failed_archive_write_preserves_existing_release(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
-            output = root / "release.zip"
+            output = root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip"
             output.write_bytes(b"previous-release")
 
             with patch.object(package_release, "create_deterministic_zip", side_effect=OSError("disk full")), self.assertRaises(OSError):
@@ -310,6 +316,15 @@ class PackageReleaseTests(unittest.TestCase):
 
             self.assertEqual(output.read_bytes(), b"previous-release")
             self.assertFalse((root / "report.json").exists())
+
+    def test_release_filename_and_notes_must_match_build_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaisesRegex(package_release.PackageAuditError, "filename"):
+                package_release.package_release(root, root / "wrong.zip", root / "report.json")
+            with patch.object(package_release, "ROOT", root), self.assertRaisesRegex(package_release.PackageAuditError, "notes"):
+                package_release.package_release(root, root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip", root / "report.json")
+            self.assertFalse((root / "latest.json").exists())
 
 
 if __name__ == "__main__":

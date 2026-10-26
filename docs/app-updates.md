@@ -1,0 +1,51 @@
+# 自动更新与发布服务器规范
+
+桌面端启动完成约 10 秒后自动检查并后台准备完整 ZIP，安装始终由用户触发。包下载、大小与 SHA-256 校验、解压及分发渠道校验全部通过后，左侧栏底部、设置入口上方出现“新版本已准备好”提示条。点击“重启并更新”进入现有保存与安装流程；关闭提示不会删除安装包，本次运行同版本不再提醒，下次启动再提醒。
+
+当前 `core/updater.py` 的 `PUBLIC_UPDATE_BASE_URL` 为空，普通版直接使用 GitHub。以后填写 HTTPS 地址并重新构建、发布版本，旧客户端先经 GitHub 升级到该版本，之后优先使用公共服务器。企业版仍从所属企业中心查询推荐版本，不访问公共源或 GitHub；曾登录企业账号不改变普通版的分发渠道。
+
+## 公共服务器
+
+只需要静态文件托管，可使用 Nginx、对象存储或 CDN。地址常量填写根地址（允许路径前缀），不带查询参数、片段或账号密码，例如 `https://updates.example.com`。客户端下载：
+
+```text
+https://updates.example.com/updates/windows-x64/latest.json
+https://updates.example.com/updates/windows-x64/deepseek-cowork-v5.3.3.zip
+```
+
+以上版本号只是示例。服务器支持无需登录的 HTTPS GET；清单使用 `Content-Type: application/json` 和 `Cache-Control: no-cache`，ZIP 使用 `application/zip`，按版本长期缓存。同版本文件发布后不覆盖，更改内容应发布新版本。ZIP 保留完整发行包结构，包括 `deepseek-cowork.exe`、`_internal` 和其余随包文件，不使用 GitHub 自动生成的源码归档。
+
+`latest.json` 的协议固定为：
+
+| 字段 | 要求 |
+| --- | --- |
+| `schema_version` | 整数 `1` |
+| `version` | 与本次构建的 `APP_VERSION` 一致，格式 `主版本.次版本.修订号`，不带 `v` |
+| `target_os` / `arch` | `windows` / `x64` |
+| `filename` | `deepseek-cowork-v版本号.zip`，无目录路径 |
+| `size` | ZIP 实际字节数，正整数 |
+| `sha256` | ZIP 的 64 位十六进制 SHA-256 |
+| `notes` | 本次更新说明字符串，可使用 Markdown；客户端按纯文本呈现 |
+
+清单没有任意下载 URL 字段：公共源在上述目录读取 `filename`，GitHub 在对应版本标签读取同名文件，确保换源时版本固定。
+
+## 打包与发布顺序
+
+1. 确定新的 `APP_VERSION`，准备 `docs/releases/版本号.md`，按 [README](../README_CN.md#构建发行包) 重新构建 EXE。不能只改版本号后对旧构建运行打包脚本。
+2. 在仓库根目录运行 `.venv/Scripts/python.exe scripts/package_release.py`。默认生成 `dist/deepseek-cowork-v版本号.zip`、审计报告和 `dist/latest.json`。版本、文件名、大小、摘要自动生成，`notes` 读取对应版本说明。自定义输出目录时，ZIP 文件名仍须匹配版本，清单生成在 ZIP 同目录。
+3. 创建 GitHub 正式 Release，标签使用 `v版本号`，同时附上该 ZIP 和 `latest.json`。客户端使用 `/releases/latest/download/latest.json` 查找最新清单，使用 `/releases/download/v版本号/文件名` 下载确定版本。
+4. 将同一份 ZIP 上传公共服务器，核对下载字节数与摘要，再原子替换公共服务器上的 `latest.json`。不要先发布指向未上传 ZIP 的清单。
+
+本功能不自动上传或发布；公共域名为空也可以通过 GitHub 的同一套清单工作。旧 GitHub Release 没有 `latest.json`（HTTP 404）时，兼容原 Releases API。其他错误或无效清单不会切换到 API 来绕过检查。
+
+## 换源、缓存与恢复
+
+- 公共清单或 ZIP 网络不可达、HTTP 服务不可用时改用 GitHub，状态和日志记录换源原因。公共清单正常返回当前或更低版本时，不额外查询 GitHub。
+- 已从公共清单选定版本后，备用下载只改变地址，版本、文件名、大小和摘要保持一致；GitHub 没有同一文件或校验失败时明确停止。无效清单、平台不符、包损坏或磁盘错误不会通过换源掩盖。
+- 检查、下载与换源总计最多 5 次尝试（含首次）。换源立即消耗下一次尝试，其余网络重试沿用 15、30、60、120 秒退避。GitHub 限流时等待时间至少满足响应中的 `Retry-After` / `X-RateLimit-Reset`，等待可取消，API 冷却期间不重复请求。
+- 社区缓存绑定公共地址与 GitHub 仓库配置及包身份；重启后重新验证 ZIP 并重建暂存文件。有效缓存可离线安装，来源配置变化后不能安装旧来源的准备结果。企业缓存仍先确认当前推荐版本。
+- 下载和暂存目录按来源隔离，安装事务仍使用稳定的 `updates/transactions`，避免更新配置后找不到启动回执或恢复备份。“查看详情”显示实际来源、换源原因、文件位置与日志入口。
+- 点击安装后先确认未保存编辑和运行中的任务。独立安装器在后台握手，主应用停止任务、保存消息和草稿并实际退出后才显示更新窗口。准备阶段在应用更新页取消；替换文件期间不能关闭安装窗口。
+- 更新成功后自动重新打开应用，收到新版本启动回执才关闭安装窗口。文件替换失败使用原有备份回滚；启动未确认显示重新打开入口。原有本地 ZIP 入口和企业分发校验保留。
+
+视觉和验证边界见[更新界面验证](guides/update-ui/README.md)。

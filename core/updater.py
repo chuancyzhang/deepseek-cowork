@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -17,9 +18,14 @@ import requests
 from core.app_version import APP_VERSION, compare_versions, is_newer_version
 from core.process_utils import subprocess_kwargs_no_window, popen_external_program
 from core.env_utils import get_app_data_dir
+from core.update_manifest import validate_manifest
 
+PUBLIC_UPDATE_BASE_URL = ""
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/chuancyzhang/deepseek-cowork/releases/latest"
 GITHUB_RELEASES_URL = "https://github.com/chuancyzhang/deepseek-cowork/releases"
+GITHUB_MANIFEST_URL = GITHUB_RELEASES_URL + "/latest/download/latest.json"
+PUBLIC_UPDATE_PATH = "/updates/windows-x64"
+_github_api_retry_at = 0.0
 APP_EXE_NAME = "deepseek-cowork.exe"
 INTERNAL_DIR_NAME = "_internal"
 UPDATE_DIR_NAME = "updates"
@@ -41,6 +47,19 @@ class UpdateCancelled(UpdaterError):
 
 class UpdateNetworkError(UpdaterError):
     """Only transient transport failures spend the bounded retry budget."""
+    def __init__(self, message, retry_after=0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class UpdateSourceUnavailable(UpdateNetworkError):
+    """The public mirror cannot serve this request; GitHub may be tried."""
+
+
+def _public_source_error(exc, message):
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    detail = f"HTTP {status}" if status is not None else type(exc).__name__
+    return UpdateSourceUnavailable(f"{message}（{detail}）。")
 
 
 def check_cancel(cancel_event=None):
@@ -51,6 +70,19 @@ def check_cancel(cancel_event=None):
 def _network_error(exc, message):
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
+    headers = getattr(response, "headers", {}) or {}
+    if status in {403, 429} and (status == 429 or headers.get("x-ratelimit-remaining") == "0"
+                                or headers.get("retry-after") or "rate limit" in str(getattr(response, "text", "")).lower()):
+        waits = [60.0]
+        for value, offset in ((headers.get("retry-after"), 0), (headers.get("x-ratelimit-reset"), time.time())):
+            try:
+                wait = float(value) - offset
+                if math.isfinite(wait):
+                    waits.append(wait)
+            except (TypeError, ValueError):
+                pass
+        delay = max(waits)
+        return UpdateNetworkError(f"更新服务请求过于频繁，将在 {int(delay) + 1} 秒后重试。", delay)
     retryable = isinstance(exc, (requests.ConnectionError, requests.Timeout)) or status in {408, 429, 500, 502, 503, 504}
     return (UpdateNetworkError if retryable else UpdaterError)(f"{message}：{exc}")
 
@@ -79,7 +111,30 @@ def updates_dir():
     return path
 
 
-def fetch_latest_release(timeout=12):
+def community_source_config():
+    base = PUBLIC_UPDATE_BASE_URL.strip().rstrip("/")
+    if base:
+        parsed = urlsplit(base)
+        if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise UpdaterError("公共更新地址必须是不含凭据、查询参数或片段的 HTTPS 地址。")
+        try:
+            parsed.port
+        except ValueError:
+            raise UpdaterError("公共更新地址端口无效。") from None
+    return {"public_base_url": base, "github_releases_url": GITHUB_RELEASES_URL, "manifest_schema": 1}
+
+
+def github_asset_url(version, filename):
+    # Both arguments originate from the validated static manifest.
+    return f"{GITHUB_RELEASES_URL}/download/v{version.lstrip('vV')}/{filename}"
+
+
+def _fetch_github_api_release(timeout):
+    global _github_api_retry_at
+    remaining = _github_api_retry_at - time.monotonic()
+    if remaining > 0:
+        raise UpdateNetworkError(f"GitHub 请求过于频繁，将在 {int(remaining) + 1} 秒后重试。", remaining)
     try:
         response = requests.get(
             GITHUB_LATEST_RELEASE_URL,
@@ -92,12 +147,45 @@ def fetch_latest_release(timeout=12):
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
-        raise _network_error(exc, "无法连接更新服务") from exc
+        error = _network_error(exc, "无法连接 GitHub 更新服务")
+        if isinstance(error, UpdateNetworkError) and error.retry_after:
+            _github_api_retry_at = time.monotonic() + error.retry_after
+        raise error from exc
     if not isinstance(data, dict):
         raise UpdaterError("GitHub Releases 返回格式无效。")
     if data.get("draft") or data.get("prerelease"):
         raise UpdaterError("最新 Release 不是正式版本。")
-    return data
+    return {**data, "source_name": "github"}
+
+
+def fetch_latest_release(timeout=12, *, source=None, source_config=None):
+    config = source_config if source_config is not None else community_source_config()
+    source = source or ("public" if config["public_base_url"] else "github")
+    if source not in {"public", "github"}:
+        raise UpdaterError("未知更新来源。")
+    base = config["public_base_url"] + PUBLIC_UPDATE_PATH
+    url = base + "/latest.json" if source == "public" else GITHUB_MANIFEST_URL
+    try:
+        with requests.get(url, headers={"User-Agent": "deepseek-cowork-updater", "Cache-Control": "no-cache"}, timeout=timeout) as response:
+            # Compatibility is limited to a genuinely missing attachment.
+            if source == "github" and response.status_code == 404:
+                return _fetch_github_api_release(timeout)
+            response.raise_for_status()
+            try:
+                manifest = validate_manifest(response.json())
+            except (ValueError, TypeError) as exc:
+                raise UpdaterError(str(exc) if isinstance(exc, ValueError) else "更新清单格式无效。") from exc
+    except UpdaterError:
+        raise
+    except requests.RequestException as exc:
+        if source == "public":
+            raise _public_source_error(exc, "公共更新源暂时不可用") from exc
+        raise _network_error(exc, "无法读取 GitHub 更新清单") from exc
+    version, filename = manifest["version"], manifest["filename"]
+    asset = ReleaseAsset(filename, base + "/" + filename if source == "public" else github_asset_url(version, filename),
+                         manifest["size"], version, "sha256:" + manifest["sha256"])
+    return {"tag_name": version, "body": manifest["notes"], "html_url": GITHUB_RELEASES_URL + "/tag/v" + version,
+            "assets": [asset.as_dict()], "source_name": source}
 
 
 def update_connection(install_dir):
@@ -361,6 +449,16 @@ def expected_asset_path(asset, target_dir=None):
     return os.path.join(target_dir, _safe_filename(asset_name))
 
 
+def same_release_asset(left, right):
+    """Mirrors may transport the same verified bytes under different URLs."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    digest = str(left.get("digest") or "")
+    if re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest) and type(left.get("size")) is int and left["size"] > 0:
+        return all(left.get(key) == right.get(key) for key in ("name", "size", "digest"))
+    return left == right
+
+
 def is_cached_asset_valid(asset, zip_path):
     if not os.path.isfile(zip_path):
         return False
@@ -407,7 +505,7 @@ def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback
     return removed
 
 
-def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None, connection=None):
+def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None, connection=None, public_source=False):
     if isinstance(asset, dict):
         asset = ReleaseAsset(
             name=str(asset.get("name") or ""),
@@ -459,6 +557,8 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
             pass
         if isinstance(exc, UpdaterError):
             raise
+        if public_source and isinstance(exc, requests.RequestException):
+            raise _public_source_error(exc, "公共更新源暂时无法下载安装包") from exc
         raise _network_error(exc, "下载更新包失败") from exc
     _emit(progress_callback, "更新包下载完成", 100)
     return zip_path

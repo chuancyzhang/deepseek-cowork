@@ -411,6 +411,8 @@ try {
   if($p -and [int]$id -ne $PID -and (App-Path $p.Path)) { $script:owned[[int]$id]=Identity $p }
  }
  Discover-Owned; Discover-Owned
+ $launchParent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
+ $launchParentIdentity=if($launchParent){Identity $launchParent}else{''}
  Save-Json 'ready.json' @{id=$cfg.id; pid=$PID}
 } catch { Save-Json 'result.json' @{id=$cfg.id; phase='startup_failed'; error=$_.Exception.Message}; throw }
 
@@ -419,14 +421,25 @@ if($Headless) {
  elseif(Test-Path -LiteralPath (Join-Path $root 'commit.json')) { $script:committed=$true; Apply-Update }
  exit $(if($script:outcome -eq 'complete'){0}else{1})
 }
+$context=New-Object Windows.Forms.ApplicationContext
+$form.Add_FormClosed({$context.ExitThread()})
 $timer=New-Object Windows.Forms.Timer; $timer.Interval=250
 $timer.Add_Tick({
- if($Recover) { $timer.Stop(); $script:committed=$true; Recover-Update; return }
- if(Test-Path -LiteralPath (Join-Path $root 'abort.json')) { $timer.Stop(); $form.Close(); return }
- if(Test-Path -LiteralPath (Join-Path $root 'commit.json')) { $timer.Stop(); $script:committed=$true; Apply-Update; return }
+ if($Recover) { $timer.Stop(); $script:committed=$true; $form.Show(); Recover-Update; return }
+ if(Test-Path -LiteralPath (Join-Path $root 'abort.json')) { $timer.Stop(); $context.ExitThread(); return }
  $parent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
- if(-not $parent) { $timer.Stop(); Status '应用未完成安装准备，尚未替换任何文件。请重新打开应用后重试。' }
+ $parentAlive=$parent -and (Identity $parent) -eq $launchParentIdentity
+ if(Test-Path -LiteralPath (Join-Path $root 'commit.json')) {
+  $script:committed=$true
+  if($parentAlive) { return }
+  $timer.Stop(); $form.Show(); Log 'installer_window_shown'; Apply-Update; return
+ }
+ if(-not $parentAlive) {
+  $timer.Stop(); Status '应用未完成安装准备，尚未替换任何文件。请重新打开应用后重试。'; $form.Show()
+ }
 })
-$form.Add_Shown({$timer.Start()})
-[void]$form.ShowDialog()
+# Pump the handshake without showing an installer window over a still-running app.
+$timer.Start()
+[Windows.Forms.Application]::Run($context)
+$timer.Dispose(); $form.Dispose(); $context.Dispose()
 '''

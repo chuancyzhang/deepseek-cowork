@@ -257,6 +257,7 @@ from core.process_utils import (
     terminate_process_tree,
 )
 from core.update_coordinator import UpdateCoordinator
+from ui.update_notice import UpdateNoticeController
 from ui.update_panel import UpdatePanel
 from ui.update_lifecycle import UpdateLifecycleMixin
 from ui.worker_lifecycle import pending_ui_workers, pause_ui_work_timers, ui_worker_snapshot, ui_work_stopping
@@ -30021,6 +30022,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         sidebar_settings_btn.clicked.connect(lambda checked=False: self.open_settings())
         self.product_nav_buttons[self.PAGE_SETTINGS] = sidebar_settings_btn
         sidebar_layout.addWidget(sidebar_settings_btn)
+        self.update_notice = UpdateNoticeController(self.update_coordinator, sidebar, sidebar_settings_btn)
 
         self.main_splitter.addWidget(sidebar)
 

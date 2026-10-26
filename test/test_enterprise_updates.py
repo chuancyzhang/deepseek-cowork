@@ -268,7 +268,7 @@ def test_enterprise_button_waits_for_download_then_emits_install_and_keeps_local
         coordinator.install_aborted()
         assert not panel.local.isHidden()
         assert panel.local.isEnabled()
-        assert panel.primary.text() == "立即更新"
+        assert panel.primary.text() == "重启并更新"
         panel.close()
         panel.deleteLater()
 

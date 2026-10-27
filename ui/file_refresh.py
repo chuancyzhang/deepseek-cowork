@@ -3,37 +3,28 @@ import logging
 import os
 from PySide6.QtCore import QTimer
 from core.deliverable_editing import sha256_file
+from core.preview_versions import html_resources, path_key
 from ui.worker_lifecycle import ui_work_stopping
 
 log = logging.getLogger(__name__)
 
 
-def html_resources(path):
-    from pathlib import Path
-    from urllib.parse import urljoin, urlparse
-    from urllib.request import url2pathname
-    from bs4 import BeautifulSoup
-    from core.deliverable_editing import decode_text_bytes
-    text, *_ = decode_text_bytes(Path(path).read_bytes())
-    soup = BeautifulSoup(text, "html.parser")
-    base = Path(path).resolve().as_uri()
-    base_node = soup.find("base", href=True)
-    if base_node:
-        base = urljoin(base, base_node["href"])
-    result = []
-    for node in soup.select("link[href], script[src]"):
-        url = urlparse(urljoin(base, node.get("href") or node.get("src") or ""))
-        if url.scheme != "file" or url.netloc:
-            continue
-        target = os.path.abspath(url2pathname(url.path))
-        if os.path.splitext(target)[1].lower() in {".css", ".js", ".mjs"} and target not in result:
-            result.append(target)
-    return result
+def preview_resources(window, path):
+    from ui.preview_refresh import controller
+    return controller(window).resources(path)
 
 
-def schedule_file_refresh(window):
+def schedule_file_refresh(window, changed_path=""):
     if ui_work_stopping(window):
         return
+    current = getattr(window, "current_deliverable_path", "")
+    if not current:
+        return
+    if changed_path:
+        related = {path_key(current)} | set(getattr(window, "_deliverable_preview_resources", ()))
+        if path_key(changed_path) not in related | {os.path.dirname(path) for path in related}:
+            return
+    window._file_refresh_scope = (getattr(window, "current_session_id", ""), path_key(current))
     timer = getattr(window, "browser_file_refresh_timer", None)
     if timer is None:
         timer = QTimer(window)
@@ -50,6 +41,9 @@ def refresh_file(window):
     browser = getattr(window, "browser_workbench", None)
     path = getattr(window, "current_deliverable_path", "")
     if not path or (browser and (browser.closed or not browser.file_active())):
+        return
+    scope = getattr(window, "_file_refresh_scope", None)
+    if scope is not None and scope != (getattr(window, "current_session_id", ""), path_key(path)):
         return
     if getattr(window, "deliverable_edit_state", "idle") in {"saving", "loading", "restoring"}:
         schedule_file_refresh(window)
@@ -73,8 +67,14 @@ def refresh_file(window):
             window.begin_deliverable_edit(editor_mode=mode)
             window._browser_restore_editor_scroll = position
         else:
+            from ui.preview_refresh import controller, managed_preview
+            if managed_preview(path):
+                controller(window).check(path)
+                return
             if not os.path.isfile(path):
                 window._set_deliverable_status("文件已移走或删除，可从目录重新选择。", tone="warning")
+                return
+            if window._deliverable_fingerprint(path) == getattr(window, "deliverable_render_fingerprint", None):
                 return
             preview = window.preview_stack.currentWidget()
             position = preview.verticalScrollBar().value() if hasattr(preview, "verticalScrollBar") else None

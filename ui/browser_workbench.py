@@ -243,6 +243,9 @@ class BrowserWorkbench(QObject):
                 pane.park(size)
 
     def show_tab(self, tab, render_file=True):
+        refresh = getattr(self.window, "preview_refresh_controller", None)
+        if refresh:
+            refresh.navigate(tab.session_id, tab.path if tab.kind == "file" else "")
         self.park_other_webpages(tab.id)
         self.store.active[tab.session_id] = tab.id
         self._compat_state(tab.session_id)

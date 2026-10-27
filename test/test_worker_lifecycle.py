@@ -525,7 +525,7 @@ class WorkerLifecycleTests(unittest.TestCase):
         host._deliverable_preview_resources = {os.path.normcase(os.path.abspath(resource))}
         with patch("ui.file_refresh.schedule_file_refresh") as preview:
             host.handle_deliverable_fs_changed(resource)
-            preview.assert_called_once_with(host)
+            preview.assert_called_once_with(host, resource)
         self.assertIsNone(host.deliverable_scan_pending)
 
     def test_shutdown_waits_for_slow_nested_worker_and_keeps_event_loop_alive(self):

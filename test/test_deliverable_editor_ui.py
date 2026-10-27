@@ -27,9 +27,8 @@ class DeliverableEditorUiTest(unittest.TestCase):
     def tearDown(self):
         if getattr(self.window, "deliverable_edit_state", "idle") != "idle":
             self.window._release_deliverable_edit_session(show_preview=False)
-        self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
+        from ui_window_cleanup import close_test_window
+        close_test_window(self.window)
 
     def _wait_until(self, predicate, timeout_ms=10000):
         deadline = time.monotonic() + timeout_ms / 1000
@@ -39,6 +38,46 @@ class DeliverableEditorUiTest(unittest.TestCase):
                 return
             QTest.qWait(20)
         self.fail("condition was not reached before timeout")
+
+    def test_pdf_retry_after_office_preview_targets_the_pdf(self):
+        from PySide6.QtCore import QTimer
+        from ui.document_preview import DocumentPreview
+        with tempfile.TemporaryDirectory() as directory:
+            office = Path(directory) / "report.docx"
+            pdf = Path(directory) / "report.pdf"
+            office.write_bytes(b"office fixture")
+            pdf.write_bytes(b"%PDF-1.4 fixture")
+
+            def opened(preview, source, mode="", **_kwargs):
+                preview.source, preview.mode = source, mode
+                QTimer.singleShot(0, preview, lambda: preview.previewReady.emit(""))
+
+            with patch.object(DocumentPreview, "open", autospec=True, side_effect=opened) as preview_open:
+                self.window.select_deliverable(str(office))
+                self._wait_until(lambda: getattr(self.window, "document_preview", None) is not None)
+                office_view = self.window.document_preview
+                self.window.select_deliverable(str(pdf))
+                pdf_view = self.window.document_preview
+                self.assertIsNot(pdf_view, office_view)
+                pdf_view.show_error("加载失败")
+                pdf_view.retry_button.click()
+                self.assertEqual(preview_open.call_args.args[1], str(pdf))
+                self.assertTrue(preview_open.call_args.kwargs["force"])
+
+    def test_preview_status_action_cancels_queued_office_load(self):
+        from ui.document_preview import DocumentPreview
+        with tempfile.TemporaryDirectory() as directory:
+            office = Path(directory) / "report.docx"
+            office.write_bytes(b"office fixture")
+            with patch.object(DocumentPreview, "open", autospec=True) as preview_open:
+                self.window.select_deliverable(str(office))
+                self.assertEqual(self.window.deliverable_update_btn.text(), "取消")
+                self.window.deliverable_update_btn.click()
+                self.app.processEvents()
+                preview_open.assert_not_called()
+                self.assertFalse(self.window.deliverable_render_loading)
+                self.assertEqual(self.window.deliverable_update_btn.text(), "刷新")
+                self.assertIn("已取消", self.window.deliverable_status_label.text())
 
     def test_text_editor_saves_atomically_and_keeps_one_previous_version(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -344,10 +383,14 @@ class DeliverableEditorUiTest(unittest.TestCase):
                     archive.writestr(name, data)
             before = source.read_bytes()
             self.assertFalse(preflight_edit(str(source)).allowed)
-            with patch.object(DocumentPreview, "open", autospec=True) as preview_open, \
+            from PySide6.QtCore import QTimer
+            def opened(preview, *_args, **_kwargs):
+                QTimer.singleShot(0, preview, lambda: preview.previewReady.emit(""))
+            with patch.object(DocumentPreview, "open", autospec=True, side_effect=opened) as preview_open, \
                     patch("main.QMessageBox.warning") as warning, \
                     patch("main.DeliverableEditLoadWorker", wraps=__import__("main").DeliverableEditLoadWorker) as loader:
                 self.window.select_deliverable(str(source), render_html=True)
+                self._wait_until(lambda: getattr(self.window, "document_preview", None) is not None)
                 loader.assert_not_called()
                 self.assertIs(self.window.preview_stack.currentWidget(), self.window.document_preview)
                 self.window.begin_deliverable_edit()
@@ -355,7 +398,7 @@ class DeliverableEditorUiTest(unittest.TestCase):
                 self.assertEqual(self.window.deliverable_edit_state, "idle")
                 self.assertIsNone(self.window.deliverable_edit_session)
                 self.assertIs(self.window.preview_stack.currentWidget(), self.window.document_preview)
-                self.assertEqual(preview_open.call_count, 2)
+                self.assertEqual(preview_open.call_count, 1)
                 self.assertIn("已返回预览", warning.call_args.args[2])
                 self.assertIn("宏", warning.call_args.args[2])
                 self.assertEqual(source.read_bytes(), before)

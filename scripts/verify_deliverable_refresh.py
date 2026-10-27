@@ -47,9 +47,12 @@ def run():
         workspace.mkdir()
         html = workspace / "周报.html"
         css = workspace / "report.css"
+        javascript = workspace / "report.js"
         note = workspace / "会议纪要.txt"
         css.write_text("body{color:rgb(30, 70, 90);font:18px sans-serif;padding:32px}", encoding="utf-8")
+        javascript.write_text("window.reportVersion = 1", encoding="utf-8")
         html.write_text('<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="report.css">'
+                        '<script src="report.js"></script>'
                         '<h1 id="title">项目周报</h1><p>本周成果已保存，可继续查看和编辑。</p>'
                         '<div style="height:1800px">进展记录</div>', encoding="utf-8")
         note.write_text("会议纪要第一版\n", encoding="utf-8")
@@ -116,17 +119,132 @@ def run():
                     window.select_deliverable(str(html), render_html=True)
                     until(lambda: window.deliverable_web_view is not None, "HTML preview created")
                     until(lambda: js("document.getElementById('title')?.textContent") == "项目周报", "HTML rendered")
+                    original_page = window.deliverable_web_view.page()
+                    js("scrollTo(0, 300); window.previewMarker = 'retained'")
                     for _ in range(40):
                         window.refresh_deliverables(render_current=True, immediate=True, reason="manual")
                         until(settled, "reused scanner completed")
                     assert window.deliverable_scanner is scanner
                     assert len(window.findChildren(main.DeliverableScanWorker)) == 1
+                    assert window.deliverable_web_view.page() is original_page
+                    assert js("window.previewMarker") == "retained"
+                    note.write_text("无关文件已更新\n", encoding="utf-8")
+                    until(settled, "unrelated file change")
+                    window.handle_deliverable_fs_changed(str(workspace))
+                    until(lambda: not getattr(window, "browser_file_refresh_timer").isActive(), "directory check")
+                    assert window.deliverable_web_view.page() is original_page
                     html.write_text(html.read_text(encoding="utf-8").replace("项目周报", "项目周报 · 已更新"), encoding="utf-8")
-                    until(lambda: js("document.getElementById('title')?.textContent") == "项目周报 · 已更新", "external HTML refresh")
+                    until(lambda: window.deliverable_status_label.text() == "文件已更新", "external HTML notification")
+                    assert window.deliverable_update_btn.isVisible()
+                    assert window.deliverable_web_view.page() is original_page
+                    assert js("document.getElementById('title')?.textContent") == "项目周报"
+                    assert js("window.previewMarker") == "retained"
+                    assert js("scrollY") > 200
+                    js("scrollTo(0, 0)")
+                    window.file_navigator_pinned = False
+                    window.set_file_navigator_visible(False, reason="verification")
+                    from PySide6.QtTest import QTest
+                    QTest.qWait(200)
+                    assert window.grab().save(str(output / f"10-preview-update-light-{scale}x.png"))
+                    window.deliverable_update_btn.click()
+                    until(lambda: js("document.getElementById('title')?.textContent") == "项目周报 · 已更新", "manual HTML refresh")
+                    until(lambda: window.deliverable_status_label.isHidden(), "new version acknowledged")
                     css.write_text("body{color:rgb(10, 100, 50);font:18px sans-serif;padding:32px}", encoding="utf-8")
-                    until(lambda: js("getComputedStyle(document.body).color") == "rgb(10, 100, 50)", "linked CSS refresh")
+                    until(lambda: window.deliverable_status_label.text() == "页面资源已更新", "linked CSS notification")
+                    assert js("getComputedStyle(document.body).color") == "rgb(30, 70, 90)"
+                    window.deliverable_update_btn.click()
+                    until(lambda: js("getComputedStyle(document.body).color") == "rgb(10, 100, 50)", "manual linked CSS refresh")
+                    javascript.write_text("window.reportVersion = 2", encoding="utf-8")
+                    until(lambda: window.deliverable_status_label.text() == "页面资源已更新", "linked JavaScript notification")
+                    assert js("window.reportVersion") == 1
+                    window.deliverable_update_btn.click()
+                    until(lambda: js("window.reportVersion") == 2, "manual linked JavaScript refresh")
                     until(settled, "filesystem scans drained")
-                    results.append("HTML/CSS refresh and 40 reusable scans")
+                    results.append("HTML/CSS notification and manual refresh; unchanged view across 40 scans")
+
+                    # Exercise the actual PDF reader and document lifecycle without
+                    # starting an installed Office process. Only conversion is stubbed.
+                    import hashlib
+                    from pypdf import PdfWriter
+                    office = workspace / "报告.docx"
+                    office.write_bytes(b"office first version")
+                    conversions, fail_conversion = [], []
+
+                    def convert(path, *, cancel=None, force=False):
+                        conversions.append(force)
+                        if fail_conversion:
+                            raise OSError("验证用转换失败")
+                        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                        pdf = base / (digest + ".pdf")
+                        writer = PdfWriter()
+                        writer.add_blank_page(width=595, height=842)
+                        with pdf.open("wb") as stream:
+                            writer.write(stream)
+                        return str(pdf), digest
+
+                    def preview_idle():
+                        refresh = window.preview_refresh_controller
+                        return (not window.deliverable_render_loading and window.preview_version_worker is None
+                                and not refresh.pending and not refresh.timer.isActive()
+                                and not window.browser_file_refresh_timer.isActive())
+
+                    with patch("ui.document_preview.render_office_pdf", side_effect=convert):
+                        window.select_deliverable(str(office))
+                        until(lambda: getattr(window, "document_preview", None) is not None and preview_idle(), "Office PDF reader")
+                        old_document = window.document_preview
+                        assert conversions == [False]
+                        for _ in range(10):
+                            window.handle_deliverable_fs_changed(str(workspace))
+                            window.select_deliverable(str(office))
+                        until(preview_idle, "unchanged Office notifications")
+                        assert conversions == [False] and window.document_preview is old_document
+                        office.write_bytes(b"office second version")
+                        until(lambda: window.deliverable_status_label.text() == "文件已更新", "Office notification")
+                        assert conversions == [False] and window.document_preview is old_document
+                        window.deliverable_update_btn.click()
+                        until(lambda: len(conversions) == 2 and preview_idle(), "manual Office refresh")
+                        assert conversions == [False, False]
+                        assert window.document_preview is not old_document
+                        window.render_selected_deliverable(force=True)
+                        until(preview_idle, "unchanged manual Office refresh")
+                        assert conversions == [False, False]
+                        old_document = window.document_preview
+                        office.write_bytes(b"office third version")
+                        fail_conversion.append(True)
+                        window.render_selected_deliverable(force=True)
+                        until(lambda: len(conversions) == 3 and preview_idle(), "failed Office refresh")
+                        assert window.document_preview is old_document
+                        assert window.preview_stack.currentWidget() is old_document
+                        assert "当前预览已保留" in window.deliverable_status_label.text()
+                        fail_conversion.clear()
+                        window.deliverable_update_btn.click()
+                        until(lambda: len(conversions) == 4 and preview_idle(), "Office retry")
+                        assert conversions[-1] is True
+                        assert window.document_preview is not old_document
+                        unavailable = workspace / "初次预览.docx"
+                        unavailable.write_bytes(b"initial failure")
+                        fail_conversion.append(True)
+                        window.select_deliverable(str(unavailable))
+                        until(lambda: len(conversions) == 5 and preview_idle(), "initial Office failure")
+                        assert window.document_preview.simple_button.isVisible()
+                        assert window.document_preview.external_button.isVisible()
+                        assert window.deliverable_update_btn.isVisible()
+                        fail_conversion.clear()
+                    results.append("Office PDF reader: no unsolicited conversion, cached reuse, failure retention and explicit retry (conversion stub)")
+
+                    from openpyxl import Workbook
+                    sheet = workspace / "数据.xlsx"
+                    book = Workbook(); book.active["A1"] = "第一版"; book.save(sheet); book.close()
+                    window.select_deliverable(str(sheet))
+                    until(preview_idle, "worksheet reader")
+                    sheet_view = window.document_preview
+                    book = Workbook(); book.active["A1"] = "第二版"; book.save(sheet); book.close()
+                    until(lambda: window.deliverable_status_label.text() == "文件已更新", "worksheet notification")
+                    assert window.document_preview is sheet_view
+                    window.deliverable_update_btn.click()
+                    until(preview_idle, "manual worksheet refresh")
+                    assert window.document_preview is not sheet_view
+                    results.append("real XLSX read-only reader notification and manual refresh")
 
                     # The actual text editor must keep its draft through external writes.
                     window.select_deliverable(str(note), render_html=False)
@@ -173,6 +291,17 @@ def run():
                         "workspace_scene": {"attachment": "fixed", "layers": []}}, preview=True, reason="refresh_qa")
                     window.resize(960, 680)
                     capture("error-dark-small")
+                    replacement = html.with_suffix(".tmp")
+                    replacement.write_text(html.read_text(encoding="utf-8").replace("项目周报 · 已更新", "项目周报 · 最新"), encoding="utf-8")
+                    os.replace(replacement, html)
+                    window.file_navigator_pinned = False
+                    window.set_file_navigator_visible(False, reason="verification")
+                    until(lambda: window.deliverable_status_label.text() == "文件已更新", "dark theme update notice")
+                    QTest.qWait(200)
+                    status_row = window.deliverable_status_row
+                    assert status_row.rect().contains(window.deliverable_update_btn.geometry())
+                    assert window.deliverable_status_label.height() >= window.deliverable_status_label.heightForWidth(window.deliverable_status_label.width())
+                    assert window.grab().save(str(output / f"10-preview-update-dark-small-{scale}x.png"))
                     assert manager.restore_saved_theme(reason="refresh_qa_cancel")
                     assert manager.repository.load() == saved
                     window.refresh_deliverables(immediate=True, reason="retry")

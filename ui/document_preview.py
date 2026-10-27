@@ -36,9 +36,10 @@ class SheetPreviewBridge(QObject):
 
     @Slot(str)
     def editorLoaded(self, identifier):
-        if identifier == self.preview.generation:
+        if not self.preview._closed and identifier == self.preview.generation:
             self.preview.refresh_theme()
             self.preview.stack.setCurrentWidget(self.preview.sheet_view)
+            self.preview.previewReady.emit(self.preview.result_fingerprint)
 
     @Slot(str)
     def reportError(self, message):
@@ -54,6 +55,8 @@ class SheetPreviewBridge(QObject):
 class DocumentPreview(QWidget):
     simpleRequested = Signal(str)
     externalRequested = Signal(str)
+    previewReady = Signal(str)
+    previewFailed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,30 +71,31 @@ class DocumentPreview(QWidget):
         self._signature = None
         self._thread = None
         self._closed = False
+        self.result_fingerprint = ""
         self.result = _Result(self)
         self.result.ready.connect(self.finished)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        self.status = QLabel()
+        self.status = QLabel(self)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         actions = QHBoxLayout()
-        self.cancel_button = QPushButton("取消")
+        self.cancel_button = QPushButton("取消", self)
         self.cancel_button.clicked.connect(self.cancel)
-        self.retry_button = QPushButton("重试")
+        self.retry_button = QPushButton("重试", self)
         self.retry_button.clicked.connect(lambda: self.open(self.source, self.mode, force=True, view_state=self.view_state))
-        self.simple_button = QPushButton("简化预览")
+        self.simple_button = QPushButton("简化预览", self)
         self.simple_button.clicked.connect(lambda: self.simpleRequested.emit(self.source))
-        self.external_button = QPushButton("用系统应用打开")
+        self.external_button = QPushButton("用系统应用打开", self)
         self.external_button.clicked.connect(lambda: self.externalRequested.emit(self.source))
         for item in (self.cancel_button, self.retry_button, self.simple_button, self.external_button):
             actions.addWidget(item)
             item.hide()
         actions.addStretch()
         layout.addLayout(actions)
-        self.stack = QStackedWidget()
-        self.empty = QWidget()
+        self.stack = QStackedWidget(self)
+        self.empty = QWidget(self.stack)
         self.stack.addWidget(self.empty)
         layout.addWidget(self.stack, 1)
         bind_theme(self, self.refresh_theme, surface="preview_shell")
@@ -144,7 +148,12 @@ class DocumentPreview(QWidget):
         def run():
             try:
                 if mode == "sheet":
+                    from core.deliverable_editing import sha256_file
+                    fingerprint = sha256_file(source)
                     result = {"kind": "sheet", **load_sheet_preview(source)}
+                    if sha256_file(source) != fingerprint:
+                        raise OSError("工作簿在加载时发生修改，请刷新最新版本。")
+                    result["fingerprint"] = fingerprint
                 elif mode == "office":
                     pdf, fingerprint = render_office_pdf(source, cancel=cancel, force=force)
                     result = {"kind": "pdf", "path": pdf, "fingerprint": fingerprint}
@@ -174,6 +183,7 @@ class DocumentPreview(QWidget):
         self.simple_button.setVisible(os.path.splitext(self.source)[1].lower() in {".docx", ".xlsx", ".pptx"})
         self.external_button.show()
         self._signature = None
+        self.previewFailed.emit(str(message))
 
     def finished(self, generation, result):
         if self._closed or generation != self.generation or self.cancel_event.is_set():
@@ -183,6 +193,7 @@ class DocumentPreview(QWidget):
             self.show_error(result["error"])
             return
         try:
+            self.result_fingerprint = result.get("fingerprint", "")
             self.status.setText(result.get("warning", ""))
             self.status.setVisible(bool(result.get("warning")))
             if result["kind"] == "pdf":
@@ -218,9 +229,17 @@ class DocumentPreview(QWidget):
             self.pdf_page.settings().setAttribute(attributes.PdfViewerEnabled, True)
             self.pdf_page.settings().setAttribute(attributes.LocalContentCanAccessRemoteUrls, False)
             self.pdf_profile.downloadRequested.connect(lambda item: item.cancel())
-            self.pdf_view.loadFinished.connect(lambda ok: None if ok else self.show_error("PDF 加载失败，请重试或用系统应用打开。"))
+            self.pdf_view.loadFinished.connect(self._pdf_loaded)
             self.stack.addWidget(self.pdf_view)
         return self.pdf_view
+
+    def _pdf_loaded(self, ok):
+        if self._closed or self.cancel_event.is_set():
+            return
+        if ok:
+            self.previewReady.emit(self.result_fingerprint)
+        else:
+            self.show_error("PDF 加载失败，请重试或用系统应用打开。")
 
     def ensure_sheet(self):
         if self.sheet_view is not None:

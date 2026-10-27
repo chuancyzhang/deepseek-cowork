@@ -2512,55 +2512,60 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_render_uses_cache_busting_local_url(self):
         app = QApplication.instance() or QApplication([])
+        from ui_window_cleanup import close_test_window
         with tempfile.TemporaryDirectory() as tmp:
             html_path = os.path.join(tmp, "report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write("<html><body>Report</body></html>")
-
-            window = MainWindow.__new__(MainWindow)
-            window.current_deliverable_path = html_path
-            window.current_deliverable_stale = True
-            window.deliverable_web_view = QWidget()
-            window.deliverable_web_view.setUrl = MagicMock()
-            window.deliverable_text_preview = QTextEdit()
-            window.deliverable_preview_stack = QStackedWidget()
-            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
-            window.deliverable_preview_stack.addWidget(window.deliverable_web_view)
-            window.deliverable_status_label = QLabel()
-
-            window.render_selected_deliverable()
-
-            rendered_url = window.deliverable_web_view.setUrl.call_args.args[0]
-            self.assertTrue(rendered_url.isLocalFile())
-            self.assertEqual(os.path.normcase(rendered_url.toLocalFile()), os.path.normcase(html_path))
-            self.assertIn("cowork_refresh=", rendered_url.query())
-            self.assertFalse(window.current_deliverable_stale)
-            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+            window = MainWindow()
+            try:
+                window.select_deliverable(html_path)
+                deadline = time.monotonic() + 10
+                while window.deliverable_render_loading and time.monotonic() < deadline:
+                    app.processEvents(); QTest.qWait(10)
+                self.assertFalse(window.deliverable_render_loading)
+                first = window.deliverable_web_view.page()
+                first_url = first.url()
+                window.render_selected_deliverable(force=True)
+                deadline = time.monotonic() + 10
+                while window.deliverable_render_loading and time.monotonic() < deadline:
+                    app.processEvents(); QTest.qWait(10)
+                rendered_url = window.deliverable_web_view.url()
+                self.assertIsNot(window.deliverable_web_view.page(), first)
+                self.assertTrue(rendered_url.isLocalFile())
+                self.assertEqual(os.path.normcase(rendered_url.toLocalFile()), os.path.normcase(html_path))
+                self.assertIn("cowork_refresh=", rendered_url.query())
+                self.assertNotEqual(rendered_url.query(), first_url.query())
+                self.assertFalse(window.current_deliverable_stale)
+            finally:
+                close_test_window(window)
 
     def test_render_reuses_unchanged_html(self):
         app = QApplication.instance() or QApplication([])
+        from ui_window_cleanup import close_test_window
         with tempfile.TemporaryDirectory() as tmp:
             html_path = os.path.join(tmp, "report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write("<html><body>Report</body></html>")
 
-            window = MainWindow.__new__(MainWindow)
-            window.current_deliverable_path = html_path
-            window.current_deliverable_stale = False
-            window.deliverable_render_path = html_path
-            window.deliverable_render_fingerprint = window._deliverable_fingerprint(html_path)
-            window.deliverable_web_view = QWidget()
-            window.deliverable_web_view.setUrl = MagicMock()
-            window.deliverable_text_preview = QTextEdit()
-            window.deliverable_preview_stack = QStackedWidget()
-            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
-            window.deliverable_preview_stack.addWidget(window.deliverable_web_view)
-            window.deliverable_status_label = QLabel()
-
-            window.render_selected_deliverable()
-
-            window.deliverable_web_view.setUrl.assert_not_called()
-            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+            window = MainWindow()
+            try:
+                window.select_deliverable(html_path)
+                deadline = time.monotonic() + 10
+                while window.deliverable_render_loading and time.monotonic() < deadline:
+                    app.processEvents(); QTest.qWait(10)
+                self.assertFalse(window.deliverable_render_loading)
+                first = window.deliverable_web_view.page()
+                with patch.object(window.preview_refresh_controller, "_load_html", wraps=window.preview_refresh_controller._load_html) as load:
+                    for _ in range(5):
+                        window.select_deliverable(html_path)
+                        window.render_selected_deliverable()
+                    QTest.qWait(400)
+                    load.assert_not_called()
+                self.assertIs(window.deliverable_web_view.page(), first)
+                self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_preview)
+            finally:
+                close_test_window(window)
 
     def test_office_deliverable_uses_builtin_structured_preview(self):
         app = QApplication.instance() or QApplication([])

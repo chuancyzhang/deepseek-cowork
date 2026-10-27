@@ -30625,11 +30625,25 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         conversion_row.addWidget(self.deliverable_conversion_cancel_btn)
         self.deliverable_conversion_row = conversion_row_widget
 
-        self.deliverable_status_label = QLabel("选择文件后会在这里预览")
+        self.deliverable_status_row = QWidget(preview_layout.parentWidget())
+        status_layout = QHBoxLayout(self.deliverable_status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(8)
+        self.deliverable_status_label = QLabel("选择文件后会在这里预览", self.deliverable_status_row)
         self.deliverable_status_label.setWordWrap(True)
         self.deliverable_status_label.setStyleSheet(apple_caption_style())
         self.deliverable_status_label.setVisible(False)
-        preview_layout.addWidget(self.deliverable_status_label)
+        status_layout.addWidget(self.deliverable_status_label, 1)
+        self.deliverable_update_btn = QPushButton("刷新", self.deliverable_status_row)
+        self.deliverable_update_btn.setAccessibleName("刷新文件预览")
+        self.deliverable_update_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_update_btn.clicked.connect(self.refresh_deliverable_preview)
+        self.deliverable_update_btn.hide()
+        status_layout.addWidget(self.deliverable_update_btn, 0, Qt.AlignTop)
+        self.deliverable_status_row.hide()
+        preview_layout.addWidget(self.deliverable_status_row)
+        bind_theme(self.deliverable_status_row, lambda _=None: self._set_deliverable_status(
+            self.deliverable_status_label.text()), surface="preview_shell")
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
@@ -32617,6 +32631,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self._sync_file_header(state)
                 return False
         else:
+            refresh = getattr(self, "preview_refresh_controller", None)
+            if refresh and refresh.can_reuse(path):
+                self.current_deliverable_path = self.current_preview_path = path
+                refresh.request_render(path)
+                self._set_deliverable_controls_enabled(path)
+                self._sync_file_header(state)
+                return True
             active_session = getattr(self, "deliverable_edit_session", None)
             if active_session is not None and self._file_tab_path_key(active_session.path) != self._file_tab_path_key(path):
                 if not self.confirm_leave_deliverable_edit("切换文件"):
@@ -32710,13 +32731,35 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         strip.setVisible(bool(paths))
         identity.setVisible(not bool(paths))
 
+    def refresh_deliverable_preview(self):
+        refresh = getattr(self, "preview_refresh_controller", None)
+        if refresh and refresh._state() and refresh._state().loading:
+            refresh.cancel()
+        else:
+            self.render_selected_deliverable(force=True)
+
     def _set_deliverable_status(self, text="", tone="info"):
         label = getattr(self, "deliverable_status_label", None)
         if label is None:
             return
+        refresh = getattr(self, "preview_refresh_controller", None)
+        notice, actionable = refresh.message() if refresh else ("", False)
+        if notice:
+            text = notice
+            tone = "warning" if refresh._state().error else "info"
         text = str(text or "").strip()
         label.setText(text)
         label.setVisible(bool(text))
+        row = getattr(self, "deliverable_status_row", None)
+        if row is not None:
+            row.setVisible(bool(text))
+        button = getattr(self, "deliverable_update_btn", None)
+        if button is not None:
+            loading = bool(notice and refresh and refresh._state().loading)
+            button.setText("取消" if loading else "刷新")
+            button.setAccessibleName("取消加载预览" if loading else "刷新文件预览")
+            button.setVisible(bool(notice and (actionable or loading)))
+            button.setStyleSheet(apple_button_style("ghost"))
         color = {
             "error": DesignTokens.error_text,
             "warning": DesignTokens.warning_text,
@@ -39640,6 +39683,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         continuation(self._shutdown_preserved_daemon_runs)
 
     def _dispose_application_event_filters(self):
+        refresh = getattr(self, "preview_refresh_controller", None)
+        if refresh is not None:
+            refresh.dispose()
         browser = getattr(self, "browser_workbench", None)
         if browser is not None:
             browser.dispose()
@@ -47139,13 +47185,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             )
             return False
         try:
-            self.deliverable_web_view = webengine_view_cls()
+            self.deliverable_web_view = webengine_view_cls(self)
             from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
             self.deliverable_preview_profile = QWebEngineProfile(self)
             self.deliverable_web_view.setPage(QWebEnginePage(self.deliverable_preview_profile, self.deliverable_web_view))
             self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
             self.deliverable_web_configuration_error = self._configure_deliverable_web_view()
-            self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view)
+            self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view, self.preview_stack)
             self.deliverable_web_view.loadProgress.connect(self.handle_deliverable_render_progress)
             self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
             self.preview_stack.addWidget(self.deliverable_web_preview)
@@ -47164,7 +47210,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             )
             return False
 
-    def _configure_deliverable_web_view(self):
+    def _configure_deliverable_web_view(self, page=None):
         view = getattr(self, "deliverable_web_view", None)
         if view is None:
             return
@@ -47179,7 +47225,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             script.setInjectionPoint(getattr(injection_enum, "DocumentCreation"))
             script.setWorldId(getattr(world_enum, "MainWorld"))
             script.setRunsOnSubFrames(False)
-            view.page().scripts().insert(script)
+            (page or view.page()).scripts().insert(script)
             return ""
         except Exception as exc:
             log_sub_agent_runtime("deliverable_preview_script_install_failed", error=str(exc))
@@ -47202,6 +47248,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return None
 
     def _can_reuse_deliverable_render(self, path):
+        from ui.preview_refresh import managed_preview
+        if managed_preview(path):
+            refresh = getattr(self, "preview_refresh_controller", None)
+            return bool(refresh and refresh.can_reuse(path) and not getattr(self, "current_deliverable_stale", False))
         fingerprint = self._deliverable_fingerprint(path)
         return bool(
             fingerprint
@@ -47449,17 +47499,19 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 if item_dir and os.path.isdir(item_dir):
                     watch_dirs.add(os.path.abspath(item_dir))
             current = getattr(self, "current_deliverable_path", "")
-            if current and os.path.isfile(current):
+            if current:
                 current_dir = os.path.dirname(current)
                 if current_dir and os.path.isdir(current_dir):
                     watch_dirs.add(os.path.abspath(current_dir))
-                watch_files.add(os.path.abspath(current))
+                if os.path.isfile(current):
+                    watch_files.add(os.path.abspath(current))
                 if os.path.splitext(current)[1].lower() in {".html", ".htm"}:
-                    from ui.file_refresh import html_resources
-                    for resource in html_resources(current)[:100]:
+                    from ui.file_refresh import preview_resources as watched_resources
+                    for resource in watched_resources(self, current):
                         if os.path.isfile(resource):
                             watch_files.add(resource)
-                            preview_resources.add(os.path.normcase(os.path.abspath(resource)))
+                        preview_resources.add(os.path.normcase(os.path.abspath(resource)))
+                        if os.path.isdir(os.path.dirname(resource)):
                             watch_dirs.add(os.path.dirname(resource))
             self._deliverable_preview_resources = preview_resources
             desired = watch_files | set(sorted(watch_dirs)[:200])
@@ -47478,7 +47530,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def handle_deliverable_fs_changed(self, path):
         from ui.file_refresh import schedule_file_refresh
-        schedule_file_refresh(self)
+        schedule_file_refresh(self, path)
         key = os.path.normcase(os.path.abspath(path))
         resources = getattr(self, "_deliverable_preview_resources", set())
         if key in resources and not any(
@@ -47687,8 +47739,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self._watch_deliverable_paths()
             return True
         previous_path = getattr(self, "current_deliverable_path", "") or ""
+        refresh = getattr(self, "preview_refresh_controller", None)
+        if refresh:
+            refresh.navigate(getattr(self, "current_session_id", ""), path)
         can_reuse_render = bool(path and self._can_reuse_deliverable_render(path))
-        self.current_deliverable_path = path if os.path.isfile(path) else ""
+        self.current_deliverable_path = path if os.path.isfile(path) or can_reuse_render else ""
         self.current_preview_path = self.current_deliverable_path
         self._file_navigator_state()["selected_path"] = self.current_deliverable_path
         self._sync_deliverable_list_selection(self.current_deliverable_path)
@@ -47712,6 +47767,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self._set_deliverable_status("")
                 if state:
                     state.deliverable_preview_rendered = True
+                from ui.file_refresh import schedule_file_refresh
+                schedule_file_refresh(self)
                 return
             try:
                 with open(self.current_deliverable_path, "r", encoding="utf-8") as f:
@@ -47738,8 +47795,16 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if getattr(self, "deliverable_edit_state", "idle") != "idle":
             return
         path = getattr(self, "current_deliverable_path", "")
+        from ui.preview_refresh import controller, managed_preview
+        if managed_preview(path):
+            controller(self).request_render(path, force=force)
+            return
         if not path or not os.path.isfile(path):
             return
+        refresh = getattr(self, "preview_refresh_controller", None)
+        if refresh:
+            refresh.navigate(getattr(self, "current_session_id", ""), path)
+            refresh.html_key = refresh.document_key = None
         ext = os.path.splitext(path)[1].lower()
         kind = (DELIVERABLE_EXTENSIONS.get(ext) or ("", "", ""))[0]
         if kind in {"text", "table"}:
@@ -47754,43 +47819,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if kind == "image":
             self._show_image_deliverable(path)
             return
-        if ext in OFFICE_EXTENSIONS:
-            self._render_office_deliverable(path, force=force)
-            return
-        if kind != "html":
-            self._set_deliverable_status("当前格式暂不支持内嵌渲染，可使用系统应用打开。", tone="warning")
-            return
-        if not self._ensure_deliverable_web_view():
-            self.deliverable_text_preview.setPlainText(self.deliverable_web_configuration_error or webengine_unavailable_message())
-            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            return
-        configuration_error = getattr(self, "deliverable_web_configuration_error", "")
-        if configuration_error:
-            self.deliverable_text_preview.setPlainText(configuration_error)
-            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self._set_deliverable_status(configuration_error, tone="error")
-            return
-        if not force and self._can_reuse_deliverable_render(path):
-            self._show_deliverable_web_preview()
-            self._set_deliverable_status("")
-            return
-        fingerprint = self._deliverable_fingerprint(path)
-        previous_fingerprint = getattr(self, "deliverable_render_fingerprint", None)
-        needs_cache_bust = bool(
-            force
-            or getattr(self, "current_deliverable_stale", False)
-            or (previous_fingerprint and previous_fingerprint != fingerprint)
-        )
-        url = QUrl.fromLocalFile(os.path.abspath(path))
-        if needs_cache_bust:
-            url.setQuery(f"cowork_refresh={time.time_ns()}")
-        self.deliverable_render_fingerprint = fingerprint
-        self.deliverable_render_path = path
-        self.deliverable_render_loading = True
-        self.current_deliverable_stale = False
-        self.deliverable_web_view.setUrl(url)
-        self._show_deliverable_web_preview()
-        self._set_deliverable_status("正在渲染轻量预览…")
+        self._set_deliverable_status("当前格式暂不支持内嵌渲染，可使用系统应用打开。", tone="warning")
 
     def _show_image_deliverable(self, path):
         max_preview_bytes = 25 * 1024 * 1024
@@ -47894,8 +47923,18 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self._set_deliverable_status("正在渲染 Markdown 预览…")
 
     def _show_document_preview(self, path, mode='', force=False):
+        from ui.preview_refresh import controller, managed_preview
+        if managed_preview(path):
+            controller(self).request_render(path, force=force, mode=mode or None)
+            return
         from ui.document_preview import DocumentPreview
         preview = getattr(self, 'document_preview', None)
+        if preview is not None and getattr(preview, 'managed_refresh', False):
+            preview.hide()
+            preview.dispose()
+            self.preview_stack.removeWidget(preview)
+            preview.deleteLater()
+            self.document_preview = preview = None
         if preview is None:
             preview = DocumentPreview(self)
             preview.simpleRequested.connect(self._render_simplified_office_deliverable)

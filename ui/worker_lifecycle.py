@@ -12,13 +12,15 @@ def ui_work_stopping(owner):
 
 def pause_ui_work_timers(owner):
     paused = []
-    for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer", "history_search_timer"):
+    for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer", "preview_version_timer", "history_search_timer"):
         timer = getattr(owner, name, None)
         # A coalesced refresh can still be pending after its timer fired while
         # the scanner was busy. Resume that request if shutdown is aborted.
         pending_refresh = (name == "deliverable_refresh_timer"
                            and getattr(owner, "deliverable_scan_pending", None) is not None)
-        if timer is not None and (timer.isActive() or pending_refresh):
+        pending_preview = (name == "preview_version_timer"
+                           and getattr(getattr(owner, "preview_refresh_controller", None), "pending", None) is not None)
+        if timer is not None and (timer.isActive() or pending_refresh or pending_preview):
             timer.stop()
             paused.append(timer)
     # Shutdown queues one final snapshot for every session. A delayed reference
@@ -62,6 +64,7 @@ def pending_ui_workers(owner, *, include_writers=False):
     finishing = (getattr(owner, "daemon_connect_worker", None),
                  getattr(owner, "daemon_status_worker", None),
                  getattr(owner, "runtime_recovery_scan_worker", None),
+                 getattr(owner, "preview_version_worker", None),
                  getattr(owner, "deliverable_scan_worker", None))
     return [worker for worker in ui_worker_snapshot(owner)
             if worker not in excluded and (worker in finishing or not worker.wait(0))]

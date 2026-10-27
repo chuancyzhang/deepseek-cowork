@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QCoreApplication, QEvent
 from PySide6.QtTest import QTest, QSignalSpy
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
@@ -58,6 +58,7 @@ class SettingsRedesignTests(unittest.TestCase):
                 widget.file_model.directoryLoaded.disconnect()
             widget.deleteLater()
         self.app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.theme_binding_registry = self.original_registry
         self.app.setFont(self.original_font)
         self.app.setStyleSheet(self.original_styles)

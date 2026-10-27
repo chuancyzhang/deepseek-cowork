@@ -661,7 +661,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             )
         return normalized
 
-    def upsert_conversation(self, conversation_id, title=None, status="active", meta=None):
+    def upsert_conversation(self, conversation_id, title=None, status="active", meta=None, *, touch_activity=True):
         with self._connect() as conn:
             self._upsert_conversation_in_connection(
                 conn,
@@ -669,6 +669,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                 title=title,
                 status=status,
                 meta=meta,
+                touch_activity=touch_activity,
             )
 
     def _upsert_conversation_in_connection(
@@ -678,12 +679,13 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
         title=None,
         status="active",
         meta=None,
+        touch_activity=True,
     ):
         now = int(time.time())
         meta = self._strip_legacy_plan_meta(meta)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
         existing = conn.execute(
-            "SELECT id, created_at, meta FROM conversations WHERE id = ?",
+            "SELECT id, title, created_at, updated_at, status, meta FROM conversations WHERE id = ?",
             (conversation_id,),
         ).fetchone()
         if existing:
@@ -691,13 +693,27 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
             if meta is None:
                 meta_json = existing["meta"]
+            # A persistence revision acknowledges reliability work, not new user
+            # activity. Re-saving an unchanged draft at exit must not promote it
+            # in recent history, while actual metadata edits still count.
+            activity_at = now
+            if not touch_activity:
+                metadata_changed = False
+                if meta is not None:
+                    previous_meta = self._parse_json_dict(existing["meta"])
+                    next_meta = dict(meta)
+                    previous_meta.pop("history_save_revision", None)
+                    next_meta.pop("history_save_revision", None)
+                    metadata_changed = previous_meta != next_meta
+                if existing["title"] == title and existing["status"] == status and not metadata_changed:
+                    activity_at = existing["updated_at"]
             conn.execute(
                 """
                 UPDATE conversations
                 SET title = ?, updated_at = ?, status = ?, meta = ?
                 WHERE id = ?
                 """,
-                (title, now, status, meta_json, conversation_id),
+                (title, activity_at, status, meta_json, conversation_id),
             )
         else:
             conn.execute(
@@ -1379,6 +1395,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                         title=title,
                         status=status,
                         meta=meta,
+                        touch_activity=False,
                     )
                 return {
                     "outcome": "unchanged" if len(comparison_messages) == len(normalized_messages) else "stale",
@@ -1399,6 +1416,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                 title=title,
                 status=status,
                 meta=meta,
+                touch_activity=len(normalized_messages) > len(existing_messages),
             )
             start = len(existing_messages)
             now = int(time.time())
@@ -1440,6 +1458,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                         else row["updated_at"]
                     ),
                     "status": row["status"] or "active",
+                    "has_messages": bool(row["has_messages"]) if "has_messages" in row.keys() else None,
                     "meta": meta,
                     "im_provider": row["im_provider"],
                 }
@@ -1469,6 +1488,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             rows = conn.execute(
                 f"""
                 SELECT c.id, c.title, c.updated_at,
+                       EXISTS(SELECT 1 FROM messages present WHERE present.conversation_id = c.id) AS has_messages,
                        COALESCE(
                            (
                                SELECT m.created_at

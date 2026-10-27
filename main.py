@@ -113,6 +113,11 @@ from core.chat_save_queue import (
     classify_chat_save_error,
 )
 from core.chat_recovery_journal import ChatRecoveryJournal
+from core.settings_changes import settings_page_config_snapshot
+from core.conversation_drafts import (
+    composer_snapshot, saved_composer, conversation_has_content,
+    history_record_has_content, history_record_title,
+)
 from core.runtime_journal import RuntimeJournal, RUN_NONTERMINAL_STATUSES
 from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
 from core.conversation_render import (
@@ -10945,6 +10950,24 @@ class SourceTestWorker(QThread):
             self.finished_signal.emit({"ok": False, "kind": self.kind, "error": str(exc)})
 
 
+class ChatRecoveryScanWorker(QThread):
+    """Discover recovery candidates without touching SQLite or GUI state."""
+
+    def __init__(self, journal, storage, parent=None):
+        super().__init__(parent)
+        self.journal = journal
+        self.storage = storage
+        self.result = None
+
+    def run(self):
+        started = time.perf_counter()
+        try:
+            self.result = {"ok": True, "scan": self.journal.scan_pending()}
+        except Exception as exc:
+            self.result = {"ok": False, "error": str(exc)}
+        self.result["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+
+
 class SessionHistoryLoadWorker(QThread):
     finished_signal = Signal(dict)
 
@@ -12953,6 +12976,33 @@ class SettingsDialog(QDialog):
             self.advanced_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
             self.theme_settings_panel.selectionCommitted.connect(self._theme_selection_committed)
         bind_theme(self, self._refresh_settings_shell, surface="settings")
+        self._cached_settings_config = settings_page_config_snapshot(self.config_manager.config)
+
+    def refresh_saved_configuration(self):
+        """Refresh cheap external preference changes without rebuilding the page."""
+        current = settings_page_config_snapshot(self.config_manager.config)
+        previous = self._cached_settings_config
+        changed = {key for key in current if current[key] != previous[key]}
+        if not changed:
+            return True
+        if self._settings_dirty or not changed <= {"god_mode", "default_workspace", "selected_model_id"}:
+            log_ui_navigation("settings_page_invalidated", changed_keys=sorted(changed))
+            return False
+        self._restoring_settings = True
+        try:
+            if "god_mode" in changed:
+                self.god_mode_check.setChecked(self.config_manager.get_god_mode())
+            if "default_workspace" in changed:
+                self.default_ws_input.setText(self.config_manager.get("default_workspace", ""))
+            if "selected_model_id" in changed:
+                self.model_channel_manager._default_model_id = self.config_manager.get_selected_model_id()
+                self.model_channel_manager._refresh_default_models()
+        finally:
+            self._restoring_settings = False
+        self._clear_settings_dirty()
+        self._cached_settings_config = current
+        log_ui_navigation("settings_page_refreshed", changed_keys=sorted(changed))
+        return True
 
     def _refresh_settings_shell(self, _resolved=None):
         if self.domain != "capabilities":
@@ -31576,6 +31626,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         }
         recent = []
         for record in getattr(self, "_home_recent_records", []):
+            if not history_record_has_content(record):
+                continue
             meta = record.get("meta") or {}
             if record.get("id") == self.current_session_id or meta.get("archived") or meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
                 continue
@@ -31589,12 +31641,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if index < len(recent):
                 record = recent[index]
                 button.setProperty("sessionId", record["id"])
-                title = str(record.get("title") or "新任务")
+                title = history_record_title(record)
                 workspace = self._conversation_workspace_path(record)
                 meta = record.get("meta") or {}
                 project_meta = next((item for item in projects if self._project_key(item.get("path")) == self._project_key(workspace)), None)
                 project = self._project_display_name(workspace, project_meta) if meta.get("workspace_source") == "project" else "独立聊天"
-                age = self._format_project_session_age(record.get("updated_at"))
+                age = self._format_project_session_age(record.get("last_message_at") or record.get("updated_at"))
                 button.set_record(title, " · ".join(part for part in (project, age) if part))
         self.home_page.recent_section.setVisible(bool(recent))
 
@@ -38543,10 +38595,57 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.queue_daemon_connection(allow_start=True, retries=0)
 
     def recover_runtime_pending_commits(self):
+        if ui_work_stopping(self) or getattr(self, "runtime_recovery_scan_worker", None) is not None:
+            return
         journal = getattr(self, "chat_recovery_journal", None)
         storage = getattr(self, "chat_storage", None)
         if journal is None or storage is None:
-            return []
+            return
+        worker = ChatRecoveryScanWorker(journal, storage, parent=self)
+        self.runtime_recovery_scan_worker = worker
+        worker.finished.connect(lambda current=worker: self._finish_runtime_recovery_scan(current))
+        log_ui_navigation("runtime_recovery_scan_start")
+        worker.start()
+
+    def _finish_runtime_recovery_scan(self, worker):
+        if worker is not getattr(self, "runtime_recovery_scan_worker", None):
+            return
+        if not worker.wait(0):
+            QTimer.singleShot(10, lambda: self._finish_runtime_recovery_scan(worker))
+            return
+        try:
+            if (ui_work_stopping(self)
+                    or worker.journal is not self.chat_recovery_journal
+                    or worker.storage is not self.chat_storage):
+                log_ui_navigation("runtime_recovery_scan_discarded", reason="owner_changed_or_stopping")
+                return
+            result = worker.result or {}
+            if not result.get("ok"):
+                error = str(result.get("error") or "Recovery scan did not return a result")
+                log_chat_recovery("runtime_scan_failed", error=error)
+                self.append_log(f"运行恢复扫描失败，下轮将重试: {error}")
+                return
+            scan = result["scan"]
+            started = time.perf_counter()
+            self._apply_runtime_recovery_scan(scan)
+            log_ui_navigation(
+                "runtime_recovery_scan_done",
+                scan_ms=result["elapsed_ms"],
+                apply_ms=int((time.perf_counter() - started) * 1000),
+                manifest_count=scan["manifest_count"],
+                pending_count=len(scan["pending_chat_save_paths"]) + len(scan["runtime_manifests"]),
+                scan_error_count=len(scan["errors"]),
+            )
+        except Exception as exc:
+            log_chat_recovery("runtime_scan_apply_failed", error=str(exc))
+            self.append_log(f"运行恢复未完成，恢复记录保留待重试: {exc}")
+        finally:
+            self.runtime_recovery_scan_worker = None
+            worker.deleteLater()
+
+    def _apply_runtime_recovery_scan(self, scan):
+        # Activity is checked after the worker finishes. A task may have started
+        # while files were being scanned, and must never receive a stale replay.
         busy_session_ids = {
             str(session_id)
             for session_id, state in list(getattr(self, "sessions", {}).items())
@@ -38559,9 +38658,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
             )
         }
-        recovered, errors = journal.recover_into(
-            storage,
+        recovered, errors = self.chat_recovery_journal.recover_into(
+            self.chat_storage,
             skip_session_ids=busy_session_ids,
+            scan=scan,
         )
         for item in errors:
             log_chat_recovery(
@@ -39916,6 +40016,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             manual = str(record.get("title") or "").strip()
             if manual:
                 return manual
+        if not messages and state:
+            return history_record_title({
+                "title": self._compute_session_title(messages),
+                "has_messages": False,
+                "meta": self._compose_session_meta(state),
+            })
         return self._compute_session_title(messages)
 
     def update_session_tab_title(self, session_id):
@@ -41058,14 +41164,14 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state.active_turn_agent = normalize_agent_selection((source.get("meta") or {}).get("conversation_agent"))
         state.active_turn_agent_profile = copy.deepcopy((source.get("meta") or {}).get("conversation_agent_profile"))
         state.knowledge_refs = copy.deepcopy(conversation_meta.get("knowledge_refs") or [])
-        update_draft = conversation_meta.get("update_composer") or {}
-        if update_draft and not state.composer_draft:
-            state.composer_draft = str(update_draft.get("text") or "")
-            state.prompt_files = list(update_draft.get("files") or [])
+        draft = saved_composer(conversation_meta)
+        if draft and not state.composer_draft and not state.prompt_files:
+            state.composer_draft = str(draft.get("text") or "")
+            state.prompt_files = list(draft.get("files") or [])
 
-        if not state.composer_draft and not state.conversation_refs:
+        if not state.conversation_refs:
             state.conversation_refs = copy.deepcopy(conversation_meta.get("composer_conversation_refs") or [])
-            if state.conversation_refs:
+            if state.conversation_refs and not state.composer_draft:
                 state.composer_draft = str(conversation_meta.get("composer_reference_draft") or "")
         state.selected_model_id = str(
             conversation_meta.get("selected_model_id") or self.config_manager.get_selected_model_id() or ""
@@ -41775,18 +41881,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return False
         if getattr(state, "messages", None):
             return True
-        if bool(getattr(state, "pending_clarify_questions", [])):
-            return True
-        if normalize_grill_mode_state(
-            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
-        ) == GRILL_MODE_ARMED:
-            return True
-        if normalize_selected_skill_names(getattr(state, "selected_skill_names", [])):
-            return True
-        return False
+        return conversation_has_content(self._compose_session_meta(state))
 
     def _live_history_conversation_record(self, state, stored_record=None):
-        if not self._session_has_history_content(state):
+        if not session_history_ready(state) or not self._session_has_history_content(state):
             return None
         session_id = str(getattr(state, "session_id", "") or "").strip()
         if not session_id:
@@ -41806,6 +41904,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             "updated_at": int(stored_record.get("updated_at") or last_message_at),
             "last_message_at": last_message_at,
             "status": getattr(state, "session_status", "draft") or "draft",
+            "has_messages": bool(getattr(state, "messages", [])),
             "meta": meta,
             "im_provider": "",
         }
@@ -41814,7 +41913,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         merged = {}
         for conversation in stored_conversations or []:
             if isinstance(conversation, dict) and conversation.get("id"):
-                merged[str(conversation.get("id"))] = dict(conversation)
+                if history_record_has_content(conversation):
+                    merged[str(conversation.get("id"))] = dict(conversation)
         for state in (getattr(self, "sessions", {}) or {}).values():
             session_id = str(getattr(state, "session_id", "") or "").strip()
             record = self._live_history_conversation_record(
@@ -43007,7 +43107,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def _render_history_list(self, stored_conversations, *, query="", search_ids=None, search_failed=False):
         if not query and not search_failed:
-            self._home_recent_records = list(stored_conversations)
+            self._home_recent_records = sorted(
+                stored_conversations,
+                key=lambda item: int(item.get("last_message_at") or item.get("updated_at") or 0),
+                reverse=True,
+            )
             self._refresh_home_recent()
         self._history_sidebar_refresh_generation += 1
         self._history_search_loading_label = None
@@ -43056,7 +43160,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             if meta.get("archived") or meta.get("team_space_required") or meta.get("workspace_source") == "team_space":
                 continue
             session_id = conv["id"]
-            title = conv["title"] or "新任务"
+            title = history_record_title(conv)
             if conv.get("im_provider") == "feishu":
                 ts = conv.get("updated_at")
                 title = f"飞书会话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}" if ts else "飞书会话"
@@ -45284,6 +45388,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         else:
             meta.pop("last_deepseek_billing", None)
         meta.pop("update_composer", None)
+        draft = composer_snapshot(getattr(state, "composer_draft", ""), getattr(state, "prompt_files", []))
+        if draft:
+            meta["composer_draft"] = draft
+        else:
+            meta.pop("composer_draft", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         selection = normalize_agent_selection(getattr(state, "conversation_agent", None))
@@ -45338,22 +45447,18 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 persisted_message_count=len(messages),
                 filtered_message_count=filtered_message_count,
             )
-        has_clarify_state = bool(
-            bool(getattr(state, "pending_clarify_questions", []))
-        )
-        has_grill_state = normalize_grill_mode_state(
-            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
-        ) == GRILL_MODE_ARMED or "grill_mode_state" in (
-            getattr(state, "persisted_conversation_meta", {}) or {}
-        )
-        has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills and getattr(state, "conversation_agent", None) is None and not getattr(state, "knowledge_refs", []) and not getattr(state, "conversation_refs", []) and not self._session_base_meta(state).get("composer_conversation_refs"):
+        meta = self._compose_session_meta(state)
+        if not conversation_has_content(meta, has_messages=bool(messages)) and not conversation_has_content(self._session_base_meta(state)):
+            # A never-used view (or a legacy record containing only defaults)
+            # needs no history row. A cleared real draft still gets one metadata
+            # save below, so reopening cannot resurrect its old input.
+            log_ui_navigation("chat_save_skipped_empty", session_id=state.session_id)
             return None
         title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
         )
-        meta = self._compose_session_meta(state)
         if consume_reference_draft:
+            meta.pop("composer_draft", None)
             meta.pop("composer_conversation_refs", None)
             meta.pop("composer_reference_draft", None)
         state.persisted_conversation_meta = copy.deepcopy(meta)
@@ -45717,6 +45822,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
         state = self.get_session(session_id)
         if state:
+            if acknowledged and not state.messages and session_history_ready(state) and not ui_work_stopping(self):
+                if self._session_has_history_content(state):
+                    self._ensure_session_visible_in_history(state)
+                elif session_id in self.history_rows:
+                    self.refresh_history_list()
             self._clear_scoped_conversation_notice(
                 state,
                 kind="chat_save",
@@ -45761,6 +45871,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                         title=request.title,
                         status=request.status,
                         meta=request.meta,
+                        touch_activity=False,
                     )
                     log_ui_navigation(
                         "chat_metadata_saved",
@@ -48798,8 +48909,9 @@ a {{ overflow-wrap: anywhere; }}
     def _ensure_product_page(self, route, section=None):
         page = self.product_pages.get(route)
         if (route == self.PAGE_SETTINGS and page is not None
+                and _qt_object_alive(page)
                 and self.current_product_route != route
-                and getattr(page, "_cached_config", None) != self.config_manager.config):
+                and not page.refresh_saved_configuration()):
             self._discard_product_page(route)
             page = None
         if page is not None and _qt_object_alive(page):
@@ -48860,7 +48972,6 @@ a {{ overflow-wrap: anywhere; }}
         if page is not None:
             if not page._confirm_discard_settings():
                 return False
-            page._cached_config = copy.deepcopy(self.config_manager.config)
         if self.current_product_subroute == "favorite_delivery_setup":
             editor = self.product_pages.get("favorite_editor")
             if editor is not None and editor.is_dirty():
@@ -54140,7 +54251,7 @@ a {{ overflow-wrap: anywhere; }}
                 messages=staged_messages,
                 status="running",
                 revision=state.chat_save_revision,
-                consume_reference_draft=clear_current_input and bool(conversation_refs),
+                consume_reference_draft=clear_current_input,
             )
         else:
             staged_save_request = self._stage_chat_save_request(
@@ -54148,7 +54259,7 @@ a {{ overflow-wrap: anywhere; }}
                 messages=staged_messages,
                 status="running",
                 failure_context="before_submit",
-                consume_reference_draft=clear_current_input and bool(conversation_refs),
+                consume_reference_draft=clear_current_input,
             )
         if staged_save_request is None:
             if grill_started:

@@ -1,0 +1,29 @@
+{
+  "platform": "offscreen",
+  "qt_scale_factor": 1,
+  "logical_dpi": 96.0,
+  "device_pixel_ratio": 1.0,
+  "dark": false,
+  "compact": false,
+  "checks": [
+    "settings_reused_after_navigation_and_preference_changes",
+    "im_status_timer_follows_page_visibility",
+    "session_draft_and_selected_skills_preserved",
+    "real_drafts_visible_and_legacy_empty_rows_preserved_but_hidden",
+    "recovery_discovery_finished_without_blocking_navigation",
+    "hidden_status_timers_stopped",
+    "send_keeps_user_message",
+    "capability_refresh_completed",
+    "theme_preview_did_not_change_saved_configuration",
+    "sent_message_persisted_after_shutdown"
+  ],
+  "slow_ui_events_over_100ms": [
+    {
+      "receiver": "QThread",
+      "event": "MetaCall",
+      "phase": "capabilities-0",
+      "elapsed_ms": 128.34
+    }
+  ],
+  "measurement": "cProfile action plus six processEvents calls; excludes model/network latency"
+}

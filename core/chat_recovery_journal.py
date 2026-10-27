@@ -213,21 +213,45 @@ class ChatRecoveryJournal:
         os.unlink(path)
         return session_id
 
-    def recover_into(self, storage, *, skip_session_ids=None):
+    def scan_pending(self):
+        """Read-only discovery, safe to run away from the GUI thread.
+
+        Return only actionable manifests; never replay, acknowledge or quarantine
+        anything here. The consumer must recheck session activity and candidates
+        before applying the result.
+        """
+        pending_paths = [
+            os.path.join(self.directory, name)
+            for name in sorted(os.listdir(self.directory))
+            if name.endswith(".json")
+        ]
+        manifests, errors = self.runtime_journal.scan_manifests()
+        return {
+            "pending_chat_save_paths": pending_paths,
+            "runtime_manifests": [
+                manifest for manifest in manifests
+                if isinstance(manifest.get("pending_commit"), dict)
+            ],
+            "errors": errors,
+            "manifest_count": len(manifests),
+        }
+
+    def recover_into(self, storage, *, skip_session_ids=None, scan=None):
         skip_session_ids = {
             str(session_id or "").strip()
             for session_id in (skip_session_ids or [])
             if str(session_id or "").strip()
         }
         recovered = []
-        errors = []
+        errors = list(scan.get("errors") or []) if scan is not None else []
         # UI save snapshots own presentation metadata. Recover them before
         # daemon/runtime ledger appends so a later canonical append cannot make
         # the richer UI snapshot look stale and discard its timeline.
-        for name in sorted(os.listdir(self.directory)):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(self.directory, name)
+        pending_paths = (scan.get("pending_chat_save_paths") or []) if scan is not None else [
+            os.path.join(self.directory, name)
+            for name in sorted(os.listdir(self.directory)) if name.endswith(".json")
+        ]
+        for path in pending_paths:
             try:
                 session_id = self._recover_pending_chat_save(
                     storage,
@@ -236,6 +260,10 @@ class ChatRecoveryJournal:
                 )
                 if session_id and session_id not in recovered:
                     recovered.append(session_id)
+            except FileNotFoundError:
+                # The normal writer may acknowledge a discovered snapshot while
+                # its read-only scan is in flight.
+                continue
             except (ConversationWriteConflict, ValueError) as exc:
                 quarantine_path = self._quarantine_pending_chat_save(path, exc)
                 errors.append(
@@ -251,19 +279,35 @@ class ChatRecoveryJournal:
                 errors.append(
                     {"path": path, "error": str(exc), "source": "pending_chat_save"}
                 )
-        try:
-            manifests, manifest_errors = self.runtime_journal.scan_manifests()
-            errors.extend(manifest_errors)
-        except Exception as exc:
-            manifests = []
-            errors.append(
-                {
-                    "path": self.runtime_journal.root,
-                    "error": f"runtime manifest scan failed: {exc}",
-                    "source": "runtime_manifest_scan",
-                }
-            )
+        if scan is not None:
+            manifests = scan.get("runtime_manifests") or []
+        else:
+            try:
+                manifests, manifest_errors = self.runtime_journal.scan_manifests()
+                errors.extend(manifest_errors)
+            except Exception as exc:
+                manifests = []
+                errors.append(
+                    {
+                        "path": self.runtime_journal.root,
+                        "error": f"runtime manifest scan failed: {exc}",
+                        "source": "runtime_manifest_scan",
+                    }
+                )
         for manifest in manifests:
+            if scan is not None:
+                path = str(manifest.get("_runtime_manifest_path") or "")
+                try:
+                    current = self.runtime_journal._read(path)
+                    discovered = {key: value for key, value in manifest.items()
+                                  if key != "_runtime_manifest_path"}
+                    if current != discovered:
+                        # A run or another writer has advanced since discovery.
+                        # Leave it for the next scan; never replay an old snapshot.
+                        continue
+                except Exception as exc:
+                    errors.append({"path": path, "error": str(exc), "source": "runtime_manifest"})
+                    continue
             pending = manifest.get("pending_commit") if isinstance(manifest, dict) else None
             if not isinstance(pending, dict):
                 continue

@@ -238,13 +238,9 @@ class UpdateLifecycleMixin:
                     return
             if not self.flush_pending_chat_saves(timeout_ms=3000):
                 raise RuntimeError("消息尚未保存完成，尚未关闭应用。")
-            # Only after the message queue has drained, so a queued old metadata write
-            # cannot erase the unsent draft. Include empty conversations as well.
-            for state in self.sessions.values():
-                meta = self._compose_session_meta(state)
-                meta["update_composer"] = {"text": getattr(state, "composer_draft", ""), "files": list(getattr(state, "prompt_files", []) or [])}
-                record = self.chat_storage.get_conversation_record(state.session_id) or {}
-                self.chat_storage.upsert_conversation(state.session_id, status=record.get("status") or "active", meta=meta)
+            # The normal save queue includes composer drafts and skips pristine
+            # views. Its acknowledgement is the sole persistence boundary here;
+            # a second unconditional upsert would create empty history records.
             self._commit_update_exit()
         except Exception as exc:
             self._abort_update(str(exc))

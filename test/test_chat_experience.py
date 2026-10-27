@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,7 +91,10 @@ class ChatExperienceTests(unittest.TestCase):
         previous = self.window.current_session_id
         self.window.create_new_session()
         state = self.window.get_current_session()
-        self.window.input_field.setPlainText("草稿必须保留")
+        with patch.object(self.window, "save_chat_history") as save:
+            self.window.input_field.setPlainText("草稿必须保留")
+            self.assertEqual(state.composer_draft, "草稿必须保留")
+            save.assert_not_called()
         with patch.object(self.window, "set_current_session", wraps=self.window.set_current_session) as activate:
             self.window.activate_session(previous)
         self.assertEqual(activate.call_count, 1)
@@ -471,16 +475,113 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertEqual(state.grill_mode_state, "armed")
         self.assertEqual(self.window.get_current_session().grill_mode_state, "disabled")
 
-    def test_settings_reused_until_configuration_changes(self):
+    def test_settings_ignore_navigation_config_and_refresh_common_preferences_in_place(self):
         self.window.open_settings()
         page = self.window.product_pages["settings"]
         self.window.show_product_page("knowledge")
+        self.window.config_manager.config["recent_workspaces"] = ["different-workspace"]
+        self.window.config_manager.config["file_navigator_scope"] = "workspace"
+        self.window.config_manager.config["favorite_run_history"] = [{"status": "completed"}]
         self.window.open_settings()
         self.assertIs(page, self.window.product_pages["settings"])
         self.window.show_conversation_page()
         self.window.config_manager.config["god_mode"] = not self.window.config_manager.get_god_mode()
         self.window.open_settings()
+        self.assertIs(page, self.window.product_pages["settings"])
+        self.assertEqual(page.god_mode_check.isChecked(), self.window.config_manager.get_god_mode())
+        self.assertFalse(page._settings_dirty)
+
+    def test_settings_reloads_changed_complex_configuration(self):
+        self.window.open_settings()
+        page = self.window.product_pages["settings"]
+        self.window.show_conversation_page()
+        self.window.config_manager.config["data_security"] = {"enabled": True}
+        self.window.open_settings()
         self.assertIsNot(page, self.window.product_pages["settings"])
+        self.assertTrue(self.window.product_pages["settings"].data_security_panel.state()["enabled"])
+
+    def test_pristine_views_and_legacy_disabled_mode_do_not_create_history(self):
+        for _ in range(3):
+            state = self.window.get_current_session()
+            state.persisted_conversation_meta = {"grill_mode_state": "disabled", "update_composer": {"text": "", "files": []}}
+            self.assertTrue(self.window.save_chat_history(state.session_id, flush=True))
+            self.assertIsNone(self.window.chat_storage.get_conversation_record(state.session_id))
+            self.window.create_new_session()
+
+    def test_real_draft_restores_text_attachments_and_references_then_clears_without_resurrection(self):
+        state = self.window.get_current_session()
+        self.window.input_field.setPlainText("需要继续整理的草稿")
+        state.prompt_files = [str(Path(self.temp.name, "attachment.txt"))]
+        Path(state.prompt_files[0]).write_text("附件", encoding="utf-8")
+        state.conversation_refs = [{"session_id": "reference", "title": "参考对话"}]
+        self.assertTrue(self.window.save_chat_history(state.session_id, flush=True))
+        saved = self.window.chat_storage.get_conversation_meta(state.session_id)
+        self.assertEqual(saved["composer_draft"]["text"], "需要继续整理的草稿")
+        self.assertEqual(saved["composer_draft"]["files"], state.prompt_files)
+        state.composer_draft = ""
+        state.prompt_files = []
+        state.conversation_refs = []
+        self.window.input_field.clear()
+        state.history_loaded = False
+        self.window.queue_session_history_load(state.session_id)
+        deadline = time.monotonic() + 4
+        while not state.history_loaded and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.01)
+        self.assertTrue(state.history_loaded)
+        self.assertEqual(state.composer_draft, "需要继续整理的草稿")
+        self.assertEqual(state.prompt_files, saved["composer_draft"]["files"])
+        self.assertEqual(state.conversation_refs, saved["composer_conversation_refs"])
+        self.window.input_field.clear()
+        state.composer_draft = ""
+        state.prompt_files = []
+        state.conversation_refs = []
+        self.assertTrue(self.window.save_chat_history(state.session_id, flush=True))
+        cleared = self.window.chat_storage.get_conversation_meta(state.session_id)
+        self.assertNotIn("composer_draft", cleared)
+        self.assertNotIn("composer_conversation_refs", cleared)
+        self.assertIsNone(self.window._build_chat_save_request(state))
+        self.window._render_history_list(self.window.chat_storage.list_conversations())
+        self.assertNotIn(state.session_id, self.window.history_rows)
+
+    def test_update_barrier_saves_real_draft_and_skips_blank_view(self):
+        blank_id = self.window.current_session_id
+        self.window.create_new_session()
+        state = self.window.get_current_session()
+        self.window.input_field.setPlainText("更新后继续")
+        self.window.sync_current_session_state()
+        self.window._update_preparing = True
+        self.window._update_transaction = self.temp.name
+        self.window._update_installer_process = SimpleNamespace(poll=lambda: None)
+        self.window._update_checkpoint_queued = False
+        self.window._update_deadline = time.monotonic() + 30
+        with patch.object(self.window, "_commit_update_exit") as commit, patch.object(self.window, "_abort_update") as abort, patch("ui.update_lifecycle.QTimer.singleShot"):
+            self.window._await_update_saves()
+            self.window._await_update_saves()
+            abort.assert_not_called()
+            commit.assert_called_once()
+        self.window._update_preparing = False
+        self.assertIsNone(self.window.chat_storage.get_conversation_record(blank_id))
+        self.assertEqual(self.window.chat_storage.get_conversation_meta(state.session_id)["composer_draft"]["text"], "更新后继续")
+
+    def test_first_submission_consumes_saved_composer_without_changing_input_before_commit(self):
+        state = self.window.get_current_session()
+        state.composer_draft = "准备发送"
+        state.prompt_files = ["attachment.txt"]
+        message = {"id": "u1", "role": "user", "content": "准备发送"}
+        request = self.window._build_chat_save_request(state, messages=[message], consume_reference_draft=True)
+        self.assertNotIn("composer_draft", request.meta)
+        self.assertEqual(state.composer_draft, "准备发送")
+        self.assertEqual(request.messages, [message])
+
+    def test_home_recent_uses_message_activity_instead_of_metadata_write_time(self):
+        records = [
+            {"id": "old", "title": "旧对话", "updated_at": 300, "last_message_at": 100, "has_messages": True, "meta": {}},
+            {"id": "new", "title": "新对话", "updated_at": 200, "last_message_at": 200, "has_messages": True, "meta": {}},
+        ]
+        self.window._render_history_list(records)
+        self.assertEqual([record["id"] for record in self.window._home_recent_records], ["new", "old"])
+        self.assertEqual(self.window.home_page.recent_buttons[0].property("sessionId"), "new")
 
     def test_search_loads_old_pages_and_highlights_matching_answer(self):
         state = self.window.get_current_session()

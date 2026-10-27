@@ -1,0 +1,22 @@
+{
+  "platform": "offscreen",
+  "qt_scale_factor": 1.5,
+  "logical_dpi": 96.0,
+  "device_pixel_ratio": 1.5,
+  "dark": true,
+  "compact": true,
+  "checks": [
+    "settings_reused_after_navigation_and_preference_changes",
+    "im_status_timer_follows_page_visibility",
+    "session_draft_and_selected_skills_preserved",
+    "real_drafts_visible_and_legacy_empty_rows_preserved_but_hidden",
+    "recovery_discovery_finished_without_blocking_navigation",
+    "hidden_status_timers_stopped",
+    "send_keeps_user_message",
+    "capability_refresh_completed",
+    "theme_preview_did_not_change_saved_configuration",
+    "sent_message_persisted_after_shutdown"
+  ],
+  "slow_ui_events_over_100ms": [],
+  "measurement": "cProfile action plus six processEvents calls; excludes model/network latency"
+}

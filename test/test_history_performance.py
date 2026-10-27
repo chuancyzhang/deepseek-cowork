@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.conversation_render import build_conversation_render_spans
+from ui_window_cleanup import close_test_window
 from main import (
     AssistantTurnGroup,
     ChatBubble,
@@ -30,9 +31,7 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.state.history_loaded = True
 
     def tearDown(self):
-        self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
+        close_test_window(self.window)
 
     def test_history_assistant_turn_materializes_details_only_after_expand(self):
         messages = []
@@ -479,7 +478,7 @@ class HistoryPerformanceTests(unittest.TestCase):
             patch.object(self.window, "queue_session_history_load") as queue_load,
             patch.object(self.window, "refresh_history_list"),
         ):
-            self.window.recover_runtime_pending_commits()
+            self.window._apply_runtime_recovery_scan({})
         queue_load.assert_not_called()
         self.assertTrue(self.state.history_loaded)
 

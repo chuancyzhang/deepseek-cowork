@@ -61,6 +61,7 @@ def pending_ui_workers(owner, *, include_writers=False):
     # deliverable_scanner is still found via Qt ownership, but is idle after wait(0).
     finishing = (getattr(owner, "daemon_connect_worker", None),
                  getattr(owner, "daemon_status_worker", None),
+                 getattr(owner, "runtime_recovery_scan_worker", None),
                  getattr(owner, "deliverable_scan_worker", None))
     return [worker for worker in ui_worker_snapshot(owner)
             if worker not in excluded and (worker in finishing or not worker.wait(0))]

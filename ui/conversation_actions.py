@@ -390,9 +390,13 @@ class ConversationActionsMixin:
 
     def queue_reference_draft_save(self):
         state = self.get_current_session()
-        if not state or not getattr(state, "conversation_refs", []):
+        if not state:
             return
+        # Session state owns all input, even when there is no reference. Keep
+        # the existing debounced disk save limited to reference drafts.
         state.composer_draft = self.input_field.toPlainText()
+        if not getattr(state, "conversation_refs", []):
+            return
         timer = getattr(state, "reference_draft_timer", None)
         if timer is None:
             timer = QTimer(self)

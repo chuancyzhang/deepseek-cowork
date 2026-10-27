@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QFont, QFontDatabase, QPalette
+from PySide6.QtCore import QCoreApplication, QEvent
 
 from core.config_manager import ConfigManager
 from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
@@ -49,6 +50,7 @@ class DefaultModelSettingsTests(unittest.TestCase):
         self.dialog.close()
         self.dialog.deleteLater()
         self.app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def select_b(self):
         self.combo.setCurrentIndex(self.combo.findData("model-b"))

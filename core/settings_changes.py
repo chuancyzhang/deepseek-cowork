@@ -2,6 +2,31 @@
 from copy import deepcopy
 
 
+def settings_page_config_snapshot(config):
+    """Only saved values represented by the settings page invalidate its editors.
+
+    Navigation, conversation workspaces and scheduler history share config.json,
+    but do not change the settings form. Keep that runtime state out of the page
+    cache, and ignore bookkeeping timestamps within editable objects.
+    """
+    keys = (
+        "model_channels", "selected_model_id", "default_workspace",
+        "chat_history_dir", "chat_workspace_root", "god_mode", "data_security",
+        "download_sources", "im_gateway", "experimental_long_context",
+        "experimental_browser_automation",
+    )
+
+    def values(value):
+        if isinstance(value, dict):
+            return {key: values(item) for key, item in value.items()
+                    if key not in {"created_at", "updated_at"}}
+        if isinstance(value, list):
+            return [values(item) for item in value]
+        return deepcopy(value)
+
+    return {key: values(config.get(key)) for key in keys}
+
+
 def merge_settings_objects(baseline, draft, live, identity="id"):
     def comparable(item):
         if isinstance(item, dict):

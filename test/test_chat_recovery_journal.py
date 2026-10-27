@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from core.chat_recovery_journal import ChatRecoveryJournal
 from core.chat_save_queue import ChatSaveRequest
@@ -10,6 +11,34 @@ from core.runtime_journal import RuntimeJournal
 
 
 class TestChatRecoveryJournal(unittest.TestCase):
+    def test_read_only_scan_and_busy_recheck_do_not_replay_live_session(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = ChatRecoveryJournal(root)
+            storage = ChatStorage(os.path.join(root, "history.sqlite"))
+            journal.record(self._request(1))
+            scan = journal.scan_pending()
+            self.assertIsNone(storage.get_conversation_record("session-recovery"))
+            self.assertTrue(os.path.exists(journal._path_for_session("session-recovery")))
+            with patch.object(journal.runtime_journal, "scan_manifests", side_effect=AssertionError("GUI rescan")):
+                self.assertEqual(journal.recover_into(storage, scan=scan, skip_session_ids={"session-recovery"}), ([], []))
+                self.assertEqual(journal.recover_into(storage, scan=scan), (["session-recovery"], []))
+                # A normal writer may already have acknowledged this candidate.
+                self.assertEqual(journal.recover_into(storage, scan=scan), ([], []))
+
+    def test_changed_runtime_manifest_is_not_replayed_from_old_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = ChatRecoveryJournal(root)
+            storage = ChatStorage(os.path.join(root, "history.sqlite"))
+            runtime = journal.runtime_journal
+            runtime.begin_run("s", "r", turn_id="t", writer_owner="test", base_messages=[])
+            runtime.mark_pending_commit("s", "r", [{"id": "u", "role": "user", "content": "保留"}])
+            scan = journal.scan_pending()
+            runtime.update_manifest("s", {"new_activity": True})
+            self.assertEqual(journal.recover_into(storage, scan=scan), ([], []))
+            self.assertIsNone(storage.get_conversation_record("s"))
+            self.assertIn("pending_commit", runtime.load_manifest("s"))
+            self.assertEqual(journal.recover_into(storage, scan=journal.scan_pending()), (["s"], []))
+
     def _request(self, revision, messages=None, status="running"):
         return ChatSaveRequest(
             session_id="session-recovery",

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "test")]
 
 
-def run(output, *, native=False, scale=1, dark=False, compact=False, idle_seconds=0, screenshots=False):
+def run(output, *, native=False, scale=1, dark=False, compact=False, idle_seconds=0, screenshots=False, recovery_manifests=0):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -27,6 +27,7 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
         import core.env_utils
         core.env_utils.get_app_data_dir = lambda: temporary
         from PySide6.QtGui import QFontDatabase
+        from PySide6.QtCore import QTimer
         from core.config_manager import ConfigManager
         from core.theme import ThemeRuntimeManager
         from core.theme_presets import builtin_theme
@@ -133,6 +134,16 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
                         measure(f"chat-from-{route}-{repeat}", window.show_conversation_page)
                 window.show_product_page(window.PAGE_SETTINGS)
                 settings = window.product_pages[window.PAGE_SETTINGS]
+                window.show_conversation_page()
+                window.config_manager.set("file_navigator_scope", "workspace")
+                measure("settings-after-navigation-change", window.open_settings)
+                assert window.product_pages[window.PAGE_SETTINGS] is settings
+                window.show_conversation_page()
+                window.config_manager.set_god_mode(not window.config_manager.get_god_mode())
+                measure("settings-after-permission-change", window.open_settings)
+                assert window.product_pages[window.PAGE_SETTINGS] is settings
+                assert settings.god_mode_check.isChecked() == window.config_manager.get_god_mode()
+                checks.append("settings_reused_after_navigation_and_preference_changes")
                 settings.select_initial_page("企业消息")
                 settle()
                 assert settings._im_gateway_status_timer.isActive()
@@ -157,6 +168,41 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
                 assert window.input_field.toPlainText() == "切换后需要保留的草稿"
                 assert window.get_current_session().selected_skill_names == selected
                 checks.append("session_draft_and_selected_skills_preserved")
+                assert window.save_chat_history(first, flush=True)
+                window.chat_storage.upsert_conversation(
+                    "legacy-empty-navigation", title="新任务", status="draft",
+                    meta={"run_phase": "待开始", "grill_mode_state": "disabled",
+                          "update_composer": {"text": "", "files": []}},
+                )
+                window.activate_session(second)
+                window._render_history_list(window.chat_storage.list_conversations())
+                assert first in window.history_rows
+                assert second not in window.history_rows
+                assert "legacy-empty-navigation" not in window.history_rows
+                assert window.chat_storage.get_conversation_record("legacy-empty-navigation") is not None
+                capture("draft-history")
+                checks.append("real_drafts_visible_and_legacy_empty_rows_preserved_but_hidden")
+                window.activate_session(first)
+                if recovery_manifests:
+                    for index in range(recovery_manifests):
+                        window.runtime_journal.update_manifest(f"profile-idle-{index}", {})
+                    measure("runtime-recovery-enqueue", window.recover_runtime_pending_commits)
+                    started = time.perf_counter()
+                    max_event_ms = 0
+                    while getattr(window, "runtime_recovery_scan_worker", None) is not None:
+                        assert time.perf_counter() - started < 10, "recovery scan did not finish"
+                        tick = time.perf_counter()
+                        app.processEvents()
+                        max_event_ms = max(max_event_ms, (time.perf_counter() - tick) * 1000)
+                        time.sleep(.005)
+                    measurements.append({"name": "runtime-recovery-completion", "manifest_fixture_count": recovery_manifests,
+                                         "wall_ms": round((time.perf_counter() - started) * 1000, 2),
+                                         "max_process_events_ms": round(max_event_ms, 2)})
+                    recovery_timer = QTimer(window)
+                    recovery_timer.setInterval(5000)
+                    recovery_timer.timeout.connect(window.recover_runtime_pending_commits)
+                    recovery_timer.start()
+                    checks.append("recovery_discovery_finished_without_blocking_navigation")
                 if idle_seconds:
                     app.profile_phase = "idle"
                     started = time.perf_counter()
@@ -183,6 +229,7 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
                 with patch.object(window, "process_agent_logic"), patch.object(window, "queue_daemon_connection"):
                     measure("send", window.handle_send)
                 assert window.get_current_session().messages[-1]["content"] == "性能验证消息"
+                assert "composer_draft" not in window.get_current_session().persisted_conversation_meta
                 checks.append("send_keeps_user_message")
                 capture("sent")
                 # Measure UI entry separately from background completion; never hide
@@ -227,6 +274,7 @@ if __name__ == "__main__":
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--idle-seconds", type=float, default=0)
     parser.add_argument("--screenshots", action="store_true")
+    parser.add_argument("--recovery-manifests", type=int, default=0)
     try:
         run(**vars(parser.parse_args()))
     except Exception:

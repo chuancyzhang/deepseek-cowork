@@ -142,7 +142,7 @@ class UpdateLifecycleTests(unittest.TestCase):
         host.chat_save_worker.stop_worker.assert_not_called()
         self.assertEqual(host.sessions["s"].composer_draft, "未发送的草稿")
 
-    def test_all_drafts_saved_after_queue_drains_and_completed_run_not_interrupted(self):
+    def test_update_uses_normal_save_barrier_without_second_metadata_upsert(self):
         host = self.host
         self.state("finished", "r")
         self.state("empty")
@@ -154,10 +154,10 @@ class UpdateLifecycleTests(unittest.TestCase):
             host._await_update_saves()
         host._queue_runtime_checkpoint.assert_not_called()
         host._commit_update_exit.assert_called_once()
-        for identity in ("finished", "empty"):
-            meta = host.chat_storage.get_conversation_record(identity)["meta"]
-            self.assertEqual(meta["update_composer"]["text"], "未发送的草稿")
-            self.assertEqual(meta["update_composer"]["files"], ["attachment.txt"])
+        self.assertEqual([call.args[0] for call in host.save_chat_history.call_args_list], ["finished", "empty"])
+        # The stubbed save queue wrote nothing: the update barrier must not
+        # independently create or rewrite conversation rows after draining it.
+        self.assertEqual(host.chat_storage.list_conversations(), [])
 
     def test_failed_commit_file_does_not_stop_writers_or_quit(self):
         host = self.host

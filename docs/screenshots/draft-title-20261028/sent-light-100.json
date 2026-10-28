@@ -1,0 +1,10 @@
+{
+  "platform": "offscreen",
+  "qt_scale_factor": "1",
+  "logical_dpi": 96.0,
+  "device_pixel_ratio": 1.0,
+  "title": "分析下今天的A股",
+  "followup_draft_retained": true,
+  "fixture": "real submit and SQLite, mocked model execution, sample assistant reply",
+  "theme_preview_cancelled_without_saving": true
+}

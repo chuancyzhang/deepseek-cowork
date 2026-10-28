@@ -574,6 +574,51 @@ class ChatExperienceTests(unittest.TestCase):
         self.assertEqual(state.composer_draft, "准备发送")
         self.assertEqual(request.messages, [message])
 
+    def test_sent_draft_title_survives_sidebar_resize_and_session_switch(self):
+        self.window._model_onboarding_shown = True
+        self.window.resize(1200, 800)
+        self.window.show()
+        state = self.window.get_current_session()
+        self.window.input_field.setPlainText("请同时使用所选能力分析")
+        self.assertTrue(self.window.save_chat_history(state.session_id, flush=True))
+        self.window.refresh_history_list()
+        self.app.processEvents()
+        row = self.window.history_rows[state.session_id]
+        button = self.window.history_buttons[state.session_id]
+        self.assertTrue(button.text().startswith("草稿"))
+
+        title = "分析下今天的A股"
+        self.window.input_field.setPlainText(title)
+        with patch.object(self.window, "_model_profile_for_state", return_value={"id": "test-model"}), \
+                patch.object(self.window, "_selected_model_supports_vision", return_value=False), \
+                patch.object(self.window, "_ensure_vision_attachment_support", return_value=True), \
+                patch.object(self.window, "_build_run_context", return_value={}), \
+                patch.object(self.window, "queue_daemon_connection"), \
+                patch.object(self.window, "process_agent_logic"), \
+                patch.object(self.window, "refresh_history_list") as rebuild:
+            self.assertTrue(self.window._submit_session_request(state, title, [], clear_current_input=True))
+            self.assertTrue(self.window.flush_pending_chat_saves(session_id=state.session_id, timeout_ms=3000))
+            self.app.processEvents()
+            for width in (90, 220, 140):
+                button.setFixedWidth(width)
+                self.app.processEvents()
+                self.assertFalse(button.text().startswith("草稿"), button.text())
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(16777215)
+            self.assertEqual(button.toolTip(), title)
+            self.assertEqual(self.window.workspace_title_label.text(), title)
+            self.assertIs(self.window.history_rows[state.session_id], row)
+            rebuild.assert_not_called()
+
+        record = self.window.chat_storage.get_conversation_record(state.session_id)
+        self.assertEqual(record["title"], title)
+        self.assertEqual(self.window.chat_storage.get_messages(state.session_id)[-1]["content"], title)
+        self.window.create_new_session()
+        self.window.activate_session(state.session_id)
+        self.app.processEvents()
+        self.assertEqual(self.window.history_buttons[state.session_id].toolTip(), title)
+        self.assertFalse(self.window.history_buttons[state.session_id].text().startswith("草稿"))
+
     def test_home_recent_uses_message_activity_instead_of_metadata_write_time(self):
         records = [
             {"id": "old", "title": "旧对话", "updated_at": 300, "last_message_at": 100, "has_messages": True, "meta": {}},

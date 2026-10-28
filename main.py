@@ -42081,8 +42081,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             anchor_y = row.mapTo(scroll.viewport(), QPoint(0, 0)).y()
 
         title = self._resolved_session_title(state)
-        if button.text() != title:
-            button.setText(title)
+        button.set_full_title(title)
         timestamp = self._last_message_timestamp(getattr(state, "messages", []))
         if timestamp:
             row._history_updated_at = int(timestamp)

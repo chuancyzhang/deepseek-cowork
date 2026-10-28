@@ -79,6 +79,7 @@ from ui.thinking_text import (
 )
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
+from ui.interaction_cards import InlineInteractionCard, InteractionChoiceButton, questionnaire_result
 from core.env_utils import (
     get_app_data_dir,
     get_base_dir,
@@ -17814,361 +17815,6 @@ class SearchableSkillPickerButton(QPushButton):
         QTimer.singleShot(0, search.setFocus)
 
 
-class InteractionChoiceButton(QPushButton):
-    """Theme-owned choice row that never falls back to native checkbox chrome."""
-
-    def __init__(self, label, description="", value="", parent=None):
-        text = str(label or "选项")
-        if description:
-            text += "\n" + str(description)
-        super().__init__(text, parent)
-        self.setCheckable(True)
-        self.setProperty("option_value", str(value or label or ""))
-        self.setCursor(Qt.PointingHandCursor)
-        self._has_description = bool(description)
-        self.setMinimumHeight(42 if self._has_description else 34)
-        self._apply_theme_style()
-        bind_theme(self, self.refresh_theme, surface="feedback")
-
-    def _apply_theme_style(self):
-        self.setStyleSheet(
-            f"QPushButton {{ text-align: left; padding: 7px 10px; color: {DesignTokens.overlay_text}; "
-            f"font-size: {DesignTokens.font_size_meta}px; background: {DesignTokens.overlay_bg}; "
-            f"border: 1px solid {DesignTokens.overlay_border}; border-radius: {DesignTokens.radius_sm}px; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; border-color: {DesignTokens.border_strong}; }}"
-            f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-            f"border: 2px solid {DesignTokens.primary}; padding: 6px 9px; }}"
-            f"QPushButton:focus {{ border: 2px solid {DesignTokens.primary_focus}; padding: 6px 9px; }}"
-            f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; "
-            f"border-color: {DesignTokens.border_subtle}; }}"
-        )
-
-    def refresh_theme(self, _resolved=None):
-        self.setMinimumHeight(
-            max(
-                DesignTokens.control_height,
-                42 if self._has_description else 34,
-            )
-        )
-        self._apply_theme_style()
-
-
-class InlineInteractionCard(QFrame):
-    """Conversation-owned response card for approval and input tool requests."""
-
-    resolved = Signal(object)
-
-    def __init__(self, request, parent=None):
-        super().__init__(parent)
-        self.request = dict(request or {})
-        self.run_id = str((self.request.get("metadata") or {}).get("run_id") or "")
-        self.kind = str(self.request.get("kind") or "approval").strip().lower()
-        self._resolved = False
-        self._terminal = False
-        self.option_checks = []
-        self.question_controls = []
-        self.question_labels = []
-        self.option_group = None
-        self.setObjectName("InlineInteractionCard")
-        self.setStyleSheet(
-            f"QFrame#InlineInteractionCard {{ background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
-        )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-        self.title_label = QLabel(str(self.request.get("title") or "需要你的输入"))
-        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
-        self.message_label = QLabel(str(self.request.get("message") or ""))
-        self.message_label.setWordWrap(True)
-        self.message_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.message_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(self.title_label)
-        layout.addWidget(self.message_label)
-
-        permission_meta = self.request.get("metadata") or {}
-        self.permission_details = None
-        self.permission_details_button = None
-        if permission_meta.get("execution_permission"):
-            self.message_label.setText("\n".join(filter(None, [self.message_label.text(), permission_meta.get("scope", "") ])))
-            self.permission_details_button = QPushButton("查看执行详情")
-            self.permission_details_button.setCheckable(True)
-            self.permission_details_button.setStyleSheet(product_button_style("secondary"))
-            layout.addWidget(self.permission_details_button)
-
-            def show_permission_details(checked):
-                if self.permission_details is None and checked:
-                    self.permission_details = QPlainTextEdit()
-                    self.permission_details.setReadOnly(True)
-                    self.permission_details.setPlainText(str(permission_meta.get("details") or ""))
-                    self.permission_details.setMinimumHeight(120)
-                    self.permission_details.setMaximumHeight(260)
-                    self.permission_details.setStyleSheet(product_field_style())
-                    layout.insertWidget(layout.indexOf(self.permission_details_button) + 1, self.permission_details)
-                if self.permission_details is not None:
-                    self.permission_details.setVisible(checked)
-
-            self.permission_details_button.toggled.connect(show_permission_details)
-
-        self.text_input = QLineEdit(self)
-        self.text_input.setPlaceholderText("自定义" if self.kind in {"choice", "multi_choice"} else "请输入回答")
-        self.text_input.setStyleSheet(product_field_style())
-        self.text_input.setVisible(
-            self.kind == "text"
-            or (self.kind in {"choice", "multi_choice"} and bool(self.request.get("allow_free_text")))
-        )
-        if self.kind == "text":
-            layout.addWidget(self.text_input)
-
-        options = self.request.get("options") if isinstance(self.request.get("options"), list) else []
-        if self.kind in {"choice", "multi_choice"}:
-            if self.kind == "choice":
-                self.option_group = QButtonGroup(self)
-                self.option_group.setExclusive(True)
-            for option in options:
-                label = str(option.get("label") or option.get("value") or "选项")
-                if str(option.get("value") or "") == "__custom__" and self.request.get("allow_free_text"):
-                    continue
-                description = str(option.get("description") or "")
-                choice = InteractionChoiceButton(label, description, str(option.get("value") or label), self)
-                if self.option_group is not None:
-                    self.option_group.addButton(choice)
-                self.option_checks.append(choice)
-                layout.addWidget(choice)
-                if self.kind == "choice":
-                    choice.toggled.connect(lambda checked, field=self.text_input: field.clear() if checked else None)
-            if not self.text_input.isHidden():
-                layout.addWidget(self.text_input)
-            if self.option_group is not None:
-                self.text_input.textChanged.connect(lambda text: self._clear_choice_on_text(self.option_group, text))
-        elif self.kind == "questionnaire":
-            for question in normalize_pending_clarify_questions(self.request.get("questions") or []):
-                question_label = QLabel(str(question.get("question") or question.get("header") or "问题"))
-                question_label.setWordWrap(True)
-                question_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
-                self.question_labels.append(question_label)
-                group = QButtonGroup(self)
-                group.setExclusive(True)
-                buttons = []
-                for option in question.get("options") or []:
-                    label = str(option.get("label") or "")
-                    value = str(option.get("value") or label)
-                    if value == "__custom__":
-                        continue
-                    choice = InteractionChoiceButton(label, str(option.get("description") or ""), value, self)
-                    group.addButton(choice)
-                    buttons.append(choice)
-                custom = QLineEdit()
-                custom.setPlaceholderText("自定义")
-                custom.setAccessibleName(str(question.get("question") or "问题") + "：自定义回答")
-                custom.setStyleSheet(product_field_style())
-                layout.addWidget(question_label)
-                for choice in buttons:
-                    layout.addWidget(choice)
-                    choice.toggled.connect(
-                        lambda checked, field=custom: field.clear() if checked else None
-                    )
-                custom.textChanged.connect(lambda text, choices=group: self._clear_choice_on_text(choices, text))
-                layout.addWidget(custom)
-                self.question_controls.append({"id": question.get("id"), "group": group, "buttons": buttons, "input": custom})
-
-        self.validation_label = QLabel("")
-        self.validation_label.setWordWrap(True)
-        self._validation_tone = "error"
-        self.validation_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 11px;")
-        self.validation_label.hide()
-        layout.addWidget(self.validation_label)
-
-        actions = QHBoxLayout()
-        actions.addStretch()
-        self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
-        self.cancel_btn.clicked.connect(lambda: self._finish(False))
-        self.submit_btn = QPushButton("继续" if self.kind == "approval" else "提交")
-        if permission_meta.get("execution_permission"):
-            self.cancel_btn.setText("拒绝")
-            self.submit_btn.setText("允许本次执行")
-        self.submit_btn.setStyleSheet(product_button_style("primary", radius=7))
-        self.submit_btn.clicked.connect(self._submit)
-        actions.addWidget(self.cancel_btn)
-        actions.addWidget(self.submit_btn)
-        layout.addLayout(actions)
-
-        self.refresh_theme()
-        bind_theme(self, self.refresh_theme, surface="feedback")
-
-    @staticmethod
-    def _clear_choice_on_text(group, text):
-        if not text.strip():
-            return
-        group.setExclusive(False)
-        for button in group.buttons():
-            button.setChecked(False)
-        group.setExclusive(True)
-
-    def refresh_theme(self, _resolved=None):
-        self.setStyleSheet(
-            f"QFrame#InlineInteractionCard {{ background: {DesignTokens.overlay_bg}; "
-            f"border: 1px solid {DesignTokens.overlay_border}; "
-            f"border-radius: {DesignTokens.overlay_radius}px; }}"
-        )
-        self.title_label.setStyleSheet(
-            f"color: {DesignTokens.overlay_text}; "
-            f"font-size: {DesignTokens.font_size_body}px; "
-            f"font-weight: {DesignTokens.font_weight_bold};"
-        )
-        self.message_label.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; "
-            f"font-size: {DesignTokens.font_size_meta}px;"
-        )
-        for label in self.question_labels:
-            label.setStyleSheet(
-                f"color: {DesignTokens.overlay_text}; "
-                f"font-size: {DesignTokens.font_size_meta}px; "
-                f"font-weight: {DesignTokens.font_weight_semibold};"
-            )
-        self.text_input.setStyleSheet(product_field_style())
-        for control in self.question_controls:
-            control["input"].setStyleSheet(product_field_style())
-        if self.permission_details is not None:
-            self.permission_details.setStyleSheet(product_field_style())
-        if self.permission_details_button is not None:
-            self.permission_details_button.setStyleSheet(product_button_style("secondary"))
-        validation_color = (
-            DesignTokens.success_text
-            if self._validation_tone == "success"
-            else DesignTokens.text_secondary if self._validation_tone == "info"
-            else DesignTokens.error_text
-        )
-        self.validation_label.setStyleSheet(
-            f"color: {validation_color}; "
-            f"font-size: {DesignTokens.font_size_caption}px;"
-        )
-        self.cancel_btn.setStyleSheet(
-            product_button_style("secondary", radius=DesignTokens.radius_sm)
-        )
-        self.submit_btn.setStyleSheet(
-            product_button_style("primary", radius=DesignTokens.radius_sm)
-        )
-
-    def _select_only(self, current, checked):
-        if not checked:
-            return
-        for checkbox in self.option_checks:
-            if checkbox is not current:
-                checkbox.setChecked(False)
-
-    def _selected_values(self):
-        return [
-            str(checkbox.property("option_value") or "")
-            for checkbox in self.option_checks
-            if checkbox.isChecked() and str(checkbox.property("option_value") or "")
-        ]
-
-    def _show_validation(self, text):
-        self._validation_tone = "error"
-        self.validation_label.setText(str(text or "请检查输入"))
-        self.refresh_theme()
-        self.validation_label.show()
-
-    def _submit(self):
-        if self.kind == "approval":
-            self._finish(True)
-            return
-        text = self.text_input.text().strip()
-        picked = self._selected_values()
-        if self.kind == "text":
-            if not text:
-                self._show_validation("请先输入内容。")
-                return
-            self._finish(text)
-            return
-        if self.kind == "choice":
-            if picked:
-                self._finish(picked[0])
-                return
-            if text:
-                self._finish(text)
-                return
-            self._show_validation("请选择一个选项或输入补充内容。")
-            return
-        if self.kind == "multi_choice":
-            values = list(picked)
-            if text:
-                values.append(text)
-            if not values:
-                self._show_validation("请至少选择一个选项或输入补充内容。")
-                return
-            self._finish(values)
-            return
-        if self.kind == "questionnaire":
-            answers = {}
-            for control in self.question_controls:
-                checked = control["group"].checkedButton()
-                value = str(checked.property("option_value") or "") if checked is not None else ""
-                custom_text = control["input"].text().strip()
-                if value or custom_text:
-                    answers[str(control.get("id") or "")] = {
-                        "selected_options": [value] if value else [],
-                        "text": custom_text if not value else "",
-                        "raw_value": value or custom_text,
-                    }
-            if not answers:
-                self._show_validation("请至少回答一个问题。")
-                return
-            self._finish(answers)
-
-    def _set_controls_enabled(self, enabled):
-        for widget in [self.text_input, self.cancel_btn, self.submit_btn, *self.option_checks]:
-            widget.setEnabled(enabled)
-        for control in self.question_controls:
-            for button in control["buttons"]:
-                button.setEnabled(enabled)
-            control["input"].setEnabled(enabled)
-
-    def _finish(self, value):
-        if self._resolved:
-            return
-        self._resolved = True
-        self._set_controls_enabled(False)
-        self._validation_tone = "info"
-        self.refresh_theme()
-        self.validation_label.setText("正在提交…")
-        self.validation_label.show()
-        self.resolved.emit(value)
-
-    def restore_after_resolution_error(self, message):
-        if self._terminal:
-            return
-        self._resolved = False
-        self._set_controls_enabled(True)
-        self._validation_tone = "error"
-        self.refresh_theme()
-        self.validation_label.setText(f"提交失败：{str(message or '未知错误')}。请重试。")
-        self.validation_label.show()
-
-    def stop_waiting(self):
-        self.finish_waiting("cancelled")
-
-    def finish_waiting(self, status):
-        self._terminal = True
-        self._resolved = True
-        self._set_controls_enabled(False)
-        for field in [self.text_input, *(control["input"] for control in self.question_controls)]:
-            field.setEnabled(True)
-            field.setReadOnly(True)
-        self.cancel_btn.hide()
-        self.submit_btn.hide()
-        messages = {
-            "timeout": "请求已超时，未提交的输入保留在这里。",
-            "cancelled": "任务已停止或请求已取消，未提交的输入保留在这里。",
-            "error": "请求处理失败，未提交的输入保留在这里。",
-        }
-        self._validation_tone = "info"
-        self.validation_label.setText(messages.get(status, "请求已结束，未提交的输入保留在这里。"))
-        self.refresh_theme()
-        self.validation_label.show()
-
 
 def _conversation_skill_text_list(text):
     values = []
@@ -23543,6 +23189,7 @@ class AssistantTurnGroup(QFrame):
         self.group_id = str(group_id or uuid.uuid4().hex)
         self.stage_bubbles = []
         self.stage_separators = []
+        self.interaction_cards = []
         self.process_finalized = False
         self.process_expanded = True
         self.process_finalization_pending = False
@@ -23666,6 +23313,17 @@ class AssistantTurnGroup(QFrame):
         self.sync_stage_visibility()
         return bubble
 
+    def add_interaction_card(self, card, stage):
+        if card in self.interaction_cards:
+            return
+        index = self.group_layout.indexOf(stage) + 1
+        while index < self.group_layout.count() and self.group_layout.itemAt(index).widget() in self.interaction_cards:
+            index += 1
+        self.interaction_cards.append(card)
+        self.group_layout.insertWidget(index, card)
+        card.show()
+        self.sync_stage_visibility()
+
     def sync_stage_visibility(self):
         """Hide semantically empty stages and separators without changing stage order."""
         changed = False
@@ -23689,7 +23347,7 @@ class AssistantTurnGroup(QFrame):
                     set_visible(bubble.thinking_widget, False)
             for separator in self.stage_separators:
                 set_visible(separator, False)
-            set_visible(self, bool(self.process_disclosure.isVisible() or self.process_result_bubble is not None))
+            set_visible(self, bool(self.interaction_cards or self.process_disclosure.isVisible() or self.process_result_bubble is not None))
             if changed:
                 self.group_layout.invalidate()
                 self.updateGeometry()
@@ -23702,7 +23360,7 @@ class AssistantTurnGroup(QFrame):
                 set_visible(self.stage_separators[index - 1], bool(visible_before and visible))
             if visible:
                 visible_before = True
-        set_visible(self, visible_before)
+        set_visible(self, visible_before or bool(self.interaction_cards))
         if changed:
             self.group_layout.invalidate()
             self.updateGeometry()
@@ -26041,6 +25699,8 @@ class ToolCallCard(QFrame):
             label = "已取消"
         elif status == "unknown":
             label = "待确认"
+        elif self.tool_name == "request_user_input" and not self.is_finished and status != "queued":
+            label = "待回答"
         elif getattr(self, "_background_pending", False):
             label = "排队中" if status == "queued" else "运行中"
         elif self.failed:
@@ -27264,6 +26924,7 @@ class SessionState:
         self.clarify_mode_state = CLARIFY_MODE_EXPLORING
         self.pending_clarify_questions = []
         self.pending_interactions = {}
+        self.interaction_cards = {}
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
         self.grill_mode_state = GRILL_MODE_DISABLED
@@ -40221,6 +39882,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state.history_detail_summaries = []
         state.history_office_cards = []
         state.tool_cards = {}
+        state.interaction_cards = {}
+        state.pending_interactions = {}
         state.pending_tool_results = {}
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
@@ -40478,6 +40141,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state.chat_layout.insertWidget(target_index, summary)
 
         for message in messages:
+            if message.get("role") == "tool":
+                self._restore_questionnaire_receipt(
+                    state, str(message.get("tool_call_id") or ""),
+                    message.get("result_obj") if message.get("result_obj") is not None else message.get("content"),
+                    target_layout=summary.body_layout,
+                )
             if not is_same_turn_guidance_message(message):
                 continue
             self.add_turn_guidance_inline(
@@ -41393,12 +41062,59 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
         self._show_inline_interaction_request(request, target_session_id, resolve)
 
-    def _finish_inline_interaction(self, state, request_id, status, *, remove=False):
+    def _place_inline_interaction_card(self, state, card, tool_card=None):
+        # Keep questions and receipts outside collapsible execution stages, while
+        # retaining their position between the originating stage and its answer.
+        ancestor = tool_card
+        stage = None
+        while ancestor is not None:
+            if isinstance(ancestor, ChatBubble):
+                stage = ancestor
+            if isinstance(ancestor, AssistantTurnGroup) and stage is not None:
+                ancestor.add_interaction_card(card, stage)
+                return
+            ancestor = ancestor.parentWidget()
+        if stage is not None:
+            stage.content_col_layout.addWidget(card)
+        else:
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
+        card.show()
+
+    def _restore_questionnaire_receipt(self, state, tool_id, result, *, target_layout=None):
+        parsed = questionnaire_result(result)
+        if parsed is None:
+            return
+        request, response = parsed
+        request_id = request["request_id"] or f"tool:{tool_id}"
+        cards = getattr(state, "interaction_cards", None)
+        if cards is None:
+            cards = state.interaction_cards = {}
+        card = cards.get(request_id)
+        if card is None or not _qt_object_alive(card):
+            card = InlineInteractionCard(request, (target_layout or state.chat_layout).parentWidget())
+            card.show_receipt(response["answers"], response["status"])
+            cards[request_id] = card
+            if target_layout is not None:
+                target_layout.addWidget(card)
+            else:
+                self._place_inline_interaction_card(state, card, state.tool_cards.get(tool_id))
+            log_ui_navigation("interaction_receipt_restored", session_id=state.session_id,
+                              request_id=request_id, tool_call_id=tool_id, answer_count=len(response["answers"]))
+        else:
+            card.show_receipt(response["answers"], response["status"])
+
+    def _finish_inline_interaction(self, state, request_id, status, *, remove=False, answers=None):
         card = state.pending_interactions.pop(request_id, None)
         if card is None:
+            card = (getattr(state, "interaction_cards", {}) or {}).get(request_id)
+            if card is not None and _qt_object_alive(card) and answers is not None:
+                card.show_receipt(answers, status)
             return
         card.finish_waiting(status)
-        if remove or status in {"completed", "auto_selected"}:
+        if card.kind == "questionnaire":
+            if answers is not None:
+                card.show_receipt(answers, status)
+        elif remove or status in {"completed", "auto_selected"}:
             state.chat_layout.removeWidget(card)
             card.hide()
             card.deleteLater()
@@ -41443,6 +41159,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         request_id = str((request or {}).get("request_id") or uuid.uuid4().hex)
         if request_id in state.pending_interactions:
             return state.pending_interactions[request_id]
+        previous = (getattr(state, "interaction_cards", {}) or {}).get(request_id)
+        if previous is not None and _qt_object_alive(previous):
+            return previous
         self.set_session_phase("Awaiting input", state.session_id)
         log_ui_navigation(
             "interaction_inline_show",
@@ -41451,23 +41170,36 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             interaction_type=str((request or {}).get("kind") or "input"),
             background=state.session_id != self.current_session_id,
         )
-        card = InlineInteractionCard(request, self)
+        card = InlineInteractionCard(request, state.chat_layout.parentWidget())
         card.run_id = str((request.get("metadata") or {}).get("run_id")
                           or getattr(state, "active_turn_request_id", "") or "")
         state.pending_interactions[request_id] = card
-        state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
+        if card.kind == "questionnaire":
+            if not hasattr(state, "interaction_cards"):
+                state.interaction_cards = {}
+            state.interaction_cards[request_id] = card
+            tool_id = str((request.get("metadata") or {}).get("tool_call_id") or "")
+            self._place_inline_interaction_card(state, card, (getattr(state, "tool_cards", {}) or {}).get(tool_id))
+        else:
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
 
         def finish(value):
             if state.pending_interactions.get(request_id) is not card:
                 return
+            log_ui_navigation(
+                "interaction_inline_submit", session_id=state.session_id,
+                run_id=card.run_id, request_id=request_id,
+                cancelled=value is False or value is None,
+                answer_count=len(value) if card.kind == "questionnaire" and isinstance(value, dict) else 0,
+            )
             try:
                 acknowledgement = resolver(value)
-                if state.pending_interactions.get(request_id) is not card:
-                    return
                 accepted = acknowledgement is True or (
                     isinstance(acknowledgement, dict) and acknowledgement.get("status") == "ok"
                     and acknowledgement.get("resolved") is True
                 )
+                if state.pending_interactions.get(request_id) is not card and not accepted:
+                    return
                 if not accepted:
                     if (isinstance(acknowledgement, dict) and acknowledgement.get("status") == "ok"
                             and acknowledgement.get("resolved") is False):
@@ -41492,7 +41224,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 )
                 self.refresh_session_activity_indicator(state.session_id)
                 return
-            self._finish_inline_interaction(state, request_id, "completed", remove=True)
+            self._finish_inline_interaction(state, request_id,
+                "cancelled" if value is False or value is None else "completed", remove=True,
+                answers=value if card.kind == "questionnaire" and isinstance(value, dict) else None)
             log_ui_navigation(
                 "interaction_inline_resolved",
                 session_id=state.session_id,
@@ -41504,9 +41238,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.refresh_session_activity_indicator(state.session_id)
         if state.session_id == self.current_session_id:
             self.request_session_scroll_to_bottom(state.session_id, force=True)
-            first_input = card.findChild(QLineEdit)
+            first_input = card.questionnaire.sections[0].header if card.questionnaire and card.questionnaire.sections else card.findChild(QLineEdit)
             if first_input is not None and first_input.isVisible():
-                QTimer.singleShot(0, first_input.setFocus)
+                QTimer.singleShot(0, first_input, first_input.setFocus)
         else:
             self.add_system_toast(
                 "后台对话正在等待你的输入",
@@ -55066,7 +54800,10 @@ a {{ overflow-wrap: anywhere; }}
         if isinstance(response, dict):
             self._finish_inline_interaction(
                 state, str(response.get("request_id") or ""), response.get("status") or "ended",
+                answers=response.get("answers") if response.get("status") in {"completed", "auto_selected"} else None,
             )
+        if card.tool_name == "request_user_input":
+            self._restore_questionnaire_receipt(state, tool_id, result_obj if result_obj is not None else result)
         client_action = result_obj.get("client_action") if isinstance(result_obj, dict) else None
         if (
             isinstance(client_action, dict)

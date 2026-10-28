@@ -120,24 +120,6 @@ def _build_response_payload(
     }
 
 
-def _recommended_questionnaire_answers(request: dict[str, Any]) -> dict[str, Any]:
-    answers = {}
-    for item in _normalize_questions(request.get("questions")):
-        qid = str(item.get("id") or "").strip()
-        options = _normalize_options(item.get("options"))
-        if not qid or not options:
-            continue
-        selected = str(options[0].get("value") or options[0].get("label") or "").strip()
-        if not selected:
-            continue
-        answers[qid] = {
-            "selected_options": [selected],
-            "text": "",
-            "raw_value": selected,
-        }
-    return answers
-
-
 def parse_interaction_reply(
     request: dict[str, Any] | None,
     raw_value: Any,
@@ -344,7 +326,7 @@ class InteractionRequest:
     options: list[dict[str, Any]] = field(default_factory=list)
     questions: list[dict[str, Any]] = field(default_factory=list)
     allow_free_text: bool = False
-    timeout_seconds: float = 120.0
+    timeout_seconds: float | None = 120.0
     source_tool: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -392,6 +374,7 @@ class InteractionService(QObject):
         metadata: dict[str, Any] | None = None,
         abort_check=None,
         require_receiver: bool = False,
+        wait_for_submission: bool = False,
     ) -> dict[str, Any]:
         owner = current_tool_run()
         task = current_tool_task()
@@ -399,6 +382,8 @@ class InteractionService(QObject):
         if owner is not None:
             session_id = owner.session_id
             metadata["run_id"] = owner.run_id
+            if task is not None:
+                metadata["tool_call_id"] = task.call_id
             original_abort_check = abort_check
             abort_check = lambda: (
                 owner.closed.is_set() or owner.abort_check()
@@ -420,13 +405,13 @@ class InteractionService(QObject):
             options=_normalize_options(options),
             questions=_normalize_questions(questions),
             allow_free_text=bool(allow_free_text),
-            timeout_seconds=_coerce_timeout(timeout_seconds),
+            timeout_seconds=None if wait_for_submission else _coerce_timeout(timeout_seconds),
             source_tool=(source_tool or "").strip(),
             metadata=dict(metadata or {}),
         )
         event = threading.Event()
         payload = request.to_dict()
-        deadline = time.monotonic() + request.timeout_seconds
+        deadline = None if request.timeout_seconds is None else time.monotonic() + request.timeout_seconds
         with self._lock:
             entry = self._pending[request.request_id] = {
                 "request": payload,
@@ -438,20 +423,21 @@ class InteractionService(QObject):
                 "abort_check": abort_check,
             }
         self.interaction_requested.emit(payload)
-        logger.info("interaction.wait session=%s run=%s request=%s kind=%s",
-                    request.session_id, metadata.get("run_id", ""), request.request_id, request.kind)
+        logger.info("interaction.wait session=%s run=%s request=%s kind=%s wait_policy=%s",
+                    request.session_id, metadata.get("run_id", ""), request.request_id, request.kind,
+                    "submission" if deadline is None else "deadline")
         response = None
         try:
             cancelled = False
             if callable(abort_check):
-                while not event.wait(min(0.05, max(0, deadline - time.monotonic()))):
+                while not event.wait(0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic()))):
                     if abort_check():
                         cancelled = True
                         break
-                    if time.monotonic() >= deadline:
+                    if deadline is not None and time.monotonic() >= deadline:
                         break
             else:
-                event.wait(max(0, deadline - time.monotonic()))
+                event.wait(None if deadline is None else max(0, deadline - time.monotonic()))
             # Answer, cancellation and timeout choose one outcome under the same
             # lock. A cancellation must not overwrite an already accepted answer.
             with self._lock:
@@ -482,14 +468,6 @@ class InteractionService(QObject):
 
     @staticmethod
     def _timeout_response(request: dict[str, Any]) -> dict[str, Any]:
-        if (request.get("kind") == "questionnaire"
-                and request.get("metadata", {}).get("auto_select_first_on_timeout")):
-            answers = _recommended_questionnaire_answers(request)
-            if answers:
-                return InteractionResponse(
-                    request["request_id"], "auto_selected", True,
-                    answers=answers, raw_value=answers,
-                ).to_dict()
         return InteractionResponse(request["request_id"], "timeout", False).to_dict()
 
     def resolve_request(self, request_id: str, raw_value: Any) -> bool:
@@ -508,7 +486,7 @@ class InteractionService(QObject):
                 abort_check = entry.get("abort_check")
                 if callable(abort_check) and abort_check():
                     entry["response"] = InteractionResponse(request_id, "cancelled", False).to_dict()
-                elif time.monotonic() >= entry["deadline"]:
+                elif entry["deadline"] is not None and time.monotonic() >= entry["deadline"]:
                     entry["response"] = self._timeout_response(request)
             if entry["response"] is not None:
                 entry["event"].set()
@@ -546,7 +524,7 @@ class InteractionService(QObject):
                 and isinstance(entry.get("request"), dict)
                 and (entry["request"].get("session_id") or "").strip() == target_session_id
                 and entry.get("response") is None
-                and time.monotonic() < entry["deadline"]
+                and (entry["deadline"] is None or time.monotonic() < entry["deadline"])
                 and not (callable(entry.get("abort_check")) and entry["abort_check"]())
             ]
         if not matches:

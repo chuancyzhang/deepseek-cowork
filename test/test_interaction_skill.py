@@ -106,10 +106,12 @@ class TestInteractionSkill(unittest.TestCase):
         self.assertEqual(sent_questions[0]["options"][-1]["label"], "自定义")
         self.assertEqual(sent_questions[0]["options"][-1]["value"], "__custom__")
         self.assertTrue(create_mock.call_args.kwargs["allow_free_text"])
+        self.assertTrue(create_mock.call_args.kwargs["wait_for_submission"])
+        self.assertIsNone(result["interaction_request"]["timeout_seconds"])
         self.assertIn("compatibility_target", result["answers"])
         self.assertTrue(result["interaction_response"]["approved"])
 
-    def test_questionnaire_timeout_auto_selects_recommended_option(self):
+    def test_legacy_questionnaire_auto_select_flag_cannot_fabricate_an_answer(self):
         result = interaction_service.create_request(
             "session-timeout",
             "questionnaire",
@@ -129,9 +131,9 @@ class TestInteractionSkill(unittest.TestCase):
             metadata={"auto_select_first_on_timeout": True},
         )
 
-        self.assertEqual(result["status"], "auto_selected")
-        self.assertTrue(result["approved"])
-        self.assertEqual(result["answers"]["scope"]["selected_options"], ["current"])
+        self.assertEqual(result["status"], "timeout")
+        self.assertFalse(result["approved"])
+        self.assertEqual(result["answers"], {})
 
     def test_grilling_questionnaire_never_auto_selects_on_timeout(self):
         with patch.object(
@@ -163,7 +165,8 @@ class TestInteractionSkill(unittest.TestCase):
 
         self.assertEqual(result["purpose"], "grill_checkpoint")
         self.assertEqual(result["interaction_response"]["status"], "timeout")
-        self.assertFalse(create_mock.call_args.kwargs["metadata"]["auto_select_first_on_timeout"])
+        self.assertTrue(create_mock.call_args.kwargs["wait_for_submission"])
+        self.assertNotIn("auto_select_first_on_timeout", create_mock.call_args.kwargs["metadata"])
         self.assertEqual(create_mock.call_args.kwargs["metadata"]["purpose"], "grill_checkpoint")
 
     def test_publish_artifacts_feishu_context_returns_structured_payload(self):

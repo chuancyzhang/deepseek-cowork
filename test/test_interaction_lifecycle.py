@@ -49,19 +49,64 @@ class InteractionLifecycleTests(unittest.TestCase):
                 self.assertIsNone(service.get_pending_request("session"))
                 self.assertIs(service.resolve_request(result["request_id"], value), False)
 
-    def test_timeout_and_questionnaire_policy_have_distinct_terminal_outcomes(self):
+    def test_explicit_deadline_never_fabricates_questionnaire_answers(self):
         for auto_select in (False, True):
             with self.subTest(auto_select=auto_select):
                 service, ended = self.service()
                 result = service.create_request("session", "questionnaire", "question", timeout_seconds=0.01,
                     questions=[{"id": "q", "question": "question", "options": ["recommended", "other"]}],
                     metadata={"auto_select_first_on_timeout": auto_select})
-                self.assertEqual(result["status"], "auto_selected" if auto_select else "timeout")
-                self.assertEqual(result["approved"], auto_select)
+                self.assertEqual(result["status"], "timeout")
+                self.assertFalse(result["approved"])
                 self.assertEqual(ended[0]["status"], result["status"])
                 self.assertFalse(ended[0]["answered"])
-                if auto_select:
-                    self.assertEqual(result["answers"]["q"]["selected_options"], ["recommended"])
+                self.assertEqual(result["answers"], {})
+
+    def test_manual_questionnaire_survives_old_deadline_and_accepts_one_answer(self):
+        service, ended = self.service()
+        ready, release = threading.Event(), threading.Event()
+        requests, results = [], []
+        def capture(request):
+            requests.append(request)
+            ready.set()
+            release.wait(3)
+        service.interaction_requested.connect(capture, Qt.DirectConnection)
+        thread = threading.Thread(target=lambda: results.append(service.create_request(
+            "session", "questionnaire", "question", timeout_seconds=0.01, wait_for_submission=True,
+            questions=[{"id": "q", "question": "question", "options": ["recommended", "other"]}])))
+        thread.start()
+        try:
+            self.assertTrue(ready.wait(2))
+            self.assertIsNone(requests[0]["timeout_seconds"])
+            with patch("core.interaction.time.monotonic", return_value=10**12):
+                self.assertIsNotNone(service.get_pending_request("session"))
+                ack = service.respond_request(requests[0]["request_id"], {"q": {"text": "my answer"}})
+                self.assertTrue(ack["resolved"])
+                self.assertFalse(service.respond_request(requests[0]["request_id"], {"q": {"text": "duplicate"}})["resolved"])
+        finally:
+            release.set()
+            service.cancel_session_requests("session")
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0]["answers"]["q"]["text"], "my answer")
+        self.assertEqual([event["status"] for event in ended], ["completed"])
+
+    def test_manual_wait_remains_cancellable_by_owner(self):
+        service, ended = self.service()
+        ready, abort = threading.Event(), threading.Event()
+        results = []
+        service.interaction_requested.connect(lambda _request: ready.set(), Qt.DirectConnection)
+        thread = threading.Thread(target=lambda: results.append(service.create_request(
+            "session", "questionnaire", "question", wait_for_submission=True, abort_check=abort.is_set)))
+        thread.start()
+        try:
+            self.assertTrue(ready.wait(2))
+        finally:
+            abort.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0]["status"], "cancelled")
+        self.assertEqual(len(ended), 1)
 
     def test_legacy_boolean_result_still_publishes_timeout(self):
         service, ended = self.service()
@@ -135,6 +180,8 @@ class InteractionLifecycleTests(unittest.TestCase):
 class InteractionHost(QWidget):
     """Real interaction handlers/widgets without starting the whole application."""
     _show_inline_interaction_request = MainWindow._show_inline_interaction_request
+    _place_inline_interaction_card = MainWindow._place_inline_interaction_card
+    _restore_questionnaire_receipt = MainWindow._restore_questionnaire_receipt
     _finish_inline_interaction = MainWindow._finish_inline_interaction
     _finish_session_interactions = MainWindow._finish_session_interactions
     _dismiss_interaction_toast = MainWindow._dismiss_interaction_toast

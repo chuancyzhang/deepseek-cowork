@@ -46,6 +46,28 @@
 
 ![执行授权选项](screenshots/chat-experience/permissions-1x.png)
 
+## 回答 AI 的问题
+
+一组问题显示在同一个提问区，默认展开第一题。其他题目显示当前答案摘要，点击标题即可展开修改；选择后不会自动跳题。
+
+普通问卷按 AI 将推荐项放在首位的约定，标出“推荐”并默认选中。可以直接点击“提交回答”采用这组答案，也可以改选或填写“其他回答”；填写文字会取消该题原有选择。仅预选不会提交，完全不操作也不会超时自动采用答案。拷问模式中“确认并执行”等执行决策仍需主动选择。
+
+题目较长时在提问区内滚动，底部保留问题数量、采用推荐的数量和统一提交入口。提交失败会保留输入并提供“重试提交”；取消或任务结束后，可查看和复制当前未提交的回答。
+
+![折叠题目与默认推荐](assets/conversation-runtime/questionnaire-light-wide-1x.png)
+
+收到成功确认后，表单缩成“已提交 N 项回答 · 查看”。点击“查看”展开实际提交的答案，再次点击收起；回执在重新打开历史和折叠执行过程后仍可查看，不增加重复聊天消息。
+
+![提交后的回执](assets/conversation-runtime/questionnaire-receipt-1x.png)
+
+![查看已提交的答案](assets/conversation-runtime/questionnaire-answers-1x.png)
+
+[窄宽浅色](assets/conversation-runtime/questionnaire-light-small-1x.png)、[窄宽深色与额外缩放](assets/conversation-runtime/questionnaire-dark-small-1.5x.png)、[失败重试](assets/conversation-runtime/questionnaire-retry-1x.png)。验证使用 Windows 原生 Qt 组件与隔离示例数据：系统缩放 150%，`QT_SCALE_FACTOR=1` 时 DPR 为 1.5，额外设置 `1.5` 后 DPR 为 2.25；主题预览取消后画面和保存配置恢复。未调用真实模型或外部账号。
+
+复现：`.venv/Scripts/python.exe -X utf8 -B scripts/render_conversation_runtime_screenshots.py --questionnaire`，设置 `QT_QPA_PLATFORM=windows`，分别使用 `QT_SCALE_FACTOR=1` / `1.5`。自动检查见 `test/test_questionnaire_interactions.py`、`test/test_interaction_lifecycle.py` 和 `test/test_interaction_skill.py`，包含统一提交、重试、取消、键盘、历史保存与重载、跨会话隔离和终态通知时序。
+
+2026-10-28 验证：问卷及交互生命周期、工具路由、相关会话回归与主题共 81 项及 29 个子测试通过。扩展的 4 个拷问集成用例因既有 `_ConfigStub` 缺少 `get_god_mode()` 在初始化时失败；另一个内联可视化用例期望 1 个卡片、实际为 0，使用 HEAD 中的原始 `main.py` 与测试文件同样复现。没有修改这些无关业务或测试夹具，不据此声明全仓测试通过。
+
 ## 查看文件、执行过程和子任务
 
 右上角提供三个入口：

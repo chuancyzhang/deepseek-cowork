@@ -161,7 +161,6 @@ def request_user_input(
 ):
     custom_option = {"label": "自定义", "value": "__custom__", "description": "选择后填写选项以外的自定义内容。"}
     normalized_purpose = str(purpose or "").strip().lower()
-    grilling = str(_run_context(_context).get("mode") or "").strip().lower() == "grilling"
 
     def _normalize_question_specs(raw_questions):
         normalized = []
@@ -222,11 +221,11 @@ def request_user_input(
             questions=normalized_questions,
             allow_free_text=True,
             timeout_seconds=timeout_seconds,
+            wait_for_submission=True,
             source_tool="request_user_input",
             metadata={
                 "input_mode": "questionnaire",
                 "purpose": normalized_purpose,
-                "auto_select_first_on_timeout": not grilling,
             },
         )
         answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
@@ -255,7 +254,7 @@ def request_user_input(
                 "questions": normalized_questions,
                 "purpose": normalized_purpose,
                 "allow_free_text": True,
-                "timeout_seconds": timeout_seconds,
+                "timeout_seconds": None,
             },
             "interaction_response": response,
             "answers": answers,

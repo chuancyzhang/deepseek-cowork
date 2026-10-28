@@ -258,12 +258,15 @@ class UpdateLifecycleTests(unittest.TestCase):
 
     def test_log_export_includes_installer_diagnostics_but_not_backup_contents(self):
         from ui.log_export import LogExportWorker
+        from core.runtime_logs import append_log
         (self.root / "main.log").write_text("application")
         updates = self.root / "updates"
         transaction = updates / "transactions" / "test"
         (transaction / "backup").mkdir(parents=True)
         (updates / "app_update.log").write_text("download")
         (transaction / "update.log").write_text("installation")
+        append_log("update", json.dumps({"phase": "mutex_acquire_result", "transaction": "test",
+                   "created_new": False, "acquired": False, "error": "安装器取锁失败"}, ensure_ascii=False), self.root)
         (transaction / "backup" / "secret.log").write_text("must not export")
         target = self.root / "export.txt"
         worker = LogExportWorker(str(self.root), str(target), MagicMock(), self.host)
@@ -272,4 +275,36 @@ class UpdateLifecycleTests(unittest.TestCase):
         text = target.read_text(encoding="utf-8")
         self.assertIn("download", text)
         self.assertIn("installation", text)
+        self.assertIn("mutex_acquire_result", text)
+        self.assertIn("安装器取锁失败", text)
         self.assertNotIn("must not export", text)
+
+    def test_abort_logs_correlated_installer_error_before_writing_abort(self):
+        from core.runtime_logs import log_path
+        host = self.host
+        transaction = Path(host._update_transaction)
+        host._update_installer_process = SimpleNamespace(pid=12345, poll=lambda: 1)
+        (transaction / "result.json").write_text(json.dumps({
+            "id": transaction.name, "pid": 12345, "phase": "startup_failed", "stage": "mutex_wait",
+            "error": "另一个安装程序正在处理此应用", "mutex_created": False, "mutex_acquired": False,
+        }), encoding="utf-8")
+        (transaction / "update-launch.log").write_text("Bearer secret-token", encoding="utf-8")
+        host._abort_update("安装程序已关闭，应用尚未退出。", notify=False)
+        line = log_path("app_update", self.root).read_text(encoding="utf-8").splitlines()[-1]
+        event = json.loads(line.split("] ", 2)[2])
+        self.assertEqual(event["transaction"], transaction.name)
+        self.assertEqual(event["installer"]["exit_code"], 1)
+        self.assertEqual(event["installer"]["result"]["stage"], "mutex_wait")
+        self.assertFalse(event["installer"]["markers"]["abort"])
+        self.assertTrue((transaction / "abort.json").exists())
+        self.assertNotIn("secret-token", line)
+
+    def test_invalid_or_foreign_installer_result_does_not_interrupt_abort(self):
+        from core.update_diagnostics import installer_exit_details
+        transaction = Path(self.host._update_transaction)
+        for content in ("{", json.dumps({"id": "different", "error": "not this attempt"})):
+            with self.subTest(content=content):
+                (transaction / "result.json").write_text(content, encoding="utf-8")
+                details = installer_exit_details(transaction, self.host._update_installer_process)
+                self.assertIn("result_read_error", details)
+                self.assertNotIn("result", details)

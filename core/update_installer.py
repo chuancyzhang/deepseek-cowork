@@ -25,17 +25,88 @@ def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_nam
 INSTALLER_SCRIPT = r'''param([switch]$Headless, [switch]$Recover, [string]$PreviewImage, [double]$PreviewScale=1)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+$script:diagnosticId = Split-Path -Leaf $root
+$script:diagnosticStage = 'bootstrap'
+$script:readyPublished = $false
+$script:mutexCreated = $null
+$script:mutexAcquired = $false
+$script:mutexName = ''
+$updatesRoot = Split-Path -Parent (Split-Path -Parent $root)
+$script:logDataRoot = if((Split-Path -Leaf $updatesRoot) -eq 'updates') { Split-Path -Parent $updatesRoot } else { $updatesRoot }
+function Write-Diagnostic($phase, $fields=@{}) {
+ try {
+  $stamp=[DateTimeOffset]::Now
+  $event=[ordered]@{phase=$phase; transaction=$script:diagnosticId; stage=$script:diagnosticStage; diagnostic_schema=1}
+  foreach($name in $fields.Keys) { $event[$name]=$fields[$name] }
+  $directory=Join-Path (Join-Path $script:logDataRoot 'logs') $stamp.ToString('yyyy-MM-dd')
+  [IO.Directory]::CreateDirectory($directory) | Out-Null
+  $line='[{0}] [source=update pid={1}] {2}' -f $stamp.ToString('o'),$PID,($event | ConvertTo-Json -Depth 8 -Compress)
+  [IO.File]::AppendAllText((Join-Path $directory ('update-'+$PID+'.log')), $line+[Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+ } catch { [Console]::Error.WriteLine('update diagnostic write failed: '+$_.Exception.Message) }
+}
+function Save-Json($name, $value) {
+ $path = Join-Path $root $name
+ $temp = $path + '.tmp'
+ $value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8
+ Move-Item -LiteralPath $temp -Destination $path -Force
+}
+function Error-Details($record) {
+ return @{error=$record.Exception.Message; error_type=$record.Exception.GetType().FullName;
+  inner_error=if($record.Exception.InnerException){$record.Exception.InnerException.Message}else{''};
+  error_id=$record.FullyQualifiedErrorId; script_line=$record.InvocationInfo.ScriptLineNumber; script_stack=$record.ScriptStackTrace}
+}
+trap {
+ $failure=$_
+ $details=Error-Details $failure
+ $details.id=$script:diagnosticId; $details.pid=$PID; $details.stage=$script:diagnosticStage
+ $details.phase=if($script:readyPublished){'runtime_failed'}else{'startup_failed'}
+ $details.mutex_name=$script:mutexName; $details.mutex_created=$script:mutexCreated; $details.mutex_acquired=$script:mutexAcquired
+ Write-Diagnostic $details.phase $details
+ try { Save-Json 'result.json' $details } catch { Write-Diagnostic 'result_write_failed' (Error-Details $_) }
+ throw $failure
+}
+function Process-Details($process) {
+ return @{pid=[int]$process.ProcessId; parent_pid=[int]$process.ParentProcessId;
+  name=$process.Name; executable=$process.ExecutablePath; created=$process.CreationDate.ToString('o'); session_id=$process.SessionId}
+}
+function Log-StartupProcesses {
+ # A candidate is not evidence of mutex ownership. Do not record arbitrary command lines.
+ try {
+  $self=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID) -OperationTimeoutSec 3
+  $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$self.ParentProcessId) -OperationTimeoutSec 3
+  Write-Diagnostic 'installer_process_identity' @{process=(Process-Details $self); parent=if($parent){Process-Details $parent}else{$null}; expected_app_pid=$cfg.wait_pids[0]}
+  $candidates=@()
+  foreach($item in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -OperationTimeoutSec 3)) {
+   if($item.CommandLine -match '(?i)(?:^|\s)-File\s+(?:"([^"]+)"|(\S+))') {
+    $candidateScript=if($Matches[1]){$Matches[1]}else{$Matches[2]}
+    if($candidateScript -notmatch '(?i)\\transactions\\([0-9a-f]{32})\\install\.ps1$') { continue }
+    $candidateTransaction=$Matches[1]
+    $candidate=Process-Details $item
+    $candidate.script=$candidateScript; $candidate.transaction=$candidateTransaction
+    $candidates += $candidate
+   }
+  }
+  Write-Diagnostic 'installer_process_snapshot' @{candidates=$candidates; candidates_are_mutex_owners=$false}
+ } catch { Write-Diagnostic 'process_snapshot_failed' (Error-Details $_) }
+}
+try { [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false) } catch { Write-Diagnostic 'output_encoding_failed' (Error-Details $_) }
+Write-Diagnostic 'installer_start' @{pid=$PID; ps_version=$PSVersionTable.PSVersion.ToString(); clr_version=[Environment]::Version.ToString();
+ os_version=[Environment]::OSVersion.VersionString; is_64bit=[Environment]::Is64BitProcess;
+ apartment=[Threading.Thread]::CurrentThread.ApartmentState.ToString(); language_mode=$ExecutionContext.SessionState.LanguageMode.ToString();
+ thread_id=[Threading.Thread]::CurrentThread.ManagedThreadId; headless=[bool]$Headless; recover=[bool]$Recover}
 # A delayed security approval must not revive a cancelled transaction or take
 # the installation mutex away from the user's subsequent attempt.
-if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
+if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { Write-Diagnostic 'installer_cancelled'; exit 0 }
+$script:diagnosticStage='assemblies'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$root = $PSScriptRoot
+$script:diagnosticStage='configuration'
 $cfg = Get-Content -LiteralPath (Join-Path $root 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $install = [IO.Path]::GetFullPath($cfg.install_dir).TrimEnd('\')
 $source = [IO.Path]::GetFullPath($cfg.source_dir).TrimEnd('\')
 $backup = Join-Path $root 'backup'
-$logPath = Join-Path $root 'update.log'
+Write-Diagnostic 'installer_configuration' @{install_dir=$install; version=$cfg.version; wait_pids=$cfg.wait_pids;
+ theme=@{bg=$cfg.theme.bg; text=$cfg.theme.text; primary=$cfg.theme.primary; font=$cfg.theme.font; font_size=$cfg.theme.font_size; spacing=$cfg.theme.spacing}}
 $script:busy = $false
 $script:committed = $false
 $script:mutated = $false
@@ -46,11 +117,23 @@ $script:outcome = 'waiting'
 $keyHash=[Security.Cryptography.SHA256]::Create()
 $key=[BitConverter]::ToString($keyHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($install.ToLowerInvariant()))).Replace('-','')
 $keyHash.Dispose()
-if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
-$mutex=New-Object Threading.Mutex($false, ('Local\CoworkUpdate'+$key))
-try { $acquired=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true }
+if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { Write-Diagnostic 'installer_cancelled'; exit 0 }
+$script:mutexName='Local\CoworkUpdate'+$key
+$script:diagnosticStage='mutex_create'
+$createdNew=$false; $abandoned=$false
+$mutexWatch=[Diagnostics.Stopwatch]::StartNew()
+Write-Diagnostic 'mutex_acquire_start' @{mutex_name=$script:mutexName; timeout_ms=0}
+$mutex=New-Object Threading.Mutex($false, $script:mutexName, [ref]$createdNew)
+$script:mutexCreated=$createdNew
+$script:diagnosticStage='mutex_wait'
+try { $acquired=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true; $abandoned=$true }
+$mutexWatch.Stop(); $script:mutexAcquired=$acquired
+Write-Diagnostic 'mutex_acquire_result' @{mutex_name=$script:mutexName; created_new=$createdNew; acquired=$acquired;
+ abandoned=$abandoned; elapsed_ms=$mutexWatch.Elapsed.TotalMilliseconds; thread_id=[Threading.Thread]::CurrentThread.ManagedThreadId}
+Log-StartupProcesses
 if(-not $acquired) { throw '另一个安装程序正在处理此应用，请等待其完成。' }
 
+$script:diagnosticStage='native_helpers'
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -91,15 +174,9 @@ public static class CoworkLocks {
 }
 '@
 
-function Save-Json($name, $value) {
- $path = Join-Path $root $name
- $temp = $path + '.tmp'
- $value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8
- Move-Item -LiteralPath $temp -Destination $path -Force
-}
 function Log($message) {
  $line = ('[{0}] {1}' -f (Get-Date -Format 'o'), $message)
- Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+ Write-Diagnostic 'status' @{message=$message}
  if($script:logBox) { $script:logBox.AppendText($line + [Environment]::NewLine) }
 }
 function Status($message, $percent=-1) {
@@ -171,6 +248,7 @@ function Live-Owned {
  return $live
 }
 function Release-Files($paths) {
+ $script:diagnosticStage='release_files'
  Status '正在关闭应用及后台任务…'
  $deadline=[DateTime]::UtcNow.AddSeconds(30)
  do {
@@ -244,6 +322,8 @@ function Rollback($plan) {
  Record-Transaction 'rolled_back'
 }
 function Recover-Update {
+ $script:diagnosticStage='recovery'
+ Write-Diagnostic 'recovery_start'
  $script:busy=$true
  try {
   Discover-Owned
@@ -256,14 +336,18 @@ function Recover-Update {
   foreach($relative in $record.removed) { $script:removed.Add([string]$relative) }
   Rollback $plan
   $script:outcome='rolled_back'; Status '已恢复原版本，可以重新打开应用。' 100
+  Write-Diagnostic 'recovery_complete'
   if(-not $Headless) { $retry.Text='打开原版本'; $retry.Visible=$true }
  } catch {
+  Write-Diagnostic 'recovery_failed' (Error-Details $_)
   $script:outcome='rollback_failed'
   Status ('恢复未完成：'+$_.Exception.Message+' 备份已保留在：'+$backup)
   if(-not $Headless) { $retry.Text='重试恢复'; $retry.Visible=$true }
  } finally { $script:busy=$false }
 }
 function Apply-Update {
+ $script:diagnosticStage='validate_install'
+ Write-Diagnostic 'install_start'
  $script:busy=$true
  $script:written.Clear(); $script:removed.Clear(); $script:mutated=$false
  $plan=$null
@@ -291,12 +375,14 @@ function Apply-Update {
     if(-not (Test-Path -LiteralPath $dest -PathType Leaf) -or (File-Hash $dest) -ne $item.before_sha256) { throw '安装目录在准备期间发生了变化，请重新打开应用后重试更新。' }
    } elseif(Test-Path -LiteralPath $dest) { throw '安装目录在准备期间出现了新文件，请重新检查更新。' }
   }
-  Status '正在备份原版本…' 10
+   $script:diagnosticStage='backup'
+   Status '正在备份原版本…' 10
   foreach($item in @($plan.modified)+@($plan.deleted)) {
    $from=Safe-Path $install $item.path
    if(Test-Path -LiteralPath $from -PathType Leaf) { Copy-File $from (Safe-Path $backup $item.path) }
   }
   Record-Transaction 'backed_up'
+   $script:diagnosticStage='write_files'
   $total=[Math]::Max(1,$files.Count+@($plan.deleted).Count); $index=0
   foreach($item in $files) {
    # Journal intent before each operation, so interruption/partial copy is recoverable.
@@ -312,12 +398,14 @@ function Apply-Update {
    }
    $index++; Status '正在安装更新…' (15+[int](65*$index/$total))
   }
-  Status '正在检查安装结果…' 85
+   $script:diagnosticStage='verify_install'
+   Status '正在检查安装结果…' 85
   foreach($item in $files) {
    if((File-Hash (Safe-Path $install $item.path)) -ne $item.sha256) { throw ('安装结果校验失败：'+$item.path) }
   }
   Record-Transaction 'installed'; $script:outcome='installed'
   try {
+    $script:diagnosticStage='relaunch'
    Status '更新已安装，正在重新打开应用…' 95
    $opened=Open-App
    $deadline=[DateTime]::UtcNow.AddSeconds(30)
@@ -329,15 +417,18 @@ function Apply-Update {
    $receipt=Get-Content -LiteralPath (Join-Path $root 'opened.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    if($receipt.id -ne $cfg.id -or $receipt.version -ne $cfg.version.TrimStart('v','V')) { throw '应用启动确认不匹配。' }
    Record-Transaction 'complete'; $script:outcome='complete'; Status '更新完成' 100
+    Write-Diagnostic 'install_complete'
    $script:busy=$false
    if(-not $Headless) { $form.Close() }
   } catch {
+    Write-Diagnostic 'relaunch_failed' (Error-Details $_)
    Log $_.Exception.Message
    $script:outcome='installed_not_opened'; Record-Transaction $script:outcome
    Status '更新已安装，未能确认应用打开。可以重新打开应用。'
    if(-not $Headless) { $retry.Text='重新打开应用'; $retry.Visible=$true }
   }
  } catch {
+   Write-Diagnostic 'install_failed' (Error-Details $_)
   $reason=$_.Exception.Message; Log $reason
   $script:outcome='failed'
   if($script:mutated -and $plan) {
@@ -353,6 +444,7 @@ function Apply-Update {
  } finally { $script:busy=$false }
 }
 
+$script:diagnosticStage='form_initialize'
 if(-not $Headless) {
  $form=New-Object Windows.Forms.Form
  $form.Text='DeepSeek Cowork · 应用更新'; $form.StartPosition='CenterScreen'
@@ -403,8 +495,9 @@ if($PreviewImage) {
  $bitmap.Save($PreviewImage); $bitmap.Dispose(); $form.Dispose(); exit 0
 }
 
+$script:diagnosticStage='process_discovery'
 try {
- if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { exit 0 }
+ if(-not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { Write-Diagnostic 'installer_cancelled'; exit 0 }
  # Capture root identities before the application exits. PID reuse cannot expand ownership.
  foreach($id in $cfg.wait_pids) {
   $p=Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
@@ -414,11 +507,14 @@ try {
  $launchParent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
  $launchParentIdentity=if($launchParent){Identity $launchParent}else{''}
  Save-Json 'ready.json' @{id=$cfg.id; pid=$PID}
-} catch { Save-Json 'result.json' @{id=$cfg.id; phase='startup_failed'; error=$_.Exception.Message}; throw }
+ $script:readyPublished=$true; $script:diagnosticStage='wait_commit'
+ Write-Diagnostic 'installer_ready' @{parent_pid=[int]$cfg.wait_pids[0]; parent_identity=$launchParentIdentity}
+} catch { throw }
 
 if($Headless) {
  if($Recover) { Recover-Update }
  elseif(Test-Path -LiteralPath (Join-Path $root 'commit.json')) { $script:committed=$true; Apply-Update }
+ Write-Diagnostic 'installer_exit' @{outcome=$script:outcome}
  exit $(if($script:outcome -eq 'complete'){0}else{1})
 }
 $context=New-Object Windows.Forms.ApplicationContext
@@ -426,20 +522,23 @@ $form.Add_FormClosed({$context.ExitThread()})
 $timer=New-Object Windows.Forms.Timer; $timer.Interval=250
 $timer.Add_Tick({
  if($Recover) { $timer.Stop(); $script:committed=$true; $form.Show(); Recover-Update; return }
- if(Test-Path -LiteralPath (Join-Path $root 'abort.json')) { $timer.Stop(); $context.ExitThread(); return }
+ if(Test-Path -LiteralPath (Join-Path $root 'abort.json')) { Write-Diagnostic 'installer_cancelled'; $timer.Stop(); $context.ExitThread(); return }
  $parent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
  $parentAlive=$parent -and (Identity $parent) -eq $launchParentIdentity
  if(Test-Path -LiteralPath (Join-Path $root 'commit.json')) {
+  if(-not $script:committed) { $script:diagnosticStage='wait_parent_exit'; Write-Diagnostic 'commit_observed' @{parent_pid=[int]$cfg.wait_pids[0]; parent_alive=[bool]$parentAlive} }
   $script:committed=$true
   if($parentAlive) { return }
   $timer.Stop(); $form.Show(); Log 'installer_window_shown'; Apply-Update; return
  }
  if(-not $parentAlive) {
+  Write-Diagnostic 'parent_exited_without_commit'
   $timer.Stop(); Status '应用未完成安装准备，尚未替换任何文件。请重新打开应用后重试。'; $form.Show()
  }
 })
 # Pump the handshake without showing an installer window over a still-running app.
 $timer.Start()
 [Windows.Forms.Application]::Run($context)
+Write-Diagnostic 'installer_exit' @{outcome=$script:outcome; committed=$script:committed}
 $timer.Dispose(); $form.Dispose(); $context.Dispose()
 '''

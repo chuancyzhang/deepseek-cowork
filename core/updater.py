@@ -754,9 +754,27 @@ def launch_windows_update_script(script_path):
         raise UpdaterError("自动安装更新仅支持 Windows。")
     script_path = os.path.abspath(script_path)
     powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    with open(os.path.join(os.path.dirname(script_path), "update-launch.log"), "a", encoding="utf-8") as handle:
-        return popen_external_program(
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", script_path],
-            close_fds=True, cwd=os.path.dirname(script_path), stdout=handle, stderr=handle,
-            **subprocess_kwargs_no_window(),
-        )
+    from core.update_diagnostics import log_installer_event
+    transaction = os.path.dirname(script_path)
+    log_installer_event(transaction, "installer_launch_requested", app_version=APP_VERSION,
+                        app_pid=os.getpid(), parent_pid=os.getppid(), frozen=bool(getattr(sys, "frozen", False)),
+                        powershell=powershell, script=script_path)
+    try:
+        with open(script_path, "rb") as script_handle:
+            script_sha256 = hashlib.sha256(script_handle.read()).hexdigest()
+        log_installer_event(transaction, "installer_script_identity", script_sha256=script_sha256)
+    except OSError as exc:
+        log_installer_event(transaction, "installer_script_identity_failed", error_type=type(exc).__name__, error=str(exc))
+    try:
+        with open(os.path.join(transaction, "update-launch.log"), "a", encoding="utf-8") as handle:
+            process = popen_external_program(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", script_path],
+                close_fds=True, cwd=transaction, stdout=handle, stderr=handle,
+                **subprocess_kwargs_no_window(),
+            )
+    except Exception as exc:
+        log_installer_event(transaction, "installer_launch_failed", error_type=type(exc).__name__,
+                            error=str(exc), winerror=getattr(exc, "winerror", None))
+        raise
+    log_installer_event(transaction, "installer_launched", installer_pid=process.pid, app_pid=os.getpid())
+    return process

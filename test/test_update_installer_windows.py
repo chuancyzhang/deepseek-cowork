@@ -8,7 +8,8 @@ import time
 import unittest
 from pathlib import Path
 
-from core.updater import build_update_plan, write_update_plan, create_windows_update_script
+from core.updater import build_update_plan, write_update_plan, create_windows_update_script, launch_windows_update_script
+from core.runtime_logs import collect_files, iter_records
 from core.process_utils import subprocess_kwargs_no_window
 
 
@@ -41,6 +42,77 @@ class WindowsInstallerTests(unittest.TestCase):
         script = create_windows_update_script(str(self.install), str(self.source), path, current_pid=os.getpid(), target_dir=str(self.root / "updates"), version="9.0.0")
         return Path(script)
 
+    def diagnostic_events(self, transaction):
+        files, issues = collect_files(self.root)
+        self.assertFalse(issues)
+        events = []
+        for file in files:
+            if file.source != "update":
+                continue
+            for record in iter_records(file):
+                self.assertFalse(record.decode_errors)
+                event = json.loads(record.text.split("] ", 2)[2])
+                if event.get("transaction") == transaction:
+                    events.append(event)
+        return events
+
+    def test_mutex_conflict_reports_real_error_and_running_installer_without_writing(self):
+        first = self.prepare()
+        owner = launch_windows_update_script(str(first))
+        self.children.append(owner)
+        deadline = time.monotonic() + 20
+        while not (first.parent / "ready.json").exists() and owner.poll() is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((first.parent / "ready.json").exists(), (first.parent / "update-launch.log").read_text(encoding="utf-8"))
+        second = self.prepare()
+        contender = launch_windows_update_script(str(second))
+        self.children.append(contender)
+        self.assertEqual(contender.wait(timeout=20), 1)
+        self.assertFalse((second.parent / "ready.json").exists())
+        result = json.loads((second.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["phase"], "startup_failed")
+        self.assertEqual(result["stage"], "mutex_wait")
+        self.assertFalse(result["mutex_created"])
+        self.assertFalse(result["mutex_acquired"])
+        self.assertIn("另一个安装程序", result["error"])
+        events = self.diagnostic_events(second.parent.name)
+        acquisition = next(event for event in events if event["phase"] == "mutex_acquire_result")
+        self.assertFalse(acquisition["acquired"])
+        snapshot = next(event for event in events if event["phase"] == "installer_process_snapshot")
+        self.assertIn(owner.pid, [item["pid"] for item in snapshot["candidates"]])
+        identity = next(event for event in events if event["phase"] == "installer_process_identity")
+        self.assertEqual(identity["process"]["parent_pid"], os.getpid())
+        self.assertNotIn("CommandLine", json.dumps(events))
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertIn("另一个安装程序", (second.parent / "update-launch.log").read_text(encoding="utf-8"))
+        (first.parent / "abort.json").write_text(json.dumps({"id": first.parent.name}))
+        self.assertEqual(owner.wait(timeout=5), 0)
+
+    def test_early_configuration_and_theme_errors_are_utf8_and_exportable(self):
+        for failure in ("configuration", "form_initialize"):
+            with self.subTest(stage=failure):
+                script = self.prepare()
+                config_path = script.parent / "config.json"
+                if failure == "configuration":
+                    config_path.write_text("{invalid", encoding="utf-8")
+                else:
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    config["theme"] = {"bg": "rgb(255, 255, 255)"}
+                    config_path.write_text(json.dumps(config), encoding="utf-8")
+                child = launch_windows_update_script(str(script))
+                self.children.append(child)
+                self.assertEqual(child.wait(timeout=20), 1)
+                result = json.loads((script.parent / "result.json").read_text(encoding="utf-8-sig"))
+                self.assertEqual(result["stage"], failure)
+                self.assertEqual(result["phase"], "startup_failed")
+                self.assertGreater(result["script_line"], 0)
+                self.assertTrue(result["error_type"])
+                self.assertFalse((script.parent / "ready.json").exists())
+                events = self.diagnostic_events(script.parent.name)
+                self.assertTrue(any(event["phase"] == "startup_failed" for event in events))
+                (script.parent / "update-launch.log").read_text(encoding="utf-8")
+                self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+
     def execute(self, script, commit=True, recover=False):
         if commit:
             (script.parent / "commit.json").write_text(json.dumps({"id": script.parent.name}), encoding="utf-8")
@@ -53,6 +125,10 @@ class WindowsInstallerTests(unittest.TestCase):
         self.execute(script, commit=False)
         self.assertEqual((self.install / "_internal" / "data.txt").read_text(), "old")
         self.assertFalse((self.install / "_internal" / "added.txt").exists())
+        acquisition = next(event for event in self.diagnostic_events(script.parent.name)
+                           if event["phase"] == "mutex_acquire_result")
+        self.assertTrue(acquisition["created_new"])
+        self.assertTrue(acquisition["acquired"])
 
     def test_delayed_launch_after_cancel_exits_without_ready_or_file_mutation(self):
         script = self.prepare()
@@ -84,13 +160,12 @@ class WindowsInstallerTests(unittest.TestCase):
         while not (script.parent / "ready.json").exists() and time.monotonic() < deadline:
             time.sleep(.05)
         self.assertTrue((script.parent / "ready.json").exists())
-        log = script.parent / "update.log"
-        self.assertNotIn("installer_window_shown", log.read_text(encoding="utf-8-sig") if log.exists() else "")
+        self.assertNotIn("installer_window_shown", json.dumps(self.diagnostic_events(script.parent.name)))
         (script.parent / "commit.json").write_text(json.dumps({"id": script.parent.name}))
         time.sleep(.6)
         self.assertIsNone(child.poll())
         self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
-        self.assertNotIn("installer_window_shown", log.read_text(encoding="utf-8-sig") if log.exists() else "")
+        self.assertNotIn("installer_window_shown", json.dumps(self.diagnostic_events(script.parent.name)))
         parent.terminate(); parent.wait(timeout=5)
         deadline = time.monotonic() + 20
         while not (script.parent / "transaction.json").exists() and time.monotonic() < deadline:
@@ -101,7 +176,7 @@ class WindowsInstallerTests(unittest.TestCase):
                 break
             time.sleep(.05)
         self.assertEqual(transaction["phase"], "installed_not_opened")
-        self.assertIn("installer_window_shown", log.read_text(encoding="utf-8-sig"))
+        self.assertIn("installer_window_shown", json.dumps(self.diagnostic_events(script.parent.name)))
         self.assertEqual((self.install / "_internal/data.txt").read_text(), "new")
 
     def test_hidden_gui_handshake_cancels_without_showing_or_installing(self):

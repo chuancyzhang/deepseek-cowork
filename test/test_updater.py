@@ -411,6 +411,7 @@ class TestUpdater(unittest.TestCase):
 
         with patch("core.updater.sys.platform", "win32"), \
              patch("core.updater.popen_external_program") as popen:
+            popen.return_value.pid = 12345
             launch_windows_update_script(script_path)
 
         args = popen.call_args.args[0]
@@ -427,6 +428,22 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual(kwargs.get("cwd"), self.temp_dir)
         self.assertIsNotNone(kwargs.get("stdout"))
         self.assertIsNotNone(kwargs.get("stderr"))
+
+    def test_launch_error_keeps_diagnostic_before_installer_can_start(self):
+        from core.runtime_logs import log_path
+        script_path = os.path.join(self.temp_dir, "apply-update.ps1")
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write("# fixture")
+        with patch("core.updater.sys.platform", "win32"), \
+             patch("core.updater.popen_external_program", side_effect=OSError("launch refused")):
+            with self.assertRaisesRegex(OSError, "launch refused"):
+                launch_windows_update_script(script_path)
+        events = [json.loads(line.split("] ", 2)[2]) for line in
+                  log_path("app_update", self.temp_dir).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events[0]["phase"], "installer_launch_requested")
+        self.assertEqual(events[-1]["phase"], "installer_launch_failed")
+        self.assertEqual(events[-1]["error_type"], "OSError")
+        self.assertTrue(all(event["transaction"] == os.path.basename(self.temp_dir) for event in events))
 
 
 

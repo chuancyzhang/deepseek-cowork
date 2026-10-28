@@ -13,6 +13,7 @@ from core.runtime_journal import RUN_NONTERMINAL_STATUSES
 from core.theme import default_design_tokens
 from core.theme_service import resolve_theme
 from core.update_coordinator import atomic_json, update_log
+from core.update_diagnostics import installer_exit_details
 from core.updater import create_windows_update_script, launch_windows_update_script
 from ui.primitives import ProductMessageDialog
 from ui.worker_lifecycle import pending_ui_workers, pause_ui_work_timers, ui_worker_snapshot
@@ -60,6 +61,7 @@ class UpdateLifecycleMixin:
             return
         self._update_result = result
         self._update_transaction = ""
+        self._update_installer_process = None
         self._update_preparing = True
         self._update_paused_timers = []
         self._update_daemon_prepared = False
@@ -109,7 +111,8 @@ class UpdateLifecycleMixin:
                 can_cancel_install=True,
                 message="正在等待安装程序启动；若安全软件弹出确认，请允许本次安装。应用和任务暂时保持运行。",
             )
-            update_log(self.update_coordinator.root, "installer_wait_start", transaction=os.path.basename(self._update_transaction), wait_seconds=INSTALLER_STARTUP_WAIT_SECONDS)
+            update_log(self.update_coordinator.root, "installer_wait_start", transaction=os.path.basename(self._update_transaction),
+                       installer_pid=self._update_installer_process.pid, wait_seconds=INSTALLER_STARTUP_WAIT_SECONDS)
             self._schedule_update_installer_check()
         except Exception as exc:
             self._abort_update(f"无法启动安装程序：{exc}")
@@ -289,6 +292,7 @@ class UpdateLifecycleMixin:
 
     def _abort_update(self, message, notify=True):
         root = getattr(self, "_update_transaction", "")
+        diagnostics = installer_exit_details(root, getattr(self, "_update_installer_process", None)) if root else {}
         if root:
             try:
                 atomic_json(os.path.join(root, "abort.json"), {"id": os.path.basename(root)})
@@ -312,7 +316,8 @@ class UpdateLifecycleMixin:
         if getattr(self, "_update_gateway_stopped", False):
             self.start_gateway_process()
         self.update_coordinator.install_aborted(message)
-        update_log(self.update_coordinator.root, "install_aborted", error=message)
+        update_log(self.update_coordinator.root, "install_aborted", error=message,
+                   transaction=os.path.basename(root), installer=diagnostics)
         if notify:
             self.add_system_toast(message, "error", auto_close_ms=8000)
 

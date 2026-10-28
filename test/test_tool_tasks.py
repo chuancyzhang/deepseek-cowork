@@ -192,10 +192,111 @@ class ToolTasksTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             manager.wait("one")
 
+    def test_terminate_only_selected_task_and_deliver_partial_output_once(self):
+        manager = self.manager()
+        execute, started, release = self.blocked("independent result")
+        other, _ = manager.submit("other", "read", {}, "other-call", execute, read_only=True)
+        self.assertTrue(started.wait(1))
+        entered = threading.Event()
+        def cancellable():
+            entered.set()
+            eventually(lambda: manager.abort_requested("one"))
+            return {"status": "cancelled", "stdout": "partial output"}
+        task, _ = manager.submit("one", "slow", {}, "call", cancellable, read_only=True)
+        self.assertTrue(entered.wait(1))
+        manager.pending_result(task)
+        self.assertEqual(self.manager().wait("one", terminate=True)["status"], "error")
+        self.assertFalse(task.cancel_requested.is_set())
+        result = manager.wait("one", terminate=True)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["result"], {"status": "cancelled", "stdout": "partial output"})
+        self.assertTrue(self.records["one"]["cancel_requested"])
+        self.assertEqual(self.records["one"]["status"], "cancelled")
+        self.assertFalse(manager.closed.is_set())
+        self.assertFalse(manager.abort_requested("other"))
+        self.assertFalse(other.done.is_set())
+        manager.mark_delivered("one", "receipt")
+        self.assertEqual(manager.wait("one", terminate=True)["status"], "already_delivered")
+        self.assertEqual(manager.ready(), [])
+        release.set()
+        self.assertEqual(manager.await_initial(other), "independent result")
+
+    def test_terminate_queued_task_never_starts_it_or_its_batch_successor(self):
+        manager = self.manager()
+        execute, started, release = self.blocked()
+        first, _ = manager.submit("one", "write", {}, "call", execute)
+        self.assertTrue(started.wait(1))
+        second, _ = manager.submit("two", "write", {"i": 2}, "call2",
+                                   lambda: self.fail("cancelled queue ran"), predecessor="one")
+        third, _ = manager.submit("three", "read", {}, "call3",
+                                  lambda: self.fail("cancelled dependency ran"), read_only=True, predecessor="two")
+        result = manager.wait("two", terminate=True)
+        self.assertEqual(result["result"]["status"], "cancelled")
+        self.assertTrue(result["result"]["not_executed"])
+        self.assertEqual(second.started_at, 0)
+        self.assertTrue(third.done.wait(1))
+        self.assertEqual(third.result["dependency_task_id"], "two")
+        self.assertFalse(first.done.is_set())
+        release.set()
+        self.assertEqual(manager.await_initial(first), "result")
+        later, _ = manager.submit("later", "write", {"i": 4}, "call4", lambda: "next operation")
+        self.assertEqual(manager.await_initial(later), "next operation")
+
+    def test_unconfirmed_stop_stays_pending_and_preserves_racing_success(self):
+        manager = self.manager(wait_seconds=0)
+        execute, started, release = self.blocked("completed despite stop request")
+        task, _ = manager.submit("one", "slow", {}, "call", execute, read_only=True)
+        self.assertTrue(started.wait(1))
+        task.pause_clock()
+        for _ in range(2):
+            result = manager.wait("one", terminate=True)
+            self.assertTrue(is_pending_tool_result(result))
+            self.assertTrue(result["cancel_requested"])
+            self.assertFalse(task.done.is_set())
+        self.assertTrue(manager.snapshot()[0]["cancel_requested"])
+        self.assertEqual(self.records["one"]["status"], "started")
+        release.set()
+        self.assertTrue(task.done.wait(1))
+        self.assertEqual(manager.wait("one", terminate=True)["result"], "completed despite stop request")
+        self.assertEqual(task.state, "succeeded")
+
+    def test_terminate_completed_task_preserves_result_without_requesting_cancel(self):
+        manager = self.manager()
+        task, _ = manager.submit("one", "read", {}, "call", lambda: "already complete", read_only=True)
+        self.assertTrue(task.done.wait(1))
+        self.assertEqual(manager.wait("one", terminate=True)["result"], "already complete")
+        self.assertFalse(task.cancel_requested.is_set())
+        self.assertNotIn("cancel_requested", self.records["one"])
+
+    def test_cancel_record_failure_does_not_signal_task(self):
+        manager = self.manager()
+        execute, started, release = self.blocked()
+        task, _ = manager.submit("one", "slow", {}, "call", execute, read_only=True)
+        self.assertTrue(started.wait(1))
+        persist = manager.persist
+        def fail_cancel(task_id, payload):
+            if payload.get("cancel_requested"):
+                raise PermissionError("cannot persist cancellation")
+            return persist(task_id, payload)
+        manager.persist = fail_cancel
+        with self.assertRaises(PermissionError):
+            manager.wait("one", terminate=True)
+        self.assertFalse(task.cancel_requested.is_set())
+        self.assertFalse(task.done.is_set())
+        manager.persist = persist
+        release.set()
+
 
 class ToolTasksWorkerTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows process-tree cancellation")
     def test_stop_terminates_real_command_descendants_and_retains_output(self):
+        self._check_real_command_stop(via_tool=False)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree cancellation")
+    def test_wait_tool_terminates_real_command_descendants_and_keeps_run_active(self):
+        self._check_real_command_stop(via_tool=True)
+
+    def _check_real_command_stop(self, *, via_tool):
         import ctypes
         import subprocess
         import sys
@@ -205,6 +306,7 @@ class ToolTasksWorkerTest(unittest.TestCase):
 
         commands = _load_command_tools_module()
         owner, handles, errors, processes = [], [], [], []
+        observed = threading.Event()
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
         kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -231,26 +333,41 @@ class ToolTasksWorkerTest(unittest.TestCase):
                         if not handle:
                             raise AssertionError("Cannot observe test process")
                         handles.append(handle)
-                    owner[0].stop()
+                    if not via_tool:
+                        owner[0].stop()
                 except Exception as exc:
                     errors.append(exc)
                     if owner:
                         owner[0].stop()
+                finally:
+                    observed.set()
 
             stopper = threading.Thread(target=stop_after_started)
             def on_ready(worker):
                 owner.append(worker)
                 stopper.start()
             def streams(turn, messages):
-                yield self.call()
+                if turn == 1:
+                    yield self.call()
+                elif turn == 2 and via_tool:
+                    self.assertTrue(observed.wait(3))
+                    self.assertFalse(errors, errors)
+                    task_id = next(m["result_obj"]["task_id"] for m in messages if is_pending_tool_result(m.get("result_obj")))
+                    yield self.call("wait_tool", "stop", {"task_id": task_id, "terminate": True})
+                else:
+                    self.assertFalse(owner[0].is_stopped)
+                    yield {"type": "content", "content": "工具已停止，输出已保留。"}
             try:
                 with patch.object(commands, "run_in_sandbox", side_effect=launch):
                     requests, final, _ = self.run_worker(streams,
                         lambda name, args, context: commands.bash(directory, "test command", context),
-                        manager_wait=5, on_ready=on_ready)
+                        manager_wait=.3 if via_tool else 5, on_ready=on_ready)
                 stopper.join(3)
                 self.assertFalse(errors, errors)
-                self.assertEqual(len(requests), 1)
+                if via_tool:
+                    self.assertGreaterEqual(len(requests), 3)
+                else:
+                    self.assertEqual(len(requests), 1)
                 for handle in handles:
                     self.assertEqual(kernel32.WaitForSingleObject(handle, 1000), 0)
                 task = next(iter(owner[0].tool_tasks.tasks.values()))
@@ -312,6 +429,62 @@ class ToolTasksWorkerTest(unittest.TestCase):
     def call(name="slow", call_id="call", args=None, index=0):
         return {"type": "tool_call", "index": index, "id": call_id,
                 "function": {"name": name, "arguments": json.dumps(args or {})}}
+
+    def test_model_terminates_task_and_continues_with_one_result_delivery(self):
+        owner, calls = [], []
+        def execute(name, args, context):
+            calls.append(args)
+            if args.get("next"):
+                self.assertFalse(context["abort_check"]())
+                self.assertFalse(context["execution_authorization"]._cancelled.is_set())
+                return "continued working"
+            eventually(context["abort_check"])
+            return {"status": "cancelled", "stdout": "saved partial output"}
+        def streams(turn, messages):
+            if turn == 1:
+                yield self.call()
+            elif turn == 2:
+                task_id = next(m["result_obj"]["task_id"] for m in messages if is_pending_tool_result(m.get("result_obj")))
+                yield self.call("wait_tool", "stop-call", {"task_id": task_id, "terminate": True})
+            elif turn == 3:
+                self.assertIn("saved partial output", str(messages))
+                self.assertFalse(owner[0].is_stopped)
+                yield self.call("slow", "next-call", {"next": True})
+            else:
+                yield {"type": "content", "content": "已停止耗时工具，并完成其他工作。"}
+        requests, final, events = self.run_worker(streams, execute, manager_wait=.3, on_ready=owner.append)
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(calls, [{}, {"next": True}])
+        messages = final["generated_messages"]
+        self.assertEqual(sum("saved partial output" in (m.get("content") or "") for m in messages), 1)
+        self.assertEqual(sum(m.get("tool_call_id") == "call" for m in messages), 1)
+        task = next(iter(owner[0].tool_tasks.tasks.values()))
+        self.assertTrue(task.delivered)
+        self.assertEqual(task.state, "cancelled")
+        self.assertTrue(any((event.get("result_obj") or {}).get("status") == "cancelled" for event in events))
+
+    def test_invalid_terminate_arguments_cannot_cancel_or_start_tools(self):
+        owner = []
+        def prepare(worker):
+            owner.append(worker)
+            worker._ensure_tool_tasks()
+        def streams(turn, messages):
+            if turn == 1:
+                invalid = [{"task_id": "foreign", "terminate": "true"},
+                           {"task_id": "foreign", "terminate": 1},
+                           {"task_id": "foreign", "terminate": None},
+                           {"task_id": "foreign", "extra": True},
+                           {"task_id": "", "terminate": True},
+                           {"task_id": "foreign", "terminate": True}]
+                for i, args in enumerate(invalid):
+                    yield self.call("wait_tool", f"invalid-{i}", args, index=i)
+            else:
+                results = [m["result_obj"] for m in messages if m.get("role") == "tool"]
+                self.assertEqual(len(results), 6)
+                self.assertTrue(all(r["status"] == "error" for r in results))
+                yield {"type": "content", "content": "参数错误，未停止任何工具。"}
+        self.run_worker(streams, lambda *a: self.fail("unexpected tool execution"), on_ready=prepare)
+        self.assertEqual(owner[0].tool_tasks.tasks, {})
 
     def test_pending_final_reply_parks_then_delivers_result_once(self):
         release, started = threading.Event(), threading.Event()

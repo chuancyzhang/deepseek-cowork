@@ -26,6 +26,12 @@ def current_tool_run():
     """The execution owner of nested tool work, independent of its thread."""
     return _active_run.get()
 
+
+def current_tool_task():
+    """Capture the task owner before handing work to another thread."""
+    return _active_task.get()
+
+
 WAIT_TOOL_DEFINITION = {
     "type": "function",
     "function": {
@@ -34,11 +40,17 @@ WAIT_TOOL_DEFINITION = {
             "Wait up to 120 seconds for a running tool task in this run. "
             "Use the task_id returned with status running or queued. The original "
             "operation continues; never repeat it to poll. You may instead do "
-            "independent work. Results are also delivered automatically."
+            "independent work. Set terminate=true to request stopping only this "
+            "task and wait up to 120 seconds for confirmation, preserving output. "
+            "A pending result with cancel_requested=true is not confirmed stopped. "
+            "Completed operations are not undone. Results are also delivered automatically."
         ),
         "parameters": {
             "type": "object",
-            "properties": {"task_id": {"type": "string"}},
+            "properties": {
+                "task_id": {"type": "string"},
+                "terminate": {"type": "boolean", "description": "Request stopping this task; defaults to false."},
+            },
             "required": ["task_id"],
             "additionalProperties": False,
         },
@@ -87,6 +99,7 @@ class ToolTask:
     active_elapsed: float = 0.0
     pause_depth: int = 0
     dependencies: tuple = ()
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     lock: object = field(default_factory=threading.RLock)
 
@@ -144,6 +157,11 @@ class ToolTaskManager:
                     self.session_id, self.run_id, task.task_id, task.call_id,
                     phase, task.elapsed())
 
+    def abort_requested(self, task_id):
+        task = self.tasks.get(task_id)
+        return (self.closed.is_set() or self.abort_check()
+                or bool(task is not None and task.cancel_requested.is_set()))
+
     def submit(self, task_id, name, args, call_id, execute, *, read_only=False, predecessor=None):
         if self.closed.is_set() or self.abort_check():
             raise RuntimeError("任务已停止，不能启动工具。")
@@ -173,7 +191,7 @@ class ToolTaskManager:
             try:
                 for dependency in dependencies:
                     while not dependency.done.wait(.05):
-                        if self.closed.is_set() or self.abort_check():
+                        if self.abort_requested(task_id):
                             return
                     if dependency.error:
                         raise RuntimeError("前序工具结果保存失败，后续操作未执行。") from dependency.error
@@ -181,16 +199,21 @@ class ToolTaskManager:
                         task.result = {"status": "unknown", "not_executed": True,
                                        "error": "前序操作结果未知，本操作未执行；请先只读核实。"}
                         return
-                if self.closed.is_set() or self.abort_check():
-                    return
+                    if dependency.task_id == predecessor and dependency.state == "cancelled":
+                        task.result = {"status": "cancelled", "not_executed": True,
+                                       "dependency_task_id": dependency.task_id,
+                                       "content": "前序工具已停止，本次后续调用未执行；请根据已有结果决定下一步。"}
+                        return
                 with task.lock:
+                    if self.abort_requested(task_id):
+                        return
                     task.state = "running"
                     task.started_at = time.time()
                     task.active_started = self.clock()
                 self._record(task, status="started", started_at=task.started_at)
                 self._log(task, "started")
                 self.events.put(("tool_task_started", (task.task_id,)))
-                if self.closed.is_set() or self.abort_check():
+                if self.abort_requested(task_id):
                     return
                 task.result = execute()
                 task.execution_finished = True
@@ -201,7 +224,7 @@ class ToolTaskManager:
                     task.active_elapsed = task.elapsed()
                     task.active_started = None
                     task.finished_at = time.time()
-                    if task.result is None and (self.closed.is_set() or self.abort_check()):
+                    if task.result is None and self.abort_requested(task_id):
                         task.result = {"status": "unknown" if task.started_at else "cancelled", "aborted": True,
                                        "not_executed": not bool(task.started_at),
                                        "content": ("已请求停止，工具结果尚未确认。" if task.started_at else
@@ -236,10 +259,16 @@ class ToolTaskManager:
             task.yielded = True
             self._record(task, yielded=True)
             state = "queued" if task.state == "queued" else "running"
+            cancelling = task.cancel_requested.is_set()
         self._log(task, "yielded")
         return {"background_tool": True, "status": state, "task_id": task.task_id,
                 "tool_name": task.name, "elapsed_seconds": round(task.elapsed(), 3),
-                "content": ("工具尚未完成，原调用会继续执行。可调用 wait_tool(task_id) 继续等待，"
+                "cancel_requested": cancelling,
+                "content": ("已请求停止此工具，但尚未确认结束，不能视为已停止。已有输出将保留；"
+                            "可调用 wait_tool(task_id) 等待确认或先做独立工作。不要重复原调用。"
+                            if cancelling else
+                            "工具尚未完成，原调用会继续执行。可调用 wait_tool(task_id) 继续等待，"
+                            "调用 wait_tool(task_id, terminate=true) 请求停止此工具，"
                             "或先进行不依赖结果的工作；完成后会自动交回结果。不要重复原调用。")}
 
     def await_initial(self, task, can_wait=True):
@@ -258,10 +287,18 @@ class ToolTaskManager:
             raise task.error
         return task.result
 
-    def wait(self, task_id):
+    def wait(self, task_id, *, terminate=False):
         task = self.tasks.get(task_id)
         if task is None:
             return {"status": "error", "error": "任务标识无效或不属于本次运行。"}
+        if terminate:
+            with task.lock:
+                if not task.done.is_set() and not task.cancel_requested.is_set():
+                    # Persist intent before signalling; completion uses the same lock.
+                    self._record(task, cancel_requested=True, cancel_requested_at=time.time())
+                    task.cancel_requested.set()
+                    self._log(task, "cancel_requested")
+                    self.changed.set()
         self._log(task, "waiting")
         previous, waited = self.clock(), 0.0
         while not task.done.wait(.02):
@@ -269,7 +306,7 @@ class ToolTaskManager:
             if self.closed.is_set() or self.abort_check():
                 return {"status": "cancelled", "aborted": True, "task_id": task_id}
             now = self.clock()
-            if not task.waiting_for_user():
+            if task.cancel_requested.is_set() or not task.waiting_for_user():
                 waited += max(0, now - previous)
             previous = now
             if waited >= self.wait_seconds:
@@ -299,6 +336,7 @@ class ToolTaskManager:
 
     def snapshot(self):
         return [{"task_id": t.task_id, "tool_name": t.name, "status": t.state,
+                 "cancel_requested": t.cancel_requested.is_set(),
                  "elapsed_seconds": round(t.elapsed(), 3), "result_saved": t.done.is_set() and not t.error}
                 for t in self.outstanding()]
 

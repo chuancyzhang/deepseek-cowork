@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 import uuid
-from core.tool_tasks import current_tool_run, tool_interaction_wait
+from core.tool_tasks import current_tool_run, current_tool_task, tool_interaction_wait
 
 
 logger = logging.getLogger(__name__)
@@ -394,6 +394,7 @@ class InteractionService(QObject):
         require_receiver: bool = False,
     ) -> dict[str, Any]:
         owner = current_tool_run()
+        task = current_tool_task()
         metadata = dict(metadata or {})
         if owner is not None:
             session_id = owner.session_id
@@ -401,6 +402,7 @@ class InteractionService(QObject):
             original_abort_check = abort_check
             abort_check = lambda: (
                 owner.closed.is_set() or owner.abort_check()
+                or (task is not None and task.cancel_requested.is_set())
                 or (callable(original_abort_check) and original_abort_check())
             )
         if callable(abort_check) and abort_check():

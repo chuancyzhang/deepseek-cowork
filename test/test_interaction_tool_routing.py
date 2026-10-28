@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import QApplication
 
 from core.execution_authorization import ExecutionAuthorization
@@ -157,6 +157,32 @@ class BackgroundInteractionTests(unittest.TestCase):
         finally:
             for owner in owners:
                 owner.close()
+            for task in tasks:
+                task.done.wait(1)
+
+    def test_terminate_one_task_cancels_only_its_question(self):
+        service = InteractionService()
+        owner = ToolTaskManager("one", "run-one")
+        tasks, requests = [], []
+        service.interaction_requested.connect(requests.append, Qt.DirectConnection)
+        try:
+            for i in range(2):
+                task, _ = owner.submit(f"ask-{i}", "read", {"i": i}, f"call-{i}",
+                    lambda i=i: service.create_request("one", "text", f"question-{i}", timeout_seconds=3),
+                    read_only=True)
+                tasks.append(task)
+            from test_tool_tasks import eventually
+            eventually(lambda: len(requests) == 2)
+            result = owner.wait("ask-0", terminate=True)
+            self.assertEqual(result["result"]["status"], "cancelled")
+            self.assertFalse(owner.closed.is_set())
+            self.assertFalse(tasks[1].done.is_set())
+            request = next(r for r in requests if r["message"] == "question-1")
+            self.assertTrue(service.resolve_request(request["request_id"], "keep working"))
+            self.assertTrue(tasks[1].done.wait(1))
+            self.assertEqual(tasks[1].result["text"], "keep working")
+        finally:
+            owner.close()
             for task in tasks:
                 task.done.wait(1)
 

@@ -2561,9 +2561,10 @@ class LLMWorker(QThread):
                          message="最近一次请求快照未能保存，暂时无法下载；对话继续运行。")
         self.observability_signal.emit(event)
 
-    def _tool_execution_policy(self, name):
+    def _tool_execution_policy(self, name, args=None):
         if name == "wait_tool":
-            return {"read_only": True, "destructive": False, "idempotent": True, "safe_retry": False}
+            return {"read_only": not (isinstance(args, dict) and args.get("terminate") is True),
+                    "destructive": False, "idempotent": True, "safe_retry": False}
         if self.bootstrap.active:
             return {"read_only": False, "destructive": True, "idempotent": False, "safe_retry": False}
         getter = getattr(self.skill_manager, "get_tool_record", None)
@@ -2950,14 +2951,16 @@ class LLMWorker(QThread):
     def _run_managed_tool(self, name, args, context, execution_id, policy, predecessor):
         manager = self._ensure_tool_tasks()
         if name == "wait_tool":
-            if not isinstance(args, dict) or set(args) != {"task_id"} or not isinstance(args.get("task_id"), str):
-                return {"status": "error", "error": "wait_tool 需要一个字符串 task_id。"}, predecessor
+            if (not isinstance(args, dict) or set(args) - {"task_id", "terminate"}
+                    or not isinstance(args.get("task_id"), str) or not args["task_id"].strip()
+                    or not isinstance(args.get("terminate", False), bool)):
+                return {"status": "error", "error": "wait_tool 需要非空字符串 task_id；可选 terminate 必须为布尔值。"}, predecessor
             target = manager.tasks.get(args["task_id"])
             if target is not None and not target.done.is_set():
                 self._emit_tool_task_result(target, manager.pending_result(target), waiting=True)
             try:
                 try:
-                    result = manager.wait(args["task_id"])
+                    result = manager.wait(args["task_id"], terminate=args.get("terminate", False))
                 except Exception:
                     if target is None or not target.error or not target.execution_finished:
                         raise
@@ -2968,6 +2971,8 @@ class LLMWorker(QThread):
                     self._emit_tool_task_result(target, result)
                 if target is not None and result.get("status") == "completed":
                     result["result"] = self._apply_tool_result_effects(target.name, target.args, target.result, target)
+                elif target is not None and is_pending_tool_result(result):
+                    self._emit_tool_task_result(target, result, waiting=True)
                 return result, predecessor
             finally:
                 self._drain_tool_events()
@@ -2981,7 +2986,7 @@ class LLMWorker(QThread):
             context["context_window_manager"] = self.context_window_manager
         for signal in ("step_signal", "observability_signal", "agent_state_signal"):
             context[signal] = ToolEventSignal(manager, signal)
-        context["abort_check"] = lambda: self.is_stopped or manager.closed.is_set()
+        context["abort_check"] = lambda: manager.abort_requested(execution_id)
         # Catalog refresh must not redirect a tool already running in another thread.
         if self.bootstrap.active:
             from core.execution_authorization import invoke
@@ -4313,7 +4318,7 @@ class LLMWorker(QThread):
                                 prepared_args,
                                 turn_count,
                             )
-                            policy = self._tool_execution_policy(prepared_name)
+                            policy = self._tool_execution_policy(prepared_name, prepared_args)
                             existing_execution = (
                                 self.runtime_journal.get_tool(self.session_id, execution_id)
                                 if self.runtime_journal and self.session_id
@@ -4435,7 +4440,7 @@ class LLMWorker(QThread):
                             execution_info = prepared_tool_executions.get(str(tool.id or ""), {})
                             args = security_args.get(str(tool.id), args)
                             execution_id = str(execution_info.get("execution_id") or "")
-                            execution_policy = execution_info.get("policy") or self._tool_execution_policy(name)
+                            execution_policy = execution_info.get("policy") or self._tool_execution_policy(name, args)
                             existing_execution = execution_info.get("existing")
                             equivalent_unknown = execution_info.get("equivalent_unknown")
                             missing_tool_name = not name

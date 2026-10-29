@@ -1,9 +1,10 @@
 """Model capabilities edited in the settings page, with one outer save boundary."""
 
 import copy
+import json
 
 from PySide6.QtCore import Qt, Signal, QSize, QPointF
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen, QPalette
 from PySide6.QtWidgets import (
     QWidget, QLabel, QLineEdit, QCheckBox, QPushButton, QVBoxLayout,
     QGridLayout, QHBoxLayout, QSizePolicy, QStackedWidget, QFrame,
@@ -23,6 +24,49 @@ from core.llm.providers import (
 from core.theme import DesignTokens, bind_theme
 from ui.primitives import PageScrollSafeComboBox, product_button_style, product_field_style
 from ui.workspace_presentation import ComposerFlowLayout
+
+
+def apply_model_combo_style(combo, *, popup_selection=None):
+    """Keep settings combo popup items legible across active and inactive states."""
+    view = combo.view()
+    view.setStyleSheet(
+        f"""
+        QAbstractItemView {{
+            background: {DesignTokens.bg_panel_strong};
+            color: {DesignTokens.text_primary};
+            border: 1px solid {DesignTokens.border_subtle};
+            outline: none;
+            padding: 4px;
+            selection-background-color: {popup_selection or DesignTokens.selection_bg};
+            selection-color: {DesignTokens.selection_text};
+        }}
+        QAbstractItemView::item {{
+            color: {DesignTokens.text_primary};
+            min-height: 28px;
+            padding: 4px 8px;
+            border: none;
+            border-radius: 8px;
+        }}
+        QAbstractItemView::item:hover {{
+            background: {DesignTokens.bg_hover};
+            color: {DesignTokens.text_primary};
+        }}
+        QAbstractItemView::item:selected,
+        QAbstractItemView::item:selected:active,
+        QAbstractItemView::item:selected:!active,
+        QAbstractItemView::item:selected:!focus {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.text_primary};
+        }}
+        """
+    )
+    palette = view.palette()
+    palette.setColor(QPalette.Base, QColor(DesignTokens.bg_panel_strong))
+    palette.setColor(QPalette.Text, QColor(DesignTokens.text_primary))
+    palette.setColor(QPalette.Highlight, QColor(DesignTokens.primary_soft))
+    palette.setColor(QPalette.HighlightedText, QColor(DesignTokens.text_primary))
+    view.setPalette(palette)
+    return combo
 
 
 def model_field_style():
@@ -115,6 +159,9 @@ class ModelCatalogRow(QWidget):
         self.default_badge.setMaximumHeight(24)
         self.default_badge.hide()
         layout.addWidget(self.default_badge)
+        self.edit_button = QPushButton("编辑", self)
+        self.edit_button.clicked.connect(self.editRequested)
+        layout.addWidget(self.edit_button)
         self.test_button = QPushButton("测试", self)
         self.test_button.clicked.connect(self.testRequested)
         layout.addWidget(self.test_button)
@@ -133,6 +180,7 @@ class ModelCatalogRow(QWidget):
         self.details.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px; }}")
         self.details.setText(self.details.fontMetrics().elidedText(self.details.full_text, Qt.ElideRight, self.details.width()))
         self.test_button.setStyleSheet(product_button_style("ghost"))
+        self.edit_button.setStyleSheet(product_button_style("secondary"))
         self.default_badge.setStyleSheet(
             f"QLabel {{ color: {DesignTokens.text_secondary}; background: {DesignTokens.bg_secondary}; border-radius: 4px; padding: 3px 6px; font-size: {DesignTokens.font_size_caption}px; }}")
 
@@ -150,6 +198,7 @@ class ModelEditForm(QWidget):
         self._editing_existing = bool(model)
         self._loading = True
         self._protocol_user_selected = False
+        self._manual_fields = set(self._source.get("discovery", {}).get("manual_fields", []))
         self._bootstrap_plugin = DeepSeekFlashMinimalBootstrap()
         self._bootstrap_choice = (
             self._source["bootstrap_plugin"] == self._bootstrap_plugin.plugin_id
@@ -186,6 +235,18 @@ class ModelEditForm(QWidget):
         self.anthropic_note = self._note("API 协议：Anthropic Messages", self.info)
         self._layout_info()
         layout.addWidget(self.info)
+        self.discovery_note = self._note("")
+        layout.addWidget(self.discovery_note)
+        self.discovery_details_button = QPushButton("查看站点信息", self)
+        self.discovery_details_button.setCheckable(True)
+        layout.addWidget(self.discovery_details_button, 0, Qt.AlignLeft)
+        self.discovery_details = self._note("")
+        self.discovery_details.setTextFormat(Qt.PlainText)
+        self.discovery_details.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.discovery_details.hide()
+        layout.addWidget(self.discovery_details)
+        self.discovery_details_button.toggled.connect(self.discovery_details.setVisible)
+        self.update_discovery(source.get("discovery", {}))
 
         self._heading("模型能力", layout)
         capabilities = QWidget(self)
@@ -283,7 +344,36 @@ class ModelEditForm(QWidget):
             self._model_name_changed()
         self._sync_controls()
         self._loading = False
+        for key, widget, signal in (("supports_vision", self.vision_check, "toggled"),
+                                    ("supports_image_generation", self.image_generation_check, "toggled"),
+                                    ("api_protocol", self.api_protocol_combo, "activated"),
+                                    ("reasoning_efforts", self.thinking_check, "toggled"),
+                                    ("context_window_tokens", self.context_window_input, "textEdited"),
+                                    ("max_output_tokens", self.max_output_input, "textEdited")):
+            getattr(widget, signal).connect(lambda *_args, field=key: self._mark_manual(field))
+        for check in self.reasoning_checks.values():
+            check.toggled.connect(lambda *_: self._mark_manual("reasoning_efforts"))
         bind_theme(self, self.refresh_theme, surface="settings")
+
+    def _mark_manual(self, field):
+        self._manual_fields.add(field)
+        self.changed.emit()
+
+    def update_discovery(self, evidence):
+        if evidence:
+            self._source["discovery"] = copy.deepcopy(evidence)
+        caps = evidence.get("capabilities", {})
+        details = []
+        for key, title in (("supports_vision", "图片理解"), ("supports_image_generation", "Responses 图片生成"),
+                           ("supports_tools", "工具调用"), ("reasoning_efforts", "推理档位")):
+            value = caps.get(key)
+            text = "未提供" if value is None else (" / ".join(value) or "不支持") if isinstance(value, list) else "支持" if value else "不支持"
+            details.append(f"{title}：{text}")
+        self.discovery_note.setText("站点声明（未经调用验证）\n" + "；".join(details))
+        self.discovery_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.discovery_note.setVisible(bool(evidence))
+        self.discovery_details_button.setVisible(bool(evidence))
+        self.discovery_details.setText(json.dumps(evidence, ensure_ascii=False, indent=2))
 
     def _note(self, text, parent=None):
         label = QLabel(text, parent or self)
@@ -412,6 +502,8 @@ class ModelEditForm(QWidget):
             item.update(api_protocol=self.api_protocol_combo.currentData(), reasoning_efforts=efforts,
                         reasoning_effort=effort, deepseek_thinking_enabled=bool(efforts),
                         deepseek_reasoning_effort=effort or DEFAULT_DEEPSEEK_REASONING_EFFORT)
+        if "discovery" in item:
+            item["discovery"]["manual_fields"] = sorted(self._manual_fields)
         return item
 
     def validation_error(self):
@@ -453,4 +545,5 @@ class ModelEditForm(QWidget):
             line.setStyleSheet(f"QFrame {{ background: {DesignTokens.separator}; border: none; }}")
         self.effort_preview.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_secondary}; background: {DesignTokens.bg_secondary}; border-radius: 6px; padding: 10px 12px; font-size: {DesignTokens.font_size_meta}px; }}")
         self.advanced_button.setStyleSheet(product_button_style("ghost"))
+        self.discovery_details_button.setStyleSheet(product_button_style("secondary"))
         self.error_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: {DesignTokens.font_size_meta}px;")

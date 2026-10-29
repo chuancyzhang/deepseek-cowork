@@ -503,10 +503,9 @@ class ModelConfigurationUiTests(unittest.TestCase):
         ]
         try:
             editor._fetch_signature = ("openai", "https://api.deepseek.com", "key")
-            with patch("main.ModelImportDialog") as dialog_type:
-                dialog_type.return_value.exec.return_value = QDialog.Accepted
-                dialog_type.return_value.selected_models.return_value = records
-                editor.handle_fetch_result({"ok": True, "models": records})
+            editor.handle_fetch_result({"ok": True, "models": records})
+            editor.import_panel._select_all()
+            editor.import_apply_btn.click()
             models = {model["model_name"]: model for model in editor._models()}
             self.assertEqual(set(models), {record["id"] for record in records})
             for model in models.values():

@@ -121,13 +121,20 @@
 
 ### 模型选择与配置
 
-模型选择浮层底部提供“配置新模型”，无配置或无搜索结果时仍可进入。点击外部或按 `Esc` 收起，不抢占刚点击控件的焦点。配置保留“设置分类 → 服务列表 → 右侧配置”的页面结构，新增与编辑只替换右侧内容，不新增“所有设置 / 模型与服务”的页面跳转。小窗口下，两级导航分别收为选择框。已有服务的连接字段按需展开；模型列表使用名称、能力摘要两行呈现，名称可编辑，右侧直接测试，勾选后可批量配置。拉取导入及新对话默认模型保留。
+模型选择浮层底部提供“配置新模型”，无配置或无搜索结果时仍可进入。点击外部或按 `Esc` 收起，不抢占刚点击控件的焦点。“设置 → 模型与服务”先展示服务总览，顶部提供“添加服务”，不再嵌套第二级服务侧栏。进入服务后直接查看模型，顶部可返回、管理接入密钥与展开“编辑连接”；删除收在“更多”。模型行直接提供编辑、测试，勾选后显示批量操作，新对话默认模型单独配置。
+
+新增服务使用同一个页内流程：账号登录或填写 API Key → 选择密钥 → 获取并选择模型 → 加入设置草稿。sub2api / New API 支持站点识别、密码登录与 TOTP，多个密钥按账号归为服务、按密钥和分组筛选。创建远端密钥是独立页面步骤，创建不确定时只能先核对；取消本地接入不删除远端密钥。部分失败保留已完成结果并提供逐个重试。站点能力未提供与明确不支持分开显示，不推断模型名、不自动调用模型。
 
 模型表单只使用页面底部“保存更改”；失败保留草稿，切换服务保留草稿，离开设置走统一确认。保存后的“返回对话并使用”绑定进入配置时的对话，不会自动更改其他对话或默认模型。
 
 | 状态 | 实际 Qt 截图 |
 | --- | --- |
 | 选择模型与配置入口 | [查看](images/model-configuration/picker.png) |
+| 服务总览 | [查看](images/model-configuration/services-overview.png) |
+| 站点识别与登录 | [识别](images/model-configuration/service-connect.png) · [登录](images/model-configuration/service-sign-in.png) |
+| 密钥选择与创建 | [选择](images/model-configuration/service-keys.png) · [创建](images/model-configuration/service-key-create.png) |
+| 部分失败与重试 | [浅色](images/model-configuration/service-partial-failure.png) · [深色](images/model-configuration/service-partial-failure-dark.png) |
+| 多密钥服务 | [模型选择](images/model-configuration/service-model-selection.png) · [服务详情](images/model-configuration/service-multiple-keys.png) |
 | 模型列表 | [查看](images/model-configuration/model-list.png) |
 | 服务连接展开 | [查看](images/model-configuration/service-connections.png) |
 | 小窗口模型列表 | [查看](images/model-configuration/model-list-narrow.png) |
@@ -144,10 +151,10 @@
 $env:QT_SCALE_FACTOR='1.5'
 .venv/Scripts/python.exe -X utf8 -B scripts/render_model_configuration.py
 Remove-Item Env:QT_SCALE_FACTOR
-.venv/Scripts/python.exe -X utf8 -B -m pytest -q test/test_model_configuration_flow.py test/test_model_catalog_and_onboarding.py test/test_default_model_settings.py test/test_chat_scroll_regressions.py
+.venv/Scripts/python.exe -X utf8 -B -m pytest -q test/test_gateway_accounts.py test/test_gateway_setup.py test/test_model_configuration_flow.py test/test_model_catalog_and_onboarding.py test/test_default_model_settings.py
 ```
 
-截图脚本使用隔离配置、Qt 离屏窗口和示例密钥，不发起真实模型请求。验证原对话切换、其他会话与默认模型不变、主题候选不落盘、无游离窗口、无水平溢出，以及服务导航与内容区无额外占位。滚到底部必须看到测试操作，防止隐藏表单把当前页面撑出空白。缩放是 `QT_SCALE_FACTOR`，不是 Windows 系统缩放验收。
+截图脚本使用隔离配置和模拟站点接口，不发起真实模型请求。覆盖识别、登录、创建密钥、部分失败、重试、导入与保存，并验证原对话切换、其他会话与默认模型不变、主题候选不落盘、无游离窗口、无水平溢出。滚到底部必须看到测试操作，防止隐藏表单把当前页面撑出空白。默认使用 Qt 离屏窗口，`QT_SCALE_FACTOR` 不等同于 Windows 系统缩放。本站点接入的接口契约与验收范围见[验证记录](gateway-model-services-validation.md)。
 
 页面调整后的模型配置、默认模型及目录导入回归共 51 项及 5 个子测试通过，另复查新增的模型行操作与切换设置保留草稿。覆盖保存重试、多个模型一次保存、原会话绑定、主题选项提交与撤销；未调用真实模型服务。变更文档的本地链接检查通过；全量 `scripts/check_docs.py` 仍被 9 份文档的 `5.3.0` 版本标记拦住，当前 `APP_VERSION` 为 `5.3.1`，已用 `HEAD` 核对这些旧标记在本次修改前存在。
 

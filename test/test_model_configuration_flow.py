@@ -47,6 +47,13 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
     def draft(self):
+        if not self.manager.editors:
+            self.manager.add_channel()
+            setup = self.manager.setup
+            setup.mode.setCurrentIndex(setup.mode.findData("manual"))
+            setup.url_input.setText("https://example.test/v1")
+            setup.api_key.setText("test-key")
+            setup.manual_without_discovery()
         editor = self.manager.open_new_model("service-a")
         form = editor.model_forms[editor._active_form_id]
         form.model_name_input.setText("custom-model")
@@ -249,7 +256,8 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.page.select_initial_page("模型与服务")
         self.assertFalse(self.page.nav_list.isHidden())
         self.assertFalse(self.page.settings_search.isHidden())
-        self.assertFalse(self.manager.service_navigation_host.isHidden())
+        self.assertIs(self.manager.route_stack.currentWidget(), self.manager.detail)
+        self.assertTrue(self.manager.channel_list.isHidden())
         self.assertIs(self.manager.channel_detail_stack.currentWidget(), editor)
         self.assertEqual(form.display_name_input.text(), "保留这份草稿")
         self.assertTrue(self.page._settings_dirty)

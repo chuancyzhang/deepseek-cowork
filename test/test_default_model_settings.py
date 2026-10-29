@@ -118,6 +118,11 @@ class DefaultModelSettingsTests(unittest.TestCase):
 
     def test_deleted_channel_requires_reselection(self):
         self.manager.add_channel()
+        setup = self.manager.setup
+        setup.mode.setCurrentIndex(setup.mode.findData("manual"))
+        setup.url_input.setText("https://second.test/v1")
+        setup.api_key.setText("second-key")
+        setup.manual_without_discovery()
         other = self.manager.editors[-1]
         other._models().append({"id": "other", "model_name": "other"})
         other.changed.emit()

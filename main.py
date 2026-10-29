@@ -227,7 +227,10 @@ from ui.primitives import (
     product_segmented_style,
     product_surface_style,
 )
-from ui.model_configuration import ModelEditForm, ModelCatalogRow, ModelPageStack, ModelFieldCombo, model_field_style
+from ui.model_configuration import ModelEditForm, ModelCatalogRow, ModelPageStack, ModelFieldCombo, model_field_style, apply_model_combo_style
+from ui.model_services import ModelServicesPage
+from ui.gateway_setup import ModelSelectionPanel
+from core.llm.gateway_catalog import catalog_record, new_catalog_model, reconcile_catalog, capability_summary
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
 from core.runtime_logs import (
@@ -2259,46 +2262,7 @@ def linear_dialog_stylesheet(object_name):
 
 
 def apply_settings_combo_style(combo, *, popup_selection=None):
-    """Keep settings combo popup items legible across active and inactive states."""
-    view = combo.view()
-    view.setStyleSheet(
-        f"""
-        QAbstractItemView {{
-            background: {DesignTokens.bg_panel_strong};
-            color: {DesignTokens.text_primary};
-            border: 1px solid {DesignTokens.border_subtle};
-            outline: none;
-            padding: 4px;
-            selection-background-color: {popup_selection or DesignTokens.selection_bg};
-            selection-color: {DesignTokens.selection_text};
-        }}
-        QAbstractItemView::item {{
-            color: {DesignTokens.text_primary};
-            min-height: 28px;
-            padding: 4px 8px;
-            border: none;
-            border-radius: 8px;
-        }}
-        QAbstractItemView::item:hover {{
-            background: {DesignTokens.bg_hover};
-            color: {DesignTokens.text_primary};
-        }}
-        QAbstractItemView::item:selected,
-        QAbstractItemView::item:selected:active,
-        QAbstractItemView::item:selected:!active,
-        QAbstractItemView::item:selected:!focus {{
-            background: {DesignTokens.primary_soft};
-            color: {DesignTokens.text_primary};
-        }}
-        """
-    )
-    palette = view.palette()
-    palette.setColor(QPalette.Base, QColor(DesignTokens.bg_panel_strong))
-    palette.setColor(QPalette.Text, QColor(DesignTokens.text_primary))
-    palette.setColor(QPalette.Highlight, QColor(DesignTokens.primary_soft))
-    palette.setColor(QPalette.HighlightedText, QColor(DesignTokens.text_primary))
-    view.setPalette(palette)
-    return combo
+    return apply_model_combo_style(combo, popup_selection=popup_selection)
 
 
 def settings_status_chip(text, tone="neutral"):
@@ -5472,11 +5436,17 @@ class CapabilityWorkbenchDialog(QDialog):
 class ModelCatalogFetchWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, provider_type, base_url, api_key, parent=None):
+    def __init__(self, provider_type, base_url, api_key, parent=None, *, gateway_source=None):
         super().__init__(parent)
         self.provider_type = str(provider_type or "openai")
         self.base_url = str(base_url or "").strip()
         self.api_key = str(api_key or "").strip()
+        self.gateway_source = dict(gateway_source or {})
+        self.cancel_event = threading.Event()
+
+    def cancel(self):
+        self.cancel_event.set()
+        self.requestInterruption()
 
     def run(self):
         started_at = time.monotonic()
@@ -5486,12 +5456,15 @@ class ModelCatalogFetchWorker(QThread):
             official_deepseek=is_deepseek_official_base_url(self.base_url),
         )
         try:
-            models = list_available_models(
-                self.provider_type,
-                self.base_url,
-                self.api_key,
-                timeout=20,
-            )
+            if self.gateway_source:
+                from core.llm.gateway_accounts import discover_saved_gateway
+                models = discover_saved_gateway(self.gateway_source, self.api_key,
+                                                base_url=self.base_url, cancelled=self.cancel_event)
+            else:
+                models = list_available_models(self.provider_type, self.base_url, self.api_key, timeout=20)
+            if self.isInterruptionRequested():
+                self.finished_signal.emit({"ok": False, "cancelled": True})
+                return
             elapsed = time.monotonic() - started_at
             log_model_service_event(
                 "fetch_finish",
@@ -5516,6 +5489,7 @@ class ModelCatalogFetchWorker(QThread):
                 "error": message,
                 "error_type": type(exc).__name__,
                 "elapsed": elapsed,
+                "cancelled": self.isInterruptionRequested(),
             })
 
 
@@ -6040,6 +6014,7 @@ class ModelConnectionTestWorker(QThread):
 
 
 class ModelChannelEditor(QFrame):
+    channelsDiscovered = Signal(list)
     changed = Signal()
     modelEdited = Signal(str)
     formRouteChanged = Signal(bool)
@@ -6053,6 +6028,7 @@ class ModelChannelEditor(QFrame):
         self.test_worker = None
         self.fetch_worker = None
         self._fetch_signature = None
+        self._fetch_cancelled = False
         self._tested_signature = ""
         self.model_forms = {}
         self._new_model_id = ""
@@ -6132,8 +6108,10 @@ class ModelChannelEditor(QFrame):
         self.service_title = QLabel("", self.service_summary)
         self.service_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         summary_layout.addWidget(self.service_title, 1)
-        self.service_delete_btn = QPushButton("删除服务", self.service_summary)
-        self.service_delete_btn.clicked.connect(self.delete_channel)
+        self.service_delete_btn = QPushButton("更多", self.service_summary)
+        self.service_menu = QMenu(self.service_delete_btn)
+        self.service_menu.addAction("删除服务", self.delete_channel)
+        self.service_delete_btn.setMenu(self.service_menu)
         summary_layout.addWidget(self.service_delete_btn)
         body_layout.addWidget(self.service_summary)
 
@@ -6196,8 +6174,12 @@ class ModelChannelEditor(QFrame):
         self.connection_button.setChecked(True)
         self.connection_button.toggled.connect(self.connection_widget.setVisible)
         self.connection_button.toggled.connect(self.refresh_header)
-        body_layout.addWidget(self.connection_button)
+        body_layout.addWidget(self.connection_button, 0, Qt.AlignLeft)
         body_layout.addWidget(self.connection_widget)
+        if self.channel_config.get("gateway_source"):
+            source_note = QLabel("手动更换地址或密钥后，此连接将作为独立服务保存；管理站点密钥请使用“管理接入密钥”。", self.connection_widget)
+            source_note.setWordWrap(True)
+            form.addWidget(source_note, 3, 0, 1, 2)
 
         self.fetch_row_widget = QWidget(self.body)
         fetch_row = QHBoxLayout(self.fetch_row_widget)
@@ -6209,11 +6191,15 @@ class ModelChannelEditor(QFrame):
         fetch_hint.setStyleSheet(apple_caption_style())
         fetch_row.addWidget(fetch_hint, 1)
         fetch_row.addStretch()
-        self.fetch_btn = QPushButton("拉取模型", self)
+        self.fetch_btn = QPushButton("获取模型", self)
         self.fetch_btn.setObjectName("SecondaryBtn")
         self.fetch_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.text_secondary))
         self.fetch_btn.clicked.connect(self.fetch_models)
         fetch_row.addWidget(self.fetch_btn)
+        self.cancel_fetch_btn = QPushButton("取消获取", self.fetch_row_widget)
+        self.cancel_fetch_btn.clicked.connect(self.cancel_fetch)
+        self.cancel_fetch_btn.hide()
+        fetch_row.addWidget(self.cancel_fetch_btn)
         body_layout.addWidget(self.fetch_row_widget)
 
         model_title = QLabel("", self)
@@ -6234,7 +6220,7 @@ class ModelChannelEditor(QFrame):
         self.model_actions = QWidget(self.body)
         button_row = QHBoxLayout(self.model_actions)
         button_row.setContentsMargins(0, 0, 0, 0)
-        self.add_model_btn = QPushButton("新增模型", self)
+        self.add_model_btn = QPushButton("手动添加", self)
         self.add_model_btn.setObjectName("SecondaryBtn")
         self.add_model_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         self.edit_model_btn = QPushButton("编辑", self)
@@ -6256,6 +6242,22 @@ class ModelChannelEditor(QFrame):
         button_row.addStretch()
         self.test_btn.hide()
         body_layout.insertWidget(body_layout.indexOf(self.model_list), self.model_actions)
+        self.import_panel = ModelSelectionPanel(self.body)
+        body_layout.addWidget(self.import_panel)
+        self.import_actions = QWidget(self.body)
+        import_layout = QHBoxLayout(self.import_actions)
+        import_layout.setContentsMargins(0, 0, 0, 0)
+        self.import_apply_btn = QPushButton("添加所选模型", self.import_actions)
+        self.import_apply_btn.clicked.connect(lambda: self._apply_import_records(self.import_panel.selected_records()))
+        self.import_panel.selectionChanged.connect(lambda: self.import_apply_btn.setEnabled(bool(self.import_panel.selected_pairs())))
+        self.import_cancel_btn = QPushButton("返回已添加模型", self.import_actions)
+        self.import_cancel_btn.clicked.connect(self.show_model_list)
+        import_layout.addWidget(self.import_apply_btn)
+        import_layout.addWidget(self.import_cancel_btn)
+        import_layout.addStretch()
+        body_layout.addWidget(self.import_actions)
+        self.import_panel.hide()
+        self.import_actions.hide()
         self.model_list.itemDoubleClicked.connect(lambda _item: self.edit_model())
         self.form_navigation = QWidget(self.body)
         navigation = QHBoxLayout(self.form_navigation)
@@ -6276,7 +6278,7 @@ class ModelChannelEditor(QFrame):
         self.model_form_stack.hide()
         self.form_test_btn.hide()
 
-        self.test_status_label = QLabel("选择一个模型后，可验证地址、密钥与真实调用。", self)
+        self.test_status_label = QLabel("测试会发起真实模型调用；获取模型仅读取站点信息。", self)
         self.test_status_label.setWordWrap(True)
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         body_layout.addWidget(self.test_status_label)
@@ -6315,8 +6317,7 @@ class ModelChannelEditor(QFrame):
         self.key_visibility_action.setIcon(qta.icon(
             "fa5s.eye" if self.api_key_input.echoMode() == QLineEdit.Password else "fa5s.eye-slash",
             color=DesignTokens.text_secondary))
-        self.connection_button.setStyleSheet(product_button_style("ghost") +
-            f"QPushButton {{ text-align: left; padding: 0; color: {DesignTokens.text_primary}; font-weight: 400; }}")
+        self.connection_button.setStyleSheet(product_button_style("secondary"))
         self.service_title.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_page}px; font-weight: 600; }}")
         self.service_delete_btn.setStyleSheet(product_button_style("ghost") +
             f"QPushButton {{ color: {DesignTokens.error_text}; font-weight: 400; }}")
@@ -6324,6 +6325,9 @@ class ModelChannelEditor(QFrame):
         self.service_summary.setStyleSheet(f"QWidget#ModelServiceSummary {{ border-bottom: 1px solid {DesignTokens.separator}; }}")
         self.form_back_btn.setStyleSheet(product_button_style("ghost"))
         self.form_test_btn.setStyleSheet(product_button_style("secondary"))
+        self.import_apply_btn.setStyleSheet(product_button_style("primary"))
+        self.import_cancel_btn.setStyleSheet(product_button_style("secondary"))
+        self.cancel_fetch_btn.setStyleSheet(product_button_style("secondary"))
         self.form_title.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_section}px; font-weight: 600; }}")
         self.fetch_hint.setStyleSheet(apple_settings_section_title_style())
         self.model_heading.setStyleSheet(apple_settings_section_title_style())
@@ -6348,6 +6352,12 @@ class ModelChannelEditor(QFrame):
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
+
+    def gateway_source(self):
+        source = self.channel_config.get("gateway_source", {})
+        same_key = self.api_key_input.text().strip() == str(self.channel_config.get("api_key", "")).strip()
+        same_url = self.base_url_input.text().strip().rstrip("/") == str(self.channel_config.get("base_url", "")).strip().rstrip("/")
+        return source if same_key and same_url else {}
 
     def _models(self):
         models = self.channel_config.setdefault("models", [])
@@ -6385,9 +6395,9 @@ class ModelChannelEditor(QFrame):
         self.service_title.setToolTip(self._channel_name())
         if hasattr(self, "connection_button"):
             expanded = self.connection_button.isChecked()
-            self.connection_button.setText("连接设置  −" if expanded else f"连接设置  ·  {provider_label}  ·  {'已填写密钥' if key_ready else '待填写密钥'}  ＋")
+            self.connection_button.setText("收起连接设置" if expanded else "编辑连接")
         if hasattr(self, "fetch_hint"):
-            self.fetch_hint.setText(f"可用模型  {model_count}")
+            self.fetch_hint.setText(f"已添加模型  {model_count}")
         self.meta_label.setText(f"{provider_label} · {model_count} 个模型 · {'已填写密钥' if key_ready else '未填写密钥'}")
         self.status_chip.setText(settings_status_chip(summary_text, tone))
         self._refresh_recommendation_notice()
@@ -6477,8 +6487,7 @@ class ModelChannelEditor(QFrame):
             reasoning = f"  ·  推理 {'/'.join(efforts)}" if efforts else ""
             identity = str(model.get("model_name") or "")
             details = (identity + "  ·  " if identity and identity != label else "")
-            details += (protocol_label if self._provider_type() == "openai" else "Anthropic")
-            details += capability + (f"  ·  推理 {model.get('reasoning_effort') or '/'.join(efforts)}" if efforts else "")
+            details += capability_summary(model)
             item = QListWidgetItem(f"{label}{recommendation}\n{details}")
             item.setToolTip(f"{label}\n模型标识：{identity}\n{details}{reasoning}")
             item.setSizeHint(QSize(0, max(76, self.model_list.fontMetrics().lineSpacing() * 2 + 28)))
@@ -6496,7 +6505,7 @@ class ModelChannelEditor(QFrame):
             if str(model.get("id") or "") == current_id:
                 self.model_list.setCurrentItem(item, QItemSelectionModel.NoUpdate)
         if self.model_list.count() and not self.model_list.selectedItems():
-            self.model_list.setCurrentRow(0)
+            self.model_list.setCurrentRow(0, QItemSelectionModel.NoUpdate)
         row_height = max(76, self.model_list.fontMetrics().lineSpacing() * 2 + 28)
         self.model_list.setFixedHeight(row_height * min(6, max(1, self.model_list.count())) + 2)
         self.refresh_header()
@@ -6515,9 +6524,11 @@ class ModelChannelEditor(QFrame):
     def _refresh_model_actions(self):
         count = len(self.model_list.selectedItems()) if hasattr(self, "model_list") else 0
         if hasattr(self, "edit_model_btn"):
+            self.edit_model_btn.setVisible(count > 0)
             self.edit_model_btn.setEnabled(count > 0)
             self.edit_model_btn.setText(f"批量配置（{count}）" if count > 1 else "编辑")
         if hasattr(self, "delete_model_btn"):
+            self.delete_model_btn.setVisible(count > 0)
             self.delete_model_btn.setEnabled(count == 1)
         if hasattr(self, "test_btn"):
             self.test_btn.setEnabled(count == 1 and not (self.test_worker and self.test_worker.isRunning()))
@@ -6547,6 +6558,13 @@ class ModelChannelEditor(QFrame):
         running = bool(self.fetch_worker and self.fetch_worker.isRunning())
         ready = bool(self.api_key_input.text().strip() and self.base_url_input.text().strip())
         self.fetch_btn.setEnabled(ready and not running)
+        self.cancel_fetch_btn.setVisible(running)
+
+    def cancel_fetch(self):
+        if self.fetch_worker:
+            self._fetch_cancelled = True
+            self.fetch_worker.cancel()
+            self.test_status_label.setText("正在取消获取，已有模型配置保留。")
 
     def clear_test_result(self, *_args):
         if self.test_worker and self.test_worker.isRunning():
@@ -6554,7 +6572,7 @@ class ModelChannelEditor(QFrame):
         if hasattr(self, "test_status_label"):
             self.test_status_label.setText(
                 "配置已修改，可重新测试。测试不保存；完成后点击页面底部“保存更改”。"
-                if self._active_form_id else "选择一个模型后，可验证地址、密钥与真实调用。")
+                if self._active_form_id else "测试会发起真实模型调用；获取模型仅读取站点信息。")
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
 
     def add_model(self):
@@ -6616,11 +6634,13 @@ class ModelChannelEditor(QFrame):
         self.key_visibility_action.setIcon(qta.icon("fa5s.eye-slash" if reveal else "fa5s.eye", color=DesignTokens.text_secondary))
 
     def show_model_list(self):
+        self.import_panel.hide()
+        self.import_actions.hide()
         active_id = self._active_form_id
         self._active_form_id = ""
         for widget in (self.form_navigation, self.model_form_stack, self.form_test_btn):
             widget.hide()
-        for widget in (self.model_list, self.model_actions, self.fetch_row_widget, self.service_summary):
+        for widget in (self.model_list, self.model_actions, self.fetch_row_widget):
             widget.show()
         self.refresh_model_list()
         for row in range(self.model_list.count()):
@@ -6698,6 +6718,9 @@ class ModelChannelEditor(QFrame):
                 updated_models = copy.deepcopy(self._models())
                 for index in indexes:
                     updated_models[index].update(copy.deepcopy(changes))
+                    if "discovery" in updated_models[index]:
+                        evidence = updated_models[index]["discovery"]
+                        evidence["manual_fields"] = sorted(set(evidence.get("manual_fields", [])) | set(changes))
                 self.channel_config["models"] = updated_models
             except Exception as exc:
                 log_model_service_event(
@@ -6743,11 +6766,13 @@ class ModelChannelEditor(QFrame):
             official_deepseek=is_deepseek_official_base_url(base_url),
         )
         self._fetch_signature = (self._provider_type(), base_url, api_key)
+        self._fetch_cancelled = False
         self.fetch_btn.setText("拉取中…")
         self.test_status_label.setText("正在读取接口模型列表…")
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         self.fetch_worker = ModelCatalogFetchWorker(
-            self._provider_type(), base_url, api_key, QApplication.instance()
+            self._provider_type(), base_url, api_key, QApplication.instance(),
+            gateway_source=self.gateway_source()
         )
         self.fetch_worker.finished.connect(self.fetch_worker.deleteLater)
         self.fetch_worker.finished_signal.connect(self.handle_fetch_result)
@@ -6755,7 +6780,7 @@ class ModelChannelEditor(QFrame):
         self._refresh_fetch_button()
 
     def handle_fetch_result(self, result):
-        self.fetch_btn.setText("拉取模型")
+        self.fetch_btn.setText("获取模型")
         current_signature = (
             self._provider_type(),
             self.base_url_input.text().strip(),
@@ -6763,6 +6788,10 @@ class ModelChannelEditor(QFrame):
         )
         self.fetch_worker = None
         self._refresh_fetch_button()
+        if self._fetch_cancelled or result.get("cancelled"):
+            self.test_status_label.setText("已取消获取，已有模型配置保留。")
+            log_model_service_event("fetch_cancel", provider_type=self._provider_type(), reason="user_cancelled")
+            return
         if current_signature != self._fetch_signature:
             self.test_status_label.setText("服务配置已变化，已忽略旧的模型列表，请重新拉取。")
             self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
@@ -6786,20 +6815,32 @@ class ModelChannelEditor(QFrame):
             provider_type=self._provider_type(),
             returned_count=len(models),
         )
-        dialog = ModelImportDialog(
-            models,
-            existing_model_names=[model.get("model_name") for model in self._models()],
-            recommended_model=self._recommended_model(),
-            parent=self,
-        )
-        if dialog.exec() != QDialog.Accepted:
-            log_model_service_event(
-                "import_cancel",
-                provider_type=self._provider_type(),
-                returned_count=len(models),
-            )
+        if self.gateway_source():
+            models = [record if record.get("discovery") else catalog_record(record, default_provider=self._provider_type()) for record in models]
+        reconcile_catalog(self._models(), models)
+        for model in self._models():
+            form = self.model_forms.get(model.get("id"))
+            if form and model.get("discovery"):
+                form.update_discovery(model["discovery"])
+        self._catalog_records = models
+        self.import_panel.set_records({"current": {"records": models}},
+                                      {( "current", model["model_name"]) for model in self._models()})
+        self.model_list.hide()
+        self.model_actions.hide()
+        self.import_panel.show()
+        self.import_actions.show()
+        warnings = {record.get("discovery", {}).get("metadata_warning", "") for record in models}
+        if any(warnings):
+            self.test_status_label.setText("\n".join(sorted(warning for warning in warnings if warning)))
+        self.changed.emit()
+
+    def _apply_import_records(self, selected):
+        current = (self._provider_type(), self.base_url_input.text().strip(), self.api_key_input.text().strip())
+        if self._fetch_signature is not None and current != self._fetch_signature:
+            self.test_status_label.setText("连接配置已变化，请重新获取模型后再添加；已有模型保留。")
             return
-        selected = dialog.selected_models()
+        models = getattr(self, "_catalog_records", selected)
+        other_channels = {}
         log_model_service_event(
             "import_submit",
             provider_type=self._provider_type(),
@@ -6816,6 +6857,19 @@ class ModelChannelEditor(QFrame):
             for record in selected:
                 model_name = str(record.get("id") or "").strip()
                 if not model_name or model_name in existing_names:
+                    continue
+                provider = record.get("provider_type", self._provider_type())
+                if record.get("discovery", {}).get("unsupported_reason"):
+                    continue
+                if provider != self._provider_type():
+                    source = self.gateway_source()
+                    channel_id = (f"{source['service_id']}-{source['key_id']}-{provider}" if source else
+                                  f"{self.channel_config['channel_id']}-{provider}")
+                    from core.llm.gateway_accounts import normalize_site_url
+                    endpoint = normalize_site_url(self.base_url_input.text()) + ("/v1" if provider == "openai" else "")
+                    channel = other_channels.setdefault(provider, dict(self.get_channel_config(), channel_id=channel_id,
+                                                                       provider_type=provider, base_url=endpoint, models=[]))
+                    channel["models"].append(new_catalog_model(record, channel_id, endpoint))
                     continue
                 model_id = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
                 while model_id in existing_ids:
@@ -6835,6 +6889,10 @@ class ModelChannelEditor(QFrame):
                         model_name,
                     )
                 )
+                if record.get("discovery"):
+                    discovered = new_catalog_model(record, self.channel_config["channel_id"], self.base_url_input.text())
+                    discovered["id"] = model_id
+                    model = discovered
                 imported_models.append(model)
             self._models().extend(imported_models)
         except Exception as exc:
@@ -6848,7 +6906,10 @@ class ModelChannelEditor(QFrame):
         for row in range(self.model_list.count()):
             item = self.model_list.item(row)
             item.setSelected(str(item.data(Qt.UserRole) or "") in imported_ids)
-        self.test_status_label.setText(f"已导入 {len(imported_ids)} 个模型；保存设置后生效。")
+        self.show_model_list()
+        if other_channels:
+            self.channelsDiscovered.emit(list(other_channels.values()))
+        self.test_status_label.setText(f"已添加 {len(imported_ids) + sum(len(channel['models']) for channel in other_channels.values())} 个模型；保存更改后生效。")
         self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
         if imported_ids:
             self.changed.emit()
@@ -6959,6 +7020,7 @@ class ModelChannelEditor(QFrame):
 
     def get_channel_config(self):
         return {
+            **({"gateway_source": copy.deepcopy(self.gateway_source())} if self.gateway_source() else {}),
             "channel_id": self.channel_config.get("channel_id") or f"{self._provider_type()}-{uuid.uuid4().hex[:8]}",
             "display_name": self._channel_name(),
             "provider_type": self._provider_type(),
@@ -6968,341 +7030,9 @@ class ModelChannelEditor(QFrame):
         }
 
 
-class ModelChannelManager(QWidget):
-    changed = Signal()
-    useModelRequested = Signal(str)
-
+class ModelChannelManager(ModelServicesPage):
     def __init__(self, channels, parent=None, selected_model_id=""):
-        super().__init__(parent)
-        self.editors = []
-        self.last_edited_model_id = ""
-        self.saved_model_id = ""
-        self.origin_session_id = ""
-        self._default_model_id = str(selected_model_id or "")
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(20)
-
-        self.service_toolbar = QWidget(self)
-        toolbar = QHBoxLayout(self.service_toolbar)
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        title_box = QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(4)
-        title = QLabel("服务", self)
-        self.channel_heading = title
-        title.setStyleSheet(apple_settings_section_title_style())
-        title_box.addWidget(title)
-        toolbar.addLayout(title_box, 1)
-        toolbar.addStretch()
-        add_channel_btn = QPushButton("添加服务", self)
-        self.compact_add_channel_btn = add_channel_btn
-        add_channel_btn.setObjectName("SecondaryBtn")
-        add_channel_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
-        add_channel_btn.clicked.connect(self.add_channel)
-        toolbar.addWidget(add_channel_btn)
-        self.delete_selected_channel_btn = QPushButton("删除服务", self)
-        self.delete_selected_channel_btn.setObjectName("SecondaryBtn")
-        self.delete_selected_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
-        self.delete_selected_channel_btn.setEnabled(False)
-        self.delete_selected_channel_btn.clicked.connect(self.delete_selected_channel)
-        toolbar.addWidget(self.delete_selected_channel_btn)
-        self.layout.addWidget(self.service_toolbar)
-
-        self.default_model_label = QLabel("新对话默认模型", self)
-        self.default_model_row = QWidget(self)
-        self.default_model_row.setObjectName("ModelDefaultRow")
-        self.default_model_layout = QGridLayout(self.default_model_row)
-        self.default_model_layout.setContentsMargins(0, 0, 0, 18)
-        self.default_model_layout.setHorizontalSpacing(24)
-        self.default_model_layout.setVerticalSpacing(4)
-        self.default_model_layout.addWidget(self.default_model_label, 0, 0)
-        self.default_model_combo = ModelFieldCombo(self)
-        self.default_model_combo.setObjectName("DefaultModelCombo")
-        self.default_model_combo.setMinimumWidth(0)
-        self.default_model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.default_model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        apply_settings_combo_style(self.default_model_combo, popup_selection=DesignTokens.primary_soft)
-        self.default_model_hint = QLabel("仅用于新建对话；已有对话保留自己的模型。", self)
-        self.default_model_hint.setWordWrap(True)
-        self.default_model_layout.addWidget(self.default_model_hint, 1, 0)
-        self.default_model_layout.addWidget(self.default_model_combo, 0, 1, 2, 1)
-        self.default_model_layout.setColumnStretch(0, 1)
-        self.default_model_layout.setColumnStretch(1, 1)
-        self.layout.insertWidget(0, self.default_model_row)
-
-        self.channel_combo = ModelFieldCombo(self)
-        self.channel_combo.setAccessibleName("所属服务")
-        self.channel_combo.currentIndexChanged.connect(lambda index: self.channel_list.setCurrentRow(index))
-        self.layout.addWidget(self.channel_combo)
-        self.channel_combo.hide()
-        self.channel_body = QWidget(self)
-        channel_body_layout = QHBoxLayout(self.channel_body)
-        channel_body_layout.setContentsMargins(0, 0, 0, 0)
-        channel_body_layout.setSpacing(0)
-        self.service_navigation_host = QWidget(self.channel_body)
-        self.service_navigation_host.setFixedWidth(176)
-        service_host_layout = QVBoxLayout(self.service_navigation_host)
-        service_host_layout.setContentsMargins(0, 0, 0, 0)
-        service_host_layout.setSpacing(0)
-        self.service_navigation = QWidget(self.service_navigation_host)
-        self.service_navigation.setObjectName("ModelServiceNavigation")
-        self.service_navigation.setFixedWidth(176)
-        service_nav_layout = QVBoxLayout(self.service_navigation)
-        service_nav_layout.setContentsMargins(8, 12, 8, 8)
-        service_nav_layout.setSpacing(8)
-        self.service_nav_label = QLabel("服务", self.service_navigation)
-        service_nav_layout.addWidget(self.service_nav_label)
-        self.channel_list = QListWidget(self.service_navigation)
-        self.channel_list.setObjectName("ModelChannelNavigation")
-        self.channel_list.setMinimumWidth(0)
-        self.channel_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.channel_list.setSpacing(0)
-        self.channel_list.setStyleSheet(apple_settings_nav_style())
-        service_nav_layout.addWidget(self.channel_list)
-        self.add_channel_btn = QPushButton("＋ 添加服务", self.service_navigation)
-        self.add_channel_btn.clicked.connect(self.add_channel)
-        service_nav_layout.addWidget(self.add_channel_btn)
-        self.service_navigation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        service_host_layout.addWidget(self.service_navigation)
-        service_host_layout.addStretch()
-        self.channel_detail_stack = ModelPageStack(self.channel_body)
-        self.channel_detail_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.channel_detail_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
-        channel_body_layout.addWidget(self.service_navigation_host)
-        channel_body_layout.addWidget(self.channel_detail_stack, 1)
-        self.layout.addWidget(self.channel_body)
-        self.saved_notice = QWidget(self)
-        saved_layout = QHBoxLayout(self.saved_notice)
-        saved_layout.setContentsMargins(0, 8, 0, 0)
-        self.saved_label = QLabel("模型已保存，可以返回对话使用。", self.saved_notice)
-        self.saved_label.setWordWrap(True)
-        self.use_model_btn = QPushButton("返回对话并使用", self.saved_notice)
-        self.use_model_btn.clicked.connect(lambda: self.useModelRequested.emit(self.saved_model_id))
-        saved_layout.addWidget(self.saved_label, 1)
-        saved_layout.addWidget(self.use_model_btn)
-        self.layout.addWidget(self.saved_notice)
-        self.saved_notice.hide()
-        self.channel_list.currentRowChanged.connect(self._on_channel_selection_changed)
-
-        for index, channel in enumerate(channels or []):
-            self._add_editor(channel, expanded=index == 0)
-        self._refresh_default_models()
-        self.default_model_combo.currentIndexChanged.connect(self._on_default_model_changed)
-        self.changed.connect(self._refresh_default_models)
-        self.changed.connect(self.saved_notice.hide)
-        self.changed.connect(self._refresh_channel_choices)
-        self._refresh_channel_choices()
-        bind_theme(self, self._refresh_default_model_theme, surface="dialogs")
-
-    def _refresh_default_model_theme(self, _resolved=None):
-        self.default_model_combo.setStyleSheet(model_field_style())
-        apply_settings_combo_style(self.default_model_combo, popup_selection=DesignTokens.primary_soft)
-        self.default_model_row.setStyleSheet(f"QWidget#ModelDefaultRow {{ border-bottom: 1px solid {DesignTokens.separator}; }}")
-        self.service_navigation.setStyleSheet(f"QWidget#ModelServiceNavigation {{ background: {DesignTokens.bg_settings_nav}; border-radius: 8px; }}")
-        self.channel_list.setStyleSheet(apple_settings_nav_style() +
-            "QListWidget#ModelChannelNavigation { background: transparent; padding: 0; border: none; }"
-            "QListWidget#ModelChannelNavigation::item { padding: 10px 8px; margin: 0; border-radius: 6px; }")
-        self.service_nav_label.setStyleSheet(apple_caption_style() + "padding: 0 8px;")
-        self.add_channel_btn.setStyleSheet(product_button_style("ghost"))
-        self.compact_add_channel_btn.setStyleSheet(product_button_style("ghost"))
-        self.channel_heading.setStyleSheet(apple_settings_section_title_style())
-        self.default_model_hint.setStyleSheet(apple_settings_inline_note_style())
-        self.channel_combo.setStyleSheet(model_field_style())
-        apply_settings_combo_style(self.channel_combo, popup_selection=DesignTokens.primary_soft)
-        self.use_model_btn.setStyleSheet(product_button_style("secondary"))
-        self.saved_label.setStyleSheet(apple_settings_inline_note_style())
-
-    def _refresh_channel_choices(self):
-        self.channel_combo.blockSignals(True)
-        self.channel_combo.clear()
-        for editor in self.editors:
-            self.channel_combo.addItem(f"{editor._channel_name()}  ·  {len(editor._models())} 个模型")
-        for index, editor in enumerate(self.editors):
-            item = self.channel_list.item(index)
-            if item:
-                item.setText(f"{editor._channel_name()}    {len(editor._models())}")
-                item.setToolTip(editor._channel_name())
-        self.channel_list.setFixedHeight(max(44, min(7, len(self.editors)) * 48 + 2))
-        self.channel_list.scrollToTop()
-        self.service_navigation.adjustSize()
-        self.channel_combo.setCurrentIndex(self.channel_list.currentRow())
-        self.channel_combo.blockSignals(False)
-
-    def open_new_model(self, channel_id=""):
-        if not self.editors:
-            self.add_channel()
-        editor = next((item for item in self.editors if item.channel_config.get("channel_id") == channel_id), None)
-        if editor is None:
-            editor = self.editors[max(0, self.channel_list.currentRow())]
-        self.channel_list.setCurrentRow(self.editors.index(editor))
-        editor.add_model()
-        return editor
-
-    def validate_models(self):
-        for index, editor in enumerate(self.editors):
-            if not editor.validate_model_forms():
-                self.channel_list.setCurrentRow(index)
-                return False
-        return True
-
-    def _model_edited(self, model_id):
-        self.last_edited_model_id = model_id
-
-    def mark_saved(self):
-        ids = {model.get("id") for editor in self.editors for model in editor._models()}
-        self.saved_model_id = self.last_edited_model_id if self.last_edited_model_id in ids else ""
-        for editor in self.editors:
-            editor.mark_models_saved()
-        self._sync_editor_route()
-        self.saved_notice.setVisible(bool(self.saved_model_id and self.origin_session_id))
-
-    def _refresh_default_models(self):
-        combo = self.default_model_combo
-        blocked = combo.blockSignals(True)
-        try:
-            combo.clear()
-            for channel in self.get_channels():
-                for model in channel.get("models") or []:
-                    combo.addItem(
-                        f"{channel.get('display_name') or '未命名服务'} / "
-                        f"{model.get('display_name') or model.get('model_name') or model['id']}",
-                        model["id"],
-                    )
-            has_models = combo.count() > 0
-            index = combo.findData(self._default_model_id)
-            combo.setPlaceholderText("请选择默认模型" if has_models else "尚未配置模型")
-            combo.setCurrentIndex(index)
-            combo.setEnabled(has_models)
-            self.default_model_hint.setText(
-                "默认模型未选择或已删除，请重新选择后保存。仅用于新建对话。"
-                if has_models and index < 0
-                else "仅用于新建对话；已有对话保留自己的模型。"
-            )
-            combo.setToolTip(combo.currentText())
-        finally:
-            combo.blockSignals(blocked)
-        for editor in self.editors:
-            editor._default_model_id = self._default_model_id
-            for model_id, row in editor._model_rows.items():
-                row.default_badge.setVisible(model_id == self._default_model_id)
-
-    def _on_default_model_changed(self, _index):
-        self._default_model_id = str(self.default_model_combo.currentData() or "")
-        self.changed.emit()
-
-    def get_default_model_id(self):
-        return str(self.default_model_combo.currentData() or "")
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._sync_editor_route()
-        narrow = self.width() < 620
-        self.default_model_layout.addWidget(self.default_model_combo, 2 if narrow else 0, 0 if narrow else 1, 1 if narrow else 2, 1)
-        self.default_model_combo.setMaximumWidth(16777215 if narrow else 380)
-
-    def _add_editor(self, channel, expanded=False):
-        editor = ModelChannelEditor(
-            channel,
-            self,
-            expanded=expanded,
-            on_expand=self._collapse_others,
-            on_delete=self.delete_channel,
-        )
-        self.editors.append(editor)
-        editor.set_management_detail_mode()
-        self.channel_detail_stack.addWidget(editor)
-        item = QListWidgetItem(str(channel.get("display_name") or "未命名服务"))
-        item.setToolTip(str(channel.get("base_url") or ""))
-        self.channel_list.addItem(item)
-        editor.display_name_input.textChanged.connect(
-            lambda text, target=item: target.setText(text.strip() or "未命名服务")
-        )
-        editor.changed.connect(self.changed.emit)
-        editor.modelEdited.connect(self._model_edited)
-        editor.formRouteChanged.connect(self._sync_editor_route)
-        if self.channel_list.currentRow() < 0:
-            self.channel_list.setCurrentRow(0)
-        return editor
-
-    def _on_channel_selection_changed(self, index):
-        self.channel_detail_stack.setCurrentIndex(index)
-        self.delete_selected_channel_btn.setEnabled(0 <= index < len(self.editors))
-        self.channel_combo.blockSignals(True)
-        self.channel_combo.setCurrentIndex(index)
-        self.channel_combo.blockSignals(False)
-        self._sync_editor_route()
-
-    def _sync_editor_route(self, *_args):
-        editor = self.channel_detail_stack.currentWidget()
-        editing = bool(editor and editor._active_form_id)
-        self.default_model_row.setVisible(not editing)
-        self.delete_selected_channel_btn.hide()
-        self.channel_heading.setText("服务")
-        compact = self.width() < 660
-        self.service_navigation_host.setVisible(not compact)
-        self.service_toolbar.setVisible(compact)
-        self.channel_combo.setVisible(compact)
-        for item in self.editors:
-            item.body.layout().setContentsMargins(0 if compact else 24, 0, 0, 0)
-            item.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred if item is editor else QSizePolicy.Ignored)
-        self.channel_detail_stack.updateGeometry()
-
-    def delete_selected_channel(self):
-        index = self.channel_list.currentRow()
-        if 0 <= index < len(self.editors):
-            self.delete_channel(self.editors[index])
-
-    def _collapse_others(self, active_editor):
-        if active_editor in self.editors:
-            self.channel_list.setCurrentRow(self.editors.index(active_editor))
-
-    def add_channel(self):
-        current = self.channel_detail_stack.currentWidget()
-        editing = bool(current and current._active_form_id)
-        channel = {
-            "channel_id": f"openai-custom-{uuid.uuid4().hex[:8]}",
-            "display_name": "新服务",
-            "provider_type": "openai",
-            "api_key": "",
-            "base_url": DEFAULT_DEEPSEEK_BASE_URL,
-            "models": [],
-        }
-        editor = self._add_editor(channel, expanded=True)
-        self.channel_list.setCurrentRow(self.editors.index(editor))
-        if editing:
-            editor.add_model()
-        self.changed.emit()
-
-    def delete_channel(self, editor):
-        if any(worker is not None and worker.isRunning() for worker in (editor.fetch_worker, editor.test_worker)):
-            QMessageBox.information(self, "服务正在使用", "模型拉取或测试正在进行，请完成后再删除此服务。")
-            return
-        reply = QMessageBox.question(
-            self,
-            "删除模型服务",
-            "确定删除这个服务及其下的模型吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        if editor in self.editors:
-            index = self.editors.index(editor)
-            self.editors.remove(editor)
-            self.channel_detail_stack.removeWidget(editor)
-            self.channel_list.takeItem(index)
-            editor.hide()
-            editor.deleteLater()
-        if self.editors:
-            self.channel_list.setCurrentRow(min(index, len(self.editors) - 1))
-        else:
-            self.channel_list.setCurrentRow(-1)
-            self.delete_selected_channel_btn.setEnabled(False)
-        self.changed.emit()
-
-    def get_channels(self):
-        return [editor.get_channel_config() for editor in self.editors]
+        super().__init__(channels, ModelChannelEditor, parent, selected_model_id)
 
 
 class AgentProfileManager(QWidget):
@@ -13269,6 +12999,7 @@ class SettingsDialog(QDialog):
 
     def _restore_configuration_editors(self, config):
         manager = self.model_channel_manager
+        manager.discard_setup()
         if manager.get_channels() != config["model_channels"] or any(editor.model_forms for editor in manager.editors):
             for editor in manager.editors:
                 manager.channel_detail_stack.removeWidget(editor)
@@ -13408,15 +13139,18 @@ class SettingsDialog(QDialog):
         if getattr(self, "_restoring_settings", False):
             return
         dirty = self._settings_state_signature() != self._settings_baseline
+        setup = self.model_channel_manager.setup
+        pending_connection = bool(setup and setup.has_pending_input())
         self._settings_dirty = dirty
         if getattr(self, "domain", "") == "capabilities" and hasattr(self, "settings_action_bar"):
             self.settings_action_bar.setVisible(dirty and self.mcp_server_manager.editor_dialog is None)
         if hasattr(self, "discard_settings_btn"):
             self.discard_settings_btn.setVisible(dirty)
         if hasattr(self, "save_settings_btn"):
-            self.save_settings_btn.setEnabled(dirty)
+            self.save_settings_btn.setEnabled(dirty and not pending_connection)
         if hasattr(self, "settings_dirty_label"):
-            self.settings_dirty_label.setText("有未保存的修改 · 切换设置页会保留" if dirty else "所有更改已保存")
+            self.settings_dirty_label.setText("服务尚未接入 · 完成模型选择后统一保存" if pending_connection else
+                                              "有未保存的修改 · 切换设置页会保留" if dirty else "所有更改已保存")
         self._sync_settings_action_bar()
 
     def _mark_settings_dirty(self):
@@ -13437,6 +13171,8 @@ class SettingsDialog(QDialog):
         self._sync_settings_action_bar()
 
     def _confirm_discard_settings(self):
+        if not self.model_channel_manager.confirm_leave():
+            return False
         if hasattr(self, "browser_automation_panel") and not self.browser_automation_panel.confirm_leave():
             return False
         if hasattr(self, "long_context_panel") and not self.long_context_panel.confirm_leave():
@@ -13475,6 +13211,7 @@ class SettingsDialog(QDialog):
         if not self._allow_close_without_prompt and not self._confirm_discard_settings():
             event.ignore()
             return
+        self.model_channel_manager.discard_setup()
         if hasattr(self, "_im_gateway_status_timer"):
             self._im_gateway_status_timer.stop()
         if self._settings_dirty:

@@ -1,0 +1,23 @@
+{
+  "logical_window": [
+    1280,
+    900
+  ],
+  "requested_window": [
+    1280,
+    900
+  ],
+  "narrow_window": [
+    760,
+    760
+  ],
+  "qt_scale_factor": "1",
+  "device_pixel_ratio": 1.5,
+  "unexpected_top_level_windows": [],
+  "theme_preview_persisted": false,
+  "origin_session_verified": true,
+  "model_requests": false,
+  "platform_plugin": "windows",
+  "gateway_flow": "probe/login/create/partial-failure/retry/import/save",
+  "windows_window_dpi": 144
+}

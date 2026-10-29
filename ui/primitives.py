@@ -1210,7 +1210,7 @@ def product_segmented_style():
 
 def product_field_style():
     return f"""
-        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDateTimeEdit {{
+        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {{
             min-height: {DesignTokens.control_height}px;
             background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};
             border: 1px solid {DesignTokens.border}; border-radius: {DesignTokens.radius_md}px;
@@ -1222,11 +1222,11 @@ def product_field_style():
             border-color: {DesignTokens.border_strong};
         }}
         QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
-        QSpinBox:focus, QDateTimeEdit:focus {{
+        QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus {{
             border: {DesignTokens.focus_ring_width}px solid {DesignTokens.primary_focus};
         }}
         QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled,
-        QSpinBox:disabled, QDateTimeEdit:disabled {{
+        QSpinBox:disabled, QDoubleSpinBox:disabled, QDateTimeEdit:disabled {{
             background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled};
         }}
         QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {{

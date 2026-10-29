@@ -730,6 +730,9 @@ class ConfigManager:
         for key in ("context_window_tokens", "max_output_tokens"):
             if type(source.get(key)) is int and 0 < source[key] <= 100000000:
                 entry[key] = source[key]
+        if isinstance(source.get("discovery"), dict):
+            from .llm.gateway_catalog import normalize_discovery
+            entry["discovery"] = normalize_discovery(source["discovery"])
         if provider_id == "openai":
             entry["api_protocol"] = normalize_openai_api_protocol(
                 source.get("api_protocol", API_PROTOCOL_CHAT_COMPLETIONS)
@@ -806,7 +809,7 @@ class ConfigManager:
             used_model_ids.add(entry["id"])
             normalized_models.append(entry)
 
-        return {
+        result = {
             "channel_id": channel_id,
             "display_name": display_name or default_name,
             "provider_type": provider_type,
@@ -814,6 +817,10 @@ class ConfigManager:
             "base_url": base_url,
             "models": normalized_models,
         }
+        if source.get("gateway_source"):
+            from .llm.gateway_catalog import normalize_gateway_source
+            result["gateway_source"] = normalize_gateway_source(source["gateway_source"])
+        return result
 
     def _normalize_provider_config(self, provider_id, config):
         defaults = self._default_model_provider_configs().get(provider_id, {})

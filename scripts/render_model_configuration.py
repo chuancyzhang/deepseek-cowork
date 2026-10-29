@@ -79,6 +79,12 @@ def run():
             QTest.qWait(120)
             assert window.grab().save(str(output / (name + suffix + ".png")))
 
+        def wait_setup(setup):
+            deadline = time.monotonic() + 5
+            while setup.worker and time.monotonic() < deadline:
+                QTest.qWait(10)
+            assert setup.worker is None, "connection task must complete"
+
         origin = window.current_session_id
         window.show_model_selector_popover()
         capture("picker")
@@ -160,13 +166,108 @@ def run():
         page = window.product_pages[window.PAGE_SETTINGS]
         page.model_channel_manager.channel_list.setCurrentRow(1)
         page.model_channel_manager.editors[1].show_model_list()
-        page._settings_pages[page._page_labels.index("模型与服务")].verticalScrollBar().setValue(0)
+        scroll = page._settings_pages[page._page_labels.index("模型与服务")]
+        scroll.verticalScrollBar().setValue(0)
         capture("model-list")
         manager = page.model_channel_manager
         editor = manager.editors[1]
-        assert manager.channel_detail_stack.x() - manager.service_navigation.geometry().right() <= 8, "unexpected gap between services and models"
+        assert manager.route_stack.currentWidget() is manager.detail
         assert page.nav_list.isVisible() and page.settings_search.isVisible()
-        assert manager.channel_list.visualItemRect(manager.channel_list.item(0)).top() >= 0
+        assert manager.channel_list.isHidden(), "second navigation must be removed"
+        manager.show_overview()
+        capture("services-overview")
+        manager.add_channel()
+        capture("service-connect")
+        import httpx
+        from core.llm.gateway_accounts import GatewayAccount
+        setup = manager.setup
+        setup.url_input.setText("https://gateway.example.test")
+        remote_keys = [
+            {"id": 1, "name": "日常工作", "group": "标准组", "status": 1, "unlimited_quota": True},
+            {"id": 2, "name": "深度研究", "group": "研究组", "status": 1, "unlimited_quota": True},
+            {"id": 3, "name": "旧项目", "group": "标准组", "status": 2}]
+        fail_second = [True]
+        calls = []
+        def gateway_response(request):
+            path = request.url.path
+            calls.append((request.method, path))
+            if path == "/api/status":
+                result = {"version": "fixture"}
+            elif path == "/api/user/login":
+                result = {"access_token": "fixture-management", "user": {"id": 17}}
+            elif path == "/api/token/":
+                if request.method == "POST":
+                    remote_keys.append(dict(json.loads(request.content), id=4, status=1))
+                    result = None
+                else:
+                    result = {"items": remote_keys, "total": len(remote_keys)}
+            elif path == "/api/user/self/groups":
+                result = {"标准组": {"desc": "标准组"}, "研究组": {"desc": "研究组"}}
+            elif path.startswith("/api/token/"):
+                if path == "/api/token/2" and fail_second[0]:
+                    return httpx.Response(503, request=request)
+                result = {"key": "fixture-" + path.rsplit("/", 1)[-1]}
+            elif path == "/v1/models":
+                result = [{"id": "work-model", "supported_endpoint_types": ["openai-response"], "supports_vision": True,
+                           "supported_reasoning_efforts": ["low", "medium", "high"]},
+                          {"id": "text-model", "supported_endpoint_types": ["openai"], "supports_vision": False},
+                          {"id": "native-video", "supported_endpoint_types": ["video"]}]
+            else:
+                raise AssertionError(path)
+            return httpx.Response(200, json={"success": True, "data": result}, request=request)
+        account = GatewayAccount(setup.url_input.text(), "new_api", transport=httpx.MockTransport(gateway_response))
+        with patch("ui.gateway_setup.GatewayAccount", return_value=account):
+            setup.connect_or_probe()
+            wait_setup(setup)
+        capture("service-sign-in")
+        setup.username.setText("example-user")
+        setup.password.setText("fixture-password")
+        setup.connect_account()
+        wait_setup(setup)
+        capture("service-keys")
+        setup.prepare_creation()
+        wait_setup(setup)
+        capture("service-key-create")
+        scroll.ensureWidgetVisible(setup.create_submit)
+        capture("service-key-create-bottom")
+        position = setup.create_submit.mapTo(scroll.viewport(), setup.create_submit.rect().center())
+        assert scroll.viewport().rect().contains(position), "creation action must remain reachable by scrolling"
+        assert setup.quota.height() >= setup.quota.fontMetrics().height() + 4, "quota input must not clip its text"
+        scroll.verticalScrollBar().setValue(0)
+        setup.create_key()
+        wait_setup(setup)
+        for item in setup._key_items():
+            item.setCheckState(Qt.Checked if item.data(Qt.UserRole)["id"] in {"1", "2"} else Qt.Unchecked)
+        setup.discover()
+        wait_setup(setup)
+        setup.selection._select_all()
+        capture("service-partial-failure")
+        runtime.switch_theme("default", mode="dark")
+        capture("service-partial-failure-dark")
+        runtime.switch_theme("default", mode="light")
+        window.resize(760, 760)
+        capture("service-partial-failure-narrow")
+        assert scroll.horizontalScrollBar().maximum() == 0
+        scroll.ensureWidgetVisible(setup.retry_rows)
+        capture("service-partial-failure-narrow-bottom")
+        scroll.verticalScrollBar().setValue(0)
+        window.resize(1280, 900)
+        fail_second[0] = False
+        setup.retry_failed()
+        wait_setup(setup)
+        setup.selection._select_all()
+        capture("service-model-selection")
+        setup.finish_import()
+        assert account.client.is_closed
+        assert manager.channel_combo.count() == 2
+        page.save_settings()
+        capture("service-multiple-keys")
+        assert not any(path in {"/v1/responses", "/v1/chat/completions"} for _, path in calls)
+        manager.add_channel()
+        manager.setup.mode.setCurrentIndex(1)
+        capture("service-api-key")
+        manager.discard_setup()
+        manager.open_service("custom")
         runtime.switch_theme("default", mode="dark")
         capture("model-list-dark")
         runtime.switch_theme("default", mode="light")
@@ -176,7 +277,7 @@ def run():
         editor.connection_button.setChecked(False)
         window.resize(760, 760)
         capture("model-list-narrow")
-        assert manager.channel_combo.isVisible()
+        assert manager.back_btn.isVisible()
         assert page._settings_pages[page._page_labels.index("模型与服务")].horizontalScrollBar().maximum() == 0
         window.resize(1280, 900)
         manager.channel_list.setCurrentRow(0)
@@ -197,11 +298,22 @@ def run():
         assert scroll.horizontalScrollBar().maximum() == 0
         window.resize(1280, 900)
         assert not tracker.stray, tracker.stray
+        QTest.qWait(80)
+        window_dpi = None
+        if app.platformName() == "windows":
+            import ctypes
+            get_dpi = ctypes.windll.user32.GetDpiForWindow
+            get_dpi.argtypes = [ctypes.c_void_p]
+            get_dpi.restype = ctypes.c_uint
+            window_dpi = int(get_dpi(int(window.winId())))
         (output / ("verification" + suffix + ".json")).write_text(json.dumps({
-            "logical_window": [1280, 900], "narrow_window": [760, 760], "qt_scale_factor": scale,
+            "logical_window": [window.width(), window.height()], "requested_window": [1280, 900],
+            "narrow_window": [760, 760], "qt_scale_factor": scale,
             "device_pixel_ratio": window.devicePixelRatioF(), "unexpected_top_level_windows": tracker.stray,
             "theme_preview_persisted": False, "origin_session_verified": True,
             "model_requests": False,
+            "platform_plugin": app.platformName(), "gateway_flow": "probe/login/create/partial-failure/retry/import/save",
+            "windows_window_dpi": window_dpi,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         app.removeEventFilter(tracker)
         runtime.stop()

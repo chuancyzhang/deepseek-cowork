@@ -186,16 +186,23 @@ def list_available_models(provider_type, base_url, api_key, timeout=20):
         raise ModelCatalogError("请填写访问密钥。")
     if not provider:
         raise ModelCatalogError(f"不支持的服务类型：{provider_type}")
+    http_client = None
     try:
         parsed = urlparse(endpoint)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ModelCatalogError("服务地址必须是有效的 HTTP 或 HTTPS URL。")
         request_timeout = httpx.Timeout(float(timeout), connect=min(float(timeout), 10.0))
+        origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        def check_origin(request):
+            target = request.url
+            if (target.scheme, target.host, target.port or (443 if target.scheme == "https" else 80)) != origin:
+                raise ModelCatalogError("模型分页指向其他站点，已停止读取；请检查服务地址。")
+        http_client = httpx.Client(timeout=request_timeout, follow_redirects=False, event_hooks={"request": [check_origin]})
         if provider == "anthropic":
-            client = Anthropic(api_key=secret, base_url=endpoint, timeout=request_timeout)
+            client = Anthropic(api_key=secret, base_url=endpoint, timeout=request_timeout, http_client=http_client, max_retries=0)
             first_page = client.models.list(limit=100)
         else:
-            client = OpenAI(api_key=secret, base_url=endpoint, timeout=request_timeout)
+            client = OpenAI(api_key=secret, base_url=endpoint, timeout=request_timeout, http_client=http_client, max_retries=0)
             first_page = client.models.list()
         records = {}
         for page in _iter_pages(first_page):
@@ -209,11 +216,21 @@ def list_available_models(provider_type, base_url, api_key, timeout=20):
                     or (item.get("owned_by") if isinstance(item, dict) else "")
                     or ""
                 ).strip()
-                records.setdefault(model_id, ModelCatalogEntry(model_id, owned_by))
+                record = ModelCatalogEntry(model_id, owned_by).as_dict()
+                raw = item if isinstance(item, dict) else item.model_dump() if callable(getattr(item, "model_dump", None)) else {}
+                if any(key in raw for key in ("supported_endpoint_types", "endpoints", "capabilities", "input_modalities",
+                                               "supports_vision", "supports_tools", "supported_reasoning_efforts",
+                                               "supports_responses_image_generation", "supported_tools", "context_window_tokens")):
+                    from .gateway_catalog import catalog_record
+                    record = catalog_record(raw, default_provider=provider)
+                records.setdefault(model_id, record)
     except ModelCatalogError:
         raise
     except Exception as exc:
         raise ModelCatalogError(_safe_error_message(exc, secret)) from exc
+    finally:
+        if http_client is not None:
+            http_client.close()
     if not records:
         raise ModelCatalogError("接口返回成功，但没有提供任何模型。")
-    return [records[key].as_dict() for key in sorted(records, key=str.casefold)]
+    return [records[key] for key in sorted(records, key=str.casefold)]

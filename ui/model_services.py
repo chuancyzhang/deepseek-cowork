@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import qtawesome as qta
 
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtWidgets import (QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -31,6 +32,7 @@ class ModelServicesPage(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(20)
+        self.layout.setAlignment(Qt.AlignTop)
         self.route_stack = ModelPageStack(self)
         self.layout.addWidget(self.route_stack)
         self.overview = QWidget(self.route_stack)
@@ -58,23 +60,27 @@ class ModelServicesPage(QWidget):
         detail = QVBoxLayout(self.detail)
         detail.setContentsMargins(0, 0, 0, 0)
         detail.setSpacing(12)
+        detail.setAlignment(Qt.AlignTop)
         header = QHBoxLayout()
-        self.back_btn = QPushButton("返回服务列表", self.detail)
-        self.back_btn.clicked.connect(self.show_overview)
+        self.back_btn = QPushButton("", self.detail)
+        self.back_btn.setFixedWidth(36)
+        self.back_btn.clicked.connect(self._back_from_detail)
         header.addWidget(self.back_btn)
-        header.addStretch()
-        self.manage_keys_btn = QPushButton("管理接入密钥", self.detail)
-        self.manage_keys_btn.clicked.connect(self.manage_keys)
-        header.addWidget(self.manage_keys_btn)
+        self.detail_title = QLabel(self.detail)
+        self.detail_title.setTextFormat(Qt.PlainText)
+        self.detail_title.setWordWrap(True)
+        header.addWidget(self.detail_title, 1)
         self.more_btn = QPushButton("更多", self.detail)
         self.more_menu = QMenu(self.more_btn)
+        self.connection_action = self.more_menu.addAction("编辑连接")
+        self.connection_action.setCheckable(True)
+        self.connection_action.triggered.connect(self._toggle_connection)
+        self.manage_keys_action = self.more_menu.addAction("管理接入密钥", self.manage_keys)
+        self.more_menu.addSeparator()
         self.more_menu.addAction("删除此服务", self.delete_active_service)
         self.more_btn.setMenu(self.more_menu)
         header.addWidget(self.more_btn)
         detail.addLayout(header)
-        self.detail_title = QLabel(self.detail)
-        self.detail_title.setWordWrap(True)
-        detail.addWidget(self.detail_title)
         self.address_label = QLabel(self.detail)
         self.address_label.setWordWrap(True)
         self.address_label.setTextFormat(Qt.PlainText)
@@ -181,13 +187,26 @@ class ModelServicesPage(QWidget):
             self.channel_combo.addItem(label or editor._channel_name(), self.editors.index(editor))
         self.channel_combo.setCurrentIndex(editors.index(selected) if selected in editors else 0)
         self.channel_combo.blockSignals(False)
-        self.key_filter.setVisible(len(editors) > 1)
         if editors:
             first = editors[0]
             source = first.gateway_source()
             self.detail_title.setText(first._channel_name())
             self.address_label.setText(source.get("site_url") or first.base_url_input.text())
-            self.manage_keys_btn.setVisible(bool(source))
+            self.manage_keys_action.setVisible(bool(source))
+        self._sync_editor_route()
+
+    def _back_from_detail(self):
+        editor = self.channel_detail_stack.currentWidget()
+        if editor and editor._active_form_id:
+            editor.show_model_list()
+        else:
+            self.show_overview()
+
+    def _toggle_connection(self, checked):
+        editor = self.channel_detail_stack.currentWidget()
+        if editor:
+            editor.connection_button.setChecked(checked)
+            self._sync_editor_route()
 
     def _open_service_item(self, item):
         self.open_service(item.data(Qt.UserRole))
@@ -218,6 +237,17 @@ class ModelServicesPage(QWidget):
     def _sync_editor_route(self, *_args):
         editor = self.channel_detail_stack.currentWidget()
         editing = bool(editor and editor._active_form_id and self.route_stack.currentWidget() is self.detail)
+        self.back_btn.setToolTip("返回模型列表" if editing else "返回服务列表")
+        self.back_btn.setAccessibleName(self.back_btn.toolTip())
+        self.more_btn.setVisible(not editing)
+        self.key_filter.setVisible(not editing and len(self._service_editors()) > 1)
+        if editor:
+            source = editor.gateway_source()
+            self.detail_title.setText(editor.form_title.text() if editing else editor._channel_name())
+            self.address_label.setText(" · ".join(filter(None, (editor._channel_name(), source.get("key_name"), source.get("group_name"))))
+                                       if editing else source.get("site_url") or editor.base_url_input.text())
+            self.connection_action.setChecked(editor.connection_button.isChecked())
+            editor._sync_connection_visibility()
         self.default_model_row.setVisible(not editing and self.route_stack.currentWidget() is not self.setup)
         for item in self.editors:
             item.body.layout().setContentsMargins(0, 0, 0, 0)
@@ -358,6 +388,7 @@ class ModelServicesPage(QWidget):
         self.saved_model_id = self.last_edited_model_id if self.last_edited_model_id in ids else ""
         for editor in self.editors:
             editor.mark_models_saved()
+        self._sync_editor_route()
         self.saved_notice.setVisible(bool(self.saved_model_id and self.origin_session_id))
 
     def _refresh_default_models(self):
@@ -432,8 +463,11 @@ class ModelServicesPage(QWidget):
             label.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_primary}; font-size: {DesignTokens.font_size_section}px; font-weight: 600; }}")
         for label in (self.empty_label, self.address_label, self.default_model_hint, self.saved_label):
             label.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_secondary}; }}")
-        for button in (self.back_btn, self.more_btn, self.manage_keys_btn, self.use_model_btn):
-            button.setStyleSheet(product_button_style("secondary"))
+        for button in (self.back_btn, self.more_btn):
+            button.setStyleSheet(product_button_style("ghost"))
+        self.back_btn.setIcon(qta.icon("fa5s.chevron-left", color=DesignTokens.text_secondary))
+        self.back_btn.setIconSize(QSize(14, 14))
+        self.use_model_btn.setStyleSheet(product_button_style("secondary"))
         self.add_channel_btn.setStyleSheet(product_button_style("primary"))
         for combo in (self.channel_combo, self.default_model_combo):
             combo.setStyleSheet(model_field_style())

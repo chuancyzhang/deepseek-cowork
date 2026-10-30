@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import httpx
 
-from core.llm.gateway_accounts import GatewayAccount, GatewayError, encrypt_password, normalize_site_url, channels_from_selection
+from core.llm.gateway_accounts import (GatewayAccount, GatewayError, encrypt_password, normalize_site_url,
+                                      normalize_api_base_url, channels_from_selection)
 from core.llm.gateway_catalog import catalog_record, new_catalog_model, reconcile_catalog, normalize_gateway_source
 
 
@@ -24,9 +25,58 @@ class GatewayAccountTests(unittest.TestCase):
     def test_url_normalization_preserves_proxy_and_rejects_embedded_secrets(self):
         for raw in ("https://SITE.test/proxy/v1/", "https://site.test:443/proxy/api/v1", "https://site.test/proxy/api"):
             self.assertEqual(normalize_site_url(raw), "https://site.test/proxy")
-        for raw in ("https://user:password@site.test", "https://site.test/?key=x", "file:///a", "https://site.test:bad"):
+        for raw in ("https://user:password@site.test", "https://@site.test", "file:///a", "https://site.test:bad"):
             with self.assertRaises(GatewayError):
                 normalize_site_url(raw)
+
+    def test_browser_urls_keep_proxy_prefix_and_drop_page_parameters(self):
+        cases = {
+            "https://site.test/dashboard": "https://site.test",
+            "https://site.test/login?redirect=%2Fdashboard#form": "https://site.test",
+            "https://site.test/proxy/dashboard/usage?range=week": "https://site.test/proxy",
+            "https://site.test/proxy/console/token": "https://site.test/proxy",
+            "https://site.test/proxy/#/login?redirect=/dashboard": "https://site.test/proxy",
+            "https://site.test/proxy/v1/?key=discard#fragment": "https://site.test/proxy",
+            "https://site.test/proxy-login/my-dashboard": "https://site.test/proxy-login/my-dashboard",
+            "https://[::1]:8443/proxy/login/": "https://[::1]:8443/proxy",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_site_url(raw), expected)
+                self.assertEqual(normalize_site_url(expected), expected)
+
+    def test_manual_base_url_preserves_explicit_custom_api_paths(self):
+        for raw, expected in (
+            ("https://site.test/dashboard", "https://site.test/v1"),
+            ("https://site.test/proxy/login?from=home", "https://site.test/proxy/v1"),
+            ("https://site.test/proxy/#/console/token", "https://site.test/proxy/v1"),
+            ("https://site.test/proxy/api/v1", "https://site.test/proxy/api/v1"),
+            ("https://site.test/console/v1", "https://site.test/console/v1"),
+            ("https://site.test/custom/openai", "https://site.test/custom/openai"),
+            ("https://site.test/", "https://site.test/v1"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_api_base_url(raw, "openai"), expected)
+                self.assertEqual(normalize_api_base_url(expected, "openai"), expected)
+        self.assertEqual(normalize_api_base_url("https://site.test/proxy/login", "anthropic"), "https://site.test/proxy")
+
+    def test_copied_page_url_is_not_used_for_account_requests(self):
+        for platform, login_path in (("sub2api", "/api/v1/auth/login"), ("new_api", "/api/user/login")):
+            with self.subTest(platform=platform):
+                paths = []
+                def handler(request):
+                    self.assertEqual(request.url.host, "site.test")
+                    self.assertFalse(request.url.query)
+                    paths.append(request.url.path)
+                    data = {"registration_enabled": True, "version": "test"} if request.method == "GET" else {
+                        "access_token": "test-management", "user": {"id": 1}}
+                    return self.response(request, data, platform)
+                account = GatewayAccount("https://site.test/proxy/login?redirect=https://elsewhere.test#form", platform,
+                                         transport=httpx.MockTransport(handler))
+                self.addCleanup(account.close)
+                account.login("user", "password")
+                self.assertEqual(paths[-1], "/proxy" + login_path)
+                self.assertEqual(len(paths), 2)
 
     def test_sub2api_login_totp_pagination_and_key_scoped_models(self):
         calls = []

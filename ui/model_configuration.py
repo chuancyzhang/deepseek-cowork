@@ -2,6 +2,7 @@
 
 import copy
 import json
+import qtawesome as qta
 
 from PySide6.QtCore import Qt, Signal, QSize, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QPalette
@@ -159,7 +160,10 @@ class ModelCatalogRow(QWidget):
         self.default_badge.setMaximumHeight(24)
         self.default_badge.hide()
         layout.addWidget(self.default_badge)
-        self.edit_button = QPushButton("编辑", self)
+        self.edit_button = QPushButton("", self)
+        self.edit_button.setFixedWidth(32)
+        self.edit_button.setToolTip(f"编辑 {title}")
+        self.edit_button.setAccessibleName(f"编辑 {title}")
         self.edit_button.clicked.connect(self.editRequested)
         layout.addWidget(self.edit_button)
         self.test_button = QPushButton("测试", self)
@@ -180,7 +184,9 @@ class ModelCatalogRow(QWidget):
         self.details.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_meta}px; }}")
         self.details.setText(self.details.fontMetrics().elidedText(self.details.full_text, Qt.ElideRight, self.details.width()))
         self.test_button.setStyleSheet(product_button_style("ghost"))
-        self.edit_button.setStyleSheet(product_button_style("secondary"))
+        self.edit_button.setStyleSheet(product_button_style("ghost"))
+        self.edit_button.setIcon(qta.icon("fa5s.chevron-right", color=DesignTokens.text_secondary))
+        self.edit_button.setIconSize(QSize(14, 14))
         self.default_badge.setStyleSheet(
             f"QLabel {{ color: {DesignTokens.text_secondary}; background: {DesignTokens.bg_secondary}; border-radius: 4px; padding: 3px 6px; font-size: {DesignTokens.font_size_caption}px; }}")
 
@@ -235,17 +241,19 @@ class ModelEditForm(QWidget):
         self.anthropic_note = self._note("API 协议：Anthropic Messages", self.info)
         self._layout_info()
         layout.addWidget(self.info)
+        self.discovery_warning = self._note("")
+        layout.addWidget(self.discovery_warning)
         self.discovery_note = self._note("")
         layout.addWidget(self.discovery_note)
-        self.discovery_details_button = QPushButton("查看站点信息", self)
+        self.discovery_details_button = QPushButton("▸ 站点声明", self)
         self.discovery_details_button.setCheckable(True)
-        layout.addWidget(self.discovery_details_button, 0, Qt.AlignLeft)
+        layout.insertWidget(layout.indexOf(self.discovery_note), self.discovery_details_button, 0, Qt.AlignLeft)
         self.discovery_details = self._note("")
         self.discovery_details.setTextFormat(Qt.PlainText)
         self.discovery_details.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.discovery_details.hide()
         layout.addWidget(self.discovery_details)
-        self.discovery_details_button.toggled.connect(self.discovery_details.setVisible)
+        self.discovery_details_button.toggled.connect(self._toggle_discovery)
         self.update_discovery(source.get("discovery", {}))
 
         self._heading("模型能力", layout)
@@ -357,23 +365,38 @@ class ModelEditForm(QWidget):
 
     def _mark_manual(self, field):
         self._manual_fields.add(field)
+        if field == "api_protocol":
+            self.update_discovery(self._source.get("discovery", {}))
         self.changed.emit()
 
     def update_discovery(self, evidence):
         if evidence:
             self._source["discovery"] = copy.deepcopy(evidence)
         caps = evidence.get("capabilities", {})
+        warnings = []
+        if evidence.get("protocol_status") == "unknown" and "api_protocol" not in self._manual_fields:
+            warnings.append("调用方式未确认，请按站点说明选择 API 协议。")
+        if evidence.get("metadata_warning"):
+            warnings.append(evidence["metadata_warning"])
+        self.discovery_warning.setText("\n".join(warnings))
+        self.discovery_warning.setVisible(bool(warnings))
         details = []
         for key, title in (("supports_vision", "图片理解"), ("supports_image_generation", "Responses 图片生成"),
                            ("supports_tools", "工具调用"), ("reasoning_efforts", "推理档位")):
             value = caps.get(key)
             text = "未提供" if value is None else (" / ".join(value) or "不支持") if isinstance(value, list) else "支持" if value else "不支持"
             details.append(f"{title}：{text}")
-        self.discovery_note.setText("站点声明（未经调用验证）\n" + "；".join(details))
+        self.discovery_note.setText("未经调用验证 · " + "；".join(details))
         self.discovery_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.discovery_note.setVisible(bool(evidence))
+        self.discovery_note.setVisible(bool(evidence) and self.discovery_details_button.isChecked())
         self.discovery_details_button.setVisible(bool(evidence))
         self.discovery_details.setText(json.dumps(evidence, ensure_ascii=False, indent=2))
+        self.discovery_details.setVisible(bool(evidence) and self.discovery_details_button.isChecked())
+
+    def _toggle_discovery(self, expanded):
+        self.discovery_details_button.setText("▾ 站点声明" if expanded else "▸ 站点声明")
+        self.discovery_note.setVisible(expanded)
+        self.discovery_details.setVisible(expanded)
 
     def _note(self, text, parent=None):
         label = QLabel(text, parent or self)
@@ -545,5 +568,5 @@ class ModelEditForm(QWidget):
             line.setStyleSheet(f"QFrame {{ background: {DesignTokens.separator}; border: none; }}")
         self.effort_preview.setStyleSheet(f"QLabel {{ color: {DesignTokens.text_secondary}; background: {DesignTokens.bg_secondary}; border-radius: 6px; padding: 10px 12px; font-size: {DesignTokens.font_size_meta}px; }}")
         self.advanced_button.setStyleSheet(product_button_style("ghost"))
-        self.discovery_details_button.setStyleSheet(product_button_style("secondary"))
+        self.discovery_details_button.setStyleSheet(product_button_style("ghost"))
         self.error_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: {DesignTokens.font_size_meta}px;")

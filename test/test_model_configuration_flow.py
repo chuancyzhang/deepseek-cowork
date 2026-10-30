@@ -121,6 +121,65 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.assertEqual(len(ConfigManager().iter_model_profiles()), 3)
         self.assertEqual(self.config.get_selected_model_id(), "model-a")
 
+    def test_model_rows_use_model_capabilities_instead_of_skill_summary(self):
+        editor = self.manager.editors[0]
+        cases = [
+            ({"supports_vision": True, "supports_image_generation": True,
+              "reasoning_efforts": ["low", "high"], "reasoning_effort": "high",
+              "discovery": {"capabilities": {"supports_vision": True}, "protocol_status": "declared"}},
+             "图片理解 · 图片生成 · 推理 high"),
+            ({"discovery": {"capabilities": {}, "protocol_status": "unknown"}}, "能力信息未提供 · 调用方式未确认"),
+            ({"discovery": {"capabilities": {"supports_vision": False}, "protocol_status": "declared"}}, "对话模型"),
+            ({}, "对话模型"),
+        ]
+        for fields, expected in cases:
+            with self.subTest(expected=expected):
+                editor.channel_config["models"] = [{"id": "model-a", "model_name": "model", "display_name": "model", **fields}]
+                editor.refresh_model_list()
+                self.assertEqual(editor._model_rows["model-a"].details.full_text, expected)
+                self.assertEqual(editor.model_list.item(0).text(), "model\n" + expected)
+                self.assertNotIn("能力信息不完整", editor.model_list.item(0).toolTip())
+
+    def test_contextual_back_keeps_model_draft_and_restores_service_actions(self):
+        self.page.show()
+        self.manager.open_service("service-a")
+        editor = self.manager.editors[0]
+        self.manager.connection_action.trigger()
+        self.assertFalse(editor.connection_widget.isHidden())
+        editor.open_model_form("model-a")
+        form = editor.model_forms["model-a"]
+        form.display_name_input.setText("尚未保存的名称")
+        self.app.processEvents()
+        self.assertTrue(editor.connection_widget.isHidden())
+        self.assertTrue(editor.form_navigation.isHidden())
+        self.assertTrue(self.manager.more_btn.isHidden())
+        self.assertEqual(self.manager.back_btn.accessibleName(), "返回模型列表")
+        self.manager.back_btn.click()
+        self.assertFalse(self.manager.more_btn.isHidden())
+        self.assertEqual(editor._models()[0]["display_name"], "尚未保存的名称")
+        self.assertEqual(self.manager.back_btn.accessibleName(), "返回服务列表")
+        self.manager.back_btn.click()
+        self.assertIs(self.manager.route_stack.currentWidget(), self.manager.overview)
+        self.manager.open_service("service-a")
+        editor.open_model_form("model-a")
+        self.assertIs(editor.model_forms["model-a"], form)
+        self.assertEqual(form.display_name_input.text(), "尚未保存的名称")
+
+    def test_site_details_collapse_keeps_protocol_warning_visible(self):
+        editor = self.manager.editors[0]
+        editor._models()[0]["discovery"] = {"capabilities": {}, "protocol_status": "unknown"}
+        editor.open_model_form("model-a")
+        form = editor.model_forms["model-a"]
+        self.assertFalse(form.discovery_warning.isHidden())
+        self.assertTrue(form.discovery_details.isHidden())
+        form.discovery_details_button.click()
+        self.assertFalse(form.discovery_details.isHidden())
+        self.assertIn('"protocol_status": "unknown"', form.discovery_details.text())
+        form.discovery_details_button.click()
+        self.assertFalse(form.discovery_warning.isHidden())
+        form._mark_manual("api_protocol")
+        self.assertTrue(form.discovery_warning.isHidden())
+
     def test_hidden_invalid_draft_blocks_save_and_returns_to_error(self):
         editor, form = self.draft()
         form.context_window_input.setText("invalid-budget")

@@ -113,6 +113,12 @@ def run():
             form.reasoning_checks[effort].setChecked(True)
         form.reasoning_combo.setCurrentIndex(form.reasoning_combo.findData("low"))
         capture("editor")
+        assert not manager.more_btn.isVisible() and not editor.form_navigation.isVisible(), {
+            "detail": manager.route_stack.currentWidget() is manager.detail,
+            "current_editor": manager.channel_detail_stack.currentWidget() is editor,
+            "form_id": editor._active_form_id,
+            "more_visible": manager.more_btn.isVisible(), "form_navigation_visible": editor.form_navigation.isVisible()}
+        assert not editor.connection_widget.isVisible() and manager.back_btn.isVisible()
         window.resize(760, 760)
         capture("editor-narrow")
         scroll = page._settings_pages[page._page_labels.index("模型与服务")]
@@ -166,6 +172,8 @@ def run():
         page = window.product_pages[window.PAGE_SETTINGS]
         page.model_channel_manager.channel_list.setCurrentRow(1)
         page.model_channel_manager.editors[1].show_model_list()
+        row = page.model_channel_manager.editors[1].model_list.item(0)
+        assert "图片理解" in row.text() and "能力信息不完整" not in row.text()
         scroll = page._settings_pages[page._page_labels.index("模型与服务")]
         scroll.verticalScrollBar().setValue(0)
         capture("model-list")
@@ -181,7 +189,7 @@ def run():
         import httpx
         from core.llm.gateway_accounts import GatewayAccount
         setup = manager.setup
-        setup.url_input.setText("https://gateway.example.test")
+        setup.url_input.setText("https://gateway.example.test/login?redirect=%2Fdashboard")
         remote_keys = [
             {"id": 1, "name": "日常工作", "group": "标准组", "status": 1, "unlimited_quota": True},
             {"id": 2, "name": "深度研究", "group": "研究组", "status": 1, "unlimited_quota": True},
@@ -225,6 +233,14 @@ def run():
         setup.connect_account()
         wait_setup(setup)
         capture("service-keys")
+        window.resize(1440, 1240)
+        setup.back_btn.click()
+        QTest.qWait(80)
+        for field in (setup.mode, setup.url_input, setup.username, setup.password, setup.name_input):
+            assert field.parentWidget().height() <= field.parentWidget().sizeHint().height() + 2
+        capture("service-sign-in-tall")
+        setup.stack.setCurrentWidget(setup.keys_page)
+        window.resize(1280, 900)
         setup.prepare_creation()
         wait_setup(setup)
         capture("service-key-create")
@@ -261,6 +277,9 @@ def run():
         assert account.client.is_closed
         assert manager.channel_combo.count() == 2
         page.save_settings()
+        imported = manager.channel_detail_stack.currentWidget()
+        assert "图片理解" in imported.model_list.item(0).text()
+        assert "能力信息不完整" not in imported.model_list.item(0).text()
         capture("service-multiple-keys")
         assert not any(path in {"/v1/responses", "/v1/chat/completions"} for _, path in calls)
         manager.add_channel()
@@ -272,9 +291,9 @@ def run():
         capture("model-list-dark")
         runtime.switch_theme("default", mode="light")
         window.resize(1440, 1000)
-        editor.connection_button.setChecked(True)
+        manager.connection_action.trigger()
         capture("service-connections")
-        editor.connection_button.setChecked(False)
+        manager.connection_action.trigger()
         window.resize(760, 760)
         capture("model-list-narrow")
         assert manager.back_btn.isVisible()

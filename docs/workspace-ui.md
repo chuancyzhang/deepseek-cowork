@@ -121,30 +121,34 @@
 
 ### 模型选择与配置
 
-模型选择浮层底部提供“配置新模型”，无配置或无搜索结果时仍可进入。点击外部或按 `Esc` 收起，不抢占刚点击控件的焦点。“设置 → 模型与服务”先展示服务总览，顶部提供“添加服务”，不再嵌套第二级服务侧栏。进入服务后直接查看模型，顶部可返回、管理接入密钥与展开“编辑连接”；删除收在“更多”。模型行直接提供编辑、测试，勾选后显示批量操作，新对话默认模型单独配置。
+模型选择浮层底部提供“配置新模型”，无配置或无搜索结果时仍可进入。点击外部或按 `Esc` 收起，不抢占刚点击控件的焦点。“设置 → 模型与服务”先展示服务总览，顶部提供“添加服务”。服务详情用一行标题和返回箭头定位，地址位于标题下方；“编辑连接”“管理接入密钥”和删除集中放入“更多”。模型数量、手动添加和获取模型位于同一栏；点击模型名称或右侧箭头进入编辑，测试保留轻量文字入口。勾选后显示删除或批量配置，不再重复单个模型的编辑按钮。新对话默认模型单独配置。
 
 新增服务使用同一个页内流程：账号登录或填写 API Key → 选择密钥 → 获取并选择模型 → 加入设置草稿。sub2api / New API 支持站点识别、密码登录与 TOTP，多个密钥按账号归为服务、按密钥和分组筛选。创建远端密钥是独立页面步骤，创建不确定时只能先核对；取消本地接入不删除远端密钥。部分失败保留已完成结果并提供逐个重试。站点能力未提供与明确不支持分开显示，不推断模型名、不自动调用模型。
+
+每一步只保留一个返回入口，并保留当前输入与选择；前往站点和放弃接入位于“更多”，需要网页验证时直接显示前往站点入口。登录表单按内容高度靠上排列，服务名称为末尾选填项；密钥列表上方放刷新和创建，下方只突出获取模型。模型编辑页只展示当前模型、所属服务和表单；站点声明就地折叠，未确认的调用方式及读取失败仍直接显示。保存继续使用页面底部统一的“保存更改”。
+
+两个接入入口都支持直接粘贴登录页、仪表盘或控制台地址，例如 `https://example.com/login`、`https://example.com/dashboard` 和 `https://example.com/proxy/console/token`。应用去掉这些已知页面路径、查询参数和页面片段，保留 `/proxy` 这类部署前缀；手动填写的自定义 API 路径继续保留。模型行按实际配置显示图片理解、图片生成和推理；站点未声明能力或协议时分别显示“能力信息未提供”和“调用方式未确认”。
 
 模型表单只使用页面底部“保存更改”；失败保留草稿，切换服务保留草稿，离开设置走统一确认。保存后的“返回对话并使用”绑定进入配置时的对话，不会自动更改其他对话或默认模型。
 
 | 状态 | 实际 Qt 截图 |
 | --- | --- |
-| 选择模型与配置入口 | [查看](images/model-configuration/picker.png) |
-| 服务总览 | [查看](images/model-configuration/services-overview.png) |
-| 站点识别与登录 | [识别](images/model-configuration/service-connect.png) · [登录](images/model-configuration/service-sign-in.png) |
-| 密钥选择与创建 | [选择](images/model-configuration/service-keys.png) · [创建](images/model-configuration/service-key-create.png) |
-| 部分失败与重试 | [浅色](images/model-configuration/service-partial-failure.png) · [深色](images/model-configuration/service-partial-failure-dark.png) |
-| 多密钥服务 | [模型选择](images/model-configuration/service-model-selection.png) · [服务详情](images/model-configuration/service-multiple-keys.png) |
-| 模型列表 | [查看](images/model-configuration/model-list.png) |
-| 服务连接展开 | [查看](images/model-configuration/service-connections.png) |
-| 小窗口模型列表 | [查看](images/model-configuration/model-list-narrow.png) |
-| 深色模型列表 | [查看](images/model-configuration/model-list-dark.png) |
-| 页内编辑 | [查看](images/model-configuration/editor.png) |
-| 小窗口 | [查看](images/model-configuration/editor-narrow.png) |
-| 150% Qt 缩放、小窗口底部 | [查看](images/model-configuration/editor-narrow-bottom-150.png) |
-| 深色主题 | [查看](images/model-configuration/editor-dark.png) |
-| 未保存的主题候选 | [查看](images/model-configuration/editor-theme-preview.png) |
-| 校验错误与输入保留 | [查看](images/model-configuration/editor-validation.png) |
+| 选择模型与配置入口 | [查看](images/model-services-refinement-20261030/picker.png) |
+| 服务总览 | [查看](images/model-services-refinement-20261030/services-overview.png) |
+| 站点识别与登录 | [识别](images/model-services-refinement-20261030/service-connect.png) · [登录](images/model-services-refinement-20261030/service-sign-in.png) |
+| 密钥选择与创建 | [选择](images/model-services-refinement-20261030/service-keys.png) · [创建](images/model-services-refinement-20261030/service-key-create.png) |
+| 部分失败与重试 | [浅色](images/model-services-refinement-20261030/service-partial-failure.png) · [深色](images/model-services-refinement-20261030/service-partial-failure-dark.png) |
+| 多密钥服务 | [模型选择](images/model-services-refinement-20261030/service-model-selection.png) · [服务详情](images/model-services-refinement-20261030/service-multiple-keys.png) |
+| 模型列表 | [查看](images/model-services-refinement-20261030/model-list.png) |
+| 服务连接展开 | [查看](images/model-services-refinement-20261030/service-connections.png) |
+| 小窗口模型列表 | [查看](images/model-services-refinement-20261030/model-list-narrow.png) |
+| 深色模型列表 | [查看](images/model-services-refinement-20261030/model-list-dark.png) |
+| 页内编辑 | [查看](images/model-services-refinement-20261030/editor.png) |
+| 小窗口 | [查看](images/model-services-refinement-20261030/editor-narrow.png) |
+| 原生窗口叠加 Qt 1.5 倍缩放、底部 | [查看](images/model-services-refinement-20261030/native/editor-narrow-bottom-150.png) |
+| 深色主题 | [查看](images/model-services-refinement-20261030/editor-dark.png) |
+| 未保存的主题候选 | [查看](images/model-services-refinement-20261030/editor-theme-preview.png) |
+| 校验错误与输入保留 | [查看](images/model-services-refinement-20261030/editor-validation.png) |
 
 ```powershell
 .venv/Scripts/python.exe -X utf8 -B scripts/render_model_configuration.py

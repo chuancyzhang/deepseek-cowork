@@ -230,7 +230,7 @@ from ui.primitives import (
 from ui.model_configuration import ModelEditForm, ModelCatalogRow, ModelPageStack, ModelFieldCombo, model_field_style, apply_model_combo_style
 from ui.model_services import ModelServicesPage
 from ui.gateway_setup import ModelSelectionPanel
-from core.llm.gateway_catalog import catalog_record, new_catalog_model, reconcile_catalog, capability_summary
+from core.llm.gateway_catalog import catalog_record, new_catalog_model, reconcile_catalog, capability_summary as model_capability_summary
 from ui.theme_settings import ThemeSettingsPanel
 from ui.log_export import LogExportPanel
 from core.runtime_logs import (
@@ -6036,6 +6036,7 @@ class ModelChannelEditor(QFrame):
         self._edited_model_ids = set()
         self._model_rows = {}
         self._default_model_id = ""
+        self._management_detail_mode = False
         self.setObjectName("ModelChannelEditor")
         self.setStyleSheet(
             f"""
@@ -6172,7 +6173,7 @@ class ModelChannelEditor(QFrame):
         self.connection_button = QPushButton("", self.body)
         self.connection_button.setCheckable(True)
         self.connection_button.setChecked(True)
-        self.connection_button.toggled.connect(self.connection_widget.setVisible)
+        self.connection_button.toggled.connect(self._sync_connection_visibility)
         self.connection_button.toggled.connect(self.refresh_header)
         body_layout.addWidget(self.connection_button, 0, Qt.AlignLeft)
         body_layout.addWidget(self.connection_widget)
@@ -6236,7 +6237,7 @@ class ModelChannelEditor(QFrame):
         self.test_btn.setObjectName("SecondaryBtn")
         self.test_btn.setIcon(qta.icon("fa5s.plug", color=DesignTokens.text_secondary))
         self.test_btn.clicked.connect(self.test_current_model)
-        button_row.addWidget(self.add_model_btn)
+        fetch_row.insertWidget(fetch_row.indexOf(self.fetch_btn), self.add_model_btn)
         button_row.addWidget(self.edit_model_btn)
         button_row.addWidget(self.delete_model_btn)
         button_row.addStretch()
@@ -6348,7 +6349,7 @@ class ModelChannelEditor(QFrame):
                                     (self.delete_model_btn, "fa5s.trash-alt", DesignTokens.error_text),
                                     (self.test_btn, "fa5s.plug", DesignTokens.icon_secondary)):
             button.setIcon(qta.icon(icon, color=color))
-            button.setStyleSheet(product_button_style("secondary"))
+            button.setStyleSheet(product_button_style("ghost" if button is self.add_model_btn else "secondary"))
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -6417,10 +6418,8 @@ class ModelChannelEditor(QFrame):
             return
         names = {str(model.get("model_name") or "").strip() for model in self._models()}
         if recommended in names:
-            self.recommendation_notice.setText(f"推荐模型：{recommended}。推荐标识不会自动替换你当前选择的模型。")
-            self.recommendation_notice.setStyleSheet(
-                f"color: {DesignTokens.primary}; font-size: 12px;"
-            )
+            self.recommendation_notice.hide()
+            return
         else:
             self.recommendation_notice.setText(f"推荐模型 {recommended} 尚未添加，请拉取模型后导入。")
             self.recommendation_notice.setStyleSheet(
@@ -6435,13 +6434,20 @@ class ModelChannelEditor(QFrame):
         self.expand_btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
 
     def set_management_detail_mode(self):
+        self._management_detail_mode = True
         self.header.hide()
         self.expanded = True
         self.body.show()
         self.connection_button.setChecked(not self._has_api_key())
+        self.connection_button.hide()
+        self._sync_connection_visibility()
         self.setStyleSheet(
             "QFrame#ModelChannelEditor { background: transparent; border: none; border-radius: 0; }"
         )
+
+    def _sync_connection_visibility(self, *_):
+        self.connection_widget.setVisible(self.connection_button.isChecked()
+                                          and not (self._management_detail_mode and self._active_form_id))
 
     def toggle_expanded(self):
         self.set_expanded(not self.expanded)
@@ -6487,7 +6493,7 @@ class ModelChannelEditor(QFrame):
             reasoning = f"  ·  推理 {'/'.join(efforts)}" if efforts else ""
             identity = str(model.get("model_name") or "")
             details = (identity + "  ·  " if identity and identity != label else "")
-            details += capability_summary(model)
+            details += model_capability_summary(model)
             item = QListWidgetItem(f"{label}{recommendation}\n{details}")
             item.setToolTip(f"{label}\n模型标识：{identity}\n{details}{reasoning}")
             item.setSizeHint(QSize(0, max(76, self.model_list.fontMetrics().lineSpacing() * 2 + 28)))
@@ -6524,14 +6530,16 @@ class ModelChannelEditor(QFrame):
     def _refresh_model_actions(self):
         count = len(self.model_list.selectedItems()) if hasattr(self, "model_list") else 0
         if hasattr(self, "edit_model_btn"):
-            self.edit_model_btn.setVisible(count > 0)
-            self.edit_model_btn.setEnabled(count > 0)
-            self.edit_model_btn.setText(f"批量配置（{count}）" if count > 1 else "编辑")
+            self.edit_model_btn.setVisible(count > 1)
+            self.edit_model_btn.setEnabled(count > 1)
+            self.edit_model_btn.setText(f"批量配置（{count}）")
         if hasattr(self, "delete_model_btn"):
             self.delete_model_btn.setVisible(count > 0)
             self.delete_model_btn.setEnabled(count == 1)
         if hasattr(self, "test_btn"):
             self.test_btn.setEnabled(count == 1 and not (self.test_worker and self.test_worker.isRunning()))
+        if hasattr(self, "model_actions"):
+            self.model_actions.setVisible(count > 0 and not self._active_form_id and self.import_panel.isHidden())
         for index in range(self.model_list.count()):
             item = self.model_list.item(index)
             row = self._model_rows.get(str(item.data(Qt.UserRole) or ""))
@@ -6599,9 +6607,11 @@ class ModelChannelEditor(QFrame):
         self.model_form_stack.setCurrentWidget(form)
         for widget in (self.model_list, self.model_actions, self.fetch_row_widget, self.model_heading, self.recommendation_notice):
             widget.hide()
-        for widget in (self.form_navigation, self.model_form_stack, self.form_test_btn):
+        self.form_navigation.setVisible(not self._management_detail_mode)
+        for widget in (self.model_form_stack, self.form_test_btn):
             widget.show()
         self.connection_button.setChecked(not self._has_api_key())
+        self._sync_connection_visibility()
         self.test_status_label.setText("复用当前服务的地址和密钥。测试不保存；完成后点击页面底部“保存更改”。")
         self.formRouteChanged.emit(True)
         log_model_service_event("model_editor_open", channel_id=self.channel_config.get("channel_id"), model_id=model_id)
@@ -6649,6 +6659,7 @@ class ModelChannelEditor(QFrame):
                 self.model_list.setCurrentItem(item, QItemSelectionModel.ClearAndSelect)
                 break
         self.connection_button.setChecked(not self._has_api_key())
+        self._sync_connection_visibility()
         self.formRouteChanged.emit(False)
 
     def validate_model_forms(self):

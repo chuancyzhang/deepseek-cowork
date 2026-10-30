@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import logging
 import uuid
+import qtawesome as qta
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal, QSize
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout,
-                             QHBoxLayout, QListWidget, QListWidgetItem, QSpinBox, QDoubleSpinBox)
+                             QHBoxLayout, QListWidget, QListWidgetItem, QSpinBox, QDoubleSpinBox,
+                             QSizePolicy, QMenu)
 
-from core.llm.gateway_accounts import GatewayAccount, GatewayError, channels_from_selection, normalize_site_url
+from core.llm.gateway_accounts import (GatewayAccount, GatewayError, channels_from_selection,
+                                      normalize_api_base_url, normalize_site_url)
 from core.llm.gateway_catalog import catalog_record, new_catalog_model
 from core.llm.model_catalog import list_available_models, ModelCatalogError
 from core.theme import DesignTokens, bind_theme
@@ -169,15 +172,28 @@ class GatewaySetup(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
+        layout.setAlignment(Qt.AlignTop)
+        header = QHBoxLayout()
+        self.back_btn = QPushButton("", self)
+        self.back_btn.setFixedWidth(36)
+        self.back_btn.clicked.connect(self._go_back)
+        header.addWidget(self.back_btn)
         self.title = QLabel("添加服务", self)
-        layout.addWidget(self.title)
+        header.addWidget(self.title, 1)
+        self.more_btn = QPushButton("更多", self)
+        menu = QMenu(self.more_btn)
+        menu.addAction("前往站点", self.open_website)
+        menu.addAction("放弃本次接入", self.cancelled.emit)
+        self.more_btn.setMenu(menu)
+        header.addWidget(self.more_btn)
+        self._buttons.extend(((self.back_btn, "ghost"), (self.more_btn, "ghost")))
+        layout.addLayout(header)
         self.stack = ModelPageStack(self)
         layout.addWidget(self.stack)
         self.login_page, form = self._page()
         self.name_input = QLineEdit(self.login_page)
         self.name_input.setText(name)
         self.name_input.setPlaceholderText("选填，默认使用站点名称")
-        self._field(form, "服务名称", self.name_input)
         self.mode = ModelFieldCombo(self.login_page)
         self.mode.addItem("账号登录", "account")
         self.mode.addItem("填写 API Key", "manual")
@@ -189,6 +205,7 @@ class GatewaySetup(QWidget):
         fields = QVBoxLayout(self.account_fields)
         fields.setContentsMargins(0, 0, 0, 0)
         fields.setSpacing(12)
+        fields.setAlignment(Qt.AlignTop)
         self.platform = ModelFieldCombo(self.account_fields)
         for title, value in (("自动识别", "auto"), ("sub2api", "sub2api"), ("New API", "new_api")):
             self.platform.addItem(title, value)
@@ -198,6 +215,7 @@ class GatewaySetup(QWidget):
         fields = QVBoxLayout(self.login_credentials)
         fields.setContentsMargins(0, 0, 0, 0)
         fields.setSpacing(12)
+        fields.setAlignment(Qt.AlignTop)
         self.username = QLineEdit(self.login_credentials)
         self.username.setPlaceholderText("sub2api 使用邮箱，New API 使用用户名")
         self.username_field = self._field(fields, "邮箱 / 用户名", self.username)
@@ -213,6 +231,8 @@ class GatewaySetup(QWidget):
         self.manual_fields = QWidget(self.login_page)
         fields = QVBoxLayout(self.manual_fields)
         fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(12)
+        fields.setAlignment(Qt.AlignTop)
         self.provider = ModelFieldCombo(self.manual_fields)
         self.provider.addItem("OpenAI 兼容", "openai")
         self.provider.addItem("Anthropic Messages", "anthropic")
@@ -222,28 +242,35 @@ class GatewaySetup(QWidget):
         self._field(fields, "访问密钥（API Key）", self.api_key)
         form.addWidget(self.manual_fields)
         self.manual_fields.hide()
-        self.connect_btn = self._button("识别站点", form, self.connect_or_probe, primary=True)
-        self.manual_btn = self._button("直接配置模型", form, self.manual_without_discovery)
+        self._field(form, "服务名称（选填）", self.name_input)
+        login_actions = QHBoxLayout()
+        form.addLayout(login_actions)
+        self.connect_btn = self._button("识别站点", login_actions, self.connect_or_probe, primary=True)
+        self.manual_btn = self._button("直接配置模型", login_actions, self.manual_without_discovery, kind="ghost")
+        login_actions.addStretch()
         self.manual_btn.hide()
 
         self.keys_page, key_layout = self._page()
-        self.keys_title = QLabel("选择要接入的密钥", self.keys_page)
-        key_layout.addWidget(self.keys_title)
+        key_toolbar = QHBoxLayout()
+        key_layout.addLayout(key_toolbar)
+        self.keys_title = QLabel("请选择密钥", self.keys_page)
+        key_toolbar.addWidget(self.keys_title, 1)
+        self.refresh_keys_btn = self._button("刷新", key_toolbar, self.refresh_keys, kind="ghost")
+        self.create_btn = self._button("创建密钥", key_toolbar, self.prepare_creation, kind="ghost")
         self.key_list = QListWidget(self.keys_page)
         self.key_list.setMinimumHeight(180)
         self.key_list.setMaximumHeight(330)
         self.key_list.setWordWrap(True)
         self.key_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.key_list.itemChanged.connect(self._key_selection_changed)
         key_layout.addWidget(self.key_list)
-        self.discover_btn = self._button("获取所选密钥的模型", key_layout, self.discover, primary=True)
-        self.refresh_keys_btn = self._button("刷新密钥列表", key_layout, self.refresh_keys)
-        self.edit_login_btn = self._button("返回编辑连接", key_layout, self.edit_login)
-        self.create_btn = self._button("创建 Cowork 专用密钥", key_layout, self.prepare_creation)
+        self.discover_btn = self._button("获取模型", key_layout, self.discover, primary=True)
+        self.discover_btn.setEnabled(False)
         self.create_panel = QWidget(self.stack)
         create_layout = QVBoxLayout(self.create_panel)
         create_layout.setContentsMargins(0, 0, 0, 0)
         create_layout.setSpacing(12)
-        create_layout.addWidget(QLabel("创建 Cowork 专用密钥", self.create_panel))
+        create_layout.setAlignment(Qt.AlignTop)
         self.key_name = QLineEdit("Cowork", self.create_panel)
         self._field(create_layout, "密钥名称", self.key_name)
         name_note = QLabel("名称会附加短标识，方便核对创建结果。", self.create_panel)
@@ -262,10 +289,12 @@ class GatewaySetup(QWidget):
         self.quota.setSpecialValueText("不另设上限，使用账号可用额度")
         self.quota.setSuffix(" USD")
         self._field(create_layout, "密钥额度", self.quota)
-        self.create_submit = self._button("创建密钥", create_layout, self.create_key, primary=True)
-        self.reconcile_btn = self._button("核对创建结果", create_layout, self.reconcile_creation)
+        create_actions = QHBoxLayout()
+        create_layout.addLayout(create_actions)
+        self.create_submit = self._button("创建密钥", create_actions, self.create_key, primary=True)
+        self.reconcile_btn = self._button("核对创建结果", create_actions, self.reconcile_creation)
+        create_actions.addStretch()
         self.reconcile_btn.hide()
-        self._button("返回密钥列表", create_layout, lambda: self.stack.setCurrentWidget(self.keys_page))
         self.stack.addWidget(self.create_panel)
         self.create_panel.hide()
 
@@ -273,14 +302,16 @@ class GatewaySetup(QWidget):
         self.selection = ModelSelectionPanel(self.models_page)
         model_layout.addWidget(self.selection)
         self.selection.selectionChanged.connect(self._selection_changed)
-        self.add_btn = self._button("添加所选模型", model_layout, self.finish_import, primary=True)
-        self.retry_btn = self._button("重试失败的密钥", model_layout, self.retry_failed)
+        model_actions = QHBoxLayout()
+        model_layout.addLayout(model_actions)
+        self.add_btn = self._button("添加所选模型", model_actions, self.finish_import, primary=True)
+        self.retry_btn = self._button("重试全部失败项", model_actions, self.retry_failed, kind="ghost")
+        model_actions.addStretch()
         self.retry_btn.hide()
         self.retry_rows = QWidget(self.models_page)
         self.retry_layout = QVBoxLayout(self.retry_rows)
         self.retry_layout.setContentsMargins(0, 0, 0, 0)
         model_layout.addWidget(self.retry_rows)
-        self.back_keys_btn = self._button("返回选择密钥", model_layout, self.back_from_models)
         self.status = QLabel(self)
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.PlainText)
@@ -292,10 +323,9 @@ class GatewaySetup(QWidget):
         self.stop_btn.hide()
         self.website_btn = QPushButton("前往站点", self)
         self.website_btn.clicked.connect(self.open_website)
-        self.cancel_btn = QPushButton("返回服务列表", self)
-        self.cancel_btn.clicked.connect(self.cancelled)
-        for button in (self.stop_btn, self.website_btn, self.cancel_btn):
-            self._buttons.append((button, False))
+        self.website_btn.hide()
+        for button in (self.stop_btn, self.website_btn):
+            self._buttons.append((button, "ghost"))
             actions.addWidget(button)
         actions.addStretch()
         layout.addLayout(actions)
@@ -308,6 +338,8 @@ class GatewaySetup(QWidget):
         if source:
             self.url_input.setText(source["site_url"])
             self.platform.setCurrentIndex(self.platform.findData(source["platform"]))
+        self.stack.currentChanged.connect(self._sync_navigation)
+        self._sync_navigation()
         self._selection_changed()
         bind_theme(self, self.refresh_theme, surface="settings")
 
@@ -316,14 +348,17 @@ class GatewaySetup(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignTop)
         self.stack.addWidget(page)
         return page, layout
 
     def _field(self, layout, text, widget):
         field = QWidget(widget.parentWidget())
+        field.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         box = QVBoxLayout(field)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(6)
+        box.setAlignment(Qt.AlignTop)
         label = QLabel(text, field)
         label.setBuddy(widget)
         box.addWidget(label)
@@ -331,12 +366,41 @@ class GatewaySetup(QWidget):
         layout.addWidget(field)
         return field
 
-    def _button(self, text, layout, callback, primary=False):
+    def _button(self, text, layout, callback, primary=False, kind="secondary"):
         button = QPushButton(text, layout.parentWidget())
         button.clicked.connect(callback)
-        self._buttons.append((button, primary))
+        self._buttons.append((button, "primary" if primary else kind))
         layout.addWidget(button, 0, Qt.AlignLeft)
         return button
+
+    def _sync_navigation(self, *_):
+        current = self.stack.currentWidget()
+        title, target = ("管理接入密钥" if self._expected_source else "添加服务", "返回服务列表")
+        if current is self.keys_page:
+            title, target = "选择密钥", "返回连接设置"
+        elif current is self.create_panel:
+            title, target = "创建 Cowork 专用密钥", "返回密钥列表"
+        elif current is self.models_page:
+            title, target = "选择模型", "返回连接设置" if self.mode.currentData() == "manual" else "返回密钥列表"
+        self.title.setText(title)
+        self.back_btn.setAccessibleName(target)
+        self.back_btn.setToolTip(target)
+
+    def _go_back(self):
+        current = self.stack.currentWidget()
+        if current is self.models_page:
+            self.back_from_models()
+        elif current is self.create_panel:
+            self.stack.setCurrentWidget(self.keys_page)
+        elif current is self.keys_page:
+            self.edit_login()
+        else:
+            self.cancelled.emit()
+
+    def _key_selection_changed(self, *_):
+        count = sum(item.checkState() == Qt.Checked and bool(item.flags() & Qt.ItemIsEnabled) for item in self._key_items())
+        self.keys_title.setText(f"{self.key_list.count()} 个密钥 · 已选 {count} 个")
+        self.discover_btn.setEnabled(count > 0)
 
     def _input_changed(self, *_):
         self._pending_input = True
@@ -407,6 +471,7 @@ class GatewaySetup(QWidget):
             worker.done(result.get("value"))
         else:
             self.status.setText(result.get("error", "请求未完成"))
+        self.website_btn.setVisible(result.get("code") == "browser_required")
         if self.account and (self.account.created_keys or self.account.pending_creation):
             self.status.setText(self.status.text() + "\n远端密钥已创建或创建结果待确认；本地返回或放弃不会删除它，请在站点管理。")
         if self.account:
@@ -414,6 +479,8 @@ class GatewaySetup(QWidget):
             self.create_submit.setEnabled(not self.account.pending_creation)
 
     def _busy(self, busy):
+        self.back_btn.setEnabled(not busy)
+        self.more_btn.setEnabled(not busy)
         self.login_page.setEnabled(not busy)
         self.keys_page.setEnabled(not busy)
         self.create_panel.setEnabled(not busy)
@@ -523,6 +590,7 @@ class GatewaySetup(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             self.key_list.addItem(item)
         self.stack.setCurrentWidget(self.keys_page)
+        self._key_selection_changed()
         if not keys:
             self.status.setText("此账号还没有密钥，可以创建 Cowork 专用密钥。")
 
@@ -590,8 +658,7 @@ class GatewaySetup(QWidget):
         self.errors.update(errors)
         self.selection.set_records(self.results, self.existing)
         self.stack.setCurrentWidget(self.models_page)
-        self.back_keys_btn.setText("返回编辑连接" if self.mode.currentData() == "manual" else "返回选择密钥")
-        self.retry_btn.setVisible(bool(self.errors))
+        self.retry_btn.setVisible(len(self.errors) > 1)
         while self.retry_layout.count():
             child = self.retry_layout.takeAt(0).widget()
             if child:
@@ -614,14 +681,10 @@ class GatewaySetup(QWidget):
         self._discover_keys([key for key in self.keys if key["id"] in self.errors])
 
     def _manual_config(self):
-        url = self.url_input.text().strip()
+        url = normalize_api_base_url(self.url_input.text(), self.provider.currentData())
         parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise GatewayError("请填写有效的服务地址。")
         if not self.api_key.text().strip():
             raise GatewayError("请填写 API Key。")
-        if self.provider.currentData() == "openai" and not parsed.path.rstrip("/"):
-            url = url.rstrip("/") + "/v1"
         return {"channel_id": self._manual_channel_id, "display_name": self.name_input.text().strip() or parsed.hostname,
                 "provider_type": self.provider.currentData(), "base_url": url,
                 "api_key": self.api_key.text().strip(), "models": []}
@@ -685,8 +748,10 @@ class GatewaySetup(QWidget):
             field.setStyleSheet(model_field_style())
         for combo in self.findChildren(ModelFieldCombo):
             apply_model_combo_style(combo, popup_selection=DesignTokens.primary_soft)
-        for button, primary in self._buttons:
-            button.setStyleSheet(product_button_style("primary" if primary else "secondary"))
+        for button, kind in self._buttons:
+            button.setStyleSheet(product_button_style(kind))
+        self.back_btn.setIcon(qta.icon("fa5s.chevron-left", color=DesignTokens.text_secondary))
+        self.back_btn.setIconSize(QSize(14, 14))
         for button in self.retry_rows.findChildren(QPushButton):
             button.setStyleSheet(product_button_style("secondary"))
         self.key_list.setStyleSheet(f"QListWidget {{ background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; }} QListWidget::item {{ padding: 10px 8px; }}")

@@ -24,24 +24,47 @@ class GatewayError(RuntimeError):
         self.code, self.status = code, status
 
 
-def normalize_site_url(value):
+def _parse_connection_url(value):
+    """Remove browser-only URL parts while retaining reverse-proxy prefixes."""
     try:
         url = urlsplit(str(value or "").strip())
         port = url.port
-        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
+        if url.scheme not in {"http", "https"} or not url.hostname or url.username is not None or url.password is not None:
             raise ValueError()
         host = url.hostname.lower()
         if ":" in host:
             host = f"[{host}]"
         netloc = host + (f":{port}" if port and (url.scheme, port) not in {("https", 443), ("http", 80)} else "")
         path = url.path.rstrip("/")
-        for suffix in ("/api/v1", "/v1", "/api"):
-            if path.endswith(suffix):
-                path = path[:-len(suffix)]
-                break
-        return urlunsplit((url.scheme, netloc, path, "", ""))
+        # An explicit API suffix can follow a proxy prefix named like a page.
+        page = None if path.endswith(("/api/v1", "/v1", "/api")) else re.search(
+            r"/(?:dashboard|login|console)(?:/.*)?$", path)
+        hash_page = re.match(r"/?(?:dashboard|login|console)(?:[/?]|$)", url.fragment)
+        if page:
+            path = path[:page.start()].rstrip("/")
+        return url._replace(netloc=netloc, path=path, query="", fragment=""), bool(page or hash_page)
     except ValueError:
-        raise GatewayError("请填写完整的 HTTP 或 HTTPS 站点地址，不包含账号、查询参数或片段。", code="invalid_url") from None
+        raise GatewayError("请填写完整的 HTTP 或 HTTPS 站点地址，不包含内嵌账号或密码。", code="invalid_url") from None
+
+
+def normalize_site_url(value):
+    url, _ = _parse_connection_url(value)
+    path = url.path
+    for suffix in ("/api/v1", "/v1", "/api"):
+        if path.endswith(suffix):
+            path = path[:-len(suffix)]
+            break
+    return urlunsplit(url._replace(path=path))
+
+
+def normalize_api_base_url(value, provider_type):
+    """Accept copied gateway pages without rewriting explicit custom API paths."""
+    url, is_page = _parse_connection_url(value)
+    if is_page:
+        return normalize_site_url(url.geturl()) + ("/v1" if provider_type == "openai" else "")
+    if provider_type == "openai" and not url.path:
+        url = url._replace(path="/v1")
+    return urlunsplit(url)
 
 
 def encrypt_password(password, public_key, key_id):

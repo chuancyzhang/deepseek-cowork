@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import httpx
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget, QLabel
 
 from core.config_manager import ConfigManager
 from core.llm.gateway_accounts import GatewayAccount
@@ -145,6 +145,56 @@ class GatewaySetupTests(unittest.TestCase):
         self.assertEqual(self.setup.results, {})
         self.assertIn("已取消", self.setup.status.text())
         self.assertEqual(self.setup.api_key.text(), "sk-key")
+
+    def test_manual_copied_page_uses_normalized_url_for_discovery_and_import(self):
+        self.setup.mode.setCurrentIndex(1)
+        self.setup.url_input.setText("https://gateway.test/proxy/dashboard?tab=models")
+        self.setup.api_key.setText("sk-key")
+        with patch("ui.gateway_setup.list_available_models", return_value=[{"id": "model"}]) as discover:
+            self.setup.discover_manual()
+            self.wait()
+        discover.assert_called_once_with("openai", "https://gateway.test/proxy/v1", "sk-key")
+        self.setup.selection._select_all()
+        received = []
+        self.setup.channelsReady.connect(received.append)
+        self.setup.finish_import()
+        self.assertEqual(received[0][0]["base_url"], "https://gateway.test/proxy/v1")
+        self.assertEqual(self.setup.url_input.text(), "https://gateway.test/proxy/dashboard?tab=models")
+
+    def test_tall_connection_form_keeps_labels_and_fields_at_content_height(self):
+        self.setup.resize(1000, 1800)
+        self.app.processEvents()
+        for widget in (self.setup.name_input, self.setup.mode, self.setup.url_input):
+            field = widget.parentWidget()
+            label = field.findChild(QLabel)
+            self.assertLessEqual(field.height(), field.sizeHint().height() + 2)
+            self.assertLessEqual(label.height(), label.fontMetrics().lineSpacing() + 4)
+        self.setup._probed({"platform": "sub2api"})
+        self.app.processEvents()
+        for widget in (self.setup.username, self.setup.password):
+            field = widget.parentWidget()
+            self.assertLessEqual(field.height(), field.sizeHint().height() + 2)
+
+    def test_step_back_preserves_connection_and_key_selection(self):
+        self.setup.url_input.setText("https://gateway.test")
+        key = {"id": "1", "name": "Work", "group_name": "Default", "reason": "", "expires_at": "Never", "usable": True}
+        self.setup._show_keys([key])
+        self.setup.key_list.item(0).setCheckState(Qt.Checked)
+        self.assertTrue(self.setup.discover_btn.isEnabled())
+        self.setup.stack.setCurrentWidget(self.setup.models_page)
+        self.setup.back_btn.setFocus()
+        QTest.keyClick(self.setup.back_btn, Qt.Key_Space)
+        self.assertIs(self.setup.stack.currentWidget(), self.setup.keys_page)
+        self.assertEqual(self.setup.key_list.item(0).checkState(), Qt.Checked)
+        self.setup.back_btn.click()
+        self.assertIs(self.setup.stack.currentWidget(), self.setup.login_page)
+        self.assertEqual(self.setup.url_input.text(), "https://gateway.test")
+        cancelled = []
+        self.setup.cancelled.connect(lambda: cancelled.append(True))
+        self.setup.back_btn.click()
+        self.assertEqual(cancelled, [True])
+        self.setup.more_btn.menu().actions()[-1].trigger()
+        self.assertEqual(cancelled, [True, True])
 
     def test_dispose_after_native_thread_finishes_closes_transient_session(self):
         account = self.account(lambda request: httpx.Response(200, json={"data": []}, request=request))

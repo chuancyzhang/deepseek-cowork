@@ -23647,17 +23647,17 @@ class ChatBubble(QFrame):
 
                 bubble_layout.addWidget(content_edit)
 
-                edit_controls = QWidget()
+                edit_controls = QWidget(bubble_frame)
                 edit_controls.setVisible(False)
                 edit_controls_layout = QHBoxLayout(edit_controls)
                 edit_controls_layout.setContentsMargins(0, 8, 0, 0)
                 edit_controls_layout.setSpacing(8)
                 edit_controls_layout.addStretch()
-                cancel_btn = QPushButton("取消")
+                cancel_btn = QPushButton("取消", edit_controls)
                 cancel_btn.setCursor(Qt.PointingHandCursor)
                 cancel_btn.setStyleSheet(apple_button_style("secondary", radius=14))
                 cancel_btn.clicked.connect(self.cancel_inline_edit)
-                submit_btn = QPushButton("保存并重新生成")
+                submit_btn = QPushButton("保存并重新生成", edit_controls)
                 submit_btn.setCursor(Qt.PointingHandCursor)
                 submit_btn.setStyleSheet(apple_button_style("primary", radius=14))
                 submit_btn.clicked.connect(self.submit_inline_edit)
@@ -23896,10 +23896,11 @@ class ChatBubble(QFrame):
         if self.content_col is not None:
             self.content_col.setMaximumWidth(DesignTokens.message_max_width)
         if self.user_bubble_frame is not None:
+            editing = not self.user_content_edit.isReadOnly()
             self.user_bubble_frame.setMaximumWidth(DesignTokens.user_bubble_max_width)
             self.user_bubble_frame.setStyleSheet(
-                f"QFrame#UserBubbleFrame {{ background: {DesignTokens.bg_user_bubble}; "
-                "border: none; "
+                f"QFrame#UserBubbleFrame {{ background: {DesignTokens.bg_secondary if editing else DesignTokens.bg_user_bubble}; "
+                f"border: {'1px solid ' + DesignTokens.primary_focus if editing else 'none'}; "
                 f"border-radius: {DesignTokens.radius_md}px; }}"
             )
         if self.user_content_edit is not None:
@@ -23914,6 +23915,9 @@ class ChatBubble(QFrame):
                 DesignTokens.selection_bg,
                 DesignTokens.selection_text,
             )
+            if self.edit_controls is not None:
+                for button, kind in zip(self.edit_controls.findChildren(QPushButton), ("secondary", "primary")):
+                    button.setStyleSheet(apple_button_style(kind))
         if getattr(self, "think_toggle_btn", None) is not None:
             self.think_toggle_btn.setIcon(
                 qta.icon("fa5s.chevron-down" if self.think_toggle_btn.isChecked() else "fa5s.chevron-right",
@@ -24035,6 +24039,8 @@ class ChatBubble(QFrame):
         thinking_spec = (resolved.get("components") or {}).get("conversation.thinking_stage") or {}
         if thinking_spec.get("visible") is False and getattr(self, "thinking_widget", None) is not None:
             self.thinking_widget.hide()
+        if self.user_content_edit is not None:
+            self.apply_dynamic_widths(*self._user_message_widths)
         self.updateGeometry()
 
     def set_virtualized(self, virtualized):
@@ -24172,23 +24178,12 @@ class ChatBubble(QFrame):
         self.user_content_edit.setReadOnly(False)
         self.user_content_edit.setFocus()
         self.user_content_edit.selectAll()
-        if self.user_bubble_frame is not None:
-            self.user_bubble_frame.setStyleSheet(f"""
-                QFrame#UserBubbleFrame {{
-                    background: {DesignTokens.bg_secondary};
-                    border: 1px solid {DesignTokens.primary_focus};
-                    border-radius: 8px;
-                }}
-            """)
-        self.user_content_edit.setStyleSheet(
-            f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; "
-            "border: none; background: transparent;"
-        )
         if self.edit_controls is not None:
             self.edit_controls.setVisible(True)
         self._set_user_action_bar_visible(False)
         for button in self.message_action_buttons:
             button.setVisible(False)
+        self.refresh_theme()
 
     def eventFilter(self, obj, event):
         if obj is self.user_content_edit and self.edit_controls is not None and self.edit_controls.isVisible():
@@ -24222,23 +24217,12 @@ class ChatBubble(QFrame):
         if self.user_content_edit is not None:
             self.user_content_edit.setVisible(bool(self.user_content_edit.toPlainText()))
             self.user_content_edit.setReadOnly(True)
-            self.user_content_edit.setStyleSheet(
-                f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                f"selection-background-color: {DesignTokens.selection_bg}; selection-color: {DesignTokens.selection_text};"
-            )
-        if self.user_bubble_frame is not None:
-            self.user_bubble_frame.setStyleSheet(f"""
-                QFrame#UserBubbleFrame {{
-                    background: {DesignTokens.bg_user_bubble};
-                    border: none;
-                    border-radius: 8px;
-                }}
-            """)
         if self.edit_controls is not None:
             self.edit_controls.setVisible(False)
         for button in self.message_action_buttons:
             button.setVisible(True)
         self._set_user_action_bar_visible(self.underMouse())
+        self.refresh_theme()
 
     def _emit_delete_request(self):
         if self.source_message_id:
@@ -24296,10 +24280,19 @@ class ChatBubble(QFrame):
             self.user_bubble_frame.setMaximumWidth(max(0, int(user_bubble_width)))
         if self.user_content_edit is not None:
             margins = self.user_bubble_layout.contentsMargins()
-            max_content_width = max(80, int(user_bubble_width) - margins.left() - margins.right())
+            frame_width = self.user_bubble_frame.frameWidth() * 2
+            max_content_width = max(80, int(user_bubble_width) - margins.left() - margins.right() - frame_width)
             lines = self.user_content_edit.toPlainText().splitlines() or [""]
             natural_width = max(self.user_content_edit.fontMetrics().horizontalAdvance(line) for line in lines) + 12
             content_width = max(80, min(max_content_width, natural_width))
+            # Reading uses a compact bubble; editing needs room for new input,
+            # including while this conversation is temporarily hidden.
+            if not self.user_content_edit.isReadOnly():
+                content_width = max_content_width
+                controls_layout = self.edit_controls.layout()
+                buttons = self.edit_controls.findChildren(QPushButton)
+                actions_width = sum(button.sizeHint().width() for button in buttons) + controls_layout.spacing()
+                controls_layout.setDirection(QBoxLayout.TopToBottom if actions_width > content_width else QBoxLayout.LeftToRight)
             if self.user_context_layout is not None and self.user_context_layout.count():
                 content_width = max(content_width, min(max_content_width, self.user_context_layout.sizeHint().width()))
                 self.user_context_container.setFixedWidth(content_width)
@@ -24930,6 +24923,9 @@ class ChatBubble(QFrame):
             button.setToolTip("复制结果")
         
     def add_tool_card(self, card_widget, session_id=None):
+        # Rich-text links have a compact preferred width. Let the tool timeline
+        # use the available column instead of wrapping paths in a narrow strip.
+        self.layout().setAlignment(Qt.AlignTop)
         # A stage's explanation precedes the tool it introduced. Keep the same
         # editors and text; only move their presentation into the ordered stream.
         if self.main_content_text.strip() and not getattr(self, "_content_in_process", False):
@@ -25255,6 +25251,7 @@ class OfficeDraftTaskCard(QFrame):
 
 class ToolCallCard(QFrame):
     agent_open_requested = Signal(str)
+    filePathActivated = Signal(str)
     clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
     geometryChanged = Signal()
 
@@ -25317,8 +25314,18 @@ class ToolCallCard(QFrame):
         """)
         
         # Title
-        args_obj = args if isinstance(args, dict) else {}
+        parsed_args, _ = parse_tool_arguments(args)
+        args_obj = parsed_args if isinstance(parsed_args, dict) else {}
+        self.file_paths = extract_related_paths(tool_name, args_obj)
+        if tool_name in {"text_file_read", "document_read"}:
+            self.file_paths = [value.strip() for key in ("path", "file_path")
+                               if isinstance((value := args_obj.get(key)), str) and value.strip()]
+            self.file_paths = list(dict.fromkeys(self.file_paths))
+        elif tool_name == "workspace_rename_path":
+            self.file_paths = [value.strip() for key in ("old_path", "new_path")
+                               if isinstance((value := args_obj.get(key)), str) and value.strip()] or self.file_paths
         display_title, display_summary = summarize_tool_action(tool_name, args_obj)
+        self.display_summary = display_summary
         name_label = QLabel(display_title or f"{tool_name}", self.main_row)
         self.name_label = name_label
         name_label.setObjectName("ToolCallTitle")
@@ -25337,7 +25344,11 @@ class ToolCallCard(QFrame):
         self.tool_context_label = QLabel(f"{tool_name} · {display_summary}" if display_summary else tool_name, self)
         self.tool_context_label.setObjectName("ToolCallContext")
         self.tool_context_label.setWordWrap(True)
-        self.tool_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tool_context_label.setMinimumWidth(0)
+        self.tool_context_label.setTextFormat(Qt.RichText)
+        self.tool_context_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.tool_context_label.setOpenExternalLinks(False)
+        self.tool_context_label.linkActivated.connect(self._activate_file_link)
         
         # 3. Right Side Controls
         self.status_icon = QLabel(self.main_row) # Default running
@@ -25395,6 +25406,7 @@ class ToolCallCard(QFrame):
             f"QLabel#ToolCallContext {{ color: {DesignTokens.chat_text_muted}; "
             f"font-size: {DesignTokens.font_size_meta}px; background: transparent; border: none; }}"
         )
+        self._refresh_file_links()
         self.name_label.setMinimumHeight(self.name_label.fontMetrics().height())
         self.tool_context_label.setMinimumHeight(self.tool_context_label.fontMetrics().height())
         self.args_preview_label.setMinimumHeight(self.args_preview_label.fontMetrics().height())
@@ -25440,6 +25452,27 @@ class ToolCallCard(QFrame):
                 f"color: {DesignTokens.chat_text_muted}; "
                 f"font-size: {max(9, DesignTokens.font_size_caption - 1)}px;"
             )
+
+    def _refresh_file_links(self):
+        tool_name = html.escape(str(self.tool_name or ""))
+        if not self.file_paths:
+            summary = html.escape(str(self.display_summary or ""))
+            self.tool_context_label.setText(f"{tool_name} · {summary}" if summary else tool_name)
+            return
+        links = [
+            f'<a href="tool-file:{index}" style="color: {DesignTokens.chat_link}; text-decoration: underline; font-weight: 600;">'
+            f'{html.escape(path)}</a>'
+            for index, path in enumerate(self.file_paths)
+        ]
+        self.tool_context_label.setText(f"{tool_name} · " + "<br>".join(links))
+        self.tool_context_label.setToolTip("在右侧工作区查看文件\n" + "\n".join(self.file_paths))
+        self.tool_context_label.setAccessibleName("工具文件：" + "，".join(self.file_paths))
+
+    def _activate_file_link(self, link):
+        for index, path in enumerate(self.file_paths):
+            if link == f"tool-file:{index}":
+                self.filePathActivated.emit(path)
+                return
 
     def _refresh_status_label(self):
         status = str((self.result_obj or {}).get("status") or "") if isinstance(self.result_obj, dict) else ""
@@ -47067,6 +47100,39 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             extension=os.path.splitext(normalized)[1].lower(),
         )
 
+    def open_tool_file_from_chat(self, path, session_id, tool_id=""):
+        state = self.get_session(session_id)
+        fields = {"session_id": session_id, "tool_id": tool_id}
+        if state is None or session_id != self.current_session_id:
+            log_ui_navigation("tool_file_open_rejected", reason="inactive_session", **fields)
+            return False
+        workspace_dir = self._workspace_dir_for_state(state)
+        raw_path = str(path or "").strip()
+        if not raw_path or not workspace_dir:
+            log_ui_navigation("tool_file_open_rejected", reason="missing_path_or_workspace", **fields)
+            self.add_system_toast("无法定位文件，请检查该对话的工作目录和文件路径。", "warning", session_id=session_id)
+            return False
+        file_map = (getattr(state, "persisted_conversation_meta", {}) or {}).get("branch_file_map") or {}
+        raw_path = file_map.get(raw_path, raw_path)
+        path = os.path.abspath(os.path.join(workspace_dir, raw_path))
+        fields["extension"] = os.path.splitext(path)[1].lower()
+        log_ui_navigation("tool_file_open_requested", **fields)
+        if not os.path.isfile(path):
+            log_ui_navigation("tool_file_open_rejected", reason="file_missing", **fields)
+            self.add_system_toast(
+                "文件已删除、移动或尚未创建，无法预览。可在工具详情中查看原路径。",
+                "warning", session_id=session_id, auto_close_ms=5000,
+            )
+            return False
+        self.show_context_drawer(self.RIGHT_TAB_FILES)
+        if self.select_deliverable(path, render_html=True) is False:
+            log_ui_navigation("tool_file_open_cancelled", **fields)
+            return False
+        self.set_file_navigator_scope(self.FILE_SCOPE_WORKSPACE, refresh=False)
+        self.set_file_navigator_visible(False, reason="tool_file_open")
+        log_ui_navigation("tool_file_opened", **fields)
+        return True
+
     def handle_chat_deliverable_paths_changed(self, paths, session_id=None, notify_user=True):
         if session_id != getattr(self, "current_session_id", None):
             return
@@ -51782,6 +51848,9 @@ a {{ overflow-wrap: anywhere; }}
                 parent=bubble.think_container,
             )
             card.clicked.connect(self.show_tool_details)
+            card.filePathActivated.connect(
+                lambda path, sid=state.session_id, tid=scoped_id: self.open_tool_file_from_chat(path, sid, tid)
+            )
             card.agent_open_requested.connect(self._open_subagent_panel)
             projection["tool_cards"][tool_call_id] = card
             bubble.add_tool_card(card)
@@ -54373,6 +54442,9 @@ a {{ overflow-wrap: anywhere; }}
         if not state: return
         if not self._event_matches_active_run(state, turn_id, request_id):
             return
+        card.filePathActivated.connect(
+            lambda path, sid=state.session_id, tid=data['id']: self.open_tool_file_from_chat(path, sid, tid)
+        )
         if getattr(state, "live_activity", False):
             self.flush_session_thinking(state.session_id)
             self.flush_session_content(state.session_id, final=False)
@@ -55756,6 +55828,9 @@ a {{ overflow-wrap: anywhere; }}
             card = bubble._subagent_tools.get(tool["id"])
             if card is None:
                 card = ToolCallCard(tool.get("name", "工具"), tool.get("args", {}), tool["id"], parent=bubble)
+                card.filePathActivated.connect(
+                    lambda path, sid=self.current_session_id, tid=tool["id"]: self.open_tool_file_from_chat(path, sid, tid)
+                )
                 bubble.add_tool_card(card)
                 bubble._subagent_tools[tool["id"]] = card
             if tool.get("result") or tool.get("result_obj") is not None:

@@ -29087,6 +29087,17 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
+        self._web_render_surface = None
+        if QApplication.platformName() == "windows":
+            # Qt recreates a visible raster HWND when the first WebEngine
+            # QQuickWidget joins it. Reserve its composition surface before the
+            # first show, without loading Chromium or any page at startup.
+            from PySide6.QtQuickWidgets import QQuickWidget
+            self._web_render_surface = QQuickWidget(self)
+            self._web_render_surface.setObjectName("WindowRenderSurface")
+            self._web_render_surface.setFixedSize(0, 0)
+            self._web_render_surface.hide()
+            log_startup_stage("window_render_surface_prepared")
         self.config_manager = config_manager or ConfigManager()
         self._update_preparing = False
         self.update_coordinator = UpdateCoordinator(get_base_dir(), bool(getattr(sys, "frozen", False) and platform.system() == "Windows"), parent=self)
@@ -31546,8 +31557,19 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 ],
             )
 
+    def event(self, event):
+        if event.type() == QEvent.PlatformSurface:
+            log_ui_navigation(
+                "main_window_surface",
+                change=event.surfaceEventType().name,
+                after_first_show=bool(getattr(self, "_main_window_has_shown", False)),
+                shutting_down=bool(getattr(self, "_checkpoint_shutdown_pending", False)),
+            )
+        return super().event(event)
+
     def showEvent(self, event):
         super().showEvent(event)
+        self._main_window_has_shown = True
         self._queue_conversation_layout_sync("show")
         if not self._startup_hydration_scheduled:
             self._startup_hydration_scheduled = True

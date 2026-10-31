@@ -773,6 +773,7 @@ pyside6_hidden = [
     "PySide6.QtPositioning",
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",
+    "PySide6.QtQuickWidgets",
     "PySide6.QtSvg",
     "PySide6.QtWebChannel",
     "PySide6.QtWidgets",

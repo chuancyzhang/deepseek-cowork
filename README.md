@@ -8,7 +8,7 @@ deliverables into one observable, steerable, and recoverable workflow.
 
 This is a personal exploration project and is not affiliated with DeepSeek.
 
-Current app version: **5.3.2** · [Read the release notes](docs/releases/5.3.2.md)
+Current app version: **5.3.3** · [Read the release notes](docs/releases/5.3.3.md)
 
 ## Current highlights
 

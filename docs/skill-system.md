@@ -1,6 +1,6 @@
 # DeepSeek Cowork Skill 系统
 
-当前应用版本：**5.3.2**
+当前应用版本：**5.3.3**
 
 ## SkillHub 专区
 

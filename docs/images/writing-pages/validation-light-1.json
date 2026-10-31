@@ -1,0 +1,9 @@
+{
+  "platform": "offscreen",
+  "qt_scale_factor": 1,
+  "device_pixel_ratio": 1.0,
+  "logical_dpi": 96.0,
+  "native_window_events": [],
+  "ime_commit": "passed",
+  "theme_preview_persisted": false
+}

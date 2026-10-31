@@ -120,8 +120,10 @@ class BrowserZoomTests(unittest.TestCase):
 
     def test_agent_lock_and_old_observation_then_native_click_at_new_zoom(self):
         before = self.observe()
+        viewport = self.pane.view.geometry()
         self.store.set_owner("zoom", self.tab.id, "agent")
         self.pane.refresh_control()
+        self.assertEqual(self.pane.view.geometry(), viewport)
         self.pane.set_zoom(.5)
         self.pane.zoom_out.click()
         self.wheel(-120)
@@ -132,6 +134,7 @@ class BrowserZoomTests(unittest.TestCase):
         self.assertEqual(self.pane.view.zoomFactor(), 1.)
         self.assertFalse(self.pane.zoom_reset.isEnabled())
         self.pane.take_over()
+        self.assertEqual(self.pane.view.geometry(), viewport)
         self.pane.set_zoom(.5)
         self.wait(lambda: self.js("innerWidth") > 1440)
         self.pane.give_back()

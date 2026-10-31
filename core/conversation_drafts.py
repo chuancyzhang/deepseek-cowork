@@ -31,7 +31,7 @@ def conversation_has_content(meta, *, has_messages=False, title="", status=""):
     if any(meta.get(key) for key in (
         "selected_skill_names", "conversation_agent", "knowledge_refs",
         "composer_conversation_refs", "pending_clarify_questions", "manual_title",
-        "pinned", "has_file_changes", "ui_timeline_v1", "team_space_required",
+        "pinned", "has_file_changes", "ui_timeline_v1", "team_space_required", "workspace_pages",
     )):
         return True
     if meta.get("grill_mode_state") in {"armed", "active"}:
@@ -65,6 +65,9 @@ def history_record_title(record):
         return "草稿 · " + (text[:24] + "…" if len(text) > 24 else text)
     if draft.get("files"):
         return f"草稿 · {len(draft['files'])} 个附件"
+    if meta.get("workspace_pages"):
+        page = meta["workspace_pages"][0]
+        return "页面 · " + str(page.get("title") or "无标题页")[:24]
     if meta.get("composer_conversation_refs") or meta.get("knowledge_refs"):
         return "草稿 · 已添加引用"
     if meta.get("selected_skill_names"):

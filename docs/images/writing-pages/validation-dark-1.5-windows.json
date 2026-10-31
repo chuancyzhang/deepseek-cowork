@@ -1,0 +1,9 @@
+{
+  "platform": "windows",
+  "qt_scale_factor": 1.5,
+  "device_pixel_ratio": 2.25,
+  "logical_dpi": 96.0,
+  "native_window_events": [],
+  "ime_commit": "passed",
+  "theme_preview_persisted": false
+}

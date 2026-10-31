@@ -18,6 +18,8 @@ from core.workbench import workbench_bridge, WorkbenchError, path_key
 from core.workbench_terminal import terminal_profiles, TerminalSession
 from ui.browser_panes import BrowserPane, TerminalPane, input_url, button, style_button
 from ui.primitives import product_field_style, product_button_style, ProductMessageBox
+from ui.writing_page import WritingPage
+from core.workspace_pages import read_page
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +49,9 @@ class BrowserWorkbench(QObject):
         self.closed = False
         self.restoring = False
         self._signature = None
+        self._pages_restored = set()
+        self._page_restore_failures = {}
+        self.page_recovery_timers = {}
         self.downloads = []
         self.browser_runs = {}
         self.follow_runs = {}
@@ -55,7 +60,13 @@ class BrowserWorkbench(QObject):
         self.release_timer.timeout.connect(self.release_finished_runs)
         self.release_timer.start()
         header = window.file_header_controls.layout()
-        self.add_button = button("+", "新标签页", self.new_tab)
+        self.chat_button = QPushButton("对话", window.file_header_controls)
+        self.chat_button.setCheckable(True)
+        self.chat_button.setAccessibleName("对话，固定标签")
+        self.chat_button.clicked.connect(window.select_workspace_conversation)
+        self.chat_button.hide()
+        header.insertWidget(2, self.chat_button)
+        self.add_button = button("+", "新标签页", self.new_tab, window.file_header_controls)
         header.insertWidget(header.count() - 1, self.add_button)
         window.file_tab_strip.activateRequested.disconnect()
         window.file_tab_strip.closeRequested.disconnect()
@@ -84,6 +95,10 @@ class BrowserWorkbench(QObject):
         self.terminal_button = QPushButton("终端")
         self.terminal_button.setMinimumHeight(42)
         self.terminal_button.clicked.connect(self.terminal_menu)
+        self.page_button = QPushButton("新增页面", widget)
+        self.page_button.setMinimumHeight(42)
+        self.page_button.clicked.connect(self.new_page)
+        row.addWidget(self.page_button)
         row.addWidget(self.files_button); row.addWidget(self.terminal_button)
         layout.addLayout(row)
         self.start_notice = QLabel()
@@ -99,11 +114,13 @@ class BrowserWorkbench(QObject):
 
     def refresh_theme(self, _resolved=None):
         self.start_address.setStyleSheet(product_field_style())
-        for widget in (self.files_button, self.terminal_button, self.browser_settings):
+        for widget in (self.page_button, self.files_button, self.terminal_button, self.browser_settings):
             widget.setStyleSheet(product_button_style("secondary" if widget is not self.browser_settings else "ghost"))
         self.start_notice.setStyleSheet(f"color:{DesignTokens.error_text};background:transparent;")
         if hasattr(self, "add_button"):
             style_button(self.add_button)
+            self.chat_button.setStyleSheet(product_button_style("secondary" if self.chat_button.isChecked() else "ghost"))
+            self.window._sync_deliverable_expand_button()
 
     def session_id(self):
         return str(self.window.current_session_id or "")
@@ -121,17 +138,19 @@ class BrowserWorkbench(QObject):
 
     def file_active(self):
         tab = self.active_tab()
-        return tab is not None and tab.kind == "file"
+        return tab is not None and tab.kind == "file" and not tab.view_state.get("writing_page")
 
     def submission_context(self, session_id):
         """Capture on the GUI thread, without reading files or claiming control."""
         active = self.store.active.get(session_id, "")
-        tabs = [tab for tab in self.store.list(session_id) if tab.kind != "new"]
+        tabs = [tab for tab in self.store.list(session_id) if tab.kind not in {"new", "page"}]
         # Always include the selected tab, even with many background tabs open.
         tabs.sort(key=lambda tab: tab.id != active)
         visible = bool(session_id == self.session_id()
                        and getattr(self.window, "right_drawer_open", False)
-                       and self.window.right_drawer_tab == self.window.RIGHT_TAB_FILES)
+                       and self.window.right_drawer_tab == self.window.RIGHT_TAB_FILES
+                       and not (getattr(self.window, "_workspace_fullscreen", False)
+                                and getattr(self.window, "_workspace_chat_selected", False)))
         entries = []
         for tab in tabs[:20]:
             entry = {key: getattr(tab, key) for key in ("id", "kind", "owner", "status")}
@@ -146,6 +165,9 @@ class BrowserWorkbench(QObject):
                              mode="edit" if editing else "preview")
                 if editing:
                     entry["editor_status"] = self.window.deliverable_edit_state
+                pane = self.panes.get(tab.id)
+                if isinstance(pane, WritingPage):
+                    entry.update(unsaved=pane.dirty, mode="edit", editor_status="saving" if pane.worker else "ready")
             elif tab.kind == "terminal":
                 entry.update(cwd=tab.cwd, shell=tab.shell)
                 pane = self.panes.get(tab.id)
@@ -175,6 +197,7 @@ class BrowserWorkbench(QObject):
         state.selected_deliverable_path = tab.path if tab and tab.kind == "file" else ""
 
     def _import_legacy_state(self, state):
+        self.restore_pages(state)
         if state and not self.store.list(state.session_id):
             for path in getattr(state, "open_file_paths", []) or []:
                 if path:
@@ -192,6 +215,13 @@ class BrowserWorkbench(QObject):
         entries = [dict(tab.snapshot(), key=tab.path if tab.kind == "file" else "@" + tab.id) for tab in tabs]
         active = self.active_tab(state.session_id)
         active_key = (active.path if active.kind == "file" else "@" + active.id) if active else ""
+        self.chat_button.setVisible(bool(getattr(self.window, "_workspace_fullscreen", False)))
+        chat = bool(getattr(self.window, "_workspace_fullscreen", False) and
+                    getattr(self.window, "_workspace_chat_selected", False))
+        self.chat_button.setChecked(chat)
+        self.chat_button.setStyleSheet(product_button_style("secondary" if chat else "ghost"))
+        if chat:
+            active_key = ""
         signature = json.dumps([entries, active_key], ensure_ascii=False, sort_keys=True)
         if signature != self._signature:
             self.window.file_tab_strip.set_entries(entries, active_key)
@@ -209,10 +239,18 @@ class BrowserWorkbench(QObject):
         if previous and previous.kind == "new":
             self.store.close(state.session_id, previous.id)
         tab = self.store.open(state.session_id, "file", path=path, activate=True)
+        if os.path.isfile(path) and path.lower().endswith(".md") and not tab.view_state.get("source_mode"):
+            if read_page(path) is not None:
+                tab.view_state["writing_page"] = True
         if state.session_id == self.session_id():
             self.park_other_webpages(tab.id)
-            self.stack.setCurrentWidget(self.file_surface)
+            if tab.view_state.get("writing_page"):
+                self.stack.setCurrentWidget(self.ensure_pane(tab))
+            else:
+                self.stack.setCurrentWidget(self.file_surface)
+            self.window._workspace_chat_selected = False
             self.sync(state)
+            self.window.sync_context_drawer_layout()
         self._compat_state(state.session_id)
         return True
 
@@ -243,13 +281,14 @@ class BrowserWorkbench(QObject):
                 pane.park(size)
 
     def show_tab(self, tab, render_file=True):
+        self.window._workspace_chat_selected = False
         refresh = getattr(self.window, "preview_refresh_controller", None)
         if refresh:
             refresh.navigate(tab.session_id, tab.path if tab.kind == "file" else "")
         self.park_other_webpages(tab.id)
         self.store.active[tab.session_id] = tab.id
         self._compat_state(tab.session_id)
-        if tab.kind == "file":
+        if tab.kind == "file" and not tab.view_state.get("writing_page"):
             self.stack.setCurrentWidget(self.file_surface)
             self.window.current_deliverable_path = tab.path
             self.window.current_preview_path = tab.path
@@ -270,6 +309,7 @@ class BrowserWorkbench(QObject):
             else:
                 self.stack.setCurrentWidget(pane or self.start_page)
         self.sync()
+        self.window.sync_context_drawer_layout()
 
     def activate(self, key):
         try:
@@ -294,6 +334,104 @@ class BrowserWorkbench(QObject):
         self.show_tab(tab)
         self.start_address.clear()
         self.start_address.setFocus()
+
+    def new_page(self):
+        if not self.window.confirm_leave_deliverable_edit("新建页面"):
+            return
+        state = self.window.get_current_session()
+        if state is None:
+            return
+        self.pause_follow()
+        previous = self.active_tab()
+        if previous and previous.kind == "new":
+            self.store.close(state.session_id, previous.id)
+        tab = self.store.open(state.session_id, "page", title="无标题页", activate=True,
+                              cwd=self.window._workspace_dir_for_state(state))
+        self._pages_restored.add(state.session_id)
+        self.show_tab(tab)
+        self.panes[tab.id].title.setFocus()
+        log.info("writing_page.created session=%s page=%s", state.session_id, tab.id)
+
+    def page_snapshots(self, state):
+        if state.session_id not in self._pages_restored:
+            return (getattr(state, "persisted_conversation_meta", {}) or {}).get("workspace_pages", [])
+        result = list(self._page_restore_failures.get(state.session_id, []))
+        for tab in self.store.list(state.session_id):
+            pane = self.panes.get(tab.id)
+            if isinstance(pane, WritingPage):
+                snapshot = pane.snapshot()
+                if snapshot["path"] or snapshot["title"].strip() or snapshot["body"].strip():
+                    result.append(snapshot)
+        return result
+
+    def restore_pages(self, state):
+        if state is None or state.session_id in self._pages_restored:
+            return
+        snapshots = (getattr(state, "persisted_conversation_meta", {}) or {}).get("workspace_pages")
+        if not snapshots:
+            return
+        self._pages_restored.add(state.session_id)
+        for snapshot in snapshots:
+            try:
+                path = str(snapshot.get("path") or "")
+                tab = self.store.open(state.session_id, "file" if path else "page", path=path,
+                            cwd=str(snapshot.get("workspace") or self.window._workspace_dir_for_state(state)),
+                            title=str(snapshot.get("title") or "无标题页"))
+                tab.view_state["writing_page"] = True
+                self.make_page_pane(tab, recovery=snapshot)
+                log.info("writing_page.restored session=%s page=%s", state.session_id, tab.id)
+            except Exception as exc:
+                self._page_restore_failures.setdefault(state.session_id, []).append(snapshot)
+                log.exception("writing_page.restore_failed session=%s", state.session_id)
+                self.window.add_system_toast(f"页面草稿恢复失败：{exc}。恢复记录已保留。", "error")
+
+    def make_page_pane(self, tab, recovery=None):
+        state = self.window.get_session(tab.session_id)
+        workspace = tab.cwd or self.window._workspace_dir_for_state(state)
+        pane = WritingPage(tab, workspace, self.stack, recovery=recovery)
+        self.panes[tab.id] = pane
+        self.stack.addWidget(pane)
+        pane.changed.connect(lambda: self.page_changed(tab.session_id))
+        pane.saved.connect(lambda: self.page_changed(tab.session_id, immediate=True))
+        pane.sourceRequested.connect(lambda: self.show_page_source(tab))
+        pane.recoveryRequested.connect(lambda: self.window.save_chat_history(tab.session_id))
+        self._pages_restored.add(tab.session_id)
+        return pane
+
+    def show_page_source(self, tab):
+        pane = self.panes.get(tab.id)
+        if not isinstance(pane, WritingPage) or not tab.path:
+            return
+        if not pane.can_close(lambda: self.show_page_source(tab)):
+            return
+        tab.view_state.pop("writing_page", None)
+        tab.view_state["source_mode"] = True
+        self.stack.removeWidget(pane)
+        pane.close_pane()
+        pane.deleteLater()
+        del self.panes[tab.id]
+        self.show_tab(tab)
+        self.page_changed(tab.session_id, immediate=True)
+
+    def page_changed(self, session_id, immediate=False):
+        self._compat_state(session_id)
+        if session_id == self.session_id():
+            self.sync()
+        from ui.worker_lifecycle import ui_work_stopping
+        if ui_work_stopping(self.window):
+            return
+        timer = self.page_recovery_timers.get(session_id)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self.window.save_chat_history(session_id))
+            self.page_recovery_timers[session_id] = timer
+        timer.start(0 if immediate else 500)
+
+    def page_recovery_result(self, session_id, revision, error=""):
+        for pane in self.panes.values():
+            if isinstance(pane, WritingPage) and pane.tab.session_id == session_id:
+                pane.recovery_result(revision, error)
 
     def open_start_address(self):
         try:
@@ -405,6 +543,8 @@ class BrowserWorkbench(QObject):
     def ensure_pane(self, tab):
         if tab.id in self.panes:
             return self.panes[tab.id]
+        if tab.kind == "page" or tab.view_state.get("writing_page"):
+            return self.make_page_pane(tab)
         if tab.kind == "web":
             pane = BrowserPane(tab, self.store, self.bridge, self.browser_profile())
             def new_window(holder):
@@ -454,6 +594,11 @@ class BrowserWorkbench(QObject):
             if not agent and not self.window.confirm_leave_deliverable_edit("关闭标签"):
                 return False
         pane = self.panes.get(tab.id)
+        if isinstance(pane, WritingPage):
+            if agent and (pane.dirty or pane.worker is not None):
+                raise WorkbenchError("unsaved_changes", "页面有用户未保存修改或正在保存，不能关闭。")
+            if not agent and not pane.can_close(lambda: self.close_tab(tab.id, session_id=session_id)):
+                return False
         self.bridge.cancel_tab(session_id, tab.id, exclude_request=request)
         if pane:
             pane.close_pane(); self.stack.removeWidget(pane); pane.deleteLater()
@@ -466,19 +611,25 @@ class BrowserWorkbench(QObject):
                 next_tab = self.store.open(session_id, "new", activate=True)
             self.show_tab(next_tab)
         self.sync()
+        if isinstance(pane, WritingPage):
+            self.page_changed(session_id, immediate=True)
         return True
 
     def file_status(self, tab):
         session = getattr(self.window, "deliverable_edit_session", None)
         editing = bool(session and self.session_id() == tab.session_id and path_key(session.path) == path_key(tab.path))
+        pane = self.panes.get(tab.id)
+        if isinstance(pane, WritingPage):
+            session, editing = pane.edit_session, True
         fingerprint = ""
         if os.path.isfile(tab.path):
             from core.deliverable_editing import sha256_file
             fingerprint = sha256_file(tab.path)
         return {"path": tab.path, "exists": os.path.isfile(tab.path), "file_version": fingerprint,
-                "unsaved": bool(editing and self.window.deliverable_edit_dirty),
-                "version_changed": bool(editing and fingerprint != session.initial_fingerprint),
-                "conflict": bool(editing and self.window.deliverable_edit_dirty and fingerprint != session.initial_fingerprint)}
+                "unsaved": pane.dirty if isinstance(pane, WritingPage) else bool(editing and self.window.deliverable_edit_dirty),
+                "version_changed": bool(editing and session and fingerprint != session.initial_fingerprint),
+                "conflict": bool(editing and session and fingerprint != session.initial_fingerprint
+                                 and (pane.dirty if isinstance(pane, WritingPage) else self.window.deliverable_edit_dirty))}
 
     def handle_request(self, request):
         if request.event.is_set() or self.bridge.host is not self:
@@ -493,7 +644,9 @@ class BrowserWorkbench(QObject):
             browser = getattr(auth, "_browser_state", {})
             internal = browser.get("snapshot", {}).get("backend") == "internal"
             if action == "list":
-                result = [dict(tab.snapshot(), **(self.file_status(tab) if tab.kind == "file" else {})) for tab in self.store.list(request.session_id) if tab.kind != "web" or internal]
+                result = [dict(tab.snapshot(), **(self.file_status(tab) if tab.kind == "file" else {}))
+                          for tab in self.store.list(request.session_id)
+                          if tab.kind != "page" and (tab.kind != "web" or internal)]
                 active = self.store.active.get(request.session_id, "")
                 request.finish({"ok": True, "tabs": result, "active_tab_id": active if any(t["id"] == active for t in result) else ""})
                 return
@@ -542,7 +695,7 @@ class BrowserWorkbench(QObject):
                 return
             self.store.check_control(request.session_id, tab.id, request.revision)
             request.revision = self.store.set_owner(request.session_id, tab.id, "agent")
-            if pane:
+            if isinstance(pane, (BrowserPane, TerminalPane)):
                 pane.refresh_control()
             request.started = True
             if action == "close":
@@ -664,6 +817,7 @@ class BrowserWorkbench(QObject):
         entry = {"item": item, "path": path, "session_id": pane.tab.session_id, "status": "下载中"}
         self.downloads.append(entry)
         pane.download = item
+        pane.download_host.show()
         pane.download_cancel.show()
         def update():
             total, received = item.totalBytes(), item.receivedBytes()
@@ -745,6 +899,8 @@ class BrowserWorkbench(QObject):
             return
         self.closed = True
         self.release_timer.stop()
+        for timer in self.page_recovery_timers.values():
+            timer.stop()
         if self.bridge.host is self:
             self.bridge.shutdown()
         try:
@@ -757,6 +913,10 @@ class BrowserWorkbench(QObject):
         self.panes.clear()
 
     def dispose_session(self, session_id):
+        timer = self.page_recovery_timers.pop(session_id, None)
+        if timer:
+            timer.stop()
+            timer.deleteLater()
         for tab in list(self.store.list(session_id)):
             self.bridge.cancel_tab(session_id, tab.id)
             pane = self.panes.pop(tab.id, None)
@@ -765,3 +925,5 @@ class BrowserWorkbench(QObject):
             self.store.close(session_id, tab.id)
         self.store.order.pop(session_id, None)
         self.store.active.pop(session_id, None)
+        self._pages_restored.discard(session_id)
+        self._page_restore_failures.pop(session_id, None)

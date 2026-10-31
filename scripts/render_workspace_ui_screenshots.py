@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False):
-    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False):
+    os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu"
@@ -21,10 +21,10 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         os.environ["LOCALAPPDATA"] = str(Path(temporary, "local"))
         import core.env_utils
         core.env_utils.get_app_data_dir = lambda: temporary
-        from PySide6.QtCore import QCoreApplication, QEvent, Qt
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QWidget
         from core.config_manager import ConfigManager
         from core.theme import ThemeRuntimeManager
         from core.theme_service import ThemeRepository
@@ -37,6 +37,17 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
+        class WindowAudit(QObject):
+            active = writing_pages
+            events = []
+            def eventFilter(self, obj, event):
+                if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
+                        and obj.isWindow() and not isinstance(obj, MainWindow)
+                        and not obj.testAttribute(Qt.WA_DontShowOnScreen)):
+                    self.events.append((type(obj).__name__, obj.objectName()))
+                return False
+        audit = WindowAudit(app)
+        app.installEventFilter(audit)
         background_patch = patch.object(MainWindow, "start_background_services", lambda self: None)
         background_patch.start()
         with patch("core.config_manager.get_app_data_dir", return_value=temporary), patch("core.config_manager.get_base_dir", return_value=temporary):
@@ -51,7 +62,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = ROOT / "docs" / "images" / ("message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = ROOT / "docs" / "images" / ("writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -60,6 +71,8 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             QTest.qWait(100)
 
         def capture(name):
+            if writing_pages and not name.startswith("writing-"):
+                return
             if message_context and not name.startswith("message-context"):
                 return
             if focused and not message_context and name not in {"home-empty", "home", "conversation", "conversation-hover", "conversation-files", "conversation-failure", "capabilities", "settings", "settings-search"}:
@@ -69,7 +82,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
                 scroll = window.get_current_session().chat_scroll.verticalScrollBar()
                 scroll.setValue(scroll.minimum())
                 QTest.qWait(40)
-            destination = output / f"{name}-{mode}-{int(scale * 100)}{'-compact' if compact else ''}.png"
+            destination = output / f"{name}-{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}.png"
             assert window.grab().save(str(destination))
             print(destination, flush=True)
 
@@ -99,6 +112,73 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         assert window.input_field.toPlainText().startswith("保留的草稿")
         assert window.input_row.parentWidget() is window.conversation_column
         capture("conversation")
+        if writing_pages:
+            import json
+            from PySide6.QtGui import QInputMethodEvent
+            browser = window.browser_workbench
+            window.show_context_drawer(window.RIGHT_TAB_FILES)
+            window.set_file_navigator_visible(False, reason="writing_page_qa")
+            if browser.active_tab() is None or browser.active_tab().kind != "new":
+                browser.new_tab()
+            capture("writing-start")
+            browser.new_page()
+            page = browser.panes[browser.active_tab().id]
+            page.title.setText("产品讨论纪要")
+            page.editor.setMarkdown("## 本次结论\n\n以 **任务为中心**，保留用户的输入和已完成成果。\n\n## 下一步\n\n1. 验证工作区展开与恢复。\n2. 检查保存后重新打开。\n3. 整理待确认的问题。\n\n*讨论记录将随任务继续完善。*")
+            page.editor.setFocus()
+            event = QInputMethodEvent()
+            event.setCommitString("中文输入验证。")
+            app.sendEvent(page.editor, event)
+            assert "中文输入验证" in page.editor.toPlainText()
+            page.editor.undo()
+            capture("writing-split")
+            original_width = window.right_sidebar.width()
+            window.toggle_deliverable_preview_expanded()
+            capture("writing-expanded")
+            assert window.right_sidebar.width() > window.main_container.width() * .9
+            browser.chat_button.click()
+            capture("writing-conversation")
+            assert window.input_field.isVisible()
+            browser.activate(page.tab.id)
+            destination = Path(page.workspace) / "产品讨论纪要.md"
+            page.save(target=str(destination))
+            deadline = time.monotonic() + 8
+            while page.worker is not None and time.monotonic() < deadline:
+                QTest.qWait(20)
+            assert page.worker is None and destination.exists() and not page.dirty
+            capture("writing-saved")
+            window.toggle_deliverable_preview_expanded()
+            settle()
+            assert window.right_sidebar.width() == original_width
+            tab = browser.open_web(current.session_id, path=str(ROOT / "test/fixtures/browser-wide-page.html"))
+            browser.activate(tab.id)
+            web = browser.panes[tab.id]
+            deadline = time.monotonic() + 8
+            while not web.document_ready and time.monotonic() < deadline:
+                QTest.qWait(20)
+            assert web.document_ready
+            capture("writing-browser-compact")
+            window.toggle_deliverable_preview_expanded()
+            capture("writing-browser-expanded")
+            window.toggle_deliverable_preview_expanded()
+            browser.close_tab(tab.id)
+            browser.activate(page.tab.id)
+            content_before_theme = page.content()
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            assert page.content() == content_before_theme and not page.dirty
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert page.content() == content_before_theme and not page.dirty
+            audit.active = False
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events, "ime_commit": "passed",
+                      "theme_preview_persisted": False}
+            (output / f"validation-{mode}-{scale}{'-windows' if native else ''}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            assert not audit.events, audit.events
         if message_context:
             capture("message-context")
             user_bubble.begin_inline_edit()
@@ -171,6 +251,9 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         window.deleteLater()
         app.processEvents()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        if writing_pages:
+            # WebEngine releases its cache writers after page/profile teardown.
+            QTest.qWait(500)
         background_patch.stop()
 
 
@@ -181,5 +264,7 @@ if __name__ == "__main__":
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--focused", action="store_true", help="Capture only the home, conversation, capabilities and settings changes")
     parser.add_argument("--message-context", action="store_true", help="Capture sent attachments and conversation references inside the user message")
+    parser.add_argument("--writing-pages", action="store_true", help="Verify writing pages, expanded conversation tabs and compact browser controls")
+    parser.add_argument("--native", action="store_true", help="Use real Windows widgets instead of offscreen rendering")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native)

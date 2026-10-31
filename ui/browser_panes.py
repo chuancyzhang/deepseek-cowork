@@ -171,36 +171,45 @@ class BrowserPane(ControlledPane):
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
         script.setSourceCode(Path(asset_path("browser-automation.js")).read_text(encoding="utf-8"))
         self.page.scripts().insert(script)
-        self.toolbar = QWidget()
+        self.toolbar = QWidget(self)
         row = QHBoxLayout(self.toolbar)
         row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.toolbar_row = row
         self.back_button = button("‹", "后退", lambda: self.user_navigate("back"))
         self.forward_button = button("›", "前进", lambda: self.user_navigate("forward"))
         self.reload_button = button("↻", "刷新", lambda: self.user_navigate("reload"))
         for item in (self.back_button, self.forward_button, self.reload_button):
             row.addWidget(item)
-        self.address = QLineEdit(tab.url)
+        self.address = QLineEdit(tab.url, self.toolbar)
+        self.address.setMinimumWidth(80)
         self.address.setPlaceholderText("搜索或输入网址")
         self.address.returnPressed.connect(self.navigate_input)
         row.addWidget(self.address, 1)
-        self.more = button("⋯", "网页操作", self.show_menu)
+        self.owner_button = button("可操作", "网页可由你或 Agent 操作", self.toggle_owner, self.toolbar)
+        row.addWidget(self.owner_button)
+        self.more = button("⋯", "网页操作", self.show_menu, self.toolbar)
         row.addWidget(self.more)
         self.outer.addWidget(self.toolbar)
-        # Keep these controls on their own row so the address remains usable in
-        # the narrow drawer, including at high Windows display scaling.
+        self.address_row = QWidget(self)
+        self.address_layout = QHBoxLayout(self.address_row)
+        self.address_layout.setContentsMargins(0, 0, 0, 0)
+        self.address_row.hide()
+        self.outer.addWidget(self.address_row)
         self.zoom_bar = QWidget(self)
         zoom_row = QHBoxLayout(self.zoom_bar)
         zoom_row.setContentsMargins(0, 0, 0, 0)
         self.zoom_label = QLabel("网页缩放")
-        zoom_row.addWidget(self.zoom_label)
+        self.zoom_label.setParent(self.zoom_bar)
+        self.zoom_label.hide()
+        zoom_row.setSpacing(2)
         self.zoom_out = button("−", "缩小网页，显示更多内容（Ctrl+- 或 Ctrl+滚轮）",
                                lambda: self.change_zoom(-1))
         self.zoom_reset = button("100%", "恢复原始大小（Ctrl+0）", lambda: self.set_zoom(1.))
         self.zoom_in = button("+", "放大网页（Ctrl++ 或 Ctrl+=）", lambda: self.change_zoom(1))
         for item in (self.zoom_out, self.zoom_reset, self.zoom_in):
             zoom_row.addWidget(item)
-        zoom_row.addStretch()
-        self.outer.addWidget(self.zoom_bar)
+        row.insertWidget(row.indexOf(self.owner_button), self.zoom_bar)
         self.zoom_shortcuts = []
         for sequence, delta in (("Ctrl+=", 1), ("Ctrl++", 1), ("Ctrl+-", -1), ("Ctrl+0", 0)):
             shortcut = QShortcut(QKeySequence(sequence), self)
@@ -215,8 +224,10 @@ class BrowserPane(ControlledPane):
         self.find.hide()
         self.outer.addWidget(self.find)
         self.outer.addWidget(self.notice)
-        self.download_row = QHBoxLayout()
-        self.download_label = QLabel()
+        self.download_host = QWidget(self)
+        self.download_row = QHBoxLayout(self.download_host)
+        self.download_row.setContentsMargins(0, 0, 0, 0)
+        self.download_label = QLabel(self.download_host)
         self.download_label.setWordWrap(True)
         self.download_cancel = button("取消", "取消下载", self.cancel_download)
         self.download_open = button("打开", "在文件标签中打开", lambda: None)
@@ -224,7 +235,8 @@ class BrowserPane(ControlledPane):
         self.download_row.addWidget(self.download_cancel)
         self.download_row.addWidget(self.download_open)
         self.download_cancel.hide(); self.download_open.hide()
-        self.outer.addLayout(self.download_row)
+        self.outer.addWidget(self.download_host)
+        self.download_host.hide()
         self.download = None
         self.outer.addWidget(self.view, 1)
         self._find_shortcut = QShortcut(QKeySequence.Find, self)
@@ -239,7 +251,32 @@ class BrowserPane(ControlledPane):
         self.view.loadProgress.connect(lambda value: self.show_notice(f"正在加载 {value}%") if self.tab.status == "loading" else None)
         self.view.installEventFilter(self)
         self.refresh_theme()
+        policy = self.control.sizePolicy()
+        policy.setRetainSizeWhenHidden(False)
+        self.control.setSizePolicy(policy)
+        self.refresh_control()
         self.view.setUrl(input_url(tab.url, allow_local=bool(tab.path)))
+
+    def toggle_owner(self):
+        if self.tab.owner == "human":
+            self.give_back()
+        else:
+            self.take_over()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "zoom_bar"):
+            return
+        self.zoom_bar.setVisible(self.width() >= 680)
+        narrow = self.width() < 400
+        if narrow != bool(getattr(self, "_address_wrapped", False)):
+            self._address_wrapped = narrow
+            if narrow:
+                self.address_layout.addWidget(self.address)
+            else:
+                self.toolbar_row.insertWidget(3, self.address, 1)
+            self.address_row.setVisible(narrow)
+            self.address.show()
 
     def refresh_theme(self, _resolved=None):
         super().refresh_theme(_resolved)
@@ -305,6 +342,10 @@ class BrowserPane(ControlledPane):
 
     def show_menu(self):
         menu = QMenu(self)
+        for label, delta in (("放大网页", 1), ("缩小网页", -1), ("恢复 100%", 0)):
+            action = menu.addAction(label, lambda change=delta: self.change_zoom(change))
+            action.setEnabled(self.tab.owner != "agent")
+        menu.addSeparator()
         menu.addAction("在页面中查找", self.show_find)
         menu.addAction("复制网址", lambda: QApplication.clipboard().setText(self.tab.url))
         menu.addAction("在系统浏览器打开", lambda: QDesktopServices.openUrl(QUrl(self.tab.url)))
@@ -315,13 +356,23 @@ class BrowserPane(ControlledPane):
             self.download.cancel()
 
     def refresh_control(self):
-        super().refresh_control()
+        if not hasattr(self, "address"):
+            super().refresh_control()
+            return
+        # Do not briefly show the inherited row: QWidget.show() can relayout
+        # synchronously and send a transient viewport resize to Chromium.
         if hasattr(self, "address"):
             controlled = self.tab.owner == "agent"
+            self.control.hide()
+            self.owner_button.setText("接管" if controlled else "交还" if self.tab.owner == "human" else "可操作")
+            self.owner_button.setToolTip("Agent 正在操作 · 点击接管" if controlled else
+                                         "由你控制 · 点击交还 Agent" if self.tab.owner == "human" else "网页可操作 · 点击由你控制")
+            self.owner_button.setAccessibleName(self.owner_button.toolTip())
             for widget in (self.address, self.back_button, self.forward_button, self.reload_button):
                 widget.setEnabled(not controlled)
             self.page.runJavaScript("window.coworkNativeAction=false; window.coworkHumanLocked=" + str(controlled).lower(), 1)
             self.refresh_zoom()
+            self.changed.emit()
 
     def eventFilter(self, obj, event):
         if obj is self.view and event.type() in {QEvent.ChildAdded, QEvent.Show}:

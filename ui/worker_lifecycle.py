@@ -12,6 +12,10 @@ def ui_work_stopping(owner):
 
 def pause_ui_work_timers(owner):
     paused = []
+    for timer in getattr(getattr(owner, "browser_workbench", None), "page_recovery_timers", {}).values():
+        if timer.isActive():
+            timer.stop()
+            paused.append(timer)
     for name in ("daemon_timer", "favorites_timer", "deliverable_refresh_timer", "browser_file_refresh_timer", "preview_version_timer", "history_search_timer"):
         timer = getattr(owner, name, None)
         # A coalesced refresh can still be pending after its timer fired while
@@ -66,5 +70,7 @@ def pending_ui_workers(owner, *, include_writers=False):
                  getattr(owner, "runtime_recovery_scan_worker", None),
                  getattr(owner, "preview_version_worker", None),
                  getattr(owner, "deliverable_scan_worker", None))
+    finishing += tuple(getattr(pane, "worker", None)
+                       for pane in getattr(getattr(owner, "browser_workbench", None), "panes", {}).values())
     return [worker for worker in ui_worker_snapshot(owner)
             if worker not in excluded and (worker in finishing or not worker.wait(0))]

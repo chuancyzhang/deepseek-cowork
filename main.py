@@ -27566,8 +27566,8 @@ class FileTabStrip(QWidget):
 
     def _file_icon(self, path):
         entry = self._entries.get(self._path_key(path), {})
-        if entry.get("kind") in {"new", "web", "terminal"}:
-            return qta.icon({"new": "fa5s.globe", "web": "fa5s.globe", "terminal": "fa5s.terminal"}[entry["kind"]], color=DesignTokens.text_secondary)
+        if entry.get("kind") in {"new", "web", "terminal", "page"}:
+            return qta.icon({"new": "fa5s.globe", "web": "fa5s.globe", "terminal": "fa5s.terminal", "page": "fa5s.file-alt"}[entry["kind"]], color=DesignTokens.text_secondary)
         path = entry.get("path") or path
         if not os.path.isfile(path):
             return qta.icon("fa5s.exclamation-triangle", color=DesignTokens.warning_text)
@@ -30559,6 +30559,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         layout.addWidget(self.top_bar_widget)
 
         self.content_area = QWidget()
+        content_policy = self.content_area.sizePolicy()
+        content_policy.setRetainSizeWhenHidden(True)
+        self.content_area.setSizePolicy(content_policy)
         self.content_area_layout = QVBoxLayout(self.content_area)
         self.content_area_layout.setContentsMargins(*self.main_content_default_margins)
         self.content_area_layout.setSpacing(0)
@@ -32522,9 +32525,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         btn = getattr(self, "deliverable_expand_btn", None)
         if not btn:
             return
-        expanded = bool(getattr(self, "context_drawer_expanded", False))
+        expanded = bool(getattr(self, "_workspace_fullscreen", False))
+        btn.setStyleSheet(apple_tool_button_style(False))
         btn.setIcon(qta.icon("fa5s.compress-alt" if expanded else "fa5s.expand-alt", color=DesignTokens.text_secondary))
-        btn.setToolTip("退出放大" if expanded else "放大预览")
+        btn.setToolTip("恢复分栏" if expanded else "展开工作区")
+        btn.setAccessibleName(btn.toolTip())
 
     def _expanded_file_workbench_width(self, parent):
         return max(
@@ -32585,45 +32590,26 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
 
     def toggle_deliverable_preview_expanded(self):
-        parent = getattr(self, "main_container", None)
-        if not parent:
+        self.set_workspace_expanded(not getattr(self, "_workspace_fullscreen", False))
+
+    def set_workspace_expanded(self, expanded):
+        """Switch presentation without moving or rebuilding the shared composer."""
+        if expanded == bool(getattr(self, "_workspace_fullscreen", False)):
             return
-        if getattr(self, "deliverable_edit_focus_snapshot", None) is not None:
-            if getattr(self, "context_drawer_expanded", False):
-                self.context_drawer_expanded = False
-                content_width = (
-                    parent.width()
-                    - self.main_layout_default_margins[0]
-                    - self.main_layout_default_margins[2]
-                )
-                self.context_drawer_user_width = self._clamp_int(
-                    int(content_width * DesignTokens.drawer_width_ratio),
-                    self.context_drawer_preferred_min_width,
-                    self.context_drawer_max_width,
-                )
-            else:
-                self.context_drawer_expanded = True
-                self.context_drawer_user_width = self._expanded_file_workbench_width(parent)
-            self._sync_deliverable_expand_button()
-            self.sync_context_drawer_layout()
-            log_ui_navigation(
-                "deliverable_edit_focus_width_toggled",
-                expanded=bool(self.context_drawer_expanded),
-                drawer_width=int(self.context_drawer_user_width),
-            )
-            return
-        if getattr(self, "context_drawer_expanded", False):
-            self.context_drawer_expanded = False
-            self.context_drawer_user_width = (
-                self.context_drawer_width_before_expand
-                or min(DesignTokens.drawer_max_width, max(DesignTokens.drawer_preferred_min_width, int(parent.width() * DesignTokens.drawer_width_ratio)))
-            )
-        else:
-            self.context_drawer_width_before_expand = self.right_sidebar.width() if hasattr(self, "right_sidebar") else 0
-            self.context_drawer_expanded = True
-            self.context_drawer_user_width = self._expanded_file_workbench_width(parent)
+        self._workspace_fullscreen = bool(expanded)
+        self._workspace_chat_selected = False
         self._sync_deliverable_expand_button()
-        self.persist_context_drawer_width()
+        self.browser_workbench.sync()
+        self.sync_context_drawer_layout()
+        log_ui_navigation("workspace_layout_changed", expanded=bool(expanded),
+                          session_id=self.current_session_id)
+
+    def select_workspace_conversation(self):
+        if not getattr(self, "_workspace_fullscreen", False):
+            return
+        self._workspace_chat_selected = True
+        self.browser_workbench.pause_follow()
+        self.browser_workbench.sync()
         self.sync_context_drawer_layout()
 
     def _compute_context_drawer_geometry(self):
@@ -32633,6 +32619,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if not parent:
             return None
         margin = self.context_drawer_margin
+        if getattr(self, "_workspace_fullscreen", False):
+            y = max(margin, self.top_bar_widget.geometry().bottom() + 12)
+            chat = bool(getattr(self, "_workspace_chat_selected", False))
+            return {"margin": margin, "x": margin, "y": y,
+                    "width": max(0, parent.width() - margin * 2),
+                    "height": self.right_header.sizeHint().height() if chat else max(120, parent.height() - y - margin)}
         content_width = parent.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
         default_width = self._clamp_int(
             int(content_width * DesignTokens.drawer_width_ratio),
@@ -32663,7 +32655,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         left, top, right, bottom = self.main_content_default_margins
         reserve = 0
-        if getattr(self, "right_drawer_open", False) and drawer_width:
+        full = bool(getattr(self, "_workspace_fullscreen", False))
+        if full:
+            top += self.right_header.sizeHint().height() + 12
+        elif getattr(self, "right_drawer_open", False) and drawer_width:
             reserve = max(0, int(drawer_width) + int(self.context_drawer_gap))
         self.content_area_layout.setContentsMargins(left, top, reserve, bottom)
         self.main_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -32676,7 +32671,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return max(minimum, min(maximum, int(value)))
 
     def _drawer_is_active(self, drawer_geometry=None):
-        return bool(self.right_drawer_open and isinstance(drawer_geometry, dict))
+        return bool(self.right_drawer_open and isinstance(drawer_geometry, dict)
+                    and not getattr(self, "_workspace_fullscreen", False))
 
     def _main_content_shell_width(self, drawer_geometry=None):
         container = getattr(self, "main_container", None)
@@ -33215,6 +33211,11 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
 
     def sync_context_drawer_layout(self):
+        full = bool(getattr(self, "_workspace_fullscreen", False))
+        chat = full and bool(getattr(self, "_workspace_chat_selected", False))
+        self.right_stack.setVisible(not chat)
+        self.content_area.setVisible(not full or chat)
+        self.right_resize_handle.setVisible(not full)
         geometry = self._compute_context_drawer_geometry()
         if geometry is None:
             return
@@ -33313,6 +33314,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def show_context_drawer(self, tab_index=None):
         if tab_index is None:
             tab_index = self.right_drawer_tab
+        if tab_index != self.RIGHT_TAB_FILES and getattr(self, "_workspace_fullscreen", False):
+            self.set_workspace_expanded(False)
         if not hasattr(self, "right_stack"):
             return
         tab_index = max(0, min(tab_index, self.right_stack.count() - 1))
@@ -33422,6 +33425,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             is_popup=is_popup,
         )
         self.right_drawer_open = False
+        if getattr(self, "_workspace_fullscreen", False):
+            self.set_workspace_expanded(False)
         if reason == "manual" and hasattr(self, "browser_workbench"):
             self.browser_workbench.pause_follow()
         self.right_sidebar.setVisible(False)
@@ -39404,6 +39409,12 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             return
         state = self.sessions.get(session_id)
         if state:
+            if any(getattr(pane, "worker", None) is not None for pane in self.browser_workbench.panes.values()
+                   if pane.tab.session_id == session_id):
+                self.add_system_toast("页面正在保存，请完成后再关闭会话。", "info")
+                return
+            if not self.save_chat_history(session_id, flush=True):
+                return
             self._stop_live_subagents(state, force=True)
             if state.daemon_worker:
                 self._disconnect_worker_signals(state.daemon_worker)
@@ -40613,6 +40624,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             or "draft"
         )
         state.persisted_conversation_meta = copy.deepcopy(conversation_meta or {})
+        self.browser_workbench.restore_pages(state)
         timeline_events, timeline_warning = self._normalize_ui_timeline_events(
             conversation_meta.get("ui_timeline_v1")
         )
@@ -44905,6 +44917,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
 
     def _compose_session_meta(self, state):
         meta = self._session_base_meta(state)
+        browser = getattr(self, "browser_workbench", None)
+        if browser is not None:
+            pages = browser.page_snapshots(state)
+            if pages:
+                meta["workspace_pages"] = pages
+            else:
+                meta.pop("workspace_pages", None)
         workspace_dir = self._workspace_dir_for_state(state) or meta.get("workspace_dir") or ""
         if workspace_dir:
             meta["workspace_dir"] = workspace_dir
@@ -45265,6 +45284,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state = self.get_session(session_id)
         if not state or revision < int(getattr(state, "chat_save_revision", 0) or 0):
             return
+        self.browser_workbench.page_recovery_result(session_id, revision, error=str(error or "恢复副本保存失败"))
         pending_bubble = getattr(state, "last_agent_bubble", None)
         pending_revision = int(
             getattr(pending_bubble, "_pending_chat_save_revision", 0) or 0
@@ -45334,6 +45354,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def handle_chat_save_completed(self, session_id, revision):
         session_id = str(session_id or "").strip()
         revision = int(revision or 0)
+        self.browser_workbench.page_recovery_result(session_id, revision)
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if isinstance(notified, dict):
             failure = notified.get(session_id) or {}

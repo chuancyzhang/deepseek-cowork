@@ -71,7 +71,7 @@ class WorkbenchStore:
             return tab
 
     def open(self, session_id, kind, *, activate=False, **values):
-        if not session_id or kind not in {"new", "file", "web", "terminal"}:
+        if not session_id or kind not in {"new", "file", "web", "terminal", "page"}:
             raise WorkbenchError("invalid_tab", "无效的聊天或标签类型。")
         with self.lock:
             if kind == "file":

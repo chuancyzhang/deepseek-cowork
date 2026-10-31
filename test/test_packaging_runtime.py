@@ -59,6 +59,9 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             "PySide6.QtPositioning",
             "PySide6.QtPdf",
             "PySide6.QtPdfWidgets",
+            "PySide6.QtOpenGL",
+            "PySide6.QtQml",
+            "PySide6.QtQuick",
             "PySide6.QtQuickWidgets",
             "PySide6.QtSvg",
             "PySide6.QtWebChannel",
@@ -70,11 +73,6 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         for module_name in required_modules:
             self.assertIn(f'"{module_name}"', hidden_imports)
             self.assertNotIn(f"'{module_name}'", excludes)
-        for module_name in (
-            "PySide6.QtQml",
-            "PySide6.QtQuick",
-        ):
-            self.assertNotIn(f'"{module_name}"', hidden_imports)
 
     def test_packaging_filters_debug_qt_resources_locales_and_python_development_files(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:

@@ -773,6 +773,11 @@ pyside6_hidden = [
     "PySide6.QtPositioning",
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",
+    # QQuickWidget's Python bindings import QtQuick -> QtOpenGL and QtQml.
+    # Shipping the Qt DLLs alone does not satisfy this import chain.
+    "PySide6.QtOpenGL",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
     "PySide6.QtQuickWidgets",
     "PySide6.QtSvg",
     "PySide6.QtWebChannel",
@@ -862,7 +867,6 @@ a = Analysis(
         'PySide6.QtMultimedia',
         'PySide6.QtMultimediaWidgets',
         'PySide6.QtNetworkAuth',
-        'PySide6.QtOpenGL',
         'PySide6.QtOpenGLWidgets',
         'PySide6.QtQmlCompiler',
         'PySide6.QtQuick3D',

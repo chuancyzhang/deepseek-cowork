@@ -214,6 +214,15 @@ class PackageReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(package_release.PackageAuditError, "pywinpty"):
                 package_release.audit_distribution(dist)
 
+    def test_window_render_surface_requires_python_bindings_and_qt_libraries(self):
+        for name in ("QtOpenGL.pyd", "QtQml.pyd", "QtQuick.pyd", "QtQuickWidgets.pyd",
+                     "Qt6OpenGL.dll", "Qt6Qml.dll", "Qt6Quick.dll", "Qt6QuickWidgets.dll"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
+                dist = self._create_minimal_dist(temp_dir)
+                (dist / "_internal/PySide6" / name).unlink()
+                with self.assertRaisesRegex(package_release.PackageAuditError, name):
+                    package_release.audit_distribution(dist)
+
     def test_audit_rejects_editor_source_maps_node_modules_and_cdn_imports(self):
         cases = (
             ("_internal/web/editors/dist/sheet-editor.js.map", b"{}"),

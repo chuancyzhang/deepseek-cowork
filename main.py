@@ -26553,9 +26553,32 @@ def show_startup_loading_window(app):
 def finish_startup_loading_window(startup_window):
     if startup_window is None:
         return
+    startup_window.indicator.setRunning(False)
     startup_window.hide()
     startup_window.deleteLater()
     log_startup_stage("startup_loading_closed")
+
+
+def show_startup_failure(app, startup_window, error):
+    details = redact_diagnostic("".join(traceback.format_exception(error)))
+    append_background_process_log(
+        UI_ERROR_LOG_FILENAME, f"stage=main_window_startup_failed\n{details}",
+    )
+    log_startup_stage("main_window_startup_failed", error_type=type(error).__name__)
+    log_path = runtime_log_path(UI_ERROR_LOG_FILENAME, get_app_data_dir())
+    finish_startup_loading_window(startup_window)
+    try:
+        dialog = ProductMessageDialog(
+            "启动失败",
+            "工作台未能启动。\n请关闭应用后重试；若问题持续，请重新解压完整安装包，"
+            "或将下方诊断日志提供给维护者。",
+            "error",
+            [("关闭应用", QMessageBox.Close, "primary", True)],
+            details=f"{type(error).__name__}: {redact_diagnostic(str(error))}\n\n诊断日志：{log_path}",
+        )
+        dialog.exec()
+    finally:
+        app.exit(1)
 
 
 def schedule_main_window_startup(
@@ -26570,14 +26593,23 @@ def schedule_main_window_startup(
     holder = {"window": None}
 
     def build_main_window():
-        window = MainWindow(config_manager=config_manager, theme_manager=theme_manager)
-        holder["window"] = window
-        app.main_window = window
-        if single_instance_server_started:
-            window.attach_single_instance_server(single_instance_server)
-        log_startup_stage("window_created", single_instance_server_started=single_instance_server_started)
-        window.showMaximized()
-        log_startup_stage("window_show_requested")
+        window = None
+        try:
+            window = MainWindow(config_manager=config_manager, theme_manager=theme_manager)
+            holder["window"] = window
+            app.main_window = window
+            if single_instance_server_started:
+                window.attach_single_instance_server(single_instance_server)
+            log_startup_stage("window_created", single_instance_server_started=single_instance_server_started)
+            window.showMaximized()
+            log_startup_stage("window_show_requested")
+        except Exception as exc:
+            if window is not None:
+                window.hide()
+            holder["window"] = None
+            app.main_window = None
+            show_startup_failure(app, startup_window, exc)
+            return
         finish_startup_loading_window(startup_window)
         if pending_activation.get("requested"):
             window.activate_existing_window()

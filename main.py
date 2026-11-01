@@ -100,6 +100,10 @@ from ui.conversation_agents import ConversationAgentsMixin
 from core.conversation_agents import builtin_agent_profiles, extract_agent_mentions, normalize_agent_selection, message_agent_identity
 from core.sidebar_projects import SIDEBAR_SEARCH_PAGE_SIZE, page_sidebar_search, visible_sidebar_projects
 from ui.history_search import HistorySearchController
+from ui.history_presentation import (
+    HistoryLoadingOverlay, RUN_ELAPSED_META_KEY,
+    history_elapsed_label, history_elapsed_seconds, valid_elapsed_seconds,
+)
 from core.chat_save_queue import (
     ChatSaveRequest,
     ContextSaveRequest,
@@ -23375,7 +23379,7 @@ class SummonedAgentProcessBlock(QFrame):
 class HistoricalAssistantSummary(QFrame):
     detailRequested = Signal(bool)
 
-    def __init__(self, stage_count=0, tool_count=0, parent=None):
+    def __init__(self, stage_count=0, tool_count=0, parent=None, *, elapsed_seconds=None):
         super().__init__(parent)
         self.setObjectName("HistoricalAssistantSummary")
         self.setFrameShape(QFrame.NoFrame)
@@ -23385,6 +23389,8 @@ class HistoricalAssistantSummary(QFrame):
         )
         self.stage_count = max(0, int(stage_count or 0))
         self.tool_count = max(0, int(tool_count or 0))
+        self.elapsed_seconds = valid_elapsed_seconds(elapsed_seconds)
+        self.detail_progress = ""
         self.detail_groups = []
         self.detail_batches = []
         self.detail_batch_index = 0
@@ -23402,10 +23408,20 @@ class HistoricalAssistantSummary(QFrame):
         self.detail_button = QPushButton(self)
         self.detail_button.setObjectName("HistoricalProcessDisclosure")
         self.detail_button.setCheckable(True)
+        self.detail_button.setLayoutDirection(Qt.RightToLeft)
         self.detail_button.setCursor(Qt.PointingHandCursor)
         self.detail_button.setStyleSheet(apple_disclosure_button_style())
         self.detail_button.toggled.connect(self._on_toggled)
-        layout.addWidget(self.detail_button)
+        layout.addWidget(self.detail_button, 0, Qt.AlignLeft | Qt.AlignAbsolute)
+        self.detail_notice = QLabel(self)
+        self.detail_notice.setWordWrap(True)
+        self.detail_notice.setTextFormat(Qt.PlainText)
+        self.detail_notice.hide()
+        layout.addWidget(self.detail_notice)
+        self.process_separator = QFrame(self)
+        self.process_separator.setObjectName("HistoricalProcessSeparator")
+        self.process_separator.setFixedHeight(1)
+        layout.addWidget(self.process_separator)
         self.retry_button = QPushButton("重试恢复", self)
         self.retry_button.setObjectName("HistoricalProcessRetryButton")
         self.retry_button.setCursor(Qt.PointingHandCursor)
@@ -23436,22 +23452,31 @@ class HistoricalAssistantSummary(QFrame):
             f"QPushButton#HistoricalProcessDisclosure:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
         )
         self.retry_button.setStyleSheet(product_button_style("secondary"))
+        self.detail_notice.setStyleSheet(
+            f"QLabel {{ color: {DesignTokens.error_text}; background: transparent; border: none; }}"
+        )
+        self.process_separator.setStyleSheet(
+            f"QFrame#HistoricalProcessSeparator {{ background: {DesignTokens.separator}; border: none; }}"
+        )
         self._refresh_button_text()
 
-    def _refresh_button_text(self, progress_text=""):
-        parts = []
-        if self.stage_count:
-            parts.append(f"{self.stage_count} 个阶段")
-        if self.tool_count:
-            parts.append(f"{self.tool_count} 次工具调用")
-        summary = " · ".join(parts) or "执行详情"
+    def _refresh_button_text(self):
+        has_process = bool(self.stage_count or self.tool_count)
+        summary = history_elapsed_label(self.elapsed_seconds)
         arrow = "fa5s.chevron-down" if self.detail_button.isChecked() else "fa5s.chevron-right"
-        suffix = f" · {progress_text}" if progress_text else ""
-        self.detail_button.setIcon(qta.icon(arrow, color=DesignTokens.chat_text_muted))
+        suffix = f" · {self.detail_progress}" if self.detail_progress else ""
+        self.detail_button.setIcon(qta.icon(arrow, color=DesignTokens.chat_text_muted) if has_process else QIcon())
         self.detail_button.setIconSize(QSize(10, 10))
-        joiner = "\n" if self.width() < 460 else "  "
-        self.detail_button.setText(f"执行过程{joiner}{summary}{suffix}")
-        self.detail_button.setVisible(bool(self.stage_count or self.tool_count))
+        self.detail_button.setText(f"{summary}{suffix}")
+        self.detail_button.setCheckable(has_process)
+        self.detail_button.setEnabled(has_process)
+        self.detail_button.setAccessibleName(
+            f"{summary}，执行过程{'已展开' if self.detail_button.isChecked() else '已折叠'}"
+            if has_process else summary
+        )
+        visible = has_process or self.elapsed_seconds is not None
+        self.detail_button.setVisible(visible)
+        self.process_separator.setVisible(visible)
 
     def _on_toggled(self, checked):
         self._refresh_button_text()
@@ -23459,22 +23484,30 @@ class HistoricalAssistantSummary(QFrame):
 
     def set_progress(self, completed, total):
         self.retry_button.hide()
-        self._refresh_button_text(f"正在加载 {int(completed)}/{int(total)}")
+        self.detail_notice.hide()
+        self.detail_progress = "正在加载…"
+        self._refresh_button_text()
 
     def set_error(self, message):
         self.detail_error = str(message or "")
-        self._refresh_button_text(f"加载失败：{self.detail_error}")
+        self.detail_progress = ""
+        self.detail_notice.setText(f"过程加载失败：{self.detail_error}")
+        self.detail_notice.show()
+        self._refresh_button_text()
         self.retry_button.show()
 
     def _retry_details(self):
         self.detail_error = ""
         self.detail_loading = False
         self.retry_button.hide()
+        self.detail_notice.hide()
         self.detailRequested.emit(True)
 
     def set_complete(self):
         self.detail_loading = False
         self.retry_button.hide()
+        self.detail_notice.hide()
+        self.detail_progress = ""
         self._refresh_button_text()
 
     def resizeEvent(self, event):
@@ -37149,6 +37182,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         elapsed_seconds = (
             max(0.0, time.monotonic() - started_at) if started_at is not None else None
         )
+        run_id = str(getattr(state, "active_turn_request_id", "") or "")
+        if run_id and valid_elapsed_seconds(elapsed_seconds) is not None:
+            # UI metadata only: never add timing fields to model messages.
+            meta = self._session_base_meta(state)
+            recorded = meta.get(RUN_ELAPSED_META_KEY)
+            recorded = dict(recorded) if isinstance(recorded, dict) else {}
+            recorded[run_id] = elapsed_seconds
+            meta[RUN_ELAPSED_META_KEY] = recorded
+            state.persisted_conversation_meta = meta
         result_group = getattr(state, "active_agent_turn_group", None)
         result_bubble = (
             result_group.active_stage()
@@ -39432,8 +39474,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.tool_menu_btn.setEnabled(history_ready)
             self.tool_menu_btn.setToolTip("添加上下文" if history_ready else "历史会话仍在加载")
             if not history_ready:
-                self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
-                self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
+                self.input_field.setPlaceholderText(
+                    "正在加载历史会话，请稍候…" if state.history_loading
+                    else "重试打开历史会话后可继续输入"
+                )
             else:
                 self.input_field.setPlaceholderText(CONTENT_DEFAULTS["composer.placeholder"])
             self.loop_hint.setVisible(False)
@@ -39712,13 +39756,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         return session_id
 
     def _reset_session_history_state(self, state):
-        loading_widget = getattr(state, "history_loading_widget", None)
-        if loading_widget is not None and _qt_object_alive(loading_widget):
-            state.chat_layout.removeWidget(loading_widget)
-            loading_widget.setParent(None)
         self.clear_chat_layout(state.chat_layout)
-        if loading_widget is not None and _qt_object_alive(loading_widget):
-            state.chat_layout.insertWidget(0, loading_widget)
         state.empty_state = None
         state.prompt_files = []
         state.messages = []
@@ -39815,31 +39853,44 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         state.token_speed_tracker.clear()
         self.refresh_token_usage_label(state.session_id)
 
-    def _show_session_loading_state(self, state, text="正在加载历史会话…"):
+    def _dismiss_session_loading_state(self, state):
+        overlay = getattr(state, "history_loading_widget", None)
+        if overlay is not None and _qt_object_alive(overlay):
+            overlay.hide()
+            overlay.deleteLater()
+            state.chat_layout.parentWidget().setEnabled(getattr(state, "history_content_enabled", True))
+        state.history_loading_widget = None
+
+    def _show_session_loading_state(self, state, text="正在打开对话…"):
+        self._dismiss_session_loading_state(state)
         self.clear_chat_layout(state.chat_layout)
         state.empty_state = None
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(24, 28, 24, 28)
-        layout.setSpacing(12)
-        placeholder = QLabel(text)
-        placeholder.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(placeholder)
-        for width in (72, 56, 64):
-            bar = QFrame()
-            bar.setFixedHeight(12)
-            bar.setMaximumWidth(int(DesignTokens.message_max_width * width / 100))
-            bar.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: none; border-radius: 6px;")
-            layout.addWidget(bar)
-        layout.addStretch()
-        state.chat_layout.insertWidget(0, wrapper)
-        state.history_loading_widget = wrapper
+        container = state.chat_layout.parentWidget()
+        state.history_content_enabled = container.isEnabled()
+        container.setEnabled(False)
+        overlay = HistoryLoadingOverlay(state.chat_scroll.viewport(), text)
+        state.history_loading_widget = overlay
+        overlay.show()
+        overlay.raise_()
+
+    def _reveal_session_history(self, session_id, token):
+        state = self.get_session(session_id)
+        if (not state or token != state.history_load_token or state.history_loading
+                or not state.history_loaded):
+            return
+        state.chat_layout.activate()
+        if session_id == self.current_session_id:
+            self._restore_session_scroll_position(state)
+        self._dismiss_session_loading_state(state)
+        log_ui_navigation("history_view_revealed", session_id=session_id, token=token)
 
     def _show_session_load_error_state(self, state, text):
+        self._dismiss_session_loading_state(state)
         self.clear_chat_layout(state.chat_layout)
         state.empty_state = None
-        notice = ProductInlineNotice(f"历史会话加载失败：{str(text or '未知错误')}", "error")
-        retry = QPushButton("重试")
+        notice = ProductInlineNotice(f"历史会话加载失败：{str(text or '未知错误')}", "error",
+                                     state.chat_layout.parentWidget())
+        retry = QPushButton("重试", notice)
         retry.setStyleSheet(product_button_style("secondary", radius=7))
         retry.clicked.connect(lambda: self.queue_session_history_load(state.session_id))
         notice.layout().addWidget(retry)
@@ -39973,7 +40024,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             or message.get("reasoning")
             or message.get("tool_calls")
         )
-        summary = HistoricalAssistantSummary(process_stage_count, tool_count, state.chat_layout.parentWidget())
+        summary = HistoricalAssistantSummary(
+            process_stage_count, tool_count, state.chat_layout.parentWidget(),
+            elapsed_seconds=history_elapsed_seconds(messages, getattr(state, "persisted_conversation_meta", {})),
+        )
         identity = message_agent_identity(state.messages, final_message or next(iter(assistant_messages), {}))
         summary.identity_header.set_identity(identity)
         summary.span_start = int(start)
@@ -40416,11 +40470,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def _render_initial_session_history(self, state, completion=None):
         spans = getattr(state, "render_items", []) or []
         if not spans:
-            loading_widget = getattr(state, "history_loading_widget", None)
-            if loading_widget is not None and _qt_object_alive(loading_widget):
-                state.chat_layout.removeWidget(loading_widget)
-                loading_widget.deleteLater()
-            state.history_loading_widget = None
             empty_state = EmptyStateWidget(self)
             state.chat_layout.insertWidget(0, empty_state)
             state.empty_state = empty_state
@@ -40454,13 +40503,23 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         queue = getattr(state, "history_initial_render_queue", [])
         if queue:
             span = queue.pop(0)
-            state.history_initial_render_inserted += int(self._render_session_history_spans(state, [span]) or 0)
-            if int(state.history_initial_render_inserted or 0) > 0:
-                loading_widget = getattr(state, "history_loading_widget", None)
-                if loading_widget is not None and _qt_object_alive(loading_widget):
-                    state.chat_layout.removeWidget(loading_widget)
-                    loading_widget.deleteLater()
-                state.history_loading_widget = None
+            try:
+                state.history_initial_render_inserted += int(self._render_session_history_spans(state, [span]) or 0)
+            except Exception as exc:
+                state.history_initial_render_queue = []
+                state.history_initial_render_completion = None
+                state.history_page_loading = False
+                state.history_loading = False
+                state.history_loaded = False
+                self._show_session_load_error_state(state, str(exc))
+                self.append_log(f"历史会话显示失败({session_id}): {exc}")
+                log_ui_navigation(
+                    "history_load_error", session_id=session_id, token=expected_token,
+                    phase="initial_render", error=str(exc),
+                )
+                if session_id == self.current_session_id:
+                    self.normalize_session_ui(state)
+                return
             QTimer.singleShot(
                 0,
                 lambda sid=session_id, load_token=expected_token:
@@ -40642,7 +40701,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             exc = str(result.get("error") or "未知错误")
             state.history_loaded = False
             state.history_loading = False
-            self._show_session_load_error_state(state, f"历史会话加载失败：{exc}")
+            self._show_session_load_error_state(state, exc)
             self.append_log(f"历史会话加载失败({session_id}): {exc}")
             log_ui_navigation(
                 "history_load_error",
@@ -40858,6 +40917,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
         self.attach_active_daemon_run_if_needed(state)
+        QTimer.singleShot(0, lambda sid=session_id, load_token=token: self._reveal_session_history(sid, load_token))
 
     def _finish_session_history_load(self, state):
         if not state:

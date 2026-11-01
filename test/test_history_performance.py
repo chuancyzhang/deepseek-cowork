@@ -1,12 +1,18 @@
 import os
+import copy
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QTimer
 
 from core.conversation_render import build_conversation_render_spans
+from ui.history_presentation import RUN_ELAPSED_META_KEY, history_elapsed_seconds
+from ui.workspace_presentation import ConversationRunNotice
 from ui_window_cleanup import close_test_window
 from main import (
     AssistantTurnGroup,
@@ -15,6 +21,7 @@ from main import (
     MainWindow,
     OfficeDraftTaskCard,
     SessionHistoryLoadWorker,
+    ThinkingTextView,
 )
 
 
@@ -24,6 +31,16 @@ class HistoryPerformanceTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        temporary_root = Path(__file__).resolve().parents[1] / ".tmp" / "history-loading-tests"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = self.enterContext(tempfile.TemporaryDirectory(dir=temporary_root))
+        self.enterContext(patch.dict(os.environ, {"APPDATA": self.temporary,
+            "LOCALAPPDATA": self.temporary, "COWORK_EXTERNAL_BACKGROUND_SERVICES": "0"}))
+        data = Path(self.temporary, "DeepSeekCowork")
+        data.mkdir()
+        (data / "config.json").write_text("{}", encoding="utf-8")
+        self.enterContext(patch("main.get_app_data_dir", return_value=str(data)))
+        self.enterContext(patch("core.config_manager.get_app_data_dir", return_value=str(data)))
         self.window = MainWindow()
         self.state = self.window.get_current_session()
         self.window.clear_chat_layout(self.state.chat_layout)
@@ -32,6 +49,103 @@ class HistoryPerformanceTests(unittest.TestCase):
 
     def tearDown(self):
         close_test_window(self.window)
+
+    def test_recorded_run_time_survives_save_without_changing_messages(self):
+        self.state.messages = [{"id": "timed-reply", "role": "assistant", "content": "回答",
+                                "meta": {"request_id": "timed-run"}}]
+        before = copy.deepcopy(self.state.messages)
+        self.state.active_turn_request_id = "timed-run"
+        self.state.live_run_started_at = 100.0
+        with patch("main.time.monotonic", return_value=219.0):
+            self.window._finalize_live_turn_process_groups(self.state)
+        self.assertTrue(self.window.save_chat_history(self.state.session_id, flush=True))
+        stored = self.window.chat_storage.get_conversation_meta(self.state.session_id)
+        self.assertEqual(history_elapsed_seconds(self.state.messages, stored), 119.0)
+        self.assertEqual(self.state.messages, before)
+        # Repeated terminal handling cannot replace the recorded duration.
+        self.window._finalize_live_turn_process_groups(self.state)
+        self.assertEqual(self.state.persisted_conversation_meta[RUN_ELAPSED_META_KEY],
+                         {"timed-run": 119.0})
+
+    def test_history_time_requires_exact_recorded_run(self):
+        messages = [{"role": "assistant", "meta": {"request_id": "run-one"}}]
+        meta = {RUN_ELAPSED_META_KEY: {"run-one": 119, "run-two": 8}}
+        self.assertEqual(history_elapsed_seconds(messages, meta), 119)
+        self.assertIsNone(history_elapsed_seconds(messages, {}))
+        self.assertIsNone(history_elapsed_seconds([{"role": "assistant"}], meta))
+        messages.append({"role": "assistant", "meta": {"request_id": "run-two"}})
+        self.assertIsNone(history_elapsed_seconds(messages, meta))
+        for value in (True, -1, float("nan"), float("inf"), "119"):
+            with self.subTest(value=value):
+                self.assertIsNone(history_elapsed_seconds(messages[:1],
+                    {RUN_ELAPSED_META_KEY: {"run-one": value}}))
+
+    def test_history_overlay_survives_reset_and_stale_reveal(self):
+        self.state.history_load_token = 30
+        self.state.history_loading = True
+        self.state.history_loaded = False
+        self.window._show_session_loading_state(self.state)
+        overlay = self.state.history_loading_widget
+        self.assertEqual(self.state.chat_layout.indexOf(overlay), -1)
+        self.window._reset_session_history_state(self.state)
+        self.assertIs(self.state.history_loading_widget, overlay)
+        self.assertFalse(overlay.isHidden())
+        self.assertFalse(self.state.chat_layout.parentWidget().isEnabled())
+        self.window._reveal_session_history(self.state.session_id, 29)
+        self.window._reveal_session_history(self.state.session_id, 30)
+        self.assertIs(self.state.history_loading_widget, overlay)
+        self.state.history_loading = False
+        self.state.history_loaded = True
+        other_id = self.window.create_new_session(make_current=False)
+        self.window.set_current_session(other_id)
+        with patch.object(self.window, "_restore_session_scroll_position") as restore:
+            self.window._reveal_session_history(self.state.session_id, 30)
+            restore.assert_not_called()
+        self.assertIsNone(self.state.history_loading_widget)
+        self.assertTrue(self.state.chat_layout.parentWidget().isEnabled())
+        self.assertEqual(self.window.current_session_id, other_id)
+
+    def test_initial_render_failure_removes_overlay_and_preserves_messages(self):
+        self.state.history_load_token = 31
+        self.state.history_loading = True
+        self.state.history_loaded = False
+        self.state.messages = [{"id": "u-render-error", "role": "user", "content": "已保存的提问"}]
+        self.state.history_initial_render_queue = [{"start": 0, "end": 1}]
+        self.state.history_initial_render_inserted = 0
+        before = copy.deepcopy(self.state.messages)
+        self.window._show_session_loading_state(self.state)
+        with patch.object(self.window, "_render_session_history_spans", side_effect=RuntimeError("渲染失败")):
+            self.window._render_next_initial_history_span(self.state.session_id, 31)
+        self.assertIsNone(self.state.history_loading_widget)
+        self.assertFalse(self.state.history_loading)
+        self.assertFalse(self.state.history_loaded)
+        self.assertEqual(self.state.messages, before)
+        notice = self.state.chat_layout.itemAt(0).widget()
+        from PySide6.QtWidgets import QPushButton
+        retry = next(button for button in notice.findChildren(QPushButton) if button.text() == "重试")
+        with patch.object(self.window, "queue_session_history_load") as load:
+            retry.click()
+            load.assert_called_once_with(self.state.session_id)
+
+    def test_timed_history_disclosure_keeps_final_reply_and_existing_thoughts(self):
+        self.state.persisted_conversation_meta = {RUN_ELAPSED_META_KEY: {"run-timed": 119}}
+        self.state.messages = [{"id": "a-timed", "role": "assistant", "content": "最终答复",
+                                "reasoning_content": "保留的思考原文",
+                                "meta": {"request_id": "run-timed", "ui_reply_kind": "final"}}]
+        self.window._render_session_history_spans(self.state, [{"start": 0, "end": 1}])
+        summary = self.state.history_detail_summaries[0]
+        self.assertEqual(summary.detail_button.text(), "用时 1分钟 59秒")
+        summary.detail_button.click()
+        for _ in range(20):
+            self.app.processEvents()
+            if summary.detail_groups and not summary.detail_loading:
+                break
+        self.assertTrue(summary.detail_groups)
+        self.assertTrue(summary.body.isVisibleTo(summary))
+        bubble = summary.detail_groups[0].stage_bubbles[0]
+        self.assertEqual(bubble.findChild(ThinkingTextView).text(), "保留的思考原文")
+        summary.detail_button.click()
+        self.assertTrue(summary.body.isVisibleTo(summary))
 
     def test_history_assistant_turn_materializes_details_only_after_expand(self):
         messages = []
@@ -84,8 +198,9 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertEqual(inserted, 1)
         summary = self.state.chat_layout.itemAt(0).widget()
         self.assertIsInstance(summary, HistoricalAssistantSummary)
-        self.assertIn("assistant:history-group", self.state.render_nodes)
-        self.assertFalse(self.state.render_nodes["assistant:history-group"]["details_materialized"])
+        node = self.state.render_node_by_message_id["a0"]
+        self.assertIs(node["widget"], summary)
+        self.assertFalse(node["details_materialized"])
         self.assertEqual(summary.detail_batch_index, 0)
         self.assertFalse(self.state.chat_layout.itemAt(0).widget().findChildren(AssistantTurnGroup))
         self.assertEqual(self.state.tool_cards, {})
@@ -98,7 +213,7 @@ class HistoryPerformanceTests(unittest.TestCase):
 
         self.assertEqual(summary.detail_batch_index, len(summary.detail_batches))
         self.assertEqual(len(self.state.tool_cards), 4)
-        self.assertTrue(self.state.render_nodes["assistant:history-group"]["details_materialized"])
+        self.assertTrue(node["details_materialized"])
         group_count = len(summary.detail_groups)
         summary.detail_button.setChecked(False)
         summary.detail_button.setChecked(True)
@@ -165,33 +280,21 @@ class HistoryPerformanceTests(unittest.TestCase):
         show_error.assert_called_once()
         worker.deleteLater.assert_called_once()
 
-    def test_live_user_projection_reentry_creates_one_widget(self):
+    def test_queued_duplicate_user_projection_creates_one_widget(self):
         message = {"id": "u-reentry", "role": "user", "content": "第一条"}
         self.state.messages = [message]
         self.state.render_items = build_conversation_render_spans(self.state.messages)
-        original_process_events = self.window.process_ui_events
         reentered = False
 
-        def reenter_once(*_args, **_kwargs):
+        def reenter_once():
             nonlocal reentered
-            if reentered:
-                return
             reentered = True
-            self.window.render_message_batch(
-                [message],
-                self.state.session_id,
-                animate=False,
-            )
+            self.window.render_message_batch([message], self.state.session_id, animate=False)
 
-        self.window.process_ui_events = reenter_once
-        try:
-            inserted = self.window.render_message_batch(
-                [message],
-                self.state.session_id,
-                animate=False,
-            )
-        finally:
-            self.window.process_ui_events = original_process_events
+        # Rendering no longer pumps a nested event loop. A queued repeat must still deduplicate.
+        QTimer.singleShot(0, reenter_once)
+        inserted = self.window.render_message_batch([message], self.state.session_id, animate=False)
+        self.app.processEvents()
 
         widgets = [
             self.state.chat_layout.itemAt(index).widget()
@@ -353,6 +456,8 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertTrue(self.state.render_nodes["office:office-user"]["details_materialized"])
 
     def test_edit_reuses_prefix_widgets_and_does_not_clear_history(self):
+        # This fixture stubs submission/persistence; keep it stubbed through shutdown.
+        self.enterContext(patch.object(self.window, "save_chat_history", return_value=True))
         messages = [
             {"id": "u1", "role": "user", "content": "第一问"},
             {"id": "a1", "role": "assistant", "content": "第一答"},
@@ -404,6 +509,7 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertTrue(self.state.messages[-1]["meta"]["edited"])
 
     def test_edit_submission_failure_restores_original_widgets_without_replay(self):
+        self.enterContext(patch.object(self.window, "save_chat_history", return_value=True))
         messages = [
             {"id": "u1", "role": "user", "content": "第一问"},
             {"id": "a1", "role": "assistant", "content": "第一答"},
@@ -437,7 +543,9 @@ class HistoryPerformanceTests(unittest.TestCase):
             self.state.chat_layout.itemAt(index).widget()
             for index in range(self.state.chat_layout.count() - 1)
         ]
-        self.assertEqual(restored_widgets, original_widgets)
+        self.assertEqual([widget for widget in restored_widgets if not isinstance(widget, ConversationRunNotice)],
+                         original_widgets)
+        self.assertEqual(sum(isinstance(widget, ConversationRunNotice) for widget in restored_widgets), 1)
         self.assertEqual([message["id"] for message in self.state.messages], ["u1", "a1", "u2", "a2"])
 
     def test_delete_user_message_keeps_downstream_widget_objects(self):

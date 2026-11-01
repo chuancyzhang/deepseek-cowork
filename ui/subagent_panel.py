@@ -69,6 +69,7 @@ class _TaskRow(QPushButton):
 
 class SubagentPanel(QWidget):
     overview_changed = Signal(str, object)
+    navigation_changed = Signal()
 
     def __init__(self, render_item, parent=None):
         super().__init__(parent)
@@ -112,7 +113,10 @@ class SubagentPanel(QWidget):
         layout = QVBoxLayout(detail)
         layout.setContentsMargins(0, 0, 0, 0)
         head = QHBoxLayout()
-        back = QPushButton("返回子任务", detail)
+        back = QPushButton(detail)
+        back.setAccessibleName("返回子任务列表")
+        back.setToolTip("返回子任务列表")
+        back.setFixedSize(32, 32)
         self.back = back
         self.detail = detail
         back.clicked.connect(self.show_overview)
@@ -172,6 +176,7 @@ class SubagentPanel(QWidget):
         bind_theme(self, self.apply_theme, surface="conversation")
 
     def apply_theme(self, _resolved=None):
+        self.back.setIcon(qta.icon("fa5s.arrow-left", color=DesignTokens.text_secondary))
         for index, widget in enumerate((self, self.stack, self.detail, self.list_content, self.content)):
             widget.setObjectName(f"SubagentSurface{index}")
             widget.setAttribute(Qt.WA_StyledBackground, True)
@@ -185,6 +190,7 @@ class SubagentPanel(QWidget):
         self.send.setStyleSheet(product_button_style("primary"))
         for button in (self.back, self.older, self.raw_toggle):
             button.setStyleSheet(product_button_style("ghost"))
+        self.back.setStyleSheet(product_button_style("ghost") + "QPushButton {padding:0;min-height:0;}")
         self.notice.setStyleSheet(f"color:{DesignTokens.text_secondary};")
         self.metrics.setStyleSheet(f"color:{DesignTokens.text_secondary};")
         for label in (self.title, self.recipient):
@@ -202,6 +208,7 @@ class SubagentPanel(QWidget):
         self.agent_id = ""
         self.generation += 1
         self.stack.setCurrentIndex(0)
+        self.navigation_changed.emit()
         for row in self.rows.values():
             row.hide()
             row.deleteLater()
@@ -309,6 +316,7 @@ class SubagentPanel(QWidget):
         self.agent_id = ""
         self.generation += 1
         self.stack.setCurrentIndex(0)
+        self.navigation_changed.emit()
         self.refresh()
 
     def open_agent(self, agent_id):
@@ -334,13 +342,14 @@ class SubagentPanel(QWidget):
         self.raw_toggle.setChecked(view.get("raw", False))
         self._restore_scroll = view.get("scroll")
         self.stack.setCurrentIndex(1)
+        self.navigation_changed.emit()
         self.notice.setText("正在加载子会话…")
         self._set_summary(self.summaries.get(agent_id, {}))
         self.load_history()
 
     def _set_summary(self, summary):
         name = summary.get("name") or "子任务"
-        self.title.setText("当前会话 / " + name)
+        self.title.setText(name)
         self.recipient.setText("发送给：" + name)
         self.metrics.setText(self.status_text(summary) + " · " + self.metric_text(summary))
         if summary.get("total_duration") is not None:

@@ -248,6 +248,7 @@ from core.runtime_logs import (
 from ui.chat_log_export import ConversationExportController
 from core.request_snapshot import RequestSnapshotStore
 from core.task_details import redact_diagnostic, tool_result_status, tool_result_summary
+from ui.task_workspace import TaskWorkspaceMixin, task_workspace_view, build_tool_detail_page
 from ui.theme_workspace import (
     WorkspaceThemeController,
     apply_theme_component_visibility,
@@ -27501,6 +27502,7 @@ class FileTabStrip(QWidget):
         self._tab_frames = {}
         self._tab_bodies = {}
         self._entries = {}
+        self._available_entries = []
         self.setObjectName("FileTabStrip")
         self.setMinimumWidth(0)
         self.setFixedHeight(36)
@@ -27615,7 +27617,8 @@ class FileTabStrip(QWidget):
         preferred = int(DesignTokens.file_tab_preferred_width)
         minimum = int(DesignTokens.file_tab_min_width)
         fitted = (available - spacing * (count - 1)) // count
-        tab_width = min(preferred, max(minimum, fitted))
+        # Keep the active tab's close control reachable even in a narrow drawer.
+        tab_width = min(preferred, max(minimum, fitted), max(72, available))
         total_width = tab_width * count + spacing * (count - 1)
         self.tabs_host.setMinimumWidth(total_width)
         for key, frame in self._tab_frames.items():
@@ -27624,7 +27627,7 @@ class FileTabStrip(QWidget):
             if body is None:
                 continue
             name = str(body.property("fullName") or "")
-            text_width = max(32, tab_width - 70)
+            text_width = max(0, tab_width - 70)
             body.setText(
                 QFontMetrics(body.font()).elidedText(name, Qt.ElideMiddle, text_width)
             )
@@ -27632,8 +27635,8 @@ class FileTabStrip(QWidget):
 
     def _file_icon(self, path):
         entry = self._entries.get(self._path_key(path), {})
-        if entry.get("kind") in {"new", "web", "terminal", "page"}:
-            return qta.icon({"new": "fa5s.globe", "web": "fa5s.globe", "terminal": "fa5s.terminal", "page": "fa5s.file-alt"}[entry["kind"]], color=DesignTokens.text_secondary)
+        if entry.get("kind") in {"new", "web", "terminal", "page", "task"}:
+            return qta.icon({"new": "fa5s.globe", "web": "fa5s.globe", "terminal": "fa5s.terminal", "page": "fa5s.file-alt", "task": "fa5s.list-ul"}[entry["kind"]], color=DesignTokens.text_secondary)
         path = entry.get("path") or path
         if not os.path.isfile(path):
             return qta.icon("fa5s.exclamation-triangle", color=DesignTokens.warning_text)
@@ -27650,9 +27653,11 @@ class FileTabStrip(QWidget):
             name = "fa5s.file-alt"
         return qta.icon(name, color=DesignTokens.text_secondary)
 
-    def set_entries(self, entries, active_key=""):
-        self._entries = {self._path_key(entry["key"]): entry for entry in entries}
+    def set_entries(self, entries, active_key="", available_entries=None):
+        self._available_entries = list(available_entries or [])
+        self._entries = {self._path_key(entry["key"]): entry for entry in [*entries, *self._available_entries]}
         self.overflow_btn.setToolTip("全部标签")
+        self.overflow_btn.setAccessibleName("全部标签")
         self.set_paths([entry["key"] for entry in entries], active_key)
 
     def set_paths(self, paths, active_path=""):
@@ -27693,6 +27698,7 @@ class FileTabStrip(QWidget):
             body.setIcon(self._file_icon(path))
             name = entry.get("title") or os.path.basename(path) or path
             body.setProperty("fullName", name)
+            body.setAccessibleName(name)
             body.setText(name)
             detail = entry.get("url") or entry.get("cwd") or entry.get("path") or name
             body.setToolTip(detail if not missing else f"文件已不存在\n{path}")
@@ -27705,6 +27711,7 @@ class FileTabStrip(QWidget):
             close_btn.setObjectName("FileTabClose")
             close_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_secondary))
             close_btn.setToolTip(f"关闭 {name}")
+            close_btn.setAccessibleName(f"关闭 {name}")
             close_btn.setCursor(Qt.PointingHandCursor)
             close_btn.setFixedSize(22, 22)
             close_btn.clicked.connect(lambda checked=False, value=path: self.closeRequested.emit(value))
@@ -27722,7 +27729,7 @@ class FileTabStrip(QWidget):
     def _rebuild_overflow_menu(self):
         self.overflow_menu.clear()
         active_key = self._path_key(self.active_path) if self.active_path else ""
-        for path in self.paths:
+        for path in [*self.paths, *(entry["key"] for entry in self._available_entries)]:
             entry = self._entries.get(self._path_key(path), {})
             name = entry.get("title") or os.path.basename(path) or path
             if entry.get("kind", "file") == "file" and not os.path.isfile(entry.get("path") or path):
@@ -27739,11 +27746,11 @@ class FileTabStrip(QWidget):
     def _sync_overflow(self):
         if not _qt_object_alive(self):
             return
-        if not self.paths:
+        if not self.paths and not self._available_entries:
             self.overflow_btn.hide()
             return
         self._sync_tab_widths()
-        overflow = self.tabs_host.sizeHint().width() > self.scroll.viewport().width()
+        overflow = bool(self._available_entries) or self.tabs_host.sizeHint().width() > self.scroll.viewport().width()
         visibility_changed = self.overflow_btn.isVisible() != overflow
         self.overflow_btn.setVisible(overflow)
         if visibility_changed:
@@ -29133,7 +29140,7 @@ class ThemePreviewSafetyBar(QFrame):
         self.setVisible(True)
 
 
-class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAgentsMixin, QMainWindow):
+class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMixin, ConversationAgentsMixin, QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
     skill_catalog_changed_ui_signal = Signal(object, object)
 
@@ -30280,7 +30287,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.right_stack.addWidget(self.workspace_tab)
 
         # Observability
-        self.tool_details_tab = QWidget()
+        self.tool_details_tab = QWidget(self.right_stack)
         td_layout = QVBoxLayout(self.tool_details_tab)
         td_layout.setContentsMargins(14, 12, 14, 14)
         td_layout.setSpacing(10)
@@ -30293,23 +30300,25 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.OBS_SECTION_PROMPT = 0
         self.OBS_SECTION_LOG = 1
         self.OBS_SECTION_DETAILS = 2
+        self.OBS_SECTION_AGENTS = 3
         self.observability_section_index = self.OBS_SECTION_LOG
 
         self.observability_segment_control = ProductSegmentedControl(
-            (("prompt", "执行上下文"), ("log", "调用记录"), ("details", "技术详情")),
+            (("log", "调用记录"), ("agents", "子任务"), ("prompt", "执行上下文")),
             current="log",
+            parent=self.tool_details_tab,
         )
-        section_indexes = {"prompt": 0, "log": 1, "details": 2}
+        section_indexes = {"prompt": 0, "log": 1, "agents": 3}
         self.observability_segment_control.currentChanged.connect(
             lambda key: self.set_observability_section(section_indexes.get(key, 1))
         )
         self.observability_segment_buttons = [
             self.observability_segment_control.buttons[key]
-            for key in ("prompt", "log", "details")
+            for key in ("log", "agents", "prompt")
         ]
         td_layout.addWidget(self.observability_segment_control)
 
-        self.observability_content_stack = QStackedWidget()
+        self.observability_content_stack = QStackedWidget(self.tool_details_tab)
         self.observability_content_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         self.observability_content_stack.currentChanged.connect(self._on_context_surface_changed)
 
@@ -30417,91 +30426,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.observability_log_edit.hide()
         self.observability_content_stack.addWidget(log_page)
 
-        details_page = QWidget()
-        details_layout = QVBoxLayout(details_page)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.setSpacing(10)
-
-
-        details_info_bar = QFrame()
-        details_info_bar.setObjectName("ToolDetailsIdentity")
-        details_info_bar.setStyleSheet("QFrame#ToolDetailsIdentity { background: transparent; border: none; }")
-        details_info_layout = QVBoxLayout(details_info_bar)
-        details_info_layout.setContentsMargins(12, 10, 12, 10)
-        details_info_layout.setSpacing(2)
-        self.td_info_label = QLabel("在调用记录中选择工具后查看详情")
-        self.td_info_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        self.td_info_label.setWordWrap(True)
-        details_info_layout.addWidget(self.td_info_label)
-
-        self.td_meta_label = QLabel("")
-        self.td_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
-        self.td_meta_label.setVisible(False)
-        self.td_meta_label.setWordWrap(True)
-        details_info_layout.addWidget(self.td_meta_label)
-        details_layout.addWidget(details_info_bar)
-        details_info_bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        self.td_empty_action = QPushButton("查看调用记录", details_page)
-        bind_theme(self.td_empty_action, lambda _=None: self.td_empty_action.setStyleSheet(apple_button_style("secondary")), surface="right_sidebar")
-        self.td_empty_action.clicked.connect(lambda: self.set_observability_section(self.OBS_SECTION_LOG))
-        details_layout.addWidget(self.td_empty_action, 0, Qt.AlignLeft | Qt.AlignTop)
-        details_layout.setAlignment(Qt.AlignTop)
-
-        self.td_detail_splitter = SmartSplitter(Qt.Vertical)
-        self.td_detail_splitter.setChildrenCollapsible(False)
-
-        td_args_section = QWidget()
-        td_args_layout = QVBoxLayout(td_args_section)
-        td_args_layout.setContentsMargins(0, 0, 0, 0)
-        td_args_layout.setSpacing(8)
-        td_args_label = QLabel("参数")
-        bind_theme(td_args_label, lambda _=None: td_args_label.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {DesignTokens.text_primary};"), surface="right_sidebar")
-        td_args_layout.addWidget(td_args_label)
-        self.td_args_edit = ProductCodeViewer("json")
-        td_args_layout.addWidget(self.td_args_edit)
-        self.td_args_meta_label = QLabel("其他参数")
-        self.td_args_meta_label.setStyleSheet(
-            f"font-size: 11px; font-weight: 600; color: {DesignTokens.text_secondary};"
-        )
-        self.td_args_meta_edit = ProductCodeViewer("json")
-        self.td_args_meta_edit.setMaximumHeight(150)
-        self.td_args_meta_label.hide()
-        self.td_args_meta_edit.hide()
-        td_args_layout.addWidget(self.td_args_meta_label)
-        td_args_layout.addWidget(self.td_args_meta_edit)
-
-        td_result_section = QWidget()
-        td_result_layout = QVBoxLayout(td_result_section)
-        td_result_layout.setContentsMargins(0, 0, 0, 0)
-        td_result_layout.setSpacing(8)
-        td_result_header = QWidget()
-        td_result_header_layout = QHBoxLayout(td_result_header)
-        td_result_header_layout.setContentsMargins(0, 0, 0, 0)
-        td_result_header_layout.setSpacing(8)
-        td_result_label = QLabel("结果")
-        bind_theme(td_result_label, lambda _=None: td_result_label.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {DesignTokens.text_primary};"), surface="right_sidebar")
-        td_result_header_layout.addWidget(td_result_label)
-        td_result_header_layout.addStretch()
-        self.td_copy_result_btn = QPushButton("复制结果")
-        self.td_copy_result_btn.setCursor(Qt.PointingHandCursor)
-        self.td_copy_result_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
-        self.td_copy_result_btn.setMinimumWidth(112)
-        self.td_copy_result_btn.setFixedHeight(28)
-        self.td_copy_result_btn.setStyleSheet(apple_button_style("secondary", radius=14))
-        self.td_copy_result_btn.clicked.connect(self.copy_tool_result)
-        td_result_header_layout.addWidget(self.td_copy_result_btn)
-        td_result_layout.addWidget(td_result_header)
-
-        self.td_result_edit = ProductResultViewer()
-        td_result_layout.addWidget(self.td_result_edit)
-
-        self.td_detail_splitter.addWidget(td_args_section)
-        self.td_detail_splitter.addWidget(td_result_section)
-        self.td_detail_splitter.setStretchFactor(0, 0)
-        self.td_detail_splitter.setStretchFactor(1, 1)
-        self.td_detail_splitter.setSizes([110, 330])
-        details_layout.addWidget(self.td_detail_splitter, 1)
-        self.td_detail_splitter.hide()
+        details_page = build_tool_detail_page(self, self.observability_content_stack, SmartSplitter)
         self.observability_content_stack.addWidget(details_page)
         td_layout.addWidget(self.observability_content_stack, 1)
         self.set_observability_section(self.OBS_SECTION_LOG)
@@ -30509,20 +30434,21 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.right_stack.addWidget(self.tool_details_tab)
 
         # Sub-Agent Monitor
-        self.sub_agent_tab = QWidget(self.right_stack)
+        self.sub_agent_tab = QWidget(self.observability_content_stack)
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
-        sub_agent_layout.setContentsMargins(14, 12, 14, 14)
+        sub_agent_layout.setContentsMargins(0, 0, 0, 0)
         sub_agent_layout.setSpacing(8)
         from ui.subagent_panel import SubagentPanel
         self.sub_agent_monitor = SubagentPanel(self._render_subagent_conversation_item, self.sub_agent_tab)
         self.sub_agent_monitor.overview_changed.connect(self._update_subagent_overview)
+        self.sub_agent_monitor.navigation_changed.connect(self._sync_task_navigation)
         self._subagent_header_buttons = {}
         self._subagent_poll = QTimer(self)
         self._subagent_poll.setInterval(1500)
         self._subagent_poll.timeout.connect(self._refresh_subagent_panel_context)
         self._subagent_poll.start()
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
-        self.right_stack.addWidget(self.sub_agent_tab)
+        self.observability_content_stack.addWidget(self.sub_agent_tab)
 
         self._set_deliverable_controls_enabled("")
         
@@ -30609,8 +30535,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         context_rail_layout.setSpacing(4)
         context_actions = [
             (self.RIGHT_TAB_FILES, "工作区", "fa5s.folder-open"),
-            (self.RIGHT_TAB_OBSERVABILITY, "任务详情", "fa5s.list-ul"),
-            (self.RIGHT_TAB_SUB_AGENTS, "子任务", "fa5s.project-diagram"),
         ]
         for tab_index, tooltip, icon_name in context_actions:
             btn = QToolButton()
@@ -31536,8 +31460,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         for button in (self.observability_copy_prompt_btn, self.td_copy_result_btn):
             button.setStyleSheet(apple_button_style("ghost", radius=6))
             button.setIcon(qta.icon("fa5s.copy", color=DesignTokens.text_secondary))
-        for label in (self.td_info_label, self.td_meta_label, self.td_args_meta_label):
-            label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; background: transparent;")
         for edit in (self.observability_prompt_edit, self.observability_log_edit):
             edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=8, subtle=True, padding=12))
         self.step_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=8, padding=2))
@@ -31860,6 +31782,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         )
 
     def toggle_file_navigator(self):
+        browser = getattr(self, "browser_workbench", None)
+        view = task_workspace_view(self.get_current_session())
+        if browser is not None and ((view and view.active) or getattr(self, "_workspace_chat_selected", False)):
+            tab = browser.active_tab() or browser.store.open(self.current_session_id, "new", activate=True)
+            browser.show_tab(tab)
+            self.set_file_navigator_visible(True, reason="header_button")
+            return
         self.set_file_navigator_visible(
             not bool(getattr(self, "file_navigator_visible", False)),
             reason="header_button",
@@ -31990,7 +31919,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             notice.setVisible(pin_pending)
         nav_button = getattr(self, "file_navigator_btn", None)
         if nav_button is not None:
-            shown = bool(getattr(self, "file_navigator_visible", False) or effective_pinned)
+            shown = (self.right_stack.currentWidget() is self.workspace_tab
+                     and not getattr(self, "_workspace_chat_selected", False)
+                     and bool(getattr(self, "file_navigator_visible", False) or effective_pinned))
             nav_button.setIcon(
                 qta.icon("fa5s.bars", color=DesignTokens.primary if shown else DesignTokens.text_secondary)
             )
@@ -33402,8 +33333,13 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def show_context_drawer(self, tab_index=None):
         if tab_index is None:
             tab_index = self.right_drawer_tab
-        if tab_index != self.RIGHT_TAB_FILES and getattr(self, "_workspace_fullscreen", False):
-            self.set_workspace_expanded(False)
+        if tab_index == self.RIGHT_TAB_SUB_AGENTS:
+            return self.open_task_workspace(self.OBS_SECTION_AGENTS)
+        if tab_index == self.RIGHT_TAB_OBSERVABILITY:
+            return self.open_task_workspace()
+        view = task_workspace_view(self.get_current_session())
+        if view is not None and view.active:
+            return self.open_task_workspace()
         if not hasattr(self, "right_stack"):
             return
         tab_index = max(0, min(tab_index, self.right_stack.count() - 1))
@@ -33420,18 +33356,10 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.right_drawer_open = True
             log_sub_agent_runtime("ui_context_drawer_stage_done", stage="set_flags", tab_index=tab_index)
 
-            if tab_index == self.RIGHT_TAB_OBSERVABILITY:
-                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_observability", tab_index=tab_index)
-                self.refresh_observability_view(self.current_session_id)
-                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_observability", tab_index=tab_index)
-            elif tab_index == self.RIGHT_TAB_DELIVERABLES:
+            if tab_index == self.RIGHT_TAB_DELIVERABLES:
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_deliverables", tab_index=tab_index)
                 self.refresh_deliverables(render_current=True, immediate=True, reason="drawer")
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_deliverables", tab_index=tab_index)
-            elif tab_index == self.RIGHT_TAB_SUB_AGENTS and hasattr(self, "sub_agent_monitor") and _qt_object_alive(self.sub_agent_monitor):
-                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="clear_sub_agent_monitor", tab_index=tab_index)
-                self.sub_agent_monitor.reset()
-                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="clear_sub_agent_monitor", tab_index=tab_index)
 
             log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="set_current_index", tab_index=tab_index)
             self.right_stack.setCurrentIndex(tab_index)
@@ -33451,10 +33379,6 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="update_badges", tab_index=tab_index)
             self.update_context_rail_badges()
             log_sub_agent_runtime("ui_context_drawer_stage_done", stage="update_badges", tab_index=tab_index)
-            if tab_index == self.RIGHT_TAB_SUB_AGENTS:
-                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="queue_sub_agent_render", tab_index=tab_index)
-                self._queue_render_sub_agent_monitor_for_state(self.get_current_session(), delay_ms=250)
-                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="queue_sub_agent_render", tab_index=tab_index)
             log_sub_agent_runtime(
                 "ui_context_drawer_show_done",
                 tab_index=tab_index,
@@ -33473,24 +33397,15 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def update_context_drawer_header(self, tab_index):
         if not hasattr(self, "right_title_label") or not hasattr(self, "right_desc_label"):
             return
-        page_titles = {
-            self.RIGHT_TAB_FILES: ("工作区", "查看和修改文件，浏览网页，使用终端"),
-            self.RIGHT_TAB_OBSERVABILITY: ("任务详情", "查看系统提示词、执行过程和错误原因"),
-            self.RIGHT_TAB_SUB_AGENTS: ("子任务", "查看并行任务，继续对话或控制运行"),
-        }
-        title, description = page_titles.get(tab_index, ("任务上下文", "查看文件与执行步骤"))
-        self.right_title_label.setText(title)
-        self.right_desc_label.setText(description)
+        self.right_title_label.setText("工作区")
         self.right_desc_label.hide()
-        files_active = tab_index == self.RIGHT_TAB_FILES
         title_block = getattr(self, "right_title_block", None)
         if title_block is not None:
-            title_block.setVisible(not files_active)
+            title_block.hide()
         file_controls = getattr(self, "file_header_controls", None)
         if file_controls is not None:
-            file_controls.setVisible(files_active)
-        if files_active:
-            self._sync_file_header()
+            file_controls.show()
+        self._sync_file_header()
 
     def hide_context_drawer(self, reason="manual", source_obj=None, source_window=None, in_drawer=None, in_rail=None, is_popup=None):
         if not hasattr(self, "right_sidebar"):
@@ -33546,7 +33461,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
         }
         for tab_index, btn in self.context_rail_buttons.items():
-            active = self.right_drawer_open and self.right_drawer_tab == tab_index
+            active = self.right_drawer_open
             btn.setChecked(active)
             btn.setStyleSheet(context_action_style(active))
             color = DesignTokens.text_primary if active else DesignTokens.text_secondary
@@ -33570,8 +33485,9 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
                 self.refresh_observability_view(self.current_session_id)
             self.observability_content_stack.setCurrentIndex(index)
             self._on_context_surface_changed()
-            for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
-                btn.setChecked(btn_index == index)
+            self._sync_task_navigation()
+            if index == self.OBS_SECTION_AGENTS and hasattr(self, "sub_agent_monitor"):
+                self._refresh_subagent_panel_context()
             log_sub_agent_runtime(
                 "ui_observability_section_done",
                 index=index,
@@ -39381,6 +39297,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def sync_current_session_state(self):
         state = self.get_current_session()
         if not state: return
+        self.capture_task_workspace_view()
         if hasattr(self, "input_field"):
             state.composer_draft = self.input_field.toPlainText()
         if getattr(state, "chat_scroll", None):
@@ -39391,6 +39308,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def set_current_session(self, session_id):
         state = self.sessions.get(session_id)
         if not state: return
+        self.capture_task_workspace_view()
         if self.current_session_id != session_id:
             self._close_conversation_search()
         self.current_session_id = session_id
@@ -39417,7 +39335,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         if (
             getattr(state, "history_loaded", True)
             and getattr(self, "right_drawer_open", False)
-            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+            and self._subagent_workspace_visible()
         ):
             self._queue_render_sub_agent_monitor_for_state(state)
         self._sync_workspace_ui_for_session(session_id, refresh_sidebar=False)
@@ -40603,7 +40521,8 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             ):
                 self._toggle_history_office_process(session_id, card, True)
         if getattr(state, "drawer_open", False) and getattr(state, "drawer_tab", None) is not None:
-            QTimer.singleShot(0, lambda tab=state.drawer_tab: self.show_context_drawer(tab))
+            QTimer.singleShot(0, lambda sid=session_id, tab=state.drawer_tab:
+                              self.show_context_drawer(tab) if self.current_session_id == sid else None)
         elif getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="session_switch")
         self.update_history_selection()
@@ -40615,7 +40534,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
             current_state
             and getattr(current_state, "history_loaded", True)
             and getattr(self, "right_drawer_open", False)
-            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+            and self._subagent_workspace_visible()
         ):
             self._queue_render_sub_agent_monitor_for_state(current_state)
 
@@ -44309,16 +44228,18 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
     def _show_run_failure_details(self, session_id, event):
         event = redact_diagnostic(event)
         self.activate_session(session_id)
-        self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
-        self.set_observability_section(self.OBS_SECTION_DETAILS)
+        if self.current_session_id != session_id or not self.open_task_workspace(self.OBS_SECTION_DETAILS):
+            return
         self.current_selected_tool_id = None
         self.td_detail_splitter.show()
         self.td_empty_action.hide()
         self.td_info_label.setText(str(event.get("summary") or "运行失败"))
+        self.td_status_label.setText("失败")
         self.td_meta_label.setText(
             f"会话 {session_id} · 轮次 {event.get('turn_id') or '-'} · 运行 {event.get('run_id') or '-'}"
         )
-        self.td_meta_label.show()
+        self.td_info_toggle.show()
+        self.td_meta_label.setVisible(self.td_info_toggle.isChecked())
         self.td_args_meta_label.hide()
         self.td_args_meta_edit.hide()
         self.td_args_edit.set_code(
@@ -44337,6 +44258,7 @@ class MainWindow(UpdateLifecycleMixin, ConversationActionsMixin, ConversationAge
         self.td_result_edit.set_result(str(event.get("error") or "未知错误"))
         self._tool_detail_session_id = session_id
         self._detail_full_result = str(event.get("error") or "未知错误")
+        self._detail_full_arguments = self.td_args_edit.toPlainText()
 
     def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
         """Restore every assistant/tool round as stages in one conversational turn."""
@@ -48296,7 +48218,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         QApplication.clipboard().setText(text)
         self.td_copy_result_btn.setText("已复制")
-        QTimer.singleShot(1200, lambda: self.td_copy_result_btn.setText("复制结果"))
+        QTimer.singleShot(1200, lambda: self.td_copy_result_btn.setText("复制"))
 
     def delete_path(self, path):
         confirm = QMessageBox.question(self, "确认删除", f"确定要删除该项目吗？\n{path}")
@@ -54440,6 +54362,8 @@ a {{ overflow-wrap: anywhere; }}
             QTimer.singleShot(0, check_unexpected_windows)
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
+        if switch_tab and not self.open_task_workspace(self.OBS_SECTION_DETAILS):
+            return
         retain_view = (not switch_tab and getattr(self, "current_selected_tool_id", None) == tool_id
                        and getattr(self, "_tool_detail_session_id", None) == self.current_session_id)
         viewers = (self.td_args_edit, self.td_args_meta_edit, self.td_result_edit)
@@ -54471,19 +54395,30 @@ a {{ overflow-wrap: anywhere; }}
         meta = redact_diagnostic(meta)
 
         # 2. Open Drawer & Switch Tab for explicit tool-detail requests.
-        if switch_tab:
-            self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
-            self.set_observability_section(self.OBS_SECTION_DETAILS)
-        else:
+        if not switch_tab:
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         
         # 3. Update Content
         self.td_detail_splitter.show()
         self.td_empty_action.hide()
-        self.td_info_label.setText(f"工具 ID: {tool_id}")
+        record = next((record for record in state.step_records if record.get("tool_id") == tool_id), {}) if state else {}
+        tool_name = str(getattr(selected_card, "tool_name", "") or record.get("tool_name") or "工具调用")
+        self.td_info_label.setText(record.get("display_title") or tool_name)
+        result_obj = getattr(selected_card, "result_obj", None)
+        if result_obj is None:
+            result_obj = result
+            if isinstance(result, str):
+                try:
+                    result_obj = json.loads(result)
+                except (TypeError, ValueError):
+                    pass
+        status = record.get("status") or ("running" if selected_card and not selected_card.is_finished else tool_result_status(result_obj))
+        status_text = "失败" if status in {"failed", "error", "killed"} else "部分完成" if status == "partial" else status_label_text(status)
+        duration = valid_elapsed_seconds((meta or {}).get("duration") if isinstance(meta, dict) else record.get("duration"))
+        self.td_status_label.setText(status_text + (f" · {duration:.1f} 秒" if duration is not None else ""))
         
         # Update Meta Label
-        meta_text = ""
+        meta_text = f"{tool_name} · {tool_id}\n"
         if isinstance(meta, dict):
             start_time = meta.get("start_time")
             duration = meta.get("duration")
@@ -54501,10 +54436,12 @@ a {{ overflow-wrap: anywhere; }}
             except Exception:
                 pass
         self.td_meta_label.setText(meta_text)
-        self.td_meta_label.setVisible(bool(meta_text))
+        self.td_info_toggle.show()
+        self.td_meta_label.setVisible(bool(meta_text) and self.td_info_toggle.isChecked())
         
         # Format arguments by intent so executable code is readable first.
         args_obj, args_parse_error = parse_tool_arguments(args)
+        self._detail_full_arguments = json.dumps(args_obj, indent=2, ensure_ascii=False) if args_obj is not None else str(args)
         tool_name = str(getattr(selected_card, "tool_name", "") or "").lower()
         self.td_args_meta_label.hide()
         self.td_args_meta_edit.hide()
@@ -54547,7 +54484,7 @@ a {{ overflow-wrap: anywhere; }}
             res_text = f"结果格式化失败：{exc}\n\n原始结果：\n{str(result)}"
 
         if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
-            res_text = "(Running...)"
+            res_text = "正在执行，等待返回结果…"
              
         self._detail_full_result = res_text
         self.td_result_edit.set_result(res_text)
@@ -55993,7 +55930,7 @@ a {{ overflow-wrap: anywhere; }}
             return
         if not (
             getattr(self, "right_drawer_open", False)
-            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+            and self._subagent_workspace_visible()
         ):
             log_sub_agent_runtime(
                 "ui_sub_agent_monitor_flush_skipped",
@@ -56360,7 +56297,7 @@ a {{ overflow-wrap: anywhere; }}
             if (
                 state.session_id == self.current_session_id
                 and getattr(self, "right_drawer_open", False)
-                and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+                and self._subagent_workspace_visible()
             ):
                 self._queue_render_sub_agent_monitor_for_state(state)
             _log_stage(

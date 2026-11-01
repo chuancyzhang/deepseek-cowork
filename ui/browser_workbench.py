@@ -19,6 +19,7 @@ from core.workbench_terminal import terminal_profiles, TerminalSession
 from ui.browser_panes import BrowserPane, TerminalPane, input_url, button, style_button
 from ui.primitives import product_field_style, product_button_style, ProductMessageBox
 from ui.writing_page import WritingPage
+from ui.task_workspace import TASK_TAB_KEY, task_workspace_view
 from core.workspace_pages import read_page
 
 log = logging.getLogger(__name__)
@@ -213,27 +214,41 @@ class BrowserWorkbench(QObject):
         self._import_legacy_state(state)
         tabs = self.store.list(state.session_id)
         entries = [dict(tab.snapshot(), key=tab.path if tab.kind == "file" else "@" + tab.id) for tab in tabs]
+        task_view = task_workspace_view(state)
+        task_entry = dict(key=TASK_TAB_KEY, kind="task", title="任务")
+        available_entries = []
+        if task_view.opened:
+            entries.insert(0, task_entry)
+        else:
+            available_entries.append(task_entry)
         active = self.active_tab(state.session_id)
         active_key = (active.path if active.kind == "file" else "@" + active.id) if active else ""
         self.chat_button.setVisible(bool(getattr(self.window, "_workspace_fullscreen", False)))
         chat = bool(getattr(self.window, "_workspace_fullscreen", False) and
                     getattr(self.window, "_workspace_chat_selected", False))
+        self.window.file_navigator_btn.setVisible(not task_view.active and not chat)
         self.chat_button.setChecked(chat)
         self.chat_button.setStyleSheet(product_button_style("secondary" if chat else "ghost"))
         if chat:
             active_key = ""
-        signature = json.dumps([entries, active_key], ensure_ascii=False, sort_keys=True)
+        elif task_view.active:
+            active_key = TASK_TAB_KEY
+        signature = json.dumps([entries, active_key, available_entries], ensure_ascii=False, sort_keys=True)
         if signature != self._signature:
-            self.window.file_tab_strip.set_entries(entries, active_key)
+            self.window.file_tab_strip.set_entries(entries, active_key, available_entries=available_entries)
             self._signature = signature
-        self.window.file_tab_strip.setVisible(bool(tabs))
-        self.window.file_header_identity_label.setVisible(not bool(tabs))
+        self.window.file_tab_strip.setVisible(True)
+        self.window.file_header_identity_label.hide()
         self._compat_state(state.session_id)
 
     def remember_file(self, path, state):
         if not path or state is None:
             return False
         if state.session_id == self.session_id():
+            self.window.capture_task_workspace_view()
+            task_workspace_view(state).active = False
+            self.window.right_drawer_tab = self.window.RIGHT_TAB_FILES
+            self.window.right_stack.setCurrentWidget(self.window.workspace_tab)
             self.pause_follow()
         previous = self.active_tab(state.session_id)
         if previous and previous.kind == "new":
@@ -263,12 +278,14 @@ class BrowserWorkbench(QObject):
 
     def restore_session(self, state):
         self._import_legacy_state(state)
+        task_active = task_workspace_view(state).active
         self.restoring = True
         try:
             tab = self.active_tab(state.session_id)
             if tab is None:
                 tab = self.store.open(state.session_id, "new", activate=True)
             self.show_tab(tab, render_file=False)
+            self.window.restore_task_workspace_view(state, active=task_active)
             self.sync(state)
         finally:
             self.restoring = False
@@ -281,6 +298,12 @@ class BrowserWorkbench(QObject):
                 pane.park(size)
 
     def show_tab(self, tab, render_file=True):
+        if not self.restoring:
+            self.window.capture_task_workspace_view()
+        state = self.window.get_session(tab.session_id)
+        task_workspace_view(state).active = False
+        self.window.right_drawer_tab = self.window.RIGHT_TAB_FILES
+        self.window.right_stack.setCurrentWidget(self.window.workspace_tab)
         self.window._workspace_chat_selected = False
         refresh = getattr(self.window, "preview_refresh_controller", None)
         if refresh:
@@ -312,6 +335,8 @@ class BrowserWorkbench(QObject):
         self.window.sync_context_drawer_layout()
 
     def activate(self, key):
+        if key == TASK_TAB_KEY:
+            return self.window.open_task_workspace()
         try:
             tab = self.resolve_tab(self.session_id(), key)
             if self.active_tab() is not tab:
@@ -586,6 +611,27 @@ class BrowserWorkbench(QObject):
 
     def close_tab(self, key, *, session_id=None, agent=False, request=None):
         session_id = session_id or self.session_id()
+        keep_chat = session_id == self.session_id() and bool(getattr(self.window, "_workspace_chat_selected", False))
+        if key == TASK_TAB_KEY and not agent:
+            state = self.window.get_session(session_id)
+            view = task_workspace_view(state)
+            if view is None:
+                return False
+            if session_id == self.session_id():
+                self.window.capture_task_workspace_view()
+            view.opened = False
+            was_active = view.active
+            view.active = False
+            if session_id == self.session_id() and was_active:
+                next_tab = self.active_tab(session_id)
+                if next_tab is None:
+                    next_tab = self.store.open(session_id, "new", activate=True)
+                self.show_tab(next_tab)
+                self.window._workspace_chat_selected = keep_chat
+                self.window.sync_context_drawer_layout()
+            self.sync()
+            log.info("task_workspace.closed session=%s", session_id)
+            return True
         tab = self.resolve_tab(session_id, key)
         active = self.active_tab(session_id) is tab
         if tab.kind == "file" and active and session_id == self.session_id():
@@ -605,11 +651,13 @@ class BrowserWorkbench(QObject):
             del self.panes[tab.id]
         self.store.close(session_id, tab.id)
         self._compat_state(session_id)
-        if active and session_id == self.session_id():
+        if active and session_id == self.session_id() and not task_workspace_view(self.window.get_current_session()).active:
             next_tab = self.active_tab(session_id)
             if next_tab is None:
                 next_tab = self.store.open(session_id, "new", activate=True)
             self.show_tab(next_tab)
+            self.window._workspace_chat_selected = keep_chat
+            self.window.sync_context_drawer_layout()
         self.sync()
         if isinstance(pane, WritingPage):
             self.page_changed(session_id, immediate=True)

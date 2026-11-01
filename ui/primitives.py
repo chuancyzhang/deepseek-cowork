@@ -237,17 +237,18 @@ class ProductCodeViewer(QPlainTextEdit):
     def __init__(self, language="text", parent=None):
         super().__init__(parent)
         self._line_number_area = QWidget(self)
+        self._header_visible = True
         self._line_number_area.paintEvent = self._paint_line_numbers
         self._header = QFrame(self)
         self._header.setObjectName("ProductCodeViewerHeader")
         header_layout = QHBoxLayout(self._header)
         header_layout.setContentsMargins(10, 0, 6, 0)
         header_layout.setSpacing(6)
-        self.language_label = QLabel("TEXT")
+        self.language_label = QLabel("TEXT", self._header)
         self.language_label.setObjectName("ProductCodeLanguage")
         header_layout.addWidget(self.language_label)
         header_layout.addStretch()
-        self.copy_button = QToolButton()
+        self.copy_button = QToolButton(self._header)
         self.copy_button.setText("复制")
         self.copy_button.setToolTip("复制代码")
         self.copy_button.setCursor(Qt.PointingHandCursor)
@@ -315,7 +316,14 @@ class ProductCodeViewer(QPlainTextEdit):
         return 12 + self.fontMetrics().horizontalAdvance("9") * digits
 
     def _update_line_number_width(self, *_):
-        self.setViewportMargins(self._line_number_width(), 30, 0, 0)
+        self.setViewportMargins(self._line_number_width(), 30 if self._header_visible else 0, 0, 0)
+
+    def set_header_visible(self, visible):
+        """Allow a host section to own the language/copy toolbar without duplicating it."""
+        self._header_visible = bool(visible)
+        self._header.setVisible(self._header_visible)
+        self._update_line_number_width()
+        self._layout_code_chrome()
 
     def _update_line_number_area(self, rect, dy):
         if dy:
@@ -327,10 +335,14 @@ class ProductCodeViewer(QPlainTextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._layout_code_chrome()
+
+    def _layout_code_chrome(self):
         rect = self.contentsRect()
-        self._header.setGeometry(QRect(rect.left(), rect.top(), rect.width(), 30))
+        header_height = 30 if self._header_visible else 0
+        self._header.setGeometry(QRect(rect.left(), rect.top(), rect.width(), header_height))
         self._header.raise_()
-        self._line_number_area.setGeometry(QRect(rect.left(), rect.top() + 30, self._line_number_width(), max(0, rect.height() - 30)))
+        self._line_number_area.setGeometry(QRect(rect.left(), rect.top() + header_height, self._line_number_width(), max(0, rect.height() - header_height)))
 
     def _copy_all(self):
         QApplication.clipboard().setText(self.toPlainText())

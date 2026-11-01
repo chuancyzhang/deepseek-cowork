@@ -185,7 +185,7 @@ class TaskDetailsTests(unittest.TestCase):
                 window._background_services_scheduled = True
                 try:
                     self.assertEqual([button.text() for button in window.observability_segment_buttons],
-                                     ["执行上下文", "调用记录", "技术详情"])
+                                     ["调用记录", "子任务", "执行上下文"])
                     self.assertFalse(hasattr(window, "chat_log_export_btn"))
                     self.assertFalse(hasattr(window, "td_raw_details"))
                     self.assertFalse(hasattr(window, "td_exported_files"))

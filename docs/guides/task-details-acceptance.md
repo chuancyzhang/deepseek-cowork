@@ -3,9 +3,11 @@
 ## 入口与面板
 
 1. 在任意对话旁打开“…”菜单，确认“下载聊天记录…”和“下载最近一次请求…”位于归档之后、删除之前。
-2. 打开任务详情：页签顺序仍为“执行上下文 / 调用记录 / 技术详情”，默认查看调用记录。执行上下文仍显示系统提示词，“复制全量”保持原有行为。
-3. 技术详情只保留调用信息、参数和结果；没有新增返回按钮、原始 JSON 折叠区或已导出文件列表。
+2. 从工作区打开“任务”标签：分类顺序为“调用记录 / 子任务 / 执行上下文”，首次进入查看调用记录，再次进入返回上次位置。执行上下文仍显示系统提示词，“复制全量”保持原有行为。
+3. 点击工具直接进入该次调用，顶部显示返回箭头、名称、状态和已记录耗时；参数可折叠，结果占主要空间，运行信息按需展开。详情中不再显示分类栏，返回后保留调用列表位置。
 4. 调用记录显示简短摘要；选择调用后可复制完整参数和结果。确认 `ok: false` 显示失败，`partial_apply` 显示部分完成；非 JSON 返回按文本展示。
+5. 展开工作区，“对话”始终固定且不可关闭，其他标签统一带“×”。关闭任务页后后台继续运行；从全部标签或详情入口重开，调用详情和子任务草稿保留。文件、网页、终端沿用原关闭行为。
+6. 打开子任务，输入草稿后切换文件、关闭任务页、切换主会话再返回，确认草稿与目标子任务准确对应；正常补充、停止、恢复仍使用原有入口。
 
 ## 导出与会话隔离
 
@@ -28,8 +30,9 @@
 .venv/Scripts/python.exe -m unittest discover -s test -p test_request_snapshot.py -q
 .venv/Scripts/python.exe -m unittest discover -s test -p test_task_details.py -q
 .venv/Scripts/python.exe scripts/smoke_task_details_ui.py
-$env:QT_SCALE_FACTOR='1.5'
-.venv/Scripts/python.exe scripts/smoke_task_details_ui.py --dark --output docs/images/task-details-dark-150
+.venv/Scripts/python.exe scripts/smoke_task_details_ui.py --dark --compact --scale 1.5 --output .tmp/unified-task-workspace/dark
 ```
 
 截图脚本使用实际控件、合成数据及临时配置，不调用真实模型，不修改用户已保存主题。真实厂商联调和完整产品体验由人工验收。
+
+临时目录与实际验证范围见[统一任务工作区验证记录](../task-workspace-validation.md)。

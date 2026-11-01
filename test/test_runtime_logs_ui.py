@@ -86,16 +86,17 @@ class RuntimeLogUITests(unittest.TestCase):
 
     def test_export_range_and_source_use_same_reader_as_preview(self):
         now = logs.local_now()
-        for days, name in ((0, "TODAY"), (6, "WEEK"), (29, "MONTH"), (30, "EXPIRED")):
+        for days, name in ((0, "TODAY"), (6, "WEEK"), (7, "EXPIRED"), (29, "MONTH")):
             logs.append_log("daemon", name, self.root, now=now - timedelta(days=days))
         logs.append_log("ui_error", "OTHER_SOURCE", self.root)
-        for days, count in ((1, 1), (7, 2), (30, 3)):
+        for days, count in ((1, 1), (7, 2)):
             worker = self.export(days=days, source="daemon")
             self.assertFalse(worker.error)
             self.assertEqual(worker.record_count, count)
             text = Path(worker.target).read_text(encoding="utf-8")
             self.assertNotIn("OTHER_SOURCE", text)
             self.assertNotIn("EXPIRED", text)
+            self.assertNotIn("MONTH", text)
 
     def test_source_disappearing_yields_explicit_partial_export(self):
         logs.append_log("daemon", "preserved", self.root)

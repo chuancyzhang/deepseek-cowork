@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from core.task_details import redact_diagnostic
 
 
-RETENTION_DAYS = 30
+RETENTION_DAYS = 7
 PAGE_SIZE = 1000
 SOURCE_LABELS = {
     "startup": "应用启动", "ui_error": "界面异常", "ui_navigation": "界面与操作",
@@ -275,8 +275,8 @@ def iter_records(file, cancelled=lambda: False):
 
 
 def date_range(days=1, now=None):
-    if days not in (1, 7, 30):
-        raise ValueError("日志时间范围必须为当天、最近 7 天或最近 30 天")
+    if days not in (1, RETENTION_DAYS):
+        raise ValueError(f"日志时间范围必须为当天或最近 {RETENTION_DAYS} 天")
     end = (now or local_now()).date()
     return end - timedelta(days=days - 1), end
 
@@ -341,7 +341,7 @@ def latest_source_path(source, data_dir=None):
 
 def latest_gateway_error(data_dir=None):
     markers = (" failed", " error=", " missing", " unavailable", "不可用", "未配置")
-    records = query_logs(data_dir, days=30, source="im_gateway", limit=60).records
+    records = query_logs(data_dir, days=RETENTION_DAYS, source="im_gateway", limit=60).records
     for record in sorted(records, key=lambda item: item.timestamp, reverse=True):
         for line in reversed(record.display_text().splitlines()):
             if any(marker in line.lower() for marker in markers):

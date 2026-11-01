@@ -63,8 +63,12 @@ class RuntimeLogsTests(unittest.TestCase):
 
     def test_day_rollover_and_retention_boundary_only_touch_owned_logs(self):
         paths = {}
-        for age in (0, 1, 29, 30, 40):
-            paths[age] = Path(logs.append_log("daemon", f"age={age}", self.root, now=NOW - timedelta(days=age)))
+        for source in logs.SOURCE_LABELS:
+            for age in (0, 1, 6, 7, 40):
+                stamp = NOW - timedelta(days=age)
+                path = Path(logs.append_log(source, f"age={age}", self.root, now=stamp))
+                os.utime(path, (stamp.timestamp(), stamp.timestamp()))
+                paths[source, age] = path
         protected = [
             self.legacy("logs/2026-09-01/user-output.log", "private"),
             self.legacy("chat_history/runtime_journal_v2/s/events/run.jsonl", "recovery", 90),
@@ -75,16 +79,16 @@ class RuntimeLogsTests(unittest.TestCase):
         ]
         before = {path: path.read_bytes() for path in protected}
         result = logs.cleanup_logs(self.root, now=NOW)
-        self.assertEqual(result.removed, 2)
+        self.assertEqual(result.removed, 2 * len(logs.SOURCE_LABELS))
         self.assertFalse(result.issues)
-        for age, path in paths.items():
-            self.assertEqual(path.exists(), age < 30)
+        for (source, age), path in paths.items():
+            self.assertEqual(path.exists(), age < 7, (source, age))
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content)
 
     def test_legacy_trim_preserves_multiline_and_original_invalid_bytes(self):
-        path = self.legacy("ui_error.log", b"[2026-09-16 10:00:00] expired\nold traceback\n"
-                           b"[2026-09-17 00:00:00] boundary\ntrace \xff\n"
+        path = self.legacy("ui_error.log", b"[2026-10-09 23:59:59] expired\nold traceback\n"
+                           b"[2026-10-10 00:00:00] boundary\ntrace \xff\n"
                            b"[2026-10-16 11:00:00] current\ncurrent traceback\n")
         result = logs.cleanup_logs(self.root, now=NOW)
         self.assertEqual(result.trimmed, 1)
@@ -93,10 +97,32 @@ class RuntimeLogsTests(unittest.TestCase):
         self.assertNotIn(b"old traceback", content)
         self.assertIn(b"trace \xff", content)
         self.assertIn(b"current traceback", content)
-        parsed = logs.query_logs(self.root, days=30, now=NOW)
+        parsed = logs.query_logs(self.root, days=7, now=NOW)
         self.assertEqual(parsed.total, 2)
         self.assertIn("\ufffd", parsed.records[0].text)
         self.assertFalse(list(self.root.glob(".log-retention-*.tmp")))
+
+    def test_all_legacy_locations_share_the_seven_day_boundary(self):
+        content = "[2026-10-09 23:59:59] expired\n[2026-10-10 00:00:00] retained\n"
+        paths = []
+        for source in logs.SOURCE_LABELS:
+            paths.append(self.legacy(f"{source}.log", content))
+            paths.append(self.legacy(f"logs/{source}.log", content))
+        paths.append(self.legacy("updates/app_update.log", content))
+        for source in ("update", "update-launch"):
+            paths.append(self.legacy(f"updates/transactions/t/{source}.log", content))
+        browser = self.root / "local/DeepSeekCowork/browser-automation/runtime"
+        browser.mkdir(parents=True)
+        browser_path = browser / "service-start-0123456789abcdef.log"
+        browser_path.write_text(content)
+        paths.append(browser_path)
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "local")}), \
+             patch("core.env_utils.get_app_data_dir", return_value=str(self.root)):
+            result = logs.cleanup_logs(self.root, now=NOW)
+        self.assertFalse(result.issues)
+        self.assertEqual(result.trimmed, len(paths))
+        for path in paths:
+            self.assertEqual(path.read_text(), "[2026-10-10 00:00:00] retained\n", path)
 
     def test_legacy_time_formats_and_missing_timestamp_are_visible(self):
         self.legacy("theme_debug.log", "2026-10-16 08:00:00 theme_start\n")
@@ -132,7 +158,7 @@ class RuntimeLogsTests(unittest.TestCase):
 
     def test_live_legacy_writer_is_deferred_without_blocking_daily_cleanup(self):
         legacy = self.legacy("daemon.log", "[2026-08-01 00:00:00] keep while running\n")
-        expired = Path(logs.append_log("daemon", "expired", self.root, now=NOW - timedelta(days=31)))
+        expired = Path(logs.append_log("daemon", "expired", self.root, now=NOW - timedelta(days=7)))
         lock = ProcessSingletonLock(build_process_singleton_lock_path(str(self.root), "daemon-23333"))
         self.assertTrue(lock.acquire())
         try:
@@ -186,7 +212,8 @@ class RuntimeLogsTests(unittest.TestCase):
         self.legacy("ui_error.log", "[2026-10-15 10:00:00] yesterday\n[2026-10-01 10:00:00] older\n")
         self.assertEqual(logs.query_logs(self.root, now=NOW).total, 2100)
         self.assertEqual(logs.query_logs(self.root, days=7, now=NOW).total, 2101)
-        self.assertEqual(logs.query_logs(self.root, days=30, now=NOW).total, 2102)
+        with self.assertRaises(ValueError):
+            logs.query_logs(self.root, days=30, now=NOW)
         page = logs.query_logs(self.root, source="daemon", now=NOW)
         self.assertEqual(len(page.records), 1000)
         self.assertNotIn("needle", "".join(record.text for record in page.records))

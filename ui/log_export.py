@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from core.app_version import APP_VERSION
 from core.runtime_logs import (
-    PAGE_SIZE, SOURCE_LABELS, collect_files, date_range, iter_records, local_now,
+    PAGE_SIZE, RETENTION_DAYS, SOURCE_LABELS, collect_files, date_range, iter_records, local_now,
     maintenance_issues, query_logs, selected_files, validate_export_target,
 )
 from core.task_details import redact_diagnostic
@@ -199,7 +199,7 @@ class LogExportPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         self.description = QLabel(
-            "自动保留最近 30 天的运行日志。导出包含所选时间与来源的完整记录，关键词只用于查看。"
+            f"所有运行日志自动保留最近 {RETENTION_DAYS} 天。导出包含所选时间与来源的完整记录，关键词只用于查看。"
             "日志可能包含本地路径及任务内容。", self
         )
         self.description.setWordWrap(True)
@@ -209,7 +209,7 @@ class LogExportPanel(QWidget):
         self.range_label = range_label
         self.range_combo = PageScrollSafeComboBox(self)
         self.range_combo.setAccessibleName("日志时间范围")
-        for label, days in (("当天", 1), ("最近 7 天", 7), ("最近 30 天", 30)):
+        for label, days in (("当天", 1), (f"最近 {RETENTION_DAYS} 天", RETENTION_DAYS)):
             self.range_combo.addItem(label, days)
         range_label.setBuddy(self.range_combo)
         source_label = QLabel("来源", self)

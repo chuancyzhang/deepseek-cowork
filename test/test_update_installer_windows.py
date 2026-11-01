@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -200,6 +201,73 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual((self.install / "user_data" / "private.txt").read_text(), "keep")
         transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
         self.assertEqual(transaction["phase"], "installed_not_opened")
+
+    def compile_relaunch_fixture(self, exit_code=0, receipt_version=None):
+        csc = Path(os.environ["SystemRoot"], "Microsoft.NET/Framework64/v4.0.30319/csc.exe")
+        if not csc.exists():
+            self.skipTest(".NET Framework C# compiler unavailable")
+        code = self.root / "relaunch.cs"
+        receipt = ""
+        if receipt_version is not None:
+            receipt = ('File.WriteAllText(Environment.GetEnvironmentVariable("COWORK_UPDATE_RECEIPT"), '
+                       '"{\\\"id\\\":\\\"" + Environment.GetEnvironmentVariable("COWORK_UPDATE_ID") + '
+                       f'"\\\",\\\"version\\\":\\\"{receipt_version}\\\"}}"); ')
+        code.write_text('using System; using System.IO; class Program { static int Main() { '
+                        'File.WriteAllText(Environment.GetEnvironmentVariable("COWORK_UPDATE_RECEIPT") + ".exited", "ready"); '
+                        + receipt +
+                        f'return {exit_code};' + ' } }')
+        exe = self.source / "deepseek-cowork.exe"
+        exe.unlink()
+        result = subprocess.run([str(csc), "/nologo", "/target:winexe", "/out:" + str(exe), str(code)],
+                                capture_output=True, **subprocess_kwargs_no_window())
+        self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
+
+    def test_clean_duplicate_exit_waits_for_actual_ui_receipt(self):
+        self.compile_relaunch_fixture()
+        script = self.prepare()
+        receipt = script.parent / "opened.json"
+        stop = threading.Event()
+        def actual_owner():
+            deadline = time.monotonic() + 20
+            while not Path(str(receipt) + ".exited").exists():
+                if stop.wait(.02) or time.monotonic() >= deadline:
+                    return
+            if not stop.wait(.7):
+                temporary = receipt.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"id": script.parent.name, "version": "9.0.0", "pid": os.getpid()}))
+                temporary.replace(receipt)
+        owner = threading.Thread(target=actual_owner)
+        owner.start()
+        try:
+            result = self.execute(script)
+            transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
+            self.assertEqual(transaction["phase"], "complete", result.stderr.decode(errors="replace"))
+            events = self.diagnostic_events(script.parent.name)
+            self.assertTrue(any(event["phase"] == "relaunch_process_exited" and event["exit_code"] == 0 for event in events))
+        finally:
+            stop.set(); owner.join(timeout=2)
+
+    def test_nonzero_relaunch_exit_preserves_install_and_records_exit_code(self):
+        self.compile_relaunch_fixture(exit_code=23)
+        script = self.prepare()
+        # A retry must not accept a stale successful receipt from an earlier launch.
+        (script.parent / "opened.json").write_text(json.dumps({"id": script.parent.name, "version": "9.0.0"}))
+        self.execute(script)
+        result = json.loads((script.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["phase"], "installed_not_opened")
+        self.assertEqual(result["exit_code"], 23)
+        self.assertGreater(result["app_pid"], 0)
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "new")
+
+    def test_actual_version_mismatch_cannot_complete_update(self):
+        self.compile_relaunch_fixture(receipt_version="8.0.0")
+        script = self.prepare()
+        self.execute(script)
+        result = json.loads((script.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["phase"], "installed_not_opened")
+        self.assertIn("8.0.0", result["error"])
+        self.assertIn("9.0.0", result["error"])
+        self.assertIn("不一致", result["error"])
 
     def test_hash_error_keeps_original_before_write(self):
         script = self.prepare()

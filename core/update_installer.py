@@ -291,13 +291,64 @@ function Record-Transaction($phase) {
 }
 function Open-App {
  $exe=Join-Path $install $cfg.exe_name
+ $script:launchedAppPid=$null; $script:launchedAppExitCode=$null
+ Write-Diagnostic 'relaunch_requested' @{executable=$exe; expected_version=$cfg.version}
+ $receiptPath=Join-Path $root 'opened.json'
+ if(Test-Path -LiteralPath $receiptPath) { Remove-Item -LiteralPath $receiptPath -Force }
  $env:COWORK_UPDATE_RECEIPT=Join-Path $root 'opened.json'
  $env:COWORK_UPDATE_ID=$cfg.id
- $p=Start-Process -FilePath $exe -WorkingDirectory $install -PassThru
- Remove-Item Env:COWORK_UPDATE_RECEIPT -ErrorAction SilentlyContinue
- Remove-Item Env:COWORK_UPDATE_ID -ErrorAction SilentlyContinue
+ try { $p=Start-Process -FilePath $exe -WorkingDirectory $install -PassThru }
+ finally {
+  Remove-Item Env:COWORK_UPDATE_RECEIPT -ErrorAction SilentlyContinue
+  Remove-Item Env:COWORK_UPDATE_ID -ErrorAction SilentlyContinue
+ }
  if(-not $p) { throw '无法启动应用。' }
+ $script:launchedAppPid=$p.Id
+ Write-Diagnostic 'relaunch_started' @{app_pid=$p.Id}
  return $p
+}
+function Wait-AppStartup($opened) {
+ $deadline=[DateTime]::UtcNow.AddSeconds(30)
+ $exitObserved=$false
+ while(-not (Test-Path -LiteralPath (Join-Path $root 'opened.json'))) {
+  if($opened.HasExited -and -not $exitObserved) {
+   $opened.WaitForExit(); $exitObserved=$true
+   $script:launchedAppExitCode=$opened.ExitCode
+   Write-Diagnostic 'relaunch_process_exited' @{app_pid=$opened.Id; exit_code=$script:launchedAppExitCode}
+   if($script:launchedAppExitCode -ne 0) { throw ('应用启动进程已退出，退出码：'+$script:launchedAppExitCode+'。请查看运行日志中的启动和异常记录。') }
+   # A clean duplicate launch hands its request to the actual UI owner, which
+   # may still be loading. Only a matching startup receipt proves success.
+  }
+  if([DateTime]::UtcNow -ge $deadline) { throw '等待应用启动确认超时，请查看运行日志或重新打开应用。' }
+  Start-Sleep -Milliseconds 250
+  if(-not $Headless) { [Windows.Forms.Application]::DoEvents() }
+ }
+ $receipt=Get-Content -LiteralPath (Join-Path $root 'opened.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+ if($receipt.id -ne $cfg.id) { throw '应用启动确认不属于本次更新。' }
+ if($receipt.version -ne $cfg.version.TrimStart('v','V')) { throw ('应用实际启动版本为 '+$receipt.version+'，与安装包标注的 '+$cfg.version+' 不一致，请获取正确构建的安装包。') }
+ Write-Diagnostic 'startup_confirmed' @{app_pid=$receipt.pid; app_version=$receipt.version; launched_pid=$opened.Id}
+}
+function Reopen-InstalledApp {
+ $script:busy=$true; $script:diagnosticStage='relaunch'
+ try {
+  if(-not $Headless) { $title.Text='更新已安装'; $subtitle.Text='正在重新打开应用，请稍候。' }
+  Status '更新已安装，正在重新打开应用…' 95
+  $opened=Open-App
+  Wait-AppStartup $opened
+  Record-Transaction 'complete'; $script:outcome='complete'; Status '更新完成' 100
+  Write-Diagnostic 'install_complete'
+  $script:busy=$false
+  if(-not $Headless) { $form.Close() }
+ } catch {
+  $details=Error-Details $_
+  $details.app_pid=$script:launchedAppPid; $details.exit_code=$script:launchedAppExitCode
+  Write-Diagnostic 'relaunch_failed' $details
+  $script:outcome='installed_not_opened'; Record-Transaction $script:outcome
+  $details.id=$cfg.id; $details.phase=$script:outcome
+  Save-Json 'result.json' $details
+  Status ('应用启动未确认：'+$details.error)
+  if(-not $Headless) { $subtitle.Text='安装文件已保留，可重新打开应用或查看详情。'; $retry.Text='重新打开应用'; $retry.Visible=$true }
+ } finally { $script:busy=$false }
 }
 function Rollback($plan) {
  Status '正在恢复原版本…'
@@ -404,29 +455,7 @@ function Apply-Update {
    if((File-Hash (Safe-Path $install $item.path)) -ne $item.sha256) { throw ('安装结果校验失败：'+$item.path) }
   }
   Record-Transaction 'installed'; $script:outcome='installed'
-  try {
-    $script:diagnosticStage='relaunch'
-   Status '更新已安装，正在重新打开应用…' 95
-   $opened=Open-App
-   $deadline=[DateTime]::UtcNow.AddSeconds(30)
-   while(-not (Test-Path -LiteralPath (Join-Path $root 'opened.json'))) {
-    if($opened.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw '应用未确认启动完成。' }
-    Start-Sleep -Milliseconds 250
-    if(-not $Headless) { [Windows.Forms.Application]::DoEvents() }
-   }
-   $receipt=Get-Content -LiteralPath (Join-Path $root 'opened.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-   if($receipt.id -ne $cfg.id -or $receipt.version -ne $cfg.version.TrimStart('v','V')) { throw '应用启动确认不匹配。' }
-   Record-Transaction 'complete'; $script:outcome='complete'; Status '更新完成' 100
-    Write-Diagnostic 'install_complete'
-   $script:busy=$false
-   if(-not $Headless) { $form.Close() }
-  } catch {
-    Write-Diagnostic 'relaunch_failed' (Error-Details $_)
-   Log $_.Exception.Message
-   $script:outcome='installed_not_opened'; Record-Transaction $script:outcome
-   Status '更新已安装，未能确认应用打开。可以重新打开应用。'
-   if(-not $Headless) { $retry.Text='重新打开应用'; $retry.Visible=$true }
-  }
+  Reopen-InstalledApp
  } catch {
    Write-Diagnostic 'install_failed' (Error-Details $_)
   $reason=$_.Exception.Message; Log $reason
@@ -458,6 +487,7 @@ if(-not $Headless) {
  $form.BackColor=Color 'bg' '#f7f7f8'; $form.ForeColor=Color 'text' '#242426'
  $layout=New-Object Windows.Forms.TableLayoutPanel
  $layout.Dock='Fill'; $layout.Padding=New-Object Windows.Forms.Padding($spacing); $layout.ColumnCount=1; $layout.RowCount=6; $layout.AutoScroll=$true
+ $layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent,100))) | Out-Null
  $form.Controls.Add($layout)
  $title=New-Object Windows.Forms.Label; $title.Text='正在安装更新'; $title.AutoSize=$true; $title.Font=New-Object Drawing.Font($fontFamily,14,[Drawing.FontStyle]::Bold)
  $subtitle=New-Object Windows.Forms.Label; $subtitle.Text='完成后会自动重新打开应用，请稍候。'; $subtitle.AutoSize=$true; $subtitle.Dock='Fill'
@@ -476,7 +506,8 @@ if(-not $Headless) {
  $details.Add_Click({ $script:logBox.Visible=-not $script:logBox.Visible; $form.Height=if($script:logBox.Visible){490}else{290}; $details.Text=if($script:logBox.Visible){'收起详情'}else{'查看详情'} })
  $retry.Add_Click({
   $retry.Visible=$false
-  if($script:outcome -in @('installed_not_opened','rolled_back')) { try { $null=Open-App; $form.Close() } catch { Status $_.Exception.Message; $retry.Visible=$true } }
+  if($script:outcome -eq 'installed_not_opened') { Reopen-InstalledApp }
+  elseif($script:outcome -eq 'rolled_back') { try { $null=Open-App; $form.Close() } catch { Status $_.Exception.Message; $retry.Visible=$true } }
   elseif($script:outcome -eq 'rollback_failed') { Recover-Update }
   else { Apply-Update }
  })

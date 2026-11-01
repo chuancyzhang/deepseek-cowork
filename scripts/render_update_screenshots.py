@@ -75,7 +75,7 @@ def workspace(theme, scale):
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
-def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False):
+def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False, package_mismatch=False):
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QPushButton, QLineEdit
@@ -106,6 +106,11 @@ def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False):
         if not failure:
             coordinator.prepared = result
         coordinator.publish(phase="error" if failure else "ready", message="暂时无法下载更新，可重试或选择本地安装包" if failure else "更新已准备好", result=result, error="更新服务连接超时，已尝试 5 次。" if failure else "")
+        if package_mismatch:
+            message = ("安装包标为 9.0.0，但文件与当前版本完全相同，无法升级。"
+                       "应用保持运行，请获取重新构建的完整安装包后再试。")
+            result["update_source"] = "local"
+            coordinator.publish(phase="error", source="local", message=message, error=message, result=result)
         if waiting:
             coordinator.publish(phase="installing", can_cancel_install=True, percent=-1,
                                 message="正在等待安装程序启动；若安全软件弹出确认，请允许本次安装。应用和任务暂时保持运行。")
@@ -149,26 +154,34 @@ def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False):
         shell.resize(480 if scale == 2 else 760, 650 if scale == 2 else 540)
         shell.show(); app.processEvents()
         for button in (control.primary, control.local):
-            assert button.width() >= button.fontMetrics().horizontalAdvance(button.text()) + 20
+            if button.isVisible():
+                assert button.width() >= button.fontMetrics().horizontalAdvance(button.text()) + 20
         assert control.notes.text().find("https://") == -1
         if waiting:
             assert control.cancel_button.isVisible()
             assert control.cancel_button.isEnabled()
             assert not control.primary.isEnabled()
-        name = f"{'enterprise-' if enterprise else ''}{'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
+        name = f"{'enterprise-' if enterprise else ''}{'package-mismatch' if package_mismatch else 'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
         assert shell.grab().save(str(OUTPUT / name))
         shell.close(); shell.deleteLater(); app.processEvents()
 
 
-def installer(theme, scale):
+def installer(theme, scale, startup_failure=False):
     from core.update_installer import write_installer
     from core.process_utils import subprocess_kwargs_no_window
     with tempfile.TemporaryDirectory(prefix="cowork-installer-ui-") as directory:
         colors = {"bg": "#242424", "text": "#ededed", "primary": "#d5d5d5"} if theme == "dark" else {"bg": "#ffffff", "text": "#303030", "primary": "#404040"}
         script = write_installer(directory, directory, str(Path(directory, "plan.json")), directory, [os.getpid()], "fixture.exe", colors, "9.0.0")
+        if startup_failure:
+            # Exercise the actual error UI without launching or updating an application.
+            path = Path(script)
+            source = path.read_text(encoding="utf-8-sig").replace(
+                "$status.Text='正在检查安装结果…'; $progress.Style='Continuous'; $progress.Value=85",
+                "function Open-App { throw '应用实际启动版本为 8.0.0，与安装包标注的 9.0.0 不一致，请获取正确构建的安装包。' }; Reopen-InstalledApp")
+            path.write_text(source, encoding="utf-8-sig")
         command = [str(Path(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe")),
                    "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", script,
-                   "-PreviewImage", str(OUTPUT / f"installer-{theme}-{int(scale*100)}.png"), "-PreviewScale", str(scale)]
+                   "-PreviewImage", str(OUTPUT / f"{'startup-failure' if startup_failure else 'installer'}-{theme}-{int(scale*100)}.png"), "-PreviewScale", str(scale)]
         result = subprocess.run(command, capture_output=True, timeout=25, **subprocess_kwargs_no_window())
         assert result.returncode == 0, result.stderr.decode(errors="replace")
 
@@ -183,12 +196,16 @@ if __name__ == "__main__":
     parser.add_argument("--enterprise", action="store_true")
     parser.add_argument("--notice", action="store_true")
     parser.add_argument("--workspace", action="store_true")
+    parser.add_argument("--package-mismatch", action="store_true")
+    parser.add_argument("--startup-failure", action="store_true")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.workspace:
         workspace(args.theme, args.scale)
+    elif args.startup_failure:
+        installer(args.theme, args.scale, startup_failure=True)
     elif args.panel:
-        panel(args.theme, args.scale, args.failure, args.waiting, args.enterprise, args.notice)
+        panel(args.theme, args.scale, args.failure, args.waiting, args.enterprise, args.notice, args.package_mismatch)
     else:
         for theme, scale, failure in [("light", 1.25, False), ("dark", 1.5, False), ("light", 2, False), ("dark", 2, True)]:
             command = [sys.executable, __file__, "--panel", "--theme", theme, "--scale", str(scale)]

@@ -228,6 +228,14 @@ class UpdateWorker(QThread):
                     backend.validate_online_package(self.result["staged_app_dir"], self.result.get("connection"))
                 plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"])
                 backend.check_cancel(self.cancel)
+                target_version = self.result["release"]["tag_name"]
+                update_log(self.root, "plan_compared", update_id=self.update_id, current_version=self.current_version,
+                           target_version=target_version, summary=plan["summary"])
+                if (is_newer_version(target_version, self.current_version)
+                        and not any(plan[group] for group in ("added", "modified", "deleted"))):
+                    raise backend.UpdaterError(
+                        f"安装包标为 {target_version}，但文件与当前版本完全相同，无法升级。"
+                        "应用保持运行，请获取重新构建的完整安装包后再试。")
                 self.result.update(change_plan=plan, change_summary=plan["summary"], change_plan_path=backend.write_update_plan(plan, self.root))
                 self.result["updates_dir"] = self.root
             self.result["update_id"] = self.update_id

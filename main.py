@@ -92,6 +92,7 @@ from core.single_instance import (
     notify_existing_ui,
     notify_existing_ui_with_retries,
 )
+from core.update_startup import update_startup_request
 from core.chat_storage import ChatStorage
 from core.theme_package import CONTENT_DEFAULTS
 from core.conversation_actions import append_reference_context, branch_display_text
@@ -57837,15 +57838,16 @@ if __name__ == "__main__":
             log_maintenance.stop()
         sys.exit(0)
     ui_server_name = build_ui_server_name()
-    if notify_existing_ui(ui_server_name):
+    startup_update_request = update_startup_request(get_base_dir())
+    if notify_existing_ui(ui_server_name, update_request=startup_update_request):
         sys.exit(0)
     ui_runtime_lock = acquire_process_singleton(
         build_process_singleton_lock_path(get_app_data_dir(), "ui-main")
     )
     if not ui_runtime_lock:
-        if notify_existing_ui_with_retries(ui_server_name):
+        if notify_existing_ui_with_retries(ui_server_name, update_request=startup_update_request):
             sys.exit(0)
-        sys.exit(0)
+        sys.exit(1 if startup_update_request else 0)
     log_maintenance = start_log_maintenance(get_app_data_dir(), owned_lock_paths=[ui_runtime_lock.lock_path],
                                             rotate_crash=install_native_crash_logging)
     if platform.system() == 'Windows':
@@ -57893,7 +57895,7 @@ if __name__ == "__main__":
 
     single_instance_server = UiSingleInstanceServer(ui_server_name, activate_main_window, app)
     single_instance_server_started = single_instance_server.start()
-    if not single_instance_server_started and notify_existing_ui_with_retries(ui_server_name):
+    if not single_instance_server_started and notify_existing_ui_with_retries(ui_server_name, update_request=startup_update_request):
         sys.exit(0)
 
     startup_window = show_startup_loading_window(app)

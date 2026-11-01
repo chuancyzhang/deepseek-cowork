@@ -25,6 +25,10 @@
 | 真实主窗口、浅色、125% | [查看](workspace-light-125.png) |
 | 真实主窗口、深色、150% | [查看](workspace-dark-150.png) |
 | 真实小窗口、浅色、200% | [查看](workspace-light-200.png) |
+| 高版本空更新拦截、浅色、125% | [查看](package-mismatch-light-125.png) |
+| 高版本空更新拦截、深色窄窗口、200% | [查看](package-mismatch-dark-200.png) |
+| 启动版本不符、浅色、125% | [查看](startup-failure-light-125.png) |
+| 启动版本不符、深色、200% | [查看](startup-failure-dark-200.png) |
 
 等待状态复现：`.venv/Scripts/python.exe scripts/render_update_screenshots.py --panel --theme light --scale 1.5 --waiting`，将 `--scale` 改为 `1` 或 `2` 验证另外两个尺寸。检查取消按钮可用、安装按钮禁用和文字完整换行。
 
@@ -39,3 +43,7 @@
 自动化验证：`test/test_public_updates.py` 使用隔离的本机 HTTP 服务验证静态清单、真实 ZIP 下载、公共源失败换 GitHub、固定版本和摘要、跨来源复用缓存、总尝试预算、取消、GitHub API 兼容与限流；`test/test_update_notice.py` 验证焦点不变、同版本去重、关闭和重新启动的提醒规则、安装请求复用协调器、主题预览及构造期间无临时顶层窗口。原更新器、协调器、企业更新、保存生命周期、打包和真实应用退出回归一并检查。
 
 Windows 安装事务现有及新增共 10 项通过：实际执行生成的 PowerShell 脚本，新增 WinForms 后台握手、提交后等待主进程真正退出才显示窗口、隐藏阶段取消且不修改文件；保留复制、占用、失败回滚、中断恢复与启动回执验证。GUI 握手测试使用透明窗口避免打扰，安装窗口外观另由截图模式验证。没有构建或更新用户实际使用的 EXE，没有访问生产公共源、GitHub 发布资产或企业服务器。
+
+2026-11-01 启动确认修复：本次相关 78 项测试及 6 个子测试通过，其中 Windows 安装器实测 15 项及 2 个子测试。`test/test_update_startup.py` 使用真实跨进程 Qt 本地通信验证主窗口加载前、加载后的更新确认转交；拒绝其他安装目录、事务和路径。协调器测试覆盖高版本但文件完全相同的包在退出前停止，以及同版本重装和实际升级仍可用。Windows 安装测试验证重复启动进程正常退出后延迟回执、非零退出码、旧回执清除和实际版本不符。更新、企业分发和保存生命周期回归沿用原测试，不对用户安装目录执行更新。
+
+错误状态截图复现：`.venv/Scripts/python.exe -X utf8 -B scripts/render_update_screenshots.py --panel --package-mismatch --theme light --scale 1.25`，另用 `--theme dark --scale 2` 检查窄窗口；安装器用 `--startup-failure` 替换 `--panel --package-mismatch`。脚本对隔离的生成脚本注入启动失败，执行实际错误呈现分支，不启动应用。Qt 使用离屏和 `QT_SCALE_FACTOR`，WinForms 使用控件和字体缩放；均在 Windows 运行，不能等同于切换系统 DPI。确认长错误完整换行、重新选择/重新打开入口可达，未写入用户主题。

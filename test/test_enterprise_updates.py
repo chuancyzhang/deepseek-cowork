@@ -222,6 +222,10 @@ def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monk
         assert restarted.cache_root != coordinator.cache_root
         monkeypatch.setenv("COWORK_UPDATE_ID", identity)
         monkeypatch.setenv("COWORK_UPDATE_RECEIPT", str(receipt))
+        receipt.parent.mkdir(parents=True)
+        (receipt.parent / "config.json").write_text(json.dumps({"id": identity, "install_dir": install}))
+        (receipt.parent / "commit.json").write_text(json.dumps({"id": identity, "saved": True}))
+        (receipt.parent / "transaction.json").write_text(json.dumps({"id": identity, "phase": "installed"}))
         UpdateLifecycleMixin.acknowledge_update_startup(SimpleNamespace(update_coordinator=restarted))
         assert json.loads(receipt.read_text())["id"] == identity
 

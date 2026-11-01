@@ -148,6 +148,36 @@ class UpdatePreparationTests(unittest.TestCase):
         coordinator._finished()
         self.assertEqual(installed, [])
 
+    def test_higher_version_with_identical_files_stops_before_installation(self):
+        staged = updater.extract_update_zip(str(self.package()), target_dir=self.root)
+        payload = {"update_source": "local", "staged_app_dir": staged, "release": {"tag_name": "9.0.0"}}
+        worker = UpdateWorker("plan", self.root, staged, "8.0.0", True, payload)
+        worker.run()
+        self.assertIsInstance(worker.error, updater.UpdaterError)
+        self.assertIn("文件与当前版本完全相同", str(worker.error))
+        self.assertFalse(list(Path(self.root).glob("apply-update-*.json")))
+        coordinator = UpdateCoordinator(staged, True, current_version="8.0.0", root=self.root)
+        coordinator.worker = worker
+        installed = []
+        coordinator.installation_ready.connect(installed.append)
+        coordinator._finished()
+        self.assertEqual(installed, [])
+        self.assertEqual(coordinator.state["phase"], "error")
+
+    def test_same_version_reinstall_and_real_upgrade_remain_available(self):
+        staged = updater.extract_update_zip(str(self.package()), target_dir=self.root)
+        payload = {"update_source": "local", "staged_app_dir": staged, "release": {"tag_name": "9.0.0"}}
+        worker = UpdateWorker("plan", self.root, staged, "9.0.0", True, payload)
+        worker.run()
+        self.assertIsNone(worker.error)
+        current = Path(self.root, "current")
+        (current / "_internal").mkdir(parents=True)
+        (current / "deepseek-cowork.exe").write_bytes(b"old exe")
+        worker = UpdateWorker("plan", self.root, str(current), "8.0.0", True, payload)
+        worker.run()
+        self.assertIsNone(worker.error)
+        self.assertTrue(worker.result["change_plan"]["modified"])
+
     def test_local_selection_wins_over_delayed_startup_and_stale_cache_event(self):
         coordinator = UpdateCoordinator(self.root, True, root=self.root)
         with patch.object(coordinator, "_start") as start:

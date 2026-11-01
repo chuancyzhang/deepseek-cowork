@@ -14,6 +14,7 @@ from core.theme import default_design_tokens
 from core.theme_service import resolve_theme
 from core.update_coordinator import atomic_json, update_log
 from core.update_diagnostics import installer_exit_details
+from core.update_startup import update_startup_request, acknowledge_update_request
 from core.updater import create_windows_update_script, launch_windows_update_script
 from ui.primitives import ProductMessageDialog
 from ui.worker_lifecycle import pending_ui_workers, pause_ui_work_timers, ui_worker_snapshot
@@ -321,10 +322,13 @@ class UpdateLifecycleMixin:
         if notify:
             self.add_system_toast(message, "error", auto_close_ms=8000)
 
-    def acknowledge_update_startup(self):
-        receipt = os.environ.pop("COWORK_UPDATE_RECEIPT", "")
-        identity = os.environ.pop("COWORK_UPDATE_ID", "")
-        if receipt and identity:
-            expected = os.path.join(self.update_coordinator.root, "transactions", identity, "opened.json")
-            if os.path.normcase(os.path.abspath(receipt)) == os.path.normcase(os.path.abspath(expected)) and len(identity) == 32 and all(c in "0123456789abcdef" for c in identity):
-                atomic_json(receipt, {"id": identity, "version": APP_VERSION})
+    def acknowledge_update_startup(self, request=None):
+        coordinator = self.update_coordinator
+        if request is None:
+            request = update_startup_request(coordinator.install_dir, consume=True)
+            server = getattr(self, "single_instance_server", None)
+            if server is not None:
+                server.set_update_startup_handler(self.acknowledge_update_startup)
+        if request is not None:
+            return acknowledge_update_request(request, coordinator.root, coordinator.install_dir, APP_VERSION)
+        return False

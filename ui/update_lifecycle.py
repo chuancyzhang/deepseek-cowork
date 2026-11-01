@@ -13,7 +13,7 @@ from core.runtime_journal import RUN_NONTERMINAL_STATUSES
 from core.theme import default_design_tokens
 from core.theme_service import resolve_theme
 from core.update_coordinator import atomic_json, update_log
-from core.update_diagnostics import installer_exit_details
+from core.update_diagnostics import installer_exit_details, installer_startup_failure_message
 from core.update_startup import update_startup_request, acknowledge_update_request
 from core.updater import create_windows_update_script, launch_windows_update_script
 from ui.primitives import ProductMessageDialog
@@ -131,7 +131,8 @@ class UpdateLifecycleMixin:
             return
         root = self._update_transaction
         if os.path.isfile(os.path.join(root, "abort.json")) or self._update_installer_process.poll() is not None:
-            self._abort_update("安装程序已关闭，应用尚未退出。")
+            diagnostics = installer_exit_details(root, self._update_installer_process)
+            self._abort_update(installer_startup_failure_message(diagnostics), diagnostics=diagnostics)
         elif os.path.isfile(os.path.join(root, "ready.json")):
             try:
                 with open(os.path.join(root, "ready.json"), encoding="utf-8-sig") as handle:
@@ -291,9 +292,10 @@ class UpdateLifecycleMixin:
             self._checkpoint_close_ready = True
             QApplication.quit()
 
-    def _abort_update(self, message, notify=True):
+    def _abort_update(self, message, notify=True, *, diagnostics=None):
         root = getattr(self, "_update_transaction", "")
-        diagnostics = installer_exit_details(root, getattr(self, "_update_installer_process", None)) if root else {}
+        if diagnostics is None:
+            diagnostics = installer_exit_details(root, getattr(self, "_update_installer_process", None)) if root else {}
         if root:
             try:
                 atomic_json(os.path.join(root, "abort.json"), {"id": os.path.basename(root)})

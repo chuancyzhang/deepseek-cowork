@@ -83,6 +83,39 @@ class UpdateLifecycleTests(unittest.TestCase):
         host._await_update_installer()
         host._quiesce_for_update.assert_called_once()
 
+    def test_busy_installer_explains_recovery_without_stopping_tasks(self):
+        host = self.host
+        state = self.state("active")
+        host._quiesce_for_update = MagicMock()
+        host._update_installer_process = SimpleNamespace(pid=12345, poll=lambda: 1)
+        transaction = Path(host._update_transaction)
+        (transaction / "result.json").write_text(json.dumps({
+            "id": transaction.name, "phase": "startup_failed", "stage": "mutex_wait",
+            "mutex_acquired": False, "error": "另一个安装程序正在处理此应用",
+        }), encoding="utf-8")
+        prepared = {"staged_app_dir": str(self.root / "prepared")}
+        host.update_coordinator.prepared = prepared
+        host._await_update_installer()
+        message = host.update_coordinator.state["message"]
+        self.assertIn("另一个更新窗口", message)
+        self.assertIn("关闭该窗口后重试", message)
+        self.assertIn("应用和任务保持运行", message)
+        self.assertIs(host.update_coordinator.prepared, prepared)
+        host._quiesce_for_update.assert_not_called()
+        self.assertEqual(state.composer_draft, "未发送的草稿")
+        self.assertFalse((transaction / "commit.json").exists())
+        self.assertTrue((transaction / "abort.json").exists())
+
+    def test_foreign_busy_result_does_not_misdiagnose_startup_failure(self):
+        host = self.host
+        host._update_installer_process = SimpleNamespace(pid=12345, poll=lambda: 1)
+        Path(host._update_transaction, "result.json").write_text(json.dumps({
+            "id": "other", "phase": "startup_failed", "stage": "mutex_wait", "mutex_acquired": False,
+        }), encoding="utf-8")
+        host._await_update_installer()
+        self.assertNotIn("另一个更新窗口", host.update_coordinator.state["message"])
+        self.assertIn("运行日志", host.update_coordinator.state["message"])
+
     def test_expired_wait_can_be_extended_without_aborting_or_stopping_tasks(self):
         host = self.host
         host._update_deadline = 0

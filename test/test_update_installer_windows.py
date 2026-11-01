@@ -153,6 +153,12 @@ class WindowsInstallerTests(unittest.TestCase):
         source = script.read_text(encoding="utf-8-sig").replace(
             "$form.MaximizeBox=$false; $form.MinimizeBox=$true",
             "$form.MaximizeBox=$false; $form.MinimizeBox=$true; $form.Opacity=0; $form.ShowInTaskbar=$false")
+        source = source.replace("$context=New-Object Windows.Forms.ApplicationContext", """
+$qaCloseTimer=New-Object Windows.Forms.Timer; $qaCloseTimer.Interval=100
+$qaCloseTimer.Add_Tick({ if(Test-Path -LiteralPath (Join-Path $root 'qa-close')) { $qaCloseTimer.Stop(); $form.Close() } })
+$qaCloseTimer.Start()
+$context=New-Object Windows.Forms.ApplicationContext
+""")
         script.write_text(source, encoding="utf-8-sig")
         child = subprocess.Popen([self.ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", str(script)],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_kwargs_no_window())
@@ -179,6 +185,26 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(transaction["phase"], "installed_not_opened")
         self.assertIn("installer_window_shown", json.dumps(self.diagnostic_events(script.parent.name)))
         self.assertEqual((self.install / "_internal/data.txt").read_text(), "new")
+        # A failed window retains ownership while its recovery actions remain usable.
+        second = self.prepare()
+        contender = launch_windows_update_script(str(second))
+        self.children.append(contender)
+        self.assertEqual(contender.wait(timeout=20), 1)
+        failure = json.loads((second.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(failure["stage"], "mutex_wait")
+        self.assertFalse(failure["mutex_acquired"])
+        # Closing that window must release ownership so a fresh install can start.
+        (script.parent / "qa-close").touch()
+        self.assertEqual(child.wait(timeout=5), 0)
+        third = self.prepare()
+        restarted = launch_windows_update_script(str(third))
+        self.children.append(restarted)
+        deadline = time.monotonic() + 20
+        while not (third.parent / "ready.json").exists() and restarted.poll() is None and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue((third.parent / "ready.json").exists())
+        (third.parent / "abort.json").write_text(json.dumps({"id": third.parent.name}))
+        self.assertEqual(restarted.wait(timeout=5), 0)
 
     def test_hidden_gui_handshake_cancels_without_showing_or_installing(self):
         script = self.prepare()

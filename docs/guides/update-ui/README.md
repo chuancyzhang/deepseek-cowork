@@ -29,6 +29,8 @@
 | 高版本空更新拦截、深色窄窗口、200% | [查看](package-mismatch-dark-200.png) |
 | 启动版本不符、浅色、125% | [查看](startup-failure-light-125.png) |
 | 启动版本不符、深色、200% | [查看](startup-failure-dark-200.png) |
+| 旧更新窗口未关闭、浅色、125% | [查看](installer-busy-light-125.png) |
+| 旧更新窗口未关闭、深色窄窗口、200% | [查看](installer-busy-dark-200.png) |
 
 等待状态复现：`.venv/Scripts/python.exe scripts/render_update_screenshots.py --panel --theme light --scale 1.5 --waiting`，将 `--scale` 改为 `1` 或 `2` 验证另外两个尺寸。检查取消按钮可用、安装按钮禁用和文字完整换行。
 
@@ -47,3 +49,7 @@ Windows 安装事务现有及新增共 10 项通过：实际执行生成的 Powe
 2026-11-01 启动确认修复：本次相关 78 项测试及 6 个子测试通过，其中 Windows 安装器实测 15 项及 2 个子测试。`test/test_update_startup.py` 使用真实跨进程 Qt 本地通信验证主窗口加载前、加载后的更新确认转交；拒绝其他安装目录、事务和路径。协调器测试覆盖高版本但文件完全相同的包在退出前停止，以及同版本重装和实际升级仍可用。Windows 安装测试验证重复启动进程正常退出后延迟回执、非零退出码、旧回执清除和实际版本不符。更新、企业分发和保存生命周期回归沿用原测试，不对用户安装目录执行更新。
 
 错误状态截图复现：`.venv/Scripts/python.exe -X utf8 -B scripts/render_update_screenshots.py --panel --package-mismatch --theme light --scale 1.25`，另用 `--theme dark --scale 2` 检查窄窗口；安装器用 `--startup-failure` 替换 `--panel --package-mismatch`。脚本对隔离的生成脚本注入启动失败，执行实际错误呈现分支，不启动应用。Qt 使用离屏和 `QT_SCALE_FACTOR`，WinForms 使用控件和字体缩放；均在 Windows 运行，不能等同于切换系统 DPI。确认长错误完整换行、重新选择/重新打开入口可达，未写入用户主题。
+
+2026-11-01 晚间复现：失败的旧安装器窗口未关闭会继续持有安装锁。界面现在根据当前事务的 `startup_failed / mutex_wait / mutex_acquired=false` 显示原因及关闭旧窗口后的重试方式，不以进程候选列表猜测锁持有者。`test/test_update_lifecycle.py` 加上 Windows 安装器的互斥冲突、GUI 握手两项测试，共 20 项及 2 个子测试通过；实际验证失败窗口保留时重试被拒绝、关闭后新安装器可就绪，应用端保留任务、草稿和准备好的包，外来事务结果不能影响提示。
+
+提示截图：`.venv/Scripts/python.exe -X utf8 -B scripts/render_update_screenshots.py --panel --installer-busy --theme light --scale 1.25`；深色窄窗口使用 `--theme dark --scale 2`。两张图检查原因完整换行及安装入口可达，沿用上述离屏和缩放边界。

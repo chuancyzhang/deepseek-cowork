@@ -131,7 +131,7 @@ $mutexWatch.Stop(); $script:mutexAcquired=$acquired
 Write-Diagnostic 'mutex_acquire_result' @{mutex_name=$script:mutexName; created_new=$createdNew; acquired=$acquired;
  abandoned=$abandoned; elapsed_ms=$mutexWatch.Elapsed.TotalMilliseconds; thread_id=[Threading.Thread]::CurrentThread.ManagedThreadId}
 Log-StartupProcesses
-if(-not $acquired) { throw '另一个安装程序正在处理此应用，请等待其完成。' }
+if(-not $acquired) { throw '另一个安装程序仍在运行。请先处理之前的更新窗口；若已失败，请关闭该窗口后重试。' }
 
 $script:diagnosticStage='native_helpers'
 Add-Type -TypeDefinition @'

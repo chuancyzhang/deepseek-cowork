@@ -75,7 +75,7 @@ def workspace(theme, scale):
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
-def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False, package_mismatch=False):
+def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False, package_mismatch=False, installer_busy=False):
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel, QPushButton, QLineEdit
@@ -114,6 +114,12 @@ def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False, 
         if waiting:
             coordinator.publish(phase="installing", can_cancel_install=True, percent=-1,
                                 message="正在等待安装程序启动；若安全软件弹出确认，请允许本次安装。应用和任务暂时保持运行。")
+        if installer_busy:
+            from core.update_diagnostics import installer_startup_failure_message
+            result["update_source"] = "local"
+            coordinator.publish(result=result)
+            coordinator.install_aborted(installer_startup_failure_message({"result": {
+                "phase": "startup_failed", "stage": "mutex_wait", "mutex_acquired": False}}))
         if notice:
             shell = QWidget()
             shell.setStyleSheet(f"background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};")
@@ -161,7 +167,7 @@ def panel(theme, scale, failure, waiting=False, enterprise=False, notice=False, 
             assert control.cancel_button.isVisible()
             assert control.cancel_button.isEnabled()
             assert not control.primary.isEnabled()
-        name = f"{'enterprise-' if enterprise else ''}{'package-mismatch' if package_mismatch else 'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
+        name = f"{'enterprise-' if enterprise else ''}{'installer-busy' if installer_busy else 'package-mismatch' if package_mismatch else 'waiting' if waiting else 'error' if failure else 'ready'}-{theme}-{int(scale*100)}.png"
         assert shell.grab().save(str(OUTPUT / name))
         shell.close(); shell.deleteLater(); app.processEvents()
 
@@ -198,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", action="store_true")
     parser.add_argument("--package-mismatch", action="store_true")
     parser.add_argument("--startup-failure", action="store_true")
+    parser.add_argument("--installer-busy", action="store_true")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.workspace:
@@ -205,7 +212,7 @@ if __name__ == "__main__":
     elif args.startup_failure:
         installer(args.theme, args.scale, startup_failure=True)
     elif args.panel:
-        panel(args.theme, args.scale, args.failure, args.waiting, args.enterprise, args.notice, args.package_mismatch)
+        panel(args.theme, args.scale, args.failure, args.waiting, args.enterprise, args.notice, args.package_mismatch, args.installer_busy)
     else:
         for theme, scale, failure in [("light", 1.25, False), ("dark", 1.5, False), ("light", 2, False), ("dark", 2, True)]:
             command = [sys.executable, __file__, "--panel", "--theme", theme, "--scale", str(scale)]

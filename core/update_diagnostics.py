@@ -7,6 +7,17 @@ from core.runtime_logs import append_log
 from core.task_details import redact_diagnostic
 
 
+def installer_startup_failure_message(details):
+    """Translate a correlated startup result without exposing raw script errors."""
+    result = details.get("result") or {}
+    if (result.get("phase") == "startup_failed" and result.get("stage") == "mutex_wait"
+            and result.get("mutex_acquired") is False):
+        return ("另一个更新窗口仍在运行。请先处理之前的更新窗口；若已失败，请关闭该窗口后重试。"
+                "应用和任务保持运行，安装包已保留。")
+    return ("安装程序已关闭，尚未开始安装。应用和任务保持运行，安装包已保留；"
+            "请查看运行日志后重试。")
+
+
 def installer_data_dir(transaction):
     transaction = Path(transaction).absolute()
     if transaction.parent.name != "transactions":

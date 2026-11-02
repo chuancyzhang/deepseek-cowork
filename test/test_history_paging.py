@@ -237,6 +237,73 @@ class HistoryPagingConsistencyTests(unittest.TestCase):
     def test_question_navigation_uses_same_failure_safe_page_order(self):
         self._check_partial_failure(navigate=True)
 
+    def test_first_open_jump_finishes_without_scrolling_first(self):
+        self._seed_history(turns=10, displayed=12)
+        # First history load has a generation, but no previous scroll page.
+        del self.state.history_page_token
+        before = copy.deepcopy(self.state.messages)
+        callbacks = []
+        with patch("main.QTimer.singleShot", side_effect=lambda delay, callback: callbacks.append(callback)):
+            self.window.jump_to_question("u0")
+            for _ in range(len(self.state.render_items) + 1):
+                if not callbacks:
+                    break
+                callbacks.pop(0)()
+        self.assertFalse(self.state.auto_loading_history)
+        self.assertFalse(self.state.history_page_loading)
+        self.assertEqual(self.state.history_page_queue, [])
+        self._assert_visible_suffix()
+        self.window._finalize_question_navigator_jump.assert_called_once_with(self.state, "u0")
+        self.assertEqual(self.state.messages, before)
+
+    def test_jump_callback_keeps_its_generation_after_reload(self):
+        self._seed_history()
+        callbacks = []
+        with patch("main.QTimer.singleShot", side_effect=lambda delay, callback: callbacks.append(callback)):
+            self.window.jump_to_question("u0")
+        # A fresh load/page has replaced the old generation before the timer runs.
+        self.state.history_load_token = 4
+        self.state.history_page_token = 4
+        before = self._widgets()
+        queue_before = list(self.state.history_page_queue)
+        callbacks[0]()
+        self.assertEqual(self._widgets(), before)
+        self.assertEqual(self.state.history_page_queue, queue_before)
+
+    def test_zero_generation_callback_cannot_consume_new_page(self):
+        self._seed_history()
+        self.window.load_more_history(self.state.session_id)
+        before = self._widgets()
+        queue_before = list(self.state.history_page_queue)
+        self.window._render_next_history_page_span(self.state.session_id, 0)
+        self.assertEqual(self._widgets(), before)
+        self.assertEqual(self.state.history_page_queue, queue_before)
+
+    def test_click_during_scroll_page_extends_to_earlier_target(self):
+        self._seed_history(turns=10, displayed=2)
+        before = copy.deepcopy(self.state.messages)
+        self.window.load_more_history(self.state.session_id)
+        self.window._render_next_history_page_span(self.state.session_id, 3)
+        self.window.jump_to_question("u0")
+        self._drain_page()
+        self.window._question_jump_error.assert_not_called()
+        self.window._finalize_question_navigator_jump.assert_called_once_with(self.state, "u0")
+        self.assertEqual(self.rendered_starts, list(range(17, -1, -1)))
+        self._assert_visible_suffix()
+        self.assertEqual(self.state.messages, before)
+
+    def test_latest_click_during_jump_wins_without_duplicate_pages(self):
+        self._seed_history(turns=10, displayed=2)
+        self.window.jump_to_question("u0")
+        self.window._render_next_history_page_span(self.state.session_id, 3)
+        self.window.jump_to_question("u2")
+        self.window.jump_to_question("u9")
+        self._drain_page()
+        self.window._question_jump_error.assert_not_called()
+        self.window._finalize_question_navigator_jump.assert_called_once_with(self.state, "u9")
+        self.assertEqual(self.rendered_starts, list(range(17, -1, -1)))
+        self._assert_visible_suffix()
+
     def test_guidance_during_pending_page_keeps_rollback_count_correct(self):
         self._seed_history()
         self._live_append({"id": "live-user", "role": "user", "content": "继续"})

@@ -26720,6 +26720,8 @@ class SessionState:
         self.history_load_worker = None
         self.history_loading_widget = None
         self.history_page_loading = False
+        self.history_page_token = 0
+        self.history_page_queue = []
         self.history_page_anchor_widget = None
         self.history_page_anchor_offset = 0
         self.history_page_jump_target_id = ""
@@ -33169,14 +33171,12 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             session_id=state.session_id,
             message_id=message_id,
         )
-        if message_id in (getattr(state, "render_node_by_message_id", {}) or {}):
+        page_loading = bool(getattr(state, "auto_loading_history", False))
+        if not page_loading and message_id in (getattr(state, "render_node_by_message_id", {}) or {}):
             self._finalize_question_navigator_jump(state, message_id)
             return
         if not getattr(state, "history_loaded", False) or getattr(state, "history_loading", False):
             self._question_jump_error(state, message_id, "历史会话仍在加载，请稍后重试。")
-            return
-        if getattr(state, "auto_loading_history", False):
-            self._question_jump_error(state, message_id, "历史分页正在加载，请稍后重试。")
             return
         message_index = next(
             (
@@ -33197,37 +33197,23 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             -1,
         )
         rendered_start = max(0, len(spans) - int(getattr(state, "displayed_render_count", 0) or 0))
+        if page_loading and target_span_index >= 0:
+            # Keep the newest click as the destination. Extend only the missing
+            # prefix; the running page still owns its callback and anchor.
+            extra_spans = spans[target_span_index:rendered_start]
+            state.history_page_queue[:0] = extra_spans
+            state.displayed_render_count += len(extra_spans)
+            log_ui_navigation(
+                "question_navigator_jump_queued", session_id=state.session_id,
+                message_id=message_id, token=state.history_page_token,
+                added_spans=len(extra_spans), pending_spans=len(state.history_page_queue),
+            )
+            return
         if target_span_index < 0 or target_span_index >= rendered_start:
             self._question_jump_error(state, message_id, "该提问缺少可加载的历史分页。")
             return
-        viewport = state.chat_scroll.viewport()
-        anchor_widget = None
-        anchor_offset = 0
-        for index in range(state.chat_layout.count() - 1):
-            candidate = state.chat_layout.itemAt(index).widget()
-            if candidate is None or not _qt_object_alive(candidate) or not candidate.isVisible():
-                continue
-            try:
-                offset = candidate.mapTo(viewport, QPoint(0, 0)).y()
-            except RuntimeError:
-                continue
-            if offset + max(candidate.height(), candidate.sizeHint().height(), 1) > 0:
-                anchor_widget = candidate
-                anchor_offset = int(offset)
-                break
         spans_to_load = spans[target_span_index:rendered_start]
-        state.auto_loading_history = True
-        state.history_page_loading = True
-        state.history_page_queue = list(spans_to_load)
-        state.history_page_anchor_widget = anchor_widget
-        state.history_page_anchor_offset = anchor_offset
-        state.displayed_render_count += len(spans_to_load)
-        log_ui_navigation(
-            "history_page_start", session_id=state.session_id, source="question_navigator",
-            span_start=int(spans_to_load[0]["start"]), span_end=int(spans_to_load[-1]["end"]),
-            span_count=len(spans_to_load), total=len(spans), displayed=state.displayed_render_count,
-        )
-        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
+        self._start_history_page(state, spans_to_load, source="question_navigator")
 
     def sync_context_drawer_layout(self):
         full = bool(getattr(self, "_workspace_fullscreen", False))
@@ -39716,7 +39702,13 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state.displayed_count = 0
         state.displayed_render_count = 0
         state.load_more_btn = None
+        state.auto_loading_history = False
         state.history_page_loading = False
+        state.history_page_queue = []
+        state.history_page_anchor_widget = None
+        state.history_page_anchor_offset = 0
+        state.history_page_jump_target_id = ""
+        state.history_page_jump_started_at = 0.0
         state.clarify_mode_enabled = False
         state.clarify_phase = CLARIFY_MODE_DISABLED
         state.clarify_mode_state = CLARIFY_MODE_EXPLORING
@@ -43300,6 +43292,11 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         start_idx = total - state.displayed_render_count - count_to_load
         end_idx = total - state.displayed_render_count
         spans_to_load = list(state.render_items[start_idx:end_idx])
+        self._start_history_page(state, spans_to_load, source="scroll")
+
+    def _start_history_page(self, state, spans_to_load, *, source):
+        # Every entry point must bind the page to this history generation before
+        # scheduling work, including navigation before the first upward scroll.
         vbar = state.chat_scroll.verticalScrollBar()
         anchor_widget = None
         anchor_offset = 0
@@ -43319,16 +43316,17 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state.auto_loading_history = True
         state.history_page_loading = True
         state.history_page_token = int(getattr(state, "history_load_token", 0) or 0)
-        state.history_page_queue = spans_to_load
+        state.history_page_queue = list(spans_to_load)
         state.history_page_old_max = vbar.maximum()
         state.history_page_old_value = vbar.value()
         state.history_page_anchor_widget = anchor_widget
         state.history_page_anchor_offset = anchor_offset
         state.displayed_render_count += len(spans_to_load)
         log_ui_navigation(
-            "history_page_start", session_id=state.session_id, source="scroll",
+            "history_page_start", session_id=state.session_id, source=source,
+            token=state.history_page_token,
             span_start=int(spans_to_load[0]["start"]), span_end=int(spans_to_load[-1]["end"]),
-            span_count=len(spans_to_load), total=total, displayed=state.displayed_render_count,
+            span_count=len(spans_to_load), total=len(state.render_items), displayed=state.displayed_render_count,
         )
         QTimer.singleShot(
             0,
@@ -43340,8 +43338,12 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state = self.get_session(session_id)
         if not state:
             return
-        expected_token = int(token or getattr(state, "history_page_token", 0) or 0)
+        expected_token = int(getattr(state, "history_page_token", 0) or 0) if token is None else int(token)
         if expected_token != int(getattr(state, "history_load_token", 0) or 0):
+            log_ui_navigation(
+                "history_page_stale_callback", session_id=session_id,
+                token=expected_token, current_token=state.history_load_token,
+            )
             return
         queue = getattr(state, "history_page_queue", [])
         if queue:
@@ -43373,7 +43375,8 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
                     "error",
                 )
                 log_ui_navigation(
-                    "history_load_error", session_id=session_id, phase="page", error=str(exc),
+                    "history_load_error", session_id=session_id, token=expected_token,
+                    phase="page", error=str(exc),
                     span_start=int(span["start"]), span_end=int(span["end"]),
                     unrendered=unrendered, total=len(state.render_items),
                     displayed=state.displayed_render_count,
@@ -43391,7 +43394,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state.auto_loading_history = False
         state.history_page_loading = False
         log_ui_navigation(
-            "history_page_done", session_id=session_id,
+            "history_page_done", session_id=session_id, token=expected_token,
             total=len(state.render_items), displayed=state.displayed_render_count,
         )
         self.queue_session_bubble_virtualization(session_id)

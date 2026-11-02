@@ -429,6 +429,8 @@ class QuestionNavigatorTest(unittest.TestCase):
 
     def test_question_navigator_is_anchored_near_sidebar_edge(self):
         window = MainWindow()
+        window._model_onboarding_shown = True
+        window._background_services_scheduled = True
         try:
             state = window.get_current_session()
             state.messages = [

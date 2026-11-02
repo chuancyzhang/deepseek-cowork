@@ -1,14 +1,16 @@
 import os
 import copy
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtTest import QTest
 
 from core.conversation_render import build_conversation_render_spans
 from ui.history_presentation import RUN_ELAPSED_META_KEY, history_elapsed_seconds
@@ -49,6 +51,84 @@ class HistoryPerformanceTests(unittest.TestCase):
 
     def tearDown(self):
         close_test_window(self.window)
+
+    def test_reopened_history_navigation_without_prior_scroll(self):
+        self.window._startup_hydration_scheduled = True
+        self.window._background_services_scheduled = True
+        self.window._model_onboarding_shown = True
+        self.state.messages = [
+            {"id": f"{role}{i}", "role": role,
+             "content": f"第 {i + 1} 轮{'提问' if role == 'user' else '回答'}\n\n" + "历史正文。" * 80}
+            for i in range(10) for role in ("user", "assistant")
+        ]
+        self.assertTrue(self.window.save_chat_history(self.state.session_id, flush=True))
+        self.window.resize(1280, 800)
+        self.window.show()
+
+        def wait_until(predicate):
+            deadline = time.monotonic() + 10
+            while not predicate() and time.monotonic() < deadline:
+                QTest.qWait(20)
+            self.assertTrue(predicate())
+            QTest.qWait(150)
+
+        for entry in ("directory", "rail", "scroll", "search"):
+            with self.subTest(entry=entry):
+                self.window._close_conversation_search()
+                self.window.queue_session_history_load(self.state.session_id)
+                wait_until(lambda: self.state.history_loaded and not self.state.history_loading
+                           and self.state.history_loading_widget is None)
+                self.assertGreater(self.state.history_load_token, 0)
+                self.assertEqual(len(self.window._question_navigator_entries_for_state(self.state)), 10)
+                self.assertNotIn("user0", self.state.render_node_by_message_id)
+                before = copy.deepcopy(self.state.messages)
+                if entry == "directory":
+                    from ui.primitives import ProductPopover
+                    anchor = next(button for button in self.state.session_widget.findChildren(QPushButton)
+                                  if button.accessibleName() == "历史提问")
+                    self.window._show_question_directory(anchor)
+                    popover = next(p for p in self.window.findChildren(ProductPopover) if p.isVisible())
+                    next(b for b in popover.findChildren(QPushButton) if b.text().startswith("1.")).click()
+                elif entry == "rail":
+                    self.window.question_navigator_rail.jumpRequested.emit("user0")
+                elif entry == "search":
+                    self.window._open_conversation_search()
+                    self.window.conversation_search.input.setText("第 1 轮提问")
+                    wait_until(lambda: self.window._conversation_search_highlight is not None)
+                else:
+                    self.state.chat_scroll.verticalScrollBar().setValue(0)
+                wait_until(lambda: "user0" in self.state.render_node_by_message_id
+                           and not self.state.auto_loading_history)
+                self.assertFalse(self.state.history_page_loading)
+                self.assertFalse(self.state.history_page_jump_target_id)
+                self.assertEqual(self.state.messages, before)
+                if entry != "scroll":
+                    target = self.state.render_node_by_message_id["user0"]["widget"]
+                    y = target.mapTo(self.state.chat_scroll.viewport(), QPoint()).y()
+                    self.assertGreaterEqual(y, -5)
+                    self.assertLess(y, self.state.chat_scroll.viewport().height())
+                # Also check a middle question: reaching the top alone would
+                # not prove that navigation uses the requested message anchor.
+                self.window._close_conversation_search()
+                for message_id in ("user7", "user2"):
+                    self.window.jump_to_question(message_id)
+                    QTest.qWait(200)
+                    target = self.state.render_node_by_message_id[message_id]["widget"]
+                    y = target.mapTo(self.state.chat_scroll.viewport(), QPoint()).y()
+                    self.assertAlmostEqual(y, 20, delta=5)
+
+    def test_history_reset_releases_pending_page_and_jump(self):
+        self.state.auto_loading_history = True
+        self.state.history_page_loading = True
+        self.state.history_page_queue = [{"start": 0, "end": 1}]
+        self.state.history_page_jump_target_id = "old-question"
+        self.state.history_page_anchor_widget = self.state.chat_scroll.widget()
+        self.window._reset_session_history_state(self.state)
+        self.assertFalse(self.state.auto_loading_history)
+        self.assertFalse(self.state.history_page_loading)
+        self.assertEqual(self.state.history_page_queue, [])
+        self.assertEqual(self.state.history_page_jump_target_id, "")
+        self.assertIsNone(self.state.history_page_anchor_widget)
 
     def test_recorded_run_time_survives_save_without_changing_messages(self):
         self.state.messages = [{"id": "timed-reply", "role": "assistant", "content": "回答",

@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -11,6 +11,31 @@ from core.llm.providers import AnthropicProvider
 
 
 class TestAnthropicProviderMessages(unittest.TestCase):
+    def test_checkpoint_requires_real_stop_and_preserves_limit_reason(self):
+        provider = self._build_provider()
+        provider.model_name, provider.base_url = "model", "https://example.test"
+        provider.client = MagicMock()
+        for reason, stopped, expected in (("end_turn", True, "completed"),
+                                           ("max_tokens", True, "incomplete"),
+                                           ("end_turn", False, None)):
+            with self.subTest(reason=reason, stopped=stopped):
+                events = [SimpleNamespace(type="message_start", message=SimpleNamespace(id="r")),
+                          SimpleNamespace(type="message_delta", delta=SimpleNamespace(stop_reason=reason))]
+                if stopped:
+                    events.append(SimpleNamespace(type="message_stop"))
+                provider.client.messages.stream.return_value.__enter__.return_value = events
+                if expected is None:
+                    with self.assertRaisesRegex(RuntimeError, "without a message_stop"):
+                        list(provider._anthropic_stream([{"role": "user", "content": "summarize"}],
+                                                       request_context={"tools_disabled": True}))
+                else:
+                    terminal = list(provider._anthropic_stream([{"role": "user", "content": "summarize"}],
+                        request_context={"tools_disabled": True}))[-1]
+                    self.assertEqual(terminal["status"], expected)
+                    self.assertEqual(terminal["finish_reason"], reason)
+                    self.assertEqual(terminal["event_type"], "message_stop")
+                    self.assertEqual(terminal["response_id"], "r")
+
     def _build_provider(self):
         provider = AnthropicProvider.__new__(AnthropicProvider)
         provider.supports_vision = False

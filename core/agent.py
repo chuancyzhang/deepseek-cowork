@@ -2453,14 +2453,17 @@ class LLMWorker(QThread):
     def _generate_context_checkpoint(self, provider, messages, rollover_id, part, repair):
         """A separate, tool-free request. Never becomes assistant dialogue or replay."""
         from core.long_context import ContextError, ContextCancelled
+        from core.task_details import redact_diagnostic
         attempt_id = f"{self.request_id}:context:{rollover_id}:{part}:{repair}:{uuid.uuid4().hex}"
+        started_at = time.time()
         self._record_provider_attempt(attempt_id, {"status": "running", "purpose": "context_checkpoint",
-                                                 "started_at": time.time(), "run_id": self.request_id})
+                                                 "started_at": started_at, "run_id": self.request_id})
         self.observability_signal.emit({"type": "context_checkpoint_request_start",
             "run_id": self.request_id, "request_id": attempt_id, "timestamp": time.time(),
             "provider": getattr(provider, "provider_name", ""), "model": getattr(provider, "model_name", "")})
         stream = None
         content = []
+        terminal = {}
         try:
             stream = self._provider_chat_stream(provider, messages, tools=[], prompt_cache_key=None,
                 request_context={"client_request_id": attempt_id, "run_id": self.request_id,
@@ -2481,8 +2484,18 @@ class LLMWorker(QThread):
                 elif kind == "provider_retry":
                     self.observability_signal.emit({"type": "context_checkpoint_retry", "run_id": self.request_id,
                         "request_id": attempt_id, "attempt": chunk.get("attempt"), "reason": chunk.get("reason", "")})
-                elif kind == "provider_terminal" and chunk.get("status") not in {None, "completed"}:
-                    raise ContextError("状态整理响应未完整结束。")
+                elif kind == "provider_terminal":
+                    terminal = {"terminal_status": str(chunk.get("status") or ""),
+                                "event_type": str(chunk.get("event_type") or kind),
+                                "finish_reason": str(chunk.get("finish_reason") or ""),
+                                "response_id": str(chunk.get("response_id") or ""),
+                                "last_provider_sequence": chunk.get("provider_sequence"),
+                                "error": redact_diagnostic(str(chunk.get("error") or ""))[:2000]}
+                    if terminal["terminal_status"] != "completed":
+                        if terminal["finish_reason"] in {"length", "max_output_tokens", "max_tokens"}:
+                            raise ContextError("上下文压缩输出达到上限，未保存这次检查点。请重试压缩。")
+                        detail = terminal["error"] or terminal["finish_reason"] or terminal["terminal_status"]
+                        raise ContextError(f"上下文压缩被服务拒绝或未完成：{detail}。请重试压缩。")
                 elif kind == "usage":
                     usage = dict(chunk.get("usage") or {})
                     usage.update(request_id=attempt_id, turn_id=self.turn_id, run_id=self.request_id,
@@ -2495,13 +2508,26 @@ class LLMWorker(QThread):
                     self.observability_signal.emit({"type": "llm_usage", "usage": usage, "timestamp": time.time()})
             if self.is_stopped:
                 raise ContextCancelled("已停止压缩上下文。")
-            self._record_provider_attempt(attempt_id, {"status": "completed", "finished_at": time.time()})
+            if terminal.get("terminal_status") != "completed":
+                raise ContextError("上下文压缩缺少完整终止事件，未保存这次检查点。请重试压缩。")
+            finished_at = time.time()
+            self._record_provider_attempt(attempt_id, {**terminal, "status": "completed",
+                "finished_at": finished_at, "duration": finished_at - started_at})
             text = "".join(content)
             security_run = getattr(provider, "data_security_run", None)
             return security_run.restore_text(text) if security_run is not None else text
         except Exception as exc:
-            self._record_provider_attempt(attempt_id, {"status": "failed", "error_type": type(exc).__name__,
-                                                     "finished_at": time.time()})
+            finished_at = time.time()
+            safe_error = redact_diagnostic(str(exc))[:2000]
+            self._record_provider_attempt(attempt_id, {**terminal, "status": "failed",
+                "error": terminal.get("error") or safe_error, "error_type": type(exc).__name__,
+                "finished_at": finished_at, "duration": finished_at - started_at})
+            self.observability_signal.emit({"type": "context_checkpoint_request_error",
+                "run_id": self.request_id, "request_id": attempt_id, **terminal,
+                "error": safe_error, "duration": finished_at - started_at})
+            if not terminal and any(marker in str(exc) for marker in (
+                    "without a terminal event", "without a finish_reason", "without a message_stop")):
+                raise ContextError("上下文压缩缺少完整终止事件，未保存这次检查点。请重试压缩。") from exc
             raise
         finally:
             close = getattr(stream, "close", None)

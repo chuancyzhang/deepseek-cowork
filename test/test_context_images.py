@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from core.context_images import ImageBudgetUnavailable, image_token_budget
+from core.context_images import ImageBudgetUnavailable, image_dimensions, image_token_budget
 from core.long_context import estimate_request
 
 
@@ -17,7 +17,28 @@ class ImageContextBudgetTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = os.path.join(self.temp.name, "image.png")
         Image.new("RGB", (1024, 1024)).save(self.path)
-        self.part = {"type": "input_image", "path": self.path, "detail": "auto"}
+        self.part = {"type": "input_image", "path": self.path, "detail": "auto", "source": "user_added"}
+
+    def test_real_attachment_history_and_protocol_sources(self):
+        history = [{"role": "user", "content": "看图", "content_parts": [self.part]},
+                   {"role": "assistant", "content": "已收到"}, {"role": "user", "content": "继续"}]
+        before = copy.deepcopy(history)
+        stats = {}
+        estimate_request(history, [], model_name="gpt-6.1-sol", image_stats=stats)
+        self.assertEqual(stats["unestimated_images"], 1)
+        stats = {}
+        estimate_request(history, [], model_name="gpt-6-astra", image_stats=stats)
+        self.assertEqual(stats["image_tokens"], 1229)
+        self.assertEqual(history, before)
+        with open(self.path, "rb") as image:
+            encoded = base64.b64encode(image.read()).decode("ascii")
+        for part in ({"source": {"type": "base64", "data": encoded}},
+                     {"source": {"url": "data:image/png;base64," + encoded}},
+                     {"source": "user_added", "image_url": {"url": "data:image/png;base64," + encoded}},
+                     {**self.part, "image_url": "https://invalid.test/unreadable"}):
+            self.assertEqual(image_dimensions(part), (1024, 1024))
+        with self.assertRaises(ImageBudgetUnavailable):
+            image_dimensions({"source": "user_added"})
 
     def test_documented_model_rules_and_detail_levels(self):
         for model, detail, expected in (

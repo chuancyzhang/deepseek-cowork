@@ -1020,6 +1020,30 @@ class OpenAIProvider(LLMProvider):
                 replay_items = self._normalize_responses_replay_items(
                     self._object_value(response, "output"),
                 )
+                completed_text_parts = []
+                for item in replay_items:
+                    if item.get("type") != "message":
+                        continue
+                    for part in item.get("content") or []:
+                        if not isinstance(part, dict):
+                            continue
+                        part_type = str(part.get("type") or "")
+                        if part_type == "output_text":
+                            completed_text_parts.append(str(part.get("text") or ""))
+                        elif part_type == "refusal":
+                            completed_text_parts.append(
+                                str(part.get("refusal") or part.get("text") or "")
+                            )
+                completed_output_text = "".join(completed_text_parts)
+                if streamed_output_text and not completed_output_text.startswith(streamed_output_text):
+                    raise RuntimeError(
+                        "服务返回的最终正文与已接收内容不一致，已有内容已保留，请重试。"
+                    )
+                else:
+                    missing_output_text = completed_output_text[len(streamed_output_text):]
+                    if missing_output_text:
+                        streamed_output_text += missing_output_text
+                        yield {"type": "content", "content": missing_output_text}
                 sanitized_replay_items = []
                 for item in replay_items:
                     if item.get("type") != "image_generation_call":
@@ -1041,33 +1065,6 @@ class OpenAIProvider(LLMProvider):
                         "id": item_id,
                     })
                 replay_items = sanitized_replay_items
-                completed_text_parts = []
-                for item in replay_items:
-                    if item.get("type") != "message":
-                        continue
-                    for part in item.get("content") or []:
-                        if not isinstance(part, dict):
-                            continue
-                        part_type = str(part.get("type") or "")
-                        if part_type == "output_text":
-                            completed_text_parts.append(str(part.get("text") or ""))
-                        elif part_type == "refusal":
-                            completed_text_parts.append(
-                                str(part.get("refusal") or part.get("text") or "")
-                            )
-                completed_output_text = "".join(completed_text_parts)
-                if streamed_output_text and not completed_output_text.startswith(streamed_output_text):
-                    yield {
-                        "type": "content_snapshot",
-                        "content": completed_output_text,
-                        "previous_content": streamed_output_text,
-                    }
-                    streamed_output_text = completed_output_text
-                else:
-                    missing_output_text = completed_output_text[len(streamed_output_text):]
-                    if missing_output_text:
-                        streamed_output_text += missing_output_text
-                        yield {"type": "content", "content": missing_output_text}
                 for item in replay_items:
                     if item.get("type") != "function_call":
                         continue
@@ -1144,6 +1141,7 @@ class OpenAIProvider(LLMProvider):
                 yield {
                     "type": "provider_terminal",
                     "status": "completed",
+                    "event_type": event_type,
                     "response_id": str(self._object_value(response, "id", "") or ""),
                     "provider_sequence": provider_sequence,
                 }
@@ -1157,6 +1155,8 @@ class OpenAIProvider(LLMProvider):
                     "type": "provider_terminal",
                     "status": "incomplete" if event_type == "response.incomplete" else "failed",
                     "event_type": event_type,
+                    "finish_reason": str(self._object_value(
+                        self._object_value(response, "incomplete_details"), "reason", "") or ""),
                     "response_id": str(self._object_value(response, "id", "") or ""),
                     "provider_sequence": provider_sequence,
                     "error": str(message or ""),
@@ -1643,9 +1643,15 @@ class AnthropicProvider(LLMProvider):
                 ),
             }
             terminal_seen = False
+            checkpoint_request = bool((request_context or {}).get("tools_disabled"))
+            response_id, stop_reason = "", ""
             for event in _iter_registered_provider_stream(request_context, stream):
                 if event.type == "message_stop":
                     terminal_seen = True
+                elif event.type == "message_start":
+                    response_id = str(getattr(getattr(event, "message", None), "id", "") or "")
+                elif event.type == "message_delta":
+                    stop_reason = str(getattr(getattr(event, "delta", None), "stop_reason", "") or stop_reason)
                 elif event.type == "content_block_delta":
                     delta_type = getattr(event.delta, "type", "")
                     if delta_type == "text_delta":
@@ -1669,14 +1675,17 @@ class AnthropicProvider(LLMProvider):
                                 "arguments": "",
                             },
                         }
-            if is_official_deepseek_api(self.base_url) and not terminal_seen:
+            if (checkpoint_request or is_official_deepseek_api(self.base_url)) and not terminal_seen:
                 raise ProviderStreamError(
-                    "DeepSeek Anthropic stream ended without a message_stop."
+                    "Anthropic stream ended without a message_stop."
                 )
             yield {
                 "type": "provider_terminal",
-                "status": "completed",
-                "finish_reason": "end_turn",
+                "status": ("incomplete" if checkpoint_request and stop_reason not in {
+                    "end_turn", "stop_sequence", "tool_use"} else "completed"),
+                "finish_reason": stop_reason or ("" if checkpoint_request else "end_turn"),
+                "event_type": "message_stop" if terminal_seen else "",
+                "response_id": response_id,
             }
 
     def test_connection(self, timeout=20):

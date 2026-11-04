@@ -3,6 +3,7 @@ import json
 import unittest
 
 from core.conversation_render import (
+    align_source_fragments,
     build_conversation_render_items,
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
@@ -11,6 +12,50 @@ from core.conversation_render import (
 
 
 class TestConversationRender(unittest.TestCase):
+    def test_fragment_alignment_preserves_exact_text_and_only_tolerates_boundary_whitespace(self):
+        cases = [
+            ("  a\n  b\nend", ["  a\n", "  b\n"], "end"),
+            ("  a\n  b\nend", ["a", "b"], "\nend"),
+            ("  a\n  b\nend", ["", "a", "", "b"], "\nend"),
+            ("a a tail", ["a", "a "], "tail"),
+            ("\nbody\n", ["body"], "\n"),
+            (" A B", ["A"], " B"),
+            (" A B", ["A "], "B"),
+            (" \nbody", [""], " \nbody"),
+        ]
+        for raw, fragments, suffix in cases:
+            with self.subTest(raw=raw, fragments=fragments):
+                ranges, tail = align_source_fragments(raw, fragments)
+                self.assertEqual(tail, suffix)
+                self.assertEqual("".join(raw[start:end] for start, end in ranges) + tail, raw)
+        for raw, fragments in [("x body", ["body"]), ("a  b", ["a b"]),
+                               ("a b", ["b", "a"]), ("a", ["a", "a"])]:
+            self.assertIsNone(align_source_fragments(raw, fragments))
+
+    def test_legacy_fragments_restore_raw_ranges_without_changing_ledger_or_guidance_order(self):
+        meta = {"ui_visible_fragment": True, "ui_source_message_id": "src", "ui_turn_group_id": "g"}
+        messages = [{"id": "u", "role": "user", "content": "same question"},
+                    {"id": "f1", "role": "assistant", "content": "first", "meta": {**meta, "ui_stage_id": "s1"}},
+                    {"id": "guide", "role": "user", "content": "continue", "meta": {"same_turn_guidance": True}},
+                    {"id": "f2", "role": "assistant", "content": "second", "meta": {**meta, "ui_stage_id": "s2"}},
+                    {"id": "src", "role": "assistant", "content": "  first\n    second\nend",
+                     "tool_calls": [{"id": "call", "function": {"name": "read", "arguments": "{}"}}]},
+                    {"id": "tool", "role": "tool", "tool_call_id": "call", "content": "result"},
+                    {"id": "u2", "role": "user", "content": "same question"},
+                    {"id": "a2", "role": "assistant", "content": "  first\n    second\nend"}]
+        before = copy.deepcopy(messages)
+        projected = project_visible_messages(messages)
+        self.assertEqual([m["id"] for m in projected], ["u", "f1", "guide", "f2", "tool", "u2", "a2"])
+        self.assertEqual(projected[1]["content"], "  first")
+        self.assertEqual(projected[3]["content"], "\n    second\nend")
+        self.assertEqual(projected[1]["content"] + projected[3]["content"], messages[4]["content"])
+        paged = [m for i in range(len(messages)) for m in project_visible_messages(messages, start=i, end=i + 1)]
+        self.assertEqual(paged, projected)
+        self.assertEqual(messages, before)
+        messages[4]["content"] = "different"
+        with self.assertLogs("core.conversation_render", level="WARNING"):
+            self.assertEqual([m["id"] for m in project_visible_messages(messages)], [m["id"] for m in messages])
+
     def test_hidden_knowledge_context_does_not_split_streamed_and_canonical_answer(self):
         from core.knowledge_library import knowledge_context_message
         from core.message_persistence import filter_persistable_messages, project_provider_messages

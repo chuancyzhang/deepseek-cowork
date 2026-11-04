@@ -6,6 +6,42 @@ import test_deepseek_provider as helpers
 
 
 class TestContextProviderContract(unittest.TestCase):
+    def test_checkpoint_terminal_details_are_retained_and_eof_is_rejected(self):
+        from core.agent import LLMWorker
+        from core.long_context import ContextBudget, ContextError, normalize_policy
+        for status, reason, expected in (("completed", "stop", None),
+                                         ("incomplete", "max_output_tokens", "输出达到上限"),
+                                         ("incomplete", "max_tokens", "输出达到上限"),
+                                         ("failed", "", "被服务拒绝"),
+                                         (None, "", "缺少完整终止事件")):
+            with self.subTest(status=status):
+                records, events = [], []
+                chunks = [{"type": "content", "content": "checkpoint"}]
+                if status:
+                    chunks.append({"type": "provider_terminal", "status": status,
+                        "finish_reason": reason, "event_type": "response." + status,
+                        "response_id": "response-id", "error": 'Bearer private-token'})
+                worker = SimpleNamespace(request_id="r", is_stopped=False,
+                    context_window_manager=SimpleNamespace(budget=ContextBudget.from_profile({}, normalize_policy({"enabled": True}))),
+                    _record_provider_attempt=lambda identity, value: records.append(value),
+                    observability_signal=SimpleNamespace(emit=events.append),
+                    _provider_chat_stream=lambda *a, **kw: iter(chunks),
+                    _register_provider_stream=Mock(), _release_provider_stream=Mock())
+                if expected:
+                    with self.assertRaisesRegex(ContextError, expected):
+                        LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, 0)
+                    self.assertEqual(records[-1]["status"], "failed")
+                else:
+                    self.assertEqual(LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, 0), "checkpoint")
+                    self.assertEqual(records[-1]["status"], "completed")
+                if status:
+                    self.assertEqual(records[-1]["terminal_status"], status)
+                    self.assertEqual(records[-1]["event_type"], "response." + status)
+                    self.assertEqual(records[-1]["response_id"], "response-id")
+                    self.assertEqual(records[-1]["finish_reason"], reason)
+                self.assertNotIn("private-token", str(records) + str(events))
+                self.assertGreaterEqual(records[-1]["duration"], 0)
+
     def test_history_save_failure_does_not_start_background_reader(self):
         from core.agent import LLMWorker
         manager = SimpleNamespace(submit=Mock())

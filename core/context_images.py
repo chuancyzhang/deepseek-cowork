@@ -22,13 +22,13 @@ class ImageBudgetUnavailable(ValueError):
 def image_dimensions(part):
     """Inspect local headers only. Budgeting never fetches a remote image."""
     path = part.get("path")
-    source = part.get("source") or {}
-    value = part.get("image_url") or source.get("url") or ""
-    url = value.get("url", "") if isinstance(value, dict) else value
     try:
         if path:
             with Image.open(path) as image:
                 return image.size
+        source = part.get("source") if isinstance(part.get("source"), dict) else {}
+        value = part.get("image_url") or source.get("url") or ""
+        url = value.get("url", "") if isinstance(value, dict) else value
         if isinstance(url, str) and url.startswith("data:"):
             header, encoded = url.split(",", 1)
             if not header.endswith(";base64"):

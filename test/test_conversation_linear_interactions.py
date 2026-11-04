@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSiz
 
 from core.chat_storage import ChatStorage
 from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
-from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message
+from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message, project_visible_messages
 from core.runtime_journal import RuntimeJournal
 from core.theme import DesignTokens
 import main as main_module
@@ -2989,30 +2989,42 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(bubble.role, "User")
             self.assertNotIn("guide-commit-once", state.guidance_widgets)
         finally:
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_completed_run_does_not_reappend_tool_round_committed_before_guidance(self):
-        window = MainWindow()
+        with patch.object(MainWindow, "start_background_services", lambda self: None):
+            window = MainWindow()
         try:
             state = window.get_current_session()
             window._retire_session_empty_state(state, reason="test_guidance_generated_replay")
             state.live_activity = True
+            state.history_loaded = True
+            state.history_loading = False
             state.active_turn_id = 9
             state.active_turn_request_id = "request-guidance-9"
-            state.active_turn_user_message_id = "user-guidance-9"
+            state.active_turn_user_message_id = f"{state.session_id}:user-guidance-9"
             state.messages = [{
-                "id": "user-guidance-9",
+                "id": f"{state.session_id}:user-guidance-9",
                 "role": "user",
                 "content": "先查询",
                 "meta": {"turn_id": "9", "request_id": "request-guidance-9"},
             }]
+            window.chat_storage.save_conversation_safely(state.session_id, state.messages)
+            window.runtime_journal.begin_run(state.session_id, "request-guidance-9", writer_owner="test",
+                                             base_messages=state.messages)
             first = window._append_live_thinking_segment(state)
+            window.handle_observability_event({"type": "assistant_message_started", "message_id": f"{state.session_id}:provider-stage-9"},
+                                               state.session_id, 9, "request-guidance-9")
             first.set_main_content("正在查询。", final=False)
             state.current_content_buffer = "正在查询。"
             window._timeline_append_text_delta(state, "content_fragment", "正在查询。")
+            window.add_tool_card({"id": f"{state.session_id}:tool-guidance-9", "name": "search", "args": {}},
+                                 state.session_id, turn_id=9, request_id="request-guidance-9")
+            window.update_tool_card({"id": f"{state.session_id}:tool-guidance-9", "result": "ok"},
+                                    state.session_id, turn_id=9, request_id="request-guidance-9")
             guidance = {
-                "id": "guide-guidance-9",
+                "id": f"{state.session_id}:guide-guidance-9",
                 "role": "user",
                 "content": "再比较另一家公司",
                 "meta": {
@@ -3022,6 +3034,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 },
             }
             window._accept_turn_guidance(state, guidance, "再比较另一家公司", [])
+            window.handle_observability_event({"type": "assistant_message_started", "message_id": f"{state.session_id}:provider-final-9"},
+                                               state.session_id, 9, "request-guidance-9")
             window.handle_content_signal(
                 "最终比较结果。",
                 state.session_id,
@@ -3035,24 +3049,24 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "request_id": "request-guidance-9",
                     "generated_messages": [
                         {
-                            "id": "provider-stage-9",
+                            "id": f"{state.session_id}:provider-stage-9",
                             "role": "assistant",
                             "content": "正在查询。",
                             "tool_calls": [{
-                                "id": "tool-guidance-9",
+                                "id": f"{state.session_id}:tool-guidance-9",
                                 "type": "function",
                                 "function": {"name": "search", "arguments": "{}"},
                             }],
                         },
                         {
-                            "id": "tool-result-guidance-9",
+                            "id": f"{state.session_id}:tool-result-guidance-9",
                             "role": "tool",
-                            "tool_call_id": "tool-guidance-9",
+                            "tool_call_id": f"{state.session_id}:tool-guidance-9",
                             "content": "ok",
                         },
                         copy.deepcopy(guidance),
                         {
-                            "id": "provider-final-9",
+                            "id": f"{state.session_id}:provider-final-9",
                             "role": "assistant",
                             "content": "最终比较结果。",
                         },
@@ -3062,20 +3076,31 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=9,
                 request_id="request-guidance-9",
             )
-
+            for _ in range(500):
+                if state.completed_turn_id == 9:
+                    break
+                QTest.qWait(10)
+            self.assertEqual(state.completed_turn_id, 9)
+            visible = project_visible_messages(state.messages)
             self.assertEqual(
-                [(item.get("role"), item.get("content")) for item in state.messages],
+                [(item.get("role"), item.get("content")) for item in visible],
                 [
                     ("user", "先查询"),
                     ("assistant", "正在查询。"),
+                    ("tool", "ok"),
                     ("user", "再比较另一家公司"),
                     ("assistant", "最终比较结果。"),
                 ],
             )
-            self.assertFalse(any(item.get("role") == "tool" for item in state.messages))
+            for identity in (f"{state.session_id}:provider-stage-9", f"{state.session_id}:tool-result-guidance-9", f"{state.session_id}:provider-final-9", f"{state.session_id}:guide-guidance-9"):
+                self.assertEqual(sum(item.get("id") == identity for item in state.messages), 1)
+            window.chat_storage.save_conversation_safely(state.session_id, state.messages)
+            reopened = project_visible_messages(window.chat_storage.get_messages(state.session_id))
+            self.assertEqual([(m["id"], m["role"], m["content"]) for m in reopened],
+                             [(m["id"], m["role"], m["content"]) for m in visible])
         finally:
-            window.close()
-            window.deleteLater()
+            from ui_window_cleanup import close_test_window
+            close_test_window(window)
 
     def test_unapplied_guidance_becomes_next_turn_without_duplicate_message(self):
         window = MainWindow()
@@ -3337,14 +3362,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 "meta": {"turn_id": "1", "request_id": "request-stop-1"},
             }]
             bubble = window._append_live_thinking_segment(state)
-            state.current_content_buffer = "部分结果"
-            bubble.set_main_content("部分结果", final=False)
+            state.current_content_buffer = "    部分结果\n"
+            bubble.set_main_content("    部分结果\n", final=False)
             state.active_run_retry_context = {"source_run_id": "request-stop-1"}
             window.stop_agent()
-            self.assertEqual(bubble.main_content_text, "部分结果")
+            self.assertEqual(bubble.main_content_text, "    部分结果\n")
             self.assertEqual(
                 [(item.get("role"), item.get("content")) for item in state.messages],
-                [("user", "先给我部分结果"), ("assistant", "部分结果")],
+                [("user", "先给我部分结果"), ("assistant", "    部分结果\n")],
             )
             persisted = state.messages[-1]
             self.assertTrue(persisted["meta"]["context_visible_interruption"])
@@ -3457,9 +3482,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             }]
 
             first = window._append_live_thinking_segment(state)
-            first.set_main_content("先分析资金面", final=False)
-            state.current_content_buffer = "先分析资金面"
-            window._timeline_append_text_delta(state, "content_fragment", "先分析资金面")
+            first.set_main_content("  先分析资金面\n", final=False)
+            state.current_content_buffer = "  先分析资金面\n"
+            window._timeline_append_text_delta(state, "content_fragment", "  先分析资金面\n")
             guidance = {
                 "id": "guide-guided-7",
                 "role": "user",
@@ -3486,12 +3511,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
 
             second = state.temp_thinking_bubble
-            second.set_main_content("东方财富显示主线仍在", final=False)
-            state.current_content_buffer = "东方财富显示主线仍在"
+            second.set_main_content("    东方财富显示主线仍在\n", final=False)
+            state.current_content_buffer = "    东方财富显示主线仍在\n"
             window._timeline_append_text_delta(
                 state,
                 "content_fragment",
-                "东方财富显示主线仍在",
+                "    东方财富显示主线仍在\n",
             )
             window.stop_agent()
 
@@ -3499,9 +3524,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 [(item.get("role"), item.get("content")) for item in state.messages],
                 [
                     ("user", "分析行情"),
-                    ("assistant", "先分析资金面"),
+                    ("assistant", "  先分析资金面\n"),
                     ("user", "改用东方财富数据"),
-                    ("assistant", "东方财富显示主线仍在"),
+                    ("assistant", "    东方财富显示主线仍在\n"),
                 ],
             )
             self.assertEqual(
@@ -3541,9 +3566,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 [(item.get("role"), item.get("content")) for item in stored],
                 [
                     ("user", "分析行情"),
-                    ("assistant", "先分析资金面"),
+                    ("assistant", "  先分析资金面\n"),
                     ("user", "改用东方财富数据"),
-                    ("assistant", "东方财富显示主线仍在"),
+                    ("assistant", "    东方财富显示主线仍在\n"),
                 ],
             )
         finally:

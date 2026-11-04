@@ -59,6 +59,7 @@ class ContextProvider:
             assert tools == []
             yield {"type": "content", "content": json.dumps(checkpoint(["u0"], goal="Finish without sending email"))}
             yield {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}}
+            yield {"type": "provider_terminal", "status": "completed", "finish_reason": "stop"}
             return
         index = len(self.main_requests)
         self.main_requests.append(copy.deepcopy({"messages": messages, "tools": tools}))

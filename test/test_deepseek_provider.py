@@ -380,6 +380,27 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertIn("Responses", chunks[0]["content"])
         client.chat.completions.create.assert_not_called()
 
+    def test_image_permission_does_not_retry_or_disable_tools_until_user_changes_option(self):
+        provider, client = self._build_provider(base_url="https://example.test/v1", model_name="test-model",
+            api_protocol=API_PROTOCOL_RESPONSES, supports_image_generation=True)
+        tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]
+        client.responses.create.side_effect = RuntimeError("403 Image generation is not enabled for this group")
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}], tools=tools))
+        self.assertEqual(client.responses.create.call_count, 1)
+        self.assertTrue(provider.supports_image_generation)
+        self.assertIn("not enabled for this group", chunks[-1]["content"])
+        self.assertIn({"type": "image_generation"}, client.responses.create.call_args.kwargs["tools"])
+        provider.supports_image_generation = False  # Explicit existing model option.
+        client.responses.create.side_effect = None
+        client.responses.create.return_value = [SimpleNamespace(type="response.completed", response=SimpleNamespace(
+            id="retry", usage=None, output=[{"id": "m", "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "hello"}]}]))]
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}], tools=tools))
+        sent = client.responses.create.call_args.kwargs["tools"]
+        self.assertEqual([tool["type"] for tool in sent], ["function"])
+        self.assertEqual(sent[0]["name"], "read_file")
+        self.assertEqual(next(c for c in chunks if c["type"] == "provider_terminal")["status"], "completed")
+
     def test_responses_completed_output_repairs_missing_function_call_stream_events(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1",
@@ -459,48 +480,32 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             "completed",
         )
 
-    def test_responses_completed_output_reconciles_divergent_streamed_text(self):
+    def test_responses_final_conflicts_preserve_streamed_text_and_require_manual_retry(self):
         provider, client = self._build_provider(
-            base_url="https://api.openai.com/v1",
-            model_name="gpt-5.6",
-            api_protocol=API_PROTOCOL_RESPONSES,
-        )
-        client.responses.create.return_value = [
-            SimpleNamespace(type="response.output_text.delta", delta="partial"),
-            SimpleNamespace(
-                type="response.completed",
-                response=SimpleNamespace(
-                    id="resp-divergent-text",
-                    output=[
-                        {
-                            "id": "msg-divergent-text",
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "text": "different",
-                                    "annotations": [],
-                                }
-                            ],
-                        }
-                    ],
-                    usage=None,
-                ),
-            ),
-        ]
-
-        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
-
-        snapshot = next(chunk for chunk in chunks if chunk["type"] == "content_snapshot")
-        self.assertEqual(snapshot["previous_content"], "partial")
-        self.assertEqual(snapshot["content"], "different")
-        self.assertFalse(any(chunk["type"] == "error" for chunk in chunks))
-        self.assertEqual(
-            next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")["status"],
-            "completed",
-        )
+            base_url="https://api.openai.com/v1", model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES)
+        for final_text in ("different", "part", ""):
+            with self.subTest(final_text=final_text):
+                client.responses.create.return_value = [
+                    SimpleNamespace(type="response.output_text.delta", delta="partial"),
+                    SimpleNamespace(type="response.completed", response=SimpleNamespace(
+                        id="resp-conflict", output=[
+                            {"id": "msg", "type": "message", "role": "assistant", "status": "completed",
+                             "content": [{"type": "output_text", "text": final_text}]},
+                            {"type": "function_call", "call_id": "call", "name": "write_file", "arguments": "{}"},
+                            {"type": "image_generation_call", "id": "image", "result": "aW1hZ2U="}], usage=None))]
+                before = client.responses.create.call_count
+                chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+                self.assertEqual(client.responses.create.call_count - before, 1)
+                self.assertEqual([c["content"] for c in chunks if c["type"] == "content"], ["partial"])
+                self.assertIn("最终正文与已接收内容不一致", next(c["content"] for c in chunks if c["type"] == "error"))
+                self.assertFalse(any(c["type"] in {"content_snapshot", "response_items", "provider_terminal",
+                                                    "tool_call", "output_image"} for c in chunks))
+        client.responses.create.return_value = [SimpleNamespace(type="response.completed", response=SimpleNamespace(
+            id="retry", output=[{"id": "m", "type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "retry succeeded"}]}], usage=None))]
+        retry = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+        self.assertEqual(next(c for c in retry if c["type"] == "provider_terminal")["status"], "completed")
 
     def test_deepseek_responses_accepts_assistant_message_without_output_id(self):
         provider, _client = self._build_provider(

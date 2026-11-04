@@ -127,6 +127,7 @@ from core.conversation_drafts import (
 from core.runtime_journal import RuntimeJournal, RUN_NONTERMINAL_STATUSES
 from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
 from core.conversation_render import (
+    align_source_fragments,
     _is_hidden_context_message,
     project_visible_messages,
     build_conversation_render_spans,
@@ -24526,8 +24527,8 @@ class ChatBubble(QFrame):
     def freeze_content_fragment(self):
         # Content already rendered beneath this thought becomes the stage
         # reply for this conversational segment. Keep it visible in place.
-        text = str(getattr(self, "main_content_text", "") or "").strip()
-        if not text:
+        text = str(getattr(self, "main_content_text", "") or "")
+        if not text.strip():
             return None
         self.set_main_content(text, final=True)
         return text
@@ -37725,23 +37726,52 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
                         )
             if event_type == "assistant_message_started":
                 source_id = str(event.get("message_id") or "")
+                try:
+                    state.replay_content_skip, state.replay_snapshot_skip = (
+                        self._replay_source_content_cursor(state, source_id)
+                        if getattr(state, "replaying_daemon_history", False) else (0, 0)
+                    )
+                except Exception as exc:
+                    worker = getattr(state, "daemon_worker", None)
+                    if worker is not None:
+                        # Fence queued deliveries before retiring the stream buffer.
+                        state.daemon_worker = None
+                        worker.detach()
+                        self._disconnect_worker_signals(worker)
+                        if worker.isRunning():
+                            self._keep_detached_worker(worker)
+                    state.daemon_transport_state = "disconnected"
+                    state.turn_steerable = False
+                    self.set_session_phase("恢复失败", state.session_id)
+                    log_chat_recovery("daemon_content_alignment_failed", session_id=state.session_id,
+                                      run_id=state.active_turn_request_id, source_id=source_id,
+                                      error=str(exc))
+                    self._show_daemon_reconnect_notice(state, state.active_turn_request_id,
+                        error="对话过程恢复失败，无法准确对齐已显示正文。已有内容已保留，请重新连接；仍失败请导出日志。")
+                    return
                 state.active_source_message_id = source_id
-                state.replay_content_skip = (
-                    sum(len(str(message.get("content") or "")) for message in state.messages
-                        if (message.get("meta") or {}).get("ui_visible_fragment")
-                        and (message.get("meta") or {}).get("ui_source_message_id") == source_id)
-                    if getattr(state, "replaying_daemon_history", False) else 0
-                )
                 bubble = self._ensure_live_agent_stage(state)
                 if bubble is not None:
                     previous_source = str(getattr(bubble, "ui_source_message_id", ""))
-                    if previous_source and previous_source != source_id:
+                    has_stage_output = bool(
+                        getattr(bubble, "main_content_text", "") or state.current_content_buffer
+                        or getattr(bubble, "timeline_events", []) or state.pending_thinking_delta
+                        or getattr(bubble, "_pending_generated_images", [])
+                    )
+                    if previous_source and previous_source != source_id and has_stage_output:
+                        self.flush_session_thinking(state.session_id)
                         self.flush_session_content(state.session_id, final=True)
                         self._close_live_agent_stage(state)
                         state.current_content_buffer = ""
                         state.current_thinking_buffer = ""
                         state.last_flushed_content_buffer = ""
                         bubble = self._append_live_thinking_segment(state)
+                    elif previous_source and previous_source != source_id:
+                        # Guidance opens an empty placeholder before the next
+                        # source is known. It is not another anchor for old tools.
+                        log_chat_recovery("empty_stage_source_rebound", session_id=state.session_id,
+                                          run_id=state.active_turn_request_id, source_id=source_id,
+                                          previous_source_id=previous_source, stage_id=bubble.ui_stage_id)
                     bubble.ui_source_message_id = source_id
                 return
             if event_type in {"provider_request_start", "context_checkpoint_request_start"}:
@@ -51286,10 +51316,10 @@ a {{ overflow-wrap: anywhere; }}
             stage_groups.append(persisted_group)
 
         if not stage_groups and fallback_bubble is not None:
-            content = str(getattr(fallback_bubble, "main_content_text", "") or "").strip()
+            content = str(getattr(fallback_bubble, "main_content_text", "") or "")
             group_id = str(getattr(fallback_bubble, "ui_turn_group_id", "") or "")
             stage_id = str(getattr(fallback_bubble, "ui_stage_id", "") or "fallback-stage")
-            if content or (group_id, stage_id) in thinking_stages:
+            if content.strip() or (group_id, stage_id) in thinking_stages:
                 message_id = self._visible_assistant_message_id(
                     state.session_id,
                     run_key,
@@ -51306,7 +51336,7 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_reply_kind": reply_kind,
                     "ui_source_message_id": str(getattr(fallback_bubble, "ui_source_message_id", "") or ""),
                     "ui_visible_fragment": True,
-                    "ui_display_anchor_only": not bool(content),
+                    "ui_display_anchor_only": not bool(content.strip()),
                 }
                 if terminal:
                     meta.update({
@@ -51393,7 +51423,7 @@ a {{ overflow-wrap: anywhere; }}
         )
         interruption_text = str(
             getattr(state, "current_content_buffer", "") or ""
-        ).strip()
+        )
         if bubble is not None:
             bubble.stop_thinking_timers()
             bubble.set_message_actions_enabled(False)
@@ -51452,6 +51482,10 @@ a {{ overflow-wrap: anywhere; }}
             return "interrupted", "已停止"
         normalized_error = str(error_text or "").strip()
         lowered_error = normalized_error.lower()
+        if "image generation is not enabled for this group" in lowered_error:
+            return "provider_error", "当前分组未开通图片生成。请在模型设置中关闭‘图片生成’，保存后重试；图片理解无需关闭。"
+        if "服务返回的最终正文与已接收内容不一致" in normalized_error:
+            return "provider_error", "服务返回的最终正文与已接收内容不一致，已有内容已保留，请重试。"
         if "invalid_model" in lowered_error or "model does not exist" in lowered_error:
             return "invalid_model", "模型不存在或当前账号无权访问，请检查模型名称和访问权限。"
         if "system message must be at the beginning" in lowered_error:
@@ -54105,6 +54139,7 @@ a {{ overflow-wrap: anywhere; }}
         state.active_source_message_id = ""
         state.replaying_daemon_history = False
         state.replay_content_skip = 0
+        state.replay_snapshot_skip = 0
         state.daemon_cursor_run_id = submit_request_id
         state.daemon_applied_sequence = 0
         state.daemon_reconnect_attempts = 0
@@ -55454,7 +55489,7 @@ a {{ overflow-wrap: anywhere; }}
         if previous_status != state.daemon_transport_state and session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
-    def _show_daemon_reconnect_notice(self, state, run_id, *, reconnecting=False, attempt=0):
+    def _show_daemon_reconnect_notice(self, state, run_id, *, reconnecting=False, attempt=0, error=""):
         manual_attempts = int(getattr(state, "daemon_reconnect_attempts", 0))
         count_text = f"已手动重连 {manual_attempts} 次。" if manual_attempts else ""
         if reconnecting:
@@ -55466,7 +55501,7 @@ a {{ overflow-wrap: anywhere; }}
                 f"{count_text}已显示内容保留，可重新连接，或点击输入框旁的停止按钮。"
             )
         notice = self._show_conversation_notice(
-            state, text, "info" if reconnecting else "warning",
+            state, error or text, "info" if reconnecting else "warning",
             action_text="" if reconnecting else "重新连接",
             action_callback=None if reconnecting else (
                 lambda sid=state.session_id, rid=run_id: self._reconnect_daemon_stream(sid, rid)
@@ -56367,6 +56402,9 @@ a {{ overflow-wrap: anywhere; }}
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        if getattr(state, "replay_snapshot_skip", 0):
+            # Earlier deltas use coordinates superseded by the recorded snapshot.
+            return
         skip = min(len(text or ""), int(getattr(state, "replay_content_skip", 0) or 0))
         if skip:
             state.replay_content_skip -= skip
@@ -56397,19 +56435,79 @@ a {{ overflow-wrap: anywhere; }}
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
 
+    @staticmethod
+    def _saved_source_message(state, source):
+        run_id = str(state.active_turn_request_id or "")
+        return next((message for message in state.messages
+                     if str(message.get("id") or "") == source
+                     and message.get("role") == "assistant"
+                     and not (message.get("meta") or {}).get("ui_visible_fragment")
+                     and str((message.get("meta") or {}).get("request_id") or run_id) == run_id), None)
+
+    def _replay_source_content_cursor(self, state, source):
+        """Return raw coverage and snapshots to reach its coordinate system.
+
+        Both counters belong only to this source's current replay. Snapshots
+        replace preceding deltas, so replay must reach the last recorded one
+        before subtracting the covered character count.
+        """
+        run_id = str(state.active_turn_request_id or "")
+        fragments = [str(message.get("content") or "") for message in state.messages
+                     if (message.get("meta") or {}).get("ui_visible_fragment")
+                     and (message.get("meta") or {}).get("ui_source_message_id") == source
+                     and str((message.get("meta") or {}).get("request_id") or run_id) == run_id]
+        canonical = MainWindow._saved_source_message(state, source)
+        if not any(fragments) and canonical is None:
+            return 0, 0
+        raw = ""
+        snapshots = 0
+        for event in self.runtime_journal.read_events(state.session_id, state.active_turn_request_id):
+            payload = event.get("payload") or {}
+            if str(payload.get("source_message_id") or "") != source:
+                continue
+            if payload.get("type") == "content":
+                raw += str(payload.get("delta") or "")
+            elif payload.get("type") == "content_snapshot":
+                raw = str(payload.get("content") or "")
+                snapshots += 1
+        aligned = align_source_fragments(raw, fragments)
+        if aligned is None:
+            raise ValueError("运行日志中的同源正文缺失或与已保存片段不一致。")
+        if canonical is not None:
+            content = (canonical.get("meta") or {}).get("security_display_content", canonical.get("content"))
+            aligned = align_source_fragments(raw, [content])
+            if aligned is None:
+                raise ValueError("运行日志中的同源正文与已保存完整消息不一致。")
+        offset = len(raw) - len(aligned[1])
+        log_chat_recovery("daemon_content_replay_aligned", session_id=state.session_id,
+                          run_id=run_id, source_id=source, covered_chars=offset, snapshots=snapshots)
+        return offset, snapshots
+
     def _visible_source_tail(self, state, text, bubble):
         source = str(getattr(bubble, "ui_source_message_id", "") or "")
         if not source:
             return str(text or "")
         stage_id = str(getattr(bubble, "ui_stage_id", "") or "")
-        prefix = "".join(
+        fragments = [
             str(message.get("content") or "") for message in state.messages
             if (message.get("meta") or {}).get("ui_visible_fragment")
             and (message.get("meta") or {}).get("ui_source_message_id") == source
             and (message.get("meta") or {}).get("ui_stage_id") != stage_id
-        )
+            and str((message.get("meta") or {}).get("request_id") or state.active_turn_request_id)
+                == str(state.active_turn_request_id)
+        ]
+        if getattr(state, "replaying_daemon_history", False):
+            canonical = MainWindow._saved_source_message(state, source)
+            if canonical is not None:
+                fragments = [(canonical.get("meta") or {}).get(
+                    "security_display_content", canonical.get("content"))]
         text = str(text or "")
-        return text[len(prefix):] if prefix and text.startswith(prefix) else text
+        aligned = align_source_fragments(text, fragments)
+        if aligned is None:
+            log_chat_recovery("live_projection_source_conflict", session_id=state.session_id,
+                              source_id=source, stage_id=stage_id)
+            return str(getattr(state, "current_content_buffer", "") or "")
+        return aligned[1]
 
     def handle_content_snapshot(self, text, session_id=None, turn_id=None, request_id=None):
         state = self.get_session(session_id)
@@ -56420,9 +56518,19 @@ a {{ overflow-wrap: anywhere; }}
         ):
             return
         canonical_content = str(text or "")
+        snapshots = int(getattr(state, "replay_snapshot_skip", 0) or 0)
+        if snapshots:
+            state.replay_snapshot_skip = snapshots - 1
+            if state.replay_snapshot_skip:
+                return
         bubble = self._ensure_live_agent_stage(state)
-        canonical_content = self._visible_source_tail(state, canonical_content, bubble)
-        state.replay_content_skip = 0
+        if snapshots:
+            skip = min(len(canonical_content), int(getattr(state, "replay_content_skip", 0) or 0))
+            state.replay_content_skip -= skip
+            canonical_content = canonical_content[skip:]
+        else:
+            canonical_content = self._visible_source_tail(state, canonical_content, bubble)
+            state.replay_content_skip = 0
         state.current_content_buffer = canonical_content
         state.last_flushed_content_buffer = ""
         if str(getattr(state, "ppt_agent_internal_stage", "") or "").strip():

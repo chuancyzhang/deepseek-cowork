@@ -107,6 +107,24 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.page.save_settings()
         self.assertEqual(ConfigManager().get_model_profile(model_id)["id"], model_id)
 
+    def test_saved_group_permission_warns_without_mutating_image_options(self):
+        editor, form = self.draft()
+        model_id = editor._active_form_id
+        form.api_protocol_combo.setCurrentIndex(form.api_protocol_combo.findData("responses"))
+        form.vision_check.setChecked(True)
+        form.image_generation_check.setChecked(True)
+        form.update_discovery({"group_restrictions": {"allow_image_generation": False}})
+        self.assertIn("当前分组未开通图片生成", form.discovery_warning.text())
+        self.assertFalse(form.discovery_warning.isHidden())
+        self.assertTrue(form.image_generation_check.isChecked())
+        self.page.save_settings()
+        self.assertTrue(ConfigManager().get_model_profile(model_id)["supports_image_generation"])
+        form.image_generation_check.setChecked(False)
+        self.page.save_settings()
+        saved = ConfigManager().get_model_profile(model_id)
+        self.assertFalse(saved["supports_image_generation"])
+        self.assertTrue(saved["supports_vision"])
+
     def test_multiple_manual_models_share_one_save_boundary(self):
         editor, first = self.draft()
         first_id = editor._active_form_id

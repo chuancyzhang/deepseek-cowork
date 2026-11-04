@@ -96,7 +96,9 @@ def iter_chat_completions_events(stream, *, usage_payload, error_factory):
     """
     tool_calls = _ToolCalls()
     terminal_seen = False
+    response_id = ""
     for chunk_number, chunk in enumerate(stream, 1):
+        response_id = str(_value(chunk, "id") or response_id)
         def fail(detail, status_code=None):
             error = error_factory(f"Chat Completions chunk {chunk_number}: {detail}.")
             if status_code is not None:
@@ -139,6 +141,8 @@ def iter_chat_completions_events(stream, *, usage_payload, error_factory):
                 "type": "provider_terminal",
                 "status": "completed" if str(finish_reason) in {"stop", "tool_calls"} else "incomplete",
                 "finish_reason": str(finish_reason),
+                **({"response_id": response_id} if response_id else {}),
+                **({"event_type": str(_value(chunk, "object"))} if _value(chunk, "object") else {}),
             }
     if not terminal_seen:
         raise error_factory("Chat Completions stream ended without a finish_reason.")

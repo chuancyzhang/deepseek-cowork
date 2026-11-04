@@ -3,6 +3,38 @@ import copy
 import logging
 
 
+def align_source_fragments(content, fragments):
+    """Return contiguous source ranges and the undisplayed suffix, or None.
+
+    Callers establish message identity before calling. Prefer exact raw text;
+    legacy fragments may differ only in boundary whitespace. Never search past
+    a non-whitespace character or normalize characters inside a fragment.
+    """
+    content = str(content or "")
+    fragments = [str(fragment or "") for fragment in fragments]
+    exact = content.startswith("".join(fragments))
+    ranges, offset = [], 0
+    for fragment in fragments:
+        start = offset
+        if exact or content.startswith(fragment, offset):
+            offset += len(fragment)
+        elif fragment.strip():
+            while offset < len(content) and content[offset].isspace():
+                offset += 1
+            core = fragment.strip()
+            if not content.startswith(core, offset):
+                return None
+            offset += len(core)
+            trailing = fragment[len(fragment.rstrip()):]
+            if trailing and content.startswith(trailing, offset):
+                offset += len(trailing)
+            # Unproven trailing whitespace belongs to the next range/suffix;
+            # consuming it here can discard the next live stage's indentation.
+        # Empty legacy anchors carry identity, not evidence of source coverage.
+        ranges.append((start, offset))
+    return ranges, content[offset:]
+
+
 def project_visible_messages(messages, *, start=0, end=None, timeline_events=()):
     """Join provider rounds onto display anchors, without changing the ledger.
 
@@ -107,19 +139,21 @@ def project_visible_messages(messages, *, start=0, end=None, timeline_events=())
         anchors = fragments.get((scopes[index], source), [])
         if not anchors:
             continue
-        visible = "".join(str(messages[i].get("content") or "") for i in anchors)
         content = str(message.get("content") or "")
-        if not content.startswith(visible):
+        aligned = align_source_fragments(content, [messages[i].get("content") for i in anchors])
+        if aligned is None:
             logging.getLogger(__name__).warning(
                 "history_projection_source_conflict source_id=%s ledger_index=%s anchors=%s",
                 source, index + scope_start, [anchor + scope_start for anchor in anchors],
             )
             continue  # Preserve both records when the identity/content contract fails.
-        for anchor in anchors:
+        ranges, remainder = aligned
+        for anchor, (begin, finish) in zip(anchors, ranges):
             slots[anchor][0] = copy.deepcopy(slots[anchor][0])
+            slots[anchor][0]["content"] = content[begin:finish]
         first = slots[anchors[0]][0]
         last = slots[anchors[-1]][0]
-        last["content"] = str(last.get("content") or "") + content[len(visible):]
+        last["content"] = str(last.get("content") or "") + remainder
         # Each fragment retains its own text and original stage/group identity.
         for anchor in anchors:
             fragment = slots[anchor][0]

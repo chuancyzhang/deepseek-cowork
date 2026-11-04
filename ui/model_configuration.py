@@ -374,6 +374,8 @@ class ModelEditForm(QWidget):
             self._source["discovery"] = copy.deepcopy(evidence)
         caps = evidence.get("capabilities", {})
         warnings = []
+        if (evidence.get("group_restrictions") or {}).get("allow_image_generation") is False:
+            warnings.append("当前分组未开通图片生成。请在模型设置中关闭‘图片生成’，保存后重试；图片理解无需关闭。")
         if evidence.get("protocol_status") == "unknown" and "api_protocol" not in self._manual_fields:
             warnings.append("调用方式未确认，请按站点说明选择 API 协议。")
         if evidence.get("metadata_warning"):

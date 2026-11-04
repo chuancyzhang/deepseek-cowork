@@ -27,6 +27,14 @@ def objects(value):
 
 
 class ChatCompletionsStreamTests(unittest.TestCase):
+    def test_terminal_retains_response_identity_for_checkpoint_diagnostics(self):
+        chunks = [frame({"content": "body"}, id="r", object="chat.completion.chunk"),
+                  frame(finish="length", object="chat.completion.chunk")]
+        terminal = list(self.parse(chunks))[-1]
+        self.assertEqual(terminal["response_id"], "r")
+        self.assertEqual(terminal["event_type"], "chat.completion.chunk")
+        self.assertEqual(terminal["status"], "incomplete")
+
     def parse(self, chunks):
         return iter_chat_completions_events(
             chunks,

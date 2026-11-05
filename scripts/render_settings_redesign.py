@@ -95,7 +95,7 @@ def run():
         while manager.preview is None and time.monotonic() < deadline:
             QTest.qWait(10)
         assert manager.preview and manager.preview["preview_id"] == candidate["preview_id"]
-        appearance = page._settings_pages[0]
+        appearance = page.ensure_page("appearance")
         QTest.qWait(150)
         appearance.verticalScrollBar().setValue(appearance.verticalScrollBar().maximum())
         capture("candidate.png")

@@ -142,7 +142,7 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
                 window.config_manager.set_god_mode(not window.config_manager.get_god_mode())
                 measure("settings-after-permission-change", window.open_settings)
                 assert window.product_pages[window.PAGE_SETTINGS] is settings
-                assert settings.god_mode_check.isChecked() == window.config_manager.get_god_mode()
+                assert settings._settings_baseline_state["config"]["god_mode"] == window.config_manager.get_god_mode()
                 checks.append("settings_reused_after_navigation_and_preference_changes")
                 settings.select_initial_page("企业消息")
                 settle()

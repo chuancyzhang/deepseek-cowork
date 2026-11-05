@@ -142,9 +142,30 @@ class ThemeSettingsPanel(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.pages = QStackedWidget()
+        self.pages = QStackedWidget(self)
         outer.addWidget(self.pages)
-        self.editor_page = QWidget()
+        self.editor_page = None
+        self._more_ready = False
+        self.hub_page = self._build_hub()
+        self.pages.addWidget(self.hub_page)
+        self.pages.setCurrentWidget(self.hub_page)
+        if callable(getattr(runtime_manager, "switch_theme", None)):
+            runtime_manager.selectionChanged.connect(self._selection_updated)
+            runtime_manager.previewStateChanged.connect(self._candidate_updated)
+            runtime_manager.previewLoadingChanged.connect(self._candidate_loading)
+            runtime_manager.themeChanged.connect(self._runtime_updated)
+            self._candidate_updated(runtime_manager.preview)
+        bind_theme(self, self._refresh_theme_styles, surface="management")
+        self._sync_hub_selection()
+
+    def open_editor(self):
+        self.ensure_editor()
+        self.pages.setCurrentWidget(self.editor_page)
+
+    def ensure_editor(self):
+        if self.editor_page is not None:
+            return
+        self.editor_page = QWidget(self.pages)
         root = QVBoxLayout(self.editor_page)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
@@ -160,13 +181,14 @@ class ThemeSettingsPanel(QWidget):
         more = QWidget()
         more_layout = QVBoxLayout(more)
         more_layout.setContentsMargins(0, 0, 0, 0)
-        more_layout.addWidget(self._build_advanced_section())
-        more_layout.addWidget(self._build_scene_section())
-        more_layout.addWidget(self._build_asset_section())
-        more_layout.addWidget(self._build_structure_section())
+        self.more_layout = more_layout
+        self.more_container = more
         more.hide()
-        more_toggle.toggled.connect(more.setVisible)
+        more_toggle.toggled.connect(self._show_more)
         root.addWidget(more)
+        self.validation_label = QLabel(self.editor_page)
+        self.validation_label.setWordWrap(True)
+        root.addWidget(self.validation_label)
         root.addWidget(
             ProductInlineNotice(
                 "也可以在对话中描述背景、图标、布局、字体和配色。AI 只能修改受验证的呈现层，预览确认后才会保存。",
@@ -176,18 +198,96 @@ class ThemeSettingsPanel(QWidget):
         root.addStretch()
         self._connect_signals()
         self._rebuild_theme_combo(self._active_theme_id)
-        self.hub_page = self._build_hub()
-        self.pages.addWidget(self.hub_page)
         self.pages.addWidget(self.editor_page)
-        self.pages.setCurrentWidget(self.hub_page)
-        if callable(getattr(runtime_manager, "switch_theme", None)):
-            runtime_manager.selectionChanged.connect(self._selection_updated)
-            runtime_manager.previewStateChanged.connect(self._candidate_updated)
-            runtime_manager.previewLoadingChanged.connect(self._candidate_loading)
-            runtime_manager.themeChanged.connect(self._runtime_updated)
-            self._candidate_updated(runtime_manager.preview)
-        bind_theme(self, self._refresh_theme_styles, surface="management")
-        self._sync_hub_selection()
+        self._refresh_theme_styles()
+
+    def _show_more(self, visible):
+        if visible:
+            try:
+                self.ensure_more()
+            except Exception as exc:
+                self.validation_label.setText(f"高级配置加载失败，已有输入已保留。请收起后重试：{exc}")
+                append_theme_log(self.repository.data_dir, "settings_editor_load_error", error_type=type(exc).__name__)
+                return
+        self.more_container.setVisible(visible)
+
+    def ensure_more(self):
+        self.ensure_editor()
+        if self._more_ready:
+            return
+        counts = [len(items) for items in (self._theme_frames, self._theme_headings, self._theme_details)]
+        loading = self._loading
+        self._loading = True
+        try:
+            for builder in (self._build_advanced_section, self._build_scene_section, self._build_asset_section, self._build_structure_section):
+                self.more_layout.addWidget(builder())
+            self._load_more(self._profile(self._current_theme_id))
+            self._more_ready = True
+        except Exception:
+            while self.more_layout.count():
+                item = self.more_layout.takeAt(0)
+                item.widget().hide()
+                item.widget().deleteLater()
+            for items, count in zip((self._theme_frames, self._theme_headings, self._theme_details), counts):
+                del items[count:]
+            raise
+        finally:
+            self._loading = loading
+        self.asset_add_btn.clicked.connect(self._add_asset)
+        self.asset_remove_btn.clicked.connect(self._remove_asset)
+        self.token_editor.textChanged.connect(self._on_editor_changed)
+        self.scene_editor.textChanged.connect(self._on_editor_changed)
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        self._refresh_theme_styles()
+
+    def _load_more(self, profile):
+        self.token_editor.setPlainText(
+            json.dumps(self._advanced_tokens, ensure_ascii=False, indent=2)
+        )
+        self.scene_editor.setPlainText(
+            json.dumps(
+                {
+                    "workspace_scene": profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
+                    "surfaces": profile.get("surfaces") or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        self.asset_list.clear()
+        asset_bytes = self._ensure_profile_asset_bytes(profile) if profile.get("id") != DEFAULT_THEME_ID else {}
+        for asset_id, record in sorted((profile.get("assets") or {}).items()):
+            animation = record.get("animation") or {}
+            animation_text = ""
+            if animation:
+                animation_text = (
+                    f"  ·  动态 {animation.get('frame_count')} 帧"
+                    f" / {int(animation.get('duration_ms') or 0) / 1000:g} 秒"
+                )
+            self.asset_list.addItem(
+                f"{asset_id}  ·  {record.get('width')}×{record.get('height')}"
+                f"  ·  {record.get('media_type')}{animation_text}"
+            )
+            item = self.asset_list.item(self.asset_list.count() - 1)
+            item.setData(Qt.UserRole, asset_id)
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(asset_bytes.get(record.get("path"), b"")):
+                raise ValueError(f"主题资产缩略图无法解码：{asset_id}")
+            item.setIcon(QIcon(pixmap))
+        self.structure_summary.setPlainText(
+            json.dumps(
+                {
+                    "background_owner": "workspace_scene",
+                    "components": profile.get("components") or {},
+                    "content": profile.get("content") or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        editable = profile["id"] not in BUILTIN_THEMES
+        for widget in (self.token_editor, self.scene_editor, self.asset_add_btn, self.asset_remove_btn):
+            widget.setEnabled(editable)
 
     def _build_hub(self):
         hub = QWidget()
@@ -228,7 +328,7 @@ class ThemeSettingsPanel(QWidget):
         use_saved.clicked.connect(lambda: self._quick_switch(theme_id=self.saved_theme_combo.currentData()))
         library.addWidget(use_saved)
         manage = QPushButton("管理主题…")
-        manage.clicked.connect(lambda: self.pages.setCurrentWidget(self.editor_page))
+        manage.clicked.connect(self.open_editor)
         library.addWidget(manage)
         box.addLayout(library)
         layout.addWidget(frame)
@@ -572,10 +672,10 @@ class ThemeSettingsPanel(QWidget):
             detail.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
             )
-        self.token_editor.setStyleSheet(product_code_style("QPlainTextEdit"))
-        self.validation_label.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
-        )
+        if self.editor_page is not None:
+            if self._more_ready:
+                self.token_editor.setStyleSheet(product_code_style("QPlainTextEdit"))
+            self.validation_label.setStyleSheet(f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};")
 
     def refresh_theme(self, _resolved=None):
         self._refresh_theme_styles()
@@ -725,14 +825,8 @@ class ThemeSettingsPanel(QWidget):
         self.token_editor.setProperty("codeSurface", True)
         self.token_editor.setStyleSheet(product_code_style("QPlainTextEdit"))
         advanced_layout.addWidget(self.token_editor)
-        self.validation_label = QLabel("")
-        self.validation_label.setWordWrap(True)
-        self.validation_label.setStyleSheet(
-            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
-        )
         self.advanced_container.setVisible(False)
         layout.addWidget(self.advanced_container)
-        layout.addWidget(self.validation_label)
         return frame
 
     def _build_asset_section(self):
@@ -790,17 +884,12 @@ class ThemeSettingsPanel(QWidget):
         self.export_btn.clicked.connect(self._export_theme)
         self.refresh_btn.clicked.connect(self._reload_from_directory)
         self.open_folder_btn.clicked.connect(self._open_theme_folder)
-        self.asset_add_btn.clicked.connect(self._add_asset)
-        self.asset_remove_btn.clicked.connect(self._remove_asset)
         self.name_edit.textChanged.connect(self._on_editor_changed)
         self.font_combo.currentFontChanged.connect(self._on_editor_changed)
         self.mono_font_combo.currentFontChanged.connect(self._on_editor_changed)
         self.font_scale_spin.valueChanged.connect(self._on_editor_changed)
         self.density_combo.currentIndexChanged.connect(self._on_editor_changed)
         self.radius_scale_spin.valueChanged.connect(self._on_editor_changed)
-        self.token_editor.textChanged.connect(self._on_editor_changed)
-        self.scene_editor.textChanged.connect(self._on_editor_changed)
-        self.advanced_toggle.toggled.connect(self._toggle_advanced)
         for editor in self.color_edits.values():
             editor.textChanged.connect(self._on_editor_changed)
         for editor in self.geometry_spins.values():
@@ -825,6 +914,9 @@ class ThemeSettingsPanel(QWidget):
         return next((item for item in self._themes if item.get("id") == theme_id), None)
 
     def _rebuild_theme_combo(self, selected_id):
+        if self.editor_page is None:
+            self._current_theme_id = selected_id
+            return
         self._loading = True
         self.theme_combo.clear()
         for key, (label, _description) in BUILTIN_THEMES.items():
@@ -884,50 +976,10 @@ class ThemeSettingsPanel(QWidget):
             for name, value in (overrides.get("tokens") or {}).items()
             if name not in basic_names
         }
-        self.token_editor.setPlainText(
-            json.dumps(advanced_tokens, ensure_ascii=False, indent=2)
-        )
-        self.scene_editor.setPlainText(
-            json.dumps(
-                {
-                    "workspace_scene": profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
-                    "surfaces": profile.get("surfaces") or {},
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        self.asset_list.clear()
-        asset_bytes = self._ensure_profile_asset_bytes(profile) if profile.get("id") != DEFAULT_THEME_ID else {}
-        for asset_id, record in sorted((profile.get("assets") or {}).items()):
-            animation = record.get("animation") or {}
-            animation_text = ""
-            if animation:
-                animation_text = (
-                    f"  ·  动态 {animation.get('frame_count')} 帧"
-                    f" / {int(animation.get('duration_ms') or 0) / 1000:g} 秒"
-                )
-            self.asset_list.addItem(
-                f"{asset_id}  ·  {record.get('width')}×{record.get('height')}"
-                f"  ·  {record.get('media_type')}{animation_text}"
-            )
-            item = self.asset_list.item(self.asset_list.count() - 1)
-            item.setData(Qt.UserRole, asset_id)
-            pixmap = QPixmap()
-            if not pixmap.loadFromData(asset_bytes.get(record.get("path"), b"")):
-                raise ValueError(f"主题资产缩略图无法解码：{asset_id}")
-            item.setIcon(QIcon(pixmap))
-        self.structure_summary.setPlainText(
-            json.dumps(
-                {
-                    "background_owner": "workspace_scene",
-                    "components": profile.get("components") or {},
-                    "content": profile.get("content") or {},
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        self._advanced_tokens = advanced_tokens
+        self._scene_document = {"workspace_scene": profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE, "surfaces": profile.get("surfaces") or {}}
+        if self._more_ready:
+            self._load_more(profile)
         editable = profile["id"] not in BUILTIN_THEMES
         for widget in (
             self.name_edit,
@@ -936,16 +988,12 @@ class ThemeSettingsPanel(QWidget):
             self.font_scale_spin,
             self.density_combo,
             self.radius_scale_spin,
-            self.token_editor,
-            self.scene_editor,
             *self.color_edits.values(),
             *self.geometry_spins.values(),
         ):
             widget.setEnabled(editable)
         self.delete_btn.setEnabled(editable)
         self.export_btn.setEnabled(editable)
-        self.asset_add_btn.setEnabled(editable)
-        self.asset_remove_btn.setEnabled(editable)
         self._loading = False
         if not editable:
             self.validation_label.setText("默认主题为只读基线。")
@@ -959,7 +1007,7 @@ class ThemeSettingsPanel(QWidget):
                 self.validation_label.setText("草稿有效，尚未预览。")
 
     def _collect_overrides(self):
-        tokens = json.loads(self.token_editor.toPlainText().strip() or "{}")
+        tokens = json.loads(self.token_editor.toPlainText().strip() or "{}") if self._more_ready else copy.deepcopy(self._advanced_tokens)
         if not isinstance(tokens, dict):
             raise ValueError("高级语义令牌必须是 JSON 对象。")
         base_tokens = default_design_tokens()
@@ -1000,7 +1048,7 @@ class ThemeSettingsPanel(QWidget):
         if not name:
             raise ValueError("主题名称不能为空。")
         overrides = self._collect_overrides()
-        scene_document = json.loads(self.scene_editor.toPlainText().strip() or "{}")
+        scene_document = json.loads(self.scene_editor.toPlainText().strip() or "{}") if self._more_ready else copy.deepcopy(self._scene_document)
         if not isinstance(scene_document, dict) or set(scene_document) - {"workspace_scene", "surfaces"}:
             raise ValueError("统一工作区场景必须是仅含 workspace_scene 和 surfaces 的 JSON 对象。")
         workspace_scene = scene_document.get("workspace_scene")
@@ -1015,6 +1063,8 @@ class ThemeSettingsPanel(QWidget):
         }
 
     def _store_current_editor(self):
+        if self.editor_page is None:
+            return
         if self._current_theme_id in BUILTIN_THEMES:
             return
         profile = self._profile(self._current_theme_id)
@@ -1175,6 +1225,7 @@ class ThemeSettingsPanel(QWidget):
         self.changed.emit()
 
     def _new_theme(self):
+        self.ensure_editor()
         try:
             self.pages.setCurrentWidget(self.editor_page)
             self._store_current_editor()
@@ -1286,6 +1337,7 @@ class ThemeSettingsPanel(QWidget):
         return profile["_asset_bytes"]
 
     def _add_asset(self):
+        self.ensure_more()
         if self._current_theme_id == DEFAULT_THEME_ID:
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -1340,6 +1392,7 @@ class ThemeSettingsPanel(QWidget):
             ProductMessageBox.critical(self, "导入主题图片失败", str(exc))
 
     def _remove_asset(self):
+        self.ensure_more()
         item = self.asset_list.currentItem()
         if item is None or self._current_theme_id == DEFAULT_THEME_ID:
             return
@@ -1490,7 +1543,7 @@ class ThemeSettingsPanel(QWidget):
             persisted_theme.pop("_asset_bytes", None)
             themes.append(persisted_theme)
         error = ""
-        if not self._loading and self._current_theme_id not in BUILTIN_THEMES:
+        if self.editor_page is not None and not self._loading and self._current_theme_id not in BUILTIN_THEMES:
             try:
                 editor_values = self._collect_current_editor_values()
                 current = next(

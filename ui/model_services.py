@@ -25,6 +25,7 @@ class ModelServicesPage(QWidget):
         super().__init__(parent)
         self.editor_factory = editor_factory
         self.editors = []
+        self._channel_configs = copy.deepcopy(channels or [])
         self.last_edited_model_id = self.saved_model_id = self.origin_session_id = ""
         self._default_model_id = selected_model_id
         self._active_service = ""
@@ -131,8 +132,8 @@ class ModelServicesPage(QWidget):
         saved.addWidget(self.use_model_btn)
         self.layout.addWidget(self.saved_notice)
         self.saved_notice.hide()
-        for channel in channels or []:
-            self._add_editor(channel)
+        for channel in self._channel_configs:
+            self.channel_list.addItem(QListWidgetItem(channel.get("display_name", "未命名服务")))
         self._refresh_channel_choices()
         self._refresh_default_models()
         self.default_model_combo.currentIndexChanged.connect(self._on_default_model_changed)
@@ -155,19 +156,21 @@ class ModelServicesPage(QWidget):
             self._active_service = self._service_id(current)
         self.service_list.clear()
         grouped = {}
-        for editor in self.editors:
-            grouped.setdefault(self._service_id(editor), []).append(editor)
-        for service_id, editors in grouped.items():
-            first = editors[0]
-            count = sum(len(editor._models()) for editor in editors)
-            source = first.gateway_source()
-            address = source.get("site_url") or first.base_url_input.text().strip()
-            keys = len({editor.gateway_source().get("key_id", "manual") for editor in editors})
-            status = "待填写密钥" if any(not editor._has_api_key() for editor in editors) else "待添加模型" if not count else ""
-            item = QListWidgetItem(f"{first._channel_name()}    {count} 个模型" + (f" · {keys} 个密钥" if source else "") +
+        for channel in self.get_channels():
+            service_id = channel.get("gateway_source", {}).get("service_id") or channel["channel_id"]
+            grouped.setdefault(service_id, []).append(channel)
+        for service_id, channels in grouped.items():
+            first = channels[0]
+            count = sum(len(channel.get("models", [])) for channel in channels)
+            source = first.get("gateway_source", {})
+            address = source.get("site_url") or first.get("base_url", "")
+            keys = len({channel.get("gateway_source", {}).get("key_id", "manual") for channel in channels})
+            status = "待填写密钥" if any(not channel.get("api_key", "").strip() for channel in channels) else "待添加模型" if not count else ""
+            name = first.get("display_name") or "未命名服务"
+            item = QListWidgetItem(f"{name}    {count} 个模型" + (f" · {keys} 个密钥" if source else "") +
                                    f"\n{address}" + (f"\n{status}" if status else ""))
             item.setData(Qt.UserRole, service_id)
-            item.setToolTip(f"{first._channel_name()}\n{address}\n点击管理模型与连接")
+            item.setToolTip(f"{name}\n{address}\n点击管理模型与连接")
             item.setSizeHint(QSize(0, 96 if status else 78))
             self.service_list.addItem(item)
         self.service_list.setFixedHeight(max(80, min(6, len(grouped)) * 96 + 4))
@@ -184,7 +187,7 @@ class ModelServicesPage(QWidget):
             source = editor.gateway_source()
             label = " · ".join(filter(None, (source.get("key_name"), source.get("group_name"),
                                              "Anthropic" if editor._provider_type() == "anthropic" else "OpenAI 兼容")))
-            self.channel_combo.addItem(label or editor._channel_name(), self.editors.index(editor))
+            self.channel_combo.addItem(label or editor._channel_name(), self._channel_index(editor))
         self.channel_combo.setCurrentIndex(editors.index(selected) if selected in editors else 0)
         self.channel_combo.blockSignals(False)
         if editors:
@@ -213,9 +216,12 @@ class ModelServicesPage(QWidget):
 
     def open_service(self, service_id):
         self._active_service = service_id
+        for channel in self.get_channels():
+            if (channel.get("gateway_source", {}).get("service_id") or channel["channel_id"]) == service_id:
+                self.ensure_editor(channel["channel_id"])
         editor = next((item for item in self.editors if self._service_id(item) == service_id), None)
         if editor:
-            index = self.editors.index(editor)
+            index = self._channel_index(editor)
             self.channel_list.setCurrentRow(index)
             self._on_channel_selection_changed(index)
 
@@ -225,10 +231,13 @@ class ModelServicesPage(QWidget):
             self.channel_list.setCurrentRow(index)
 
     def _on_channel_selection_changed(self, index):
-        if not 0 <= index < len(self.editors):
+        if not 0 <= index < len(self._channel_configs):
             return
-        editor = self.editors[index]
+        editor = self.ensure_editor(self._channel_configs[index]["channel_id"])
         self._active_service = self._service_id(editor)
+        for channel in self.get_channels():
+            if (channel.get("gateway_source", {}).get("service_id") or channel["channel_id"]) == self._active_service:
+                self.ensure_editor(channel["channel_id"])
         self.channel_detail_stack.setCurrentWidget(editor)
         self.route_stack.setCurrentWidget(self.detail)
         self._refresh_key_filter()
@@ -259,6 +268,31 @@ class ModelServicesPage(QWidget):
         self.route_stack.setCurrentWidget(self.overview)
         self._sync_editor_route()
 
+    def _channel_index(self, editor):
+        return next(index for index, channel in enumerate(self._channel_configs) if channel["channel_id"] == editor.channel_config["channel_id"])
+
+    def ensure_editor(self, channel_id):
+        editor = next((item for item in self.editors if item.channel_config["channel_id"] == channel_id), None)
+        if editor is None:
+            channel = next(item for item in self._channel_configs if item["channel_id"] == channel_id)
+            editor = self._add_editor(channel)
+        return editor
+
+    def reset_channels(self, channels):
+        for editor in self.editors:
+            self.channel_detail_stack.removeWidget(editor)
+            editor.hide()
+            editor.deleteLater()
+        self.editors = []
+        self._channel_configs = copy.deepcopy(channels)
+        self.channel_list.blockSignals(True)
+        self.channel_list.clear()
+        for channel in channels:
+            self.channel_list.addItem(QListWidgetItem(channel.get("display_name", "未命名服务")))
+        self.channel_list.blockSignals(False)
+        self._active_service = ""
+        self.show_overview()
+
     def _add_editor(self, channel, expanded=False):
         editor = self.editor_factory(channel, self.channel_detail_stack, expanded=True,
                                      on_expand=self._collapse_others, on_delete=self.delete_channel)
@@ -266,7 +300,9 @@ class ModelServicesPage(QWidget):
         self.channel_detail_stack.addWidget(editor)
         editor.set_management_detail_mode()
         editor.service_summary.hide()
-        self.channel_list.addItem(QListWidgetItem(channel.get("display_name", "未命名服务")))
+        if not any(item["channel_id"] == channel["channel_id"] for item in self._channel_configs):
+            self._channel_configs.append(copy.deepcopy(channel))
+            self.channel_list.addItem(QListWidgetItem(channel.get("display_name", "未命名服务")))
         editor.changed.connect(self.changed.emit)
         editor.modelEdited.connect(self._model_edited)
         editor.formRouteChanged.connect(self._sync_editor_route)
@@ -329,6 +365,8 @@ class ModelServicesPage(QWidget):
         active = None
         for channel in channels:
             editor = next((item for item in self.editors if item.channel_config["channel_id"] == channel["channel_id"]), None)
+            if editor is None and any(item["channel_id"] == channel["channel_id"] for item in self._channel_configs):
+                editor = self.ensure_editor(channel["channel_id"])
             if editor:
                 # Keep manual overrides and existing identities; update evidence only.
                 known = {item["model_name"]: item for item in editor._models()}
@@ -357,13 +395,13 @@ class ModelServicesPage(QWidget):
         log.info("gateway.import.draft channels=%s", len(channels))
 
     def open_new_model(self, channel_id=""):
-        if not self.editors:
+        if not self._channel_configs:
             # Conversation entry opens the same connection route before editing.
             self.add_channel()
             return None
         editor = next((item for item in self.editors if item.channel_config["channel_id"] == channel_id), None)
-        editor = editor or self.channel_detail_stack.currentWidget() or self.editors[0]
-        index = self.editors.index(editor)
+        editor = editor or (self.ensure_editor(channel_id) if any(item["channel_id"] == channel_id for item in self._channel_configs) else self.channel_detail_stack.currentWidget()) or self.ensure_editor(self._channel_configs[0]["channel_id"])
+        index = self._channel_index(editor)
         self.channel_list.setCurrentRow(index)
         self._on_channel_selection_changed(index)
         editor.add_model()
@@ -376,7 +414,7 @@ class ModelServicesPage(QWidget):
             return False
         for index, editor in enumerate(self.editors):
             if not editor.validate_model_forms():
-                self._on_channel_selection_changed(index)
+                self._on_channel_selection_changed(self._channel_index(editor))
                 return False
         return True
 
@@ -420,10 +458,11 @@ class ModelServicesPage(QWidget):
         return self.default_model_combo.currentData() or ""
 
     def get_channels(self):
-        return [editor.get_channel_config() for editor in self.editors]
+        edited = {editor.channel_config["channel_id"]: editor.get_channel_config() for editor in self.editors}
+        return [copy.deepcopy(edited.get(channel["channel_id"], channel)) for channel in self._channel_configs]
 
     def _collapse_others(self, editor):
-        self._on_channel_selection_changed(self.editors.index(editor))
+        self._on_channel_selection_changed(self._channel_index(editor))
 
     def delete_channel(self, editor):
         self._active_service = self._service_id(editor)
@@ -439,8 +478,9 @@ class ModelServicesPage(QWidget):
             return
         self.channel_list.blockSignals(True)
         for editor in editors:
-            index = self.editors.index(editor)
+            index = self._channel_index(editor)
             self.editors.remove(editor)
+            self._channel_configs.pop(index)
             self.channel_list.takeItem(index)
             self.channel_detail_stack.removeWidget(editor)
             editor.hide()

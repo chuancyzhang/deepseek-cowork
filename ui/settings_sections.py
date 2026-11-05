@@ -10,8 +10,9 @@ from ui.primitives import ProductSegmentedControl, PageScrollSafeComboBox, produ
 class SettingsSection(QWidget):
     sectionChanged = Signal(str)
 
-    def __init__(self, pages, parent=None):
+    def __init__(self, pages, parent=None, *, lazy=False):
         super().__init__(parent)
+        self.lazy = lazy
         self.pages = dict(pages)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -30,7 +31,7 @@ class SettingsSection(QWidget):
             self.stack.addWidget(page)
         layout.addWidget(self.stack, 1)
         self.tabs.currentChanged.connect(self.select)
-        self.select(next(iter(self.pages)))
+        self.select(next(iter(self.pages)), load=not lazy)
         bind_theme(self, self.refresh_theme, surface="settings")
 
     def refresh_theme(self, _resolved=None):
@@ -42,7 +43,11 @@ class SettingsSection(QWidget):
         self.tabs.setVisible(not compact)
         self.compact_tabs.setVisible(compact)
 
-    def select(self, label):
+    def ensure(self):
+        page = self.stack.currentWidget()
+        return page.ensure() if self.lazy else page
+
+    def select(self, label, *, load=True):
         if label not in self.pages:
             return
         self.tabs.set_current(label)
@@ -50,6 +55,8 @@ class SettingsSection(QWidget):
         self.compact_tabs.setCurrentText(label)
         self.compact_tabs.blockSignals(False)
         self.stack.setCurrentWidget(self.pages[label])
+        if load and self.lazy:
+            self.ensure()
         self.sectionChanged.emit(label)
 
     @property

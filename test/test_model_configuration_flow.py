@@ -140,6 +140,7 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.assertEqual(self.config.get_selected_model_id(), "model-a")
 
     def test_model_rows_use_model_capabilities_instead_of_skill_summary(self):
+        self.manager.open_service(self.manager.get_channels()[0]["channel_id"])
         editor = self.manager.editors[0]
         cases = [
             ({"supports_vision": True, "supports_image_generation": True,
@@ -161,6 +162,7 @@ class ModelConfigurationFlowTests(unittest.TestCase):
     def test_contextual_back_keeps_model_draft_and_restores_service_actions(self):
         self.page.show()
         self.manager.open_service("service-a")
+        self.manager.open_service(self.manager.get_channels()[0]["channel_id"])
         editor = self.manager.editors[0]
         self.manager.connection_action.trigger()
         self.assertFalse(editor.connection_widget.isHidden())
@@ -184,6 +186,7 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.assertEqual(form.display_name_input.text(), "尚未保存的名称")
 
     def test_site_details_collapse_keeps_protocol_warning_visible(self):
+        self.manager.open_service(self.manager.get_channels()[0]["channel_id"])
         editor = self.manager.editors[0]
         editor._models()[0]["discovery"] = {"capabilities": {}, "protocol_status": "unknown"}
         editor.open_model_form("model-a")
@@ -231,7 +234,8 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         self.assertEqual(form.model_name_input.text(), "custom-model")
         with patch("main.ProductMessageDialog.exec_result", return_value="discard"):
             self.assertTrue(self.page._confirm_discard_settings())
-        self.assertEqual(len(self.manager.editors), 1)
+        self.assertEqual(self.manager.editors, [])
+        self.manager.open_service(self.manager.get_channels()[0]["channel_id"])
         self.assertEqual(self.manager.editors[0].model_forms, {})
         self.assertEqual(len(self.manager.get_channels()[0]["models"]), 1)
         self.assertFalse(self.page._settings_dirty)
@@ -276,6 +280,7 @@ class ModelConfigurationFlowTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.assertTrue(worker.wait(2000))
         self.app.processEvents()
+        self.manager.open_service(self.manager.get_channels()[0]["channel_id"])
         self.assertEqual(self.manager.editors[0].model_forms, {})
         self.assertEqual(len(ConfigManager().iter_model_profiles()), 1)
 

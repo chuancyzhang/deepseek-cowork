@@ -488,7 +488,7 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.config_manager.config["god_mode"] = not self.window.config_manager.get_god_mode()
         self.window.open_settings()
         self.assertIs(page, self.window.product_pages["settings"])
-        self.assertEqual(page.god_mode_check.isChecked(), self.window.config_manager.get_god_mode())
+        self.assertEqual(page._settings_baseline_state["config"]["god_mode"], self.window.config_manager.get_god_mode())
         self.assertFalse(page._settings_dirty)
 
     def test_settings_reloads_changed_complex_configuration(self):
@@ -498,6 +498,7 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.config_manager.config["data_security"] = {"enabled": True}
         self.window.open_settings()
         self.assertIsNot(page, self.window.product_pages["settings"])
+        self.window.open_settings("数据安全")
         self.assertTrue(self.window.product_pages["settings"].data_security_panel.state()["enabled"])
 
     def test_pristine_views_and_legacy_disabled_mode_do_not_create_history(self):

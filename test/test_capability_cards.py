@@ -63,6 +63,7 @@ class CapabilityCardTests(unittest.TestCase):
             self.assertFalse(page._confirm_discard_settings())
         page.discard_page_changes()
         self.assertFalse(manager.servers[1]["enabled"])
+        page.ensure_page("agents")
         self.assertTrue(any(p.get("builtin") for p in page.agent_profile_manager.profiles))
         manager.server_grid.cards[0].findChild(CapabilitySwitch).click()
         page.save_settings()

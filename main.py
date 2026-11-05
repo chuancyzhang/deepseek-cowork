@@ -469,7 +469,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QTextLayout, QTextOption, QIco
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel, QItemSelectionModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QSignalBlocker, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel, QItemSelectionModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -11888,9 +11888,11 @@ class AppVariableManager(QWidget):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config_manager, parent=None, initial_page_label=None, domain="settings"):
-        embedded = getattr(parent, "main_page_stack", None)
+    def __init__(self, config_manager, parent=None, initial_page_label=None, domain="settings", *, embedded_parent=None):
+        embedded = embedded_parent if embedded_parent is not None else getattr(parent, "main_page_stack", None)
         super().__init__(embedded if embedded is not None else parent, Qt.Widget if embedded is not None else Qt.Dialog)
+        if embedded is not None:
+            self.setWindowFlags(Qt.Widget)
         self.domain = domain
         self._active_settings_row = -1
         self._layout_sync_timer = QTimer(self)
@@ -11952,46 +11954,159 @@ class SettingsDialog(QDialog):
         self._settings_pages = []
         self._page_labels = []
 
-        def make_scroll_page(title, intro=None):
-            scroll_area = QScrollArea()
-            scroll_area.setWidgetResizable(True)
-            scroll_area.setFrameShape(QFrame.NoFrame)
-            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            content = QWidget()
-            content.setObjectName("SettingsPageContent")
-            content.setStyleSheet(f"QWidget#SettingsPageContent {{ background: {DesignTokens.bg_app}; }}")
-            if title in {"外观", "回答偏好", "记忆", "工作区与存储", "权限", "应用更新"}:
-                content.setMaximumWidth(960)
-                scroll_area.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-            page_layout = QVBoxLayout(content)
-            page_layout.setContentsMargins(6, 4, 6, 18)
-            page_layout.setSpacing(16)
-
-            # Capability managers already own their title and primary action.
-            if self.domain != "capabilities":
-                page_layout.addWidget(build_settings_page_header(title, intro))
-
-            scroll_area.setWidget(content)
-            return scroll_area, page_layout
-
-        def add_settings_page(label, icon_name, page):
-            allowed = {
-                "settings": {"外观", "回答偏好", "模型与服务", "企业账号", "工作区与存储", "变量与凭据", "数据安全", "消息连接", "实验功能", "组件与依赖", "运行日志", "更新与关于"},
-                "capabilities": {"MCP 服务", "专家"},
-                "projects": {"项目", "对话", "记忆", "归档"},
-            }
-            page.setParent(self.content_stack)
-            page.hide()
-            if label not in allowed[self.domain]:
-                return None
-            item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
-            self.nav_list.addItem(item)
-            self.nav_combo.addItem(label)
+        from ui.settings_loading import LazySettingsPage, PAGE_GROUPS, PAGE_SPECS
+        from ui.settings_sections import SettingsSection
+        self._loaded_pages = {}
+        self._lazy_pages = {}
+        self._restoring_settings = True
+        self.memory_workspace_dir = self._main._active_workspace_dir() if self._main and hasattr(self._main, "_active_workspace_dir") else ""
+        self.memory_store = None
+        self._settings_baseline_state = self._settings_state()
+        self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
+        for label, icon, keys in PAGE_GROUPS[domain]:
+            for key in keys:
+                self._lazy_pages[key] = LazySettingsPage(
+                    lambda host, key=key: self._create_settings_page(key, host), self.content_stack,
+                    on_reuse=lambda key=key: log_ui_navigation("settings_section_reused", section=key, domain=self.domain))
+            if len(keys) == 1:
+                page = self._lazy_pages[keys[0]]
+            else:
+                page = SettingsSection([(PAGE_SPECS[key][0], self._lazy_pages[key]) for key in keys], self.content_stack, lazy=True)
+                page.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
+                if label == "隐私与数据":
+                    self.privacy_section = page
+                else:
+                    self.advanced_section = page
             self._settings_pages.append(page)
             self._page_labels.append(label)
-            return item
+            self.nav_list.addItem(QListWidgetItem(qta.icon(icon, color=DesignTokens.text_secondary), label))
+            self.nav_combo.addItem(label)
+            self.content_stack.addWidget(page)
+        self.update_nav_item = self.nav_list.item(len(self._page_labels) - 1)
+        self.nav_list.currentRowChanged.connect(self._show_settings_page)
+        self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
+        action_bar = ProductActionBar()
+        self.settings_action_bar = action_bar
+        self.settings_dirty_label = QLabel("没有未保存的修改")
+        self.settings_dirty_label.setStyleSheet(apple_caption_style())
+        action_bar.layout.insertWidget(0, self.settings_dirty_label)
+        self.save_settings_btn = QPushButton("保存更改")
+        self.save_settings_btn.setObjectName("PrimaryBtn")
+        self.save_settings_btn.setEnabled(False)
+        self.save_settings_btn.clicked.connect(self.save_settings)
+        cancel_btn = QPushButton("放弃更改")
+        cancel_btn.setObjectName("SecondaryBtn")
+        self.discard_settings_btn = cancel_btn
+        cancel_btn.hide()
+        cancel_btn.clicked.connect(self.discard_page_changes)
+        action_bar.layout.addWidget(cancel_btn)
+        action_bar.layout.addWidget(self.save_settings_btn)
+        layout.addWidget(action_bar)
+        self.settings_search = QLineEdit()
+        self.settings_search.setPlaceholderText("搜索设置名称或用途…" if domain == "settings" else "搜索管理页面…")
+        self.settings_search.setClearButtonEnabled(True)
+        self.settings_search.textChanged.connect(self._filter_settings_pages)
+        self.settings_search.returnPressed.connect(self._activate_settings_search)
+        layout.insertWidget(1, self.settings_search)
+        if domain == "settings":
+            self.settings_search.setPlaceholderText("搜索设置，例如字体、凭据、日志…")
+            self.settings_search.setMaximumWidth(600)
+            self.settings_search_results = QListWidget()
+            self.settings_search_results.setObjectName("SettingsSearchResults")
+            self.settings_search_results.setAccessibleName("设置搜索结果")
+            self.settings_search.installEventFilter(self)
+            self.settings_search_results.installEventFilter(self)
+            self.settings_search_results.setMaximumHeight(240)
+            self.settings_search_results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.settings_search_results.itemClicked.connect(self._open_settings_search_result)
+            self.settings_search_results.itemActivated.connect(self._open_settings_search_result)
+            self.settings_search_results.hide()
+            self._settings_search_matches = []
+            layout.insertWidget(2, self.settings_search_results)
+        bind_theme(self, self._refresh_settings_shell, surface="settings")
+        self._cached_settings_config = settings_page_config_snapshot(self.config_manager.config)
 
-        model_page, model_layout = make_scroll_page(
+        self._restoring_settings = False
+        self.select_initial_page(initial_page_label)
+
+    def _make_scroll_page(self, title, intro=None):
+        scroll_area = QScrollArea(self._building_host)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget(scroll_area)
+        content.setObjectName("SettingsPageContent")
+        content.setStyleSheet(f"QWidget#SettingsPageContent {{ background: {DesignTokens.bg_main if self.domain == 'settings' else DesignTokens.bg_app}; }}")
+        if title in {"外观", "回答偏好", "记忆", "工作区与存储", "权限", "应用更新"}:
+            content.setMaximumWidth(960)
+            scroll_area.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        page_layout = QVBoxLayout(content)
+        page_layout.setContentsMargins(6, 4, 6, 18)
+        page_layout.setSpacing(16)
+
+        # Capability managers already own their title and primary action.
+        if self.domain != "capabilities":
+            page_layout.addWidget(build_settings_page_header(title, intro))
+
+        scroll_area.setWidget(content)
+        return scroll_area, page_layout
+
+    def ensure_page(self, key):
+        return self._lazy_pages[key].ensure()
+
+    def _create_settings_page(self, key, host):
+        from ui.settings_loading import PAGE_FIELDS
+        started = time.perf_counter()
+        log_ui_navigation("settings_section_create_begin", section=key, domain=self.domain)
+        restoring = self._restoring_settings
+        self._restoring_settings = True
+        self._building_host = host
+        previous_attributes = set(vars(self))
+        try:
+            if key in {"projects", "sessions"}:
+                from ui.project_management import ProjectBrowser
+                page = ProjectBrowser(self._main, key)
+            else:
+                page = getattr(self, "_build_" + key)()
+            self._loaded_pages[key] = page
+            state = self._settings_state()
+            for group, fields in PAGE_FIELDS.get(key, {}).items():
+                if fields is None:
+                    self._settings_baseline_state[group] = state[group]
+                else:
+                    for field in fields:
+                        self._settings_baseline_state[group][field] = state[group][field]
+            self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
+            self._connect_settings_dirty_tracking(page)
+            log_ui_navigation("settings_section_create_done", section=key, elapsed_ms=round((time.perf_counter()-started)*1000, 2))
+            return page
+        except Exception as exc:
+            self._loaded_pages.pop(key, None)
+            for name in set(vars(self)) - previous_attributes:
+                delattr(self, name)
+            log_ui_navigation("settings_section_create_error", section=key, error_type=type(exc).__name__)
+            raise
+        finally:
+            self._restoring_settings = restoring
+
+    def _show_settings_page(self, row):
+        if not 0 <= row < len(self._settings_pages):
+            return
+        if self.domain != "settings" and self._active_settings_row >= 0 and row != self._active_settings_row:
+            if not self._confirm_discard_settings():
+                with QSignalBlocker(self.nav_list):
+                    self.nav_list.setCurrentRow(self._active_settings_row)
+                return
+        page = self._settings_pages[row]
+        self.content_stack.setCurrentWidget(page)
+        self._active_settings_row = row
+        page.ensure()
+        with QSignalBlocker(self.nav_combo):
+            self.nav_combo.setCurrentIndex(row)
+        self._sync_settings_action_bar()
+
+    def _build_models(self):
+        model_page, model_layout = self._make_scroll_page(
             "模型与服务",
         )
 
@@ -12001,7 +12116,14 @@ class SettingsDialog(QDialog):
             selected_model_id=self.config_manager.get_selected_model_id(),
         )
 
-        appearance_page, appearance_layout = make_scroll_page(
+        model_layout.addWidget(self.model_channel_manager)
+        model_layout.addStretch()
+        if self._main and hasattr(self._main, "use_configured_model"):
+            self.model_channel_manager.useModelRequested.connect(self._main.use_configured_model)
+        return model_page
+
+    def _build_appearance(self):
+        appearance_page, appearance_layout = self._make_scroll_page(
             "外观与阅读",
         )
         theme_repository = (
@@ -12010,7 +12132,7 @@ class SettingsDialog(QDialog):
             else ThemeRepository(self.config_manager.data_dir)
         )
         self.theme_settings_panel = ThemeSettingsPanel(
-            theme_repository,
+            theme_repository, parent=appearance_layout.parentWidget(),
             runtime_manager=(
                 self._main.theme_manager
                 if self._main and getattr(self._main, "theme_manager", None)
@@ -12021,7 +12143,11 @@ class SettingsDialog(QDialog):
         if self._main and hasattr(self._main, "start_theme_design"):
             self.theme_settings_panel.set_design_host(self._main)
 
-        agent_page, agent_layout = make_scroll_page(
+        self.theme_settings_panel.selectionCommitted.connect(self._theme_selection_committed)
+        return appearance_page
+
+    def _build_agents(self):
+        agent_page, agent_layout = self._make_scroll_page(
             "专家",
             "把重复出现的工作角色预设下来，后续在会话里可以直接复用。",
         )
@@ -12032,19 +12158,12 @@ class SettingsDialog(QDialog):
         )
         self.agent_profile_manager = AgentProfileManager(
             self.config_manager.get_agent_profiles(),
-            skill_provider=skill_provider,
+            skill_provider=skill_provider, parent=agent_layout.parentWidget(),
         )
-        workspace_page, workspace_layout = make_scroll_page(
-            "文件与存储",
-        )
-        archive_page, archive_layout = make_scroll_page(
-            "归档",
-            "从侧边栏收起不常用的项目与对话，需要时可以随时恢复。",
-        )
-        memory_page, memory_layout = make_scroll_page(
-            "记忆",
-            "管理全局与项目记忆；修改从下一轮对话开始生效，不改写历史。",
-        )
+        agent_layout.addWidget(self.agent_profile_manager)
+        return agent_page
+
+    def _build_preferences(self):
         self.memory_store = MemoryStore(self.config_manager.get_chat_history_dir())
         self.memory_workspace_dir = (
             self._main._active_workspace_dir()
@@ -12064,9 +12183,23 @@ class SettingsDialog(QDialog):
         self.memory_soul_edit.setMinimumHeight(120)
         self.memory_soul_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=8, subtle=True, padding=12))
         personality_layout.addWidget(self.memory_soul_edit)
-        preference_page, preference_layout = make_scroll_page("回答偏好", "设置通用交流偏好，从下一轮对话开始生效。")
+        preference_page, preference_layout = self._make_scroll_page("回答偏好", "设置通用交流偏好，从下一轮对话开始生效。")
         preference_layout.addWidget(personality_group)
         preference_layout.addStretch()
+
+        return preference_page
+
+    def _build_memory(self):
+        memory_page, memory_layout = self._make_scroll_page(
+            "记忆",
+            "管理全局与项目记忆；修改从下一轮对话开始生效，不改写历史。",
+        )
+        self.memory_store = MemoryStore(self.config_manager.get_chat_history_dir())
+        self.memory_workspace_dir = (
+            self._main._active_workspace_dir()
+            if self._main and hasattr(self._main, "_active_workspace_dir")
+            else ""
+        )
 
         global_group, global_layout = build_settings_surface(
             "全局长期摘要",
@@ -12129,6 +12262,13 @@ class SettingsDialog(QDialog):
         self.memory_project_combo.setCurrentIndex(max(0, self.memory_project_combo.findData(self.memory_workspace_dir)))
         workspace_memory_layout.insertWidget(0, self.memory_project_combo)
         memory_layout.addStretch()
+        self.memory_project_combo.currentIndexChanged.connect(lambda: self.select_memory_workspace(self.memory_project_combo.currentData() or ""))
+        return memory_page
+
+    def _build_storage(self):
+        workspace_page, workspace_layout = self._make_scroll_page(
+            "文件与存储",
+        )
         storage_group, storage_group_layout = build_settings_surface(
             "工作区与存储",
             "默认工作区决定首次进入的任务范围；聊天记录目录会同时承载历史和长期记忆。",
@@ -12216,6 +12356,21 @@ class SettingsDialog(QDialog):
 
         chat_workspace_btn.clicked.connect(choose_chat_workspace_root)
 
+        workspace_layout.addWidget(storage_group)
+        log_group, log_layout = build_settings_surface("运行日志", show_subtitle=False)
+        logs_link = QPushButton("查看与导出运行日志")
+        logs_link.setStyleSheet(product_button_style("secondary"))
+        logs_link.clicked.connect(lambda: self.select_initial_page("运行日志"))
+        log_layout.addWidget(logs_link, 0, Qt.AlignLeft)
+        workspace_layout.addWidget(log_group)
+        workspace_layout.addStretch()
+        return workspace_page
+
+    def _build_archive(self):
+        archive_page, archive_layout = self._make_scroll_page(
+            "归档",
+            "从侧边栏收起不常用的项目与对话，需要时可以随时恢复。",
+        )
         archive_project_group, archive_project_layout = build_settings_surface(
             "已归档项目",
             "归档项目会从左侧栏和项目选择器中隐藏，恢复后未归档对话会重新出现。",
@@ -12263,54 +12418,35 @@ class SettingsDialog(QDialog):
         self.archived_conversation_list.itemSelectionChanged.connect(self.update_archive_action_state)
         self.refresh_archive_lists()
 
-        permission_page, permission_page_layout = make_scroll_page(
-            "权限",
-            "把更高风险的执行能力收在明确的确认边界内，避免误触。",
-        )
-        mcp_page, mcp_layout = make_scroll_page(
-            "MCP 服务",
-            "连接工具与数据，查看配置状态和最近测试结果。",
-        )
-        variable_page, variable_layout = make_scroll_page(
+        return archive_page
+
+    def _build_variables(self):
+        variable_page, variable_layout = self._make_scroll_page(
             "变量与凭据",
             "集中管理可复用文本与本机凭据；AI 只能读取明确授权的敏感值。",
         )
-        self.app_variable_manager = AppVariableManager(self.config_manager, parent=self)
+        self.app_variable_manager = AppVariableManager(self.config_manager, parent=variable_layout.parentWidget())
         variable_layout.addWidget(self.app_variable_manager)
         variable_layout.addStretch()
+        return variable_page
+
+    def _build_mcp(self):
+        mcp_page, mcp_layout = self._make_scroll_page(
+            "MCP 服务",
+            "连接工具与数据，查看配置状态和最近测试结果。",
+        )
         self.mcp_server_manager = McpServerManager(
             self.config_manager.get_mcp_servers(),
             config_manager=self.config_manager,
-            parent=self,
-            skill_manager=getattr(parent, "skill_manager", None),
+            parent=mcp_layout.parentWidget(),
+            skill_manager=getattr(self._main, "skill_manager", None),
         )
-        permission_group, permission_group_layout = build_settings_surface(
-            "扩展权限",
-            "只有在你完全信任当前任务时，才建议打开这类突破工作区限制的执行能力。",
-            radius=20,
-            show_subtitle=False,
-        )
-        permission_group_layout.setSpacing(14)
+        mcp_layout.addWidget(self.mcp_server_manager)
+        self.mcp_server_manager.commit_callback = self.save_settings
+        return mcp_page
 
-        permission_panel = QFrame()
-        permission_panel.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.warning_panel_bg}; border: none; border-radius: 14px; }}"
-        )
-        permission_panel_layout = QVBoxLayout(permission_panel)
-        permission_panel_layout.setContentsMargins(14, 14, 14, 14)
-        permission_title = QLabel("扩展权限模式")
-        permission_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.warning_panel_text};")
-        permission_desc = QLabel("上帝模式为新任务提供持续执行授权。关闭后，读取和分析不受影响，修改原有资产或运行代码时请求本次许可。切换不改变正在运行的任务。")
-        permission_desc.setWordWrap(True)
-        permission_desc.setStyleSheet(f"color: {DesignTokens.warning_panel_text}; font-size: 12px;")
-        self.god_mode_check = QCheckBox("允许高风险操作")
-        self.god_mode_check.setChecked(self.config_manager.get_god_mode())
-        permission_panel_layout.addWidget(permission_title)
-        permission_panel_layout.addWidget(permission_desc)
-        permission_panel_layout.addWidget(self.god_mode_check)
-        permission_group_layout.addWidget(permission_panel)
-
-        components_page, components_layout = make_scroll_page(
+    def _build_components(self):
+        components_page, components_layout = self._make_scroll_page(
             "组件与依赖",
             "文档工具包随应用安装；其他运行环境、工具包与 Skill 依赖按需准备。",
         )
@@ -12518,13 +12654,16 @@ class SettingsDialog(QDialog):
             self.component_task_manager.component_status_changed.connect(self.handle_component_status_changed)
             self.handle_component_task_state(self.component_task_manager.snapshot())
 
-        update_page, update_layout = make_scroll_page(
+        return components_page
+
+    def _build_update(self):
+        update_page, update_layout = self._make_scroll_page(
             "应用更新", "获取最新改进，也可以使用已经下载好的安装包。",
         )
         coordinator = getattr(self._main, "update_coordinator", None)
         if coordinator is None:
             coordinator = UpdateCoordinator(get_base_dir(), bool(getattr(sys, "frozen", False) and platform.system() == "Windows"), parent=QApplication.instance())
-        self.update_panel = UpdatePanel(coordinator, self)
+        self.update_panel = UpdatePanel(coordinator, update_layout.parentWidget())
         update_layout.addWidget(self.update_panel)
         update_layout.addStretch()
         self.update_current_label = self.update_panel.current
@@ -12537,23 +12676,9 @@ class SettingsDialog(QDialog):
         self.local_update_btn = self.update_panel.local
         self.local_update_hint_label = self.update_panel.hint
 
-        model_layout.addWidget(self.model_channel_manager)
-        model_layout.addStretch()
-        if domain == "capabilities":
-            old_agent_page = agent_page
-            agent_page = QWidget()
-            agent_layout = QVBoxLayout(agent_page)
-            agent_layout.setContentsMargins(0, 0, 0, 0)
-            old_agent_page.deleteLater()
-        agent_layout.addWidget(self.agent_profile_manager, 1)
-        workspace_layout.addWidget(storage_group)
-        log_group, log_layout = build_settings_surface("运行日志", show_subtitle=False)
-        logs_link = QPushButton("查看与导出运行日志")
-        logs_link.setStyleSheet(product_button_style("secondary"))
-        logs_link.clicked.connect(lambda: self.select_initial_page("运行日志"))
-        log_layout.addWidget(logs_link, 0, Qt.AlignLeft)
-        workspace_layout.addWidget(log_group)
-        workspace_layout.addStretch()
+        return update_page
+
+    def _build_logs(self):
         logs_page = QWidget()
         logs_layout = QVBoxLayout(logs_page)
         logs_layout.setContentsMargins(6, 4, 6, 18)
@@ -12561,17 +12686,10 @@ class SettingsDialog(QDialog):
         logs_layout.addWidget(build_settings_page_header("运行日志", "查看运行过程，导出日志以便排查问题。"))
         self.runtime_logs_panel = LogExportPanel(get_app_data_dir(), append_background_process_log, logs_page)
         logs_layout.addWidget(self.runtime_logs_panel, 1)
-        if domain == "capabilities":
-            old_mcp_page = mcp_page
-            mcp_page = QWidget()
-            mcp_layout = QVBoxLayout(mcp_page)
-            mcp_layout.setContentsMargins(0, 0, 0, 0)
-            old_mcp_page.deleteLater()
-        mcp_layout.addWidget(self.mcp_server_manager, 1)
-        permission_page_layout.addWidget(permission_group)
-        permission_page_layout.addStretch()
+        return logs_page
 
-        im_page, im_layout = make_scroll_page(
+    def _build_im(self):
+        im_page, im_layout = self._make_scroll_page(
             "消息连接",
         )
 
@@ -12585,147 +12703,32 @@ class SettingsDialog(QDialog):
         im_page.installEventFilter(self)
         im_layout.addStretch()
 
-        if domain == "projects":
-            from ui.project_management import ProjectBrowser
-            for kind, label in (("projects", "项目"), ("sessions", "对话")):
-                add_settings_page(label, "fa5s.folder-open", ProjectBrowser(self._main, kind))
-        add_settings_page("外观", "fa5s.palette", appearance_page)
-        add_settings_page("回答偏好", "fa5s.comment", preference_page)
-        add_settings_page("模型与服务", "fa5s.brain", model_page)
-        if domain == "settings":
-            from ui.account_connections import AccountConnectionsPage
-            self.account_connections_page = AccountConnectionsPage(config_manager=self.config_manager)
-            if hasattr(self._main, "refresh_model_selector"):
-                self.account_connections_page.enterprise.changed.connect(self._main.refresh_model_selector)
-            add_settings_page("企业账号", "fa5s.user-circle", self.account_connections_page)
-        add_settings_page("MCP 服务", "fa5s.plug", mcp_page)
-        add_settings_page("专家", "fa5s.user-astronaut", agent_page)
-        add_settings_page("记忆", "fa5s.brain", memory_page)
-        add_settings_page("工作区与存储", "fa5s.folder-open", workspace_page)
-        add_settings_page("运行日志", "fa5s.file-alt", logs_page)
-        add_settings_page("归档", "fa5s.archive", archive_page)
-        add_settings_page("变量与凭据", "fa5s.key", variable_page)
+        return im_page
+
+    def _build_security(self):
         from ui.data_security import create_data_security_panel
         from core.data_security import read_config
-        security_page, security_layout = make_scroll_page("数据安全", "按需启用的本地安全插件。")
+        security_page, security_layout = self._make_scroll_page("数据安全", "按需启用的本地安全插件。")
         self.data_security_panel = create_data_security_panel(read_config(self.config_manager))
         security_layout.addWidget(self.data_security_panel)
-        add_settings_page("数据安全", "fa5s.shield-alt", security_page)
-        add_settings_page("消息连接", "fa5s.comments", im_page)
-        add_settings_page("权限", "fa5s.shield-alt", permission_page)
-        add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
+        return security_page
+
+    def _build_experiments(self):
         from ui.long_context import LongContextSettings
-        experiment_page, experiment_layout = make_scroll_page("实验功能", "按需启用，设置从下一轮任务生效。")
+        experiment_page, experiment_layout = self._make_scroll_page("实验功能", "按需启用，设置从下一轮任务生效。")
         self.long_context_panel = LongContextSettings(self.config_manager)
         experiment_layout.addWidget(self.long_context_panel)
         from ui.browser_automation_settings import BrowserAutomationSettings
         self.browser_automation_panel = BrowserAutomationSettings(self.config_manager)
         experiment_layout.addWidget(self.browser_automation_panel)
-        add_settings_page("实验功能", "fa5s.flask", experiment_page)
-        self.update_nav_item = add_settings_page("更新与关于", "fa5s.download", update_page)
-        if domain == "settings":
-            from ui.settings_sections import SettingsSection
-            pages = dict(zip(self._page_labels, self._settings_pages))
-            self.privacy_section = SettingsSection([(label, pages[label]) for label in ("数据安全", "变量与凭据")])
-            self.advanced_section = SettingsSection([(label, pages[label]) for label in ("实验功能", "组件与依赖", "运行日志", "更新与关于")])
-            sections = [
-                ("外观与阅读", "fa5s.palette", pages["外观"]),
-                ("回答偏好", "fa5s.comment", pages["回答偏好"]),
-                ("模型与服务", "fa5s.brain", pages["模型与服务"]),
-                ("消息连接", "fa5s.comments", pages["消息连接"]),
-                ("企业账号", "fa5s.user-circle", pages["企业账号"]),
-                ("隐私与数据", "fa5s.shield-alt", self.privacy_section),
-                ("文件与存储", "fa5s.folder-open", pages["工作区与存储"]),
-                ("高级与维护", "fa5s.sliders-h", self.advanced_section),
-            ]
-            self.nav_list.clear()
-            self.nav_combo.clear()
-            for label, icon, page in sections:
-                self.nav_list.addItem(QListWidgetItem(qta.icon(icon, color=DesignTokens.text_secondary), label))
-                self.nav_combo.addItem(label)
-                self.content_stack.addWidget(page)
-            self._page_labels = [label for label, _, _ in sections]
-            self._settings_pages = [page for _, _, page in sections]
-            self.update_nav_item = self.nav_list.item(7)
-        def show_settings_page(row):
-            if row < 0 or row >= len(self._settings_pages):
-                return
-            if self.domain != "settings" and row != self._active_settings_row and (self._settings_dirty or self.mcp_server_manager.editor_dialog is not None
-                    or self.long_context_panel.has_pending_input()
-                    or self.browser_automation_panel.has_pending_input()
-                    or (hasattr(self, "account_connections_page") and self.account_connections_page.has_pending_input())):
-                if not self._confirm_discard_settings():
-                    self.nav_list.blockSignals(True)
-                    self.nav_list.setCurrentRow(self._active_settings_row)
-                    self.nav_list.blockSignals(False)
-                    self.nav_combo.blockSignals(True)
-                    self.nav_combo.setCurrentIndex(self._active_settings_row)
-                    self.nav_combo.blockSignals(False)
-                    return
-            page = self._settings_pages[row]
-            if self.content_stack.indexOf(page) < 0:
-                self.content_stack.addWidget(page)
-            self.content_stack.setCurrentWidget(page)
-            self._active_settings_row = row
-            self.nav_combo.blockSignals(True)
-            self.nav_combo.setCurrentIndex(row)
-            self.nav_combo.blockSignals(False)
-            if hasattr(self, "settings_action_bar"):
-                self._sync_settings_action_bar()
+        return experiment_page
 
-        self.nav_list.currentRowChanged.connect(show_settings_page)
-        self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
-        self.select_initial_page(initial_page_label)
-
-        action_bar = ProductActionBar()
-        self.settings_action_bar = action_bar
-        self.settings_dirty_label = QLabel("没有未保存的修改")
-        self.settings_dirty_label.setStyleSheet(apple_caption_style())
-        action_bar.layout.insertWidget(0, self.settings_dirty_label)
-        self.save_settings_btn = QPushButton("保存更改")
-        self.save_settings_btn.setObjectName("PrimaryBtn")
-        self.save_settings_btn.setEnabled(False)
-        self.save_settings_btn.clicked.connect(self.save_settings)
-        cancel_btn = QPushButton("放弃更改")
-        cancel_btn.setObjectName("SecondaryBtn")
-        self.discard_settings_btn = cancel_btn
-        cancel_btn.hide()
-        cancel_btn.clicked.connect(self.discard_page_changes)
-        action_bar.layout.addWidget(cancel_btn)
-        action_bar.layout.addWidget(self.save_settings_btn)
-        layout.addWidget(action_bar)
-        self._settings_baseline_state = self._settings_state()
-        self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
-        self._connect_settings_dirty_tracking()
-        self.mcp_server_manager.commit_callback = self.save_settings
-        self.memory_project_combo.currentIndexChanged.connect(lambda: self.select_memory_workspace(self.memory_project_combo.currentData() or ""))
-        show_settings_page(self.nav_list.currentRow())
-        self.settings_search = QLineEdit()
-        self.settings_search.setPlaceholderText("搜索设置名称或用途…" if domain == "settings" else "搜索管理页面…")
-        self.settings_search.setClearButtonEnabled(True)
-        self.settings_search.textChanged.connect(self._filter_settings_pages)
-        self.settings_search.returnPressed.connect(self._activate_settings_search)
-        layout.insertWidget(1, self.settings_search)
-        if domain == "settings":
-            self.settings_search.setPlaceholderText("搜索设置，例如字体、凭据、日志…")
-            self.settings_search.setMaximumWidth(600)
-            self.settings_search_results = QListWidget()
-            self.settings_search_results.setObjectName("SettingsSearchResults")
-            self.settings_search_results.setAccessibleName("设置搜索结果")
-            self.settings_search.installEventFilter(self)
-            self.settings_search_results.installEventFilter(self)
-            self.settings_search_results.setMaximumHeight(240)
-            self.settings_search_results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self.settings_search_results.itemClicked.connect(self._open_settings_search_result)
-            self.settings_search_results.itemActivated.connect(self._open_settings_search_result)
-            self.settings_search_results.hide()
-            self._settings_search_matches = []
-            layout.insertWidget(2, self.settings_search_results)
-            self.privacy_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
-            self.advanced_section.sectionChanged.connect(lambda _label: self._sync_settings_action_bar())
-            self.theme_settings_panel.selectionCommitted.connect(self._theme_selection_committed)
-        bind_theme(self, self._refresh_settings_shell, surface="settings")
-        self._cached_settings_config = settings_page_config_snapshot(self.config_manager.config)
+    def _build_account(self):
+        from ui.account_connections import AccountConnectionsPage
+        self.account_connections_page = AccountConnectionsPage(config_manager=self.config_manager)
+        if hasattr(self._main, "refresh_model_selector"):
+            self.account_connections_page.enterprise.changed.connect(self._main.refresh_model_selector)
+        return self.account_connections_page
 
     def refresh_saved_configuration(self):
         """Refresh cheap external preference changes without rebuilding the page."""
@@ -12740,10 +12743,14 @@ class SettingsDialog(QDialog):
         self._restoring_settings = True
         try:
             if "god_mode" in changed:
-                self.god_mode_check.setChecked(self.config_manager.get_god_mode())
+                self._settings_baseline_state["config"]["god_mode"] = self.config_manager.get_god_mode()
             if "default_workspace" in changed:
+                self._settings_baseline_state["config"]["default_workspace"] = self.config_manager.get("default_workspace", "")
+            if "default_workspace" in changed and "storage" in self._loaded_pages:
                 self.default_ws_input.setText(self.config_manager.get("default_workspace", ""))
             if "selected_model_id" in changed:
+                self._settings_baseline_state["config"]["selected_model_id"] = self.config_manager.get_selected_model_id()
+            if "selected_model_id" in changed and "models" in self._loaded_pages:
                 self.model_channel_manager._default_model_id = self.config_manager.get_selected_model_id()
                 self.model_channel_manager._refresh_default_models()
         finally:
@@ -12799,79 +12806,38 @@ class SettingsDialog(QDialog):
         if self.domain == "settings":
             if self._settings_search_matches:
                 self._open_settings_search_result(self.settings_search_results.currentItem() or self.settings_search_results.item(0))
-            return
-        from ui.settings_sections import SettingsSection
-        query = self.settings_search.text().strip().casefold()
-        def title_match(item):
-            row, page = item
-            titles = [self._page_labels[row], *(page.pages if isinstance(page, SettingsSection) else [])]
-            return 0 if query and any(query in title.casefold() for title in titles) else 1
-        for row, page in sorted(enumerate(self._settings_pages), key=title_match):
-            if self.nav_list.item(row).isHidden():
-                continue
-            self.nav_list.setCurrentRow(row)
-            if self._active_settings_row != row:
-                return
-            if isinstance(page, SettingsSection):
-                for title, child in sorted(page.pages.items(), key=lambda item: query not in item[0].casefold()):
-                    words = [title, *(label.text() for label in child.findChildren(QLabel))]
-                    if query and query in " ".join(words).casefold():
-                        page.select(title)
-                        page = child
-                        break
-            for label in page.findChildren(QLabel):
-                if query in label.text().casefold() and isinstance(page, QScrollArea):
-                    page.ensureWidgetVisible(label)
+        else:
+            for row in range(self.nav_list.count()):
+                if not self.nav_list.item(row).isHidden():
+                    self.nav_list.setCurrentRow(row)
                     break
-            return
 
     def _filter_settings_pages(self, query):
-        from ui.settings_sections import SettingsSection
+        from ui.settings_loading import PAGE_GROUPS, PAGE_SPECS
         query = query.strip().casefold()
-        for row, page in enumerate(self._settings_pages):
-            words = [self._page_labels[row]]
-            if isinstance(page, SettingsSection):
-                words.extend(page.pages)
-            words.extend(label.text() for label in page.findChildren(QLabel))
-            self.nav_list.item(row).setHidden(bool(query) and query not in " ".join(words).casefold())
-        if self.domain == "settings" and hasattr(self, "settings_search_results"):
+        for row, (title, _icon, keys) in enumerate(PAGE_GROUPS[self.domain]):
+            words = " ".join([title, *(" ".join(PAGE_SPECS[key]) for key in keys)])
+            self.nav_list.item(row).setHidden(bool(query) and query not in words.casefold())
+        if self.domain == "settings":
             self._update_settings_search_results(query)
 
     def _update_settings_search_results(self, query):
-        from ui.settings_sections import SettingsSection
+        from ui.settings_loading import PAGE_GROUPS, PAGE_SPECS
         self.settings_search_results.clear()
         self._settings_search_matches = []
         if not query:
             self.settings_search_results.hide()
             return
         matches = []
-        for row, page in enumerate(self._settings_pages):
-            sections = page.pages.items() if isinstance(page, SettingsSection) else [("", page)]
-            for section, child in sections:
-                category = self._page_labels[row]
-                path = " › ".join(part for part in (category, section) if part)
-                if query in (section or category).casefold():
-                    matches.append((0, path, row, section, child, None))
-                seen = set()
-                description_match = False
-                field_match = False
-                for label in child.findChildren(QLabel):
-                    ancestor = label
-                    while ancestor is not child and ancestor is not None and not ancestor.isHidden():
-                        ancestor = ancestor.parentWidget()
-                    if ancestor is not child:
-                        continue
-                    title = re.sub(r"<[^>]+>", "", label.text()).strip().replace("\n", " ")
-                    if not title or query not in title.casefold() or title in seen:
-                        continue
-                    if len(title) > 48:
-                        description_match = True
-                        continue
-                    seen.add(title)
-                    field_match = True
-                    matches.append((1, f"{title}  ·  {path}", row, section, child, label))
-                if description_match and not field_match and query not in (section or category).casefold():
-                    matches.append((2, path, row, section, child, None))
+        for row, (category, _icon, keys) in enumerate(PAGE_GROUPS[self.domain]):
+            for key in keys:
+                title, keywords = PAGE_SPECS[key]
+                path = category if title == category else category + " › " + title
+                if query in path.casefold():
+                    matches.append((0, path, row, key, ""))
+                for field in keywords.split():
+                    if query in field.casefold() and field != title:
+                        matches.append((1, f"{field}  ·  {path}", row, key, field))
         self._settings_search_matches = sorted(matches, key=lambda item: (item[0], len(item[1])))[:8]
         for match in self._settings_search_matches:
             self.settings_search_results.addItem(match[1])
@@ -12885,29 +12851,30 @@ class SettingsDialog(QDialog):
         self.settings_search_results.show()
 
     def _open_settings_search_result(self, item):
+        from ui.settings_loading import PAGE_SPECS
         index = self.settings_search_results.row(item)
         if not 0 <= index < len(self._settings_search_matches):
             return
-        _, _, row, section, page, label = self._settings_search_matches[index]
-        self.nav_list.setCurrentRow(row)
-        if section:
-            self._settings_pages[row].select(section)
+        _, _, row, key, field = self._settings_search_matches[index]
+        self.select_initial_page(PAGE_SPECS[key][0])
         self.settings_search_results.hide()
-        if label is not None:
+        page = self._loaded_pages.get(key)
+        if page is not None and field:
             def reveal():
-                if not _qt_object_alive(self) or not _qt_object_alive(label):
+                if not _qt_object_alive(page):
                     return
-                ancestor = label.parentWidget()
-                while ancestor is not None and ancestor is not self:
-                    if isinstance(ancestor, QScrollArea):
-                        ancestor.ensureWidgetVisible(label, 20, 40)
-                        break
-                    ancestor = ancestor.parentWidget()
-                buddy = label.buddy()
-                if buddy is not None:
-                    buddy.setFocus(Qt.OtherFocusReason)
+                label = next((label for label in page.findChildren(QLabel) if field in label.text()), None)
+                if label is not None:
+                    ancestor = label.parentWidget()
+                    while ancestor is not None and ancestor is not self:
+                        if isinstance(ancestor, QScrollArea):
+                            ancestor.ensureWidgetVisible(label, 20, 40)
+                            break
+                        ancestor = ancestor.parentWidget()
+                    if label.buddy() is not None:
+                        label.buddy().setFocus(Qt.OtherFocusReason)
             QTimer.singleShot(0, reveal)
-        log_ui_navigation("settings_search_navigate", page=self._page_labels[row], section=section)
+        log_ui_navigation("settings_search_navigate", page=self._page_labels[row], section=key)
 
     def eventFilter(self, watched, event):
         if self.domain == "settings" and watched is getattr(self, "_im_status_page", None):
@@ -12957,11 +12924,27 @@ class SettingsDialog(QDialog):
     def discard_page_changes(self):
         if not self._settings_dirty:
             return
-        if self.domain == "capabilities":
-            self._restoring_settings = True
-            try:
+        self._restoring_settings = True
+        try:
+            config = self.config_manager
+            loaded = self._loaded_pages
+            if "preferences" in loaded or "memory" in loaded:
+                self.memory_store = MemoryStore(config.get_chat_history_dir())
+            if "preferences" in loaded:
+                self.memory_soul_edit.setPlainText(self.memory_store.read_soul())
+            if "memory" in loaded:
+                self.memory_global_edit.setPlainText(self.memory_store.read_summary("global", ""))
+                self.memory_workspace_edit.setPlainText(self.memory_store.read_summary("workspace", self.memory_workspace_dir) if self.memory_workspace_dir else "")
+            if "storage" in loaded:
+                self.default_ws_input.setText(config.get("default_workspace", ""))
+                self.history_dir_input.setText(config.get_chat_history_dir())
+                self.chat_workspace_root_input.setText(config.get_chat_workspace_root())
+            if "security" in loaded:
+                from core.data_security import read_config
+                self.data_security_panel.set_value(read_config(config))
+            if "agents" in loaded:
                 manager = self.agent_profile_manager
-                manager.profiles = json.loads(json.dumps(self.config_manager.get_agent_profiles()))
+                manager.profiles = copy.deepcopy(config.get_agent_profiles())
                 manager.profiles = builtin_agent_profiles(manager.profiles) + manager.profiles
                 manager._untouched_drafts.clear()
                 manager._current_index = -1
@@ -12970,73 +12953,36 @@ class SettingsDialog(QDialog):
                     manager.profile_list.setCurrentRow(0)
                 else:
                     manager._load_profile_into_fields(-1)
-                self.mcp_server_manager.servers = json.loads(json.dumps(self.config_manager.get_mcp_servers()))
+            if "mcp" in loaded:
+                self.mcp_server_manager.servers = copy.deepcopy(config.get_mcp_servers())
                 self.mcp_server_manager._refresh_list()
-            finally:
-                self._restoring_settings = False
-            self._clear_settings_dirty()
-            return
-        self._restoring_settings = True
-        try:
-            state = json.loads(json.dumps(self._settings_baseline_state))
-            config = state["config"]
-            config.update(model_channels=self.config_manager.get_model_channels(),
-                          selected_model_id=self.config_manager.get_selected_model_id(),
-                          agent_profiles=self.config_manager.get_agent_profiles(),
-                          mcp_servers=self.config_manager.get_mcp_servers(),
-                          default_workspace=self.config_manager.get("default_workspace", ""),
-                          history_dir=self.config_manager.get_chat_history_dir(),
-                          chat_workspace_root=self.config_manager.get_chat_workspace_root(),
-                          god_mode=self.config_manager.get_god_mode())
-            self.memory_store = MemoryStore(config["history_dir"])
-            state["memory"]["soul"] = self.memory_store.read_soul()
-            state["memory"]["global"] = self.memory_store.read_summary("global", "")
-            state["memory"]["workspace"] = self.memory_store.read_summary("workspace", self.memory_workspace_dir) if self.memory_workspace_dir else ""
-            self.memory_soul_edit.setPlainText(state["memory"]["soul"])
-            self.memory_global_edit.setPlainText(state["memory"]["global"])
-            self.memory_workspace_edit.setPlainText(state["memory"]["workspace"])
-            self.default_ws_input.setText(config["default_workspace"])
-            self.history_dir_input.setText(config["history_dir"])
-            self.chat_workspace_root_input.setText(config["chat_workspace_root"])
-            self.god_mode_check.setChecked(config["god_mode"])
-            from core.data_security import read_config
-            self.data_security_panel.set_value(read_config(self.config_manager))
-            self.agent_profile_manager.profiles = json.loads(json.dumps(config["agent_profiles"]))
-            self.agent_profile_manager.profiles = builtin_agent_profiles(self.agent_profile_manager.profiles) + self.agent_profile_manager.profiles
-            self.agent_profile_manager._current_index = -1
-            self.agent_profile_manager._refresh_profile_list()
-            self.agent_profile_manager.profile_list.setCurrentRow(0)
-            self.mcp_server_manager.servers = json.loads(json.dumps(config["mcp_servers"]))
-            self.mcp_server_manager._refresh_list()
-            self.theme_settings_panel.restore_saved_theme()
-            # Complex editors are restored using their existing load APIs below.
-            self._restore_configuration_editors(config)
+            if "appearance" in loaded:
+                self.theme_settings_panel.restore_saved_theme()
+            values = copy.deepcopy(self._settings_baseline_state["config"])
+            values.update(model_channels=config.get_model_channels(), selected_model_id=config.get_selected_model_id())
+            self._restore_configuration_editors(values)
         finally:
             self._restoring_settings = False
         self._clear_settings_dirty()
 
     def _restore_configuration_editors(self, config):
-        manager = self.model_channel_manager
-        manager.discard_setup()
-        if manager.get_channels() != config["model_channels"] or any(editor.model_forms for editor in manager.editors):
-            for editor in manager.editors:
-                manager.channel_detail_stack.removeWidget(editor)
-                editor.hide()
-                editor.deleteLater()
-            manager.editors = []
-            manager.channel_list.clear()
-            for channel in config["model_channels"]:
-                manager._add_editor(channel)
-        manager.last_edited_model_id = ""
-        manager.saved_model_id = ""
-        manager.saved_notice.hide()
-        manager._refresh_channel_choices()
-        manager._default_model_id = config["selected_model_id"]
-        manager._refresh_default_models()
-        for kind, value in config["download_sources"].items():
-            combo = getattr(self, f"{kind}_source_combo")
-            combo.setCurrentIndex(max(0, combo.findData(value["selected"])))
-            getattr(self, f"{kind}_source_url").setText(value["url"])
+        if "models" in self._loaded_pages:
+            manager = self.model_channel_manager
+            manager.discard_setup()
+            if manager.get_channels() != config["model_channels"] or any(editor.model_forms for editor in manager.editors):
+                manager.reset_channels(config["model_channels"])
+            manager.last_edited_model_id = ""
+            manager.saved_model_id = ""
+            manager.saved_notice.hide()
+            manager._refresh_channel_choices()
+            manager._default_model_id = config["selected_model_id"]
+            manager._refresh_default_models()
+        if "components" in self._loaded_pages:
+            for kind, value in config["download_sources"].items():
+                combo = getattr(self, f"{kind}_source_combo")
+                combo.setCurrentIndex(max(0, combo.findData(value["selected"])))
+                getattr(self, f"{kind}_source_url").setText(value["url"])
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -13068,9 +13014,9 @@ class SettingsDialog(QDialog):
                 auto_close_ms=5000,
             )
 
-    def _connect_settings_dirty_tracking(self):
+    def _connect_settings_dirty_tracking(self, page):
         callback = lambda *_args: self._refresh_settings_dirty_state()
-        roots = [self] + list(getattr(self, "_settings_pages", []) or [])
+        roots = [page]
 
         def descendants(widget_type):
             seen = set()
@@ -13097,10 +13043,10 @@ class SettingsDialog(QDialog):
             spin.valueChanged.connect(callback)
         for date_edit in descendants(QDateTimeEdit):
             date_edit.dateTimeChanged.connect(callback)
-        for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
-            manager.changed.connect(callback)
-        self.theme_settings_panel.changed.connect(callback)
-        self.data_security_panel.changed.connect(callback)
+        for name in ("model_channel_manager", "agent_profile_manager", "mcp_server_manager", "theme_settings_panel", "data_security_panel"):
+            manager = getattr(self, name, None)
+            if manager is not None and (manager is page or page.isAncestorOf(manager)):
+                manager.changed.connect(callback)
 
     @staticmethod
     def _strip_settings_state_metadata(value):
@@ -13115,35 +13061,47 @@ class SettingsDialog(QDialog):
         return value
 
     def _settings_state(self):
-        source_state = {}
-        for kind in ("python", "node"):
-            combo = getattr(self, f"{kind}_source_combo")
-            editor = getattr(self, f"{kind}_source_url")
-            source_state[kind] = {
-                "selected": str(combo.currentData() or ""),
-                "url": editor.text().strip(),
-            }
-        state = {
-            "config": {
-                "model_channels": self.model_channel_manager.get_channels(),
-                "selected_model_id": self.model_channel_manager.get_default_model_id(),
-                "agent_profiles": self.agent_profile_manager.get_profiles(),
-                "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
-                "default_workspace": self.default_ws_input.text().strip(),
-                "history_dir": self.history_dir_input.text().strip(),
-                "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
-                "god_mode": self.god_mode_check.isChecked(),
-                "data_security": self.data_security_panel.state(),
-                "download_sources": source_state,
-            },
-            "appearance": self.theme_settings_panel.state_signature(),
-            "memory": {
-                "soul": self.memory_soul_edit.toPlainText(),
-                "global": self.memory_global_edit.toPlainText(),
-                "workspace": self.memory_workspace_edit.toPlainText() if self.memory_workspace_dir else "",
-                "workspace_dir": self.memory_workspace_dir,
-            },
-        }
+        # Unopened editors have no draft. Their stored baseline stays stable even
+        # when another part of the app updates configuration in the meantime.
+        baseline = getattr(self, "_settings_baseline_state", {})
+        if baseline:
+            state = copy.deepcopy(baseline)
+        else:
+            from core.data_security import read_config
+            sources = normalize_download_sources(self.config_manager.get("download_sources", {}))
+            source_state = {kind: {"selected": value["selected"], "url": next((item["url"] for item in value["custom"] if item["id"] == value["selected"]), "")}
+                            for kind, value in sources.items()}
+            state = {"config": {
+                "model_channels": self.config_manager.get_model_channels(),
+                "selected_model_id": self.config_manager.get_selected_model_id(),
+                "agent_profiles": self.config_manager.get_agent_profiles(),
+                "mcp_servers": normalize_mcp_servers(self.config_manager.get_mcp_servers()),
+                "default_workspace": self.config_manager.get("default_workspace", ""),
+                "history_dir": self.config_manager.get_chat_history_dir(),
+                "chat_workspace_root": self.config_manager.get_chat_workspace_root(),
+                "god_mode": self.config_manager.get_god_mode(),
+                "data_security": read_config(self.config_manager), "download_sources": source_state,
+            }, "appearance": None, "memory": {"soul": "", "global": "", "workspace": "", "workspace_dir": self.memory_workspace_dir}}
+        config = state["config"]
+        loaded = self._loaded_pages
+        if "models" in loaded:
+            config.update(model_channels=self.model_channel_manager.get_channels(), selected_model_id=self.model_channel_manager.get_default_model_id())
+        if "agents" in loaded:
+            config["agent_profiles"] = self.agent_profile_manager.get_profiles()
+        if "mcp" in loaded:
+            config["mcp_servers"] = normalize_mcp_servers(self.mcp_server_manager.get_servers())
+        if "storage" in loaded:
+            config.update(default_workspace=self.default_ws_input.text().strip(), history_dir=self.history_dir_input.text().strip(), chat_workspace_root=self.chat_workspace_root_input.text().strip())
+        if "security" in loaded:
+            config["data_security"] = self.data_security_panel.state()
+        if "components" in loaded:
+            config["download_sources"] = {kind: {"selected": str(getattr(self, f"{kind}_source_combo").currentData() or ""), "url": getattr(self, f"{kind}_source_url").text().strip()} for kind in ("python", "node")}
+        if "appearance" in loaded:
+            state["appearance"] = self.theme_settings_panel.state_signature()
+        if "preferences" in loaded:
+            state["memory"]["soul"] = self.memory_soul_edit.toPlainText()
+        if "memory" in loaded:
+            state["memory"].update({"global": self.memory_global_edit.toPlainText(), "workspace": self.memory_workspace_edit.toPlainText() if self.memory_workspace_dir else "", "workspace_dir": self.memory_workspace_dir})
         return self._strip_settings_state_metadata(state)
 
     @staticmethod
@@ -13157,11 +13115,11 @@ class SettingsDialog(QDialog):
         if getattr(self, "_restoring_settings", False):
             return
         dirty = self._settings_state_signature() != self._settings_baseline
-        setup = self.model_channel_manager.setup
+        setup = self.model_channel_manager.setup if "models" in self._loaded_pages else None
         pending_connection = bool(setup and setup.has_pending_input())
         self._settings_dirty = dirty
         if getattr(self, "domain", "") == "capabilities" and hasattr(self, "settings_action_bar"):
-            self.settings_action_bar.setVisible(dirty and self.mcp_server_manager.editor_dialog is None)
+            self.settings_action_bar.setVisible(dirty and (getattr(getattr(self, "mcp_server_manager", None), "editor_dialog", None) is None))
         if hasattr(self, "discard_settings_btn"):
             self.discard_settings_btn.setVisible(dirty)
         if hasattr(self, "save_settings_btn"):
@@ -13189,7 +13147,7 @@ class SettingsDialog(QDialog):
         self._sync_settings_action_bar()
 
     def _confirm_discard_settings(self):
-        if not self.model_channel_manager.confirm_leave():
+        if "models" in self._loaded_pages and not self.model_channel_manager.confirm_leave():
             return False
         if hasattr(self, "browser_automation_panel") and not self.browser_automation_panel.confirm_leave():
             return False
@@ -13197,7 +13155,7 @@ class SettingsDialog(QDialog):
             return False
         if hasattr(self, "account_connections_page") and not self.account_connections_page.confirm_leave():
             return False
-        if not self.mcp_server_manager.confirm_editor():
+        if "mcp" in self._loaded_pages and not self.mcp_server_manager.confirm_editor():
             return False
         if self._settings_dirty:
             choice = ProductMessageDialog(
@@ -13229,7 +13187,8 @@ class SettingsDialog(QDialog):
         if not self._allow_close_without_prompt and not self._confirm_discard_settings():
             event.ignore()
             return
-        self.model_channel_manager.discard_setup()
+        if "models" in self._loaded_pages:
+            self.model_channel_manager.discard_setup()
         if hasattr(self, "_im_gateway_status_timer"):
             self._im_gateway_status_timer.stop()
         if self._settings_dirty:
@@ -13241,10 +13200,10 @@ class SettingsDialog(QDialog):
         initial_page_label = {"个性与记忆": "记忆", "MCP": "MCP 服务", "企业消息": "消息连接", "工作区": "工作区与存储", "更新": "更新与关于", "日志下载": "运行日志"}.get(initial_page_label, initial_page_label)
         if self.domain == "settings":
             if initial_page_label in self.privacy_section.pages:
-                self.privacy_section.select(initial_page_label)
+                self.privacy_section.select(initial_page_label, load=False)
                 initial_page_label = "隐私与数据"
             elif initial_page_label in self.advanced_section.pages:
-                self.advanced_section.select(initial_page_label)
+                self.advanced_section.select(initial_page_label, load=False)
                 initial_page_label = "高级与维护"
             initial_page_label = {"外观": "外观与阅读", "工作区与存储": "文件与存储"}.get(initial_page_label, initial_page_label)
         if not initial_page_label:
@@ -13253,7 +13212,11 @@ class SettingsDialog(QDialog):
         matches = self.nav_list.findItems(str(initial_page_label), Qt.MatchExactly)
         if not matches:
             raise ValueError(f"未找到设置页：{initial_page_label}")
-        self.nav_list.setCurrentItem(matches[0])
+        row = self.nav_list.row(matches[0])
+        if row == self._active_settings_row:
+            self._settings_pages[row].ensure()
+        else:
+            self.nav_list.setCurrentItem(matches[0])
 
     def refresh_archive_lists(self):
         def format_time(timestamp):
@@ -13570,7 +13533,8 @@ class SettingsDialog(QDialog):
         apply_product_dialog(self, "SettingsDialog", background=DesignTokens.bg_main)
 
     def refresh_current_version_label(self):
-        self.update_current_label.setText(f"当前版本：{APP_VERSION}")
+        if hasattr(self, "update_current_label"):
+            self.update_current_label.setText(f"当前版本：{APP_VERSION}")
 
     def showEvent(self, event):
         self.refresh_current_version_label()
@@ -13665,13 +13629,6 @@ class SettingsDialog(QDialog):
 
         self.im_provider_stack = QStackedWidget()
         self.im_provider_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        for spec in IM_PROVIDER_SPECS:
-            panel = self._build_im_provider_detail(
-                spec,
-                providers.get(spec.provider_id) or {},
-            )
-            self.im_provider_panels[spec.provider_id] = panel
-            self.im_provider_stack.addWidget(panel)
         detail_layout.addWidget(self.im_provider_stack, 1)
 
         self.im_master_detail = ProductMasterDetail(browse, detail)
@@ -13854,6 +13811,13 @@ class SettingsDialog(QDialog):
             return
         self.im_selected_provider = name
         panel = self.im_provider_panels.get(name)
+        if panel is None and show_detail:
+            spec = get_provider_spec(name)
+            config = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))["providers"].get(name) or {}
+            panel = self._build_im_provider_detail(spec, config)
+            self.im_provider_panels[name] = panel
+            self.im_provider_stack.addWidget(panel)
+            self._refresh_im_action_theme()
         if panel:
             self.im_provider_stack.setCurrentWidget(panel)
         for provider_id, row in getattr(self, "im_provider_rows", {}).items():
@@ -13974,7 +13938,9 @@ class SettingsDialog(QDialog):
             action = self.im_provider_buttons.get(name)
             if action is not None:
                 action.setText("管理" if name == active else ("查看" if configured else "接入"))
-            notice = self.im_provider_statuses[name]
+            notice = self.im_provider_statuses.get(name)
+            if notice is None:
+                continue
             if name == active and running and runtime_state == "connected":
                 notice.set_text(
                     f"{spec.title}正在使用中，收到的文字和链接会交给默认主助手处理。",
@@ -14082,6 +14048,7 @@ class SettingsDialog(QDialog):
 
     def _restart_existing_im_provider(self, provider_name):
         name = str(provider_name or "").strip().lower()
+        self._select_im_provider(name)
         spec = get_provider_spec(name)
         if spec is None:
             return
@@ -14099,6 +14066,7 @@ class SettingsDialog(QDialog):
 
     def _connect_form_im_provider(self, provider_name):
         name = str(provider_name or "").strip().lower()
+        self._select_im_provider(name)
         spec = get_provider_spec(name)
         if spec is None or spec.auth_kind != "form":
             return
@@ -14224,7 +14192,9 @@ class SettingsDialog(QDialog):
 
     def _open_im_gateway_log(self):
         self.select_initial_page("运行日志")
-        self.runtime_logs_panel.set_source("im_gateway")
+        self.select_initial_page("运行日志")
+        if "logs" in self._loaded_pages:
+            self.runtime_logs_panel.set_source("im_gateway")
 
     def _save_im_gateway_config(self):
         """Enterprise-message settings are committed by their local action."""
@@ -14232,12 +14202,14 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         self.requires_skill_reload = False
-        if not self.model_channel_manager.validate_models():
+        current_state = self._settings_state()
+        model_manager = getattr(self, "model_channel_manager", None)
+        if model_manager is not None and not model_manager.validate_models():
             self.select_initial_page("模型与服务")
             return
-        selected_model_id = self.model_channel_manager.get_default_model_id()
-        model_channels = self.model_channel_manager.get_channels()
-        mcp_servers = normalize_mcp_servers(self.mcp_server_manager.get_servers())
+        selected_model_id = current_state["config"]["selected_model_id"]
+        model_channels = current_state["config"]["model_channels"]
+        mcp_servers = current_state["config"]["mcp_servers"]
         current_mcp_servers = self.config_manager.get_mcp_servers()
         all_model_ids = [
             model.get("id")
@@ -14268,7 +14240,7 @@ class SettingsDialog(QDialog):
             if reply != QMessageBox.Yes:
                 self.god_mode_check.setChecked(False)
         try:
-            pending_download_sources = self._source_config_from_editors()
+            pending_download_sources = self._source_config_from_editors() if "components" in self._loaded_pages else normalize_download_sources(self.config_manager.get("download_sources", {}))
         except ValueError as exc:
             QMessageBox.warning(self, "下载源", str(exc))
             return
@@ -14301,14 +14273,21 @@ class SettingsDialog(QDialog):
             return
         appearance_changed = (
             current_state["appearance"] != baseline_state["appearance"]
-            or self.theme_settings_panel.has_active_preview()
+            or ("appearance" in self._loaded_pages and self.theme_settings_panel.has_active_preview())
         )
-        target_history_dir = self.history_dir_input.text().strip()
+        target_history_dir = current_state["config"]["history_dir"]
         history_dir_changed = (
             current_config_state["history_dir"] != baseline_config_state["history_dir"]
         )
         current_memory_state = current_state["memory"]
         baseline_memory_state = baseline_state["memory"]
+        if history_dir_changed:
+            source_store = MemoryStore(baseline_config_state["history_dir"])
+            if "preferences" not in self._loaded_pages:
+                current_memory_state["soul"] = source_store.read_soul()
+            if "memory" not in self._loaded_pages:
+                current_memory_state["global"] = source_store.read_summary("global", "")
+                current_memory_state["workspace"] = source_store.read_summary("workspace", self.memory_workspace_dir) if self.memory_workspace_dir else ""
         memory_write_scopes = set()
         if history_dir_changed or current_memory_state["soul"] != baseline_memory_state["soul"]:
             memory_write_scopes.add("soul")
@@ -14454,7 +14433,7 @@ class SettingsDialog(QDialog):
             self.agent_profile_manager._untouched_drafts.clear()
         if memory_write_scopes:
             self.memory_store = target_memory_store
-        self.requires_skill_reload = mcp_servers != current_mcp_servers
+        self.requires_skill_reload = "mcp_servers" in changed_keys and mcp_servers != current_mcp_servers
         theme_commit_warning = (
             self.theme_settings_panel.last_commit_warning
             if appearance_changed
@@ -14462,7 +14441,8 @@ class SettingsDialog(QDialog):
         )
         self._clear_settings_dirty()
         self._allow_close_without_prompt = False
-        self.model_channel_manager.mark_saved()
+        if model_manager is not None:
+            model_manager.mark_saved()
         if self.property("embeddedProductPage"):
             if self._main and hasattr(self._main, "add_system_toast"):
                 if theme_commit_warning:
@@ -15617,8 +15597,8 @@ class SkillsCenterDialog(QDialog):
             QTimer.singleShot(0, self._hub_reflow)
         else:
             if self.management_page is None:
-                self.management_page = SettingsDialog(self.config_manager, self._main, domain="capabilities")
-                self.management_page.setWindowFlags(Qt.Widget)
+                self.management_page = SettingsDialog(self.config_manager, self._main, domain="capabilities",
+                    initial_page_label="MCP 服务" if section == "mcp" else "专家", embedded_parent=self.section_stack)
                 self.management_page.setProperty("embeddedProductPage", True)
                 self.management_page.setProperty("sectionHosted", True)
                 self.management_page.setMinimumSize(0, 0)
@@ -48614,7 +48594,6 @@ a {{ overflow-wrap: anywhere; }}
             page = SettingsDialog(self.config_manager, self, initial_page_label=section, domain="projects")
         elif route == self.PAGE_SETTINGS:
             page = SettingsDialog(self.config_manager, self, initial_page_label=section)
-            page.model_channel_manager.useModelRequested.connect(self.use_configured_model)
         else:
             return self.conversation_page
         return self._prepare_embedded_product_page(page, route)

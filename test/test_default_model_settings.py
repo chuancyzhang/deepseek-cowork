@@ -43,6 +43,7 @@ class DefaultModelSettingsTests(unittest.TestCase):
         self.dialog = SettingsDialog(self.config, initial_page_label="模型与服务")
         self.addCleanup(self.close_dialog)
         self.manager = self.dialog.model_channel_manager
+        self.manager.open_service(channels[0]["channel_id"])
         self.combo = self.manager.default_model_combo
 
     def close_dialog(self):

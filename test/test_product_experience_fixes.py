@@ -119,9 +119,12 @@ class ProductExperienceFixTests(unittest.TestCase):
 
     def test_settings_dirty_state_ignores_background_logs_and_reverts(self):
         dialog = SettingsDialog(ConfigManager())
+        dialog.ensure_page('storage')
+        dialog.ensure_page('components')
         try:
             self.assertFalse(dialog._settings_dirty)
             original = dialog.default_ws_input.text()
+            dialog.ensure_page("update")
             dialog.update_log_edit.append("background update progress")
             self.app.processEvents()
             self.assertFalse(dialog._settings_dirty)
@@ -144,6 +147,7 @@ class ProductExperienceFixTests(unittest.TestCase):
             main_module.sys, "frozen", False, create=True
         ):
             dialog = SettingsDialog(ConfigManager())
+            dialog.ensure_page('update')
         try:
             self.assertFalse(dialog.local_update_btn.isEnabled())
             self.assertIn("源码运行模式", dialog.local_update_hint_label.text())
@@ -153,6 +157,7 @@ class ProductExperienceFixTests(unittest.TestCase):
 
     def test_settings_local_update_file_picker_cancel_is_noop(self):
         dialog = SettingsDialog(ConfigManager())
+        dialog.ensure_page('update')
         try:
             with patch("ui.update_panel.QFileDialog.getOpenFileName", return_value=("", "")), patch.object(dialog.update_panel.coordinator, "select_local") as select:
                 dialog.update_panel.choose_local()
@@ -163,6 +168,7 @@ class ProductExperienceFixTests(unittest.TestCase):
 
     def test_settings_local_validation_error_restores_actions_and_message(self):
         dialog = SettingsDialog(ConfigManager())
+        dialog.ensure_page('update')
         try:
             coordinator = dialog.update_panel.coordinator
             coordinator.install_enabled = True
@@ -245,9 +251,12 @@ class ProductExperienceFixTests(unittest.TestCase):
         ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
             config = ConfigManager()
             dialog = SettingsDialog(config)
+            dialog.ensure_page('models')
             try:
+                dialog.model_channel_manager.open_service(config.get_model_channels()[0]["channel_id"])
                 editor = dialog.model_channel_manager.editors[0]
                 current = dict(editor._models()[0])
+                editor.model_list.setCurrentRow(0)
                 editor.edit_model()
                 editor.model_forms[current["id"]].display_name_input.setText("Edited Model")
                 self.app.processEvents()
@@ -261,11 +270,11 @@ class ProductExperienceFixTests(unittest.TestCase):
 
                 with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
                     while dialog.model_channel_manager.editors:
-                        dialog.model_channel_manager.delete_selected_channel()
+                        dialog.model_channel_manager.delete_active_service()
                 self.app.processEvents()
                 self.assertEqual(dialog.model_channel_manager.get_channels(), [])
                 self.assertTrue(dialog._settings_dirty)
-                self.assertFalse(dialog.model_channel_manager.delete_selected_channel_btn.isEnabled())
+                self.assertIs(dialog.model_channel_manager.route_stack.currentWidget(), dialog.model_channel_manager.overview)
 
                 dialog.save_settings()
                 self.assertEqual(config.get_model_channels(), [])
@@ -289,8 +298,11 @@ class ProductExperienceFixTests(unittest.TestCase):
                     ["feishu", "dingtalk", "wecom", "qq", "wechat"],
                 )
                 self.assertTrue(dialog.im_search_input.isHidden())
+                dialog._select_im_provider("qq")
                 self.assertEqual(dialog.im_provider_fields["qq"], {})
+                dialog._select_im_provider("wechat")
                 self.assertEqual(dialog.im_provider_fields["wechat"], {})
+                dialog._select_im_provider("dingtalk")
                 self.assertTrue(
                     dialog.im_provider_advanced_widgets["dingtalk"].isHidden()
                 )
@@ -477,6 +489,8 @@ class ProductExperienceFixTests(unittest.TestCase):
             config = ConfigManager()
             original_workspace = config.get("default_workspace", "")
             dialog = SettingsDialog(config)
+            dialog.ensure_page('preferences')
+            dialog.ensure_page('storage')
             try:
                 original_soul = dialog.memory_store.read_soul()
                 dialog.default_ws_input.setText(os.path.join(temp_dir, "changed-workspace"))
@@ -514,6 +528,8 @@ class ProductExperienceFixTests(unittest.TestCase):
         ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
             config = ConfigManager()
             dialog = SettingsDialog(config)
+            dialog.ensure_page('storage')
+            dialog.ensure_page('preferences')
             try:
                 dialog.default_ws_input.setText(os.path.join(temp_dir, "workspace"))
                 self.app.processEvents()
@@ -551,6 +567,7 @@ class ProductExperienceFixTests(unittest.TestCase):
         ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
             config = ConfigManager()
             dialog = SettingsDialog(config)
+            dialog.ensure_page('preferences')
             try:
                 dialog.memory_soul_edit.setPlainText("只更新灵魂记忆")
                 self.app.processEvents()
@@ -591,6 +608,7 @@ class ProductExperienceFixTests(unittest.TestCase):
             source_store.save_soul("灵魂记忆")
             source_store.save_summary("全局摘要", "global", "")
             dialog = SettingsDialog(config)
+            dialog.ensure_page('storage')
             try:
                 target_history_dir = os.path.join(temp_dir, "new-history")
                 dialog.history_dir_input.setText(target_history_dir)

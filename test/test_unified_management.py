@@ -104,7 +104,7 @@ class UnifiedManagementTests(unittest.TestCase):
         manager.add_profile()
         manager.name_input.setText("中文角色")
         self.assertTrue(page._settings_dirty)
-        with patch.object(page.theme_settings_panel, "restore_saved_theme", side_effect=AssertionError("theme reload")):
+        with patch("main.ThemeSettingsPanel", side_effect=AssertionError("theme created")):
             page.discard_page_changes()
         self.assertFalse(page._settings_dirty)
         self.assertEqual(manager.get_profiles(), [])

@@ -131,7 +131,7 @@ class SettingsRedesignTests(unittest.TestCase):
         page.settings_search.setText("字体")
         self.assertTrue(page._settings_search_matches)
         self.assertFalse(any("等宽字体" in match[1] for match in page._settings_search_matches))
-        field_index = next(index for index, match in enumerate(page._settings_search_matches) if match[-1] is not None and match[-1].text() == "界面字体")
+        field_index = next(index for index, match in enumerate(page._settings_search_matches) if match[-1] == "界面字体")
         page._open_settings_search_result(page.settings_search_results.item(field_index))
         self.assertEqual(page._page_labels[page._active_settings_row], "外观与阅读")
         self.assertEqual(page.theme_settings_panel.reading_scale.value(), 1.2)
@@ -149,6 +149,7 @@ class SettingsRedesignTests(unittest.TestCase):
         panel._new_theme()
         panel.color_edits["primary"].setText("#39735a")
         panel.reading_scale.setValue(1.2)
+        page.select_initial_page("回答偏好")
         page.memory_soul_edit.setPlainText("待保存的偏好")
         with patch.object(panel.repository, "replace_state", side_effect=OSError("disk write failed")), \
                 patch("main.QMessageBox.critical") as error:
@@ -194,6 +195,7 @@ class SettingsRedesignTests(unittest.TestCase):
         _parent, page = self.panel()
         panel = page.theme_settings_panel
         panel._new_theme()
+        panel.ensure_more()
         panel.token_editor.setPlainText("{unfinished")
         self.manager.switch_theme("builtin_paper")
         self.assertEqual(panel.token_editor.toPlainText(), "{unfinished")
@@ -259,6 +261,7 @@ class SettingsRedesignTests(unittest.TestCase):
     def test_navigation_preserves_drafts_and_legacy_routes(self):
         _parent, page = self.panel()
         self.assertEqual(page._page_labels, ["外观与阅读", "回答偏好", "模型与服务", "消息连接", "企业账号", "隐私与数据", "文件与存储", "高级与维护"])
+        page.select_initial_page("回答偏好")
         page.memory_soul_edit.setPlainText("保留的回答偏好")
         page.theme_settings_panel.reading_scale.setValue(1.15)
         with patch.object(page, "_confirm_discard_settings", side_effect=AssertionError("switch discarded draft")):
@@ -274,6 +277,7 @@ class SettingsRedesignTests(unittest.TestCase):
     def test_quick_switch_preserves_input_and_does_not_rebuild_history(self):
         parent, page = self.panel()
         parent.input_field.setPlainText("仍未发送的输入")
+        page.select_initial_page("回答偏好")
         page.memory_soul_edit.setPlainText("未保存的偏好")
         page.theme_settings_panel.reading_scale.setValue(1.2)
         with patch.object(parent, "refresh_history_list", side_effect=AssertionError("history rebuilt")):

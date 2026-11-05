@@ -32,12 +32,15 @@ class ThemeSettingsUiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repository = ThemeRepository(self.temp_dir.name)
         self.panel = ThemeSettingsPanel(self.repository)
+        self.panel.open_editor()
+        self.panel.ensure_more()
 
     def tearDown(self):
         self.panel.deleteLater()
         self.temp_dir.cleanup()
 
     def test_default_theme_is_read_only(self):
+        self.panel.open_editor()
         self.assertEqual(self.panel.theme_combo.currentData(), DEFAULT_THEME_ID)
         self.assertFalse(self.panel.name_edit.isEnabled())
         self.assertFalse(self.panel.delete_btn.isEnabled())
@@ -160,6 +163,8 @@ class ThemeSettingsUiTests(unittest.TestCase):
 
         self.panel = ThemeSettingsPanel(self.repository)
         observed_signatures = []
+        self.panel.open_editor()
+        self.panel.ensure_more()
         self.panel.name_edit.textChanged.connect(
             lambda: observed_signatures.append(self.panel.state_signature())
         )

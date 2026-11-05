@@ -118,6 +118,8 @@ class ChildWindowLifecycleTests(unittest.TestCase):
                                           for index in range(2))
         with patch("main.IM_PROVIDER_SPECS", specs):
             settings = SettingsDialog(self.config, self.parent)
+            settings.select_initial_page("组件与依赖")
+            settings.select_initial_page("消息连接")
         for field in (settings.python_source_url, settings.node_source_url, settings.im_search_input):
             self.assertFalse(field.isHidden())
             self.assertFalse(field.isWindow())

@@ -1,110 +1,73 @@
 # DeepSeek Cowork
 
-[中文](README_CN.md) | [English](README.md) | [Documentation](docs/index.md)
+[中文](README_CN.md) | [English](README.md) | [User guide](docs/user-guide.md) | [Technical guide](docs/technical-design.md)
 
-DeepSeek Cowork is a local Windows desktop workspace for agentic work. It brings
-chat, project files, Tool execution, capability extensions, reusable favorites, and
-deliverables into one observable, steerable, and recoverable workflow.
+DeepSeek Cowork is a local Windows desktop agent workspace that brings conversations, project files, tool execution, specialized capabilities, and deliverables into one workflow. Describe a goal, provide source material, follow the execution, and edit the resulting files.
 
-This is a personal exploration project and is not affiliated with DeepSeek.
+This is an independent personal project, unaffiliated with DeepSeek.
 
-Current app version: **5.3.3** · [Read the release notes](docs/releases/5.3.3.md)
+Documented version: **5.3.3** · [Version notes](docs/releases/5.3.3.md) · [Release history](docs/releases/index.md)
 
-## Current highlights
+## What you can do
 
-- **Team spaces:** share plans, immutable file revisions, and selected results through the company center; execute in isolated local conversations. See the [team-space guide](docs/team-spaces.md).
-- **Multiple knowledge sources:** connect WeKnora, Tencent Docs, and Lexiang, use selected references, and save results within the chosen source and account scope.
-- **Enterprise account:** sign in to the company center for assigned models and team spaces. Each knowledge source and Skill/MCP manages its own authentication; former shared connections require signing in again.
-- **Optional data security:** all features start disabled; opt into capability checks, credential warnings, or tokenization of selected model-request text.
-- **Task control and recovery:** stopping signals supported tools to cancel while preserving existing output; knowledge context is added on demand without creating extra historical questions.
+- **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
+- **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Office/PDF output.
+- **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, browser automation, and speech transcription.
+- **Knowledge and collaboration**: WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
+- **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
+- **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 
-## Core workflow
+Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New API model service onboarding, and improvements to questionnaires, file links, previews, and update notifications.
 
-1. Select a model and start either a standalone conversation or a project-bound workspace.
-2. Describe the outcome and attach or paste the files, images, and references the task needs.
-3. Follow reasoning, Tools, stage results, and the final answer in one stream; steer or stop the run when needed.
-4. Inspect observability, files, and deliverables in the right drawer, then edit or convert the result.
-5. Store durable preferences as memory, validated methods as experience or a Skill, and repeatable work modes as favorites with optional schedules.
+## Get started
 
-## Capability map
+1. Download the Windows ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases), extract it fully, and run `deepseek-cowork.exe`.
+2. Enter a DeepSeek API key in onboarding, or add a service and model under Settings → Models & Services. Enterprise clients can also sign in to their organization.
+3. Start a chat, attach source material, and describe the task. Select a project directory when working on an existing project.
+4. Follow the answer and execution, then open, edit, and save deliverables in the workspace.
 
-| Layer | Main capabilities |
-| --- | --- |
-| Workspace | Standalone chat directories, explicit project boundaries, history recovery, background runs, and grouped pagination |
-| Files & deliverables | File/image paste, Markdown/HTML/image/PDF/DOCX/PPTX/XLSX preview, safe editing, and Office conversion |
-| Agent runtime | Streaming reasoning and Tools, mid-run guidance, structured observability, sub-agents, daemon, and scheduled favorites |
-| Extensions | Built-in, optional, and user Skills; `stdio` and Streamable HTTP MCP; on-demand dependencies and remote Skill installation |
-| Connections | Browser automation, web search, finance and data capabilities, plus Feishu/DingTalk/WeCom/QQ/WeChat |
-| Personalization | Global and workspace memory, the Experience System, safe `.cowork-theme` themes, and Visualize |
+See the [user guide](docs/user-guide.md) for detailed instructions in Chinese.
 
-## Three design principles
+## Run from source
 
-- **Everything is Tool:** every executable action shares the same Tool schema, permissions, observability, and result protocol. Skills provide guidance, Agents provide roles, and an optional favorite schedule provides the trigger.
-- **AI-designed UI:** AI can configure theme tokens, the workspace scene, and constrained components, but it cannot rewrite the component tree, protected actions, or recovery controls. Themes require validation, isolated preview, and user confirmation.
-- **Experience System:** history preserves evidence, memory keeps durable facts, experience improves methods, and Skills package reusable capability. This is not model fine-tuning.
+Use Python 3.10+ and run these commands from the repository root:
 
-See the [product document](docs/product.md) for the complete product model.
-
-## Install
-
-### Windows release
-
-1. Download the latest ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
-2. Extract it completely, then run `deepseek-cowork.exe`; do not launch it from inside the archive.
-3. On first launch, paste a DeepSeek API key to validate the official service, sync its models, and select the recommended `deepseek-flash`. You can also configure another service later under **Settings → Models & Services**.
-
-The reference environment is a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is
-recommended; a discrete GPU is not required.
-
-### Run from source
-
-Requires Python 3.10+.
-
-```bash
+```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
 cd deepseek-cowork
-python -m pip install -r requirements.txt
-python main.py
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
 
-Library sources manage their own sign-in. Enterprise server authentication dependencies remain in its separate [deployment guide](web/platform/README.md).
+## Build a release
 
-### Build a release
+Prepare the pinned runtimes in a Windows build environment, then build the executable and release ZIP:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-.\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
-.\.venv\Scripts\python.exe .\scripts\package_release.py
+.\.venv\Scripts\python.exe -m PyInstaller deepseek-cowork.spec --noconfirm --clean
+.\.venv\Scripts\python.exe scripts/package_release.py
 ```
 
-The release uses pinned runtimes, offline editor assets, and a packaging audit.
-Treat the report from the current build as authoritative for size and contents.
+Packaging produces the versioned ZIP, audit report, and `latest.json`. Update notes come from `docs/releases/VERSION.md`. See [build and release instructions](docs/technical-design.md#构建与发布).
+
+## Design principles
+
+- **Everything is Tool**: executable actions share tool registration, authorization, execution, and results. Skills organize guidance and resources; experts provide roles.
+- **AI-designed UI**: declarative themes and isolated previews let users review and apply changes to the workspace.
+- **Experience System**: history records the process, memory stores lasting facts, experience captures reusable methods, and Skills organize specialized workflows. This is not model fine-tuning.
 
 ## Documentation
 
-- [Workspace interface](docs/workspace-ui.md) (Chinese): home, conversations, task details, and theme screenshots
-- [Settings and capability management](docs/unified-management.md) (Chinese): navigation and save boundaries
-- [Knowledge library](docs/knowledge_library.md) (Chinese): sources, references, uploads, and recovery
-- [Knowledge library](docs/knowledge_library.md) (Chinese): source sign-in, references, and uploads; [shared connection retirement](docs/account-connections.md)
-- [Data security](docs/data-security.md) (Chinese): optional checks and model-request text processing
-- [User guide](docs/user-guide.md) (Chinese): installation, setup, and complete task workflows
-- [Product document](docs/product.md) (Chinese): goals, principles, and boundaries
-- [Technical design](docs/technical-design.md) (Chinese): Agent Loop, Tools, safety, persistence, and desktop runtime
-- [Skill system](docs/skill-system.md) (Chinese): sources, discovery, configuration, MCP, dependencies, and experience
-- [AI themes and Visualize](docs/guides/ai-theme-and-visualize.md) (Chinese): user-focused walkthrough
-- [Roadmap](docs/roadmap.md) (Chinese): current phase and candidate directions
-- [Release history](docs/releases/index.md) (Chinese): version changes and acceptance priorities
+| Goal | Entry point |
+| --- | --- |
+| Complete tasks and use settings and capabilities | [User guide](docs/user-guide.md) |
+| Understand the architecture, develop Skills, test, build, and release | [Technical guide](docs/technical-design.md) |
+| Deploy and administer the enterprise platform | [Enterprise platform](web/platform/README.md) |
+| Review version changes | [Release history](docs/releases/index.md) |
 
-## Execution permissions
-
-Execution permissions and the manual product acceptance checklist are documented in [God Mode](docs/GOD_MODE.md) (Chinese). Turning God Mode off preserves tool discovery and reasoning, while requiring per-action approval for changes outside the current run's artifact directory and for opaque code execution.
-
-The Windows bundle includes ripgrep 15.1.0 (`rg`) for command-line file searches.
-Its bundled Git defaults to Git Credential Manager (`manager`), without a credential
-helper selection dialog. Account sign-in, password/token prompts and browser
-authorization remain available. Run `scripts/fetch_runtimes.ps1` before building;
-it verifies the pinned runtime and licenses and configures only the extracted Git,
-without changing the build machine's global or repository configuration.
+Detailed guides are maintained in Chinese.
 
 ## License
 

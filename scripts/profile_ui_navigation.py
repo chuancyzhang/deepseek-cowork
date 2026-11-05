@@ -1,4 +1,7 @@
 """Profile local navigation with isolated data and no remote requests."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import cProfile
 import io
@@ -267,7 +270,7 @@ def run(output, *, native=False, scale=1, dark=False, compact=False, idle_second
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", default=str(QA_ROOT / "results"))
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--dark", action="store_true")

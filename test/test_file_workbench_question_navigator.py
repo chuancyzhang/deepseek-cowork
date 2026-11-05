@@ -180,6 +180,8 @@ class FileWorkbenchTest(unittest.TestCase):
         host.file_navigator_current_frame.hide()
         host.file_browser_empty_state = QFrame()
         host.file_browser_empty_state.hide()
+        host.file_source_stack = QWidget()
+        host.file_source_stack.show()
         host.file_workbench = QWidget()
         host.file_workbench.resize(700, 520)
         host._visible_workspace_file_row_count = lambda limit=1000: 1
@@ -289,6 +291,8 @@ class FileTabStripTest(unittest.TestCase):
 
     def test_main_window_keeps_ordered_tabs_per_runtime_session(self):
         window = MainWindow()
+        window._startup_hydration_scheduled = True
+        window._background_services_scheduled = True
         try:
             with tempfile.TemporaryDirectory() as directory:
                 paths = []
@@ -327,10 +331,10 @@ class FileTabStripTest(unittest.TestCase):
                 second_state.open_file_paths = [paths[2]]
                 second_state.selected_deliverable_path = paths[2]
                 window.set_current_session(second_session_id)
-                self.assertEqual(window.file_tab_strip.paths, [paths[2]])
+                self.assertEqual(window.file_tab_strip.paths, ["@task", paths[2]])
                 self.assertEqual(window.file_tab_strip.active_path, paths[2])
                 window.set_current_session(state.session_id)
-                self.assertEqual(window.file_tab_strip.paths, paths[1:])
+                self.assertEqual(window.file_tab_strip.paths, ["@task", *paths[1:]])
                 self.assertEqual(window.file_tab_strip.active_path, paths[1])
 
                 window.resize(1280, 760)

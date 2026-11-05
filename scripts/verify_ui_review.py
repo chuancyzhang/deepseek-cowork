@@ -1,4 +1,7 @@
 """Verify the UI review against isolated data; optionally leave a native preview open."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -52,7 +55,7 @@ def verify(dark=False, scale=1, compact=False, native=False, interactive=False):
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=dark), preview=True), manager.last_error
-        output = ROOT / "docs/screenshots/ui-review-20261025"
+        output = QA_ROOT / "screenshots"
         output.mkdir(parents=True, exist_ok=True)
         suffix = f"{'dark' if dark else 'light'}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
         captures = []

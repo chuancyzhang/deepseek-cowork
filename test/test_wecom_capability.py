@@ -63,8 +63,10 @@ class TestWecomCapabilityPackage(unittest.TestCase):
             enabled.get_tools_for_skill("wecom-unified"),
             ["wecom_reference_read", "wecom_cli"],
         )
+        from core.execution_authorization import ExecutionAuthorization
         payload = json.loads(enabled.call_tool(
-            "wecom_reference_read", {"path": "wecomcli-contact.md"}
+            "wecom_reference_read", {"path": "wecomcli-contact.md"},
+            context={"execution_authorization": ExecutionAuthorization("wecom-test", "run", True, str(ROOT))}
         ))
         self.assertEqual(payload["status"], "completed")
 

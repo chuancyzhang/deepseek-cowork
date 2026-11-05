@@ -1,4 +1,7 @@
 """Render isolated update controls at 125/150/200 percent; no network or app install."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import os
 from pathlib import Path
@@ -10,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-OUTPUT = ROOT / "docs" / "guides" / "update-ui"
+OUTPUT = QA_ROOT / "screenshots"
 
 
 def workspace(theme, scale):

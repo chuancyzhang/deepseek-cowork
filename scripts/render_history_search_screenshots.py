@@ -1,5 +1,8 @@
 """Real sidebar search with isolated synthetic history, scaling and theme QA."""
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import argparse
 import os
 from pathlib import Path
@@ -18,7 +21,7 @@ os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
 
 def run():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/screenshots/history-search")
+    parser.add_argument("--output", type=Path, default=QA_ROOT / "screenshots")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cowork-history-search-qa-") as root:

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.skill_manager import SkillManager
+from core.execution_authorization import ExecutionAuthorization
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -163,7 +164,7 @@ class TestSpeechToTextSkill(unittest.TestCase):
         }
         manager.tools["transcribe_audio"] = lambda _context=None: "prepared"
 
-        result = manager.call_tool("transcribe_audio", {})
+        result = manager.call_tool("transcribe_audio", {}, context={"execution_authorization": ExecutionAuthorization("speech-test", "run", True, self.workspace_dir)})
 
         self.assertEqual(result, "prepared")
         self.assertEqual(len(coordinator.calls), 1)

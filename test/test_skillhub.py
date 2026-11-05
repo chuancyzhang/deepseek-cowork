@@ -19,6 +19,9 @@ class Config:
     def set_skill_enabled(self, name, value, *, persist_strict=False):
         self.enabled[name] = value
 
+    def get(self, key, default=None):
+        return default
+
 
 class SkillHubTests(unittest.TestCase):
     def test_disk_cache_survives_recreation_expires_and_rejects_corruption(self):

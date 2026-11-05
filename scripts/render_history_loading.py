@@ -1,4 +1,7 @@
 """Verify history loading and recorded timing with isolated native/offscreen UI."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -161,7 +164,7 @@ def run(output, scale, native):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=ROOT / "docs" / "images" / "history-loading")
+    parser.add_argument("--output", type=Path, default=QA_ROOT / "screenshots")
     parser.add_argument("--scale", type=float, default=1)
     parser.add_argument("--native", action="store_true")
     args = parser.parse_args()

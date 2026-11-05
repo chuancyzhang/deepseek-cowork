@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import subprocess
 import tempfile
+import time
 import unittest
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from core.chat_storage import ChatStorage
 from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
 from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message, project_visible_messages
 from core.runtime_journal import RuntimeJournal
+from core.message_persistence import project_provider_messages
 from core.theme import DesignTokens
 import main as main_module
 
@@ -59,6 +61,7 @@ from main import (
     summarize_tool_action,
 )
 from ui.primitives import ProductActionRow, ProductEmptyState, ProductPopover
+from ui_window_cleanup import close_test_window
 
 
 class TopLevelShowTracker(QObject):
@@ -83,6 +86,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.temp = self.enterContext(tempfile.TemporaryDirectory())
+        with open(os.path.join(self.temp, "config.json"), "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        for name in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir", "main.get_app_data_dir"):
+            self.enterContext(patch(name, return_value=self.temp))
+        self.enterContext(patch.object(MainWindow, "_run_startup_hydration", new=lambda _self: None))
+
         def accept_chat_save(window, session_id=None, flush=False):
             del flush
             sessions = getattr(window, "sessions", None)
@@ -112,6 +122,33 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self._save_chat_patch.start()
         self._wait_for_save_patch.start()
         self._checkpoint_patch.start()
+
+        queue_checkpoint = MainWindow._queue_runtime_checkpoint
+
+        def checkpoint_for_fixture_run(window, state, **kwargs):
+            # These UI tests construct active runs directly instead of submitting
+            # a real model request. Give the real checkpoint worker its run record.
+            run_id = str(getattr(state, "active_turn_request_id", "") or "")
+            if run_id and not window.runtime_journal.get_run(state.session_id, run_id):
+                window.runtime_journal.begin_run(
+                    state.session_id, run_id, turn_id=str(state.active_turn_id),
+                    writer_owner="ui:test", base_messages=state.messages,
+                )
+            return queue_checkpoint(window, state, **kwargs)
+
+        self.enterContext(patch.object(MainWindow, "_queue_runtime_checkpoint", new=checkpoint_for_fixture_run))
+
+    def _close_window(self, window):
+        close_test_window(window)
+
+    def _wait_for_checkpoints(self, window):
+        deadline = time.monotonic() + 5
+        while getattr(window, "_checkpoint_continuations", {}) and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(
+            getattr(window, "_checkpoint_continuations", {}),
+            "Runtime checkpoint callbacks did not finish",
+        )
 
     def tearDown(self):
         self.app.processEvents()
@@ -378,8 +415,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.chat_layout.indexOf(card), -1)
             self.assertTrue(card.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_background_inline_request_keeps_waiting_input_toast(self):
         window = MainWindow()
@@ -406,8 +442,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 request_id="background-waiting",
             )
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_legacy_interaction_dialog_cannot_create_top_level_surface(self):
         with self.assertRaisesRegex(RuntimeError, "InlineInteractionCard"):
@@ -459,8 +494,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(card.submit_btn.isEnabled())
             self.assertIn("提交失败", card.validation_label.text())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_product_popover_is_single_in_window_overlay(self):
         host = QWidget()
@@ -886,8 +920,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(bubble.thinking_widget.isHidden())
             self.assertEqual(bubble.main_content_text, "最终结果")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_completed_lifecycle_clears_sidebar_activity_without_worker_state(self):
         window = MainWindow()
@@ -904,8 +937,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(window._session_has_live_activity(state.session_id))
             self.assertFalse(state.live_activity)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_completed_lifecycle_ignores_stale_worker_and_daemon_flags(self):
         window = MainWindow()
@@ -928,8 +960,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(window.action_btn.text(), "开始")
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_steerable_running_composer_shows_stop_without_text(self):
         window = MainWindow()
@@ -983,8 +1014,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertNotIn("provider_retry", session_meta)
             self.assertNotIn("正在重试", session_meta)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_session_switch_keeps_runtime_state_owned_by_each_session(self):
         window = MainWindow()
@@ -1010,8 +1040,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(hasattr(window, "chat_layout"))
             self.assertFalse(hasattr(window, "llm_worker"))
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_history_rewrite_truncates_session_messages(self):
         window = MainWindow()
@@ -1027,8 +1056,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual([message["id"] for message in state.messages], ["keep"])
             self.assertEqual(retained_ids, {"keep"})
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_clear_chat_layout_stops_bubble_timers_before_delete(self):
         host = QWidget()
@@ -1099,8 +1127,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.normalize_session_ui(background)
             self.assertEqual(window.loop_hint.text(), "正在重试 2/5")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_retry_exhaustion_has_specific_notice_and_technical_event(self):
         window = MainWindow()
@@ -1118,6 +1145,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
+            self._wait_for_checkpoints(window)
 
             self.assertEqual(
                 state.conversation_notice.label.text(),
@@ -1128,8 +1156,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(event["retry_attempt"], 5)
             self.assertTrue(state.conversation_notice.action_button.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_prefix_and_journal_failures_have_actionable_safe_copy(self):
         prefix_category, prefix_summary = MainWindow._run_failure_presentation(
@@ -1175,6 +1202,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=1,
                 request_id="request-overload",
             )
+            self._wait_for_checkpoints(window)
 
             self.assertEqual([message["id"] for message in state.messages], before_message_ids)
             self.assertEqual(len(state.messages), 1)
@@ -1184,8 +1212,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             )
             self.assertEqual(state.observability_events[-1]["category"], "provider_overloaded")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_daemon_native_finish_uses_daemon_terminal_handler(self):
         window = MainWindow()
@@ -1215,8 +1242,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(worker._ui_terminal_handled)
         finally:
             state.daemon_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_python_examples_complete_without_execution_or_extra_result_widgets(self):
         from core.execution_authorization import ExecutionAuthorization
@@ -1285,8 +1311,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     self.assertEqual(window.action_btn.text(), "开始")
                     self.assertEqual(window.action_btn.property("composerAction"), "send")
                 finally:
-                    window.close()
-                    window.deleteLater()
+                    self._close_window(window)
 
     def test_normal_completion_has_no_interruption_warning_and_clears_activity(self):
         window = MainWindow()
@@ -1304,6 +1329,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.set_session_status("running", state.session_id)
             bubble = window._append_live_thinking_segment(state)
 
+            window.handle_observability_event(
+                {"type": "assistant_message_started", "message_id": "a-normal"},
+                state.session_id, turn_id=1, request_id="request-normal",
+            )
             window.handle_llm_response(
                 {
                     "request_id": "request-normal",
@@ -1319,6 +1348,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
+            self._wait_for_checkpoints(window)
 
             self.assertEqual(state.session_status, "completed")
             self.assertFalse(window._session_has_live_activity(state.session_id))
@@ -1331,16 +1361,16 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     if isinstance(message, dict)
                 )
             )
+            provider_messages, _ = project_provider_messages(state.messages)
             final_messages = [
                 message
-                for message in state.messages
+                for message in provider_messages
                 if message.get("role") == "assistant"
                 and message.get("content") == "正常完成。"
             ]
             self.assertEqual([message.get("id") for message in final_messages], ["a-normal"])
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_empty_generated_merge_persists_visible_terminal_fallback(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1349,6 +1379,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 storage = ChatStorage(os.path.join(root, "chat.sqlite"))
                 window.chat_storage = storage
                 window.runtime_journal = RuntimeJournal(root)
+                window.runtime_checkpoint_worker.journal = window.runtime_journal
                 state = window.get_current_session()
                 window._retire_session_empty_state(state, reason="test_terminal_fallback")
                 state.history_loaded = True
@@ -1414,6 +1445,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                         turn_id=1,
                         request_id="request-terminal-fallback",
                     )
+                    self._wait_for_checkpoints(window)
 
                 persisted = storage.get_messages(state.session_id)
                 final_messages = [
@@ -1430,8 +1462,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "最终正文",
                 )
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_diverged_pending_commit_keeps_current_history_and_persists_fallback(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1440,6 +1471,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 storage = ChatStorage(os.path.join(root, "chat.sqlite"))
                 window.chat_storage = storage
                 window.runtime_journal = RuntimeJournal(root)
+                window.runtime_checkpoint_worker.journal = window.runtime_journal
                 state = window.get_current_session()
                 window._retire_session_empty_state(state, reason="test_diverged_pending_commit")
                 state.history_loaded = True
@@ -1503,6 +1535,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                         turn_id=1,
                         request_id="request-diverged-terminal",
                     )
+                    self._wait_for_checkpoints(window)
 
                 persisted = storage.get_messages(state.session_id)
                 self.assertEqual(persisted[0]["content"], "编辑后的问题")
@@ -1517,8 +1550,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     ["分叉后的最终正文"],
                 )
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_terminal_fallback_is_idempotent_and_rejects_content_conflict(self):
         window = MainWindow()
@@ -1558,8 +1590,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     **kwargs,
                 )
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_terminal_save_barrier_keeps_actions_hidden_when_revision_fails(self):
         window = MainWindow()
@@ -1590,12 +1621,17 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                         "request_id": "request-terminal-save-failed",
                         "role": "assistant",
                         "content": "已显示但未保存",
-                        "generated_messages": [],
+                        "generated_messages": [{
+                            "id": "assistant-terminal-save-failed",
+                            "role": "assistant", "content": "已显示但未保存",
+                            "meta": {"turn_id": "1", "request_id": "request-terminal-save-failed"},
+                        }],
                     },
                     state.session_id,
                     turn_id=1,
                     request_id="request-terminal-save-failed",
                 )
+                self._wait_for_checkpoints(window)
 
             self.assertEqual(bubble.main_content_text, "已显示但未保存")
             self.assertFalse(bubble.message_actions_enabled)
@@ -1605,8 +1641,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIsNone(state.conversation_notice)
             self.assertGreater(int(bubble._pending_chat_save_revision), 0)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_daemon_history_commit_error_keeps_visible_answer_with_reason(self):
         window = MainWindow()
@@ -1633,7 +1668,11 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                         "request_id": "request-daemon-save-failed",
                         "role": "assistant",
                         "content": "已显示的结果",
-                        "generated_messages": [],
+                        "generated_messages": [{
+                            "id": "assistant-daemon-save-failed",
+                            "role": "assistant", "content": "已显示的结果",
+                            "meta": {"turn_id": "1", "request_id": "request-daemon-save-failed"},
+                        }],
                         "_runtime_terminal": "completed",
                         "_history_commit_error": "[Errno 13] denied",
                         "_history_commit_error_category": "permission",
@@ -1642,16 +1681,16 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     turn_id=1,
                     request_id="request-daemon-save-failed",
                 )
+                self._wait_for_checkpoints(window)
 
             self.assertEqual(bubble.main_content_text, "已显示的结果")
-            self.assertTrue(bubble._pending_main_content_final)
+            self.assertEqual(state.session_status, "error")
             self.assertFalse(bubble.message_actions_enabled)
             self.assertIn("仍在当前窗口", state.conversation_notice.label.text())
             self.assertIn("数据目录权限", state.conversation_notice.label.text())
             self.assertNotIn("Errno", state.conversation_notice.label.text())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_terminal_runtime_result_never_rewrites_loaded_history(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1666,6 +1705,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 }]
                 state.history_loaded = False
                 window.runtime_journal = RuntimeJournal(root)
+                window.runtime_checkpoint_worker.journal = window.runtime_journal
                 window.runtime_journal.begin_run(
                     state.session_id,
                     "request-runtime",
@@ -1699,8 +1739,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 self.assertFalse(window.attach_active_daemon_run_if_needed(state))
                 self.assertEqual(state.messages, before)
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_failed_terminal_runtime_never_rewrites_loaded_history(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1715,6 +1754,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 }]
                 state.history_loaded = False
                 window.runtime_journal = RuntimeJournal(root)
+                window.runtime_checkpoint_worker.journal = window.runtime_journal
                 window.runtime_journal.begin_run(
                     state.session_id,
                     "request-runtime-failed",
@@ -1741,8 +1781,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 self.assertFalse(window.attach_active_daemon_run_if_needed(state))
                 self.assertEqual(state.messages, before)
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_history_load_is_rejected_while_session_is_running(self):
         window = MainWindow()
@@ -1760,8 +1799,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(state.history_loaded)
             self.assertTrue(state.live_activity)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_history_batch_renders_only_into_its_target_session(self):
         window = MainWindow()
@@ -1796,8 +1834,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertNotIn("history-user-target", current_ids)
             self.assertIn("history-user-target", background_ids)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_active_local_worker_is_not_recovered_as_previous_process(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1816,6 +1853,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.llm_worker = MagicMock()
                 state.llm_worker.isRunning.return_value = True
                 window.runtime_journal = RuntimeJournal(root)
+                window.runtime_checkpoint_worker.journal = window.runtime_journal
                 window.runtime_journal.begin_run(
                     state.session_id,
                     "request-live-local",
@@ -1835,8 +1873,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     "running",
                 )
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_submitting_run_without_backend_is_not_recovered_as_previous_process(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1923,14 +1960,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     state.session_id,
                     turn_id=1,
                 )
+                self._wait_for_checkpoints(window)
 
             self.assertEqual(state.session_status, "completed")
             self.assertFalse(window._session_has_live_activity(state.session_id))
             notice.assert_called()
             self.assertEqual(notice.call_args.args[1], "本轮未完成，请重试")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_agent_bubble_has_no_sub_agent_pip_or_raw_log_widgets(self):
         bubble = ChatBubble("Agent", "")
@@ -2642,8 +2679,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.ui_timeline_events[0]["text"], "原引导")
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_pending_guidance_delete_restores_text_and_attachments_to_composer(self):
         class _Worker:
@@ -2707,8 +2743,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertNotIn("guide-delete", state.guidance_widgets)
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
             os.unlink(attachment.name)
 
     def test_pending_guidance_mutation_never_rewrites_ledger_message(self):
@@ -2782,8 +2817,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.messages[0]["meta"]["request_id"], "request-1")
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_guidance_restore_targets_background_session_draft(self):
         window = MainWindow()
@@ -2808,8 +2842,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(window.input_field.toPlainText(), "前台草稿")
             self.assertEqual(background.composer_draft, "撤回内容\n\n后台原草稿")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_pending_guidance_edit_failure_keeps_unsaved_text_actionable(self):
         class _Worker:
@@ -2854,8 +2887,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.pending_guidance_messages[0]["content"], "原内容")
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_safe_point_race_marks_guidance_applied_without_restoring_composer(self):
         class _Worker:
@@ -2899,8 +2931,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(window.input_field.toPlainText(), "保留草稿")
         finally:
             state.llm_worker = None
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_live_guidance_splits_thinking_into_conversational_segments(self):
         window = MainWindow()
@@ -2949,8 +2980,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(first.copy_result_btn.isVisible())
             self.assertFalse(first.more_actions_btn.isVisible())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_accepted_guidance_is_committed_once_and_rendered_as_user_message(self):
         window = MainWindow()
@@ -3076,6 +3106,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 turn_id=9,
                 request_id="request-guidance-9",
             )
+            self._wait_for_checkpoints(window)
             for _ in range(500):
                 if state.completed_turn_id == 9:
                     break
@@ -3126,8 +3157,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(kwargs["existing_message_payload"]["id"], "guide-next")
             self.assertEqual([item["id"] for item in state.messages], ["u1", "guide-next"])
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_unsteerable_running_stage_commits_message_for_next_turn(self):
         window = MainWindow()
@@ -3214,7 +3244,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             routed_event = next(
                 event
                 for event in reversed(state.ui_timeline_events)
-                if event.get("kind") == "thinking" and event.get("text") == "新组分析"
+                if event.get("kind") == "thinking" and main_module.thinking_event_text(event) == "新组分析"
             )
             self.assertEqual(routed_event["group_id"], continuation_group.group_id)
             self.assertEqual(
@@ -3226,8 +3256,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(first.isHidden())
             self.assertNotIn("深度思考中", first.think_toggle_btn.text())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_terminal_state_folds_process_only_group_and_waits_for_final_result(self):
         window = MainWindow()
@@ -3296,8 +3325,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(bubble.main_content_text, "仍在处理")
             self.assertNotIn("任务已停止", bubble.main_content_text)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_daemon_guidance_waits_for_ui_history_commit_before_steering(self):
         window = MainWindow()
@@ -3383,8 +3411,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
             self.assertFalse(window._session_is_busy(state))
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_daemon_stop_stays_pending_until_resource_release_confirmation(self):
         window = MainWindow()
@@ -3406,8 +3433,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             if state is not None:
                 state.stop_pending = False
                 state.stop_pending_run_id = ""
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_failed_daemon_stop_exposes_retry_and_keeps_conversation(self):
         window = MainWindow()
@@ -3460,8 +3486,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             if state is not None:
                 state.stop_pending = False
                 state.stop_pending_run_id = ""
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_stop_persists_all_visible_stages_around_guidance_in_display_order(self):
         window = MainWindow()
@@ -3572,8 +3597,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 ],
             )
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_submit_clear_input_also_clears_session_draft_before_history_refresh(self):
         window = MainWindow()
@@ -3588,8 +3612,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.composer_draft, "")
             self.assertEqual(window.input_field.toPlainText(), "")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_submit_reentrant_call_is_rejected_before_second_dispatch(self):
         window = MainWindow.__new__(MainWindow)
@@ -3646,8 +3669,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertNotIn("old-tool", state.tool_cards)
             active_card.set_result.assert_not_called()
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_content_snapshot_replaces_only_the_active_run_buffer(self):
         window = MainWindow()
@@ -3669,8 +3691,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.current_content_buffer, "终态正文")
             self.assertEqual(state.last_agent_bubble.main_content_text, "终态正文")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_three_sessions_accept_only_their_own_interleaved_run_events(self):
         window = MainWindow()
@@ -3717,8 +3738,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 self.assertIn(f"tool-{index}", state.pending_tool_results)
                 self.assertNotIn("tool-cross", state.pending_tool_results)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_new_stage_freezes_previous_thinking_timer(self):
         first = ChatBubble("Agent", "", thinking="...")
@@ -3784,6 +3804,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             bubble = window._append_live_thinking_segment(state)
             with patch("main.append_background_process_log") as append_log:
                 window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
+                self._wait_for_checkpoints(window)
             self.assertIsNotNone(bubble.parent())
             self.assertFalse(bubble.think_timer.isActive())
             self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
@@ -3817,8 +3838,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 any("模型服务未能完成本轮请求" in str(message.get("content") or "") for message in state.messages)
             )
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_failed_run_notice_allows_retry_with_original_task_context(self):
         window = MainWindow()
@@ -3880,8 +3900,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.conversation_notice.label.text(), "正在重试上一轮请求…")
             self.assertTrue(state.conversation_notice.action_button.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_office_failed_run_replaces_card_notice_and_clears_it_on_retry(self):
         window = MainWindow()
@@ -3938,8 +3957,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.failed_run_retry_context, {})
             self.assertIsNone(state.conversation_notice)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_internal_runtime_errors_never_enter_conversation_notice(self):
         forbidden = (
@@ -3973,14 +3991,14 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     turn_id=index,
                     request_id=f"request-{index}",
                 )
+                self._wait_for_checkpoints(window)
 
                 visible = state.conversation_notice.label.text()
                 self.assertEqual(visible, "本轮未完成，请重试")
                 self.assertTrue(state.conversation_notice.action_button.isHidden())
                 self.assertFalse(any(word.lower() in visible.lower() for word in forbidden))
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_invalid_timeline_is_logged_without_chat_notice(self):
         window = MainWindow()
@@ -3997,8 +4015,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(state.chat_layout.count(), before)
             self.assertIsNone(state.conversation_notice)
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_worker_error_output_is_logged_without_user_toast(self):
         window = MainWindow.__new__(MainWindow)
@@ -4074,6 +4091,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
+            self._wait_for_checkpoints(window)
             self.assertIs(state.chat_layout.itemAt(0).widget(), group)
             self.assertTrue(first.copy_result_btn.isHidden())
             self.assertFalse(second.copy_result_btn.isHidden())
@@ -4081,8 +4099,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(assistant_messages[0]["meta"]["ui_reply_kind"], "stage")
             self.assertEqual(assistant_messages[-1]["meta"]["ui_reply_kind"], "final")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_history_restores_one_group_and_final_actions_only(self):
         window = MainWindow()
@@ -4121,8 +4138,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(final.more_actions_btn.isHidden())
             self.assertEqual(final.main_content_text, "检查已通过。")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_history_guidance_splits_groups_and_suppresses_pre_guidance_actions(self):
         window = MainWindow()
@@ -4150,8 +4166,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(first_group.stage_bubbles[-1].copy_result_btn.isHidden())
             self.assertFalse(second_group.stage_bubbles[-1].copy_result_btn.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_worker_messages_strip_unified_ui_metadata(self):
         window = MainWindow()
@@ -4173,8 +4188,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertEqual(messages[0]["meta"], {"provider_hint": "keep"})
             self.assertEqual(state.messages[0]["meta"]["ui_turn_group_id"], "turn-1-group-1")
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_history_missing_final_body_shows_error_without_actions(self):
         window = MainWindow()
@@ -4203,8 +4217,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertTrue(final.copy_result_btn.isHidden())
             self.assertTrue(final.more_actions_btn.isHidden())
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_live_missing_final_body_does_not_promote_stage_reply(self):
         window = MainWindow()
@@ -4241,6 +4254,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 state.session_id,
                 turn_id=1,
             )
+            self._wait_for_checkpoints(window)
             self.assertIsNotNone(bubble.parent())
             self.assertNotIn("本轮执行失败", bubble.main_content_text)
             self.assertEqual(state.conversation_notice.label.text(), "本轮未完成，请重试")
@@ -4269,8 +4283,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 any((message.get("meta") or {}).get("context_visible_interruption") for message in assistants)
             )
         finally:
-            window.close()
-            window.deleteLater()
+            self._close_window(window)
 
     def test_live_continuation_renders_registered_inline_visualization(self):
         with tempfile.TemporaryDirectory() as root:
@@ -4295,9 +4308,10 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
                 with patch.object(window.config_manager, "is_skill_enabled", return_value=True):
                     continuation = window._append_live_thinking_segment(state)
+                window.show()
+                self.app.processEvents()
                 directive = '::cowork-inline-vis{file="live-visual-12345678.html"}'
-                with patch("main.QTimer.singleShot"):
-                    continuation.set_main_content(f"结果\n\n{directive}", final=True)
+                continuation.set_main_content(f"结果\n\n{directive}", final=True)
 
                 self.assertEqual(continuation.session_id, state.session_id)
                 self.assertIs(continuation.chat_storage, window.chat_storage)
@@ -4305,8 +4319,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 self.assertEqual(len(continuation.inline_visualization_cards), 1)
                 self.assertNotIn("cowork-inline-vis", continuation.content_edit.toPlainText())
             finally:
-                window.close()
-                window.deleteLater()
+                self._close_window(window)
 
     def test_ui_timeline_metadata_validation_is_explicit(self):
         events, warning = MainWindow._normalize_ui_timeline_events(

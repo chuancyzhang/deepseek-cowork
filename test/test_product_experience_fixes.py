@@ -65,6 +65,7 @@ class ProductExperienceFixTests(unittest.TestCase):
             self.assertTrue(QImage(16, 12, QImage.Format_RGB32).save(image_path))
             bubble = ChatBubble("Agent", "")
             try:
+                bubble.show()
                 bubble.set_main_content(
                     "",
                     content_parts=[{
@@ -990,16 +991,21 @@ class ProductExperienceFixTests(unittest.TestCase):
             )
             self.assertEqual(completed.kwargs["duplicate_count"], 1)
 
-    def test_input_height_animation_is_owned_by_editor(self):
+    def test_input_height_tracks_content_and_stays_bounded(self):
         host = QWidget()
         editor = AutoResizingInputEdit(host)
-        editor.setFixedHeight(120)
+        editor.resize(360, 120)
         editor.setPlainText("触发输入框高度调整")
-
         editor.adjustHeight()
-
-        self.assertIsNotNone(editor.anim)
-        self.assertIs(editor.anim.parent(), editor)
+        short_height = editor.height()
+        self.assertGreaterEqual(short_height, editor.min_height)
+        editor.setPlainText("长内容\n" * 30)
+        editor.adjustHeight()
+        self.assertEqual(editor.height(), editor.max_height)
+        editor.clear()
+        editor.adjustHeight()
+        self.assertEqual(editor.height(), editor.min_height)
+        host.deleteLater()
 
     def test_clipboard_image_is_saved_in_session_attachment_directory(self):
         class Stub:

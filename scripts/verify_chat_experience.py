@@ -1,4 +1,7 @@
 """Render real chat surfaces and measure navigation with isolated local data."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -56,7 +59,7 @@ def run(*, references_only=False, workspace_only=False):
         window._sync_home_presentation()
         window.workspace_title_label.setText("AI 发展规划")
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
-        out = ROOT / "docs/screenshots" / (
+        out = QA_ROOT / "screenshots" / (
             "composer-workspace" if workspace_only else "conversation-references" if references_only else "chat-experience")
         out.mkdir(parents=True, exist_ok=True)
         window.show()

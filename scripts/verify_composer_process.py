@@ -1,4 +1,7 @@
 """Exercise the shared composer and lazily restored process with isolated data."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import copy
 import json
@@ -17,7 +20,7 @@ def run(*, scale=1, compact=False, dark=False, native=False, interactive=False, 
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
-    output = Path(output or ROOT / "docs/screenshots/composer-process-20261025")
+    output = Path(output or QA_ROOT / "screenshots")
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cowork-composer-process-") as temporary:
         os.environ.update(APPDATA=temporary, LOCALAPPDATA=temporary)

@@ -1,4 +1,7 @@
 """Isolated representative browser UI captures; review before promoting to docs."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import argparse
 import os

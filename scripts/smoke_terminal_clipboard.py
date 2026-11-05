@@ -1,4 +1,7 @@
 """Exercise the real WebEngine/xterm clipboard path with native Qt input."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import json
 import os
 from pathlib import Path

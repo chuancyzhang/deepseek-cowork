@@ -152,9 +152,11 @@ class TestWecomCapabilityUi(unittest.TestCase):
         self.dialogs.append(store)
         card = store._capability_row(store._all_skills[0])
         labels = [label.text() for label in card.findChildren(QLabel)]
-        buttons = [button.text() for button in card.findChildren(QPushButton)]
         self.assertIn("已连接 · 已关闭", labels)
-        self.assertIn("开启", buttons)
+        switch = card.findChild(main_module.CapabilitySwitch)
+        self.assertIsNotNone(switch)
+        self.assertFalse(switch.isChecked())
+        self.assertEqual(switch.accessibleName(), "启用企业微信办公套件")
 
         unauthorized_skill = _skill(False)
         unauthorized_skill["_authorization_status"] = {

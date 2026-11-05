@@ -19,23 +19,24 @@ class DocumentationTests(unittest.TestCase):
         errors.extend(check_docs.validate_local_links(check_docs.markdown_files()))
         errors.extend(check_docs.validate_current_versions())
         errors.extend(check_docs.validate_legacy_paths_removed())
+        errors.extend(check_docs.validate_document_assets())
         self.assertEqual(errors, [])
 
     def test_current_version_allows_historical_references(self):
         path = check_docs.CURRENT_DOCS[0]
-        text = f"当前应用版本：**{check_docs.APP_VERSION}**\n历史版本见 [5.2.0](releases/5.2.0.md)。"
+        text = f"文档适用版本：**{check_docs.APP_VERSION}**\n历史版本见 [5.2.0](releases/5.2.0.md)。"
         with patch.object(check_docs, "CURRENT_DOCS", (path,)), patch.object(check_docs, "_read", return_value=text):
             self.assertEqual(check_docs.validate_current_versions(), [])
 
     def test_current_version_rejects_stale_or_missing_declaration(self):
         path = check_docs.CURRENT_DOCS[0]
-        for text in ("当前应用版本：**0.0.0**", f"正文中提到 {check_docs.APP_VERSION}，但没有版本声明。"):
+        for text in ("文档适用版本：**0.0.0**", f"正文中提到 {check_docs.APP_VERSION}，但没有版本声明。"):
             with self.subTest(text=text), patch.object(check_docs, "CURRENT_DOCS", (path,)), patch.object(check_docs, "_read", return_value=text):
                 self.assertTrue(check_docs.validate_current_versions())
 
     def test_all_supported_version_labels(self):
         path = check_docs.CURRENT_DOCS[0]
-        for label in ("当前应用版本：", "- 应用版本：", "适用版本：", "Current app version:"):
+        for label in ("文档适用版本：", "Documented version:"):
             with self.subTest(label=label), patch.object(check_docs, "CURRENT_DOCS", (path,)), patch.object(check_docs, "_read", return_value=f"{label} **{check_docs.APP_VERSION}**"):
                 self.assertEqual(check_docs.validate_current_versions(), [])
 
@@ -56,18 +57,25 @@ class DocumentationTests(unittest.TestCase):
                 self.assertTrue(any("missing heading" in error for error in errors))
                 self.assertTrue(any("missing link target missing.md" in error for error in errors))
 
-    def test_screenshot_scenarios_do_not_require_fixed_count(self):
+    def test_images_are_optional_but_unused_assets_are_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "docs").mkdir()
             source = root / "docs" / "user-guide.md"
             (source.parent / "screen.png").write_bytes(b"fixture")
-            with patch.object(check_docs, "ROOT", root), patch.object(check_docs, "markdown_files", return_value=[source]):
+            (source.parent / "screen.png").unlink()
+            (source.parent / "images").mkdir()
+            (source.parent / "images" / "screen.png").write_bytes(b"fixture")
+            with patch.object(check_docs, "ROOT", root), patch.object(check_docs, "CURRENT_DOCS", (source,)), patch.object(check_docs, "markdown_files", return_value=[source]):
                 for count in (1, 3):
-                    source.write_text("## 1. 首次使用\n" + "![截图](screen.png)\n" * count, encoding="utf-8")
-                    self.assertEqual(check_docs.validate_screenshot_contract(), [])
-                source.write_text("## 1. 首次使用\n缺少操作图。", encoding="utf-8")
-                self.assertTrue(any("missing scenario screenshot" in error for error in check_docs.validate_screenshot_contract()))
+                    source.write_text("## 首次使用\n" + "![截图](images/screen.png)\n" * count, encoding="utf-8")
+                    self.assertEqual(check_docs.validate_document_assets(), [])
+                source.write_text("## 不需要图片的操作\n文字说明。", encoding="utf-8")
+                self.assertTrue(any("unreferenced" in error for error in check_docs.validate_document_assets()))
+                (source.parent / "images" / "screen.png").unlink()
+                self.assertEqual(check_docs.validate_document_assets(), [])
+                (source.parent / "images" / "validation.json").write_text("{}", encoding="utf-8")
+                self.assertTrue(any("unexpected documentation artifact" in error for error in check_docs.validate_document_assets()))
 
     def test_documentation_image_edits_do_not_unlock_runtime_assets(self):
         result = type("GitResult", (), {"returncode": 0, "stdout": "images/user-guide/old.png\nimages/ai-theme-visualize/old.png\nimages/app-icon.png\nskills/example/SKILL.md\nAGENTS.md\n", "stderr": ""})()
@@ -78,11 +86,11 @@ class DocumentationTests(unittest.TestCase):
         self.assertTrue(any("SKILL.md" in error for error in errors))
         self.assertTrue(any("AGENTS.md" in error for error in errors))
 
-    def test_product_concepts_and_screenshot_contract(self):
-        errors = []
-        errors.extend(check_docs.validate_product_concepts())
-        errors.extend(check_docs.validate_screenshot_contract())
-        self.assertEqual(errors, [])
+    def test_documented_release_can_precede_source_version(self):
+        with patch.object(check_docs, "APP_VERSION", "999.0.0"):
+            self.assertEqual(check_docs.validate_current_versions(), [])
+        with patch.object(check_docs, "APP_VERSION", "0.0.0"):
+            self.assertTrue(any("newer than app" in error for error in check_docs.validate_current_versions()))
 
 
 if __name__ == "__main__":

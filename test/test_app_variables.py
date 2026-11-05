@@ -7,6 +7,7 @@ import unittest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import RUN_MODE_EXECUTION
+from core.execution_authorization import ExecutionAuthorization
 from core.skill_manager import SkillManager
 from core.variable_store import (
     VARIABLE_KIND_SECRET,
@@ -108,6 +109,12 @@ class TestAppVariables(unittest.TestCase):
                 "run_context": {"mode": RUN_MODE_EXECUTION, "app_variable_access": True},
                 "discovered_tool_names": set(),
             }
+            unavailable = manager.call_tool("lookup_app_variable", {"name": "plain"}, context=local_context)
+            self.assertEqual(unavailable["status"], "unavailable")
+            self.assertFalse(unavailable["executed"])
+            local_context["execution_authorization"] = ExecutionAuthorization(
+                "variables-test", "run", False, os.path.join(temp_dir, "artifacts")
+            )
             initial_names = {
                 item["function"]["name"]
                 for item in manager.get_tool_definitions(run_context=local_context["run_context"])

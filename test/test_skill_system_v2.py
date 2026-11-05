@@ -12,11 +12,13 @@ from unittest.mock import MagicMock, patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.skill_manager import SkillManager
+from core.execution_authorization import ExecutionAuthorization
 
 
 class TestSkillSystemV2(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.authorization = ExecutionAuthorization("skill-test", "run", True, self.temp_dir)
         self.skills_dir = os.path.join(self.temp_dir, "skills")
         self.ai_skills_dir = os.path.join(self.temp_dir, "ai_skills")
         os.makedirs(self.skills_dir, exist_ok=True)
@@ -432,6 +434,7 @@ class TestSkillSystemV2(unittest.TestCase):
                 "tool_search",
                 {"query": "Superset dashboards"},
                 context={
+                    "execution_authorization": self.authorization,
                     "run_context": {
                         "mode": "execution",
                         "allowed_skill_names": ["superset-mcp"],
@@ -625,7 +628,7 @@ class TestSkillSystemV2(unittest.TestCase):
         sm = self._build_manager()
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
         self.assertIn("echo", tool_names)
-        self.assertEqual(sm.call_tool("echo", {"message": "hello"}, context={}), "ECHO:hello")
+        self.assertEqual(sm.call_tool("echo", {"message": "hello"}, context={"execution_authorization": self.authorization}), "ECHO:hello")
         self.assertEqual(sm.get_skill_of_tool("echo"), "echo-tools")
 
     def test_mcp_tools_are_discovered_on_demand_when_loading_is_deferred(self):
@@ -674,7 +677,7 @@ class TestSkillSystemV2(unittest.TestCase):
             result = sm.call_tool(
                 "tool_search",
                 {"query": "Demo MCP echo"},
-                context={"discovered_tool_names": set(), "run_context": {"mode": "execution"}},
+                context={"execution_authorization": self.authorization, "discovered_tool_names": set(), "run_context": {"mode": "execution"}},
             )
 
         self.assertEqual(result["status"], "ok")
@@ -747,11 +750,11 @@ class TestSkillSystemV2(unittest.TestCase):
         structured_result = sm.call_tool(
             "structured_echo",
             {"message": "hello"},
-            context={"session_id": "session-9"},
+            context={"session_id": "session-9", "execution_authorization": self.authorization},
         )
         self.assertEqual(structured_result["echo"], "hello")
         self.assertEqual(structured_result["session_id"], "session-9")
-        self.assertEqual(sm.call_tool("legacy_echo", {"message": "hi"}, context={}), "LEGACY:hi")
+        self.assertEqual(sm.call_tool("legacy_echo", {"message": "hi"}, context={"execution_authorization": self.authorization}), "LEGACY:hi")
 
     def test_record_experience_creates_structured_entry_and_summary(self):
         skill_dir = os.path.join(self.skills_dir, "ops-guide")

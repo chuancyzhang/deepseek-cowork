@@ -103,6 +103,10 @@ class ToolResultFreshnessTests(unittest.TestCase):
 
         def cli(args, **kwargs):
             command = args[0]
+            if args[:2] == ["session", "start"]:
+                return {"status": "completed", "result": {"session_id": "abcd"}}
+            if args[:2] == ["session", "request"]:
+                return {"status": "completed", "result": {"request_id": args[2], "state": "active", "session": {"session_id": "abcd"}}}
             if command == "snapshot":
                 state["observed"] = True
                 observations.append(state["page"])

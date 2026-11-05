@@ -320,14 +320,14 @@ class RuntimeLogUITests(unittest.TestCase):
             config = ConfigManager()
             settings = main.SettingsDialog(config, initial_page_label="运行日志")
             try:
-                self.assertEqual(settings.nav_list.currentItem().text(), "运行日志")
+                self.assertEqual(settings.nav_list.currentItem().text(), "高级与维护")
                 self.assertTrue(settings.settings_action_bar.isHidden())
                 settings.runtime_logs_panel.keyword.setText("query")
                 settings.runtime_logs_panel.range_combo.setCurrentIndex(1)
                 self.assertFalse(settings._settings_dirty)
                 settings.select_initial_page("消息连接")
                 settings._open_im_gateway_log()
-                self.assertEqual(settings.nav_list.currentItem().text(), "运行日志")
+                self.assertEqual(settings.nav_list.currentItem().text(), "高级与维护")
                 self.assertEqual(settings.runtime_logs_panel.source_combo.currentData(), "im_gateway")
                 self.until(lambda: settings.runtime_logs_panel._read_worker is None)
             finally:

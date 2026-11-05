@@ -19,7 +19,7 @@
 | [UI 性能准则](UI_PERFORMANCE_PRINCIPLES.md) | 增量更新、调度、延迟渲染及滚动稳定性 |
 | [DesignTokens](../core/theme.py)、[内置主题](../core/theme_presets.py) | 当前默认颜色、字体、几何参数与主题变体 |
 | [共享组件](../ui/primitives.py)、[工作台呈现组件](../ui/workspace_presentation.py) | 控件样式、交互及布局复用 |
-| [工作台使用说明与截图](../docs/workspace-ui.md) | 入口、操作和代表性视觉参考 |
+| [工作台使用说明与截图](../docs/user-guide.md#使用工作区与文件) | 入口、操作和代表性视觉参考 |
 
 截图用于理解布局与气质；精确参数以当前源码为准。用户明确要求优先于本文件的默认约定。只授权 UI/UX 时，复用现有事件处理与业务流程，不能借界面整理改变权限范围、消息协议、模型请求或保存规则。
 
@@ -276,11 +276,13 @@
 
 按改动选择已有验证入口：
 
-| 范围 | 入口与记录 |
+| 范围 | 验证入口 |
 | --- | --- |
-| 消息附件与引用 | [工作台截图脚本](../scripts/render_workspace_ui_screenshots.py) 的 `--message-context` 模式及[工作台说明](../docs/workspace-ui.md) |
-| 思考原文、流式、折叠及工具详情 | [思考时间线脚本](../scripts/render_thinking_timeline.py)与[验证记录](../docs/thinking-timeline-validation.md) |
-| 子控件原生窗口、历史重载与切换 | [窗口生命周期测试](../test/test_child_window_lifecycle.py)、[原生窗口审计脚本](../scripts/verify_child_window_lifecycle.py)与[验证记录](../docs/screenshots/child-window-audit/README.md) |
+| 消息附件与引用 | [工作台截图脚本](../scripts/render_workspace_ui_screenshots.py) 的 `--message-context` 模式及[用户手册](../docs/user-guide.md#使用工作区与文件) |
+| 思考原文、流式、折叠及工具详情 | [思考时间线脚本](../scripts/render_thinking_timeline.py) |
+| 子控件原生窗口、历史重载与切换 | [窗口生命周期测试](../test/test_child_window_lifecycle.py)、[原生窗口审计脚本](../scripts/verify_child_window_lifecycle.py) |
+
+截图、计时和窗口审计输出默认放在 `.tmp/<脚本名>/`，也可通过 `COWORK_QA_ROOT` 指定本次任务的临时根目录；正式操作配图经审阅后放入 `docs/images/`。验证结果在交付时报告，不保留历史验证报告与截图集。
 
 截图中的隔离示例数据只能证明布局与指定交互，不等同于外部账号、网络服务或真实模型端到端验证。交付时说明改动、已验证范围和未覆盖部分；行为变化同步操作文档与受影响截图。
 

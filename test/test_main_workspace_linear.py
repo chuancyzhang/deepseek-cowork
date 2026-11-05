@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QPushButton, QWidget
 
@@ -20,6 +21,7 @@ from main import (
     parse_tool_arguments,
 )
 from core.theme import DesignTokens
+from ui_window_cleanup import close_test_window
 from ui.primitives import (
     ProductCodeViewer,
     ProductGrabScrollBar,
@@ -35,6 +37,9 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.data_dir = self.enterContext(tempfile.TemporaryDirectory())
+        for target in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir", "main.get_app_data_dir"):
+            self.enterContext(patch(target, return_value=self.data_dir))
         self.window = MainWindow()
         # UI unit tests own their data; showing a window must not launch the
         # first-run modal or unrelated background services while awaiting Qt.
@@ -42,9 +47,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.window._background_services_scheduled = True
 
     def tearDown(self):
-        self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
+        close_test_window(self.window)
 
     def test_observability_uses_shared_segments_and_structured_viewers(self):
         self.assertFalse(hasattr(self.window, "step_intro_label"))
@@ -185,7 +188,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertEqual(self.window.prompt_toolbar.direction(), QBoxLayout.LeftToRight)
         self.assertIs(self.window.prompt_context_group.parentWidget(), self.window.prompt_toolbar_container)
         self.assertIs(self.window.prompt_action_group.parentWidget(), self.window.prompt_toolbar_container)
-        self.assertEqual(self.window.action_btn.size().width(), 88)
+        self.assertEqual(self.window.action_btn.size().width(), 34)
         self.assertEqual(self.window.action_btn.size().height(), 34)
         self.assertEqual(self.window.model_select_btn.minimumWidth(), 100)
 
@@ -246,12 +249,19 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertTrue(state.auto_scroll_enabled)
 
     def test_chat_scrollbar_uses_thin_visual_and_forgiving_drag_target(self):
-        bar = ProductGrabScrollBar(Qt.Vertical)
+        host = QWidget()
+        host.resize(30, 620)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        bar = ProductGrabScrollBar(Qt.Vertical, host)
         bar.setRange(0, 1000)
         bar.setPageStep(200)
         bar.setValue(500)
         bar.resize(14, 600)
-        bar.show()
+        bar.move(8, 10)
+        host.show()
+        host.raise_()
+        host.activateWindow()
         self.app.processEvents()
 
         self.assertEqual(bar.sizeHint().width(), 14)
@@ -264,12 +274,21 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
         edge = handle.center()
         edge.setX(0)
-        QTest.mouseMove(bar, edge)
+
+        def move_mouse(point, buttons=Qt.NoButton):
+            # Native QTest.mouseMove only moves the system cursor; an edge pixel
+            # can receive no Qt move event. Dispatch the widget's input explicitly.
+            self.app.sendEvent(bar, QMouseEvent(
+                QEvent.MouseMove, QPointF(point), QPointF(bar.mapToGlobal(point)),
+                Qt.NoButton, buttons, Qt.NoModifier,
+            ))
+
+        move_mouse(edge)
         self.assertEqual(bar.cursor().shape(), Qt.OpenHandCursor)
         QTest.mousePress(bar, Qt.LeftButton, pos=edge)
         self.assertTrue(bar.isSliderDown())
         self.assertEqual(bar.cursor().shape(), Qt.ClosedHandCursor)
-        QTest.mouseMove(bar, edge + QPoint(0, 40), delay=1)
+        move_mouse(edge + QPoint(0, 40), Qt.LeftButton)
         QTest.mouseRelease(bar, Qt.LeftButton, pos=edge + QPoint(0, 40))
         self.assertGreater(bar.value(), 500)
         self.assertEqual(pressed, [True])
@@ -281,7 +300,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         QTest.mousePress(bar, Qt.LeftButton, pos=near_handle)
         self.assertTrue(bar.isSliderDown())
         QTest.mouseRelease(bar, Qt.LeftButton, pos=near_handle)
-        bar.close()
+        host.close()
 
     def test_chat_scrollbar_theme_refresh_updates_visual_and_hit_widths(self):
         bar = ProductGrabScrollBar(Qt.Vertical)
@@ -310,7 +329,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertTrue(self.window.question_navigator_rail.isVisible())
 
         product_page = QWidget()
-        product_page.refresh_list = lambda: None
+        product_page.refresh_list_async = lambda: None
         self.window.main_page_stack.addWidget(product_page)
         with patch.object(self.window, "_ensure_product_page", return_value=product_page):
             self.assertTrue(self.window.show_product_page(self.window.PAGE_CAPABILITIES))
@@ -398,9 +417,9 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         from main import SkillsCenterDialog
         page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
         self.assertEqual(page.advanced_btn.text(), "开发与诊断")
-        self.assertEqual(page.import_skill_btn.text(), "导入 Skill")
+        self.assertEqual(page.import_skill_btn.text(), "添加技能")
         self.assertIsNone(page.advanced_btn.menu())
-        self.assertEqual(page.mode_control.buttons["library"].text(), "发现能力")
+        self.assertEqual(page.mode_control.buttons["library"].text(), "发现技能")
         self.assertEqual(page.mode_control.buttons["mine"].text(), "我的能力")
         page.deleteLater()
 
@@ -526,7 +545,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertFalse(actions.isHidden())
             header._set_actions_visible(False)
             self.assertTrue(actions.isHidden())
-            disclosure = [button.text().strip() for button in row.findChildren(type(self.window.action_btn))]
+            disclosure = [button.text().strip() for button in row.findChildren(QPushButton)]
             self.assertIn("展开显示", disclosure)
             row.deleteLater()
 
@@ -1200,6 +1219,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         )
         other = self.window.get_session(other_id)
         self.assertIsNotNone(other)
+        other.history_loaded = True
         other.messages = [
             {
                 "id": "other-new",
@@ -1208,7 +1228,8 @@ class MainWorkspaceLinearTests(unittest.TestCase):
                 "created_at": 4_000_000_200,
             }
         ]
-        self.window.refresh_history_list()
+        self.window._ensure_session_visible_in_history(current)
+        self.window._ensure_session_visible_in_history(other)
         original_row = self.window.history_rows[current.session_id]
 
         current.messages.append(
@@ -1363,8 +1384,6 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         message = next(m for m in state.messages if m.get("role") == "user")
         self.assertEqual(message["meta"]["workbench_context"]["active_tab_id"], web.id)
         self.assertEqual(message["content"], "首次提交立即显示")
-        from ui_window_cleanup import close_test_window
-        close_test_window(self.window, delete=False)
 
     def test_staged_chat_save_is_really_enqueued(self):
         state = self.window.get_current_session()

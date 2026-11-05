@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.skill_manager import SkillManager
+from core.execution_authorization import ExecutionAuthorization
 from core.agent import LLMWorker
 
 
@@ -208,7 +209,7 @@ class TestSkillCatalogService(unittest.TestCase):
                 ],
             )
             self.assertFalse(os.path.exists(marker))
-            self.assertEqual(manager.call_tool("hello", {"name": "Codex"}), "hello Codex")
+            self.assertEqual(manager.call_tool("hello", {"name": "Codex"}, context={"execution_authorization": ExecutionAuthorization("catalog-test", "run", True, root)}), "hello Codex")
             self.assertTrue(os.path.exists(marker))
         finally:
             shutil.rmtree(root, ignore_errors=True)

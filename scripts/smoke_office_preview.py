@@ -3,6 +3,9 @@
 Creates and closes only a hidden sentinel presentation; existing user documents
 and the existing PowerPoint process must survive every path.
 """
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import base64
 import json
 import os

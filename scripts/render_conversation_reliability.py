@@ -1,4 +1,7 @@
 """Render real failure/settings widgets with isolated data and no model calls."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os

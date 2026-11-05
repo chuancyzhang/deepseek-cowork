@@ -13,6 +13,7 @@ from core.theme import default_design_tokens
 from core.theme_package import build_asset_record
 from core.theme_service import ThemeRepository
 from main import MainWindow, ConversationSkillWizardDialog
+from ui_window_cleanup import close_test_window
 
 
 class LinearManagementNavigationTests(unittest.TestCase):
@@ -22,20 +23,20 @@ class LinearManagementNavigationTests(unittest.TestCase):
 
     def setUp(self):
         # Navigation tests must not start a live GitHub request merely by showing a page.
-        update_check = patch("main.SettingsDialog.start_app_update")
+        update_check = patch("core.update_coordinator.UpdateCoordinator.check")
         update_check.start()
         self.addCleanup(update_check.stop)
         self.window = MainWindow()
+        self.window._startup_hydration_scheduled = True
+        self.window._background_services_scheduled = True
 
     def tearDown(self):
-        self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
+        close_test_window(self.window)
 
-    def test_sidebar_only_exposes_three_management_routes(self):
+    def test_sidebar_exposes_management_and_library_routes(self):
         self.assertEqual(
             set(self.window.product_nav_buttons),
-            {"capabilities", "favorites", "settings"},
+            {"capabilities", "favorites", "settings", "knowledge", "team_spaces"},
         )
         self.assertFalse(hasattr(self.window, "sidebar_agent_module_btn"))
         self.assertFalse(hasattr(self.window, "sidebar_memory_btn"))

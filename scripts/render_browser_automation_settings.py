@@ -1,4 +1,7 @@
 """Light-theme browser-mode settings QA in isolated application storage."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import argparse
 import os

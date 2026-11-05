@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.config_manager import ConfigManager
+from core.execution_authorization import ExecutionAuthorization
 from core.favorites_manager import make_favorite_run_record
 from core.skill_manager import SkillManager
 
@@ -52,7 +53,13 @@ class TestFavoritesManagerSkill(unittest.TestCase):
         return manager
 
     def _context(self, config_manager):
-        return {"config_manager": config_manager, "run_context": {"mode": RUN_MODE_EXECUTION}}
+        return {
+            "config_manager": config_manager,
+            "run_context": {"mode": RUN_MODE_EXECUTION},
+            "execution_authorization": ExecutionAuthorization(
+                "favorites-test", "run", True, os.path.join(self.temp_dir, "artifacts")
+            ),
+        }
 
     def test_tool_search_discovers_favorites_tools_and_not_legacy_automation_tools(self):
         self._copy_repo_skill()
@@ -63,7 +70,7 @@ class TestFavoritesManagerSkill(unittest.TestCase):
         result = skill_manager.call_tool(
             "tool_search",
             {"query": "保存常用提示词和能力组合并定时运行"},
-            context={"run_context": {"mode": RUN_MODE_EXECUTION}, "discovered_tool_names": discovered},
+            context={**self._context(config_manager), "discovered_tool_names": discovered},
         )
 
         self.assertEqual(result["status"], "ok")

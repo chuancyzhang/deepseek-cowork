@@ -129,6 +129,7 @@ class TestTokenUsageBuckets(unittest.TestCase):
             "output_tokens": 400,
             "total_tokens": 409_400,
             "cached_input_tokens": 391_700,
+            "uncached_input_tokens": 17_300,
         }
 
         text = format_token_usage_chip_text(
@@ -138,14 +139,14 @@ class TestTokenUsageBuckets(unittest.TestCase):
 
         self.assertEqual(
             text,
-            "409.4K tokens · 缓存 391.7K / 96% · 速度 48.2 tok/s",
+            "用量 409.4K · 命中 96% · 速度 48.2 tok/s",
         )
 
     def test_no_speed_snapshot_keeps_existing_chip_text(self):
         usage = {"total_tokens": 100, "cached_input_tokens": 0}
         self.assertEqual(
             format_token_usage_chip_text(usage),
-            "100 tokens · 缓存 0",
+            "用量 100",
         )
 
     def test_idle_speed_and_speed_details_use_runtime_snapshot(self):
@@ -154,6 +155,7 @@ class TestTokenUsageBuckets(unittest.TestCase):
             "output_tokens": 20,
             "total_tokens": 120,
             "cached_input_tokens": 80,
+            "uncached_input_tokens": 20,
         }
         speed = {
             "active": False,
@@ -164,10 +166,10 @@ class TestTokenUsageBuckets(unittest.TestCase):
 
         self.assertEqual(
             format_token_usage_chip_text(usage, speed),
-            "120 tokens · 缓存 80 / 80% · 最近 12.5 tok/s",
+            "用量 120 · 命中 80% · 最近 12.5 tok/s",
         )
         tooltip = format_token_usage_tooltip(usage, speed_snapshot=speed)
-        self.assertIn("缓存输入：80 (80.0%)", tooltip)
+        self.assertIn("缓存输入：80（占全部输入 80.0%）", tooltip)
         self.assertIn("最近完成请求均速：12.5 tok/s", tooltip)
         self.assertIn("统计思考与正文，不含 Tool 参数", tooltip)
 
@@ -178,14 +180,14 @@ class TestTokenUsageBuckets(unittest.TestCase):
                 usage,
                 {"active": True, "current_rate": None},
             ),
-            "120 tokens · 缓存 0 · 速度 --",
+            "用量 120 · 速度 --",
         )
         self.assertEqual(
             format_token_usage_chip_text(
                 usage,
                 {"active": True, "current_rate": 0.0},
             ),
-            "120 tokens · 缓存 0 · 速度 0.0 tok/s",
+            "用量 120 · 速度 0.0 tok/s",
         )
 
     def test_main_window_monitor_helpers_drive_timer_and_runtime_state(self):
@@ -257,17 +259,18 @@ class TestTokenUsageBuckets(unittest.TestCase):
 
         tooltip = format_token_usage_tooltip(usage, usage)
 
-        self.assertIn("最近一轮请求（本轮，不是累计）", tooltip)
+        self.assertIn("最近一次模型请求（一次用户任务可能包含多次请求）", tooltip)
         self.assertIn("DeepSeek / deepseek-v4-flash / chat_completions", tooltip)
         self.assertIn("deepseek_prompt_cache", tooltip)
         self.assertIn("req-1", tooltip)
 
-    def test_deepseek_billing_appends_to_existing_chip_without_replacing_usage(self):
+    def test_deepseek_billing_stays_in_details_without_replacing_usage(self):
         usage = {
             "input_tokens": 100,
             "output_tokens": 20,
             "total_tokens": 120,
             "cached_input_tokens": 80,
+            "uncached_input_tokens": 20,
         }
         billing = {
             "run_id": "run-1",
@@ -300,7 +303,7 @@ class TestTokenUsageBuckets(unittest.TestCase):
         text = format_token_usage_chip_text(usage, None, billing)
         tooltip = format_token_usage_tooltip(usage, billing_snapshot=billing)
 
-        self.assertEqual(text, "120 tokens · 缓存 80 / 80% · 本轮 ¥0.0051 · 余 ¥23.45")
+        self.assertEqual(text, "用量 120 · 命中 80%")
         self.assertIn("本次运行费用（DeepSeek 官方目录价计算）", tooltip)
         self.assertIn("本轮预估：¥0.0051", tooltip)
         self.assertIn("运行结束时余额：¥23.45", tooltip)
@@ -318,7 +321,7 @@ class TestTokenUsageBuckets(unittest.TestCase):
         text = format_token_usage_chip_text(usage, None, billing)
         tooltip = format_token_usage_tooltip(usage, billing_snapshot=billing)
 
-        self.assertEqual(text, "120 tokens · 缓存 0 · 本轮 ＜¥0.0001")
+        self.assertEqual(text, "用量 120")
         self.assertIn("余额：查询失败（查询超时）", tooltip)
         self.assertIn("不影响本轮结果", tooltip)
 

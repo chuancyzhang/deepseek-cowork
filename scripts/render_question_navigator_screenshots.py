@@ -1,4 +1,7 @@
 """Render actual question-navigation widgets with 200 sample questions, in isolation."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import os
 import sys
 import tempfile
@@ -24,7 +27,7 @@ def run():
         if font_path.exists():
             QFontDatabase.addApplicationFont(str(font_path))
     app.setFont(QFont("Microsoft YaHei", 10))
-    output = ROOT / "docs/assets/question-navigator"
+    output = QA_ROOT / "screenshots"
     output.mkdir(parents=True, exist_ok=True)
     scale = os.environ.get("QT_SCALE_FACTOR", "1")
     with tempfile.TemporaryDirectory(prefix="cowork-question-qa-") as temporary:

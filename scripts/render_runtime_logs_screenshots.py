@@ -1,4 +1,7 @@
 """Isolated runtime-log UI fixtures; no real logs, credentials or background app."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import os
 from pathlib import Path
@@ -9,7 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-OUTPUT = ROOT / "docs" / "images" / "runtime-logs"
+OUTPUT = QA_ROOT / "screenshots"
 
 
 def render(theme, scale, scenario):

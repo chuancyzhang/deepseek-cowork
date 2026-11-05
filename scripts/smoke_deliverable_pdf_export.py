@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import os
 from pathlib import Path
 import sys
@@ -132,7 +135,7 @@ def main() -> int:
     app = QApplication.instance() or QApplication([])
     output_dir = Path(
         os.environ.get("COWORK_PDF_SMOKE_OUTPUT_DIR")
-        or ROOT / "tmp" / "pdfs"
+        or QA_ROOT / "pdfs"
     ).resolve()
     results = []
     for source, target in _create_inputs(output_dir):

@@ -2,6 +2,9 @@
 
 Uses a controlled model result, not a live model or a fidelity benchmark.
 """
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -54,7 +57,7 @@ def run(options):
         for name in ("msyh.ttc", "segoeui.ttf", "segoeuib.ttf", "consola.ttf", "seguisym.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["WINDIR"]) / "Fonts" / name))
         main.initialize_desktop_theme(app)
-        output = ROOT / "docs/guides/experts"
+        output = QA_ROOT / "screenshots"
         output.mkdir(parents=True, exist_ok=True)
         suffix = f"{options.theme}-{int(options.scale * 100)}"
         with patch.object(main.MainWindow, "showEvent", lambda w, e: QMainWindow.showEvent(w, e)):

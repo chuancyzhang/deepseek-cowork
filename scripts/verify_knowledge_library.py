@@ -1,5 +1,8 @@
 """Run the native WeKnora page for live sign-in, or render deterministic UI fixtures."""
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import argparse
 import logging
 import os

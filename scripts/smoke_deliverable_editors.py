@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import argparse
 import base64
 import io

@@ -4,13 +4,14 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QVBoxLayout, QWidget
 
 from main import (
     AgentModuleDialog,
@@ -43,6 +44,7 @@ from main import (
 )
 from ui.primitives import ProductEmptyState
 from core.ppt_agent import build_ppt_agent_prompt
+from document_fixtures import write_pdf, write_pptx
 
 
 class TestDeliverableScanning(unittest.TestCase):
@@ -330,6 +332,7 @@ class TestDeliverableScanning(unittest.TestCase):
             bubble = ChatBubble("Agent", "", workspace_dir=workspace)
             activated = []
             bubble.deliverablePathActivated.connect(activated.append)
+            bubble.show()
             bubble.set_main_content(f"完成：{report}\n另一个版本：{deck}\n重复：{report}", final=True)
             app.processEvents()
 
@@ -363,11 +366,12 @@ class TestDeliverableScanning(unittest.TestCase):
             bubble.deliverablePathActivated.connect(activated.append)
             bubble.deliverablePathsChanged.connect(registered.append)
             bubble.set_main_content(
-                f"PNG: [view png]({png_path})\nSVG: [view svg]({svg_path})\nNotes: {report_path}",
+                f"PNG: [view png]({Path(png_path).as_uri()})\nSVG: [view svg]({Path(svg_path).as_uri()})\nNotes: {report_path}",
                 final=True,
             )
             bubble.resize(900, 600)
             bubble.show()
+            QTest.qWait(30)
             app.processEvents()
 
             self.assertEqual(bubble.generated_images_layout.count(), 2)
@@ -383,10 +387,15 @@ class TestDeliverableScanning(unittest.TestCase):
             link_cursor = bubble.content_rich_edit.document().find("view png")
             self.assertFalse(link_cursor.isNull())
             link_cursor.setPosition(link_cursor.selectionStart() + 1)
+            bubble.content_rich_edit.setTextCursor(link_cursor)
+            bubble.content_rich_edit.ensureCursorVisible()
+            app.processEvents()
+            link_position = bubble.content_rich_edit.cursorRect(link_cursor).center()
+            self.assertTrue(bubble.content_rich_edit.anchorAt(link_position).startswith("cowork-file:"))
             QTest.mouseClick(
                 bubble.content_rich_edit.viewport(),
                 Qt.LeftButton,
-                pos=bubble.content_rich_edit.cursorRect(link_cursor).center(),
+                pos=link_position,
             )
             QTest.mouseClick(png_card.image_label, Qt.LeftButton)
             QTest.mouseClick(svg_card.image_label, Qt.LeftButton)
@@ -412,6 +421,7 @@ class TestDeliverableScanning(unittest.TestCase):
             bubble.set_main_content("已完成 HTML 复现：[打开页面](index.html)。", final=True)
             bubble.resize(620, 250)
             bubble.show()
+            QTest.qWait(30)
             app.processEvents()
             self.assertEqual(bubble._deliverable_paths, [path])
             self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
@@ -477,21 +487,21 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_agent_bubble_builds_card_for_inline_code_delivery_path(self):
         app = QApplication.instance() or QApplication([])
-        workspace = r"D:\code\数据分析测试"
-        path = os.path.join(workspace, "html_test_output_20260625_225209.pptx")
-        if not os.path.isfile(path):
-            self.skipTest("Screenshot regression fixture is unavailable")
-
-        bubble = ChatBubble("Agent", "", workspace_dir=workspace)
-        bubble.set_main_content(f"主文件路径： `{path}` (35,331 字节)", final=True)
-        app.processEvents()
-
-        self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
-        self.assertEqual(
-            bubble.deliverable_cards_layout.itemAt(0).widget().text(),
-            "html_test_output_20260625_225209.pptx",
-        )
-        self.assertIn("cowork-file:", bubble.content_rich_edit.toHtml())
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "临时文稿.pptx")
+            write_pptx(path)
+            bubble = ChatBubble("Agent", "", workspace_dir=workspace)
+            try:
+                bubble.show()
+                bubble.set_main_content(f"主文件路径： `{path}`", final=True)
+                app.processEvents()
+                self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
+                self.assertEqual(bubble.deliverable_cards_layout.itemAt(0).widget().text(), "临时文稿.pptx")
+                self.assertIn("cowork-file:", bubble.content_rich_edit.toHtml())
+            finally:
+                bubble.close()
+                bubble.deleteLater()
+                app.processEvents()
 
     def test_agent_bubble_ignores_non_workspace_deliverable_cards(self):
         app = QApplication.instance() or QApplication([])
@@ -614,13 +624,13 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.office_output_profile, "")
             self.assertIsNotNone(widget.findChild(QPushButton, None))
             labels = [label.text() for label in widget.findChildren(QLabel)]
-            self.assertIn("想换一种工作台风格？", labels)
-            self.assertIn("需要处理文档或数据？", labels)
+            self.assertIn("工作台主题", labels)
+            self.assertIn("工具包", labels)
             self.assertTrue(any("文档工具包" in text and "数据分析工具包" in text for text in labels))
             widget.theme_hint_button.click()
             self.assertEqual(main_window.prepared_actions, ["finance", "finance", "theme"])
-            self.assertIn("Theme Customizer", main_window.input_field.text)
-            self.assertIn("不要直接保存或启用", main_window.input_field.text)
+            self.assertIn("设计", main_window.input_field.text)
+            self.assertIn("主题", main_window.input_field.text)
             widget.toolkit_hint_button.click()
             self.assertEqual(main_window.opened_settings_page, "组件与依赖")
 
@@ -645,6 +655,7 @@ class TestDeliverableScanning(unittest.TestCase):
         try:
             widget.resize(720, 480)
             widget.show()
+            widget.home_options.click()
             app.processEvents()
             self.assertEqual(widget.theme_hint._theme_layout.direction(), QBoxLayout.LeftToRight)
             widget.current_cols = 1
@@ -659,6 +670,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.assertFalse(card.windowFlags() & Qt.Window)
 
             widget.resize(480, 640)
+            QTest.qWait(30)
             app.processEvents()
             self.assertEqual(widget.theme_hint._theme_layout.direction(), QBoxLayout.TopToBottom)
             self.assertEqual(widget.toolkit_hint._theme_layout.direction(), QBoxLayout.TopToBottom)
@@ -818,7 +830,7 @@ class TestDeliverableScanning(unittest.TestCase):
     def test_browser_home_action_requires_connection_before_loading(self):
         window, _state = self._home_action_window(browser_ready=False)
 
-        with patch("main.log_ui_navigation"):
+        with patch("main.log_ui_navigation"), patch("core.browser_backend.BrowserBackendCoordinator", return_value=MagicMock(snapshot=lambda: {"backend": "external", "pending": None})):
             prepared = window.prepare_home_action("browser")
 
         self.assertFalse(prepared)
@@ -829,7 +841,7 @@ class TestDeliverableScanning(unittest.TestCase):
     def test_browser_home_action_loads_ready_browser_capability(self):
         window, state = self._home_action_window(browser_ready=True)
 
-        with patch("main.log_ui_navigation"):
+        with patch("main.log_ui_navigation"), patch("core.browser_backend.BrowserBackendCoordinator", return_value=MagicMock(snapshot=lambda: {"backend": "external", "pending": None})):
             prepared = window.prepare_home_action("browser")
 
         self.assertTrue(prepared)
@@ -1135,7 +1147,7 @@ class TestDeliverableScanning(unittest.TestCase):
             },
         )()
         window = MainWindow.__new__(MainWindow)
-        window.config_manager = type("_Config", (), {"get_selected_model_id": lambda _self: "model-1"})()
+        window.config_manager = type("_Config", (), {"get_selected_model_id": lambda _self: "model-1", "get": lambda _self, key, default=None: default})()
         window._selected_reasoning_effort = MagicMock(return_value="高")
         window._ensure_session_workspace = MagicMock(return_value=r"D:\workspace")
 
@@ -1163,6 +1175,7 @@ class TestDeliverableScanning(unittest.TestCase):
             },
         )()
         window = MainWindow.__new__(MainWindow)
+        window.config_manager = type("_Config", (), {"get": lambda _self, key, default=None: default})()
         profiles = {
             "chat-model": {"id": "chat-model", "model_name": "chat", "supports_vision": False},
             "vision-model": {"id": "vision-model", "model_name": "vision", "supports_vision": True},
@@ -1444,7 +1457,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 },
             )()
             window.get_session = MagicMock(return_value=state)
-            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._ensure_session_workspace = MagicMock(return_value=workspace)
             window._submit_session_request = MagicMock(return_value=True)
             window.add_system_toast = MagicMock()
 
@@ -1463,7 +1476,7 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
             self.assertEqual(submit_call.kwargs["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
             self.assertFalse(submit_call.kwargs["check_duplicates"])
-            window.add_system_toast.assert_called_once()
+            window.add_system_toast.assert_not_called()
 
     def test_office_draft_request_uses_chat_workspace_without_project(self):
         window = MainWindow.__new__(MainWindow)
@@ -1477,7 +1490,8 @@ class TestDeliverableScanning(unittest.TestCase):
 
         self.assertTrue(submitted)
         window._submit_session_request.assert_called_once()
-        window.add_system_toast.assert_called_once()
+        window._ensure_session_workspace.assert_called_once_with(state)
+        window.add_system_toast.assert_not_called()
 
     def test_conversion_continues_in_current_conversation_for_all_formats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1491,12 +1505,14 @@ class TestDeliverableScanning(unittest.TestCase):
                     state = type("_Session", (), {"session_id": "current-session"})()
                     window.current_deliverable_path = html_path
                     window.workspace_dir = tmp
-                    window._workspace_dir_for_state = MagicMock(return_value=tmp)
+                    window._ensure_session_workspace = MagicMock(return_value=tmp)
                     window.get_current_session = MagicMock(return_value=state)
                     window.create_new_session = MagicMock()
                     window._set_prompt_files = MagicMock()
                     window._submit_session_request = MagicMock(return_value=True)
                     window.add_system_toast = MagicMock()
+                    window._set_deliverable_conversion_running = MagicMock()
+                    window.set_context_tab_hint = MagicMock()
 
                     window.start_deliverable_conversion(target_format)
 
@@ -1513,12 +1529,8 @@ class TestDeliverableScanning(unittest.TestCase):
                     self.assertTrue(submit_call.kwargs["clear_current_input"])
                     self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_FILE_CONVERSION)
                     self.assertEqual(submit_call.kwargs["office_conversion_target"], target_format)
-                    window.add_system_toast.assert_called_once_with(
-                        f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
-                        "info",
-                        session_id="current-session",
-                        auto_close_ms=3200,
-                    )
+                    window._set_deliverable_conversion_running.assert_called_once_with(target_format)
+                    window.add_system_toast.assert_not_called()
 
     def test_pptx_conversion_can_attach_template(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1533,11 +1545,13 @@ class TestDeliverableScanning(unittest.TestCase):
             state = type("_Session", (), {"session_id": "current-session"})()
             window.current_deliverable_path = html_path
             window.workspace_dir = tmp
-            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window._ensure_session_workspace = MagicMock(return_value=tmp)
             window.get_current_session = MagicMock(return_value=state)
             window._set_prompt_files = MagicMock()
             window._submit_session_request = MagicMock(return_value=True)
             window.add_system_toast = MagicMock()
+            window._set_deliverable_conversion_running = MagicMock()
+            window.set_context_tab_hint = MagicMock()
 
             window.start_deliverable_conversion("pptx", template_path=template_path)
 
@@ -2113,7 +2127,10 @@ class TestDeliverableScanning(unittest.TestCase):
             "retry_of_run_id": "",
             "submit_options": {"workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST},
         }
-        window._show_conversation_notice = MagicMock(return_value="global")
+        host = QWidget()
+        state.chat_layout = QVBoxLayout(host)
+        global_notice = QLabel("普通对话失败")
+        window._show_conversation_notice = MagicMock(return_value=global_notice)
         try:
             notice = MainWindow._show_retryable_run_failure(
                 window,
@@ -2139,7 +2156,8 @@ class TestDeliverableScanning(unittest.TestCase):
                 "run-chat",
             )
 
-            self.assertEqual(notice, "global")
+            self.assertIs(notice, global_notice)
+            self.assertEqual(state.chat_layout.indexOf(global_notice), 0)
             self.assertTrue(card.retry_failure_notice.isHidden())
             window._show_conversation_notice.assert_called_once()
         finally:
@@ -2426,6 +2444,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 handle.write("<html></html>")
             window = MainWindow.__new__(MainWindow)
             window.current_deliverable_path = html_path
+            window.set_preview_header = MagicMock()
             window.deliverable_conversion_status_label = QLabel()
             window.deliverable_conversion_cancel_btn = QPushButton("取消")
             pptx_btn = QPushButton("生成 PPTX")
@@ -2472,19 +2491,21 @@ class TestDeliverableScanning(unittest.TestCase):
             window = MainWindow.__new__(MainWindow)
             state = type("_Session", (), {"session_id": "current-session"})()
             window.current_deliverable_path = html_path
-            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window._ensure_session_workspace = MagicMock(return_value=tmp)
             window.get_current_session = MagicMock(return_value=state)
             window.create_new_session = MagicMock()
             window._set_prompt_files = MagicMock()
             window._submit_session_request = MagicMock(return_value=False)
-            window.add_system_toast = MagicMock()
+            window._show_conversation_notice = MagicMock()
+            window._set_deliverable_conversion_running = MagicMock()
+            window.set_context_tab_hint = MagicMock()
 
             window.start_deliverable_conversion("pdf")
 
             window.create_new_session.assert_not_called()
             self.assertEqual(state.selected_deliverable_path, html_path)
-            self.assertIn("HTML 已保留在当前对话中", window.add_system_toast.call_args.args[0])
-            self.assertEqual(window.add_system_toast.call_args.args[1], "warning")
+            self.assertIn("HTML 已保留在当前对话中", window._show_conversation_notice.call_args.args[1])
+            self.assertEqual(window._show_conversation_notice.call_args.args[2], "warning")
 
     def test_conversion_reports_when_current_conversation_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2567,7 +2588,7 @@ class TestDeliverableScanning(unittest.TestCase):
             finally:
                 close_test_window(window)
 
-    def test_office_deliverable_uses_builtin_structured_preview(self):
+    def test_explicit_simplified_office_preview_uses_structured_content(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as tmp:
             docx_path = os.path.join(tmp, "report.docx")
@@ -2592,12 +2613,12 @@ class TestDeliverableScanning(unittest.TestCase):
                 "main.render_structured_document_preview",
                 return_value={"format": "DOCX", "html": "<html>preview</html>", "text": "preview"},
             ) as preview_mock:
-                window.render_selected_deliverable()
+                window._render_simplified_office_deliverable(docx_path)
 
             preview_mock.assert_called_once_with(docx_path)
             window.deliverable_web_view.setHtml.assert_called_once()
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
-            self.assertIn("内置预览", window.deliverable_status_label.text())
+            self.assertEqual(window.deliverable_status_label.text(), "")
 
     def test_image_deliverable_renders_in_preview_label(self):
         app = QApplication.instance() or QApplication([])
@@ -2626,7 +2647,8 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.preview_image)
             self.assertFalse(window.preview_image.pixmap().isNull())
             self.assertFalse(window.current_deliverable_stale)
-            self.assertIn("图片", window.deliverable_status_label.text())
+            self.assertEqual(window.deliverable_status_label.text(), "")
+            self.assertTrue(window.deliverable_status_label.isHidden())
 
     def test_invalid_image_deliverable_reports_decode_failure(self):
         app = QApplication.instance() or QApplication([])
@@ -2650,43 +2672,40 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIn("无法解码图片文件", window.deliverable_text_preview.toPlainText())
             self.assertEqual("图片预览失败。", window.deliverable_status_label.text())
 
-    def test_pdf_view_is_bound_to_document_before_preview(self):
+    def test_pdf_fixture_loads_in_current_document_preview(self):
+        from pathlib import Path
+        from ui.document_preview import DocumentPreview
+
         app = QApplication.instance() or QApplication([])
-
-        class FakePdfDocument:
-            def __init__(self, parent=None):
-                self.parent = parent
-
-        class FakePdfView(QWidget):
-            class PageMode:
-                MultiPage = object()
-
-            class ZoomMode:
-                FitToWidth = object()
-
-            def __init__(self):
-                super().__init__()
-                self.bound_document = None
-
-            def setDocument(self, document):
-                self.bound_document = document
-
-            def setPageMode(self, mode):
-                self.page_mode = mode
-
-            def setZoomMode(self, mode):
-                self.zoom_mode = mode
-
-        window = MainWindow.__new__(MainWindow)
-        window.deliverable_pdf_view = None
-        window.deliverable_pdf_document = None
-        window.deliverable_preview_stack = QStackedWidget()
-
-        with patch("main.load_qpdf_classes", return_value=(FakePdfDocument, FakePdfView)):
-            view = window._ensure_deliverable_pdf_view()
-
-        self.assertIs(view.bound_document, window.deliverable_pdf_document)
-        self.assertEqual(window.deliverable_preview_stack.indexOf(view), 0)
+        with tempfile.TemporaryDirectory() as directory:
+            source = write_pdf(Path(directory) / "preview.pdf")
+            original = source.read_bytes()
+            preview = DocumentPreview()
+            ready, failures = [], []
+            preview.previewReady.connect(ready.append)
+            preview.previewFailed.connect(failures.append)
+            try:
+                preview.resize(640, 480)
+                preview.show()
+                with patch("core.document_preview.get_app_data_dir", return_value=directory):
+                    preview.open(str(source))
+                    deadline = time.monotonic() + 15
+                    while not ready and not failures and time.monotonic() < deadline:
+                        app.processEvents()
+                        QTest.qWait(20)
+                self.assertEqual(failures, [])
+                self.assertTrue(ready, "PDF fixture did not finish loading")
+                self.assertEqual(preview.source, str(source))
+                self.assertIs(preview.stack.currentWidget(), preview.pdf_view)
+                cached = Path(preview.pdf_view.url().toLocalFile())
+                self.assertNotEqual(cached, source)
+                self.assertEqual(cached.read_bytes(), original)
+                self.assertEqual(source.read_bytes(), original)
+            finally:
+                preview.dispose()
+                preview.close()
+                preview.deleteLater()
+                app.processEvents()
 
     def test_light_preview_scripts_throttle_continuous_rendering(self):
         bootstrap = deliverable_preview_bootstrap_script()

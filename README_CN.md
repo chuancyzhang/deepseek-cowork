@@ -1,118 +1,71 @@
 # DeepSeek Cowork
 
-[中文](README_CN.md) | [English](README.md) | [文档中心](docs/index.md) | [设置与能力管理](docs/unified-management.md)
+[中文](README_CN.md) | [English](README.md) | [用户手册](docs/user-guide.md) | [技术文档](docs/technical-design.md)
 
-DeepSeek Cowork 是一个面向 Windows 的本地桌面 Agent 工作台。它把对话、项目文件、
-Tool 执行、能力扩展、常用工作模式和交付物组织成一条可观察、可干预、可恢复的工作流。
+DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、项目文件、工具执行、专业能力和交付物放在同一工作流程中。你可以描述目标、提供资料、查看执行过程，并继续编辑生成的文件。
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前应用版本：**5.3.3** · [查看本版发布说明](docs/releases/5.3.3.md)
+文档适用版本：**5.3.3** · [本版说明](docs/releases/5.3.3.md) · [发布记录](docs/releases/index.md)
 
-## 当前版本的重点
+## 可以完成什么
 
-- **团队空间**：在企业中心共享分工、固定资料版本和选定成果，任务在独立本机目录与会话执行；[使用说明](docs/team-spaces.md)。
-- **多来源资料库**：连接 WeKnora、腾讯文档和乐享，读取选定资料并保存成果；来源、账号和任务范围独立绑定。
-- **独立资料库登录**：在 WeKnora、腾讯文档和乐享各自页面登录、续期与退出；企业登录集中在“设置 → 企业账号”。
-- **企业平台基础功能**：可选接入独立 Linux 中心，统一认证、分配企业模型、管理客户端分发及近 30 天企业提问；[使用与部署](docs/enterprise-platform.md)。
-- **可选数据安全**：插件及各项功能默认关闭，按需检查能力风险、提醒疑似凭证或令牌化模型请求中的选定文本。
-- **任务控制与恢复**：停止时向受支持工具传递取消，保留已有输出；资料上下文按需加入，历史打开不产生额外提问。
+- **对话与项目工作**：独立聊天目录、项目会话、历史搜索、运行中补充要求、执行详情与子任务。
+- **文件与交付物**：文件和图片附件、办公文档预览、文本与表格编辑、HTML 工作稿、Markdown 写作页及 Office/PDF 输出。
+- **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家、浏览器自动化和语音转文字。
+- **资料与协作**：WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
+- **重复任务**：常用任务、定时计划、消息渠道与计划结果投递。
+- **个性化**：主题、AI 主题设计、Visualize、长期记忆与经验系统。
 
-## 核心工作流
+5.3.3 增加工作区展开与 Markdown 写作页、sub2api / New API 模型服务接入，并改进问卷、文件链接、预览与更新提示。
 
-1. 选择模型，创建独立聊天或绑定明确的项目工作区。
-2. 描述目标，按需添加或粘贴文件、图片和参考资料。
-3. Agent 在同一消息流中展示 reasoning、Tool、阶段结果与最终回答；运行中可以补充要求或停止。
-4. 从右侧抽屉检查任务观测、文件和交付物，并继续编辑或转换结果。
-5. 把稳定偏好写入记忆，把经过验证的方法沉淀为经验或 Skill；经常使用的工作模式保存为常用，并按需附加定时计划。
+## 开始使用
 
-## 能力地图
+1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载 Windows ZIP，完整解压后运行 `deepseek-cowork.exe`。
+2. 在首次启动向导填写 DeepSeek API Key，或到“设置 → 模型与服务”添加服务和模型。也可使用企业提供的客户端登录企业账号。
+3. 新建聊天，添加资料并描述任务；处理固定项目时先选择项目目录。
+4. 查看回答与执行过程，在右侧工作区打开、编辑和保存成果。
 
-| 层次 | 主要能力 |
-| --- | --- |
-| 工作区 | 独立聊天目录、项目边界、历史恢复、后台运行与分组分页 |
-| 文件与交付物 | 文件/图片粘贴，Markdown、HTML、图片、PDF、DOCX、PPTX、XLSX 预览，安全编辑与 Office 转换 |
-| Agent 运行时 | 流式 reasoning 与 Tool、运行中引导、结构化观测、子 Agent、daemon 与常用计划 |
-| 能力扩展 | 内置/可选/用户 Skill，`stdio` 与 Streamable HTTP MCP，按需依赖和远程 Skill 安装 |
-| 外部连接 | 浏览器自动化、网页搜索、金融与数据能力、飞书/钉钉/企业微信/QQ/微信 |
-| 个性化 | 全局与工作区记忆、经验系统、`.cowork-theme` 安全主题、Visualize |
+详细操作见[用户手册](docs/user-guide.md)。
 
-## 三条设计原则
+## 从源码运行
 
-- **Everything is Tool**：所有可执行动作共享 Tool Schema、权限、观测和结果协议；Skill 提供指导，Agent 提供角色，常用项上的可选计划提供触发方式。
-- **AI 设计 UI**：AI 可以配置主题令牌、工作区场景和受控组件，但不能改写组件树、关键动作或安全恢复路径。主题必须经过校验、隔离预览和用户确认。
-- **经验系统**：历史负责追溯，记忆保存长期事实，经验改善方法，Skill 组织可复用能力；这不是模型微调。
+使用 Python 3.10+，在仓库根目录执行：
 
-完整说明见[产品文档](docs/product.md)。
-
-## 安装
-
-### Windows 发行包
-
-1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版 ZIP。
-2. 完整解压后运行 `deepseek-cowork.exe`；不要直接在压缩包内启动。
-3. 首次启动时可直接填写 DeepSeek API Key；应用会验证官方接口、同步模型并优先选择推荐的 `deepseek-flash`。也可以稍后到“设置 → 模型与服务”手动配置。
-
-启动后会后台准备可用更新，完成后在侧栏设置入口上方提示“重启并更新”。公共地址暂空，默认从 GitHub 获取；服务器目录、清单和发布步骤见[自动更新规范](docs/app-updates.md)。
-
-基准环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
-
-### 从源码运行
-
-前置要求：Python 3.10+
-
-```bash
+```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
 cd deepseek-cowork
-python -m pip install -r requirements.txt
-python main.py
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
 
-桌面端无需安装统一连接认证依赖；中心平台使用独立的依赖清单，见[企业平台部署](web/platform/README.md)。
+## 构建发行包
 
-### 构建发行包
+在 Windows 构建环境中准备固定运行时，再生成 EXE 和发行 ZIP：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-.\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
-.\.venv\Scripts\python.exe .\scripts\package_release.py
+.\.venv\Scripts\python.exe -m PyInstaller deepseek-cowork.spec --noconfirm --clean
+.\.venv\Scripts\python.exe scripts/package_release.py
 ```
 
-发行包使用固定运行时、离线编辑器资源和打包审计；不设置目录或 ZIP 总体积上限，仍检查必要文件、依赖完整性及禁止混入的内容。最终体积与组件清单以本次构建生成的报告为准。
+打包生成版本 ZIP、审计报告和 `latest.json`。更新说明读取 `docs/releases/版本号.md`；具体格式和发布步骤见[技术文档](docs/technical-design.md#构建与发布)。
 
-打包同时生成 `dist/latest.json`，发布时与版本 ZIP 一起上传 GitHub Release；更新说明读取 `docs/releases/APP_VERSION.md` 对应文件。上传公共服务器时先上传 ZIP，再原子替换清单。
+## 设计思路
 
-发行包内置 ripgrep 15.1.0（`rg`），命令工具可直接搜索文件，无需额外安装。
-自带 Git 默认使用 Git Credential Manager（`manager`），不再要求选择凭据助手；
-需要登录时仍会显示账号、密码、令牌或浏览器授权流程。
-
-构建前必须执行上述运行时准备脚本：它校验 `rg` 的官方归档、可执行文件及许可证，
-并只将下载的 PortableGit 默认助手设为 `manager`。不会修改构建机器的全局或仓库级
-Git 配置。缺失运行时、校验不符或仍配置 `helper-selector` 时，构建和发行审计会失败。
+- **Everything is Tool**：可执行动作统一通过 Tool 注册、授权、执行和返回结果；Skill 组织指导与资源，专家提供角色。
+- **AI 设计 UI**：用声明式主题与隔离预览调整工作界面，由用户确认应用。
+- **经验系统**：历史保留过程，记忆记录长期事实，经验沉淀可复用方法，Skill 组织专业流程；这不是模型微调。
 
 ## 文档
 
-- [工作台界面](docs/workspace-ui.md)：首页、对话、任务详情与主题截图
-- [设置与能力管理](docs/unified-management.md)：能力、项目与设置的入口和保存边界
-- [资料库](docs/knowledge_library.md)：多来源连接、引用、上传和失败恢复
-- [资料库](docs/knowledge_library.md)：各来源登录、引用与保存；旧统一连接用户参见[升级说明](docs/account-connections.md)
-- [数据安全](docs/data-security.md)：默认关闭的检查与请求文本处理
-- [执行授权](docs/GOD_MODE.md)：上帝模式、按次许可和停止边界
-- [用户指南](docs/user-guide.md)：安装、配置与完整任务操作
-- [产品文档](docs/product.md)：产品目标、核心理念与边界
-- [技术设计](docs/technical-design.md)：Agent Loop、Tool、安全、持久化与桌面运行时
-- [Skill 系统](docs/skill-system.md)：能力来源、发现、配置、MCP、依赖与经验
-- [AI 主题与 Visualize](docs/guides/ai-theme-and-visualize.md)：普通用户专题指南
-- [路线图](docs/roadmap.md)：当前阶段和候选方向
-- [发布记录](docs/releases/index.md)：版本变化与验收重点
-
-### 资料库
-
-连接 WeKnora、腾讯文档或乐享知识库，在 Cowork 中浏览和阅读选定资料，并把本地产物保存回指定来源；搜索范围以各来源支持的能力为准。详见 [资料库使用说明](docs/knowledge_library.md)。
-
-### 上帝模式与按次授权
-
-上帝模式提供全局持续执行授权，仅影响新启动任务。关闭后，可信读取和本次任务产物加工可继续进行；修改原有资产或执行代码时申请本次许可。详见 [使用说明与产品验收清单](docs/GOD_MODE.md)。
+| 目标 | 入口 |
+| --- | --- |
+| 安装后完成任务、使用设置和各项能力 | [用户手册](docs/user-guide.md) |
+| 理解架构、开发能力、运行测试和构建发布 | [技术文档](docs/technical-design.md) |
+| 部署与管理企业中心 | [企业平台说明](web/platform/README.md) |
+| 查看已有版本变化 | [发布记录](docs/releases/index.md) |
 
 ## 许可证
 

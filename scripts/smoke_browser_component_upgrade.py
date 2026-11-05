@@ -1,4 +1,7 @@
 """Validate the bundled Windows CLI without connecting to the user's browser."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os

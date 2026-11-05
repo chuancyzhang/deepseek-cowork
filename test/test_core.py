@@ -185,7 +185,7 @@ class TestConfigManager(unittest.TestCase):
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()
         self.assertEqual(DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro")
-        self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
+        self.assertEqual(cm.get("model_name"), "deepseek-flash")
         self.assertEqual(cm.get("deepseek_reasoning_effort"), "max")
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
         self.assertEqual(cm.get("deepseek_v4_context_window_tokens"), 1000000)
@@ -193,7 +193,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("context_compression_recent_keep_turns"), 40)
         self.assertTrue(cm.get("model_channels"))
         self.assertTrue(cm.get("model_provider_configs"))
-        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-flash")
         self.assertEqual(
             cm.get_chat_workspace_root(),
             os.path.join(self.temp_dir, "conversation_workspaces"),
@@ -286,7 +286,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(channel["base_url"], "https://api.deepseek.com")
         self.assertEqual(
             [model["id"] for model in channel["models"]],
-            ["deepseek-v4-flash", "deepseek-v4-pro"],
+            ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"],
         )
         for model in channel["models"]:
             self.assertEqual(model["display_name"], model["id"])
@@ -294,9 +294,9 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(model["api_protocol"], "responses")
             self.assertEqual(model["reasoning_efforts"], ["high", "max"])
             self.assertEqual(model["reasoning_effort"], "max")
-            self.assertFalse(model["supports_vision"])
-        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
-        self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
+            self.assertTrue(model["supports_vision"])
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-flash")
+        self.assertEqual(cm.get("model_name"), "deepseek-flash")
 
     def test_unrelated_existing_config_uses_fresh_deepseek_defaults(self):
         cm = self._create_config_manager({"god_mode": True})
@@ -305,7 +305,7 @@ class TestConfigManager(unittest.TestCase):
             [channel["channel_id"] for channel in cm.get_model_channels()],
             ["deepseek-official-channel"],
         )
-        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-flash")
 
     def test_project_config_migrates_hidden_to_archived(self):
         project_dir = os.path.join(self.temp_dir, "legacy-hidden")
@@ -2842,8 +2842,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     "register_stream",
                     "release_stream",
                     "capture_request",
+                    "enterprise_questions",
+                    "enterprise_accepted",
                 },
             )
+            self.assertEqual(provider_calls[0]["request_context"]["enterprise_questions"], [])
+            self.assertTrue(callable(provider_calls[0]["request_context"]["enterprise_accepted"]))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -4267,6 +4271,9 @@ class TestLLMWorkerGuidance(unittest.TestCase):
         QThread = __import__("PySide6.QtCore", fromlist=["QThread"]).QThread
         QThread.__init__(worker)
         worker.turn_id = turn_id
+        worker.session_id = "guidance-test"
+        worker.is_subagent = False
+        worker._enterprise_questions = []
         worker.is_stopped = False
         worker._guidance_lock = threading.Lock()
         worker._pending_guidance = []

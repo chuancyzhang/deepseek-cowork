@@ -1,4 +1,7 @@
 """Exercise the real Word review entry, keyboard edits, review and repeated save."""
+
+from qa_support import close_main_window, prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import argparse
 import json
@@ -145,18 +148,7 @@ def run():
                 print("PASS Word review: body/footnote/endnote keyboard edits, undo/redo, accept/reject, atomic repeated save, original parts preserved, reopen and small window")
             finally:
                 window._release_deliverable_edit_session(show_preview=False)
-                window._dispose_application_event_filters()
-                for attribute in ("chat_save_worker", "runtime_checkpoint_worker"):
-                    worker = getattr(window, attribute, None)
-                    if worker is not None and worker.isRunning():
-                        if hasattr(worker, "request_stop"):
-                            worker.request_stop()
-                        else:
-                            worker.stop_worker(timeout_ms=3000)
-                        assert worker.wait(3000), attribute
-                window.close(); window.deleteLater()
-                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-                app.processEvents()
+                close_main_window(window)
 
 
 if __name__ == "__main__":

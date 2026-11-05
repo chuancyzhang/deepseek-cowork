@@ -39,6 +39,9 @@ class _ConfigStub:
     def get_chat_history_dir(self):
         return self._history_dir
 
+    def get_god_mode(self):
+        return False
+
 
 class TestClarifyModeHelpers(unittest.TestCase):
     def test_normalize_run_context_maps_legacy_planning_to_execution(self):
@@ -809,7 +812,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             self.assertEqual(len(provider_calls), 2)
-            self.assertEqual(provider_calls[0]["tool_names"], ["tool_search", "run_python_code"])
+            self.assertEqual(provider_calls[0]["tool_names"], ["tool_search", "run_python_code", "wait_tool"])
             self.assertIn("- `tool_search`, `run_python_code`", provider_calls[0]["system_prompt"])
             self.assertNotIn("- `tool_search`, `run_python_code`, `bash`", provider_calls[0]["system_prompt"])
             self.assertIn("run_python_code", provider_calls[1]["tool_names"])

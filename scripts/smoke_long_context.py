@@ -5,6 +5,9 @@ The model's local test budget is deliberately 32k to exercise three windows.
 No application settings, real conversations, or tool side effects are changed.
 """
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import argparse
 import copy
 import json

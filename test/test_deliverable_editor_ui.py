@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 from core.deliverable_editing import backup_paths
 from core.deliverable_editing import DeliverableEditError
 from main import MainWindow
+from document_fixtures import write_pdf
 
 
 class DeliverableEditorUiTest(unittest.TestCase):
@@ -46,7 +47,7 @@ class DeliverableEditorUiTest(unittest.TestCase):
             office = Path(directory) / "report.docx"
             pdf = Path(directory) / "report.pdf"
             office.write_bytes(b"office fixture")
-            pdf.write_bytes(b"%PDF-1.4 fixture")
+            write_pdf(pdf)
 
             def opened(preview, source, mode="", **_kwargs):
                 preview.source, preview.mode = source, mode

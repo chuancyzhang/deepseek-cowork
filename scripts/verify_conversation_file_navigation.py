@@ -1,5 +1,8 @@
 """Exercise message editing and tool-file links with an isolated real workspace."""
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import argparse
 import json
 import os
@@ -65,7 +68,7 @@ def run(platform, scale):
         window.resize(min(1440, available.width() - 40) if platform == "windows" else 1440,
                       min(900, available.height() - 60) if platform == "windows" else 900)
         window.show()
-        output = ROOT / "docs/images/conversation-file-navigation"
+        output = QA_ROOT / "screenshots"
         output.mkdir(parents=True, exist_ok=True)
         suffix = f"{platform}-{scale:g}x"
 

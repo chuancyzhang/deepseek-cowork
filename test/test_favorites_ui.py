@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -464,7 +465,7 @@ class FavoritesUiTests(unittest.TestCase):
             editor.deleteLater()
             close_test_window(window)
 
-    def test_favorites_follow_theme_preview_and_restore_without_changing_data(self):
+    def test_favorites_remain_unchanged_during_isolated_theme_preview(self):
         previous_manager = getattr(self.app, "theme_manager", None)
         manager = ThemeRuntimeManager(self.app, ThemeRepository(self.temp.name))
         self.app.theme_manager = manager
@@ -493,11 +494,14 @@ class FavoritesUiTests(unittest.TestCase):
                 default_tokens=default_design_tokens(),
                 session_id="favorites-theme-test",
             )
-            with patch(
-                "core.theme.QFontDatabase.families",
-                return_value=["Microsoft YaHei UI", "Consolas"],
-            ):
-                self.assertTrue(manager.apply_repository_state(reason="favorites_preview"), manager.last_error)
+            manager.request_preview_update()
+            deadline = time.monotonic() + 5
+            while manager.preview is None and time.monotonic() < deadline:
+                self.app.processEvents()
+                QTest.qWait(10)
+            self.assertIsNotNone(manager.preview)
+            self.assertEqual(manager.preview["_resolved"]["tokens"]["bg_panel"], "#1c2230")
+            self.assertEqual(DesignTokens.bg_panel, original_panel)
             page = window.product_pages[window.PAGE_FAVORITES]
             preview_card = next(
                 page.grid.itemAt(index).widget()
@@ -505,7 +509,7 @@ class FavoritesUiTests(unittest.TestCase):
                 if page.grid.itemAt(index).widget()
                 and page.grid.itemAt(index).widget().objectName() == "FavoriteTaskRow"
             )
-            self.assertIn("#1c2230", preview_card.styleSheet())
+            self.assertIn(original_panel, preview_card.styleSheet())
             self.assertFalse(window.theme_preview_bar.isHidden())
             self.assertEqual(window.config_manager.get_favorites(), original_favorites)
 
@@ -514,6 +518,7 @@ class FavoritesUiTests(unittest.TestCase):
                 return_value=["Microsoft YaHei UI", "Consolas"],
             ):
                 self.assertTrue(manager.restore_saved_theme(reason="favorites_preview_restore"))
+            self.app.processEvents()
             restored_card = next(
                 page.grid.itemAt(index).widget()
                 for index in range(page.grid.count())

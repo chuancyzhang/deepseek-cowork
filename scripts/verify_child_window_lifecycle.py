@@ -1,4 +1,7 @@
 """Audit real page/picker lifecycles for unintended native top-level windows."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -232,7 +235,7 @@ def run(output, screenshots=False, history_screenshots=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/screenshots/child-window-audit/report.json")
+    parser.add_argument("--output", type=Path, default=QA_ROOT / "window-audit.json")
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--history-screenshots", action="store_true")
     args = parser.parse_args()

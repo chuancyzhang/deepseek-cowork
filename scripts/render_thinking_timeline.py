@@ -1,4 +1,7 @@
 """Verify the real thought timeline and task-details drawer with isolated data."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -39,7 +42,7 @@ def run(scale):
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
         saved = repository.load()
-        output = ROOT / "docs/images/thinking-timeline"
+        output = QA_ROOT / "screenshots"
         output.mkdir(parents=True, exist_ok=True)
         host = QWidget()
         host.setObjectName("ThinkingTimelinePreview")

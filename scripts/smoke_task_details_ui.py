@@ -1,4 +1,7 @@
 """Render real task-detail widgets with synthetic data and isolated settings."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 import json
 import os
@@ -26,7 +29,7 @@ from main import MainWindow, SystemToast
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", default="docs/images/task-details")
+    parser.add_argument("--output", default=str(QA_ROOT / "screenshots"))
     parser.add_argument("--dark", action="store_true")
     parser.add_argument("--compact", action="store_true")
     parser.add_argument("--scale", type=float, default=1)

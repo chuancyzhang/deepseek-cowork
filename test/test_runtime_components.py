@@ -230,16 +230,11 @@ class TestRuntimeComponents(unittest.TestCase):
             unrelated = os.path.join(skill_path, "requests")
             os.makedirs(broken_pil)
             os.makedirs(unrelated)
-            results = [
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-                type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "broken PIL"})(),
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-                type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-            ]
-            with patch.object(runtime_components.subprocess, "run", side_effect=results):
+            def probe(command, **_kwargs):
+                broken = "import_module('PIL" in command[-1] and os.path.isdir(broken_pil)
+                return type("Completed", (), {"returncode": int(broken), "stdout": "", "stderr": "broken PIL" if broken else ""})()
+
+            with patch.object(runtime_components.subprocess, "run", side_effect=probe):
                 repaired = runtime_components._repair_python_runner_import_conflicts(
                     "C:\\runtime\\python.exe",
                     "documents",

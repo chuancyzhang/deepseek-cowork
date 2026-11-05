@@ -1,4 +1,7 @@
 """Render real conversation components, without model calls or user data."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import os
 import sys
 import tempfile
@@ -29,7 +32,7 @@ def run():
         if path.exists():
             QFontDatabase.addApplicationFont(str(path))
     app.setFont(QFont("Microsoft YaHei UI", 10))
-    output = ROOT / "docs/assets/conversation-runtime"
+    output = QA_ROOT / "screenshots"
     output.mkdir(parents=True, exist_ok=True)
     scale = os.environ.get("QT_SCALE_FACTOR", "1")
     with tempfile.TemporaryDirectory(prefix="cowork-conversation-qa-") as temporary:
@@ -115,7 +118,7 @@ def run_interaction_states():
         if path.exists():
             QFontDatabase.addApplicationFont(str(path))
     app.setFont(QFont("Microsoft YaHei UI", 10))
-    output = ROOT / "docs/assets/conversation-runtime"
+    output = QA_ROOT / "screenshots"
     output.mkdir(parents=True, exist_ok=True)
     scale = os.environ.get("QT_SCALE_FACTOR", "1")
     with tempfile.TemporaryDirectory(prefix="cowork-interaction-qa-") as temporary:
@@ -192,7 +195,7 @@ def run_questionnaire_states():
         if path.exists():
             QFontDatabase.addApplicationFont(str(path))
     app.setFont(QFont("Microsoft YaHei UI", 10))
-    output = ROOT / "docs/assets/conversation-runtime"
+    output = QA_ROOT / "screenshots"
     output.mkdir(parents=True, exist_ok=True)
     scale = os.environ.get("QT_SCALE_FACTOR", "1")
     payload = {"kind": "questionnaire", "title": "明确你的 A 股分析需求", "questions": [

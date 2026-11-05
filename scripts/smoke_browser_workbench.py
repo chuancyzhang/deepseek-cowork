@@ -2,6 +2,9 @@
 
 Run with the repository Python. QT_SCALE_FACTOR can be 1, 1.25 or 1.5.
 """
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import os
 import sys

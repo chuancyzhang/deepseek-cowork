@@ -1,4 +1,7 @@
 """Verify the normal HTML edit entry, rendered CSS, keyboard edits and safe save."""
+
+from qa_support import close_main_window, prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import argparse
 import json
@@ -132,10 +135,7 @@ def run():
                 print("PASS HTML visual default, local CSS/base, keyboard edit, atomic save, scripts/head preserved, explicit source mode and encoding retry")
             finally:
                 window._release_deliverable_edit_session(show_preview=False)
-                window._dispose_application_event_filters()
-                window.close(); window.deleteLater()
-                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-                app.processEvents()
+                close_main_window(window)
                 faulthandler.cancel_dump_traceback_later()
 
 

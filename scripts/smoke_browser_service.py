@@ -1,4 +1,7 @@
 """Exercise the production BrowserSkill service supervisor in an isolated home."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json

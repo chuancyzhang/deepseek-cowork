@@ -74,6 +74,7 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             title="IM",
             status="active",
             meta={"source": "im"},
+            touch_activity=False,
         )
         window._stage_chat_save_request.assert_not_called()
 

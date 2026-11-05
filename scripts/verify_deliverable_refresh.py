@@ -1,4 +1,7 @@
 """Isolated real-window/WebEngine refresh checks and user-guide screenshots."""
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 import os
 import sys
 import tempfile
@@ -41,7 +44,7 @@ def run():
         assert manager.apply_repository_state(reason="refresh_qa")
         errors, quit_events, results = [], [], []
         app.aboutToQuit.connect(lambda: quit_events.append(True))
-        output = ROOT / "docs/guides/user-guide"
+        output = QA_ROOT / "screenshots"
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
         workspace = base / "workspace"
         workspace.mkdir()

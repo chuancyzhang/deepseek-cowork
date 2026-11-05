@@ -1,5 +1,8 @@
 """Exercise the real model configuration route with isolated data and no network."""
 
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
+
 import json
 import os
 from pathlib import Path
@@ -70,7 +73,7 @@ def run():
         window.start_background_skill_load = lambda *args, **kwargs: None
         window.resize(1280, 900)
         window.show()
-        output = Path(os.environ.get("COWORK_MODEL_SCREENSHOTS", ROOT / "docs/images/model-configuration"))
+        output = Path(os.environ.get("COWORK_MODEL_SCREENSHOTS", QA_ROOT / "screenshots"))
         output.mkdir(parents=True, exist_ok=True)
         scale = os.environ.get("QT_SCALE_FACTOR", "1")
         suffix = "-150" if scale == "1.5" else ""

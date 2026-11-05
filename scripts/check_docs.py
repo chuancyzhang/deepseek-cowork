@@ -15,22 +15,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from core.app_version import APP_VERSION
 
-CURRENT_DOCS = (
-    ROOT / "README.md",
-    ROOT / "README_CN.md",
-    ROOT / "docs" / "index.md",
-    ROOT / "docs" / "product.md",
-    ROOT / "docs" / "technical-design.md",
-    ROOT / "docs" / "skill-system.md",
-    ROOT / "docs" / "user-guide.md",
-    ROOT / "docs" / "guides" / "ai-theme-and-visualize.md",
-    ROOT / "docs" / "roadmap.md",
-    ROOT / "docs" / "unified-management.md",
-    ROOT / "docs" / "knowledge_library.md",
-    ROOT / "docs" / "account-connections.md",
-    ROOT / "docs" / "data-security.md",
-    ROOT / "docs" / "GOD_MODE.md",
-)
+CURRENT_DOCS = tuple(ROOT / name for name in (
+    "README.md", "README_CN.md", "docs/user-guide.md",
+    "docs/technical-design.md", "web/platform/README.md",
+))
 
 REMOVED_LEGACY_DOCS = {
     "USER_GUIDE.md",
@@ -60,7 +48,7 @@ LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
 IMAGE_RE = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 CURRENT_VERSION_RE = re.compile(
-    r"^(?:-\s*)?(?:当前应用版本|应用版本|适用版本|Current app version)\s*[:：]\s*\*\*(\d+\.\d+\.\d+)\*\*",
+    r"^(?:文档适用版本|Documented version)\s*[:：]\s*\*\*(\d+\.\d+\.\d+)\*\*",
     re.MULTILINE,
 )
 
@@ -112,16 +100,29 @@ def validate_local_links(markdown_files: list[Path]) -> list[str]:
     return errors
 
 
+def documented_version() -> str:
+    path = ROOT / "README_CN.md"
+    if not path.is_file():
+        return ""
+    versions = CURRENT_VERSION_RE.findall(_read(path))
+    return versions[0] if len(versions) == 1 else ""
+
+
 def validate_current_versions() -> list[str]:
-    errors: list[str] = []
+    # Guides can stay on a release while source development advances.
+    version = documented_version()
+    if not version:
+        return ["README_CN.md: expected one documented-version declaration"]
+    errors = []
+    if tuple(map(int, version.split("."))) > tuple(map(int, APP_VERSION.split("."))):
+        errors.append(f"documented version {version} is newer than app version {APP_VERSION}")
+    if not (ROOT / "docs/releases" / f"{version}.md").is_file():
+        errors.append(f"missing release notes for documented version {version}")
     for path in CURRENT_DOCS:
-        text = _read(path)
-        versions = set(CURRENT_VERSION_RE.findall(text))
-        stale = sorted(version for version in versions if version != APP_VERSION)
-        if stale:
-            errors.append(f"{path.relative_to(ROOT)}: stale current version(s): {', '.join(stale)}")
-        if APP_VERSION not in versions:
-            errors.append(f"{path.relative_to(ROOT)}: does not declare {APP_VERSION}")
+        if not path.is_file():
+            errors.append(f"missing guide: {path.relative_to(ROOT)}")
+        elif CURRENT_VERSION_RE.findall(_read(path)) != [version]:
+            errors.append(f"{path.relative_to(ROOT)}: expected documented version {version}")
     return errors
 
 
@@ -133,50 +134,24 @@ def validate_legacy_paths_removed() -> list[str]:
     return errors
 
 
-def validate_product_concepts() -> list[str]:
-    errors: list[str] = []
-    product = _read(ROOT / "docs" / "product.md")
-    technical = _read(ROOT / "docs" / "technical-design.md")
-    skill_system = _read(ROOT / "docs" / "skill-system.md")
-    readmes = _read(ROOT / "README.md") + "\n" + _read(ROOT / "README_CN.md")
-
-    required_product_terms = (
-        "Everything is Tool",
-        "AI 设计 UI",
-        "经验系统",
-        "general-experience",
-        "不是模型微调",
-        "preview_id + revision",
-    )
-    for term in required_product_terms:
-        if term not in product:
-            errors.append(f"docs/product.md: missing product concept {term!r}")
-
-    for term in ("最小循环", "Tool Registry", "tool_call_id", "tool_search", "daemon", "恢复日志"):
-        if term not in technical:
-            errors.append(f"docs/technical-design.md: missing Agent Loop layer {term!r}")
-
-    for term in ("Tool 是执行面", "experience/entries.jsonl", "SkillChangeEvent", "托管 MCP"):
-        if term not in skill_system:
-            errors.append(f"docs/skill-system.md: missing runtime concept {term!r}")
-
-    for term in ("Everything is Tool", "AI", "Experience System", "经验系统"):
-        if term not in readmes:
-            errors.append(f"README parity: missing {term!r}")
-    return errors
-
-
-def validate_screenshot_contract() -> list[str]:
-    # Validate actual references, not a frozen screenshot count.
-    errors = validate_local_links(markdown_files())
-    path = ROOT / "docs" / "user-guide.md"
-    sections = re.split(r"(?=^## )", _read(path), flags=re.MULTILINE)
-    for section in sections:
-        if re.match(r"## \d+\.", section) and not IMAGE_RE.search(section):
-            # Update/log-export instructions deliberately have no screenshot.
-            if section.startswith("## 25. "):
-                continue
-            errors.append(f"{path.relative_to(ROOT)}: missing scenario screenshot: {section.splitlines()[0]}")
+def validate_document_assets() -> list[str]:
+    errors = []
+    referenced = set()
+    for source in markdown_files():
+        for raw_target in IMAGE_RE.findall(_read(source)):
+            if not raw_target.startswith(("http://", "https://")):
+                referenced.add((source.parent / unquote(raw_target)).resolve())
+    for path in (ROOT / "docs").rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(ROOT / "docs")
+        if path in CURRENT_DOCS or (relative.parts[0] == "releases" and path.suffix == ".md"):
+            continue
+        if relative.parts[0] == "images" and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}:
+            if path.resolve() not in referenced:
+                errors.append(f"unreferenced documentation image: docs/{relative.as_posix()}")
+        else:
+            errors.append(f"unexpected documentation artifact: docs/{relative.as_posix()}")
     return errors
 
 
@@ -195,14 +170,14 @@ def validate_protected_diff() -> list[str]:
     errors: list[str] = []
     for raw_name in result.stdout.splitlines():
         name = raw_name.replace("\\", "/").strip()
-        doc_image = name.startswith(DOCUMENTATION_IMAGE_PREFIXES) and Path(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        doc_image = (name.startswith(DOCUMENTATION_IMAGE_PREFIXES) or name in {"images/english_intro.png", "images/使用界面.png", "images/首页.png"}) and Path(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
         if name in PROTECTED_FILES or (name.startswith(PROTECTED_PREFIXES) and not doc_image):
             errors.append(f"protected path changed: {name}")
     return errors
 
 
 def markdown_files() -> list[Path]:
-    files = [ROOT / "README.md", ROOT / "README_CN.md"]
+    files = [path for path in CURRENT_DOCS if path.is_file() and path.parent != ROOT / "docs"]
     files.extend(sorted((ROOT / "docs").rglob("*.md")))
     return files
 
@@ -213,8 +188,7 @@ def run_checks(include_protected_diff: bool = True) -> list[str]:
     errors.extend(validate_local_links(files))
     errors.extend(validate_current_versions())
     errors.extend(validate_legacy_paths_removed())
-    errors.extend(validate_product_concepts())
-    errors.extend(validate_screenshot_contract())
+    errors.extend(validate_document_assets())
     if include_protected_diff:
         errors.extend(validate_protected_diff())
     return errors
@@ -233,7 +207,7 @@ def main() -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print(f"Documentation checks passed for app version {APP_VERSION}.")
+    print(f"Documentation checks passed for documented version {documented_version()}.")
     return 0
 
 

@@ -63,7 +63,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        for target in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir"):
+        for target in ("core.config_manager.get_app_data_dir", "core.config_manager.get_base_dir", "main.get_app_data_dir"):
             patcher = patch(target, return_value=self.temp_dir.name)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -86,13 +86,8 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         ):
             self.manager.restore_saved_theme(reason="test_cleanup")
         self.manager.stop()
-        self.window.close()
-        deadline = time.monotonic() + 5
-        while not getattr(self.window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
-            QTest.qWait(10)
-        self.window.file_model.directoryLoaded.disconnect()
-        self.window.deleteLater()
-        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        from ui_window_cleanup import close_test_window
+        close_test_window(self.window)
         self.app.theme_manager = self.previous_manager
         self.temp_dir.cleanup()
         self.app.processEvents()
@@ -477,8 +472,9 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             second = canvas._rendered_scene()
             self.assertEqual(first.cacheKey(), second.cacheKey())
             image = first.toImage()
-            self.assertGreater(image.pixelColor(0, 20).red(), 240)
-            self.assertLess(image.pixelColor(32, 20).red(), 245)
+            ratio = first.devicePixelRatio()
+            self.assertGreater(image.pixelColor(0, round(20 * ratio)).red(), 240)
+            self.assertLess(image.pixelColor(round(32 * ratio), round(20 * ratio)).red(), 245)
             host.resize(162, 98)
             self.app.processEvents()
             resized = canvas._rendered_scene()

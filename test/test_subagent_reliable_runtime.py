@@ -277,7 +277,7 @@ class ReliableSubagentTests(unittest.TestCase):
         manager.execution_owner = "daemon"
         aid = manager.spawn_agent("daemon task")["agent_id"]
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), DaemonRequestHandler)
-        server.state = types.SimpleNamespace(chat_storage=self.storage, config_manager=self.config)
+        server.state = types.SimpleNamespace(chat_storage=self.storage, config_manager=self.config, lock=threading.RLock())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

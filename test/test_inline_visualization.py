@@ -254,6 +254,8 @@ class TestInlineVisualization(unittest.TestCase):
                     chat_storage=storage,
                     visualize_enabled=False,
                 )
+            history.show()
+            app.processEvents()
             self.assertEqual(len(history.inline_visualization_cards), 1)
             self.assertTrue(history.inline_visualization_cards[0].read_only)
             self.assertNotIn("cowork-inline-vis", history.content_edit.toPlainText())
@@ -267,6 +269,8 @@ class TestInlineVisualization(unittest.TestCase):
         directive = '::cowork-inline-vis{file="visual-12345678.html"}'
         with patch("main.log_sub_agent_runtime") as log_mock:
             bubble = main.ChatBubble("Agent", directive)
+            bubble.show()
+            app.processEvents()
         self.assertNotIn("cowork-inline-vis", bubble.content_edit.toPlainText())
         self.assertIn("缺少会话上下文", bubble.content_edit.toPlainText())
         log_mock.assert_any_call(

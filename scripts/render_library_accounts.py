@@ -2,6 +2,9 @@
 
 Run with QT_SCALE_FACTOR=1 or 1.5. All accounts and responses are local fixtures.
 """
+
+from qa_support import prepare_qa_directory
+QA_ROOT = prepare_qa_directory(__file__)
 from pathlib import Path
 import os
 import sys
@@ -52,7 +55,7 @@ def main():
             "tencent-docs": TencentDocsProvider(store, remote, remote.call, remote.discover),
             "lexiang": LexiangProvider(store, remote, remote.call, remote.discover),
         })
-        output = ROOT / "docs/images/library-accounts"
+        output = QA_ROOT / "screenshots"
         output.mkdir(parents=True, exist_ok=True)
         scale = os.environ.get("QT_SCALE_FACTOR", "1").replace(".", "_")
         page = MultiSourceKnowledgePage(service=service)

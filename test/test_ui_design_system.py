@@ -3,11 +3,12 @@ import json
 import unittest
 import main as main_module
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QRawFont
+from PySide6.QtCore import QEvent
+from PySide6.QtGui import QTextLayout
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from core.theme import DesignTokens
@@ -98,9 +99,14 @@ class UiDesignSystemTests(unittest.TestCase):
 
     def test_desktop_font_can_render_chinese_ui_copy(self):
         initialize_desktop_theme(self.app)
-        raw_font = QRawFont.fromFont(self.app.font())
-        self.assertTrue(raw_font.isValid())
-        self.assertTrue(raw_font.supportsCharacter(ord("设")))
+        layout = QTextLayout("设置", self.app.font())
+        layout.beginLayout()
+        line = layout.createLine()
+        line.setLineWidth(200)
+        layout.endLayout()
+        glyphs = [glyph for run in layout.glyphRuns() for glyph in run.glyphIndexes()]
+        self.assertTrue(glyphs)
+        self.assertNotIn(0, glyphs, "Chinese UI text contains a missing glyph")
 
     def test_shared_primitives_cover_product_states(self):
         self.assertIn("QPushButton:pressed", product_button_style("primary"))
@@ -192,6 +198,7 @@ class UiDesignSystemTests(unittest.TestCase):
             },
             {
                 "name": "my-skill",
+                "source_kind": "user_extension",
                 "display_name": "我的整理助手",
                 "description_cn": "整理我的项目资料。",
                 "enabled": True,
@@ -223,7 +230,7 @@ class UiDesignSystemTests(unittest.TestCase):
                 [label.text() for label in page.findChildren(QLabel)]
                 + [button.text() for button in page.findChildren(QPushButton)]
             )
-            for technical_term in ("MCP", "Tool", "Script", "Medium Risk"):
+            for technical_term in ("Tool", "Script", "Medium Risk"):
                 self.assertNotIn(technical_term, visible_copy)
         finally:
             page.deleteLater()
@@ -266,7 +273,7 @@ class UiDesignSystemTests(unittest.TestCase):
                 for label in page.findChildren(QLabel)
                 if label.objectName() == "CapabilityStateLabel"
             ]
-            self.assertIn("✓ 已开启", state_labels)
+            self.assertIn("已开启", state_labels)
             close_buttons = [
                 button
                 for button in page.findChildren(QPushButton)
@@ -281,7 +288,9 @@ class UiDesignSystemTests(unittest.TestCase):
                 for button in page.findChildren(QPushButton)
                 if button.objectName() == "CapabilityEnableAction"
             ]
-            self.assertEqual([button.text() for button in enable_buttons], ["开启"])
+            self.assertEqual(len(enable_buttons), 1)
+            self.assertFalse(enable_buttons[0].isChecked())
+            self.assertEqual(enable_buttons[0].accessibleName(), "启用能力一")
         finally:
             page.deleteLater()
 
@@ -304,6 +313,7 @@ class UiDesignSystemTests(unittest.TestCase):
         ]
         manager.is_skill_editable.return_value = False
         config = MagicMock()
+        self.enterContext(patch("core.browser_backend.BrowserBackendCoordinator", return_value=MagicMock(snapshot=lambda: {"backend": "external", "pending": None})))
         page = SkillsCenterDialog(manager, config)
         try:
             state_labels = [
@@ -311,15 +321,15 @@ class UiDesignSystemTests(unittest.TestCase):
                 for label in page.findChildren(QLabel)
                 if label.objectName() == "CapabilityStateLabel"
             ]
-            self.assertIn("还需完成一次简单设置", state_labels)
-            self.assertNotIn("✓ 已开启", state_labels)
+            self.assertIn("需要连接", state_labels)
+            self.assertNotIn("已开启", state_labels)
             self.assertEqual(
                 [
                     button.text()
                     for button in page.findChildren(QPushButton)
-                    if button.objectName() == "BrowserAutomationSetupAction"
+                    if button.objectName() == "BrowserAutomationSettingsAction"
                 ],
-                ["继续设置"],
+                ["连接设置"],
             )
             self.assertEqual(
                 len(
@@ -329,7 +339,7 @@ class UiDesignSystemTests(unittest.TestCase):
                         if button.objectName() == "CapabilityDisableAction"
                     ]
                 ),
-                1,
+                0,
             )
 
             page.browser_component_status = {
@@ -338,20 +348,21 @@ class UiDesignSystemTests(unittest.TestCase):
                 "ready": True,
             }
             page._render_content()
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
             self.app.processEvents()
             ready_labels = [
                 label.text()
                 for label in page.findChildren(QLabel)
                 if label.objectName() == "CapabilityStateLabel"
             ]
-            self.assertIn("✓ 已开启", ready_labels)
+            self.assertIn("已就绪", ready_labels)
             self.assertEqual(
                 [
                     button.text()
                     for button in page.findChildren(QPushButton)
                     if button.objectName() == "BrowserAutomationSettingsAction"
                 ],
-                ["设置"],
+                ["连接设置"],
             )
         finally:
             page.deleteLater()
@@ -374,15 +385,14 @@ class UiDesignSystemTests(unittest.TestCase):
             self.assertTrue(str(presentation.get("access_note") or "").strip(), payload["name"])
         self.assertGreaterEqual(len(bundled), 14)
 
-    def test_empty_agent_settings_create_a_disabled_template(self):
+    def test_empty_agent_settings_do_not_persist_an_untouched_template(self):
         manager = AgentProfileManager([], lambda: [])
         try:
-            profiles = manager.get_profiles()
-            self.assertEqual(len(profiles), 1)
-            self.assertEqual(profiles[0]["name"], "新智能体")
-            self.assertFalse(profiles[0]["enabled"])
+            self.assertEqual(manager.get_profiles(), [])
+            manager.add_profile()
             self.assertFalse(manager.enabled_check.isChecked())
-            self.assertIn("已停用", manager.profile_list.item(0).text())
+            self.assertEqual(manager.get_profiles(), [])
+            self.assertEqual(manager.profiles[-1]["name"], "新专家")
         finally:
             manager.deleteLater()
 

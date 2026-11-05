@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSiz
 
 from core.chat_storage import ChatStorage
 from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
+from core.conversation_integrity import LedgerMessageConflictError
 from core.conversation_render import build_conversation_render_items, is_legacy_skill_change_notice_message, project_visible_messages
 from core.runtime_journal import RuntimeJournal
 from core.message_persistence import project_provider_messages
@@ -1407,6 +1408,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                     writer_owner="ui:test",
                     base_messages=state.messages,
                 )
+                original_messages = storage.get_messages(state.session_id)
                 bubble = window._append_live_thinking_segment(state)
 
                 def save_now(session_id=None, flush=False):
@@ -1457,9 +1459,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 self.assertEqual(len(final_messages), 1)
                 self.assertEqual(final_messages[0]["meta"]["ui_reply_kind"], "final")
                 self.assertEqual(bubble.source_message_id, final_messages[0]["id"])
+                self.assertEqual(state.session_status, "completed")
+                self.assertIsNone(state.conversation_notice)
+                self.assertTrue(bubble.message_actions_enabled)
+                self.assertEqual(persisted[:-1], original_messages)
                 self.assertEqual(
-                    ChatStorage(os.path.join(root, "chat.sqlite")).get_messages(state.session_id)[-1]["content"],
-                    "最终正文",
+                    ChatStorage(os.path.join(root, "chat.sqlite")).get_messages(state.session_id),
+                    persisted,
                 )
             finally:
                 self._close_window(window)
@@ -1552,6 +1558,71 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             finally:
                 self._close_window(window)
 
+    def test_terminal_reuses_committed_visible_message_without_rewriting_history(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.active_turn_id = 3
+            state.active_turn_request_id = "request-visible-terminal"
+            bubble = window._append_live_thinking_segment(state)
+            bubble.set_main_content("  最终结果\n", final=False)
+            appended = window._append_visible_assistant_stages(
+                state, turn_id=3, run_id=state.active_turn_request_id,
+                outcome="completed", fallback_bubble=bubble,
+            )
+            before = copy.deepcopy(state.messages)
+            provider_before = project_provider_messages(state.messages)
+            kwargs = dict(
+                generated_messages=[], generated_messages_raw=[],
+                content="  最终结果\n", reasoning="已经保存在时间线的思考",
+                content_parts=[], turn_id=3, run_id=state.active_turn_request_id,
+                bubble=bubble,
+            )
+            with patch("main.log_sub_agent_runtime") as log:
+                for _ in range(2):
+                    message_id = window._ensure_terminal_assistant_message(state, **kwargs)
+                    self.assertEqual(message_id, appended[-1]["id"])
+                self.assertEqual(log.call_args.kwargs["decision"], "fallback_existing")
+            self.assertEqual(state.messages, before)
+            self.assertEqual(project_provider_messages(state.messages), provider_before)
+
+            for other_session, other_run in (
+                (state.session_id, "another-run"),
+                ("another-session", state.active_turn_request_id),
+            ):
+                with self.subTest(session=other_session, run=other_run):
+                    other_state = SimpleNamespace(
+                        session_id=other_session, active_turn_id=3,
+                        messages=copy.deepcopy(before),
+                    )
+                    other_id = window._ensure_terminal_assistant_message(
+                        other_state, **{**kwargs, "run_id": other_run},
+                    )
+                    self.assertNotEqual(other_id, message_id)
+                    self.assertEqual(other_state.messages[:-1], before)
+
+            variants = [
+                ("content", {"content": "最终结果"}, {}),
+                ("image", {"content_parts": [{"type": "output_image", "path": "other.png"}]}, {}),
+                ("turn", {}, {"turn_id": "4"}),
+                ("run", {}, {"request_id": "other-run"}),
+                ("group", {}, {"ui_turn_group_id": "other-group"}),
+                ("stage", {}, {"ui_stage_id": "other-stage"}),
+                ("ui_turn", {}, {"ui_turn_id": "4"}),
+                ("source", {}, {"ui_source_message_id": "other-source"}),
+                ("unfinished", {}, {"ui_reply_kind": "stage"}),
+            ]
+            for name, arguments, metadata in variants:
+                with self.subTest(conflict=name):
+                    state.messages = copy.deepcopy(before)
+                    state.messages[-1]["meta"].update(metadata)
+                    conflict_before = copy.deepcopy(state.messages)
+                    with self.assertRaises(LedgerMessageConflictError):
+                        window._ensure_terminal_assistant_message(state, **{**kwargs, **arguments})
+                    self.assertEqual(state.messages, conflict_before)
+        finally:
+            self._close_window(window)
+
     def test_terminal_fallback_is_idempotent_and_rejects_content_conflict(self):
         window = MainWindow()
         try:
@@ -1593,6 +1664,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self._close_window(window)
 
     def test_terminal_save_barrier_keeps_actions_hidden_when_revision_fails(self):
+        self._assert_terminal_save_barrier_pending(include_generated=True)
+
+    def test_visible_terminal_save_barrier_keeps_actions_hidden_until_confirmed(self):
+        self._assert_terminal_save_barrier_pending(include_generated=False)
+
+    def _assert_terminal_save_barrier_pending(self, *, include_generated):
         window = MainWindow()
         try:
             state = window.get_current_session()
@@ -1625,7 +1702,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                             "id": "assistant-terminal-save-failed",
                             "role": "assistant", "content": "已显示但未保存",
                             "meta": {"turn_id": "1", "request_id": "request-terminal-save-failed"},
-                        }],
+                        }] if include_generated else [],
                     },
                     state.session_id,
                     turn_id=1,

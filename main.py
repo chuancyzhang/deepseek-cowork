@@ -140,6 +140,7 @@ from core.message_persistence import (
     project_provider_messages,
 )
 from core.conversation_integrity import (
+    LedgerMessageConflictError,
     ensure_tool_call_sequence,
     merge_messages_by_id,
 )
@@ -56805,11 +56806,33 @@ a {{ overflow-wrap: anywhere; }}
                     "ui_conversation_agent": copy.deepcopy(getattr(state, "active_turn_agent", None)),
                 },
             }
-            previous_count = len(state.messages)
-            merged = merge_messages_by_id(state.messages, [fallback_message])
-            state.messages[:] = merged
-            final_message = self._find_message_by_id(state.messages, message_id)
-            decision = "fallback_appended" if len(merged) > previous_count else "fallback_existing"
+            existing = self._find_message_by_id(state.messages, message_id)
+            existing_meta = (existing or {}).get("meta") or {}
+            if existing_meta.get("ui_visible_fragment"):
+                # The terminal boundary has already committed this visible
+                # stage. Bind it as-is instead of rebuilding the same ID with
+                # different reasoning/content_parts and forking the ledger.
+                if not (
+                    existing.get("role") == "assistant"
+                    and not existing.get("tool_calls")
+                    and existing_meta.get("ui_reply_kind") == "final"
+                    and str(existing_meta.get("ui_turn_id") or "") == turn_key
+                    and all(str(existing_meta.get(key) or "") == value for key, value in identity.items())
+                    and str(existing_meta.get("ui_source_message_id") or "")
+                        == str(getattr(bubble, "ui_source_message_id", "") or "")
+                    and str(existing.get("content") or "") == str(content or "")
+                    and MainWindow._output_image_identity(existing.get("content_parts"))
+                        == MainWindow._output_image_identity(content_parts)
+                ):
+                    raise LedgerMessageConflictError(message_id, existing, fallback_message)
+                final_message = existing
+                decision = "fallback_existing"
+            else:
+                previous_count = len(state.messages)
+                merged = merge_messages_by_id(state.messages, [fallback_message])
+                state.messages[:] = merged
+                final_message = self._find_message_by_id(state.messages, message_id)
+                decision = "fallback_appended" if len(merged) > previous_count else "fallback_existing"
 
         message_id = str((final_message or {}).get("id") or "").strip()
         if not message_id:

@@ -12721,6 +12721,8 @@ class SettingsDialog(QDialog):
         experiment_layout.addWidget(self.long_context_panel)
         from ui.browser_automation_settings import BrowserAutomationSettings
         self.browser_automation_panel = BrowserAutomationSettings(self.config_manager)
+        if self._main is not None and callable(getattr(self._main, "activate_session", None)):
+            self.browser_automation_panel.taskRequested.connect(self._main.activate_session)
         experiment_layout.addWidget(self.browser_automation_panel)
         return experiment_page
 
@@ -44056,7 +44058,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             state,
             text,
             "error",
-            action_text="重试",
+            action_text="继续任务" if (getattr(state, "run_failure_details", {}) or {}).get("category") == "browser_unavailable" else "重试",
             action_callback=retry_callback,
         )
         return self._present_run_failure_notice(state, notice, run_id)
@@ -44442,9 +44444,12 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             ),
             "json",
         )
-        self.td_result_edit.set_result(str(event.get("error") or "未知错误"))
+        failure_detail = str(event.get("error") or "未知错误")
+        if event.get("browser_detail"):
+            failure_detail += "\n\n" + json.dumps(event["browser_detail"], ensure_ascii=False, indent=2)
+        self.td_result_edit.set_result(failure_detail)
         self._tool_detail_session_id = session_id
-        self._detail_full_result = str(event.get("error") or "未知错误")
+        self._detail_full_result = failure_detail
         self._detail_full_arguments = self.td_args_edit.toPlainText()
 
     def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
@@ -57409,6 +57414,9 @@ a {{ overflow-wrap: anywhere; }}
                 retry_attempt,
                 retry_max,
             )
+            if not interrupted and error_type == "BrowserUnavailable":
+                failure_category = "browser_unavailable"
+                failure_summary = "浏览器暂时无法继续操作，已保留本次进度。"
             if failure_category == "runtime_journal_write_failed":
                 visible_content = str(
                     getattr(state, "current_content_buffer", "") or ""
@@ -57527,6 +57535,7 @@ a {{ overflow-wrap: anywhere; }}
                 "run_id": run_id, "summary": failure_summary, "category": failure_category,
                 "error": error_text, "error_type": error_type,
                 "retry_attempt": retry_attempt, "max_retries": retry_max,
+                "browser_detail": result.get("error_detail") if error_type == "BrowserUnavailable" else None,
             }
             bubble.stop_thinking_timers()
             interruption_text = self._finish_interrupted_turn(

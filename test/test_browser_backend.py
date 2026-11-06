@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,59 @@ class BrowserBackendTest(unittest.TestCase):
         self.assertEqual(second["backend"], EXTERNAL)
         self.assertGreater(second["generation"], first["generation"])
 
+    def test_missing_preference_defaults_to_internal_and_explicit_external_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = browser_config(directory, external=False)
+            coordinator = BrowserBackendCoordinator(config)
+            self.assertEqual(coordinator.snapshot()["backend"], INTERNAL)
+            coordinator.save(False)
+            self.assertEqual(BrowserBackendCoordinator(config).snapshot()["backend"], EXTERNAL)
+
+    def test_background_cleanup_does_not_hold_run_completion_or_miscount_active_tasks(self):
+        auth = self.auth()
+        with browser_operation({"execution_authorization": auth}, EXTERNAL):
+            self.coordinator.track_session("chat", "run", "owned")
+        self.coordinator.save(True)
+        entered, release = threading.Event(), threading.Event()
+        def stop(*_args, **_kwargs):
+            entered.set()
+            release.wait(5)
+            return {"stopped": True}
+        with patch("core.browser_skill_component._stop_session_after_interruption", side_effect=stop), \
+                patch("core.browser_skill_component.prepare_browser_recovery"):
+            started = time.monotonic()
+            finish_run(auth, background=True)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertTrue(entered.wait(2))
+            job = self.coordinator.request_recovery()
+            try:
+                state = self.coordinator.snapshot()
+                self.assertEqual(state["running_runs"], 0)
+                self.assertEqual(state["cleanup_runs"], 1)
+                self.assertTrue(state["pending"])
+            finally:
+                release.set()
+                job.join(5)
+        self.assertFalse(job.is_alive())
+        self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
+
+    def test_automatic_cleanup_is_bounded_and_polling_does_not_restart_it(self):
+        auth = self.auth()
+        with browser_operation({"execution_authorization": auth}, EXTERNAL):
+            self.coordinator.track_session("chat", "run", "owned")
+        with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": False, "error": "disconnected"}) as stop, \
+                patch("core.browser_skill_component.prepare_browser_recovery"):
+            self.coordinator.finish("chat", "run", background=True)
+            job = self.coordinator.request_recovery()
+            job.join(8)
+            self.assertFalse(job.is_alive())
+            for _ in range(5):
+                state = self.coordinator.snapshot()
+                self.assertTrue(state["recoverable"])
+                self.assertFalse(state["recovering"])
+                self.assertIn("disconnected", state["cleanup_errors"][0])
+            self.assertEqual(stop.call_count, 3)
+
     def test_wait_cancel_and_new_run_rejected_while_old_run_continues(self):
         auth = self.auth()
         context = {"execution_authorization": auth}
@@ -64,7 +118,7 @@ class BrowserBackendTest(unittest.TestCase):
         with patch.object(self.config, "_write_config_or_raise", side_effect=OSError("full")):
             with self.assertRaises(OSError): self.coordinator.save(True)
         self.assertEqual(Path(self.config.config_path).read_bytes(), before)
-        self.assertNotIn("experimental_browser_automation", self.config.config)
+        self.assertEqual(self.config.config["experimental_browser_automation"], {"enabled": False})
         self.assertEqual(self.coordinator.snapshot()["backend"], EXTERNAL)
 
     def test_coordinator_failure_restores_saved_preference(self):
@@ -101,7 +155,7 @@ class BrowserBackendTest(unittest.TestCase):
         self.assertTrue(self.coordinator.snapshot()["cleanup_errors"])
         with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}) as stop:
             self.coordinator.recover()
-            stop.assert_called_once_with("owned")
+            stop.assert_called_once_with("owned", timeout_seconds=10)
         self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
 
     def test_finish_waits_inflight_operation_and_shared_workers(self):

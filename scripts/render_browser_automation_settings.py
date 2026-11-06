@@ -1,4 +1,4 @@
-"""Light-theme browser-mode settings QA in isolated application storage."""
+"""Browser-mode settings QA in isolated application storage."""
 
 from qa_support import prepare_qa_directory
 QA_ROOT = prepare_qa_directory(__file__)
@@ -19,7 +19,11 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=str(ROOT / ".tmp/browser-mode-qa"))
+    parser.add_argument("--mode", choices=("light", "dark"), default="light")
+    parser.add_argument("--scale", default="1")
+    parser.add_argument("--compact", action="store_true")
     options = parser.parse_args()
+    os.environ["QT_SCALE_FACTOR"] = options.scale
     output = Path(options.output); output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cowork-browser-mode-") as temporary:
         os.environ["APPDATA"] = str(Path(temporary) / "appdata")
@@ -30,7 +34,7 @@ def main():
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QMainWindow
         from PySide6.QtGui import QFontDatabase
-        from core.browser_backend import bind_run, finish_run, browser_operation, EXTERNAL
+        from core.browser_backend import bind_run, finish_run, browser_operation, INTERNAL
         from core.execution_authorization import ExecutionAuthorization
         import main as product
         app = QApplication.instance() or QApplication([])
@@ -42,11 +46,12 @@ def main():
         from core.theme_service import ThemeRepository
         theme = ThemeRuntimeManager(app, ThemeRepository(str(Path(temporary) / "themes")))
         app.theme_manager = theme
-        theme.apply_repository_state(reason="browser_mode_qa")
+        theme.repository.save_appearance({"mode": options.mode})
+        assert theme.apply_repository_state(reason="browser_mode_qa"), theme.last_error
         with patch.object(product.MainWindow, "showEvent", lambda self, event: QMainWindow.showEvent(self, event)):
             window = product.MainWindow(theme_manager=theme)
             try:
-                window.resize(1000, 720); window.show()
+                window.resize(900 if options.compact else 1000, 720); window.show()
                 window.open_settings("实验功能")
                 app.processEvents()
                 page = window.product_pages[window.PAGE_SETTINGS]
@@ -63,19 +68,23 @@ def main():
                         ancestor.verticalScrollBar().setValue(ancestor.verticalScrollBar().maximum())
                     QTest.qWait(80)
                     scale = os.environ.get("QT_SCALE_FACTOR", "1")
-                    assert window.grab().save(str(output / f"{name}-1000-{scale}.png"))
+                    assert panel.status.height() >= panel.status.heightForWidth(panel.status.width())
+                    assert sum(button.isVisible() for button in (panel.apply_button, panel.recover_button)) <= 1
+                    assert window.grab().save(str(output / f"{name}-{options.mode}-{scale}.png"))
+                    if name == "browser-mode-default":
+                        assert not panel.apply_button.isVisible() and not panel.recover_button.isVisible()
                 capture("browser-mode-default")
                 auth = ExecutionAuthorization("qa", "qa-run", True, "")
                 bind_run(window.config_manager, auth, worker=True)
-                with browser_operation({"execution_authorization": auth}, EXTERNAL): pass
-                panel.enabled.setChecked(True)
+                with browser_operation({"execution_authorization": auth}, INTERNAL): pass
+                panel.enabled.setChecked(False)
                 assert panel.save()
                 assert panel.coordinator.snapshot()["pending"]
                 capture("browser-mode-pending")
                 panel.cancel_switch()
                 assert not panel.coordinator.snapshot()["pending"]
                 finish_run(auth)
-                panel.enabled.setChecked(True)
+                panel.enabled.setChecked(False)
                 with patch("ui.browser_automation_settings.ProductMessageDialog.exec_result", return_value="stay"):
                     assert not window._confirm_leave_product_page()
                 with patch.object(panel.coordinator, "save", side_effect=OSError("disk full")):
@@ -85,13 +94,21 @@ def main():
                 panel.reset()
                 panel.enabled.setChecked(True); assert panel.save()
                 capture("browser-mode-internal")
+                actual = panel.coordinator.snapshot()
+                with patch.object(panel.coordinator, "snapshot", return_value={**actual, "backend": "external", "desired": "internal", "pending": True,
+                        "active_runs": 2, "running_runs": 0, "cleanup_runs": 2, "running_tasks": [], "recoverable": True,
+                        "recovering": False, "cleanup_errors": ["连接超时，未确认浏览器操作已结束。"]}):
+                    panel._refresh()
+                    capture("browser-mode-recovery")
+                    assert "2 个任务" not in panel.status.text()
+                panel._refresh()
                 saved = DesignTokens.primary
                 theme.repository.write_preview(name="浅色浏览器设置预览", overrides={"tokens": {"primary": "#39734d", "primary_hover": "#2d603e"}}, default_tokens=default_design_tokens())
                 assert theme.apply_repository_state(reason="browser_mode_preview"), theme.last_error
                 capture("browser-mode-theme-preview")
                 assert theme.restore_saved_theme()
                 assert DesignTokens.primary == saved
-                print("light settings default/pending/cancel/save failure/internal: PASS", flush=True)
+                print(f"{options.mode} settings default/pending/cancel/save failure/recovery/preview: PASS; DPR={window.devicePixelRatioF()}", flush=True)
             finally:
                 stopped = []
                 window._shutdown_workers_async(lambda _preserved: stopped.append(True))

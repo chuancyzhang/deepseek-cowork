@@ -81,7 +81,7 @@ class PackageReleaseTests(unittest.TestCase):
                         "component_id": "browser-skill",
                         "license": "LICENSE.txt",
                         "cli": {
-                            "version": "0.3.3",
+                            "version": "0.4.2",
                             "archive": package_release.BROWSER_SKILL_CLI_ARCHIVE,
                             "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["cli"]["url"],
                             "sha256": self.fixture_hashes[
@@ -89,7 +89,7 @@ class PackageReleaseTests(unittest.TestCase):
                             ],
                         },
                         "extension": {
-                            "version": "0.3.3",
+                            "version": "0.4.2",
                             "archive": package_release.BROWSER_SKILL_EXTENSION_ARCHIVE,
                             "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["extension"]["url"],
                             "sha256": self.fixture_hashes[

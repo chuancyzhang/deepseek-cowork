@@ -1,9 +1,8 @@
-"""Opt-in browser backend selection, with visible pending-switch recovery."""
+"""Browser choice with automatic recovery and task-oriented status."""
 import logging
-import threading
 
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton
+from PySide6.QtCore import Signal, QTimer, Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton, QMenu, QSizePolicy
 
 from core.browser_backend import BrowserBackendCoordinator, INTERNAL
 from core.theme import DesignTokens, bind_theme
@@ -12,11 +11,9 @@ from ui.primitives import product_button_style, ProductMessageDialog
 log = logging.getLogger(__name__)
 
 
-class RecoverySignals(QObject):
-    finished = Signal(object)
-
-
 class BrowserAutomationSettings(QWidget):
+    taskRequested = Signal(str)
+
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
         self.setObjectName("BrowserAutomationSettings")
@@ -24,42 +21,45 @@ class BrowserAutomationSettings(QWidget):
         self.coordinator = BrowserBackendCoordinator(config_manager)
         self.saved = self.coordinator.snapshot()["desired"] == INTERNAL
         self.recovering = False
-        self.signals = RecoverySignals()
-        self.signals.finished.connect(self._recovered)
+        self._details_expanded = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(12)
-        self.title = QLabel("内置浏览器自动化 · 实验功能")
+        self.title = QLabel("浏览器", self)
         self.title.setObjectName("BrowserAutomationHeading")
         layout.addWidget(self.title)
-        note = QLabel("让 AI 在右侧浏览器中阅读和操作网页，你可以查看过程并随时接管。关闭时使用外部 BrowserSkill，开启时只使用内置网页工具。")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        self.enabled = QCheckBox("启用内置浏览器自动化")
+        self.enabled = QCheckBox("使用内置浏览器", self)
         self.enabled.setChecked(self.saved)
         layout.addWidget(self.enabled)
-        self.status = QLabel()
+        note = QLabel("在右侧查看网页操作并随时接管。关闭后使用 Chrome 或 Edge 的已有登录状态。", self)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.status = QLabel(self)
+        self.status.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        timing = QLabel("默认关闭。保存后立即切换；有浏览器任务运行时，等待已有任务结束再切换，期间不启动新的浏览器任务。手动浏览、文件和终端不受影响。")
-        timing.setWordWrap(True)
-        layout.addWidget(timing)
+        self.status_actions = QLabel(self)
+        self.status_actions.setTextFormat(Qt.RichText)
+        self.status_actions.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
+        self.status_actions.setWordWrap(True)
+        self.status_actions.linkActivated.connect(self._status_action)
+        layout.addWidget(self.status_actions)
+        self.details = QLabel(self)
+        self.details.setWordWrap(True)
+        self.details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.details.hide()
+        layout.addWidget(self.details)
         row = QHBoxLayout()
-        self.apply_button = QPushButton("保存设置")
+        self.apply_button = QPushButton("保存设置", self)
         self.apply_button.clicked.connect(self.save)
-        self.reset_button = QPushButton("撤销更改")
-        self.reset_button.clicked.connect(self.reset)
         row.addWidget(self.apply_button)
-        row.addWidget(self.reset_button)
+        self.recover_button = QPushButton("重试连接", self)
+        self.recover_button.clicked.connect(self.recover)
+        row.addWidget(self.recover_button)
         row.addStretch()
         layout.addLayout(row)
-        self.cancel_switch_button = QPushButton("取消待执行的切换")
-        self.cancel_switch_button.clicked.connect(self.cancel_switch)
-        layout.addWidget(self.cancel_switch_button, 0, Qt.AlignLeft)
-        self.recover_button = QPushButton("重试释放已结束的浏览器任务")
-        self.recover_button.clicked.connect(self.recover)
-        layout.addWidget(self.recover_button, 0, Qt.AlignLeft)
-        self.result = QLabel()
+        self.result = QLabel(self)
         self.result.setWordWrap(True)
         self.result.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.result)
@@ -82,7 +82,14 @@ class BrowserAutomationSettings(QWidget):
         super().showEvent(event)
         self.timer.start()
         # Defer the initial status read until the show event has returned.
-        QTimer.singleShot(0, self._refresh_if_visible)
+        QTimer.singleShot(0, self, self._recover_on_open)
+
+    def _recover_on_open(self):
+        if not self.isVisible():
+            return
+        if self.coordinator.snapshot()["recoverable"]:
+            self.coordinator.request_recovery()
+        self._refresh()
 
     def hideEvent(self, event):
         self.timer.stop()
@@ -94,24 +101,76 @@ class BrowserAutomationSettings(QWidget):
         except Exception:
             self.status.setText("无法读取浏览器状态，请检查配置目录后重试。")
             return
-        backend = "内置浏览器" if state["backend"] == INTERNAL else "外部 BrowserSkill"
-        text = f"当前使用：{backend}"
+        self.recovering = state.get("recovering", False)
+        backend = "内置浏览器" if state["backend"] == INTERNAL else "Chrome / Edge"
+        text = f"当前使用{backend}"
         if state["pending"]:
-            target = "内置浏览器" if state["desired"] == INTERNAL else "外部 BrowserSkill"
-            text += f"\n等待当前 {state['active_runs']} 个浏览器任务结束后切换至{target}；暂不启动新的浏览器任务。"
-        if state["cleanup_errors"]:
-            text += "\n任务已结束，但浏览器会话尚未释放。请检查外部浏览器连接后重试释放。"
+            target = "内置浏览器" if state["desired"] == INTERNAL else "Chrome / Edge"
+            text = f"正在切换至{target}"
+            if state.get("running_runs", 0):
+                text += f"\n还有 {state['running_runs']} 个任务正在使用浏览器，结束后自动切换。"
+        if self.recovering:
+            text += "\n正在恢复连接…聊天和已有内容不受影响。"
         elif state["recoverable"]:
-            text += "\n有已结束或中断的浏览器任务，可重试释放后继续切换。"
+            text += "\n连接尚未恢复，已有内容已保留。请打开使用过的浏览器后重试。"
         if self.has_pending_input():
             text += "\n有未保存的更改。"
-        self.status.setText(text)
-        self.apply_button.setEnabled(self.has_pending_input() and not self.recovering)
-        self.reset_button.setEnabled(self.has_pending_input())
-        self.cancel_switch_button.setVisible(state["pending"])
-        self.cancel_switch_button.setEnabled(not self.recovering)
-        self.recover_button.setVisible(state["recoverable"])
+        if self.status.text() != text:
+            self.status.setText(text)
+        self._fit_status()
+        self.apply_button.setVisible(self.has_pending_input())
+        self.apply_button.setEnabled(not self.recovering)
+        self.recover_button.setVisible(state["recoverable"] and not self.recovering and not self.has_pending_input())
         self.recover_button.setEnabled(not self.recovering)
+        actions = []
+        if state.get("running_tasks"):
+            actions.append(("tasks", "查看任务"))
+        if state["pending"]:
+            actions.append(("cancel", "取消切换"))
+        if state["cleanup_errors"]:
+            actions.append(("details", "收起详情" if self._details_expanded else "详情"))
+        self.status_actions.setText(" &nbsp;·&nbsp; ".join(
+            f'<a href="{action}" style="color:{DesignTokens.chat_link}">{label}</a>' for action, label in actions))
+        self.status_actions.setVisible(bool(actions))
+        self.details.setText("\n".join(state["cleanup_errors"]))
+        self.details.setVisible(bool(state["cleanup_errors"]) and self._details_expanded)
+        self.result.setVisible(bool(self.result.text()))
+
+    def _status_action(self, action):
+        if action == "tasks":
+            self.show_tasks()
+        elif action == "cancel":
+            self.cancel_switch()
+        elif action == "details":
+            self._details_expanded = not self._details_expanded
+            self._refresh()
+
+    def _fit_status(self):
+        # Status grows asynchronously; reserve its actual wrapped height before
+        # the outer scroll area computes its minimum content size.
+        if self.status.width() > 0:
+            self.status.setMinimumHeight(self.status.heightForWidth(self.status.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_status()
+
+    def show_tasks(self):
+        tasks = self.coordinator.snapshot().get("running_tasks", [])
+        if len(tasks) == 1:
+            self.taskRequested.emit(tasks[0]["session"])
+            return
+        menu = QMenu(self)
+        for index, task in enumerate(tasks, 1):
+            title = f"正在进行的任务 {index}"
+            storage = getattr(self.window(), "chat_storage", None)
+            if storage:
+                meta = storage.get_conversation_meta(task["session"]) or {}
+                title = meta.get("title") or title
+            action = menu.addAction(title)
+            action.triggered.connect(lambda _checked=False, sid=task["session"]: self.taskRequested.emit(sid))
+        menu.exec(self.status_actions.mapToGlobal(self.status_actions.rect().bottomLeft()))
+        menu.deleteLater()
 
     def save(self):
         enabled = self.enabled.isChecked()
@@ -122,9 +181,12 @@ class BrowserAutomationSettings(QWidget):
             log.error("browser.settings_save_failed error_type=%s", type(exc).__name__)
             self.result.setText(str(exc) if getattr(exc, "code", "") == "browser_save_uncertain" else
                                 "保存失败，原设置继续生效，当前选择已保留。请检查磁盘空间和目录权限后重试。")
+            self.result.show()
             return False
         self.saved = enabled
-        self.result.setText("已保存，等待当前浏览器任务结束后切换。" if state["pending"] else "已保存，浏览器模式已切换。")
+        self.result.clear()
+        if state["pending"] and self.coordinator.snapshot()["recoverable"]:
+            self.coordinator.request_recovery()
         self._refresh()
         return True
 
@@ -135,29 +197,13 @@ class BrowserAutomationSettings(QWidget):
 
     def cancel_switch(self):
         self.enabled.setChecked(self.coordinator.snapshot()["backend"] == INTERNAL)
-        if self.save():
-            self.result.setText("已取消待执行的切换，继续使用当前浏览器。")
+        self.save()
 
     def recover(self):
         if self.recovering:
             return
-        self.recovering = True
-        self.result.setText("正在释放本应用已结束的浏览器任务…")
-        self._refresh()
-        coordinator, signals = self.coordinator, self.signals
-        def work():
-            try:
-                value = coordinator.recover()
-            except Exception as exc:
-                value = {"error": str(exc)}
-            signals.finished.emit(value)
-        threading.Thread(target=work, name="browser-backend-cleanup", daemon=True).start()
-
-    @Slot(object)
-    def _recovered(self, value):
-        self.recovering = False
-        failed = value.get("error") or value.get("cleanup_errors")
-        self.result.setText("释放未完成，原模式保持。请检查浏览器连接后重试。" if failed else "已释放结束的任务。")
+        self.result.clear()
+        self.coordinator.request_recovery()
         self._refresh()
 
     def confirm_leave(self):
@@ -181,5 +227,6 @@ class BrowserAutomationSettings(QWidget):
             f"QWidget#BrowserAutomationSettings > QLabel {{ color:{t.text_secondary}; font-size:{t.font_size_body}px; }}"
             f"QWidget#BrowserAutomationSettings > QLabel#BrowserAutomationHeading {{ color:{t.text_primary}; font-size:{t.font_size_section}px; font-weight:600; }}"
             f"QWidget#BrowserAutomationSettings > QCheckBox {{ color:{t.text_primary}; font-size:{t.font_size_body}px; spacing:8px; min-height:{t.control_height}px; }}")
-        for widget in (self.apply_button, self.reset_button, self.cancel_switch_button, self.recover_button):
-            widget.setStyleSheet(product_button_style("primary" if widget is self.apply_button else "secondary"))
+        for widget in (self.apply_button, self.recover_button):
+            widget.setStyleSheet(product_button_style("primary"))
+        self._refresh()

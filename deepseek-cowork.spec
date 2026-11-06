@@ -23,16 +23,16 @@ ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
 BROWSER_SKILL_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "browser_skill")
 BROWSER_SKILL_BUILD_ARTIFACTS = {
     "cli": {
-        "version": "0.3.3",
-        "archive": "bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.3.3/bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
-        "sha256": "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02",
+        "version": "0.4.2",
+        "archive": "bsk-v0.4.2-x86_64-pc-windows-msvc.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.4.2/bsk-v0.4.2-x86_64-pc-windows-msvc.zip",
+        "sha256": "CC1594E62B4D97CA6C96D33E47F8D1D2B8FA2E2B8B8F6987C5B284EC1C437362",
     },
     "extension": {
-        "version": "0.3.3",
-        "archive": "browser-skill-extension-v0.3.3-chrome.zip",
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.3.3/browser-skill-extension-v0.3.3-chrome.zip",
-        "sha256": "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA",
+        "version": "0.4.2",
+        "archive": "browser-skill-extension-v0.4.2-chrome.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.4.2/browser-skill-extension-v0.4.2-chrome.zip",
+        "sha256": "5360EF01EC8FCD3550215E12C417D8B98814BFF0E54D478E6B867D693C1D4D76",
     },
 }
 WECOM_CLI_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "wecom_cli")

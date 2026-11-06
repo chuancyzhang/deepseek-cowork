@@ -719,6 +719,9 @@ class LLMWorker(QThread):
         )
         from core.browser_backend import bind_run
         self.run_context["browser_backend"] = bind_run(config_manager, self.execution_authorization, worker=True)
+        browser_coordinator = self.execution_authorization._browser_state["coordinator"]
+        if browser_coordinator.snapshot()["recoverable"]:
+            browser_coordinator.request_recovery()
         self.bootstrap = BootstrapSession()
         self._authorization_events = {}
         
@@ -2956,6 +2959,8 @@ class LLMWorker(QThread):
                                       f"工具 {name} 的执行结果未知；禁止自动重复执行。请先只读核实。")}
             if context["abort_check"]():
                 return result
+            if name == "browser_skill_cli" and isinstance(result, dict) and (result.get("recovery") or {}).get("kind") == "browser":
+                return result
             failure = self._tool_result_failure_kind(result)
             if (failure == "failed" and policy.get("safe_retry") and attempt < max_attempts
                     and not (isinstance(result, dict) and result.get("authorization_status"))
@@ -2975,6 +2980,9 @@ class LLMWorker(QThread):
             return result
 
     def _run_managed_tool(self, name, args, context, execution_id, policy, predecessor):
+        if getattr(self, "_browser_failure", None):
+            return {"status": "denied", "not_executed": True,
+                    "error": "浏览器暂时不可用，本轮后续操作未执行。"}, predecessor
         manager = self._ensure_tool_tasks()
         if name == "wait_tool":
             if (not isinstance(args, dict) or set(args) - {"task_id", "terminate"}
@@ -3034,6 +3042,10 @@ class LLMWorker(QThread):
     def _apply_tool_result_effects(self, name, args, result, task=None):
         if is_pending_tool_result(result) or (task is not None and task.effects_applied):
             return result
+        if name == "browser_skill_cli" and isinstance(result, dict) and (result.get("recovery") or {}).get("kind") == "browser":
+            self._browser_failure = result.get("error") or {}
+            self.observability_signal.emit({"type": "browser_task_blocked", "run_id": self.request_id,
+                                           "error": self._browser_failure, "timestamp": time.time()})
         if name == "request_user_input" and self._is_grilling_mode():
             if self._is_grill_checkpoint_args(args):
                 result = self._apply_grill_checkpoint_result(args, result)
@@ -3080,6 +3092,18 @@ class LLMWorker(QThread):
                     "result_text": ToolTaskManager.result_text(result), "tool_effects_applied": True,
                 })
         return result
+
+    def _finish_browser_failure(self, generated_messages):
+        if self.is_stopped or not getattr(self, "_browser_failure", None):
+            return False
+        self._checkpoint_generated_ledger(generated_messages, boundary="browser_unavailable")
+        self._commit_tool_deliveries()
+        self.finished_signal.emit({
+            "error": "浏览器暂时无法继续操作，已保留本次进度。",
+            "error_type": "BrowserUnavailable", "error_detail": self._browser_failure,
+            "generated_messages": generated_messages, "turn_id": self.turn_id, "request_id": self.request_id,
+        })
+        return True
 
     def _emit_tool_task_result(self, task, result, *, waiting=False):
         payload = {
@@ -3306,7 +3330,7 @@ class LLMWorker(QThread):
             self._close_data_security()
             try:
                 from core.browser_backend import finish_run
-                finish_run(self.execution_authorization)
+                finish_run(self.execution_authorization, background=True)
             except Exception as exc:
                 self.observability_signal.emit({"type": "browser_cleanup_error", "error": str(exc),
                                                "run_id": self.execution_authorization.run_id})
@@ -3410,6 +3434,9 @@ class LLMWorker(QThread):
                 })
                 return
             self._append_pending_guidance(current_messages, generated_messages)
+
+            if self._finish_browser_failure(generated_messages):
+                return
 
             if getattr(self, "_grill_prompt_reset", False):
                 grill_checkpoint_prompt_attempts = 0
@@ -4911,6 +4938,8 @@ class LLMWorker(QThread):
                                 "turn_id": self.turn_id,
                                 "request_id": self.request_id,
                             })
+                            return
+                        if self._finish_browser_failure(generated_messages):
                             return
                         if self.bootstrap.active and not self.is_stopped and not self._ensure_tool_tasks().outstanding():
                             self._finish_bootstrap(

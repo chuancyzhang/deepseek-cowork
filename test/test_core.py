@@ -2553,6 +2553,31 @@ class TestAgentSystemPrompt(unittest.TestCase):
 
 
 class TestLLMWorkerToolLoopGuard(unittest.TestCase):
+    def test_browser_unavailable_finishes_once_with_content_and_tool_receipt_preserved(self):
+        from test_agent_bootstrap import TestAgentBootstrap, SkillStub, tool_call
+        from core.browser_skill_component import browser_unavailable
+        calls = []
+        def execute(_skills, name, args, context=None):
+            calls.append(name)
+            return browser_unavailable("extension protocol 1.3", not_executed=True)
+        definitions = [{"type": "function", "function": {"name": "browser_skill_cli", "description": "browser",
+                       "parameters": {"type": "object", "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}}]
+        with patch.object(SkillStub, "get_tool_definitions", return_value=definitions), \
+                patch.object(SkillStub, "call_tool", execute):
+            requests, result, events, _, _, _ = TestAgentBootstrap().run_worker(
+                [[{"type": "content", "content": "已完成资料整理，接下来读取网页。"},
+                  tool_call("browser_skill_cli", arguments='{"args":["session","start"]}')]],
+                profile={"provider_type": "openai", "model_name": "test", "base_url": "https://example.invalid/v1"},
+            )
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(calls, ["browser_skill_cli"])
+        self.assertEqual(result["error_type"], "BrowserUnavailable")
+        self.assertTrue(any("已完成资料整理" in str(m.get("content")) for m in result["generated_messages"]))
+        receipts = [m for m in result["generated_messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(receipts), 1)
+        self.assertTrue(receipts[0]["result_obj"]["not_executed"])
+        self.assertFalse(any(e.get("type") == "tool_repair_round_isolated" for e in events))
+
     def test_deepseek_empty_reasoning_tool_round_continues_after_success_or_error(self):
         from core.llm.providers import OpenAIProvider
         from core.chat_storage import ChatStorage

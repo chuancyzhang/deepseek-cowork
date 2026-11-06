@@ -214,12 +214,15 @@ class BrowserScreenshotTests(unittest.TestCase):
                 patch.object(SkillStub, "call_tool", execute), \
                 patch.object(ProviderStub, "supports_vision", True, create=True), \
                 patch.object(ProviderStub, "chat_stream", stream), \
+                patch("core.browser_skill_component.prepare_browser_recovery"), \
                 patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}), \
                 patch.object(self.module, "run_browser_skill_cli", side_effect=self.capture):
             requests, result, events, calls, _, _ = TestAgentBootstrap().run_worker(
                 [[tool_call("browser_skill_cli", arguments=json.dumps({"args": ["screenshot", "--session", "abcd"]}))],
                  [{"type": "content", "content": "Screenshot inspected."}]],
+                authorization=self.authorization,
                 profile={"provider_type": "openai", "model_name": "vision-model", "base_url": "https://example.invalid/v1"})
+            self.authorization._browser_state["coordinator"].request_recovery().join(5)
         self.assertNotIn("error", result)
         self.assertEqual(len(calls), 1)
         message = next(message for message in requests[-1]["messages"] if message.get("role") == "tool")

@@ -23,16 +23,16 @@ from .runtime_logs import append_log, log_path as runtime_log_path
 
 
 BROWSER_SKILL_COMPONENT_ID = "browser-skill"
-BROWSER_SKILL_VERSION = "0.3.3"
-BROWSER_SKILL_ARCHIVE = "bsk-v0.3.3-x86_64-pc-windows-msvc.zip"
-BROWSER_SKILL_SHA256 = "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02"
+BROWSER_SKILL_VERSION = "0.4.2"
+BROWSER_SKILL_ARCHIVE = "bsk-v0.4.2-x86_64-pc-windows-msvc.zip"
+BROWSER_SKILL_SHA256 = "CC1594E62B4D97CA6C96D33E47F8D1D2B8FA2E2B8B8F6987C5B284EC1C437362"
 BROWSER_SKILL_DOWNLOAD_URL = (
     "https://github.com/Tencent/BrowserSkill/releases/download/"
     f"cli-v{BROWSER_SKILL_VERSION}/{BROWSER_SKILL_ARCHIVE}"
 )
-BROWSER_SKILL_EXTENSION_VERSION = "0.3.3"
-BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.3.3-chrome.zip"
-BROWSER_SKILL_EXTENSION_SHA256 = "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA"
+BROWSER_SKILL_EXTENSION_VERSION = "0.4.2"
+BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.4.2-chrome.zip"
+BROWSER_SKILL_EXTENSION_SHA256 = "5360EF01EC8FCD3550215E12C417D8B98814BFF0E54D478E6B867D693C1D4D76"
 BROWSER_SKILL_EXTENSION_DOWNLOAD_URL = (
     "https://github.com/Tencent/BrowserSkill/releases/download/"
     f"ext-v{BROWSER_SKILL_EXTENSION_VERSION}/{BROWSER_SKILL_EXTENSION_ARCHIVE}"
@@ -45,6 +45,14 @@ BROWSER_SKILL_MARKER_SCHEMA = 2
 BROWSER_SKILL_BUNDLE_SCHEMA = 1
 BROWSER_SKILL_PROBE_TIMEOUT_SECONDS = 45
 BROWSER_SKILL_SERVICE_START_TIMEOUT_SECONDS = 15
+BROWSER_SKILL_DIAGNOSTIC_MAX_AGE_SECONDS = 60
+
+
+def browser_unavailable(detail="", *, code="browser_skill_not_ready", not_executed=False):
+    """A recoverable run failure, never a request for the model to repair setup."""
+    return {"status": "incomplete", "not_executed": not_executed,
+            "error": {"code": code, "message": "浏览器暂时无法继续操作，已保留本次进度。", "detail": detail},
+            "recovery": {"kind": "browser", "action": "retry"}}
 
 def browser_skill_root():
     return os.path.join(
@@ -108,7 +116,11 @@ def _read_diagnostics_cache():
     try:
         with open(_diagnostics_path(), "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict) or payload.get("cli_version") != BROWSER_SKILL_VERSION:
+            return {}
+        checked = datetime.fromisoformat(payload.get("checked_at") or "")
+        age = (datetime.now(timezone.utc) - checked).total_seconds()
+        return payload if 0 <= age <= BROWSER_SKILL_DIAGNOSTIC_MAX_AGE_SECONDS else {}
     except (OSError, ValueError, TypeError):
         return {}
 
@@ -116,6 +128,7 @@ def _read_diagnostics_cache():
 def _write_diagnostics_cache(status):
     payload = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "cli_version": BROWSER_SKILL_VERSION,
         "state": status.get("state"),
         "state_text": status.get("state_text"),
         "ready": bool(status.get("ready")),
@@ -489,7 +502,9 @@ def _probe_browser_skill_service(timeout=3):
     )
     payload = _parse_json_output(result["stdout"], result["stderr"])
     if result["returncode"] == 0 and isinstance(payload, dict) and isinstance(payload.get("pid"), int):
-        return {"state": "ready", "pid": payload["pid"], "port": payload.get("ws_port")}
+        return {"state": "ready", "pid": payload["pid"], "port": payload.get("ws_port"),
+                "daemon_version": payload.get("daemon_version"), "protocol_version": payload.get("protocol_version"),
+                "browsers": payload.get("browsers", [])}
     detail = str(payload.get("message") or "") if isinstance(payload, dict) else ""
     detail = detail or result["stderr"] or result["stdout"] or "服务状态不可识别。"
     # Only this explicit result establishes an absent IPC listener. Permission,
@@ -526,6 +541,8 @@ def _ensure_browser_skill_service(abort_check=None, *, timeout_seconds=BROWSER_S
     def success(state, reused):
         return {"ready": True, "mode": "existing" if reused else "host_managed",
                 "pid": state["pid"], "port": state.get("port"),
+                "daemon_version": state.get("daemon_version"), "protocol_version": state.get("protocol_version"),
+                "browsers": state.get("browsers", []),
                 "elapsed_ms": int((time.monotonic() - started) * 1000)}
 
     try:
@@ -786,6 +803,14 @@ def _doctor_check_detail(check):
     )
 
 
+def _supports_browser_control(protocol):
+    try:
+        major, minor = map(int, str(protocol).split("."))
+        return major == 1 and minor >= 8
+    except (TypeError, ValueError):
+        return False
+
+
 def _classify_doctor_result(payload, combined_text):
     checks = _structured_doctor_checks(payload)
     local_failures = []
@@ -990,7 +1015,7 @@ def browser_skill_execution_probe(timeout_seconds=BROWSER_SKILL_PROBE_TIMEOUT_SE
             )
 
 
-def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_check=None):
+def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_check=None, *, verify_execution=True, start_service=True):
     root = browser_skill_root()
     executable = browser_skill_executable()
     marker = _read_marker()
@@ -1128,7 +1153,16 @@ def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_ch
 
     if progress_callback:
         progress_callback("正在启动并验证本机浏览器服务…", 25)
-    service = _ensure_browser_skill_service(abort_check)
+    if abort_check and abort_check():
+        return {**result, "state": "cancelled", "health_error": "浏览器准备已停止。"}
+    if start_service:
+        service = _ensure_browser_skill_service(abort_check)
+    else:
+        try:
+            probe = _probe_browser_skill_service()
+            service = {**probe, "ready": probe.get("state") == "ready"}
+        except Exception as exc:
+            service = {"ready": False, "detail": str(exc)}
     if not service.get("ready"):
         result.update({
             "state": "service_unavailable", "state_text": "本机浏览器服务未启动",
@@ -1136,6 +1170,20 @@ def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_ch
                              "本机浏览器服务启动失败，扩展安装已保留。请查看诊断详情后重新检查。"),
             "diagnostics": {"service": service},
         })
+        _write_diagnostics_cache(result)
+        return result
+    if service.get("daemon_version") and service["daemon_version"] != BROWSER_SKILL_VERSION:
+        result.update(state="service_unavailable", state_text="浏览器更新尚未完成",
+                      health_error="浏览器后台服务仍在使用旧版本，请在当前浏览器任务结束后重新打开应用。",
+                      diagnostics={"service": service})
+        _write_diagnostics_cache(result)
+        return result
+    incompatible = [browser for browser in service.get("browsers", [])
+                    if not _supports_browser_control(browser.get("extension_protocol_version"))]
+    if incompatible:
+        result.update(state="extension_incompatible", state_text="浏览器需要更新", protocol_incompatible=True,
+                      health_error="已连接的浏览器扩展需要更新。请更新扩展并重新打开浏览器后继续任务。",
+                      diagnostics={"service": service})
         _write_diagnostics_cache(result)
         return result
     if progress_callback:
@@ -1204,7 +1252,9 @@ def browser_skill_status(run_diagnostics=False, progress_callback=None, abort_ch
     elif classification["kind"] == "connected":
         if progress_callback:
             progress_callback("扩展已连接，正在验证网页操作；期间会短暂打开 Agent 窗口…", 75)
-        probe = browser_skill_execution_probe()
+        # Task startup already creates its own owned session. A diagnostic must
+        # not create an extra window, nor turn a stop into another browser task.
+        probe = browser_skill_execution_probe() if verify_execution else {"ok": True, "skipped": True}
         result["diagnostics"]["probe"] = probe
         if probe.get("ok"):
             result.update({
@@ -1333,6 +1383,12 @@ def _stop_managed_daemon():
 
 
 def install_browser_skill(progress_callback=None, *, require_idle=False):
+    from .file_write_locks import file_write_lock
+    with file_write_lock(browser_skill_root() + ".maintenance"):
+        return _install_browser_skill(progress_callback, require_idle=require_idle)
+
+
+def _install_browser_skill(progress_callback=None, *, require_idle=False):
     components_root = os.path.dirname(browser_skill_root())
     os.makedirs(components_root, exist_ok=True)
     staged_root = tempfile.mkdtemp(prefix=".browser-skill-", dir=components_root)
@@ -1536,7 +1592,7 @@ def _session_id_from_args(args):
     return ""
 
 
-def _stop_session_after_interruption(session_id):
+def _stop_session_after_interruption(session_id, *, timeout_seconds=10):
     cleanup = {
         "attempted": bool(session_id),
         "session_id": session_id or "",
@@ -1548,7 +1604,7 @@ def _stop_session_after_interruption(session_id):
         return cleanup
     cleanup = _run_bsk(
         ["--json", "--quiet", "session", "stop", session_id],
-        timeout=10,
+        timeout=timeout_seconds,
     )
     payload = _parse_json_output(cleanup["stdout"], cleanup["stderr"])
     detail = cleanup["stderr"] or cleanup["stdout"]
@@ -1593,6 +1649,12 @@ def _require_idle_browser_sessions():
 
 
 def _prepare_bundled_browser_upgrade(status, abort_check=None):
+    from .file_write_locks import file_write_lock
+    with file_write_lock(browser_skill_root() + ".maintenance"):
+        return _prepare_bundled_browser_upgrade_locked(status, abort_check)
+
+
+def _prepare_bundled_browser_upgrade_locked(status, abort_check=None):
     """Update an existing managed installation on first use of a newer app."""
     def extension_outdated(value):
         return bool(value.get("extension_path") and value.get("extension_prepared_version")
@@ -1628,7 +1690,7 @@ def _prepare_bundled_browser_upgrade(status, abort_check=None):
         if extension_outdated(status):
             prepare_browser_skill_extension(check_cancelled)
         check_cancelled()
-        result = browser_skill_status(run_diagnostics=True)
+        result = browser_skill_status(run_diagnostics=True, verify_execution=False)
         log_browser_skill_event("bundled_upgrade_finish", version=BROWSER_SKILL_VERSION, ready=result.get("ready"), state=result.get("state"))
         return result
     except Exception as exc:
@@ -1638,37 +1700,39 @@ def _prepare_bundled_browser_upgrade(status, abort_check=None):
         lock.release()
 
 
+def prepare_browser_recovery():
+    """Reconnect for owned cleanup only; never open a session or replay an action."""
+    status = _prepare_bundled_browser_upgrade(browser_skill_status(run_diagnostics=False))
+    if not status.get("installed"):
+        return
+    service = _ensure_browser_skill_service()
+    log_browser_skill_event("recovery_connection", ready=service.get("ready"), code=service.get("code"))
+
+
 def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
     command_args = [str(item) for item in (args or [])]
-    status = _prepare_bundled_browser_upgrade(browser_skill_status(run_diagnostics=False), abort_check)
     starting_session = (command_args[:2] == ["session", "start"]
                         and not any(arg in {"--help", "-h"} for arg in command_args))
-    if (starting_session and not status.get("ready") and status.get("installed")
+    if abort_check and abort_check():
+        return {"status": "incomplete", "not_executed": True,
+                "error": {"code": "aborted", "message": "浏览器操作已停止。"}}
+    status = browser_skill_status(run_diagnostics=False)
+    if starting_session:
+        status = _prepare_bundled_browser_upgrade(status, abort_check)
+    if ((starting_session or not status.get("ready")) and status.get("installed")
             and not status.get("needs_update") and not status.get("needs_repair")):
-        # Recover stale offline/service diagnostics at the task boundary only.
-        # Never silently recreate a daemon for a continuing browser session.
-        status = browser_skill_status(run_diagnostics=True, abort_check=abort_check)
+        # Always check current peers at the task boundary, even with a ready
+        # cache. Mid-session checks must never recreate a lost daemon.
+        status = browser_skill_status(run_diagnostics=True, abort_check=abort_check,
+                                      verify_execution=False, start_service=starting_session)
     if not status.get("ready"):
-        return {
-            "status": "incomplete",
-            "error": {
-                "code": "browser_skill_not_ready",
-                "message": (
-                    "浏览器自动化尚未就绪。请前往"
-                    "“AI 能力商城 → 浏览器自动化”完成设置和连接检查。"
-                ),
-                "detail": status.get("health_error") or status.get("state_text"),
-            },
-            "component": status,
-        }
+        return {**browser_unavailable(status.get("health_error") or status.get("state_text"), not_executed=True),
+                "component": status}
     if starting_session:
         service = _ensure_browser_skill_service(abort_check)
         if not service.get("ready"):
-            return {"status": "incomplete", "error": {
-                "code": service.get("code"),
-                "message": "本机浏览器服务尚未就绪，请在浏览器自动化设置中启动服务并检查连接。",
-                "detail": service.get("detail"),
-            }}
+            return browser_unavailable(service.get("detail"),
+                                       code=service.get("code") or "browser_service_unavailable", not_executed=True)
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 1800))
     if starting_session and "--request-id" in command_args:
         request_index = command_args.index("--request-id") + 1
@@ -1735,30 +1799,19 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             else "BrowserSkill CLI 在 Cowork 外层时限内未结束。"
         )
         session_id = _session_id_from_args(command_args)
-        try:
-            session_cleanup = _stop_session_after_interruption(session_id)
-        except Exception as cleanup_exc:
-            session_cleanup = {
-                "attempted": bool(session_id),
-                "session_id": session_id,
-                "stopped": False,
-                "exit_code": None,
-                "error": str(cleanup_exc),
-            }
-            log_browser_skill_event(
-                "error",
-                operation="session_cleanup",
-                session_id=session_id,
-                error=str(cleanup_exc),
-            )
-        if session_cleanup.get("stopped"):
-            message += " Cowork 已结束该 BrowserSkill 会话。"
+        # The skill has durably registered the session/request with its run.
+        # Return the stopped CLI promptly; the coordinator confirms browser
+        # cleanup in the background without holding the conversation open.
+        session_cleanup = {"attempted": False, "session_id": session_id,
+                           "stopped": False, "pending": bool(session_id or starting_session),
+                           "error": ""}
         log_browser_skill_event(
             "session_cleanup",
             source=code,
             attempted=session_cleanup.get("attempted"),
             session_id=session_cleanup.get("session_id"),
             stopped=session_cleanup.get("stopped"),
+            pending=session_cleanup["pending"],
             exit_code=session_cleanup.get("exit_code"),
             already_stopped=session_cleanup.get("already_stopped"),
             error=session_cleanup.get("error") or "",
@@ -1792,6 +1845,7 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             "error": {"code": code, "message": message},
             "session_cleanup": session_cleanup,
             "elapsed_ms": elapsed_ms,
+            **({"recovery": {"kind": "browser", "action": "retry"}} if timed_out else {}),
         }
     if returncode != 0:
         log_browser_skill_event(
@@ -1813,7 +1867,7 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             stdout_chars=len(stdout or ""),
             stderr_chars=len(stderr or ""),
         )
-        return {
+        failed = {
             "status": "incomplete",
             "result": payload,
             "artifacts": _collect_artifacts(payload),
@@ -1826,6 +1880,12 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             },
             "elapsed_ms": elapsed_ms,
         }
+        effect = (payload.get("data") or {}).get("effect_state") if isinstance(payload, dict) and isinstance(payload.get("data", {}), dict) else None
+        if effect == "unknown":
+            failed["status"] = "unknown"
+        if returncode in {2, 4, 5} or effect == "unknown":
+            failed["recovery"] = {"kind": "browser", "action": "retry"}
+        return failed
     result = {
         "status": "completed",
         "result": payload if payload not in ({}, None) else (stdout or "").strip(),

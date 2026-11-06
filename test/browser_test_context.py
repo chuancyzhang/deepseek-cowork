@@ -7,11 +7,11 @@ from core.execution_authorization import ExecutionAuthorization, bind_authorizat
 from core.browser_backend import bind_run, finish_run, browser_operation, EXTERNAL
 
 
-def browser_config(directory):
+def browser_config(directory, *, external=True):
     config = ConfigManager.__new__(ConfigManager)
     config.data_dir = str(directory)
     config.config_path = str(Path(directory) / "config.json")
-    config.config = {}
+    config.config = {"experimental_browser_automation": {"enabled": False}} if external else {}
     Path(config.config_path).write_text(json.dumps(config.config), encoding="utf-8")
     return config
 

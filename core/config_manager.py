@@ -302,7 +302,7 @@ class ConfigManager:
             "deepseek_v4_context_window_tokens": 1000000,
             "context_budget_ratio": 0.8,
             "experimental_long_context": {"enabled": False, "target_tokens": 300000},
-            "experimental_browser_automation": {"enabled": False},
+            "experimental_browser_automation": {"enabled": True},
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],

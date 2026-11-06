@@ -11,10 +11,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("COWORK_EXTERNAL_BACKGROUND_SERVICES", "0")
-from PySide6.QtCore import QMimeData, Qt, QCoreApplication, QEvent
+from PySide6.QtCore import QMimeData, Qt, QCoreApplication, QEvent, QUrl, QPointF
 from PySide6.QtTest import QTest
-from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QApplication, QMenu, QWidget, QVBoxLayout, QLabel
+from PySide6.QtGui import QTextCursor, QImage, QDropEvent
+from PySide6.QtWidgets import QApplication, QMenu, QWidget, QVBoxLayout, QLabel, QMessageBox
 from core.conversation_render import build_conversation_render_spans
 from core.llm.providers import _build_openai_user_content
 from core.workbench_terminal import terminal_launch_args
@@ -86,6 +86,159 @@ class ChatExperienceTests(unittest.TestCase):
         self.window.input_field.insertFromMimeData(mime)
         self.assertEqual(self.window.input_field.toPlainText(), "一段短文字")
         self.assertFalse(self.window._current_prompt_files())
+
+    def _editable_history(self):
+        self.window._model_onboarding_shown = True
+        state = self.window.get_current_session()
+        original = Path(self.temp.name, "原附件.txt")
+        original.write_text("原资料", encoding="utf-8")
+        state.messages = [
+            {"id": "edit-user", "role": "user", "content": "原提问", "meta": {"user_added_files": [str(original)]}},
+            {"id": "edit-answer", "role": "assistant", "content": "已有回答"},
+        ]
+        self.assertTrue(self.window.save_chat_history(state.session_id, flush=True))
+        bubble = self.window.add_chat_bubble("User", "原提问", source_message_id="edit-user",
+            attachments=[{"path": str(original)}], session_id=state.session_id, animate=False)
+        self.window.add_chat_bubble("Agent", "已有回答", source_message_id="edit-answer",
+            session_id=state.session_id, animate=False)
+        bubble.begin_inline_edit()
+        return state, bubble, original
+
+    def test_history_edit_files_paste_drop_and_picker_stay_out_of_composer(self):
+        state, bubble, original = self._editable_history()
+        self.window.input_field.setPlainText("底部草稿")
+        extra = Path(self.temp.name, "新附件.txt")
+        extra.write_text("新资料", encoding="utf-8")
+        self.window._add_prompt_files([str(extra)])
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(extra)), QUrl.fromLocalFile(str(original)),
+                      QUrl.fromLocalFile(self.temp.name)])
+        bubble.user_content_edit.insertFromMimeData(mime)
+        event = QDropEvent(QPointF(2, 2), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        bubble.user_content_edit.dropEvent(event)
+        with patch("main.QFileDialog.getOpenFileNames", return_value=([str(extra)], "")):
+            bubble.select_edit_files()
+        self.assertEqual(bubble.edit_attachment_paths, [str(original), str(extra)])
+        self.assertTrue(event.isAccepted())
+        bubble.remove_edit_file(str(original))
+        self.assertEqual(bubble.edit_attachment_paths, [str(extra)])
+        self.assertEqual(state.messages[0]["meta"]["user_added_files"], [str(original)])
+        bubble.cancel_inline_edit()
+        self.assertTrue(original.exists())
+        self.assertTrue(extra.exists())
+        self.assertEqual(self.window.input_field.toPlainText(), "底部草稿")
+        self.assertEqual(state.prompt_files, [str(extra)])
+        self.assertEqual(bubble.user_attachments, [{"path": str(original)}])
+
+    def test_history_edit_long_text_image_and_switch_use_source_session(self):
+        state, bubble, original = self._editable_history()
+        text = "完整原文🚀\r\n" * 1000
+        mime = QMimeData()
+        mime.setText(text)
+        bubble.user_content_edit.insertFromMimeData(mime)
+        text_path = Path(bubble.edit_attachment_paths[-1])
+        self.assertEqual(text_path.read_bytes().decode("utf-8"), text)
+        self.assertEqual(bubble.user_content_edit.toPlainText(), "原提问")
+        self.window.create_new_session()
+        other = self.window.get_current_session()
+        self.window.input_field.setPlainText("另一个会话的草稿")
+        image = QImage(3, 2, QImage.Format_ARGB32)
+        image.fill(Qt.red)
+        mime.setImageData(image)
+        bubble.user_content_edit.insertFromMimeData(mime)
+        image_path = Path(bubble.edit_attachment_paths[-1])
+        self.assertEqual(image_path.parent, Path(self.window._session_attachment_dir(state.session_id)))
+        self.assertEqual(QImage(str(image_path)).size(), image.size())
+        self.assertEqual(other.prompt_files, [])
+        self.assertEqual(state.prompt_files, [])
+        self.window.activate_session(state.session_id)
+        self.assertFalse(bubble.user_content_edit.isReadOnly())
+        self.assertIn(str(text_path), bubble.edit_attachment_paths)
+        bubble.cancel_inline_edit()
+        self.assertFalse(text_path.exists())
+        self.assertFalse(image_path.exists())
+        self.assertTrue(original.exists())
+        self.assertEqual(other.composer_draft, "另一个会话的草稿")
+
+    def test_history_edit_failed_text_capture_keeps_input_and_readonly_ignores_paste(self):
+        state, bubble, original = self._editable_history()
+        text = "不能丢失\n" * 1000
+        mime = QMimeData()
+        mime.setText(text)
+        with patch("main.os.replace", side_effect=OSError("disk error")):
+            bubble.user_content_edit.insertFromMimeData(mime)
+        self.assertIn(text, bubble.user_content_edit.toPlainText())
+        self.assertEqual(bubble.edit_attachment_paths, [str(original)])
+        self.assertEqual(state.prompt_files, [])
+        bubble.cancel_inline_edit()
+        bubble.user_content_edit.insertFromMimeData(mime)
+        self.assertEqual(bubble.user_content_edit.toPlainText(), "原提问")
+
+    def test_history_edit_cancel_missing_file_and_save_failure_preserve_history_and_draft(self):
+        state, bubble, original = self._editable_history()
+        original_messages = copy.deepcopy(state.messages)
+        mime = QMimeData()
+        mime.setText("新资料\n" * 1000)
+        bubble.user_content_edit.insertFromMimeData(mime)
+        generated = Path(bubble.edit_attachment_paths[-1])
+        bubble.user_content_edit.setPlainText("修改后")
+        with patch("main.ProductMessageDialog.exec_result", return_value=QMessageBox.No), \
+                patch.object(self.window, "_submit_session_request") as submit:
+            bubble.submit_inline_edit()
+            submit.assert_not_called()
+        with patch("main.ProductMessageDialog.exec_result", return_value=QMessageBox.Yes), \
+                patch.object(self.window, "_persist_history_rewrite", side_effect=OSError("disk error")), \
+                patch.object(self.window, "_model_profile_for_state", return_value={"id": "test-model"}), \
+                patch.object(self.window, "_build_run_context", return_value={}), \
+                patch.object(self.window, "queue_daemon_connection"), \
+                patch.object(self.window, "process_agent_logic") as start:
+            bubble.submit_inline_edit()
+            start.assert_not_called()
+        self.assertEqual(state.messages, original_messages)
+        self.assertEqual(self.window.chat_storage.get_messages(state.session_id)[0]["id"], "edit-user")
+        self.assertEqual(bubble.user_content_edit.toPlainText(), "修改后")
+        self.assertIn(str(generated), bubble.edit_attachment_paths)
+        self.assertTrue(generated.exists())
+        original.unlink()
+        with patch.object(self.window, "_submit_session_request") as submit:
+            bubble.submit_inline_edit()
+            submit.assert_not_called()
+        self.assertFalse(bubble.user_content_edit.isReadOnly())
+        self.assertEqual(state.messages, original_messages)
+        bubble.cancel_inline_edit()
+        self.assertFalse(generated.exists())
+
+    def test_history_edit_persists_new_attachments_and_leaves_normal_draft(self):
+        state, bubble, original = self._editable_history()
+        self.window.input_field.setPlainText("底部未发送")
+        self.window._add_prompt_files([str(original)])
+        mime = QMimeData()
+        mime.setText("不再使用的资料\n" * 1000)
+        bubble.user_content_edit.insertFromMimeData(mime)
+        unused = bubble.edit_attachment_paths[-1]
+        bubble.remove_edit_file(unused)
+        mime.setText("新资料\n" * 1000)
+        bubble.user_content_edit.insertFromMimeData(mime)
+        generated = bubble.edit_attachment_paths[-1]
+        bubble.remove_edit_file(str(original))
+        bubble.user_content_edit.clear()  # Attachment-only edits are valid.
+        with patch("main.ProductMessageDialog.exec_result", return_value=QMessageBox.Yes), \
+                patch.object(self.window, "_model_profile_for_state", return_value={"id": "test-model"}), \
+                patch.object(self.window, "_build_run_context", return_value={}), \
+                patch.object(self.window, "queue_daemon_connection"), \
+                patch.object(self.window, "process_agent_logic") as start:
+            bubble.submit_inline_edit()
+            start.assert_called_once()
+        saved = self.window.chat_storage.get_messages(state.session_id)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["meta"]["user_added_files"], [generated])
+        self.assertEqual([part["path"] for part in saved[0]["content_parts"] if part["type"] == "input_file"], [generated])
+        self.assertIn(generated, start.call_args.args[0])
+        self.assertTrue(Path(generated).exists())
+        self.assertFalse(Path(unused).exists())
+        self.assertTrue(original.exists())
+        self.assertEqual(self.window.input_field.toPlainText(), "底部未发送")
+        self.assertEqual(state.prompt_files, [str(original)])
 
     def test_session_activation_runs_once_and_keeps_draft(self):
         previous = self.window.current_session_id

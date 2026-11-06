@@ -19125,6 +19125,60 @@ class AutoResizingInputEdit(QTextEdit):
         populate_text_context_menu(menu, self, editable=True)
         menu.exec(event.globalPos())
 
+class InlineMessageTextEdit(AutoResizingTextEdit):
+    """Message-local attachment input; never routes pastes into the composer."""
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self.attachment_owner = owner
+
+    def canInsertFromMimeData(self, source):
+        return not self.isReadOnly() and bool(
+            source and (source.hasUrls() or source.hasImage() or source.hasText())
+        )
+
+    def contextMenuEvent(self, event):
+        menu = create_styled_menu(self)
+        populate_text_context_menu(menu, self, editable=not self.isReadOnly())
+        menu.exec(event.globalPos())
+
+    def insertFromMimeData(self, source):
+        if self.isReadOnly() or source is None:
+            return
+        owner = self.attachment_owner
+        paths = [url.toLocalFile() for url in source.urls() if url.isLocalFile()]
+        if paths:
+            owner.add_edit_files(paths)
+        elif source.hasImage():
+            owner.capture_edit_attachment(source.imageData(), image=True)
+        elif source.hasText():
+            text = source.text()
+            if (len(text) >= AutoResizingInputEdit.LONG_PASTE_CHARS
+                    or text.count("\n") >= AutoResizingInputEdit.LONG_PASTE_LINES):
+                if owner.capture_edit_attachment(text):
+                    return
+            self.insertPlainText(text)
+        else:
+            super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event):
+        if self.canInsertFromMimeData(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if self.canInsertFromMimeData(event.mimeData()):
+            self.setTextCursor(self.cursorForPosition(event.position().toPoint()))
+            self.insertFromMimeData(event.mimeData())
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 class DaemonRequestWorker(QThread):
     finished_signal = Signal(object, str)
 
@@ -23595,6 +23649,8 @@ class ChatBubble(QFrame):
         self.message_actions_enabled = True
         self.edit_controls = None
         self.edit_original_text = ""
+        self.edit_attachment_paths = []
+        self._edit_created_files = set()
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -23646,11 +23702,11 @@ class ChatBubble(QFrame):
                 self.user_context_layout = ComposerFlowLayout(self.user_context_container)
                 self.user_context_layout.setSpacing(6)
                 for attachment in attachments:
-                    self.user_context_layout.addWidget(FileChip(attachment.get("path") or "", removable=False, compact=True))
+                    self.user_context_layout.addWidget(FileChip(attachment.get("path") or "", parent=self.user_context_container, compact=True))
                 self.user_context_container.setVisible(bool(attachments))
                 bubble_layout.addWidget(self.user_context_container)
 
-                content_edit = AutoResizingTextEdit(bubble_frame)
+                content_edit = InlineMessageTextEdit(self, bubble_frame)
                 self.user_content_edit = content_edit
                 content_edit.installEventFilter(self)
                 content_edit.setPlainText(text)
@@ -23669,6 +23725,11 @@ class ChatBubble(QFrame):
                 edit_controls_layout = QHBoxLayout(edit_controls)
                 edit_controls_layout.setContentsMargins(0, 8, 0, 0)
                 edit_controls_layout.setSpacing(8)
+                add_attachment_btn = QPushButton("添加附件", edit_controls)
+                add_attachment_btn.setCursor(Qt.PointingHandCursor)
+                add_attachment_btn.setToolTip("选择文件，也可拖入或粘贴文件、图片和长文本")
+                add_attachment_btn.clicked.connect(self.select_edit_files)
+                edit_controls_layout.addWidget(add_attachment_btn)
                 edit_controls_layout.addStretch()
                 cancel_btn = QPushButton("取消", edit_controls)
                 cancel_btn.setCursor(Qt.PointingHandCursor)
@@ -23933,7 +23994,7 @@ class ChatBubble(QFrame):
                 DesignTokens.selection_text,
             )
             if self.edit_controls is not None:
-                for button, kind in zip(self.edit_controls.findChildren(QPushButton), ("secondary", "primary")):
+                for button, kind in zip(self.edit_controls.findChildren(QPushButton), ("secondary", "secondary", "primary")):
                     button.setStyleSheet(apple_button_style(kind))
         if getattr(self, "think_toggle_btn", None) is not None:
             self.think_toggle_btn.setIcon(
@@ -24190,9 +24251,13 @@ class ChatBubble(QFrame):
     def begin_inline_edit(self):
         if not self.source_message_id or self.role != "User" or self.user_content_edit is None:
             return
+        if not self.user_content_edit.isReadOnly():
+            return
         self.edit_original_text = self.user_content_edit.toPlainText()
+        self.edit_attachment_paths = [item["path"] for item in self.user_attachments if item.get("path")]
         self.user_content_edit.show()
         self.user_content_edit.setReadOnly(False)
+        self._refresh_edit_attachment_chips()
         self.user_content_edit.setFocus()
         self.user_content_edit.selectAll()
         if self.edit_controls is not None:
@@ -24201,6 +24266,96 @@ class ChatBubble(QFrame):
         for button in self.message_action_buttons:
             button.setVisible(False)
         self.refresh_theme()
+
+    def _refresh_edit_attachment_chips(self):
+        # References keep their widgets and callbacks while file chips change.
+        references = []
+        while self.user_context_layout.count():
+            item = self.user_context_layout.takeAt(0)
+            widget = item.widget()
+            if isinstance(widget, FileChip):
+                widget.hide()
+                widget.deleteLater()
+            else:
+                references.append(item)
+        editing = not self.user_content_edit.isReadOnly()
+        paths = self.edit_attachment_paths if editing else [item["path"] for item in self.user_attachments if item.get("path")]
+        for path in paths:
+            chip = FileChip(path, removable=editing, compact=True, parent=self.user_context_container)
+            chip.removeRequested.connect(self.remove_edit_file)
+            self.user_context_layout.addWidget(chip)
+        for item in references:
+            self.user_context_layout.addItem(item)
+        self.user_context_container.setVisible(bool(self.user_context_layout.count()))
+        self.apply_dynamic_widths(*self._user_message_widths)
+
+    def _edit_attachment_notice(self, text, tone="error"):
+        window = self.window()
+        if hasattr(window, "_show_conversation_notice"):
+            window._show_conversation_notice(window.get_session(self.session_id), text, tone)
+
+    def select_edit_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择文件", self.workspace_dir, "所有文件 (*.*)")
+        self.add_edit_files(paths)
+
+    def add_edit_files(self, paths):
+        if self.user_content_edit.isReadOnly():
+            return []
+        accepted, rejected = [], 0
+        existing = {os.path.normcase(os.path.normpath(path)) for path in self.edit_attachment_paths}
+        for path in paths:
+            if not os.path.isfile(path):
+                rejected += 1
+                continue
+            path = os.path.normpath(path)
+            accepted.append(path)
+            if os.path.normcase(path) not in existing:
+                self.edit_attachment_paths.append(path)
+                existing.add(os.path.normcase(path))
+        self._refresh_edit_attachment_chips()
+        self.user_content_edit.setFocus()
+        if rejected:
+            self._edit_attachment_notice(f"{rejected} 项未添加：附件必须是存在的文件，不能是文件夹。", "warning")
+        log_attachment_event("history_edit_files_added", session_id=self.session_id,
+                             message_id=self.source_message_id, accepted_count=len(accepted), rejected_count=rejected)
+        return accepted
+
+    def capture_edit_attachment(self, value, *, image=False):
+        if self.user_content_edit.isReadOnly():
+            return ""
+        window = self.window()
+        method = getattr(window, "_add_clipboard_image" if image else "_add_pasted_text", None)
+        if method is None or not self.session_id:
+            self._edit_attachment_notice("当前会话不可用，无法添加附件。")
+            return ""
+        path = method(value, session_id=self.session_id, add_files=self.add_edit_files)
+        if path:
+            self._edit_created_files.add(path)
+        return path
+
+    def remove_edit_file(self, path):
+        self.edit_attachment_paths = [item for item in self.edit_attachment_paths if item != path]
+        self._refresh_edit_attachment_chips()
+
+    def discard_edit_created_files(self, keep=()):
+        window = self.window()
+        state = window.get_session(self.session_id) if hasattr(window, "get_session") else None
+        if state is None:
+            return
+        retained = {os.path.normcase(os.path.normpath(path)) for path in (*keep, *window._current_prompt_files(self.session_id))}
+        for path in list(self._edit_created_files):
+            if os.path.normcase(path) in retained or window._attachment_is_referenced(path, state=state):
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log_attachment_event("history_edit_attachment_cleanup_failed", session_id=self.session_id,
+                                     message_id=self.source_message_id, error_type=type(exc).__name__)
+                self._edit_attachment_notice("未使用的临时附件清理失败；原消息和附件仍保留。")
+                continue
+            self._edit_created_files.discard(path)
 
     def eventFilter(self, obj, event):
         if obj is self.user_content_edit and self.edit_controls is not None and self.edit_controls.isVisible():
@@ -24219,14 +24374,17 @@ class ChatBubble(QFrame):
     def cancel_inline_edit(self):
         if self.user_content_edit is None:
             return
+        self.discard_edit_created_files()
         self.user_content_edit.setPlainText(self.edit_original_text)
         self._finish_inline_edit()
+        self.edit_attachment_paths = []
+        self._refresh_edit_attachment_chips()
 
     def submit_inline_edit(self):
         if not self.source_message_id or self.user_content_edit is None:
             return
         text = self.user_content_edit.toPlainText().strip()
-        if not text and not self.user_attachments:
+        if self.user_content_edit.isReadOnly() or (not text and not self.edit_attachment_paths):
             return
         self.editSubmitRequested.emit(self.source_message_id, text)
 
@@ -24308,7 +24466,7 @@ class ChatBubble(QFrame):
                 content_width = max_content_width
                 controls_layout = self.edit_controls.layout()
                 buttons = self.edit_controls.findChildren(QPushButton)
-                actions_width = sum(button.sizeHint().width() for button in buttons) + controls_layout.spacing()
+                actions_width = sum(button.sizeHint().width() for button in buttons) + controls_layout.spacing() * max(0, len(buttons) - 1)
                 controls_layout.setDirection(QBoxLayout.TopToBottom if actions_width > content_width else QBoxLayout.LeftToRight)
             if self.user_context_layout is not None and self.user_context_layout.count():
                 content_width = max(content_width, min(max_content_width, self.user_context_layout.sizeHint().width()))
@@ -33628,8 +33786,9 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
                     return True
         return False
 
-    def _add_clipboard_image(self, image):
-        state = self.get_current_session()
+    def _add_clipboard_image(self, image, *, session_id=None, add_files=None):
+        state = self.get_session(session_id) if session_id is not None else self.get_current_session()
+        attach = add_files if add_files is not None else self._add_prompt_files
         if not state:
             self.add_system_toast("当前没有可接收图片的会话。", "error")
             return ""
@@ -33640,7 +33799,6 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             self.add_system_toast("剪贴板中的图片无法读取。", "error")
             return ""
         target_dir = self._session_attachment_dir(state.session_id)
-        os.makedirs(target_dir, exist_ok=True)
         filename = f"clipboard-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.png"
         target_path = os.path.join(target_dir, filename)
         temp_path = target_path + ".tmp"
@@ -33651,21 +33809,25 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             height=image.height(),
         )
         try:
+            os.makedirs(target_dir, exist_ok=True)
             if not image.save(temp_path, "PNG"):
                 raise OSError("Qt image encoder rejected clipboard image")
             os.replace(temp_path, target_path)
+            accepted = attach([target_path])
+            if add_files is not None and target_path not in accepted:
+                raise OSError("附件未能加入消息")
         except Exception as exc:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             log_attachment_event("clipboard_save_failed", session_id=state.session_id, error=str(exc))
             self.add_system_toast(f"图片附件保存失败：{exc}", "error", auto_close_ms=6000)
             return ""
-        self._add_prompt_files([target_path])
         log_attachment_event("clipboard_capture_completed", session_id=state.session_id, path=target_path)
         return target_path
 
-    def _add_pasted_text(self, text):
-        state = self.get_current_session()
+    def _add_pasted_text(self, text, *, session_id=None, add_files=None):
+        state = self.get_session(session_id) if session_id is not None else self.get_current_session()
+        attach = add_files if add_files is not None else self._add_prompt_files
         if state is None:
             self.add_system_toast("当前会话不可用，粘贴文字已保留在输入框。", "error")
             return ""
@@ -33679,7 +33841,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             with open(temp_path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(text)
             os.replace(temp_path, target_path)
-            if target_path not in self._add_prompt_files([target_path]):
+            if target_path not in attach([target_path]):
                 raise OSError("附件未能加入当前会话")
         except Exception as exc:
             for path in (temp_path, target_path):
@@ -35021,7 +35183,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         )
         return result
 
-    def edit_user_message_inline(self, session_id, message_id, edited_text, *, regenerate=False):
+    def edit_user_message_inline(self, session_id, message_id, edited_text, *, regenerate=False, edited_files=None):
         session_id = str(session_id or "").strip()
         message_id = str(message_id or "").strip()
         if not session_id or not message_id:
@@ -35037,16 +35199,18 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             return False
 
         edited_text = str(edited_text or "").strip()
-        prompt_files = self._message_attachment_paths(source_message)
+        prompt_files = (self._message_attachment_paths(source_message) if edited_files is None
+                        else [item["path"] for item in self._prompt_file_items(edited_files)])
         if not edited_text and not prompt_files:
             self._show_conversation_notice(state, "消息内容不能为空。", "warning")
             return False
 
-        if regenerate:
+        if regenerate or edited_files is not None:
             missing = [path for path in prompt_files if not os.path.isfile(path)]
             if missing:
                 self._show_conversation_notice(state, "重新生成所需的附件已不存在，请恢复文件后再试。", "error")
                 return False
+        if regenerate:
             if not self._model_profile_for_state(state):
                 self._show_conversation_notice(state, "当前模型不可用，请重新选择模型。", "error")
                 return False
@@ -55032,7 +55196,7 @@ a {{ overflow-wrap: anywhere; }}
         if hasattr(bubble, "regenerate_btn"):
             bubble.regenerate_btn.setEnabled(not self._session_is_busy(state))
         bubble.editSubmitRequested.connect(
-            lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
+            lambda msg_id, text, sid=state.session_id: self._submit_message_attachment_edit(bubble, sid, msg_id, text)
         )
         bubble.deleteRequested.connect(
             lambda msg_id, sid=state.session_id: self.delete_user_message_in_place(sid, msg_id)
@@ -55056,6 +55220,13 @@ a {{ overflow-wrap: anywhere; }}
         bubble.geometryChanged.connect(
             lambda sid=state.session_id: self.request_session_scroll_to_bottom(sid, force=False)
         )
+
+    def _submit_message_attachment_edit(self, bubble, session_id, message_id, text):
+        paths = list(bubble.edit_attachment_paths)
+        submitted = self.edit_user_message_inline(session_id, message_id, text, edited_files=paths)
+        if submitted:
+            bubble.discard_edit_created_files(keep=paths)
+        return submitted
 
     def _system_toast_duration(self, type="info", auto_close_ms=None):
         if auto_close_ms is not None:

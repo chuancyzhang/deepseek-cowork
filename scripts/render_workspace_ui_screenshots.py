@@ -24,7 +24,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         os.environ["LOCALAPPDATA"] = str(Path(temporary, "local"))
         import core.env_utils
         core.env_utils.get_app_data_dir = lambda: temporary
-        from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject, QMimeData
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QWidget
@@ -41,7 +41,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
         class WindowAudit(QObject):
-            active = writing_pages
+            active = writing_pages or message_context
             events = []
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
@@ -185,8 +185,29 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         if message_context:
             capture("message-context")
             user_bubble.begin_inline_edit()
+            pasted = QMimeData()
+            pasted.setText("产品讨论的补充资料。\n" * 100)
+            user_bubble.user_content_edit.insertFromMimeData(pasted)
+            assert len(user_bubble.edit_attachment_paths) == len(attachments) + 1
+            assert not current.prompt_files
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
             capture("message-context-edit")
+            from PySide6.QtWidgets import QPushButton
+            assert all(user_bubble.edit_controls.rect().contains(button.geometry())
+                       for button in user_bubble.edit_controls.findChildren(QPushButton))
             user_bubble.cancel_inline_edit()
+            assert window.input_field.toPlainText().startswith("保留的草稿")
+            audit.active = False
+            import json
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events}
+            (output / f"validation-{mode}-{scale}{'-windows' if native else ''}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            assert not audit.events, audit.events
         if focused:
             QTest.mouseMove(user_bubble, user_bubble.rect().center())
             capture("conversation-hover")

@@ -22066,11 +22066,12 @@ class FileChip(QFrame):
     previewRequested = Signal(str)
     activated = Signal(str)
 
-    def __init__(self, path, removable=False, parent=None, *, compact=False):
+    def __init__(self, path, removable=False, parent=None, *, compact=False, composer=False):
         super().__init__(parent)
         self.path = os.path.normpath(str(path or ""))
         self._preview_dialog = None
         self._compact = compact
+        self._composer = composer
         self.setObjectName("FileChip")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
@@ -22107,6 +22108,10 @@ class FileChip(QFrame):
             icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
         layout.addWidget(icon_label)
 
+        self.type_label = QLabel("附件", self) if composer else None
+        if self.type_label is not None:
+            layout.addWidget(self.type_label)
+
         name = os.path.basename(self.path) or self.path
         text_label = MessageContextLabel(name, self) if compact else QLabel(name, self)
         self.text_label = text_label
@@ -22127,7 +22132,7 @@ class FileChip(QFrame):
             for target in (self, icon_label, text_label):
                 self.copy_btn.add_context_menu(target)
 
-        self._activation_targets = (icon_label, text_label)
+        self._activation_targets = (icon_label, text_label) + ((self.type_label,) if composer else ())
         for target in self._activation_targets:
             target.installEventFilter(self)
 
@@ -22152,7 +22157,8 @@ class FileChip(QFrame):
         self.setToolTip(self.path)
         self.previewRequested.connect(self._open_image_preview)
         self.activated.connect(self._activate)
-        bind_theme(self, self.refresh_theme, surface="conversation")
+        bind_theme(self, self.refresh_theme, surface="composer" if composer else "conversation")
+        self.refresh_theme()
 
     def eventFilter(self, watched, event):
         if watched in getattr(self, "_activation_targets", ()):
@@ -22231,9 +22237,12 @@ class FileChip(QFrame):
         log_attachment_event("attachment_opened", path=path, image=True)
 
     def refresh_theme(self, _resolved=None):
+        background = (DesignTokens.composer_file_bg if self._composer else
+                      DesignTokens.bg_secondary if self._compact else DesignTokens.bg_main)
+        foreground = DesignTokens.composer_text if self._composer else DesignTokens.chat_text
         self.setStyleSheet(
-            f"QFrame#FileChip {{ background: {DesignTokens.bg_secondary if self._compact else DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.chat_border}; "
+            f"QFrame#FileChip {{ background: {background}; "
+            f"border: 1px solid {DesignTokens.composer_border if self._composer else DesignTokens.chat_border}; "
             f"border-radius: {DesignTokens.radius_sm}px; }}"
             f"QFrame#FileChip:hover {{ background: {DesignTokens.bg_hover}; "
             f"border-color: {DesignTokens.border}; }}"
@@ -22241,17 +22250,21 @@ class FileChip(QFrame):
             f"{DesignTokens.primary_focus}; }}"
         )
         self.text_label.setStyleSheet(
-            f"color: {DesignTokens.chat_text}; "
+            f"color: {foreground}; background: transparent; border: none; "
             f"font-size: {DesignTokens.font_size_body if self._compact else DesignTokens.font_size_meta}px; "
             f"font-weight: {DesignTokens.font_weight_medium};"
         )
         if self._compact:
             self.text_label._elide()
+        if self.type_label is not None:
+            self.type_label.setStyleSheet(
+                f"color: {DesignTokens.composer_file_text}; font-size: {DesignTokens.font_size_meta}px; "
+                "background: transparent; border: none;")
         if self._uses_file_icon:
             self.icon_label.setPixmap(
                 qta.icon(
                     file_chip_icon_name(self.path),
-                    color=DesignTokens.primary,
+                    color=DesignTokens.composer_file_text if self._composer else DesignTokens.primary,
                 ).pixmap(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm)
             )
         if self._is_image:
@@ -34296,7 +34309,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         files = self._current_prompt_files(session_id)
         chips = []
         for path in files:
-            chip = FileChip(path, removable=True, parent=self.composer_context_tags.contents, compact=True)
+            chip = FileChip(path, removable=True, parent=self.composer_context_tags.contents, compact=True, composer=True)
             chip.removeRequested.connect(self._remove_prompt_file)
             chips.append(chip)
         self.composer_context_tags.set_chips("files", chips)
@@ -35883,14 +35896,10 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state = self.get_session(session_id)
         if state and state.session_id == self.current_session_id:
             self.refresh_conversation_reference_chips()
+            self._refresh_composer_knowledge_tags(state)
             self.refresh_branch_origin(state)
         if hasattr(self, "knowledge_refs_button"):
-            references = getattr(state, "knowledge_refs", []) if state else []
-            self.knowledge_refs_button.setVisible(bool(references))
-            self.knowledge_refs_button.setText(f"资料 · {len(references)}")
-            self.knowledge_refs_button.setIcon(qta.icon("fa5s.book-open", color=DesignTokens.icon_secondary))
-            self.knowledge_refs_button.setToolTip("\n".join(ref.get("title", "") for ref in references))
-            self.knowledge_refs_button.setStyleSheet(apple_button_style("ghost", radius=DesignTokens.radius_sm))
+            self.knowledge_refs_button.hide()
         profile = self._model_profile_for_state(state)
         provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
         model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
@@ -48604,10 +48613,36 @@ a {{ overflow-wrap: anywhere; }}
         store.references(owner, refs)
         self.add_system_toast("已设为项目新对话的默认资料。", "success")
 
-    def edit_knowledge_references(self):
+    def _refresh_composer_knowledge_tags(self, state):
+        if state.session_id != self.current_session_id:
+            return
+        references = copy.deepcopy(getattr(state, "knowledge_refs", []) or [])
+        signature = (state.session_id, references)
+        if getattr(self, "_composer_knowledge_tag_signature", None) == signature:
+            return
+        from core.knowledge_sources import SOURCES
+        chips = []
+        for ref in references:
+            title = str(ref.get("title") or "资料")
+            source = SOURCES.get(ref.get("source", "weknora"), "资料库")
+            chip = ComposerContextChip(title, "fa5s.book-open", self.composer_context_tags.contents, kind="knowledge")
+            hint = f"资料 · {title}\n{source}\n本对话已选资料；调整从下一次提交生效。点击管理。"
+            chip.setToolTip(hint)
+            chip.main_btn.setToolTip(hint)
+            chip.label.setToolTip(hint)
+            chip.main_btn.setAccessibleName("管理资料：" + title)
+            chip.clicked.connect(lambda sid=state.session_id, anchor=chip.main_btn:
+                                 self.edit_knowledge_references(session_id=sid, anchor=anchor))
+            chip.closeClicked.connect(lambda sid=state.session_id, item=ref:
+                                      self._remove_knowledge_reference(sid, item))
+            chips.append(chip)
+        self.composer_context_tags.set_chips("knowledge", chips)
+        self._composer_knowledge_tag_signature = signature
+
+    def edit_knowledge_references(self, *, session_id=None, anchor=None):
         from ui.knowledge_library import KnowledgeReferencePopover
-        state = self.get_session()
-        if not state:
+        state = self.get_session(session_id)
+        if not state or state.session_id != self.current_session_id:
             return
         initial = copy.deepcopy(getattr(state, "knowledge_refs", []))
         popover = KnowledgeReferencePopover(initial, self)
@@ -48628,12 +48663,12 @@ a {{ overflow-wrap: anywhere; }}
         if workspace:
             owner = "project:" + self._project_key(workspace)
             if self._knowledge_service().store.references(owner):
-                defaults = QPushButton("管理项目新对话默认资料")
+                defaults = QPushButton("管理项目新对话默认资料", popover)
                 defaults.setStyleSheet(product_button_style("ghost"))
                 defaults.clicked.connect(lambda checked=False, owner=owner: (
                     popover.close(), QTimer.singleShot(0, lambda: self._edit_project_knowledge(owner))))
                 popover.layout().insertWidget(popover.layout().count() - 1, defaults)
-        popover.show_for(self.tool_menu_btn, prefer_above=True)
+        popover.show_for(anchor or self.tool_menu_btn, prefer_above=True)
         QTimer.singleShot(0, popover.search.setFocus)
 
     def _edit_project_knowledge(self, owner):
@@ -48659,17 +48694,33 @@ a {{ overflow-wrap: anywhere; }}
             store.references(owner, refs)
         self.add_system_toast("项目默认资料已更新，已有对话保持原选择。", "success")
 
-    def _remove_knowledge_reference(self, session_id, index):
+    def _remove_knowledge_reference(self, session_id, reference):
         state = self.get_session(session_id)
-        refs = list(getattr(state, "knowledge_refs", []))
-        if index is None:
-            refs = []
-        elif 0 <= index < len(refs):
-            refs.pop(index)
-        state.knowledge_refs = refs
+        if state is None:
+            return
+        before = copy.deepcopy(getattr(state, "knowledge_refs", []) or [])
+        if reference not in before:
+            return
+        refs = [ref for ref in before if ref != reference]
+        state.knowledge_refs = copy.deepcopy(refs)
         self.save_chat_history(session_id=session_id)
         self.refresh_context_badges(session_id)
-        self.add_system_toast("资料引用已更新，下次提交时生效。", "success")
+        logging.getLogger(__name__).info("knowledge_selection removed session=%s remaining=%s", session_id, len(refs))
+        self.add_system_toast("资料已移除，下次提交时生效。", "info", session_id=session_id,
+                              actions=(("撤销", lambda: self._restore_knowledge_references(session_id, before, refs)),))
+
+    def _restore_knowledge_references(self, session_id, references, expected):
+        state = self.get_session(session_id)
+        if state is None:
+            return
+        if state.knowledge_refs != expected:
+            logging.getLogger(__name__).info("knowledge_selection undo_rejected session=%s reason=selection_changed", session_id)
+            self.add_system_toast("资料选择已有新的调整，请重新添加需要的资料。", "info", session_id=session_id)
+            return
+        state.knowledge_refs = copy.deepcopy(references)
+        self.save_chat_history(session_id=session_id)
+        self.refresh_context_badges(session_id)
+        logging.getLogger(__name__).info("knowledge_selection restored session=%s count=%s", session_id, len(references))
 
     def start_team_space_task(self, request):
         """Create the durable scope before any message can reach a worker."""
@@ -50217,7 +50268,7 @@ a {{ overflow-wrap: anywhere; }}
         for name, display in zip(selected, names):
             category = "connectors" if skill_center_tab_key(skill_records.get(name, {})) == "mcp" else "skills"
             chip = ComposerContextChip(display, "fa5s.plug" if category == "connectors" else "fa5s.puzzle-piece",
-                                       self.composer_context_tags.contents)
+                                       self.composer_context_tags.contents, kind=category)
             chip.setToolTip(f"{display} · 本会话持续使用，点击调整")
             chip.setEnabled(enabled)
             chip.clicked.connect(lambda selected_category=category: self.open_session_skill_picker(category=selected_category))

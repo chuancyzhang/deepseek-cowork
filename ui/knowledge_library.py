@@ -301,15 +301,16 @@ class KnowledgeReferencePopover(ProductPopover):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
-        layout.addWidget(QLabel("本对话使用的资料"))
-        subtitle = QLabel("取消勾选可移除资料；应用后从下一次提交生效。")
+        layout.addWidget(QLabel("本对话使用的资料", self))
+        subtitle = QLabel("取消勾选可移除资料；应用后从下一次提交生效。", self)
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
-        self.search = QLineEdit()
+        self.search = QLineEdit(self)
         self.search.setPlaceholderText("搜索已选资料")
+        self.search.setAccessibleName("搜索已选资料")
         self.search.setStyleSheet(product_field_style())
         layout.addWidget(self.search)
-        self.items = QListWidget()
+        self.items = QListWidget(self)
         self.items.setMinimumHeight(160)
         self.items.setMaximumHeight(280)
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -325,20 +326,34 @@ class KnowledgeReferencePopover(ProductPopover):
         self.search.textChanged.connect(self.filter_items)
         layout.addWidget(self.items)
         actions = QHBoxLayout()
-        clear = QPushButton("清除")
+        clear = self.clear_button = QPushButton("清除", self)
         clear.clicked.connect(self.clear_selection)
         clear.setStyleSheet(product_button_style("ghost"))
         actions.addWidget(clear)
         actions.addStretch()
-        cancel = QPushButton("取消")
+        cancel = self.cancel_button = QPushButton("取消", self)
         cancel.clicked.connect(self.close)
         cancel.setStyleSheet(product_button_style("secondary"))
         actions.addWidget(cancel)
-        self.apply_button = QPushButton("应用")
+        self.apply_button = QPushButton("应用", self)
         self.apply_button.setStyleSheet(product_button_style("primary"))
         self.apply_button.clicked.connect(self.apply_selection)
         actions.addWidget(self.apply_button)
         layout.addLayout(actions)
+        self.refresh_theme()
+
+    def refresh_theme(self, _resolved=None):
+        super().refresh_theme(_resolved)
+        if not hasattr(self, "apply_button"):
+            return
+        self.search.setStyleSheet(product_field_style())
+        self.items.setStyleSheet(
+            f"QListWidget {{ background:{DesignTokens.overlay_bg}; color:{DesignTokens.overlay_text}; "
+            f"border:1px solid {DesignTokens.overlay_border}; border-radius:{DesignTokens.radius_sm}px; padding:4px; }}"
+            "QListWidget::item { padding:8px; }")
+        self.clear_button.setStyleSheet(product_button_style("ghost"))
+        self.cancel_button.setStyleSheet(product_button_style("secondary"))
+        self.apply_button.setStyleSheet(product_button_style("primary"))
 
     def filter_items(self, text):
         for index in range(self.items.count()):

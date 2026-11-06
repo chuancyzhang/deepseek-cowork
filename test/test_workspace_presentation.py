@@ -1,5 +1,6 @@
 """Interaction regressions for the shared home/conversation presentation."""
 import os
+import copy
 from pathlib import Path
 import tempfile
 import time
@@ -190,6 +191,68 @@ class WorkspacePresentationTests(unittest.TestCase):
         window.copy_observability_full_prompt()
         self.assertIn("完整结尾", QApplication.clipboard().text())
         self.assertIn("本次运行上下文", QApplication.clipboard().text())
+
+    def test_knowledge_chips_restore_selection_and_stay_in_their_session(self):
+        window = self.window
+        first = window.get_current_session()
+        refs = [{"title": "交割答疑手册", "source": "weknora", "knowledge_id": "doc-a"},
+                {"title": "交割答疑手册", "source": "tencent-docs", "item_id": "doc-b"}]
+        first.knowledge_refs = copy.deepcopy(refs)
+        window.input_field.setPlainText("保留未发送的问题")
+        window.refresh_context_badges()
+        chips = window.composer_context_tags.chips("knowledge")
+        self.assertEqual(len(chips), 2)
+        self.assertTrue(all(chip.isVisible() for chip in chips))
+        self.assertIn("WeKnora", chips[0].label.toolTip())
+        self.assertIn("腾讯文档", chips[1].label.toolTip())
+        window.refresh_context_badges()
+        self.assertIs(window.composer_context_tags.chips("knowledge")[0], chips[0])
+        with patch.object(window, "add_system_toast") as toast:
+            chips[0].close_btn.click()
+        self.assertEqual(first.knowledge_refs, refs[1:])
+        undo = toast.call_args.kwargs["actions"][0][1]
+        window.create_new_session()
+        second = window.get_current_session()
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        undo()
+        self.assertEqual(first.knowledge_refs, refs)
+        self.assertEqual(second.knowledge_refs, [])
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        window.activate_session(first.session_id)
+        self.assertEqual(len(window.composer_context_tags.chips("knowledge")), 2)
+        self.assertEqual(window.input_field.toPlainText(), "保留未发送的问题")
+        self.assertTrue(window.save_chat_history(first.session_id, flush=True))
+        self.assertEqual(window.chat_storage.get_conversation_record(first.session_id)["meta"]["knowledge_refs"], refs)
+
+    def test_knowledge_management_cancel_apply_and_stale_undo_preserve_new_choices(self):
+        window = self.window
+        state = window.get_current_session()
+        first = {"title": "手册", "source": "weknora", "knowledge_id": "doc-a"}
+        second = {"title": "新增资料", "source": "weknora", "knowledge_id": "doc-b"}
+        state.knowledge_refs = [first]
+        state.messages = [{"id": "saved-user", "role": "user", "content": "已有提问"}]
+        before_messages = copy.deepcopy(state.messages)
+        window.refresh_context_badges()
+        window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+        popover = window.knowledge_reference_popover
+        self.assertTrue(popover.isVisible())
+        popover.items.item(0).setCheckState(Qt.Unchecked)
+        popover.cancel_button.click()
+        self.assertEqual(state.knowledge_refs, [first])
+        window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+        popover = window.knowledge_reference_popover
+        popover.items.item(0).setCheckState(Qt.Unchecked)
+        popover.apply_button.click()
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        state.knowledge_refs = [first]
+        window.refresh_context_badges()
+        with patch.object(window, "add_system_toast") as toast:
+            window.composer_context_tags.chips("knowledge")[0].close_btn.click()
+        undo = toast.call_args.kwargs["actions"][0][1]
+        state.knowledge_refs.append(second)
+        undo()
+        self.assertEqual(state.knowledge_refs, [second])
+        self.assertEqual(state.messages, before_messages)
 
 
 if __name__ == "__main__":

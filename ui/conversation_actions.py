@@ -413,7 +413,7 @@ class ConversationActionsMixin:
         refs = getattr(state, "conversation_refs", []) if state else []
         chips = []
         for ref in refs:
-            chip = ComposerContextChip(ref["title"], "fa5s.comment-alt", container.contents)
+            chip = ComposerContextChip(ref["title"], "fa5s.comment-alt", container.contents, kind="references")
             chip.setToolTip(ref["title"] + "\n作为参考资料，发送时固定上下文。点击查看。")
             chip.main_btn.setAccessibleName("查看引用：" + ref["title"])
             chip.clicked.connect(lambda r=copy.deepcopy(ref): self.show_conversation_reference(r))

@@ -526,6 +526,25 @@ def resolve_theme(
         if target in tokens and target not in explicit_tokens and source in tokens:
             tokens[target] = tokens[source]
 
+    # Context categories are independent of success/error semantics. Derive their
+    # quiet surfaces from the effective composer, while honoring explicit colors.
+    composer_surface = tokens.get("composer_bg", tokens.get("bg_main"))
+    luminance = _relative_luminance(composer_surface)
+    dark_composer = luminance is not None and luminance < 0.18
+    for kind in ("reference", "skill", "knowledge", "file"):
+        foreground, background = f"composer_{kind}_text", f"composer_{kind}_bg"
+        if foreground not in tokens or background not in tokens:
+            continue
+        if foreground not in explicit_tokens:
+            base = default_tokens[foreground]
+            if kind == "file":
+                tokens[foreground] = _mix_hex(composer_surface, tokens["composer_text"], 0.76)
+            else:
+                tokens[foreground] = _mix_hex(base, "#ffffff", 0.55) if dark_composer else base
+        if background not in explicit_tokens:
+            tokens[background] = _mix_hex(composer_surface, tokens[foreground],
+                                         0.12 if dark_composer else 0.07)
+
     if "primary" in explicit_tokens:
         primary = explicit_tokens["primary"]
         surface = explicit_tokens.get("bg_main", tokens.get("bg_main", "#ffffff"))
@@ -607,6 +626,8 @@ def theme_contrast_warnings(resolved: dict[str, Any]) -> list[dict[str, Any]]:
         ("left_sidebar", "sidebar_text", "bg_sidebar", 4.5),
         ("conversation", "chat_text", "bg_chat", 4.5),
         ("composer", "composer_text", "composer_bg", 4.5),
+        *(("composer", f"composer_{kind}_text", f"composer_{kind}_bg", 4.5)
+          for kind in ("reference", "skill", "knowledge", "file")),
         ("right_sidebar", "right_sidebar_text", "right_sidebar_bg", 4.5),
         ("management", "text_primary", "management_panel_bg", 4.5),
         ("feedback", "overlay_text", "overlay_bg", 4.5),

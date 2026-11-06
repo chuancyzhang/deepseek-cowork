@@ -316,10 +316,16 @@ class ComposerContextChip(QFrame):
     clicked = Signal()
     closeClicked = Signal()
 
-    def __init__(self, text, icon_name, parent=None):
+    def __init__(self, text, icon_name, parent=None, *, kind="files"):
         super().__init__(parent)
         self.setObjectName("ComposerContextChip")
         self.icon_name = icon_name
+        self.context_kind = kind
+        self.type_text, self.palette_kind = {
+            "references": ("对话", "reference"), "skills": ("技能", "skill"),
+            "connectors": ("连接器", "skill"), "knowledge": ("资料", "knowledge"),
+            "files": ("附件", "file"),
+        }[kind]
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setMaximumWidth(280)
         row = QHBoxLayout(self)
@@ -328,33 +334,40 @@ class ComposerContextChip(QFrame):
         self.main_btn = MessageReferenceButton(self)
         self.main_btn.setObjectName("ComposerContextOpen")
         self.main_btn.setCursor(Qt.PointingHandCursor)
-        self.main_btn.setAccessibleName(text)
+        self.main_btn.setAccessibleName(f"{self.type_text}：{text}")
         self.main_btn.clicked.connect(self.clicked.emit)
         content = QHBoxLayout(self.main_btn)
         content.setContentsMargins(4, 0, 4, 0)
         content.setSpacing(6)
         self.icon = QLabel(self.main_btn)
+        self.type_label = QLabel(self.type_text, self.main_btn)
+        self.type_label.setObjectName("ComposerContextType")
+        self.type_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.label = MessageContextLabel(text, self.main_btn)
         self.label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.icon.setAttribute(Qt.WA_TransparentForMouseEvents)
         content.addWidget(self.icon)
+        content.addWidget(self.type_label)
         content.addWidget(self.label, 1)
         self.close_btn = QPushButton("×", self)
         self.close_btn.setObjectName("ComposerContextRemove")
         self.close_btn.setFixedSize(28, 28)
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setAccessibleName(f"移除 {text}")
+        self.close_btn.setAccessibleName(f"移除{self.type_text}：{text}")
         self.close_btn.setToolTip(f"移除 {text}")
         self.close_btn.clicked.connect(self.closeClicked.emit)
         row.addWidget(self.main_btn, 1)
         row.addWidget(self.close_btn)
         self.setToolTip(text)
         bind_theme(self, self.refresh_theme, surface="composer")
+        self.refresh_theme()
 
     def refresh_theme(self, _resolved=None):
-        self.icon.setPixmap(qta.icon(self.icon_name, color=DesignTokens.composer_text_muted).pixmap(16, 16))
+        foreground = getattr(DesignTokens, f"composer_{self.palette_kind}_text")
+        background = getattr(DesignTokens, f"composer_{self.palette_kind}_bg")
+        self.icon.setPixmap(qta.icon(self.icon_name, color=foreground).pixmap(DesignTokens.icon_size, DesignTokens.icon_size))
         self.setStyleSheet(
-            f"QFrame#ComposerContextChip {{ background: {DesignTokens.bg_secondary}; "
+            f"QFrame#ComposerContextChip {{ background: {background}; "
             f"border: 1px solid {DesignTokens.composer_border}; border-radius: {DesignTokens.radius_sm}px; }}"
             f"QPushButton#ComposerContextOpen, QPushButton#ComposerContextRemove {{ background: transparent; "
             f"color: {DesignTokens.composer_text}; border: 1px solid transparent; border-radius: {DesignTokens.radius_sm}px; }}"
@@ -362,7 +375,11 @@ class ComposerContextChip(QFrame):
             f"QPushButton#ComposerContextOpen:focus, QPushButton#ComposerContextRemove:focus {{ border-color: {DesignTokens.primary_focus}; }}"
             f"QFrame#ComposerContextChip QLabel {{ color: {DesignTokens.composer_text}; background: transparent; border: none; "
             f"font-size: {DesignTokens.font_size_body}px; }}"
+            f"QFrame#ComposerContextChip QLabel#ComposerContextType {{ color: {foreground}; font-size: {DesignTokens.font_size_meta}px; }}"
+            f"QFrame#ComposerContextChip QLabel:disabled, QPushButton#ComposerContextRemove:disabled {{ color: {DesignTokens.text_disabled}; }}"
         )
+        self.label._elide()
+        self.updateGeometry()
 
 
 class ComposerContextStrip(QScrollArea):
@@ -398,7 +415,7 @@ class ComposerContextStrip(QScrollArea):
             chip.hide()
             chip.deleteLater()
         self._groups[kind] = list(chips)
-        for key in ("references", "files", "skills"):
+        for key in ("references", "files", "skills", "knowledge"):
             for chip in self._groups.get(key, []):
                 chip.setProperty("composerContextKind", key)
                 self.flow.addWidget(chip)

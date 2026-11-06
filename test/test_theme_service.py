@@ -5,6 +5,7 @@ import unittest
 import zipfile
 
 from core.theme import default_design_tokens
+from core.theme_presets import BUILTIN_THEMES, builtin_theme
 from core.theme_service import (
     DEFAULT_THEME_ID,
     ThemeRepository,
@@ -58,6 +59,23 @@ class ThemeServiceTests(unittest.TestCase):
             self.defaults,
         )
         self.assertEqual(resolved["tokens"]["primary_hover"], "#123456")
+
+    def test_composer_category_colors_follow_theme_and_keep_explicit_overrides(self):
+        category_text = {f"composer_{kind}_text" for kind in ("reference", "skill", "knowledge", "file")}
+        for theme in BUILTIN_THEMES:
+            for dark in (False, True):
+                with self.subTest(theme=theme, dark=dark):
+                    resolved = resolve_theme(builtin_theme(theme, dark=dark), self.defaults)
+                    warnings = [w for w in theme_contrast_warnings(resolved) if w["foreground"] in category_text]
+                    self.assertEqual(warnings, [])
+        custom = {"id": "custom", "name": "Custom", "overrides": {"tokens": {
+            "composer_bg": "#242424", "composer_text": "#ededed",
+            "composer_knowledge_text": "#a8d4cb", "composer_skill_bg": "#342f39",
+        }}}
+        tokens = resolve_theme(custom, self.defaults)["tokens"]
+        self.assertEqual(tokens["composer_knowledge_text"], "#a8d4cb")
+        self.assertEqual(tokens["composer_skill_bg"], "#342f39")
+        self.assertNotEqual(tokens["composer_reference_bg"], self.defaults["composer_reference_bg"])
 
     def test_low_contrast_is_advisory(self):
         resolved = resolve_theme(

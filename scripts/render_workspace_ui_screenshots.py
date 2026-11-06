@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -32,16 +32,20 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         from core.theme import ThemeRuntimeManager
         from core.theme_service import ThemeRepository
         from core.theme_presets import builtin_theme
-        from main import MainWindow
+        from main import MainWindow, initialize_desktop_theme
 
         app = QApplication([])
+        if composer_context:
+            initialize_desktop_theme(app)
         for font in ("msyh.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["SystemRoot"], "Fonts", font)))
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
+        if composer_context:
+            assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
         class WindowAudit(QObject):
-            active = writing_pages or message_context
+            active = writing_pages or message_context or composer_context
             events = []
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
@@ -60,12 +64,12 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         window.skill_manager.load_skills(load_mcp_tools=False)
         window.skill_manager_ready = True
         window.refresh_selected_skill_controls()
-        window.resize((760 if focused else 1100) if compact else 1440, 760 if compact else 900)
+        window.resize((760 if focused or composer_context else 1100) if compact else 1440, 760 if compact else 900)
         window.show()
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = QA_ROOT / "screenshots" / ("writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = QA_ROOT / "screenshots" / ("composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -74,6 +78,8 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             QTest.qWait(100)
 
         def capture(name):
+            if composer_context and not name.startswith("composer-context"):
+                return
             if writing_pages and not name.startswith("writing-"):
                 return
             if message_context and not name.startswith("message-context"):
@@ -88,6 +94,24 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             destination = output / f"{name}-{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}.png"
             assert window.grab().save(str(destination))
             print(destination, flush=True)
+
+        def finish():
+            assert (state_path.read_bytes() if state_path.exists() else None) == saved_before
+            manager.restore_saved_theme(reason="preview_finished")
+            manager.stop()
+            window.close()
+            deadline = time.monotonic() + 5
+            while not getattr(window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.01)
+            assert window._checkpoint_close_ready
+            window.file_model.directoryLoaded.disconnect()
+            window.deleteLater()
+            app.processEvents()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            if writing_pages:
+                QTest.qWait(500)
+            background_patch.stop()
 
         if focused:
             capture("home-empty")
@@ -115,6 +139,55 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         assert window.input_field.toPlainText().startswith("保留的草稿")
         assert window.input_row.parentWidget() is window.conversation_column
         capture("conversation")
+        if composer_context:
+            import json
+            current.conversation_refs = [{"session_id": "reference-preview", "title": "上次交割问题讨论"}]
+            current.knowledge_refs = [
+                {"title": "交割部交割答疑手册", "source": "weknora", "knowledge_id": "manual"},
+                {"title": "交割业务办理流程与材料清单（修订版）", "source": "tencent-docs", "item_id": "process"},
+            ]
+            window._available_session_skills = lambda: [{"name": "document-analysis", "display_name": "文档分析", "type": "ai_generated"}]
+            current.selected_skill_names = ["document-analysis"]
+            attachment = Path(temporary, "交割办理问题清单.txt")
+            attachment.write_text("资料标签布局示例。", encoding="utf-8")
+            window._set_prompt_files([str(attachment)])
+            window.refresh_selected_skill_controls()
+            window.refresh_context_badges()
+            window.input_field.setPlainText("请根据手册整理交割办理的常见问题。")
+            capture("composer-context")
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert window.input_row.grab().save(str(output / f"composer-context-input-{suffix}.png"))
+            for chip in window.composer_context_tags.chips("knowledge"):
+                assert chip.type_label.text() == "资料"
+                assert chip.rect().contains(chip.close_btn.geometry())
+            strip = window.composer_context_tags
+            strip.verticalScrollBar().setValue(strip.verticalScrollBar().maximum())
+            settle()
+            last = strip.chips("knowledge")[-1]
+            assert strip.viewport().rect().contains(last.close_btn.mapTo(strip.viewport(), last.close_btn.rect().center()))
+            strip.verticalScrollBar().setValue(0)
+            draft = window.input_field.toPlainText()
+            window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+            capture("composer-context-manage")
+            popover = window.knowledge_reference_popover
+            assert popover.isVisible()
+            assert window.rect().contains(popover.geometry())
+            popover.cancel_button.click()
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert window.input_field.toPlainText() == draft
+            assert len(window.composer_context_tags.chips("knowledge")) == 2
+            assert not audit.events, audit.events
+            audit.active = False
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events, "theme_preview_persisted": False}
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+            finish()
+            return
         if writing_pages:
             import json
             from PySide6.QtGui import QInputMethodEvent
@@ -262,23 +335,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
                 QTest.keyClick(page.settings_search, Qt.Key_Return)
                 assert page._page_labels[page._active_settings_row] == "外观与阅读"
                 page.settings_search.clear()
-        assert (state_path.read_bytes() if state_path.exists() else None) == saved_before
-        manager.restore_saved_theme(reason="preview_finished")
-        manager.stop()
-        window.close()
-        deadline = time.monotonic() + 5
-        while not getattr(window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
-            app.processEvents()
-            time.sleep(.01)
-        assert window._checkpoint_close_ready
-        window.file_model.directoryLoaded.disconnect()
-        window.deleteLater()
-        app.processEvents()
-        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-        if writing_pages:
-            # WebEngine releases its cache writers after page/profile teardown.
-            QTest.qWait(500)
-        background_patch.stop()
+        finish()
 
 
 if __name__ == "__main__":
@@ -290,5 +347,6 @@ if __name__ == "__main__":
     parser.add_argument("--message-context", action="store_true", help="Capture sent attachments and conversation references inside the user message")
     parser.add_argument("--writing-pages", action="store_true", help="Verify writing pages, expanded conversation tabs and compact browser controls")
     parser.add_argument("--native", action="store_true", help="Use real Windows widgets instead of offscreen rendering")
+    parser.add_argument("--composer-context", action="store_true", help="Verify typed composer tags and knowledge selection without external services")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context)

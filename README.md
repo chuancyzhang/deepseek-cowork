@@ -6,7 +6,9 @@ DeepSeek Cowork is a local Windows desktop agent workspace that brings conversat
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
-Documented version: **5.3.3** · [Version notes](docs/releases/5.3.3.md) · [Release history](docs/releases/index.md)
+Current app version: **5.3.4** · [Version notes](docs/releases/5.3.4.md) · [Release history](docs/releases/index.md)
+
+Documented version: **5.3.3**; see the version notes for changes in 5.3.4.
 
 ## What you can do
 
@@ -17,7 +19,7 @@ Documented version: **5.3.3** · [Version notes](docs/releases/5.3.3.md) · [Rel
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 
-Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New API model service onboarding, and improvements to questionnaires, file links, previews, and update notifications.
+Version 5.3.4 adds attachment editing for past messages, visible knowledge references, a dismissible discussion-mode chip, and a unified task workspace. It also improves browser task recovery and fixes history loading, response completion, and update installation.
 
 ## Get started
 

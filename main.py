@@ -29052,16 +29052,19 @@ class SessionContextChip(QWidget):
     clicked = Signal()
     closeClicked = Signal()
 
-    def __init__(self, text="", icon=None, parent=None):
+    def __init__(self, text="", icon=None, parent=None, *, pill=False):
         super().__init__(parent)
+        self._pill = bool(pill)
+        self.setObjectName("SessionContextChip")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(32)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setSpacing(0 if self._pill else 2)
 
-        self.close_btn = QPushButton("×")
+        self.close_btn = QPushButton("" if self._pill else "×", self)
         self.close_btn.setObjectName("ChipCloseButton")
         self.close_btn.setCursor(Qt.PointingHandCursor)
         self.close_btn.setFixedSize(24, 24)
@@ -29071,25 +29074,48 @@ class SessionContextChip(QWidget):
 
         self._text = str(text or "").strip()
         self._menu_indicator_visible = True
-        self.main_btn = QPushButton()
+        self.main_btn = QPushButton(self)
         self.main_btn.setObjectName("ChipMainButton")
         self.main_btn.setCursor(Qt.PointingHandCursor)
         self.main_btn.setFixedHeight(32)
         self.main_btn.clicked.connect(self.clicked.emit)
         if icon is not None:
             self.main_btn.setIcon(icon)
+        if self._pill:
+            layout.addWidget(self.close_btn)
         layout.addWidget(self.main_btn)
-        layout.addWidget(self.close_btn)
+        if not self._pill:
+            layout.addWidget(self.close_btn)
 
-        self._apply_style()
+        self.refresh_theme()
         self._refresh_main_text()
         bind_theme(self, self.refresh_theme, surface="composer")
 
     def _refresh_main_text(self):
         indicator = "  ▾" if self._menu_indicator_visible else ""
-        self.main_btn.setText(f" {self._text}{indicator}")
+        prefix = "" if self._pill else " "
+        self.main_btn.setText(f"{prefix}{self._text}{indicator}")
+        self.main_btn.setAccessibleName(self._text)
 
     def _apply_style(self):
+        if self._pill:
+            radius = DesignTokens.control_height_sm // 2
+            left_padding = 10 if self.close_btn.isHidden() else 2
+            self.setStyleSheet(
+                f"QWidget#SessionContextChip {{ background: {DesignTokens.primary_soft}; "
+                f"border: none; border-radius: {radius}px; }}"
+                f"QPushButton#ChipCloseButton, QPushButton#ChipMainButton {{ "
+                f"background: transparent; color: {DesignTokens.composer_text}; "
+                f"border: 1px solid transparent; border-radius: {radius}px; "
+                f"font-size: {DesignTokens.font_size_body}px; font-weight: 400; }}"
+                "QPushButton#ChipCloseButton { padding: 0; }"
+                f"QPushButton#ChipMainButton {{ padding: 0 10px 0 {left_padding}px; }}"
+                f"QPushButton#ChipCloseButton:hover, QPushButton#ChipMainButton:hover {{ "
+                f"background: {DesignTokens.bg_hover}; }}"
+                f"QPushButton#ChipCloseButton:focus, QPushButton#ChipMainButton:focus {{ "
+                f"border-color: {DesignTokens.primary_focus}; }}"
+            )
+            return
         self.setStyleSheet(
             f"QPushButton#ChipCloseButton {{ background: transparent; "
             f"color: {DesignTokens.composer_text_muted}; "
@@ -29110,12 +29136,16 @@ class SessionContextChip(QWidget):
         )
 
     def refresh_theme(self, _resolved=None):
-        self.setFixedHeight(DesignTokens.control_height)
+        height = DesignTokens.control_height_sm if self._pill else DesignTokens.control_height
+        self.setFixedHeight(height)
         self.close_btn.setFixedSize(
             DesignTokens.control_height_sm,
             DesignTokens.control_height_sm,
         )
-        self.main_btn.setFixedHeight(DesignTokens.control_height)
+        self.main_btn.setFixedHeight(height)
+        if self._pill:
+            self.close_btn.setIcon(qta.icon("fa5s.times-circle", color=DesignTokens.composer_text_muted))
+            self.close_btn.setIconSize(QSize(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm))
         self._apply_style()
 
     def setText(self, text):
@@ -29134,6 +29164,7 @@ class SessionContextChip(QWidget):
 
     def setCloseToolTip(self, text):
         self.close_btn.setToolTip(text)
+        self.close_btn.setAccessibleName(text)
 
     def setMenuIndicatorVisible(self, visible):
         self._menu_indicator_visible = bool(visible)
@@ -29141,6 +29172,8 @@ class SessionContextChip(QWidget):
 
     def setRemovable(self, removable):
         self.close_btn.setVisible(bool(removable))
+        if self._pill:
+            self._apply_style()
 
     def setEnabled(self, enabled):
         super().setEnabled(enabled)
@@ -30869,14 +30902,17 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
 
         self.grill_mode_badge = SessionContextChip(
             "拷问模式",
-            qta.icon("fa5s.question-circle", color=DesignTokens.primary),
+            parent=self.input_card,
+            pill=True,
         )
         self.grill_mode_badge.setMenuIndicatorVisible(False)
         self.grill_mode_badge.setRemovable(True)
         self.grill_mode_badge.setCloseToolTip("取消拷问模式")
         self.grill_mode_badge.setToolTip("先澄清关键决策，再执行任务")
         self.grill_mode_badge.setVisible(False)
-        self.grill_mode_badge.clicked.connect(self.toggle_grill_mode)
+        self.grill_mode_badge.clicked.connect(
+            lambda: self.show_composer_mode_picker(anchor=self.grill_mode_badge)
+        )
         self.grill_mode_badge.closeClicked.connect(self.toggle_grill_mode)
 
         self.agent_picker_btn = SessionContextChip("专家")
@@ -30991,7 +31027,6 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         self.knowledge_refs_button.clicked.connect(self.edit_knowledge_references)
         self.knowledge_refs_button.hide()
         secondary_context_layout.addWidget(self.knowledge_refs_button)
-        secondary_context_layout.addWidget(self.grill_mode_badge)
         secondary_context_layout.addWidget(self.loop_hint)
         self.secondary_context_group.setParent(self.prompt_context_group)
         self.secondary_context_group.hide()
@@ -31064,6 +31099,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         self.composer_permission.toggled.connect(self._refresh_permission_presentation)
         primary_context_layout.addWidget(self.permission_button)
         primary_context_layout.addWidget(self.agent_picker_btn)
+        primary_context_layout.addWidget(self.grill_mode_badge)
         bind_theme(self.permission_button, self._refresh_permission_presentation, surface="composer")
         self._refresh_permission_presentation()
         self._apply_composer_toolbar_layout(compact=False)
@@ -31302,7 +31338,9 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         compact = self.input_card.width() < 820
         agent = self.agent_picker_btn
         agent_width = agent.minimumWidth() + 8 if not agent.isHidden() else 0
-        self.model_select_btn.setMaximumWidth(max(100, min(220, self.input_card.width() - 250 - agent_width)))
+        grill = self.grill_mode_badge
+        grill_width = grill.sizeHint().width() + 8 if not grill.isHidden() else 0
+        self.model_select_btn.setMaximumWidth(max(100, min(220, self.input_card.width() - 250 - agent_width - grill_width)))
         label = self.model_select_btn.property("compactLabel") if compact else self.model_select_btn.toolTip()
         if label:
             self.model_select_btn.setText(label)
@@ -31548,9 +31586,7 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         self.selected_skills_badge.setIcon(
             qta.icon("fa5s.puzzle-piece", color=DesignTokens.primary)
         )
-        self.grill_mode_badge.setIcon(
-            qta.icon("fa5s.question-circle", color=DesignTokens.primary)
-        )
+        self.grill_mode_badge.refresh_theme()
         self.agent_picker_btn.setIcon(
             qta.icon("fa5s.user-astronaut", color=DesignTokens.icon_secondary)
         )
@@ -36897,24 +36933,16 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         )
         visible = grill_state in {GRILL_MODE_ARMED, GRILL_MODE_ACTIVE}
         active = grill_state == GRILL_MODE_ACTIVE
-        round_count = min(
-            GRILL_MAX_ROUNDS,
-            max(0, int(getattr(state, "grill_round_count", 0) or 0)),
-        )
-        cycle_number = max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1
-        self.grill_mode_badge.setText(
-            f"拷问中 {cycle_number} · {round_count}/{GRILL_MAX_ROUNDS}"
-            if active
-            else "拷问模式"
-        )
+        self.grill_mode_badge.setText("拷问模式")
         self.grill_mode_badge.setRemovable(grill_state == GRILL_MODE_ARMED)
         self.grill_mode_badge.setEnabled(grill_state == GRILL_MODE_ARMED)
         self.grill_mode_badge.setToolTip(
             "正在先澄清关键决策；可使用停止按钮结束，绝不会自动执行"
             if active
-            else "先澄清关键决策，再执行下一项任务"
+            else "先澄清关键决策，仅作用于下一项任务"
         )
         self.grill_mode_badge.setVisible(visible)
+        self._apply_composer_toolbar_layout(compact=self.input_card.width() < 820)
 
     def show_composer_mode_picker(self, *, anchor=None, parent_menu=None):
         state = self.get_current_session()
@@ -36989,12 +37017,6 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         self.refresh_grill_mode_controls(state.session_id)
         self.refresh_composer_action_state()
         self.save_chat_history(session_id=state.session_id)
-        self.add_system_toast(
-            "已开启拷问模式，仅作用于下一项任务" if enabled else "已取消拷问模式",
-            "success" if enabled else "info",
-            session_id=state.session_id,
-            auto_close_ms=3000,
-        )
 
     def _finish_grill_mode(self, state, outcome):
         if not state:

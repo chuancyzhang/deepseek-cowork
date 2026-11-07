@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -35,17 +35,17 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         from main import MainWindow, initialize_desktop_theme
 
         app = QApplication([])
-        if composer_context:
+        if composer_context or composer_mode:
             initialize_desktop_theme(app)
         for font in ("msyh.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["SystemRoot"], "Fonts", font)))
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
-        if composer_context:
+        if composer_context or composer_mode:
             assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
         class WindowAudit(QObject):
-            active = writing_pages or message_context or composer_context
+            active = writing_pages or message_context or composer_context or composer_mode
             events = []
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
@@ -64,12 +64,12 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         window.skill_manager.load_skills(load_mcp_tools=False)
         window.skill_manager_ready = True
         window.refresh_selected_skill_controls()
-        window.resize((760 if focused or composer_context else 1100) if compact else 1440, 760 if compact else 900)
+        window.resize((760 if focused or composer_context or composer_mode else 1100) if compact else 1440, 760 if compact else 900)
         window.show()
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = QA_ROOT / "screenshots" / ("composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = QA_ROOT / "screenshots" / ("composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -78,6 +78,8 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             QTest.qWait(100)
 
         def capture(name):
+            if composer_mode and not name.startswith("composer-mode"):
+                return
             if composer_context and not name.startswith("composer-context"):
                 return
             if writing_pages and not name.startswith("writing-"):
@@ -112,6 +114,71 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             if writing_pages:
                 QTest.qWait(500)
             background_patch.stop()
+
+        if composer_mode:
+            import json
+            from core.clarify_mode import GRILL_MODE_ACTIVE, GRILL_MODE_ARMED, GRILL_MODE_DISABLED
+
+            state = window.get_current_session()
+            chip = window.grill_mode_badge
+            assert chip.isHidden()
+            window.input_field.setPlainText("请先帮我梳理方案中的关键决策。")
+            window.show_composer_mode_picker()
+            choices = window.composer_mode_choices
+            QTest.mouseClick(choices.viewport(), Qt.LeftButton,
+                             pos=choices.visualItemRect(choices.item(1)).center())
+            window.composer_mode_popover.close()
+            capture("composer-mode-home")
+            assert state.grill_mode_state == GRILL_MODE_ARMED
+            assert chip.isVisible() and chip.close_btn.isVisible()
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert window.input_row.grab().save(str(output / f"composer-mode-input-{suffix}.png"))
+            draft = window.input_field.toPlainText()
+            attachment = Path(temporary, "方案.txt")
+            attachment.write_text("胶囊取消时保留的附件。", encoding="utf-8")
+            window._set_prompt_files([str(attachment)])
+            QTest.mouseClick(chip.close_btn, Qt.LeftButton)
+            assert chip.isHidden() and state.grill_mode_state == GRILL_MODE_DISABLED
+            assert window.input_field.toPlainText() == draft
+            assert window._current_prompt_files() == [str(attachment)]
+            window.toggle_grill_mode()
+            window._set_prompt_files([])
+            state.messages = [{"id": "mode-preview-user", "role": "user", "content": "先讨论方案"}]
+            window.add_chat_bubble("User", "先讨论方案", source_message_id="mode-preview-user", animate=False)
+            window.normalize_session_ui(state)
+            capture("composer-mode-conversation")
+            assert not window._home_presentation_active and not window.home_scroll.isVisible()
+            for control in (chip, window.model_select_btn, window.action_btn):
+                assert window.input_card.rect().contains(control.mapTo(window.input_card, control.rect().topLeft()))
+                assert window.input_card.rect().contains(control.mapTo(window.input_card, control.rect().bottomRight()))
+            assert not chip.geometry().intersects(window.agent_picker_btn.geometry())
+            state.grill_mode_state = GRILL_MODE_ACTIVE
+            window.refresh_grill_mode_controls(state.session_id)
+            assert chip.isVisible() and chip.close_btn.isHidden() and not chip.main_btn.isEnabled()
+            capture("composer-mode-active")
+            state.grill_mode_state = GRILL_MODE_ARMED
+            window.refresh_grill_mode_controls(state.session_id)
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert chip.isVisible() and chip.close_btn.isVisible()
+            assert window.input_field.toPlainText() == draft
+            window.create_new_session(make_current=True)
+            settle()
+            assert chip.isHidden()
+            window.set_current_session(state.session_id)
+            settle()
+            assert chip.isVisible() and window.input_field.toPlainText() == draft
+            assert not audit.events, audit.events
+            print(json.dumps({"platform": app.platformName(), "qt_scale_factor": scale,
+                              "device_pixel_ratio": window.devicePixelRatioF(),
+                              "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                              "native_window_events": audit.events,
+                              "theme_preview_persisted": False}, ensure_ascii=False), flush=True)
+            audit.active = False
+            finish()
+            return
 
         if focused:
             capture("home-empty")
@@ -348,5 +415,6 @@ if __name__ == "__main__":
     parser.add_argument("--writing-pages", action="store_true", help="Verify writing pages, expanded conversation tabs and compact browser controls")
     parser.add_argument("--native", action="store_true", help="Use real Windows widgets instead of offscreen rendering")
     parser.add_argument("--composer-context", action="store_true", help="Verify typed composer tags and knowledge selection without external services")
+    parser.add_argument("--composer-mode", action="store_true", help="Verify the removable mode capsule, draft isolation and toolbar layout")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode)

@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 
 from core.conversation_render import build_conversation_render_spans
@@ -31,6 +32,9 @@ class HistoryPerformanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # Windows font discovery can copy registered user fonts into LOCALAPPDATA.
+        # Initialize it before per-case data directories that are deleted in cleanup.
+        QFontDatabase.families()
 
     def setUp(self):
         temporary_root = Path(__file__).resolve().parents[1] / ".tmp" / "history-loading-tests"
@@ -84,7 +88,7 @@ class HistoryPerformanceTests(unittest.TestCase):
                 before = copy.deepcopy(self.state.messages)
                 if entry == "directory":
                     from ui.primitives import ProductPopover
-                    anchor = next(button for button in self.state.session_widget.findChildren(QPushButton)
+                    anchor = next(button for button in self.state.header_tools.findChildren(QPushButton)
                                   if button.accessibleName() == "历史提问")
                     self.window._show_question_directory(anchor)
                     popover = next(p for p in self.window.findChildren(ProductPopover) if p.isVisible())

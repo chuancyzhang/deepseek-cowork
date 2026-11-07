@@ -144,7 +144,9 @@ class WorkspacePresentationTests(unittest.TestCase):
         window.sync_context_drawer_layout()
         QTest.qWait(60)
         self.assertTrue(window.composer_context_tags.isVisible())
-        self.assertGreater(window.right_sidebar.y(), window.top_bar_widget.geometry().bottom())
+        self.assertEqual(window.right_sidebar.y(), window.top_bar_widget.y())
+        for control in (window.workspace_title_label, state.header_tools):
+            self.assertLess(control.mapTo(window.main_container, control.rect().bottomRight()).x(), window.right_sidebar.x())
         composer_position = window.input_card.mapTo(window, QPoint(0, 0))
         header_position = window.top_bar_widget.pos()
         bar = state.chat_scroll.verticalScrollBar()
@@ -164,7 +166,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         state = window.get_current_session()
         state.messages = [{"id": f"question-{index}", "role": "user", "content": "需要完整保留的长问题标题" * 20} for index in range(30)]
         window._retire_session_empty_state(state, reason="test_directory_fixture")
-        anchor = next(button for button in state.session_widget.findChildren(QPushButton) if button.accessibleName() == "历史提问")
+        anchor = next(button for button in state.header_tools.findChildren(QPushButton) if button.accessibleName() == "历史提问")
         window._show_question_directory(anchor)
         QTest.qWait(50)
         popover = next(item for item in window.findChildren(ProductPopover) if item.isVisible())
@@ -175,6 +177,41 @@ class WorkspacePresentationTests(unittest.TestCase):
         with patch.object(window, "jump_to_question") as jump:
             entries[-1].click()
             jump.assert_called_once_with("question-29")
+
+    def test_header_tools_keep_session_ownership_and_popovers_close_on_switch(self):
+        window = self.window
+        first = window.get_current_session()
+        window.add_chat_bubble("User", "第一段对话", animate=False)
+        window.input_field.setPlainText("第一段草稿")
+        first.token_usage_label.click()
+        self.assertTrue(first.token_usage_label._popover.isVisible())
+        second_id = window.create_new_session(make_current=True)
+        second = window.get_session(second_id)
+        window.add_chat_bubble("User", "第二段对话", animate=False)
+        QTest.qWait(30)
+        self.assertIs(window.session_tools_stack.currentWidget(), second.header_tools)
+        self.assertFalse(first.token_usage_label._popover.isVisible())
+        self.assertFalse(first.header_tools.isVisible())
+        self.assertTrue(second.token_usage_label.isVisible())
+        # Background updates must not replace the current session's header.
+        first.token_usage_label.setText("后台用量 300K")
+        self.assertNotIn("300K", second.token_usage_label.accessibleDescription())
+        window.activate_session(first.session_id)
+        self.assertIs(window.session_tools_stack.currentWidget(), first.header_tools)
+        self.assertEqual(window.input_field.toPlainText(), "第一段草稿")
+        search = next(b for b in first.header_tools.findChildren(QPushButton) if b.accessibleName() == "对话内搜索")
+        search.click()
+        self.assertTrue(window.conversation_search.isVisible())
+        window.show_product_page(window.PAGE_SETTINGS)
+        self.assertFalse(window.session_tools_stack.isVisible())
+        window.show_product_page(window.PAGE_CONVERSATION)
+        self.assertIs(window.session_tools_stack.currentWidget(), first.header_tools)
+        tools = first.header_tools
+        window.close_session_tab(window.session_tabs.indexOf(first.session_widget))
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(isValid(tools))
+        self.assertNotIn(first.session_id, window.sessions)
+        self.assertIs(window.session_tools_stack.currentWidget(), second.header_tools)
 
     def test_context_overview_keeps_full_request_available(self):
         window = self.window

@@ -1,7 +1,7 @@
 """Presentation-only controls for the conversation workspace."""
 
 from PySide6.QtCore import QRect, QSize, Qt, Signal, QTimer, QEvent
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPalette, QPen
 from PySide6.QtWidgets import (
     QLabel, QLayout, QPushButton, QStyle, QStyleOptionButton, QStylePainter,
     QFrame, QHBoxLayout, QToolButton, QVBoxLayout, QSizePolicy, QWidget, QScrollArea, QStyledItemDelegate,
@@ -505,6 +505,15 @@ class EditableConversationTitle(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumWidth(0)
         self.setTextFormat(Qt.PlainText)
+
+    def paintEvent(self, event):
+        # Keep text() and accessibility complete for rename; elide only paint.
+        painter = QStylePainter(self)
+        painter.drawItemText(
+            self.contentsRect(), int(self.alignment()), self.palette(), self.isEnabled(),
+            self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.contentsRect().width()),
+            QPalette.WindowText,
+        )
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):

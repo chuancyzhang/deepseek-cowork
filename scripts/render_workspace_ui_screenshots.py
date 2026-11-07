@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False, compact_workspace=False):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -35,17 +35,17 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         from main import MainWindow, initialize_desktop_theme
 
         app = QApplication([])
-        if composer_context or composer_mode:
+        if composer_context or composer_mode or compact_workspace:
             initialize_desktop_theme(app)
         for font in ("msyh.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["SystemRoot"], "Fonts", font)))
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
-        if composer_context or composer_mode:
+        if composer_context or composer_mode or compact_workspace:
             assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
         class WindowAudit(QObject):
-            active = writing_pages or message_context or composer_context or composer_mode
+            active = writing_pages or message_context or composer_context or composer_mode or compact_workspace
             events = []
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
@@ -69,7 +69,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = QA_ROOT / "screenshots" / ("composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = QA_ROOT / "screenshots" / ("compact-workspace" if compact_workspace else "composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -78,6 +78,8 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             QTest.qWait(100)
 
         def capture(name):
+            if compact_workspace and not name.startswith("compact-"):
+                return
             if composer_mode and not name.startswith("composer-mode"):
                 return
             if composer_context and not name.startswith("composer-context"):
@@ -111,7 +113,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             window.deleteLater()
             app.processEvents()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            if writing_pages:
+            if writing_pages or compact_workspace:
                 QTest.qWait(500)
             background_patch.stop()
 
@@ -253,6 +255,91 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
                       "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
                       "native_window_events": audit.events, "theme_preview_persisted": False}
             print(json.dumps(report, ensure_ascii=False), flush=True)
+            finish()
+            return
+        if compact_workspace:
+            import json
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 10
+                while not predicate() and time.monotonic() < deadline:
+                    QTest.qWait(20)
+                assert predicate()
+
+            def evaluate(script):
+                results = []
+                window.deliverable_web_view.page().runJavaScript(script, results.append)
+                wait_for(lambda: bool(results))
+                return results[0]
+
+            source = Path(window._workspace_dir_for_state(current)) / "产品讨论纪要.md"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            content = ("# 把工作空间留给内容\n\n"
+                       "> 好的界面让用户知道 **当前状态**，也知道下一步可以做什么。\n\n"
+                       "## 本次结论\n\n标题和工作区标签齐顶，常用操作仍然就近可达。正文保留清晰的段落与阅读间距。\n\n"
+                       "---\n\n## 验证重点\n\n1. 展开和恢复工作区，不丢失对话草稿。\n"
+                       "2. 文件编辑、保存与取消沿用原有规则。\n3. 切换主题保留阅读位置。\n\n"
+                       "```python\nprint('内容完整保留')\n```\n\n"
+                       "| 状态 | 下一步 |\n| --- | --- |\n| 文件已更新 | 点击刷新 |\n| 编辑中 | 保存或取消 |\n\n"
+                       + "阅读区域会保留原文中的标题、引用、列表、链接和代码。\n\n" * 12)
+            source.write_text(content, encoding="utf-8")
+            window.input_field.setPlainText("这段草稿在展开、切换文件和恢复分栏后仍应保留。")
+            window.show_context_drawer(window.RIGHT_TAB_FILES)
+            window.set_file_navigator_visible(False, reason="compact_workspace_qa")
+            window.select_deliverable(str(source))
+            wait_for(lambda: not window.deliverable_render_loading and window.deliverable_web_view is not None)
+            capture("compact-split")
+            assert window.right_sidebar.y() == window.top_bar_widget.y()
+            for control in (window.workspace_title_label, current.header_tools):
+                assert control.mapTo(window.main_container, control.rect().bottomRight()).x() < window.right_sidebar.x()
+            width = window.right_sidebar.width()
+            window.toggle_deliverable_preview_expanded()
+            capture("compact-markdown")
+            metrics = evaluate("""(() => { const content = document.querySelector('.markdown-document');
+                const quote = document.querySelector('blockquote');
+                return JSON.stringify({font: getComputedStyle(document.body).fontFamily,
+                  padding: getComputedStyle(content).paddingLeft, width: content.getBoundingClientRect().width,
+                  quotePadding: getComputedStyle(quote).paddingLeft,
+                  overflow: document.documentElement.scrollWidth > window.innerWidth}); })()""")
+            assert not json.loads(metrics)["overflow"], metrics
+            evaluate("window.scrollTo(0, 150); window.scrollY")
+            scroll = evaluate("window.scrollY")
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            assert evaluate("window.scrollY") == scroll
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert evaluate("window.scrollY") == scroll
+            window.browser_workbench.chat_button.click()
+            capture("compact-conversation")
+            assert window.input_field.isVisible()
+            assert window.input_field.toPlainText().startswith("这段草稿")
+            window.select_deliverable(str(source))
+            window.begin_deliverable_edit()
+            wait_for(lambda: window.deliverable_edit_state == "ready")
+            capture("compact-markdown-edit")
+            assert window.deliverable_text_editor.toPlainText() == content
+            window.cancel_deliverable_edit()
+            wait_for(lambda: not window.deliverable_render_loading)
+            window.toggle_deliverable_preview_expanded()
+            settle()
+            assert window.right_sidebar.width() == width
+            assert window.input_field.toPlainText().startswith("这段草稿")
+            assert source.read_text(encoding="utf-8") == content
+            window.hide_context_drawer()
+            capture("compact-conversation-wide")
+            window.show_product_page(window.PAGE_SETTINGS)
+            assert not window.session_tools_stack.isVisible()
+            window.show_product_page(window.PAGE_CONVERSATION)
+            assert window.session_tools_stack.currentWidget() == current.header_tools
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events, "markdown": json.loads(metrics),
+                      "theme_preview_persisted": False}
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+            assert not audit.events, audit.events
+            audit.active = False
             finish()
             return
         if writing_pages:
@@ -416,5 +503,6 @@ if __name__ == "__main__":
     parser.add_argument("--native", action="store_true", help="Use real Windows widgets instead of offscreen rendering")
     parser.add_argument("--composer-context", action="store_true", help="Verify typed composer tags and knowledge selection without external services")
     parser.add_argument("--composer-mode", action="store_true", help="Verify the removable mode capsule, draft isolation and toolbar layout")
+    parser.add_argument("--compact-workspace", action="store_true", help="Verify aligned headers, Markdown reading/editing and theme continuity")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode, args.compact_workspace)

@@ -133,6 +133,45 @@ class DeliverableEditorUiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "editor_assets_missing")
 
+    def test_markdown_theme_refresh_keeps_draft_selection_scroll_and_saved_content(self):
+        from PySide6.QtGui import QTextCursor
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "阅读与编辑.md")
+            original = "# 标题\n\n> 引用中的 **重点**。\n\n---\n\n" + "正文与 [链接](https://example.com)。\n\n" * 45
+            source.write_text(original, encoding="utf-8")
+            self.window.resize(1200, 800)
+            self.window._startup_hydration_scheduled = True
+            self.window._background_services_scheduled = True
+            self.window.show()
+            self.window.show_context_drawer(self.window.RIGHT_TAB_FILES)
+            self.window.select_deliverable(str(source))
+            self.window.begin_deliverable_edit()
+            self._wait_until(lambda: self.window.deliverable_edit_state == "ready")
+            draft = original + "\n## 编辑后保留的内容\n\n- 最后一项\n"
+            self.window.deliverable_text_editor.setPlainText(draft)
+            preview = self.window.deliverable_markdown_preview
+            self._wait_until(lambda: preview.verticalScrollBar().maximum() > 0)
+            cursor = preview.textCursor()
+            cursor.setPosition(0)
+            cursor.setPosition(2, QTextCursor.KeepAnchor)
+            preview.setTextCursor(cursor)
+            selected = preview.textCursor().selectedText()
+            preview.verticalScrollBar().setValue(100)
+            scroll = preview.verticalScrollBar().value()
+            self.window.refresh_deliverable_editor_theme()
+            self.assertEqual(preview.textCursor().selectedText(), selected)
+            self.assertEqual(preview.verticalScrollBar().value(), scroll)
+            self.assertEqual(self.window.deliverable_text_editor.toPlainText(), draft)
+            self.assertTrue(self.window.deliverable_edit_dirty)
+            self.assertIn("最后一项", preview.toPlainText())
+            self.window.save_deliverable_edit()
+            self._wait_until(lambda: self.window.deliverable_save_worker is None and not self.window.deliverable_edit_dirty)
+            self.assertEqual(source.read_text(encoding="utf-8"), draft)
+            self.window.cancel_deliverable_edit()
+            self.assertEqual(self.window.deliverable_edit_state, "idle")
+            self.assertEqual(source.read_text(encoding="utf-8"), draft)
+
     def test_python_preview_edit_focus_and_layout_restore(self):
         with tempfile.TemporaryDirectory() as directory:
             source = os.path.join(directory, "script.py")

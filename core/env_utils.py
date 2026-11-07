@@ -49,7 +49,8 @@ def get_app_data_dir():
     elif sys.platform == 'darwin':
         data_dir = os.path.expanduser(f"~/Library/Application Support/{app_name}")
     else: # Linux/Unix
-        data_dir = os.path.expanduser(f"~/.local/share/{app_name}")
+        xdg_data = os.environ.get("XDG_DATA_HOME", "")
+        data_dir = os.path.join(xdg_data if os.path.isabs(xdg_data) else os.path.expanduser("~/.local/share"), app_name)
         
     os.makedirs(data_dir, exist_ok=True)
     return data_dir

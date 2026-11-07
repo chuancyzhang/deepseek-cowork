@@ -1,4 +1,4 @@
-"""Interactive Windows terminals. PTYs live independently of visible widgets."""
+"""Interactive ConPTY/POSIX terminals, independent of visible widgets."""
 from __future__ import annotations
 
 import ctypes
@@ -95,6 +95,15 @@ class WindowsProcessJob:
 def terminal_profiles():
     from .sandbox_runtime import get_runtime_executable
     result = []
+    if os.name != "nt":
+        seen = set()
+        for name, candidate in (("default", os.environ.get("SHELL", "")),
+                                ("zsh", shutil.which("zsh")), ("bash", get_runtime_executable("bash"))):
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK) and candidate not in seen:
+                seen.add(candidate)
+                result.append({"id": name, "name": os.path.basename(candidate),
+                               "executable": candidate, "args": ["-l", "-i"]})
+        return result
     bash = get_runtime_executable("bash")
     if bash and os.path.isfile(bash):
         result.append({"id": "bash", "name": "Git Bash", "executable": bash,
@@ -146,9 +155,6 @@ class TerminalSession:
     def _run(self):
         log.info("terminal.start session=%s tab=%s shell=%s", self.session_id, self.tab_id, self.profile["id"])
         try:
-            if os.name != "nt":
-                raise WorkbenchError("unsupported", "交互终端需要 Windows ConPTY。")
-            from winpty import PTY, Backend
             from .sandbox_runtime import build_sandbox_env
             if not os.path.isdir(self.cwd):
                 raise WorkbenchError("cwd_missing", "终端启动目录已不存在。")
@@ -157,11 +163,17 @@ class TerminalSession:
             env["PROMPT_DIRTRIM"] = "2"
             # Use the native nonblocking API. PtyProcess adds a blocking socket
             # reader whose shutdown can wait forever on an otherwise idle PTY.
-            self.process = PTY(self._cols, self._rows, backend=Backend.ConPTY)
-            self.process.spawn(self.profile["executable"],
-                cmdline=" " + subprocess.list2cmdline(terminal_launch_args(self.profile)), cwd=self.cwd,
-                env="\0".join(f"{key}={value}" for key, value in env.items()) + "\0")
-            self.job = WindowsProcessJob(self.process.pid)
+            if os.name == "nt":
+                from winpty import PTY, Backend
+                self.process = PTY(self._cols, self._rows, backend=Backend.ConPTY)
+                self.process.spawn(self.profile["executable"],
+                    cmdline=" " + subprocess.list2cmdline(terminal_launch_args(self.profile)), cwd=self.cwd,
+                    env="\0".join(f"{key}={value}" for key, value in env.items()) + "\0")
+                self.job = WindowsProcessJob(self.process.pid)
+            else:
+                from .posix_terminal import PosixPTY
+                self.process = PosixPTY(self.profile["executable"], terminal_launch_args(self.profile),
+                                        self.cwd, env, self._cols, self._rows)
             if self._closed.is_set():
                 return
             self.status = "running"
@@ -183,15 +195,19 @@ class TerminalSession:
                 self.status, self.error = "failed", str(exc)
                 log.exception("terminal.error session=%s tab=%s", self.session_id, self.tab_id)
         finally:
+            cleanup_error = None
             if self.job:
                 self.job.close()
             if self.process:
                 try:
                     self.process.cancel_io()
-                except Exception:
+                except Exception as exc:
+                    cleanup_error = exc
                     log.exception("terminal.cleanup_error tab=%s", self.tab_id)
             if self._closed.is_set():
                 self.status = "closed"
+            if cleanup_error is not None and os.name != "nt":
+                self.status, self.error = "failed", "终端清理未完成，请检查诊断记录后重试。"
             log.info("terminal.finish session=%s tab=%s status=%s exit=%s", self.session_id, self.tab_id, self.status, self.exit_code)
 
     def read(self, cursor=0, limit=32768):

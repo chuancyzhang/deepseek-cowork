@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from .platform_capabilities import is_windows
 import sqlite3
 import threading
 import uuid
@@ -98,6 +99,8 @@ class BrowserBackendCoordinator:
             db.close()
 
     def _desired(self):
+        if not is_windows():
+            return INTERNAL
         if self.config_path and self.config_path.exists():
             with self.config_path.open(encoding="utf-8") as stream:
                 value = json.load(stream).get(CONFIG_KEY)
@@ -136,6 +139,8 @@ class BrowserBackendCoordinator:
         return (row["pid"] == os.getpid() and row["process_token"] != _PROCESS_TOKEN) or not _alive(row["pid"])
 
     def save(self, enabled):
+        if not is_windows() and enabled is not True:
+            raise BrowserBackendError("unsupported", "此平台首版只支持内置浏览器自动化。")
         if self.config is None:
             raise BrowserBackendError("unavailable", "浏览器设置存储不可用。")
         # Serialize preference writes against lease acquisition in both processes.
@@ -156,6 +161,8 @@ class BrowserBackendCoordinator:
         return result
 
     def acquire(self, session, run, snapshot, backend):
+        if not is_windows() and backend != INTERNAL:
+            raise BrowserBackendError("unsupported", "此平台首版不支持外部浏览器自动化。")
         with self._transaction() as db:
             if db.execute("SELECT 1 FROM finished_runs WHERE session=? AND run=?", (session, run)).fetchone():
                 raise BrowserBackendError("browser_run_finished", "本轮浏览器任务已结束，旧调用不会再次执行。")
@@ -301,6 +308,8 @@ def browser_operation(context, backend):
 
 
 def run_backend(run_context=None, config=None):
+    if not is_windows():
+        return INTERNAL
     value = (run_context or {}).get("browser_backend")
     if isinstance(value, dict) and value.get("backend") in {INTERNAL, EXTERNAL}:
         return value["backend"]

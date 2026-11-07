@@ -480,6 +480,9 @@ class SkillManager:
         }
 
     def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        from .platform_capabilities import skill_unavailable_reason
+        if skill_unavailable_reason(skill_name):
+            return False
         if skill_name in {"browser-automation", "workbench"} and self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_OPTIONAL:
             # Both are registered; per-run routing prevents hot-unloading active tools.
             return True
@@ -1028,6 +1031,9 @@ class SkillManager:
         return deduped
 
     def _register_tool(self, skill_name, tool_name, func, description=None, tool_kind="legacy_function"):
+        from .platform_capabilities import tool_unavailable_reason
+        if tool_unavailable_reason(tool_name):
+            return
         if tool_name in self.tools:
             print(
                 f"[SkillManager] Duplicate tool '{tool_name}' from skill '{skill_name}' skipped; already provided by '{self.tool_to_skill_map.get(tool_name)}'."
@@ -1106,6 +1112,9 @@ class SkillManager:
         if not isinstance(export, dict):
             return
         tool_name = str(export.get("name") or "").strip()
+        from .platform_capabilities import tool_unavailable_reason
+        if tool_unavailable_reason(tool_name):
+            return
         func = export.get("handler")
         if not tool_name or not callable(func):
             return
@@ -1570,7 +1579,15 @@ class SkillManager:
     def get_skill_config_fields(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
-        return json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+        fields = json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+        from .platform_capabilities import is_windows
+        if skill_name == "speech-to-text" and not is_windows():
+            for field in fields:
+                if field.get("name") == "ASR_BACKEND":
+                    field["default"] = "openai_compatible"
+                    field["options"] = [option for option in field.get("options", []) if option.get("value") != "local"]
+                    field["help"] = "此平台仅支持主动配置的远程接口；转录时音频将上传到该接口。"
+        return fields
 
     def get_skill_mcp_server_presets(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
@@ -1651,6 +1668,10 @@ class SkillManager:
             elif field.get("required"):
                 missing.append(name)
         config_errors = self._skill_config_requirement_errors(skill_name, values=values)
+        from .platform_capabilities import skill_unavailable_reason
+        platform_issue = skill_unavailable_reason(skill_name)
+        if platform_issue:
+            config_errors.append(platform_issue)
         if issue:
             config_errors.append(issue)
         return {
@@ -2118,6 +2139,15 @@ class SkillManager:
         meta, body = self._parse_skill_md_content(md_path) if os.path.exists(md_path) else ({}, "")
         spec = self._load_skill_json(skill_path)
         tool_refs = self._parse_tool_refs(meta, spec)
+        from .platform_capabilities import is_windows, tool_unavailable_reason
+        if not is_windows():
+            tool_refs = [name for name in tool_refs if not tool_unavailable_reason(name)]
+            if skill_name == "history-query":
+                meta["allowed-tools"] = ", ".join(tool_refs)
+                body = "Use query_history to search local chat history by keywords and date ranges. Vector indexing and vector search are unavailable on this platform."
+            elif skill_name == "speech-to-text":
+                body = ("On this platform only the explicitly configured remote transcription endpoint is available. "
+                        "Do not install or call the local transcription pipeline. Audio upload requires the saved remote configuration.\n\n" + body)
         kind = self._normalize_skill_kind(meta, spec)
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
@@ -2200,6 +2230,10 @@ class SkillManager:
             return None
 
     def _prepare_skill_dependencies(self, skill_name, skill_path):
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if issue:
+            return {"ok": False, "message": issue, "unsupported_platform": True}
         spec = self._load_skill_json(skill_path)
         if not isinstance(spec, dict):
             return {"ok": True, "message": "No dependency metadata."}
@@ -2236,6 +2270,10 @@ class SkillManager:
 
     def ensure_skill_dependencies_ready(self, skill_name, progress=None, observability=None, retry=False):
         """Prepare one loaded Skill's declared dependencies through the process coordinator."""
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if issue:
+            return {"ok": False, "message": issue, "unsupported_platform": True}
         normalized_name = str(skill_name or "").strip()
         record = self.skill_records.get(normalized_name)
         if not record:
@@ -2964,6 +3002,11 @@ class SkillManager:
                 info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
                 if info.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
                     info["type"] = self.BUNDLED_PLUGIN_SOURCE_TYPE
+                from .platform_capabilities import skill_unavailable_reason
+                issue = skill_unavailable_reason(skill_name)
+                if issue:
+                    info.update(enabled=False, platform_unavailable=issue)
+                info["config_fields"] = self.get_skill_config_fields(skill_name)
                 all_skills.append(info)
                 seen.add(skill_name)
         for skill_name, record in self.skill_records.items():
@@ -3666,6 +3709,11 @@ class SkillManager:
         from .execution_authorization import invoke, current_authorization
         record = self.tool_registry.get(name)
         resolved_name = record.name if record else str(name or "").strip()
+        from .platform_capabilities import skill_unavailable_reason, tool_unavailable_reason
+        platform_issue = tool_unavailable_reason(resolved_name) or skill_unavailable_reason(
+            (args or {}).get("skill_name") if resolved_name == "run_skill_script" else self.tool_to_skill_map.get(resolved_name))
+        if platform_issue:
+            return {"ok": False, "status": "unsupported_platform", "executed": False, "error": platform_issue}
         if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
         from .connection_retirement import skill_issue

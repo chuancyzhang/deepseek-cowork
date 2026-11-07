@@ -1691,6 +1691,9 @@ class ConfigManager:
         return self._set_config_value(key, value)
 
     def is_skill_enabled(self, skill_name, default_enabled=True):
+        from .platform_capabilities import skill_unavailable_reason
+        if skill_unavailable_reason(skill_name):
+            return False
         if skill_name == "browser-automation":
             from .browser_backend import BrowserBackendCoordinator, EXTERNAL
             return BrowserBackendCoordinator(self).snapshot()["backend"] == EXTERNAL
@@ -1709,6 +1712,10 @@ class ConfigManager:
         self.set("data_security", validate_config(value))
 
     def set_skill_enabled(self, skill_name, enabled, *, persist_strict=False):
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if enabled and issue:
+            raise ValueError(issue)
         if skill_name == "browser-automation":
             # Browser selection has one saved switch; legacy enable calls cannot
             # overwrite it or create a second, contradictory preference.

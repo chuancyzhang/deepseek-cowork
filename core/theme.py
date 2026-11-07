@@ -25,6 +25,15 @@ from .theme_service import (
 )
 
 
+def _native_theme_fonts():
+    if os.name == "nt":
+        return {}  # Preserve the existing Windows defaults and validation.
+    return {
+        "default_font_family": QFontDatabase.systemFont(QFontDatabase.GeneralFont).family(),
+        "default_mono_font_family": QFontDatabase.systemFont(QFontDatabase.FixedFont).family(),
+    }
+
+
 class DesignTokens:
     primary = "#404040"
     primary_hover = "#333333"
@@ -564,7 +573,7 @@ class ThemeRuntimeManager(QObject):
                 if candidate:
                     appearance = repository.load_appearance()
                     effective = {**candidate, "overrides": {**(candidate.get("overrides") or {}), **appearance["reading"]}}
-                    resolved = resolve_theme(effective, default_design_tokens())
+                    resolved = resolve_theme(effective, default_design_tokens(), **_native_theme_fonts())
                     resolved.update({key: copy.deepcopy(candidate.get(key) or {})
                                      for key in ("assets", "workspace_scene", "surfaces", "components", "content")})
                     resolved["_asset_bytes"] = assets
@@ -700,7 +709,7 @@ class ThemeRuntimeManager(QObject):
                     **(profile or {}),
                     **validated_manifest,
                 }
-            resolved = resolve_theme(profile, default_design_tokens())
+            resolved = resolve_theme(profile, default_design_tokens(), **_native_theme_fonts())
             append_theme_log(
                 self.repository.data_dir,
                 "apply_run",

@@ -3590,6 +3590,11 @@ class CapabilityWorkbenchDialog(QDialog):
         # Keep ownership explicit even for simple setup pages that hide the tabs.
         # An unparented hidden QTabWidget can outlive its dialog ownership path.
         self.tabs = QTabWidget(self)
+        if self.skill.get("platform_unavailable"):
+            self.tabs.hide()
+            layout.addWidget(ProductInlineNotice(self.skill["platform_unavailable"], "neutral", parent=self))
+            layout.addStretch()
+            return
         if self.simple_mode and self._is_browser_automation():
             self.tabs.hide()
             self._build_browser_automation_setup(layout)
@@ -4502,6 +4507,9 @@ class CapabilityWorkbenchDialog(QDialog):
             root_layout.addWidget(ProductInlineNotice(access_note, "neutral"))
 
     def _build_simple_actions(self, root_layout):
+        if self.skill.get("platform_unavailable"):
+            root_layout.addWidget(ProductInlineNotice(self.skill["platform_unavailable"], "neutral", parent=self))
+            return
         actions = ProductActionBar()
         user_owned = False
         try:
@@ -4539,6 +4547,9 @@ class CapabilityWorkbenchDialog(QDialog):
 
     def _set_simple_enabled(self, enabled):
         name = self.skill_name
+        from core.platform_capabilities import skill_unavailable_reason
+        if enabled and skill_unavailable_reason(name):
+            return False
         if name == "browser-automation":
             return self._open_browser_mode_settings()
         if (
@@ -11758,7 +11769,8 @@ class AppVariableManager(QWidget):
         self.create_value_input.setPlaceholderText("输入 AK / token / key" if is_secret else "输入变量值")
         self.create_allow_ai_read_check.setVisible(is_secret)
         self.create_notice.set_text(
-            "凭据使用 Windows DPAPI 加密。授权 AI 读取后，明文仍会发送给当前模型并进入会话历史。"
+            ("凭据使用 Windows DPAPI 加密。" if os.name == "nt" else "凭据使用系统密钥环保护的密钥加密。")
+            + "授权 AI 读取后，明文仍会发送给当前模型并进入会话历史。"
             if is_secret else
             "普通变量可插入输入框，也可由本地主会话按准确名称读取。",
             "warning" if is_secret else "neutral",
@@ -13363,6 +13375,13 @@ class SettingsDialog(QDialog):
     def update_component_row(self, component_id, status):
         row = self.component_rows.get(component_id)
         if not row:
+            return
+        if component_id == SPEECH_TO_TEXT_COMPONENT_ID and os.name != "nt":
+            row["status"].setText("此平台仅支持主动配置的远程语音接口，本地组件暂不提供。")
+            row["action"].setText("暂不支持")
+            row["action"].setEnabled(False)
+            row["repair"].hide()
+            row["progress"].hide()
             return
         status = dict(status or {})
         if not status.get("known"):

@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QTimer, Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton
 
 from core.browser_backend import BrowserBackendCoordinator, INTERNAL
+from core.platform_capabilities import is_windows
 from core.theme import DesignTokens, bind_theme
 from ui.primitives import product_button_style, ProductMessageDialog
 
@@ -29,26 +30,33 @@ class BrowserAutomationSettings(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(12)
-        self.title = QLabel("内置浏览器自动化 · 实验功能")
+        self.title = QLabel("内置浏览器自动化 · 实验功能", self)
         self.title.setObjectName("BrowserAutomationHeading")
         layout.addWidget(self.title)
-        note = QLabel("让 AI 在右侧浏览器中阅读和操作网页，你可以查看过程并随时接管。关闭时使用外部 BrowserSkill，开启时只使用内置网页工具。")
+        note = QLabel("让 AI 在右侧浏览器中阅读和操作网页，你可以查看过程并随时接管。" +
+                      ("关闭时使用外部 BrowserSkill，开启时只使用内置网页工具。" if is_windows() else
+                       "此平台首版仅提供内置浏览器，不接管外部浏览器及其登录会话。"), self)
         note.setWordWrap(True)
         layout.addWidget(note)
         self.enabled = QCheckBox("启用内置浏览器自动化")
         self.enabled.setChecked(self.saved)
+        self.enabled.setEnabled(is_windows())
         layout.addWidget(self.enabled)
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         timing = QLabel("默认关闭。保存后立即切换；有浏览器任务运行时，等待已有任务结束再切换，期间不启动新的浏览器任务。手动浏览、文件和终端不受影响。")
         timing.setWordWrap(True)
+        if not is_windows():
+            timing.setText("当前平台固定使用内置浏览器。手动浏览、文件和终端不受影响。")
         layout.addWidget(timing)
         row = QHBoxLayout()
         self.apply_button = QPushButton("保存设置")
         self.apply_button.clicked.connect(self.save)
         self.reset_button = QPushButton("撤销更改")
         self.reset_button.clicked.connect(self.reset)
+        self.apply_button.setVisible(is_windows())
+        self.reset_button.setVisible(is_windows())
         row.addWidget(self.apply_button)
         row.addWidget(self.reset_button)
         row.addStretch()

@@ -9,6 +9,7 @@ from core.app_version import APP_VERSION, compare_versions
 from core.update_coordinator import release_notes_text, update_log_directory
 from core.runtime_logs import log_path as runtime_log_path
 from core.theme import DesignTokens, bind_theme
+from core.platform_capabilities import is_windows
 from ui.primitives import product_button_style
 
 
@@ -44,7 +45,8 @@ class UpdatePanel(QWidget):
         self.hint = QLabel("更新时应用会短暂关闭，完成后自动重新打开。", self)
         self.hint.setWordWrap(True)
         if not coordinator.install_enabled:
-            self.hint.setText("当前为源码运行模式，可以检查版本；自动安装仅适用于 Windows 打包版。")
+            self.hint.setText("当前为源码运行模式，可以检查版本；自动安装仅适用于 Windows 打包版。" if is_windows() else
+                              "此平台提供更新检查和安装包下载。下载完成后，请关闭应用并手动安装。")
         layout.addWidget(self.hint)
         self.notes_title = QLabel("本次更新", self)
         self.notes = QLabel(self)
@@ -105,8 +107,11 @@ class UpdatePanel(QWidget):
             self.primary.setText("重新选择安装包" if state.get("source") == "local" else "重试")
         self.local.setVisible(not (phase == "error" and state.get("source") == "local"))
         if not self.coordinator.install_enabled and available:
-            self.primary.setText("查看新版")
-        self.primary.setEnabled(phase != "installing" and (not busy or ready or available) and not state.get("install_requested"))
+            self.primary.setText("查看新版" if is_windows() else "打开安装包目录" if phase == "downloaded" else "重新检查")
+        if not is_windows():
+            self.local.hide()
+            self.primary.setEnabled(not busy)
+        self.primary.setEnabled(phase != "installing" and (not busy or (is_windows() and (ready or available))) and not state.get("install_requested"))
         self.local.setEnabled(self.coordinator.install_enabled and phase != "installing")
         self.cancel_button.setVisible((busy and phase != "installing") or bool(state.get("can_cancel_install")))
         self.cancel_button.setText("取消更新" if state.get("install_requested") or phase == "installing" else "取消验证" if phase == "validating" else "取消下载")
@@ -149,7 +154,15 @@ class UpdatePanel(QWidget):
     def act(self):
         state = self.coordinator.snapshot()
         result = state.get("result") or {}
-        if not self.coordinator.install_enabled and result.get("update_available"):
+        if not is_windows():
+            if state.get("phase") == "downloaded" and result.get("zip_path"):
+                from core.process_utils import reveal_path_in_file_manager
+                opened = reveal_path_in_file_manager(result["zip_path"])
+                if not opened.ok:
+                    self.status.setText("无法打开安装包目录，请从详情复制路径后打开。")
+            else:
+                self.coordinator.check()
+        elif not self.coordinator.install_enabled and result.get("update_available"):
             QDesktopServices.openUrl(QUrl(result["release"]["html_url"]))
         elif state.get("phase") == "error":
             if state.get("source") == "local":

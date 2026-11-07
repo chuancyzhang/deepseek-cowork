@@ -15,7 +15,7 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from .env_utils import get_app_data_dir
-from .variable_store import WindowsDpapiProtector
+from .credential_protection import create_credential_protector
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ class KnowledgeStore:
 
     def crypt(self):
         if self.protector is None:
-            self.protector = WindowsDpapiProtector()
+            self.protector = create_credential_protector(self.data_dir)
         return self.protector
 
     def connection(self, db=None, secret=False, source="weknora"):

@@ -79,8 +79,11 @@ def load_prepared(root, current_version, connection=None, source_config=None):
     if result.get("sha256") != backend._hash_file(zip_path):
         return None
     # The ZIP is verified; staging may have been modified since the previous run.
-    result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
-    backend.validate_online_package(result["staged_app_dir"], connection)
+    if backend.is_windows():
+        result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
+        backend.validate_online_package(result["staged_app_dir"], connection)
+    else:
+        result["manual_install"] = True
     result["cache_reused"] = True
     return result
 
@@ -112,7 +115,7 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                     return result
                 result["asset"] = backend.select_release_asset(release).as_dict()
                 emit("available", message="发现新版本", result=result)
-            if not install_enabled:
+            if not install_enabled and backend.is_windows():
                 return result
             expected = backend.expected_asset_path(result["asset"], downloads)
             identity_path = os.path.join(downloads, "asset.json")
@@ -138,6 +141,10 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                                         "source_name": result["source_name"], "fallback_reason": result["fallback_reason"]})
             backend.check_cancel(cancel)
             emit("validating", message="正在准备安装包…", percent=-1)
+            if not backend.is_windows():
+                result.update(zip_path=zip_path, sha256=backend._hash_file(zip_path), manual_install=True)
+                atomic_json(os.path.join(root, "prepared.json"), result)
+                return result
             staged = backend.extract_update_zip(zip_path, target_dir=root)
             backend.validate_online_package(staged, connection)
             backend.check_cancel(cancel)
@@ -198,7 +205,7 @@ class UpdateWorker(QThread):
                 try:
                     # Enterprise caches are reused only after checking the current recommendation.
                     cached = None if self.connection else load_prepared(self.root, self.current_version, source_config=self.source_config)
-                    if cached:
+                    if cached and not cached.get("manual_install"):
                         self.emit_state("ready", message="更新已准备好", result=cached)
                 except (ValueError, KeyError, OSError, backend.UpdaterError) as exc:
                     update_log(self.root, "cache_invalid", error=str(exc))
@@ -401,6 +408,11 @@ class UpdateCoordinator(QObject):
             self.publish(phase="ready" if self.prepared else "error", message=message, error=str(worker.error), percent=-1)
             return
         result = worker.result
+        if result.get("manual_install"):
+            self.prepared = None
+            self.install_requested = False
+            self.publish(phase="downloaded", message="安装包已下载并校验。请关闭应用后手动安装。", result=result, percent=100)
+            return
         if result.get("staged_app_dir"):
             self.prepared = result
             self.publish(phase="ready", message="更新已准备好", result=result, percent=100)

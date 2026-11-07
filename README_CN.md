@@ -6,6 +6,8 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
+当前分支正在适配 **Apple Silicon Mac 与统信 V25 x86_64 个人桌面端**，保留 Windows 原有功能。新平台代码与构建入口已加入，尚未完成目标桌面实机验收，也未发布新平台安装包。功能边界见[用户手册](docs/user-guide.md#mac-与统信的功能范围)，架构和构建方法见[技术文档](docs/technical-design.md#平台适配边界)。
+
 文档适用版本：**5.3.3** · [本版说明](docs/releases/5.3.3.md) · [发布记录](docs/releases/index.md)
 
 ## 可以完成什么
@@ -51,6 +53,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 打包生成版本 ZIP、审计报告和 `latest.json`。更新说明读取 `docs/releases/版本号.md`；具体格式和发布步骤见[技术文档](docs/technical-design.md#构建与发布)。
+
+Mac／统信必须在目标系统及 CPU 上构建，使用独立的 `deepseek-cowork-posix.spec` 与 `scripts/posix_release.py`；Windows 命令保持不变。新平台暂不适配企业专属客户端与企业分发服务。
 
 ## 设计思路
 

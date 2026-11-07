@@ -1333,6 +1333,8 @@ def _stop_managed_daemon():
 
 
 def install_browser_skill(progress_callback=None, *, require_idle=False):
+    from .platform_capabilities import require_windows_capability
+    require_windows_capability("外部浏览器组件")
     components_root = os.path.dirname(browser_skill_root())
     os.makedirs(components_root, exist_ok=True)
     staged_root = tempfile.mkdtemp(prefix=".browser-skill-", dir=components_root)

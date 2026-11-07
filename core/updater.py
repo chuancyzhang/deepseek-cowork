@@ -19,6 +19,7 @@ from core.app_version import APP_VERSION, compare_versions, is_newer_version
 from core.process_utils import subprocess_kwargs_no_window, popen_external_program
 from core.env_utils import get_app_data_dir
 from core.update_manifest import validate_manifest
+from core.platform_capabilities import desktop_target, is_windows
 
 PUBLIC_UPDATE_BASE_URL = ""
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/chuancyzhang/deepseek-cowork/releases/latest"
@@ -122,7 +123,10 @@ def community_source_config():
             parsed.port
         except ValueError:
             raise UpdaterError("公共更新地址端口无效。") from None
-    return {"public_base_url": base, "github_releases_url": GITHUB_RELEASES_URL, "manifest_schema": 1}
+    config = {"public_base_url": base, "github_releases_url": GITHUB_RELEASES_URL, "manifest_schema": 1}
+    if not is_windows():
+        config["target"] = desktop_target()
+    return config
 
 
 def github_asset_url(version, filename):
@@ -163,8 +167,10 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
     source = source or ("public" if config["public_base_url"] else "github")
     if source not in {"public", "github"}:
         raise UpdaterError("未知更新来源。")
-    base = config["public_base_url"] + PUBLIC_UPDATE_PATH
-    url = base + "/latest.json" if source == "public" else GITHUB_MANIFEST_URL
+    target = "windows-x64" if is_windows() else desktop_target()
+    base = config["public_base_url"] + (PUBLIC_UPDATE_PATH if is_windows() else "/updates/" + target)
+    github_manifest = GITHUB_MANIFEST_URL if is_windows() else GITHUB_RELEASES_URL + f"/latest/download/latest-{target}.json"
+    url = base + "/latest.json" if source == "public" else github_manifest
     try:
         with requests.get(url, headers={"User-Agent": "deepseek-cowork-updater", "Cache-Control": "no-cache"}, timeout=timeout) as response:
             # Compatibility is limited to a genuinely missing attachment.
@@ -172,7 +178,7 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
                 return _fetch_github_api_release(timeout)
             response.raise_for_status()
             try:
-                manifest = validate_manifest(response.json())
+                manifest = validate_manifest(response.json(), target)
             except (ValueError, TypeError) as exc:
                 raise UpdaterError(str(exc) if isinstance(exc, ValueError) else "更新清单格式无效。") from exc
     except UpdaterError:
@@ -190,6 +196,8 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
 
 def update_connection(install_dir):
     """The installed distribution chooses the channel, not a past account login."""
+    if not is_windows():
+        return None  # Enterprise distributions remain Windows-only in this release.
     from core.enterprise_connection import read_connection, validate_connection
     from core.enterprise_client import EnterpriseStore
     import sqlite3
@@ -274,6 +282,15 @@ def fetch_enterprise_release(connection, timeout=12):
 
 
 def select_release_asset(release):
+    if not is_windows():
+        from core.update_manifest import release_filename
+        version = str(release.get("tag_name") or "").lstrip("vV")
+        expected = release_filename(version, desktop_target())
+        for asset in release.get("assets") or []:
+            if asset.get("name") == expected and re.fullmatch(r"sha256:[a-fA-F0-9]{64}", str(asset.get("digest") or "")):
+                return ReleaseAsset(expected, str(asset.get("browser_download_url") or ""),
+                                    int(asset.get("size") or 0), str(asset.get("id") or ""), asset["digest"].lower())
+        raise UpdaterError("该版本尚未发布当前平台的已校验安装包，请稍后再检查。")
     assets = release.get("assets") if isinstance(release, dict) else None
     if not isinstance(assets, list):
         assets = []
@@ -468,6 +485,8 @@ def is_cached_asset_valid(asset, zip_path):
     digest = str((asset.get("digest") if isinstance(asset, dict) else getattr(asset, "digest", "")) or "")
     if digest.startswith("sha256:") and _hash_file(zip_path) != digest[7:]:
         return False
+    if not is_windows():
+        return expected_size > 0 and bool(re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
     try:
         with zipfile.ZipFile(zip_path) as archive:
             return archive.testzip() is None

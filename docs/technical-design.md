@@ -55,6 +55,40 @@ flowchart TB
 | `web/editors/` | 离线编辑器源码及分发资源 |
 | `web/platform/` | 独立部署的企业中心 |
 
+### 平台适配边界
+
+采用共享业务核心、少量平台后端和集中能力策略。消息持久化、Agent Loop、会话隔离、文件编辑和任务调度复用同一套实现；平台差异只进入系统边界。避免给每个业务对象增加平台接口，也不在不同平台维护独立 UI。
+
+```mermaid
+flowchart TB
+    UI[共享 Qt 页面] --> Core[共享业务与任务执行]
+    Policy[平台能力策略] --> UI
+    Policy --> Catalog[工具目录与组件准备]
+    Catalog --> Core
+    Core --> Secrets[凭据保护接口]
+    Core --> Terminal[终端接口]
+    Core --> Preview[文档转换接口]
+    Core --> Update[更新协调器]
+    Secrets --> NativeKeys[Windows DPAPI / Keychain / Secret Service]
+    Terminal --> PTY[ConPTY / POSIX PTY]
+    Preview --> Office[Windows Office/WPS / LibreOffice]
+    Update --> Install[Windows 安装器 / 新平台手动安装]
+```
+
+| 边界 | 代码入口与约束 |
+| --- | --- |
+| 发行范围与功能限制 | `core/platform_capabilities.py`；目录、设置、依赖准备和执行同时校验，不能只隐藏按钮 |
+| 敏感数据 | `core/credential_protection.py` 提供 `protect/unprotect`；Windows 原 DPAPI 格式兼容，POSIX 使用系统密钥环保存 AES-256-GCM 密钥，密文带版本与认证信息；解密缺密钥不自动生成 |
+| 并发保存 | `core/file_write_locks.py`；Windows Mutex／POSIX flock 锁定稳定的路径键，不锁会被原子替换的目标 inode；支持同线程嵌套并设等待上限 |
+| 终端 | `core/workbench_terminal.py` 保留公共会话生命周期，`core/posix_terminal.py` 通过独立会话和控制终端启动 Shell，避免在线程化 Qt 进程里使用 `preexec_fn`；清理覆盖该终端会话的前后台进程组 |
+| 外部程序 | `core/process_utils.py`；POSIX 冻结态恢复外部程序的库搜索环境，避免 PyInstaller 的动态库覆盖系统 LibreOffice |
+| 运行时 | `core/runtime_manifest.py` 固定目标、下载地址和 SHA-256；在线／离线准备复用校验，tar 解压保留内部链接和执行权限并拒绝越界路径 |
+| 默认字体 | 未配置字体时，新平台使用 Qt 系统正文／等宽字体；自定义主题的显式字体仍校验，不绕过预览事务 |
+
+非 Windows 的提示词差异限于已确认的能力范围：直接使用完整 Agent，停用能力不进入运行目录，历史向量工具不注册，语音指导明确仅支持主动配置的远程接口。Windows 的既有工具定义、顺序及极简启动选择不改变；不修改模型协议与历史消息格式。
+
+企业服务端、企业专属分发和跨平台企业接入不在当前改造范围内。Mac／统信使用全新用户环境；最低 macOS 版本及统信 V25 补丁、显示服务、输入法、托盘和睡眠恢复需在目标设备验收。
+
 ## Agent Loop 与模型协议
 
 最小循环围绕模型消息与工具结果推进：
@@ -208,7 +242,7 @@ example-skill/
 
 网页通过 `core/browser_backend.py` 保存后端选择与运行租约。桌面桥接按会话、run_id 和请求 ID 领取工具请求，网页观察版本与控制权用于后续动作校验。
 
-终端使用 pywinpty ConPTY 和离线 xterm.js，后台线程读取，UI 分批呈现；Windows Job 管理所属进程。Office 预览通过后台 helper 生成阅读副本，`core/preview_versions.py` 按内容版本组织缓存，界面通过显式刷新加载新内容。
+终端使用 ConPTY／POSIX PTY 和离线 xterm.js，后台线程读取，UI 分批呈现；Windows Job 或 POSIX 会话管理所属进程。Office 预览通过后台 helper 或可选 LibreOffice 生成阅读副本，`core/preview_versions.py` 按内容版本组织缓存，界面通过显式刷新加载新内容。
 
 写作页在会话中维护标题、正文和恢复副本，首次保存创建 Markdown 文件。富编辑器使用 QWebEngine 与 QWebChannel，前端资源由 `web/editors/` 构建并随应用分发。
 
@@ -236,7 +270,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。
 
-`VariableStore` 独立保存变量，敏感值由 Windows DPAPI 加密。`lookup_app_variable` 按明确名称和授权读取变量。
+`VariableStore` 独立保存变量，敏感值通过共享凭据保护接口加密。`lookup_app_variable` 按明确名称和授权读取变量。资料库和脱敏映射复用该接口，企业账号在本轮继续沿用 Windows 实现。
 
 数据安全宿主位于 `core/data_security.py`，插件位于 `bundled_plugins/data_security/`，提供任务策略、能力检查、请求投影和参数处理。启用后在附件展开与 SDK 发送之间处理用户及工具文本副本，会话令牌映射独立保存。
 
@@ -251,6 +285,8 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 `scripts/package_release.py` 读取当前版本说明，生成完整 ZIP、审计报告及 `latest.json`。语音组件使用单独的 `scripts/package_speech_to_text_component.py --offline` 打包入口。
 
 ### 更新清单
+
+Mac／统信使用相同版本、大小和 SHA-256 校验字段，但清单和安装包按目标隔离：`updates/macos-arm64/latest.json` 对应 `deepseek-cowork-v版本号-macos-arm64.dmg`，`updates/linux-x64/latest.json` 对应 `deepseek-cowork-v版本号-linux-x64.deb`。GitHub 附件名为 `latest-macos-arm64.json`／`latest-linux-x64.json`。下载后不进入 Windows 解包和自动安装流程；尚无对应发行物时明确提示当前平台安装包未发布。
 
 普通版读取公共更新地址；地址为空时使用 GitHub。企业版通过所属中心的推荐版本接口取得安装包。
 
@@ -275,6 +311,24 @@ updates/windows-x64/deepseek-cowork-v5.3.3.zip
 发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
 
 更新协调器负责检查、下载和包准备，设置页与侧栏订阅其状态。用户触发安装后，独立安装器与主应用握手，主应用完成保存并退出，安装器替换文件并等待新版本启动确认。
+
+### Mac 与统信原生构建
+
+在目标 CPU 和系统构建，不使用 Windows 交叉打包。建议使用 Python 3.12 的独立构建环境；基础工具运行时固定为 Python Build Standalone 3.12.16、Node 24.14.1、ripgrep 15.1.0。其发布地址和哈希统一在运行时清单，更新清单时须同步验收原生依赖。Mac 与统信的构建／签名／安装结果仍待各自目标桌面确认，Linux 容器检查不能替代统信实机验收。
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt 'PySide6==6.10.1' 'PySide6-Addons==6.10.1'
+.venv/bin/python scripts/posix_release.py prepare
+.venv/bin/python scripts/posix_release.py build
+.venv/bin/python scripts/posix_release.py package
+```
+
+构建缓存统一位于 `.tmp/native-build/<目标>/`，正式安装包与清单位于 `dist/`。`prepare --offline /路径/组件包` 从该目录读取清单中的固定归档，并从 `wheels/` 安装该平台的文档工具依赖，禁止联网；在线和离线归档使用同一 SHA-256。`build` 使用原生 spec，复制完整的独立运行时并保留符号链接；Windows spec 与发行流程独立保留。
+
+Mac 的开发构建可使用临时签名；正式 `package` 必须提供 `COWORK_CODESIGN_IDENTITY` 和已配置到钥匙串的 `COWORK_NOTARY_PROFILE`，依次签名内部程序与 Bundle、生成 DMG、提交公证并附加票据。统信构建机需要 `dpkg-deb`，DEB 安装到 `/opt/deepseek-cowork` 并提供桌面入口。不要将签名密钥或公证凭据写入仓库，也不要将构建成功视为发布验收通过。
+
+每个目标桌面的验收应覆盖首次启动、WebEngine 编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。新平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；前者的真实 POSIX 项在 Windows 跳过。
 
 ## 开发与测试
 

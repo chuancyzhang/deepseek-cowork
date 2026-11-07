@@ -1,4 +1,5 @@
 from urllib.parse import urlsplit
+from .platform_capabilities import is_windows
 
 
 SPEECH_TO_TEXT_SKILL_ID = "speech-to-text"
@@ -33,7 +34,8 @@ class RemoteTranscriptionInputError(ValueError):
 
 def speech_to_text_config(values):
     source = values if isinstance(values, dict) else {}
-    backend = str(source.get(ASR_BACKEND_FIELD) or ASR_BACKEND_LOCAL).strip().lower()
+    default = ASR_BACKEND_LOCAL if is_windows() else ASR_BACKEND_OPENAI_COMPATIBLE
+    backend = str(source.get(ASR_BACKEND_FIELD) or default).strip().lower()
     return {
         "backend": backend,
         "api_url": str(source.get(ASR_API_URL_FIELD) or "").strip(),
@@ -66,6 +68,8 @@ def validate_speech_to_text_config(values):
     if backend not in SUPPORTED_ASR_BACKENDS:
         raise ValueError(f"不支持的语音转文字方式：{backend or '空'}。")
     if backend == ASR_BACKEND_LOCAL:
+        if not is_windows():
+            raise ValueError("此平台首版不提供本地语音识别；请主动配置远程接口后再转录。音频尚未上传。")
         return config
     missing = [
         label

@@ -289,8 +289,118 @@ def run_questionnaire_states():
     print(f"Questionnaire screenshots: {output} ({scale}x)")
 
 
+def run_questionnaire_history():
+    """Exercise the actual lazy history layout, including two questionnaire rounds."""
+    from unittest.mock import patch
+    from PySide6.QtGui import QColor, QPixmap
+    from core.config_manager import ConfigManager
+    from main import ChatBubble, MainWindow
+    from qa_support import close_main_window
+
+    app = QApplication.instance() or QApplication([])
+    app.setFont(QFont("Microsoft YaHei UI", 10))
+    output = QA_ROOT / "screenshots"
+    output.mkdir(parents=True, exist_ok=True)
+    scale = os.environ.get("QT_SCALE_FACTOR", "1")
+    messages = [{"id": "user", "role": "user", "content": "请检查这份方案，先确认评估范围。"}]
+    for index, text in enumerate((
+        "先确认评估范围，再核对方案中的事实与依据。\n\n本次重点关注完整性、适用条件与表达清晰度。",
+        "## 当前共识总结\n\n### 目标\n\n逐项核对方案中的结论，标明需要补充证据的位置。\n\n"
+        "- 保留已经确认的判断。\n- 区分事实、推测与待确认问题。\n- 给出可直接采用的修改建议。",
+    )):
+        request = {"kind": "questionnaire", "title": "确认评估要求", "questions": [
+            {"id": "scope", "question": "优先检查什么？", "options": [
+                {"label": "观点与证据", "value": "evidence"}, {"label": "文字表达", "value": "writing"}]}]}
+        result = {"source_tool": "request_user_input", "interaction_request": request,
+                  "interaction_response": {"request_id": f"question-{index}", "status": "completed", "approved": True,
+                                           "answers": {"scope": {"selected_options": ["evidence"]}}}}
+        messages.extend([
+            {"id": f"stage-{index}", "role": "assistant", "content": text, "tool_calls": [
+                {"id": f"call-{index}", "type": "function", "function": {
+                    "name": "request_user_input", "arguments": json.dumps(request, ensure_ascii=False)}}]},
+            {"id": f"result-{index}", "role": "tool", "tool_call_id": f"call-{index}",
+             "content": json.dumps(result, ensure_ascii=False)},
+        ])
+    messages.append({"id": "answer", "role": "assistant", "content": "## 总体结论\n\n"
+                     "方案的主要方向成立。建议补充适用条件与验证依据，再逐项修改表达。"})
+    with tempfile.TemporaryDirectory(prefix="questionnaire-history-") as temporary, \
+            patch.dict(os.environ, {"APPDATA": temporary, "LOCALAPPDATA": temporary}), \
+            patch("core.config_manager.get_app_data_dir", return_value=temporary), \
+            patch("core.config_manager.get_base_dir", return_value=temporary):
+        Path(temporary, "config.json").write_text("{}", encoding="utf-8")
+        repository = ThemeRepository(temporary)
+        manager = ThemeRuntimeManager(app, repository)
+        app.theme_manager = manager
+        assert manager.apply_repository_state(reason="questionnaire_history_capture"), manager.last_error
+        saved = repository.load()
+        window = MainWindow(config_manager=ConfigManager(), theme_manager=manager)
+        window._startup_hydration_scheduled = window._background_services_scheduled = True
+        window._model_onboarding_shown = True
+        try:
+            window.resize(1280, 1000)
+            window.show()
+            state = window.get_current_session()
+            window._reset_session_history_state(state)
+            state.messages = messages
+            state.history_loaded = True
+            state.session_status = "completed"
+            window._render_session_history_spans(state, [{"start": 0, "end": 1}, {"start": 1, "end": len(messages)}])
+            window.normalize_session_ui(state)
+            summary = state.history_detail_summaries[0]
+
+            def capture(name):
+                QTest.qWait(300)
+                state.chat_scroll.verticalScrollBar().setValue(0)
+                QTest.qWait(100)
+                assert summary.isVisible()
+                for bubble in summary.details.findChildren(ChatBubble):
+                    if bubble.isVisible():
+                        for tool in bubble.findChildren(ToolCallCard):
+                            assert tool.y() > bubble.content_edit.geometry().bottom()
+                            assert bubble.think_container.height() > tool.geometry().bottom()
+                for card in summary.findChildren(InlineInteractionCard):
+                    assert card.isVisibleTo(summary) == summary.detail_button.isChecked()
+                assert window.grab().save(str(output / f"questionnaire-history-{name}-{scale}x.png"))
+
+            capture("collapsed")
+            summary.detail_button.setChecked(True)
+            for _ in range(100):
+                QTest.qWait(20)
+                if not summary.detail_loading:
+                    break
+            assert not summary.detail_loading and not summary.detail_error
+            capture("expanded")
+            ratio = summary.devicePixelRatioF()
+            content_image = QPixmap(summary.size() * ratio)
+            content_image.setDevicePixelRatio(ratio)
+            content_image.fill(QColor(DesignTokens.bg_chat))
+            summary.render(content_image)
+            assert content_image.save(str(output / f"questionnaire-history-expanded-content-{scale}x.png"))
+            first = state.interaction_cards["question-0"]
+            first.receipt.view_btn.click()
+            capture("answers")
+            first.receipt.view_btn.click()
+            window.resize(800, 850)
+            assert manager.apply_profile(builtin_theme("default", dark=True), preview=True, reason="questionnaire_history_dark")
+            capture("dark-small")
+            assert manager.restore_saved_theme(reason="questionnaire_history_cancel")
+            assert repository.load() == saved
+            summary.detail_button.setChecked(False)
+            capture("restored-collapsed")
+            print(json.dumps({"platform": app.platformName(), "qt_scale_factor": scale,
+                              "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                              "device_pixel_ratio": app.primaryScreen().devicePixelRatio(),
+                              "theme_preview_restored": True}, ensure_ascii=False))
+        finally:
+            close_main_window(window)
+            manager.stop()
+    print(f"Questionnaire history screenshots: {output}")
+
+
 if __name__ == "__main__":
-    if "--questionnaire" in sys.argv:
+    if "--questionnaire-history" in sys.argv:
+        run_questionnaire_history()
+    elif "--questionnaire" in sys.argv:
         run_questionnaire_states()
     elif "--interactions" in sys.argv:
         run_interaction_states()

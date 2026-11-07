@@ -23125,6 +23125,7 @@ class AssistantTurnGroup(QFrame):
         while index < self.group_layout.count() and self.group_layout.itemAt(index).widget() in self.interaction_cards:
             index += 1
         self.interaction_cards.append(card)
+        card.receiptChanged.connect(self.sync_stage_visibility)
         self.group_layout.insertWidget(index, card)
         card.show()
         self.sync_stage_visibility()
@@ -23141,6 +23142,9 @@ class AssistantTurnGroup(QFrame):
             if widget.isHidden() == bool(visible):
                 widget.setVisible(bool(visible))
                 changed = True
+
+        for card in self.interaction_cards:
+            set_visible(card, not self.process_finalized or self.process_expanded or not card._terminal)
 
         if self.process_finalized and not self.process_expanded:
             for bubble in self.stage_bubbles:
@@ -23263,7 +23267,7 @@ class AssistantTurnGroup(QFrame):
         self.process_finalized = True
         self.process_result_bubble = None
         stage_count, tool_count = self._process_counts(None)
-        has_process = bool(stage_count or tool_count)
+        has_process = bool(stage_count or tool_count or self.interaction_cards)
         self.process_disclosure.setVisible(has_process)
         self.process_disclosure.blockSignals(True)
         self.process_disclosure.setChecked(False)
@@ -23281,6 +23285,7 @@ class AssistantTurnGroup(QFrame):
             group_id=self.group_id,
             stage_count=stage_count,
             tool_count=tool_count,
+            interaction_count=len(self.interaction_cards),
             active_timer_count=active_timer_count,
             has_process=has_process,
         )
@@ -23293,7 +23298,7 @@ class AssistantTurnGroup(QFrame):
         self.process_finalized = True
         self.process_result_bubble = result_bubble
         stage_count, tool_count = self._process_counts(result_bubble)
-        has_process = bool(stage_count or tool_count)
+        has_process = bool(stage_count or tool_count or self.interaction_cards)
         self.process_disclosure.setVisible(has_process)
         self.process_disclosure.blockSignals(True)
         self.process_disclosure.setChecked(False)
@@ -23307,6 +23312,7 @@ class AssistantTurnGroup(QFrame):
             group_id=self.group_id,
             stage_count=stage_count,
             tool_count=tool_count,
+            interaction_count=len(self.interaction_cards),
             has_process=has_process,
         )
 
@@ -40160,12 +40166,6 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         state.chat_layout.insertWidget(target_index, summary)
 
         for message in messages:
-            if message.get("role") == "tool":
-                self._restore_questionnaire_receipt(
-                    state, str(message.get("tool_call_id") or ""),
-                    message.get("result_obj") if message.get("result_obj") is not None else message.get("content"),
-                    target_layout=summary.body_layout,
-                )
             if not is_same_turn_guidance_message(message):
                 continue
             self.add_turn_guidance_inline(
@@ -40415,9 +40415,13 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
             )
             added = state.chat_layout.count() - before_count
             for _ in range(added):
-                item = state.chat_layout.takeAt(insert_index)
+                item = state.chat_layout.itemAt(insert_index)
                 widget = item.widget() if item is not None else None
                 if widget is not None:
+                    # removeWidget destroys the old QWidgetItem. Retaining a
+                    # takeAt item while addWidget creates another leaves Qt's
+                    # height-for-width cache attached to the former layout.
+                    state.chat_layout.removeWidget(widget)
                     if isinstance(widget, AssistantTurnGroup):
                         widget.identity_header.hide()
                     summary.details_layout.addWidget(widget)
@@ -40430,6 +40434,8 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
                 span_start=summary.span_start,
                 completed=summary.detail_batch_index,
                 total=total,
+                widget_count=added,
+                interaction_count=len(summary.findChildren(InlineInteractionCard)),
             )
             if getattr(self, "_conversation_search_matches", None) and self._conversation_search_index >= 0:
                 mid = self._conversation_search_matches[self._conversation_search_index]["message_id"]
@@ -41090,8 +41096,8 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         self._show_inline_interaction_request(request, target_session_id, resolve)
 
     def _place_inline_interaction_card(self, state, card, tool_card=None):
-        # Keep questions and receipts outside collapsible execution stages, while
-        # retaining their position between the originating stage and its answer.
+        # Keep questions actionable while pending; terminal receipts follow the
+        # originating turn's disclosure, between its stage and the next answer.
         ancestor = tool_card
         stage = None
         while ancestor is not None:

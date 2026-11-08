@@ -334,7 +334,7 @@ from core.memory_update import (
 from core.memory_store import MemoryStore
 from core.token_speed import TokenSpeedTracker
 from core.context_usage import CONTEXT_CATEGORIES, normalize_context_usage
-from ui.token_usage import TokenUsagePopover
+from ui.token_usage import TokenUsagePopover, OVERVIEW_CONTEXT_GROUPS
 from core.deepseek_billing import (
     DEEPSEEK_PRICING_VERSION,
     DeepSeekBalanceError,
@@ -1933,7 +1933,7 @@ def format_token_usage_overview(summary, last, speed, billing, context, rounds, 
 
     data = {
         "scope": "当前会话 · " + str(last.get("model") or "当前模型"),
-        "total": metric("累计用量", compact_token_count(usage["total_tokens"]), "tokens · 输入 + 输出",
+        "total": metric("累计 token", compact_token_count(usage["total_tokens"]), "tokens · 输入 + 输出",
                         f"输入 {usage['input_tokens']:,} · 输出 {usage['output_tokens']:,}\n仅累计当前服务、模型与协议的请求。"),
         "cached": metric("缓存输入", compact_token_count(cached) if known else "—",
                          "tokens" if complete_cache else "部分已知" if known else "尚未返回",
@@ -1946,6 +1946,9 @@ def format_token_usage_overview(summary, last, speed, billing, context, rounds, 
     }
     if usage["missing_usage_count"]:
         data["cache_note"] += f" · {usage['missing_usage_count']} 次未返回用量"
+        data["total"]["primary_note"] = f"{usage['missing_usage_count']} 次请求未返回用量"
+    if not complete_cache:
+        data["hit"]["primary_note"] = "仅已知输入" if known else "服务未提供"
     rounds = normalize_usage_rounds(rounds)
     current_is_running = running and rounds.get("current", {}).get("run_id") == str(run_id)
     selected_round = rounds.get("previous" if current_is_running else "current", {})
@@ -1973,6 +1976,7 @@ def format_token_usage_overview(summary, last, speed, billing, context, rounds, 
         data["balance"] = metric("账户余额", "查询失败", "下轮结束后重试", "可在统计详情查看失败原因。")
     elif billing:
         data["balance"] = metric("账户余额", "—", "本轮结束后查询")
+    data["balance"]["visible"] = balance_status in {"succeeded", "querying", "failed"}
     speed_active = bool(speed.get("active"))
     speed_rate = speed.get("current_rate" if speed_active else "last_rate")
     speed_note = "实时估算 · tok/s" if speed_active else "最近均速 · tok/s"
@@ -1989,11 +1993,18 @@ def format_token_usage_overview(summary, last, speed, billing, context, rounds, 
     if snapshot.get("status") == "available" and snapshot.get("total"):
         counts = snapshot["counts"]
         total = snapshot["total"]
+        grouped = {key: sum(counts[member] for member in members)
+                   for key, _label, _color, members in OVERVIEW_CONTEXT_GROUPS}
         data["context"] = {
             "total": f"≈ {compact_token_count(total)} tokens",
-            "segments": [(counts[key], color) for key, _label, color in CONTEXT_CATEGORIES],
-            "values": {key: ("<0.1%" if 0 < count / total < 0.001 else f"{count / total:.1%}") for key, count in counts.items()},
-            "details": {key: f"{label} · 约 {counts[key]:,} tokens" for key, label, _color in CONTEXT_CATEGORIES},
+            "segments": [(grouped[key], color) for key, _label, color, _members in OVERVIEW_CONTEXT_GROUPS],
+            "values": {key: ("<0.1%" if 0 < count / total < 0.001 else f"{count / total:.1%}") for key, count in grouped.items()},
+            "details": {key: f"{label} · 约 {grouped[key]:,} tokens" for key, label, _color, _members in OVERVIEW_CONTEXT_GROUPS},
+            "caption": "最近请求 · 文本组成估算",
+            "detail": "最近请求文本组成（发送前估算）\n" + f"合计：约 {total:,} tokens\n" + "\n".join(
+                f"{label}：约 {counts[key]:,} tokens · {counts[key] / total:.1%}"
+                for key, label, _color in CONTEXT_CATEGORIES)
+                + "\n仅反映文本结构，不含图片等非文本内容；与预算占用的统计口径不同。",
             "note": "最近请求的发送前文本估算，非账单或上下文容量。注入含运行说明与技能内容。"
                     + (" 图片等非文本内容未计入。" if snapshot.get("has_media") else ""),
         }
@@ -29245,7 +29256,10 @@ class SessionContextChip(QWidget):
 
 
 class TokenUsageChip(QPushButton):
-    def __init__(self, parent=None, *, compact=False):
+    policy_saved = Signal()
+    overview_requested = Signal()
+
+    def __init__(self, parent=None, *, compact=False, config_manager=None):
         super().__init__(parent)
         self._compact = compact
         self.setObjectName("TokenUsageChip")
@@ -29258,7 +29272,8 @@ class TokenUsageChip(QPushButton):
         self.setToolTip("查看用量、缓存与上下文组成")
         self._full_text = ""
         self._detail_text = ""
-        self._popover = TokenUsagePopover(self)
+        self._popover = TokenUsagePopover(self, config_manager=config_manager)
+        self._popover.policy_saved.connect(self.policy_saved)
         self.clicked.connect(self.toggle_popover)
         self.refresh_theme()
         bind_theme(self, self.refresh_theme, surface="feedback")
@@ -29317,6 +29332,7 @@ class TokenUsageChip(QPushButton):
         if self._popover.isVisible():
             self._popover.hide()
             return
+        self.overview_requested.emit()
         self._popover.set_detail_text(self._detail_text)
         self._popover.show_for(self)
 
@@ -39893,7 +39909,9 @@ class MainWindow(TaskWorkspaceMixin, UpdateLifecycleMixin, ConversationActionsMi
         header_tools_layout = QHBoxLayout(header_tools)
         header_tools_layout.setContentsMargins(0, 0, 0, 0)
         header_tools_layout.setSpacing(4)
-        token_usage_label = TokenUsageChip(header_tools, compact=True)
+        token_usage_label = TokenUsageChip(header_tools, compact=True, config_manager=self.config_manager)
+        token_usage_label.policy_saved.connect(lambda sid=session_id: self.refresh_token_usage_label(sid))
+        token_usage_label.overview_requested.connect(lambda sid=session_id: self.refresh_token_usage_label(sid))
         header_tools_layout.addWidget(token_usage_label)
         search_button = QPushButton(header_tools)
         search_button.setFixedSize(DesignTokens.control_height_sm, DesignTokens.control_height_sm)

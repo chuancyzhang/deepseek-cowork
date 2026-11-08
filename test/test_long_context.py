@@ -459,6 +459,21 @@ class TestContextBudget(unittest.TestCase):
         self.assertEqual(sum(value for value, _ in overview["segments"]), budget.effective_tokens)
         self.assertIn("上次运行", format_capacity(snap)["note"])
 
+    def test_capacity_remaining_uses_runtime_budget_not_new_target(self):
+        policy = {"enabled": True, "target_tokens": 1000000}
+        budget = ContextBudget.from_profile({"context_window_tokens": 500000}, policy)
+        snapshot = {**budget.snapshot(150775), "run_id": "run", "unestimated_images": 5}
+        view = format_capacity(snapshot, policy={"enabled": True, "target_tokens": 300000}, active_run_id="run")
+        self.assertEqual(view["remaining"], "≈ 316.0K")
+        self.assertIn("466.8K", view["budget"])
+        self.assertIn("新设置下次生效", view["limit_note"])
+        self.assertIn("5 张图片未计入", view["caption"])
+        self.assertIn("模型资料容量：500,000", view["detail"])
+        self.assertIn("安全余量：25,000", view["detail"])
+        exceeded = format_capacity({**snapshot, "used_tokens": 500000}, policy=policy)
+        self.assertEqual(exceeded["remaining"], "≈ 0")
+        self.assertIn("已超预算", exceeded["caption"])
+
 
 if __name__ == "__main__":
     unittest.main()

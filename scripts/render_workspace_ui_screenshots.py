@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False, compact_workspace=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False, compact_workspace=False, usage=False):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -27,7 +27,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject, QMimeData
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QApplication, QWidget
+        from PySide6.QtWidgets import QApplication, QLabel, QWidget
         from core.config_manager import ConfigManager
         from core.theme import ThemeRuntimeManager
         from core.theme_service import ThemeRepository
@@ -35,21 +35,23 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         from main import MainWindow, initialize_desktop_theme
 
         app = QApplication([])
-        if composer_context or composer_mode or compact_workspace:
+        if composer_context or composer_mode or compact_workspace or usage:
             initialize_desktop_theme(app)
         for font in ("msyh.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["SystemRoot"], "Fonts", font)))
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
-        if composer_context or composer_mode or compact_workspace:
+        if composer_context or composer_mode or compact_workspace or usage:
             assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
         class WindowAudit(QObject):
-            active = writing_pages or message_context or composer_context or composer_mode or compact_workspace
+            active = writing_pages or message_context or composer_context or composer_mode or compact_workspace or usage
             events = []
+            allowed = set()
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
-                        and obj.isWindow() and not isinstance(obj, MainWindow)
+                        and obj.isWindow() and not isinstance(obj, MainWindow) and obj not in self.allowed
+                        and not (usage and type(obj).__name__ == "TokenUsagePopover")
                         and not obj.testAttribute(Qt.WA_DontShowOnScreen)):
                     self.events.append((type(obj).__name__, obj.objectName()))
                 return False
@@ -69,7 +71,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = QA_ROOT / "screenshots" / ("compact-workspace" if compact_workspace else "composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = QA_ROOT / "screenshots" / ("usage" if usage else "compact-workspace" if compact_workspace else "composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -116,6 +118,66 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             if writing_pages or compact_workspace:
                 QTest.qWait(500)
             background_patch.stop()
+
+        if usage:
+            import json
+            from core.long_context import ContextBudget
+            state = window.get_current_session()
+            config.set_experimental_long_context({"enabled": True, "target_tokens": 1000000})
+            state.messages = [{"id": "usage-user", "role": "user", "content": "整理资料并核对结论。"}]
+            window.add_chat_bubble("User", state.messages[0]["content"], source_message_id="usage-user", animate=False)
+            window.normalize_session_ui(state)
+            state.token_usage_summary = {"input_tokens": 1433798, "output_tokens": 66202, "total_tokens": 1500000,
+                                         "cached_input_tokens": 1094000, "uncached_input_tokens": 339798, "request_count": 28}
+            state.last_token_usage = {"model": "gpt-6.1-sol"}
+            state.context_usage_snapshot = {"status": "available", "has_media": True,
+                "counts": {"system": 1879, "tools": 7452, "user": 259, "assistant": 26114, "results": 19699, "injected": 9396}}
+            state.context_capacity_snapshot = {**ContextBudget.from_profile({"context_window_tokens": 500000},
+                config.get("experimental_long_context")).snapshot(150775), "unestimated_images": 5}
+            window.refresh_token_usage_label(state.session_id)
+            state.token_usage_label.click()
+            popover = state.token_usage_label._popover
+            settle()
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert popover.grab().save(str(output / f"usage-{suffix}.png"))
+            capture("usage-conversation")
+            control = popover.limit_control
+            audit.allowed.add(control.target.view().window())
+            QTest.mouseClick(control.target, Qt.LeftButton)
+            QTest.keyClick(control.target, Qt.Key_Up)
+            QTest.keyClick(control.target, Qt.Key_Return)
+            settle()
+            assert popover.isVisible() and control.target.currentData() == 300000
+            assert popover.grab().save(str(output / f"usage-pending-{suffix}.png"))
+            with patch.object(config, "_write_config_or_raise", side_effect=OSError("fixture")):
+                assert not control.save()
+            settle()
+            assert popover.grab().save(str(output / f"usage-failed-{suffix}.png"))
+            assert control.save()
+            assert "466.8K" in popover.capacity_budget.text()
+            popover.details_button.click()
+            settle()
+            assert popover.grab().save(str(output / f"usage-details-{suffix}.png"))
+            before_draft = control.target.currentData()
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert control.target.currentData() == before_draft
+            popover.hide()
+            state.token_usage_label.click()
+            settle()
+            assert control.target.currentData() == 300000
+            for label in popover.findChildren(QLabel):
+                if label.isVisible() and label.wordWrap():
+                    assert label.height() >= label.heightForWidth(label.width()), (label.text(), label.size())
+            assert not audit.events, audit.events
+            print(json.dumps({"platform": app.platformName(), "device_pixel_ratio": window.devicePixelRatioF(),
+                              "logical_dpi": window.screen().logicalDotsPerInch(), "qt_scale_factor": scale,
+                              "unexpected_windows": audit.events}), flush=True)
+            popover.hide()
+            finish()
+            return
 
         if composer_mode:
             import json
@@ -504,5 +566,6 @@ if __name__ == "__main__":
     parser.add_argument("--composer-context", action="store_true", help="Verify typed composer tags and knowledge selection without external services")
     parser.add_argument("--composer-mode", action="store_true", help="Verify the removable mode capsule, draft isolation and toolbar layout")
     parser.add_argument("--compact-workspace", action="store_true", help="Verify aligned headers, Markdown reading/editing and theme continuity")
+    parser.add_argument("--usage", action="store_true", help="Verify usage overview, inline limits, save failure and theme continuity")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode, args.compact_workspace)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode, args.compact_workspace, args.usage)

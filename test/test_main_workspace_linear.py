@@ -192,6 +192,55 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertEqual(self.window.action_btn.size().height(), 34)
         self.assertEqual(self.window.model_select_btn.minimumWidth(), 100)
 
+    def test_grill_chip_is_visible_and_cancels_only_current_session_mode(self):
+        from pathlib import Path
+        from core.clarify_mode import GRILL_MODE_ACTIVE, GRILL_MODE_ARMED, GRILL_MODE_DISABLED
+
+        self.window.show()
+        self.app.processEvents()
+        state = self.window.get_current_session()
+        chip = self.window.grill_mode_badge
+        self.assertTrue(chip.isHidden())
+        self.window.input_field.setPlainText("保留草稿")
+        attachment = Path(self.data_dir, "context.txt")
+        attachment.write_text("上下文", encoding="utf-8")
+        self.window._set_prompt_files([str(attachment)])
+        self.window.toggle_grill_mode()
+        self.app.processEvents()
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
+        self.assertTrue(chip.isVisible())
+        self.assertTrue(chip.close_btn.isVisible())
+
+        chip.main_btn.click()
+        self.assertTrue(self.window.composer_mode_popover.isVisible())
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
+        self.window.composer_mode_popover.close()
+        chip.close_btn.click()
+        self.assertTrue(chip.isHidden())
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_DISABLED)
+        self.assertEqual(self.window.input_field.toPlainText(), "保留草稿")
+        self.assertEqual(self.window._current_prompt_files(), [str(attachment)])
+
+        self.window.toggle_grill_mode()
+        other = self.window.create_new_session(make_current=True)
+        self.app.processEvents()
+        self.assertTrue(chip.isHidden())
+        self.window.refresh_grill_mode_controls(state.session_id)
+        self.assertTrue(chip.isHidden())
+        self.assertEqual(self.window.get_session(other).grill_mode_state, GRILL_MODE_DISABLED)
+        self.window.set_current_session(state.session_id)
+        self.app.processEvents()
+        self.assertTrue(chip.isVisible())
+        self.assertEqual(self.window.input_field.toPlainText(), "保留草稿")
+        state.grill_mode_state = GRILL_MODE_ACTIVE
+        self.window.refresh_grill_mode_controls(state.session_id)
+        self.assertTrue(chip.isVisible())
+        self.assertTrue(chip.close_btn.isHidden())
+        self.assertFalse(chip.main_btn.isEnabled())
+        state.grill_mode_state = GRILL_MODE_DISABLED
+        self.window.refresh_grill_mode_controls(state.session_id)
+        self.assertTrue(chip.isHidden())
+
     def test_session_switch_after_sidebar_cycle_keeps_composer_in_bounds(self):
         self.window.show()
         self.window.resize(1707, 1019)

@@ -1,5 +1,6 @@
 """Interaction regressions for the shared home/conversation presentation."""
 import os
+import copy
 from pathlib import Path
 import tempfile
 import time
@@ -143,7 +144,9 @@ class WorkspacePresentationTests(unittest.TestCase):
         window.sync_context_drawer_layout()
         QTest.qWait(60)
         self.assertTrue(window.composer_context_tags.isVisible())
-        self.assertGreater(window.right_sidebar.y(), window.top_bar_widget.geometry().bottom())
+        self.assertEqual(window.right_sidebar.y(), window.top_bar_widget.y())
+        for control in (window.workspace_title_label, state.header_tools):
+            self.assertLess(control.mapTo(window.main_container, control.rect().bottomRight()).x(), window.right_sidebar.x())
         composer_position = window.input_card.mapTo(window, QPoint(0, 0))
         header_position = window.top_bar_widget.pos()
         bar = state.chat_scroll.verticalScrollBar()
@@ -163,7 +166,7 @@ class WorkspacePresentationTests(unittest.TestCase):
         state = window.get_current_session()
         state.messages = [{"id": f"question-{index}", "role": "user", "content": "需要完整保留的长问题标题" * 20} for index in range(30)]
         window._retire_session_empty_state(state, reason="test_directory_fixture")
-        anchor = next(button for button in state.session_widget.findChildren(QPushButton) if button.accessibleName() == "历史提问")
+        anchor = next(button for button in state.header_tools.findChildren(QPushButton) if button.accessibleName() == "历史提问")
         window._show_question_directory(anchor)
         QTest.qWait(50)
         popover = next(item for item in window.findChildren(ProductPopover) if item.isVisible())
@@ -174,6 +177,41 @@ class WorkspacePresentationTests(unittest.TestCase):
         with patch.object(window, "jump_to_question") as jump:
             entries[-1].click()
             jump.assert_called_once_with("question-29")
+
+    def test_header_tools_keep_session_ownership_and_popovers_close_on_switch(self):
+        window = self.window
+        first = window.get_current_session()
+        window.add_chat_bubble("User", "第一段对话", animate=False)
+        window.input_field.setPlainText("第一段草稿")
+        first.token_usage_label.click()
+        self.assertTrue(first.token_usage_label._popover.isVisible())
+        second_id = window.create_new_session(make_current=True)
+        second = window.get_session(second_id)
+        window.add_chat_bubble("User", "第二段对话", animate=False)
+        QTest.qWait(30)
+        self.assertIs(window.session_tools_stack.currentWidget(), second.header_tools)
+        self.assertFalse(first.token_usage_label._popover.isVisible())
+        self.assertFalse(first.header_tools.isVisible())
+        self.assertTrue(second.token_usage_label.isVisible())
+        # Background updates must not replace the current session's header.
+        first.token_usage_label.setText("后台用量 300K")
+        self.assertNotIn("300K", second.token_usage_label.accessibleDescription())
+        window.activate_session(first.session_id)
+        self.assertIs(window.session_tools_stack.currentWidget(), first.header_tools)
+        self.assertEqual(window.input_field.toPlainText(), "第一段草稿")
+        search = next(b for b in first.header_tools.findChildren(QPushButton) if b.accessibleName() == "对话内搜索")
+        search.click()
+        self.assertTrue(window.conversation_search.isVisible())
+        window.show_product_page(window.PAGE_SETTINGS)
+        self.assertFalse(window.session_tools_stack.isVisible())
+        window.show_product_page(window.PAGE_CONVERSATION)
+        self.assertIs(window.session_tools_stack.currentWidget(), first.header_tools)
+        tools = first.header_tools
+        window.close_session_tab(window.session_tabs.indexOf(first.session_widget))
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(isValid(tools))
+        self.assertNotIn(first.session_id, window.sessions)
+        self.assertIs(window.session_tools_stack.currentWidget(), second.header_tools)
 
     def test_context_overview_keeps_full_request_available(self):
         window = self.window
@@ -190,6 +228,68 @@ class WorkspacePresentationTests(unittest.TestCase):
         window.copy_observability_full_prompt()
         self.assertIn("完整结尾", QApplication.clipboard().text())
         self.assertIn("本次运行上下文", QApplication.clipboard().text())
+
+    def test_knowledge_chips_restore_selection_and_stay_in_their_session(self):
+        window = self.window
+        first = window.get_current_session()
+        refs = [{"title": "交割答疑手册", "source": "weknora", "knowledge_id": "doc-a"},
+                {"title": "交割答疑手册", "source": "tencent-docs", "item_id": "doc-b"}]
+        first.knowledge_refs = copy.deepcopy(refs)
+        window.input_field.setPlainText("保留未发送的问题")
+        window.refresh_context_badges()
+        chips = window.composer_context_tags.chips("knowledge")
+        self.assertEqual(len(chips), 2)
+        self.assertTrue(all(chip.isVisible() for chip in chips))
+        self.assertIn("WeKnora", chips[0].label.toolTip())
+        self.assertIn("腾讯文档", chips[1].label.toolTip())
+        window.refresh_context_badges()
+        self.assertIs(window.composer_context_tags.chips("knowledge")[0], chips[0])
+        with patch.object(window, "add_system_toast") as toast:
+            chips[0].close_btn.click()
+        self.assertEqual(first.knowledge_refs, refs[1:])
+        undo = toast.call_args.kwargs["actions"][0][1]
+        window.create_new_session()
+        second = window.get_current_session()
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        undo()
+        self.assertEqual(first.knowledge_refs, refs)
+        self.assertEqual(second.knowledge_refs, [])
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        window.activate_session(first.session_id)
+        self.assertEqual(len(window.composer_context_tags.chips("knowledge")), 2)
+        self.assertEqual(window.input_field.toPlainText(), "保留未发送的问题")
+        self.assertTrue(window.save_chat_history(first.session_id, flush=True))
+        self.assertEqual(window.chat_storage.get_conversation_record(first.session_id)["meta"]["knowledge_refs"], refs)
+
+    def test_knowledge_management_cancel_apply_and_stale_undo_preserve_new_choices(self):
+        window = self.window
+        state = window.get_current_session()
+        first = {"title": "手册", "source": "weknora", "knowledge_id": "doc-a"}
+        second = {"title": "新增资料", "source": "weknora", "knowledge_id": "doc-b"}
+        state.knowledge_refs = [first]
+        state.messages = [{"id": "saved-user", "role": "user", "content": "已有提问"}]
+        before_messages = copy.deepcopy(state.messages)
+        window.refresh_context_badges()
+        window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+        popover = window.knowledge_reference_popover
+        self.assertTrue(popover.isVisible())
+        popover.items.item(0).setCheckState(Qt.Unchecked)
+        popover.cancel_button.click()
+        self.assertEqual(state.knowledge_refs, [first])
+        window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+        popover = window.knowledge_reference_popover
+        popover.items.item(0).setCheckState(Qt.Unchecked)
+        popover.apply_button.click()
+        self.assertFalse(window.composer_context_tags.chips("knowledge"))
+        state.knowledge_refs = [first]
+        window.refresh_context_badges()
+        with patch.object(window, "add_system_toast") as toast:
+            window.composer_context_tags.chips("knowledge")[0].close_btn.click()
+        undo = toast.call_args.kwargs["actions"][0][1]
+        state.knowledge_refs.append(second)
+        undo()
+        self.assertEqual(state.knowledge_refs, [second])
+        self.assertEqual(state.messages, before_messages)
 
 
 if __name__ == "__main__":

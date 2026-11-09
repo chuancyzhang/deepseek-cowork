@@ -21,7 +21,7 @@ Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New 
 
 ## Get started
 
-This branch adds personal desktop adapters for Apple Silicon macOS and UOS V25 x86_64 while preserving Windows functionality. Target desktop acceptance and native releases are still pending. See the [platform scope](docs/user-guide.md#mac-与统信的功能范围) and [native build instructions](docs/technical-design.md#平台适配边界). Enterprise compatibility on the new platforms is out of scope.
+This branch introduces an Electron + React/TypeScript + Python + SQLite workspace, starting with the Windows conversation and writing workflow. The original Qt entry retains the full feature set. See the [new workspace guide and migration scope](docs/user-guide.md#新版-windows-工作台) and [development/build instructions](docs/technical-design.md#electron-工作台). Earlier Apple Silicon macOS and UOS V25 adapters remain; native validation and releases for the new host are pending.
 
 1. Download the Windows ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases), extract it fully, and run `deepseek-cowork.exe`.
 2. Enter a DeepSeek API key in onboarding, or add a service and model under Settings → Models & Services. Enterprise clients can also sign in to their organization.

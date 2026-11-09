@@ -217,6 +217,9 @@ def _probe_executable(executable, args=None, extra_paths=None, timeout=8):
     try:
         out = subprocess.check_output(
             [executable] + list(args or []),
+            # Version probes have no input. In a stdio service, inheriting the
+            # command pipe can block MSYS startup and consume protocol bytes.
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",

@@ -32,8 +32,9 @@ class RuntimeJournal:
     _thread_locks_guard = threading.Lock()
     _thread_locks = {}
 
-    def __init__(self, history_dir):
+    def __init__(self, history_dir, *, retain_committed_events=False):
         self._diagnostic_context = threading.local()
+        self.retain_committed_events = retain_committed_events
         self.root = os.path.join(os.path.abspath(history_dir), "runtime_journal_v2")
         os.makedirs(self.root, exist_ok=True)
 
@@ -1020,10 +1021,11 @@ class RuntimeJournal:
                 self._category_dir(session_id, "events"),
                 f"{self._safe_id(run_id, 'run_id')}.jsonl",
             )
-            try:
-                os.unlink(event_path)
-            except FileNotFoundError:
-                pass
+            if not self.retain_committed_events:
+                try:
+                    os.unlink(event_path)
+                except FileNotFoundError:
+                    pass
             return True
 
     def acknowledge_superseded_commit(

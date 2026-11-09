@@ -17,7 +17,7 @@ from core.long_context import ContextBudget, format_capacity, normalize_policy
 from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
 from core.theme_service import ThemeRepository
 from main import MainWindow, ModelEditDialog, SettingsDialog, format_token_usage_overview
-from ui.long_context import ContextRolloverNotice, LongContextSettings
+from ui.long_context import ContextLimitControl, ContextRolloverNotice, LongContextSettings
 from ui.token_usage import TokenUsagePopover
 
 
@@ -205,7 +205,8 @@ class TestLongContextUI(unittest.TestCase):
         popover.set_overview(data)
         popover.show_for(anchor)
         self.app.processEvents()
-        self.assertIn("62%", popover.capacity_value.text())
+        self.assertEqual(popover.capacity_value.text(), "≈ 114.0K")
+        self.assertIn("62%", popover.capacity_used.text())
         self.assertIn("沿用设置", data["capacity"]["note"])
         self.assertIn("700", popover.metrics["total"][1].text())
         self.assertTrue(popover.capacity_box.isVisible())
@@ -235,6 +236,83 @@ class TestLongContextUI(unittest.TestCase):
         self.assertNotIn("暂缓", data["capacity"]["note"])
         self.assertTrue(popover.capacity_box.isVisible())
         self.capture("image-budget", popover)
+
+    def test_inline_limit_explicit_save_failure_and_reopen_preserve_draft(self):
+        self.config.set_experimental_long_context({"enabled": True, "target_tokens": 1000000})
+        anchor = self.widget(QWidget())
+        anchor.resize(440, 700)
+        anchor.show()
+        popover = self.widget(TokenUsagePopover(anchor, config_manager=self.config))
+        panel = popover.limit_control
+        snapshot = ContextBudget.from_profile({"context_window_tokens": 500000},
+            normalize_policy(self.config.get("experimental_long_context"))).snapshot(150775)
+        before = copy.deepcopy(snapshot)
+        data = format_token_usage_overview({}, {}, {}, {}, {}, {}, False)
+        data["capacity"] = format_capacity(snapshot, policy=self.config.get("experimental_long_context"))
+        popover.set_overview(data)
+        with patch("core.llm.factory.LLMFactory.create_provider") as request:
+            popover.show_for(anchor)
+            panel.target.setCurrentIndex(panel.target.findData(300000))
+            self.assertEqual(self.config.get("experimental_long_context")["target_tokens"], 1000000)
+            popover.hide()
+            popover.show_for(anchor)
+            self.assertEqual(panel.target.currentData(), 300000)
+            self.assertTrue(panel.actions.isVisible())
+            with patch.object(self.config, "_write_config_or_raise", side_effect=OSError("disk full")):
+                self.assertFalse(panel.save())
+            self.assertIn("选择已保留", panel.result.text())
+            self.assertEqual(ConfigManager().get("experimental_long_context")["target_tokens"], 1000000)
+            self.assertEqual(panel.target.currentData(), 300000)
+            self.assertTrue(panel.save())
+            self.assertEqual(ConfigManager().get("experimental_long_context")["target_tokens"], 300000)
+            self.assertIn("下次开始或重试", panel.result.text())
+            self.assertEqual(snapshot, before)
+            self.assertIn("466.8K", popover.capacity_budget.text())
+            panel.target.setCurrentIndex(panel.target.findData(1000000))
+            panel.reset_button.click()
+            self.assertEqual(panel.target.currentData(), 300000)
+            request.assert_not_called()
+
+    def test_inline_and_settings_reload_the_same_saved_policy(self):
+        panel = self.widget(ContextLimitControl(self.config))
+        settings = self.widget(LongContextSettings(self.config))
+        panel.target.setCurrentIndex(panel.target.findData(1000000))
+        self.assertTrue(panel.save())
+        self.assertTrue(ConfigManager().get("experimental_long_context")["enabled"])
+        settings.show()
+        self.app.processEvents()
+        self.assertTrue(settings.enabled.isChecked())
+        self.assertEqual(settings.target.currentData(), 1000000)
+        settings.target.setCurrentIndex(settings.target.findData(300000))
+        settings.save()
+        panel.sync_saved()
+        self.assertEqual(panel.target.currentData(), 300000)
+        panel.target.setCurrentIndex(panel.target.findData(0))
+        panel.save()
+        self.assertEqual(self.config.get("experimental_long_context"), {"enabled": False, "target_tokens": 300000})
+
+    def test_overview_grouping_and_copy_keep_complete_statistics(self):
+        counts = {"system": 29, "tools": 115, "user": 4, "assistant": 403, "results": 304, "injected": 145}
+        context = {"status": "available", "counts": counts, "total": 1000, "has_media": True}
+        data = format_token_usage_overview({"input_tokens": 100, "cached_input_tokens": 40, "uncached_input_tokens": 10},
+                                          {}, {}, {}, context, {}, False)
+        self.assertEqual(data["context"]["values"], {"dialogue": "40.7%", "results": "30.4%", "instructions": "17.4%", "tools": "11.5%"})
+        self.assertEqual(sum(value for value, _ in data["context"]["segments"]), 1000)
+        self.assertEqual(data["hit"]["primary_note"], "仅已知输入")
+        popover = self.widget(TokenUsagePopover())
+        popover.set_overview(data)
+        popover.set_detail_text("生成速度：58.1 tok/s")
+        self.assertTrue(popover.balance_box.isHidden())
+        self.assertTrue(popover.copy_button.isHidden())
+        popover.details_button.click()
+        popover._copy_details()
+        copied = self.app.clipboard().text()
+        for text in ("系统提示词：约 29", "用户消息：约 4", "助手消息：约 403", "58.1 tok/s", "缓存明细尚不完整"):
+            self.assertIn(text, copied)
+        data["balance"] = {"visible": True, "value": "¥0.00", "note": "最近查询结果"}
+        popover.set_overview(data)
+        self.assertFalse(popover.balance_box.isHidden())
+        self.assertEqual(popover.balance_value.text(), "¥0.00")
 
     def test_notice_same_identity_order_and_no_ledger_entry(self):
         host = self.widget(QWidget())

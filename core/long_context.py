@@ -249,6 +249,36 @@ def format_capacity(snapshot, *, policy=None, active_run_id=""):
         note += "新设置下一轮生效。"
     if snapshot.get("unestimated_images"):
         note += f"有 {snapshot['unestimated_images']} 张图片未计入本地估算。"
+    def short(value):
+        return (f"{value / 1_000_000:.1f}M" if value >= 1_000_000 else
+                f"{value / 1000:.1f}K" if value >= 1000 else str(value))
+    remaining = max(0, effective - used)
+    caption = ("" if current else "上次运行 · ") + "本地估算"
+    if snapshot.get("unestimated_images"):
+        caption += f"，{snapshot['unestimated_images']} 张图片未计入"
+    if used > effective:
+        caption += f" · 已超预算约 {short(used - effective)}"
+    target = snapshot.get("target_tokens", effective)
+    trigger = snapshot.get("trigger_tokens", int(effective * .8))
+    detail = [f"{prefix}上下文预算", f"目标上限：{target:,} tokens",
+              f"已用估算：{used:,} tokens", f"剩余估算：{remaining:,} tokens"]
+    model = snapshot.get("model_tokens")
+    output = snapshot.get("output_tokens")
+    if type(model) is int and type(output) is int:
+        detail.extend([f"模型资料容量：{model:,} tokens", f"输出预留：{output:,} tokens",
+                       f"安全余量：{max(2048, model // 20):,} tokens",
+                       "容量来自本地模型资料，不代表已实测确认的服务上限。"])
+    else:
+        detail.append("服务容量未知，沿用设置中的目标上限。")
+    detail.extend([f"当前可用预算：{effective:,} tokens", f"约 {trigger:,} tokens 时自动整理",
+                   f"预计再用 {max(0, trigger - used):,} tokens 后触发；完整对话仍保留。", note])
     return {"visible": True, "value": f"约 {compact(used)} / {compact(effective)} tokens · {used / effective:.0%}",
             "note": note + "上下文估算，实际用量以服务返回为准。",
+            "remaining": f"≈ {short(remaining)}", "used": f"已用 ≈ {short(used)} · {used / effective:.0%}",
+            "budget": f"当前预算 {short(effective)}", "caption": caption,
+            "limit_note": ("当前任务沿用原上限，新设置下次生效。" if current and
+                           (not policy["enabled"] or policy["target_tokens"] != target) else
+                           "预算受模型资料与预留限制。" if target != effective else
+                           "服务容量未知，按目标预算。" if model is None else ""),
+            "detail": "\n".join(detail),
             "segments": [(min(used, effective), "accent_ai"), (max(0, effective - used), "bg_tertiary")]}

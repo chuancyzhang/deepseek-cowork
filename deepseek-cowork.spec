@@ -52,6 +52,8 @@ def _env_flag(name, default=False):
 
 
 ALLOW_MISSING_MCP = _env_flag("COWORK_ALLOW_MISSING_MCP", False)
+DESKTOP_SERVICE = _env_flag("COWORK_BUILD_DESKTOP_SERVICE", False)
+EXECUTABLE_NAME = "cowork-service" if DESKTOP_SERVICE else "deepseek-cowork"
 
 
 def _add_data_file(store, src, dest):
@@ -812,7 +814,7 @@ if os.name == "nt":
         os.path.join(windows_root, "System32"), windows_root,
     ])
 a = Analysis(
-    ['main.py'],
+    ['scripts/desktop_service_entry.py' if DESKTOP_SERVICE else 'main.py'],
     pathex=[],
     binaries=collect_dynamic_libs("winpty"),
     datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
@@ -914,12 +916,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='deepseek-cowork',
+    name=EXECUTABLE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=DESKTOP_SERVICE,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -935,5 +937,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='deepseek-cowork',
+    name=EXECUTABLE_NAME,
 )

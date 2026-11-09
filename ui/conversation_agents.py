@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QPushButton
 
 from core.conversation_agents import agent_role_context, normalize_agent_selection
 from core.deliverable_preview import iter_local_file_references, iter_workspace_file_paths, normalize_workspace_file
-from core.theme import bind_theme
+from core.theme import DesignTokens, bind_theme
 from ui.conversation_actions import ConversationMentionPopover
 from ui.primitives import product_button_style
 
@@ -71,21 +71,26 @@ class ConversationAgentsMixin:
         # Reserve the model, submit/stop buttons and toolbar spacing first.
         margins = self.input_card.layout().contentsMargins()
         available = self.input_card.contentsRect().width() - margins.left() - margins.right()
-        for name in ("tool_menu_btn", "permission_button", "action_btn"):
+        for name in ("tool_menu_btn", "permission_button", "action_btn", "grill_mode_badge"):
             control = getattr(self, name, None)
             if control is not None and not control.isHidden():
                 available -= (control.minimumWidth() if control.minimumWidth() == control.maximumWidth()
                               else max(control.minimumWidth(), control.sizeHint().width()))
         available -= 100 + 32
+        if not self.grill_mode_badge.isHidden():
+            available -= 8
         name = getattr(button, "conversation_agent_name", "专家")
         button.setText(name)
         chrome = button.main_btn.sizeHint().width() - button.main_btn.fontMetrics().horizontalAdvance(name)
         chrome += 26 if not button.close_btn.isHidden() else 0
         width = max(12, min(150, available - chrome)) if self.input_card.isVisible() else 150
-        button.setText(button.main_btn.fontMetrics().elidedText(name, Qt.ElideRight, width))
+        icon_only = name == "专家" and width < button.main_btn.fontMetrics().horizontalAdvance(name)
+        button.setText("" if icon_only else button.main_btn.fontMetrics().elidedText(name, Qt.ElideRight, width))
         close_width = button.close_btn.width() + button.layout().spacing() if not button.close_btn.isHidden() else 0
         main_width = button.main_btn.sizeHint().width()
-        if self.input_card.isVisible():
+        if icon_only:
+            main_width = DesignTokens.control_height
+        elif self.input_card.isVisible():
             main_width = min(main_width, max(1, available - close_width))
         button.main_btn.setFixedWidth(main_width)
         button.setFixedWidth(main_width + close_width)

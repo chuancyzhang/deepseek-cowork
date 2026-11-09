@@ -2,7 +2,7 @@
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from core.long_context import normalize_policy
@@ -11,6 +11,127 @@ from ui.primitives import PageScrollSafeComboBox, ProductMessageDialog
 
 
 logger = logging.getLogger(__name__)
+
+
+class ContextLimitControl(QWidget):
+    """Inline editor for the existing global policy; never changes a running task."""
+
+    saved = Signal()
+    layout_changed = Signal()
+
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContextLimitControl")
+        self.config_manager = config_manager
+        self._saved = normalize_policy(config_manager.get("experimental_long_context"))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        row = QHBoxLayout()
+        label = QLabel("目标上限", self)
+        self.target = PageScrollSafeComboBox(self)
+        self.target.setAccessibleName("上下文目标上限")
+        label.setBuddy(self.target)
+        self.target.addItem("未启用", 0)
+        self.target.addItem("300K", 300000)
+        self.target.addItem("1M", 1000000)
+        row.addWidget(label)
+        row.addWidget(self.target)
+        row.addStretch()
+        layout.addLayout(row)
+        self.result = QLabel(self)
+        self.result.setWordWrap(True)
+        self.result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.result)
+        self.actions = QWidget(self)
+        actions = QHBoxLayout(self.actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.addStretch()
+        self.reset_button = QPushButton("取消", self.actions)
+        self.apply_button = QPushButton("保存", self.actions)
+        self.apply_button.setObjectName("ContextLimitSave")
+        actions.addWidget(self.reset_button)
+        actions.addWidget(self.apply_button)
+        layout.addWidget(self.actions)
+        self.target.currentIndexChanged.connect(self._input_changed)
+        self.reset_button.clicked.connect(self.reset)
+        self.apply_button.clicked.connect(self.save)
+        self.reset()
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def _value(self):
+        target = self.target.currentData()
+        return {"enabled": bool(target), "target_tokens": target or self._saved["target_tokens"]}
+
+    def has_pending_input(self):
+        return self._value() != self._saved
+
+    def sync_saved(self):
+        # A popup may disappear on outside click or navigation. Keep its draft.
+        pending = self.has_pending_input()
+        current = normalize_policy(self.config_manager.get("experimental_long_context"))
+        if current != self._saved:
+            self._saved = current
+            if pending:
+                self._input_changed()
+            else:
+                self.reset()
+
+    def _input_changed(self):
+        dirty = self.has_pending_input()
+        note = "下次开始或重试任务时生效，适用于桌面主会话。" if dirty else ""
+        if dirty and not self._value()["enabled"]:
+            note = "关闭后使用完整历史；已有记录保留，下次任务生效。"
+        self._show_result(note)
+        self.actions.setVisible(dirty)
+        self.layout_changed.emit()
+
+    def _show_result(self, text, *, error=False):
+        self.result.setText(text)
+        self.result.setProperty("error", error)
+        self.result.style().unpolish(self.result)
+        self.result.style().polish(self.result)
+        self.result.setVisible(bool(text))
+
+    def reset(self):
+        self._saved = normalize_policy(self.config_manager.get("experimental_long_context"))
+        self.target.blockSignals(True)
+        self.target.setCurrentIndex(self.target.findData(self._saved["target_tokens"] if self._saved["enabled"] else 0))
+        self.target.blockSignals(False)
+        self._input_changed()
+
+    def save(self):
+        value = self._value()
+        logger.info("long_context_quick_save_started enabled=%s target_tokens=%s", value["enabled"], value["target_tokens"])
+        try:
+            self.config_manager.set_experimental_long_context(value)
+        except Exception as exc:
+            logger.error("long_context_quick_save_failed error_type=%s", type(exc).__name__)
+            self._show_result("保存失败，选择已保留。请检查磁盘空间和配置目录权限后重试。", error=True)
+            self.layout_changed.emit()
+            return False
+        self._saved = value
+        self.actions.hide()
+        self._show_result("已保存，下次开始或重试任务时生效。")
+        logger.info("long_context_quick_save_completed enabled=%s target_tokens=%s", value["enabled"], value["target_tokens"])
+        self.saved.emit()
+        self.layout_changed.emit()
+        return True
+
+    def refresh_theme(self, _resolved=None):
+        t = DesignTokens
+        self.setStyleSheet(
+            f"QWidget#ContextLimitControl {{ background: transparent; }}"
+            f"QWidget#ContextLimitControl QLabel {{ background: transparent; color: {t.text_secondary}; font-size: {t.font_size_meta}px; border: none; }}"
+            f"QWidget#ContextLimitControl QLabel[error='true'] {{ color: {t.error_text}; }}"
+            f"QWidget#ContextLimitControl QComboBox {{ background: {t.overlay_bg}; color: {t.overlay_text}; border: 1px solid {t.border_subtle}; border-radius: {t.radius_sm}px; padding: 3px 8px; min-height: {t.control_height_sm}px; }}"
+            f"QWidget#ContextLimitControl QPushButton {{ background: transparent; color: {t.overlay_text}; border: 1px solid {t.border_subtle}; border-radius: {t.radius_sm}px; padding: 4px 12px; font-size: {t.font_size_meta}px; }}"
+            f"QWidget#ContextLimitControl QPushButton:hover {{ background: {t.bg_hover}; }}"
+            f"QWidget#ContextLimitControl QPushButton#ContextLimitSave {{ background: {t.primary}; color: {t.text_inverse}; border-color: {t.primary}; }}"
+            f"QWidget#ContextLimitControl QPushButton#ContextLimitSave:hover {{ background: {t.primary_hover}; }}"
+            f"QWidget#ContextLimitControl QComboBox:focus, QWidget#ContextLimitControl QPushButton:focus {{ border-color: {t.primary_focus}; }}"
+        )
 
 
 class LongContextSettings(QWidget):
@@ -77,6 +198,12 @@ class LongContextSettings(QWidget):
 
     def _value(self):
         return {"enabled": self.enabled.isChecked(), "target_tokens": self.target.currentData()}
+
+    def showEvent(self, event):
+        if not self.has_pending_input():
+            self.saved = normalize_policy(self.config_manager.get("experimental_long_context"))
+            self.reset()
+        super().showEvent(event)
 
     def has_pending_input(self):
         return self._value() != self.saved

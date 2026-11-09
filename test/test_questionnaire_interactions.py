@@ -195,7 +195,7 @@ class QuestionnaireTests(unittest.TestCase):
         card._submit()
         resolver.assert_not_called()
 
-    def test_replayed_result_is_read_only_unique_and_outside_collapsed_process(self):
+    def test_replayed_result_is_read_only_unique_and_folds_with_process(self):
         group = AssistantTurnGroup("turn", self.host)
         self.host.state.chat_layout.insertWidget(0, group)
         stage = ChatBubble("Agent", "分析前需要你选择", parent=group)
@@ -215,11 +215,42 @@ class QuestionnaireTests(unittest.TestCase):
         group.finalize_process_only()
         group.set_process_expanded(False)
         self.app.processEvents()
+        self.assertFalse(card.isVisible())
+        group.process_disclosure.setChecked(True)
         self.assertTrue(card.isVisible())
+        card.receipt.view_btn.click()
+        self.assertFalse(card.receipt.details.isHidden())
+        group.process_disclosure.setChecked(False)
+        self.assertFalse(card.isVisible())
         self.assertEqual(card.receipt.rows[0].answer_label.text(), "具体问题")
         self.assertEqual(payload, original)
         self.assertEqual(self.host.state.messages, [])
         self.assertFalse(self.host.state.pending_interactions)
+
+    def test_live_questionnaire_stays_actionable_then_folds_with_final_answer(self):
+        group = AssistantTurnGroup("turn", self.host)
+        self.host.state.chat_layout.insertWidget(0, group)
+        stage = group.add_stage(ChatBubble("Agent", "请确认范围", parent=group))
+        tool = ToolCallCard("request_user_input", {}, "call", parent=stage)
+        stage.add_tool_card(tool)
+        self.host.state.tool_cards["call"] = tool
+        payload = request()
+        payload["metadata"] = {"tool_call_id": "call"}
+        card = self.show_card(payload=payload)
+        self.assertTrue(card.isVisible())
+        final = group.add_stage(ChatBubble("Agent", "最终结论保持可见", parent=group))
+        group.finalize_process(final)
+        self.assertTrue(card.isVisible(), "Unanswered questions must remain actionable")
+        card._submit()
+        self.app.processEvents()
+        self.assertFalse(card.isVisible())
+        self.assertTrue(final.isVisible())
+        group.process_disclosure.setChecked(True)
+        self.assertTrue(card.isVisible())
+        self.assertEqual(card.receipt.label.text(), "已提交 2 项回答")
+        group.process_disclosure.setChecked(False)
+        self.assertFalse(card.isVisible())
+        self.assertTrue(final.isVisible())
 
     def test_legacy_automatic_result_never_claims_user_submitted(self):
         self.host._restore_questionnaire_receipt(self.host.state, "call", result({"scope": {"text": "旧默认值"}}, status="auto_selected"))
@@ -281,7 +312,8 @@ class QuestionnaireHistoryTests(unittest.TestCase):
                     payload = result({"scope": {"selected_options": ["specific"]},
                                       "format": {"text": "保留的自定义回答"}})
                     messages = [
-                        {"id": "question-call", "role": "assistant", "content": "请确认分析范围",
+                        {"id": "question-call", "role": "assistant", "content": "## 当前共识总结\n\n### 目标\n\n"
+                         + "分析资料中的观点并给出依据。" * 20 + "\n\n- 第一项\n- 第二项\n\n末行必须可见。",
                          "tool_calls": [{"id": "call", "type": "function", "function": {
                              "name": "request_user_input", "arguments": json.dumps(request())}}]},
                         {"id": "question-result", "role": "tool", "tool_call_id": "call",
@@ -298,11 +330,8 @@ class QuestionnaireHistoryTests(unittest.TestCase):
                         window._render_session_history_spans(state, [{"start": 0, "end": len(stored)}])
                         self.app.processEvents()
                         summary = state.history_detail_summaries[0]
-                        card = state.interaction_cards["questions"]
                         self.assertFalse(summary.detail_button.isChecked())
-                        self.assertTrue(card.isVisibleTo(summary))
-                        self.assertIs(card.parentWidget(), summary.body)
-                        self.assertEqual(card.receipt.rows[1].answer_label.text(), "保留的自定义回答")
+                        self.assertFalse(summary.findChildren(InlineInteractionCard))
                         summary.detail_button.setChecked(True)
                         deadline = time.monotonic() + 5
                         while summary.detail_loading and time.monotonic() < deadline:
@@ -310,8 +339,28 @@ class QuestionnaireHistoryTests(unittest.TestCase):
                             time.sleep(.01)
                         self.assertFalse(summary.detail_loading)
                         self.assertFalse(summary.detail_error)
-                        summary.detail_button.setChecked(False)
+                        QTest.qWait(200)
+                        card = state.interaction_cards["questions"]
                         self.assertTrue(card.isVisibleTo(summary))
+                        self.assertTrue(summary.details.isAncestorOf(card))
+                        self.assertEqual(card.receipt.rows[1].answer_label.text(), "保留的自定义回答")
+                        for width in (1280, 800):
+                            window.resize(width, 850)
+                            QTest.qWait(150)
+                            for bubble in summary.details.findChildren(ChatBubble):
+                                for tool in bubble.findChildren(ToolCallCard):
+                                    self.assertGreater(tool.y(), bubble.content_edit.geometry().bottom(),
+                                                       "Tool row must follow the complete stage text")
+                                    self.assertGreaterEqual(bubble.think_container.height(), tool.geometry().bottom())
+                            card.receipt.view_btn.setChecked(True)
+                            QTest.qWait(50)
+                            self.assertTrue(card.receipt.rows[1].answer_label.isVisibleTo(summary))
+                        summary.detail_button.setChecked(False)
+                        self.assertFalse(card.isVisibleTo(summary))
+                        summary.detail_button.setChecked(True)
+                        self.app.processEvents()
+                        self.assertTrue(card.isVisibleTo(summary))
+                        summary.detail_button.setChecked(False)
                         self.assertEqual(len(summary.findChildren(InlineInteractionCard)), 1)
                         for sid in (other, state.session_id):
                             window.set_current_session(sid)

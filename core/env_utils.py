@@ -30,6 +30,12 @@ def get_app_data_dir():
     1. Portable Mode: Check if 'user_data' folder exists next to executable/script.
     2. Installed Mode: Use standard AppData location.
     """
+    explicit_dir = os.environ.get("COWORK_APP_DATA_DIR", "").strip()
+    if explicit_dir:
+        if not os.path.isabs(explicit_dir):
+            raise ValueError("COWORK_APP_DATA_DIR 必须是绝对路径。")
+        os.makedirs(explicit_dir, exist_ok=True)
+        return os.path.normpath(explicit_dir)
     base_dir = get_base_dir()
     
     # 1. Portable Mode Check

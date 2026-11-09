@@ -21,6 +21,7 @@ from main import (CapabilityWorkbenchDialog, ChatBubble, FavoriteEditorPage, IM_
                   SettingsDialog, SubAgentEventTile, MainWindow)
 from core.conversation_agents import builtin_agent_profiles
 from ui.conversation_actions import ConversationMentionPopover
+from ui.token_usage import TokenUsagePopover
 from ui_window_cleanup import close_test_window
 
 
@@ -79,6 +80,21 @@ class ChildWindowLifecycleTests(unittest.TestCase):
         cancel = next(button for button in picker.findChildren(QPushButton) if button.text() == "取消")
         self.assertFalse(cancel.isHidden())
         self.assertEqual(self.tracker.events, [])
+
+    def test_usage_editor_construction_and_live_theme_keep_children_owned(self):
+        self.tracker.allowed.add(self.parent)
+        self.parent.show()
+        popover = TokenUsagePopover(self.parent, config_manager=self.config)
+        self.assertEqual(self.tracker.events, [])
+        self.assertFalse(popover.limit_control.target.isWindow())
+        self.assertFalse(popover.limit_control.apply_button.isWindow())
+        self.tracker.allowed.add(popover)
+        popover.show_for(self.parent)
+        popover.limit_control.target.setCurrentIndex(2)
+        popover.refresh_theme()
+        self.app.processEvents()
+        self.assertEqual(self.tracker.events, [])
+        popover.hide()
 
     def test_editors_never_show_native_action_buttons(self):
         manager = MagicMock()

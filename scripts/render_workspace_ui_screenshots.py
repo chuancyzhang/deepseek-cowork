@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False):
+def render(mode="light", scale=1, compact=False, focused=False, message_context=False, writing_pages=False, native=False, composer_context=False, composer_mode=False, compact_workspace=False, usage=False):
     os.environ["QT_QPA_PLATFORM"] = "windows" if native else "offscreen"
     os.environ["QT_SCALE_FACTOR"] = str(scale)
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
@@ -24,28 +24,34 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         os.environ["LOCALAPPDATA"] = str(Path(temporary, "local"))
         import core.env_utils
         core.env_utils.get_app_data_dir = lambda: temporary
-        from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject
+        from PySide6.QtCore import QCoreApplication, QEvent, Qt, QObject, QMimeData
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QApplication, QWidget
+        from PySide6.QtWidgets import QApplication, QLabel, QWidget
         from core.config_manager import ConfigManager
         from core.theme import ThemeRuntimeManager
         from core.theme_service import ThemeRepository
         from core.theme_presets import builtin_theme
-        from main import MainWindow
+        from main import MainWindow, initialize_desktop_theme
 
         app = QApplication([])
+        if composer_context or composer_mode or compact_workspace or usage:
+            initialize_desktop_theme(app)
         for font in ("msyh.ttc", "consola.ttf"):
             QFontDatabase.addApplicationFont(str(Path(os.environ["SystemRoot"], "Fonts", font)))
         repository = ThemeRepository(temporary)
         manager = ThemeRuntimeManager(app, repository)
         app.theme_manager = manager
+        if composer_context or composer_mode or compact_workspace or usage:
+            assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
         class WindowAudit(QObject):
-            active = writing_pages
+            active = writing_pages or message_context or composer_context or composer_mode or compact_workspace or usage
             events = []
+            allowed = set()
             def eventFilter(self, obj, event):
                 if (self.active and event.type() == QEvent.Show and isinstance(obj, QWidget)
-                        and obj.isWindow() and not isinstance(obj, MainWindow)
+                        and obj.isWindow() and not isinstance(obj, MainWindow) and obj not in self.allowed
+                        and not (usage and type(obj).__name__ == "TokenUsagePopover")
                         and not obj.testAttribute(Qt.WA_DontShowOnScreen)):
                     self.events.append((type(obj).__name__, obj.objectName()))
                 return False
@@ -60,12 +66,12 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         window.skill_manager.load_skills(load_mcp_tools=False)
         window.skill_manager_ready = True
         window.refresh_selected_skill_controls()
-        window.resize((760 if focused else 1100) if compact else 1440, 760 if compact else 900)
+        window.resize((760 if focused or composer_context or composer_mode else 1100) if compact else 1440, 760 if compact else 900)
         window.show()
         state_path = Path(repository.store_path)
         saved_before = state_path.read_bytes() if state_path.exists() else None
         assert manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True), manager.last_error
-        output = QA_ROOT / "screenshots" / ("writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
+        output = QA_ROOT / "screenshots" / ("usage" if usage else "compact-workspace" if compact_workspace else "composer-mode" if composer_mode else "composer-context" if composer_context else "writing-pages" if writing_pages else "message-context" if message_context else "focused-workspace" if focused else "workspace-redesign")
         output.mkdir(parents=True, exist_ok=True)
 
         def settle():
@@ -74,6 +80,12 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             QTest.qWait(100)
 
         def capture(name):
+            if compact_workspace and not name.startswith("compact-"):
+                return
+            if composer_mode and not name.startswith("composer-mode"):
+                return
+            if composer_context and not name.startswith("composer-context"):
+                return
             if writing_pages and not name.startswith("writing-"):
                 return
             if message_context and not name.startswith("message-context"):
@@ -88,6 +100,149 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
             destination = output / f"{name}-{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}.png"
             assert window.grab().save(str(destination))
             print(destination, flush=True)
+
+        def finish():
+            assert (state_path.read_bytes() if state_path.exists() else None) == saved_before
+            manager.restore_saved_theme(reason="preview_finished")
+            manager.stop()
+            window.close()
+            deadline = time.monotonic() + 5
+            while not getattr(window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.01)
+            assert window._checkpoint_close_ready
+            window.file_model.directoryLoaded.disconnect()
+            window.deleteLater()
+            app.processEvents()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            if writing_pages or compact_workspace:
+                QTest.qWait(500)
+            background_patch.stop()
+
+        if usage:
+            import json
+            from core.long_context import ContextBudget
+            state = window.get_current_session()
+            config.set_experimental_long_context({"enabled": True, "target_tokens": 1000000})
+            state.messages = [{"id": "usage-user", "role": "user", "content": "整理资料并核对结论。"}]
+            window.add_chat_bubble("User", state.messages[0]["content"], source_message_id="usage-user", animate=False)
+            window.normalize_session_ui(state)
+            state.token_usage_summary = {"input_tokens": 1433798, "output_tokens": 66202, "total_tokens": 1500000,
+                                         "cached_input_tokens": 1094000, "uncached_input_tokens": 339798, "request_count": 28}
+            state.last_token_usage = {"model": "gpt-6.1-sol"}
+            state.context_usage_snapshot = {"status": "available", "has_media": True,
+                "counts": {"system": 1879, "tools": 7452, "user": 259, "assistant": 26114, "results": 19699, "injected": 9396}}
+            state.context_capacity_snapshot = {**ContextBudget.from_profile({"context_window_tokens": 500000},
+                config.get("experimental_long_context")).snapshot(150775), "unestimated_images": 5}
+            window.refresh_token_usage_label(state.session_id)
+            state.token_usage_label.click()
+            popover = state.token_usage_label._popover
+            settle()
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert popover.grab().save(str(output / f"usage-{suffix}.png"))
+            capture("usage-conversation")
+            control = popover.limit_control
+            audit.allowed.add(control.target.view().window())
+            QTest.mouseClick(control.target, Qt.LeftButton)
+            QTest.keyClick(control.target, Qt.Key_Up)
+            QTest.keyClick(control.target, Qt.Key_Return)
+            settle()
+            assert popover.isVisible() and control.target.currentData() == 300000
+            assert popover.grab().save(str(output / f"usage-pending-{suffix}.png"))
+            with patch.object(config, "_write_config_or_raise", side_effect=OSError("fixture")):
+                assert not control.save()
+            settle()
+            assert popover.grab().save(str(output / f"usage-failed-{suffix}.png"))
+            assert control.save()
+            assert "466.8K" in popover.capacity_budget.text()
+            popover.details_button.click()
+            settle()
+            assert popover.grab().save(str(output / f"usage-details-{suffix}.png"))
+            before_draft = control.target.currentData()
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert control.target.currentData() == before_draft
+            popover.hide()
+            state.token_usage_label.click()
+            settle()
+            assert control.target.currentData() == 300000
+            for label in popover.findChildren(QLabel):
+                if label.isVisible() and label.wordWrap():
+                    assert label.height() >= label.heightForWidth(label.width()), (label.text(), label.size())
+            assert not audit.events, audit.events
+            print(json.dumps({"platform": app.platformName(), "device_pixel_ratio": window.devicePixelRatioF(),
+                              "logical_dpi": window.screen().logicalDotsPerInch(), "qt_scale_factor": scale,
+                              "unexpected_windows": audit.events}), flush=True)
+            popover.hide()
+            finish()
+            return
+
+        if composer_mode:
+            import json
+            from core.clarify_mode import GRILL_MODE_ACTIVE, GRILL_MODE_ARMED, GRILL_MODE_DISABLED
+
+            state = window.get_current_session()
+            chip = window.grill_mode_badge
+            assert chip.isHidden()
+            window.input_field.setPlainText("请先帮我梳理方案中的关键决策。")
+            window.show_composer_mode_picker()
+            choices = window.composer_mode_choices
+            QTest.mouseClick(choices.viewport(), Qt.LeftButton,
+                             pos=choices.visualItemRect(choices.item(1)).center())
+            window.composer_mode_popover.close()
+            capture("composer-mode-home")
+            assert state.grill_mode_state == GRILL_MODE_ARMED
+            assert chip.isVisible() and chip.close_btn.isVisible()
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert window.input_row.grab().save(str(output / f"composer-mode-input-{suffix}.png"))
+            draft = window.input_field.toPlainText()
+            attachment = Path(temporary, "方案.txt")
+            attachment.write_text("胶囊取消时保留的附件。", encoding="utf-8")
+            window._set_prompt_files([str(attachment)])
+            QTest.mouseClick(chip.close_btn, Qt.LeftButton)
+            assert chip.isHidden() and state.grill_mode_state == GRILL_MODE_DISABLED
+            assert window.input_field.toPlainText() == draft
+            assert window._current_prompt_files() == [str(attachment)]
+            window.toggle_grill_mode()
+            window._set_prompt_files([])
+            state.messages = [{"id": "mode-preview-user", "role": "user", "content": "先讨论方案"}]
+            window.add_chat_bubble("User", "先讨论方案", source_message_id="mode-preview-user", animate=False)
+            window.normalize_session_ui(state)
+            capture("composer-mode-conversation")
+            assert not window._home_presentation_active and not window.home_scroll.isVisible()
+            for control in (chip, window.model_select_btn, window.action_btn):
+                assert window.input_card.rect().contains(control.mapTo(window.input_card, control.rect().topLeft()))
+                assert window.input_card.rect().contains(control.mapTo(window.input_card, control.rect().bottomRight()))
+            assert not chip.geometry().intersects(window.agent_picker_btn.geometry())
+            state.grill_mode_state = GRILL_MODE_ACTIVE
+            window.refresh_grill_mode_controls(state.session_id)
+            assert chip.isVisible() and chip.close_btn.isHidden() and not chip.main_btn.isEnabled()
+            capture("composer-mode-active")
+            state.grill_mode_state = GRILL_MODE_ARMED
+            window.refresh_grill_mode_controls(state.session_id)
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert chip.isVisible() and chip.close_btn.isVisible()
+            assert window.input_field.toPlainText() == draft
+            window.create_new_session(make_current=True)
+            settle()
+            assert chip.isHidden()
+            window.set_current_session(state.session_id)
+            settle()
+            assert chip.isVisible() and window.input_field.toPlainText() == draft
+            assert not audit.events, audit.events
+            print(json.dumps({"platform": app.platformName(), "qt_scale_factor": scale,
+                              "device_pixel_ratio": window.devicePixelRatioF(),
+                              "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                              "native_window_events": audit.events,
+                              "theme_preview_persisted": False}, ensure_ascii=False), flush=True)
+            audit.active = False
+            finish()
+            return
 
         if focused:
             capture("home-empty")
@@ -115,6 +270,140 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         assert window.input_field.toPlainText().startswith("保留的草稿")
         assert window.input_row.parentWidget() is window.conversation_column
         capture("conversation")
+        if composer_context:
+            import json
+            current.conversation_refs = [{"session_id": "reference-preview", "title": "上次交割问题讨论"}]
+            current.knowledge_refs = [
+                {"title": "交割部交割答疑手册", "source": "weknora", "knowledge_id": "manual"},
+                {"title": "交割业务办理流程与材料清单（修订版）", "source": "tencent-docs", "item_id": "process"},
+            ]
+            window._available_session_skills = lambda: [{"name": "document-analysis", "display_name": "文档分析", "type": "ai_generated"}]
+            current.selected_skill_names = ["document-analysis"]
+            attachment = Path(temporary, "交割办理问题清单.txt")
+            attachment.write_text("资料标签布局示例。", encoding="utf-8")
+            window._set_prompt_files([str(attachment)])
+            window.refresh_selected_skill_controls()
+            window.refresh_context_badges()
+            window.input_field.setPlainText("请根据手册整理交割办理的常见问题。")
+            capture("composer-context")
+            suffix = f"{mode}-{int(scale * 100)}{'-compact' if compact else ''}{'-windows' if native else ''}"
+            assert window.input_row.grab().save(str(output / f"composer-context-input-{suffix}.png"))
+            for chip in window.composer_context_tags.chips("knowledge"):
+                assert chip.type_label.text() == "资料"
+                assert chip.rect().contains(chip.close_btn.geometry())
+            strip = window.composer_context_tags
+            strip.verticalScrollBar().setValue(strip.verticalScrollBar().maximum())
+            settle()
+            last = strip.chips("knowledge")[-1]
+            assert strip.viewport().rect().contains(last.close_btn.mapTo(strip.viewport(), last.close_btn.rect().center()))
+            strip.verticalScrollBar().setValue(0)
+            draft = window.input_field.toPlainText()
+            window.composer_context_tags.chips("knowledge")[0].main_btn.click()
+            capture("composer-context-manage")
+            popover = window.knowledge_reference_popover
+            assert popover.isVisible()
+            assert window.rect().contains(popover.geometry())
+            popover.cancel_button.click()
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert window.input_field.toPlainText() == draft
+            assert len(window.composer_context_tags.chips("knowledge")) == 2
+            assert not audit.events, audit.events
+            audit.active = False
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events, "theme_preview_persisted": False}
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+            finish()
+            return
+        if compact_workspace:
+            import json
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 10
+                while not predicate() and time.monotonic() < deadline:
+                    QTest.qWait(20)
+                assert predicate()
+
+            def evaluate(script):
+                results = []
+                window.deliverable_web_view.page().runJavaScript(script, results.append)
+                wait_for(lambda: bool(results))
+                return results[0]
+
+            source = Path(window._workspace_dir_for_state(current)) / "产品讨论纪要.md"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            content = ("# 把工作空间留给内容\n\n"
+                       "> 好的界面让用户知道 **当前状态**，也知道下一步可以做什么。\n\n"
+                       "## 本次结论\n\n标题和工作区标签齐顶，常用操作仍然就近可达。正文保留清晰的段落与阅读间距。\n\n"
+                       "---\n\n## 验证重点\n\n1. 展开和恢复工作区，不丢失对话草稿。\n"
+                       "2. 文件编辑、保存与取消沿用原有规则。\n3. 切换主题保留阅读位置。\n\n"
+                       "```python\nprint('内容完整保留')\n```\n\n"
+                       "| 状态 | 下一步 |\n| --- | --- |\n| 文件已更新 | 点击刷新 |\n| 编辑中 | 保存或取消 |\n\n"
+                       + "阅读区域会保留原文中的标题、引用、列表、链接和代码。\n\n" * 12)
+            source.write_text(content, encoding="utf-8")
+            window.input_field.setPlainText("这段草稿在展开、切换文件和恢复分栏后仍应保留。")
+            window.show_context_drawer(window.RIGHT_TAB_FILES)
+            window.set_file_navigator_visible(False, reason="compact_workspace_qa")
+            window.select_deliverable(str(source))
+            wait_for(lambda: not window.deliverable_render_loading and window.deliverable_web_view is not None)
+            capture("compact-split")
+            assert window.right_sidebar.y() == window.top_bar_widget.y()
+            for control in (window.workspace_title_label, current.header_tools):
+                assert control.mapTo(window.main_container, control.rect().bottomRight()).x() < window.right_sidebar.x()
+            width = window.right_sidebar.width()
+            window.toggle_deliverable_preview_expanded()
+            capture("compact-markdown")
+            metrics = evaluate("""(() => { const content = document.querySelector('.markdown-document');
+                const quote = document.querySelector('blockquote');
+                return JSON.stringify({font: getComputedStyle(document.body).fontFamily,
+                  padding: getComputedStyle(content).paddingLeft, width: content.getBoundingClientRect().width,
+                  quotePadding: getComputedStyle(quote).paddingLeft,
+                  overflow: document.documentElement.scrollWidth > window.innerWidth}); })()""")
+            assert not json.loads(metrics)["overflow"], metrics
+            evaluate("window.scrollTo(0, 150); window.scrollY")
+            scroll = evaluate("window.scrollY")
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            assert evaluate("window.scrollY") == scroll
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
+            settle()
+            assert evaluate("window.scrollY") == scroll
+            window.browser_workbench.chat_button.click()
+            capture("compact-conversation")
+            assert window.input_field.isVisible()
+            assert window.input_field.toPlainText().startswith("这段草稿")
+            window.select_deliverable(str(source))
+            window.begin_deliverable_edit()
+            wait_for(lambda: window.deliverable_edit_state == "ready")
+            capture("compact-markdown-edit")
+            assert window.deliverable_text_editor.toPlainText() == content
+            window.cancel_deliverable_edit()
+            wait_for(lambda: not window.deliverable_render_loading)
+            window.toggle_deliverable_preview_expanded()
+            settle()
+            assert window.right_sidebar.width() == width
+            assert window.input_field.toPlainText().startswith("这段草稿")
+            assert source.read_text(encoding="utf-8") == content
+            window.hide_context_drawer()
+            capture("compact-conversation-wide")
+            window.show_product_page(window.PAGE_SETTINGS)
+            assert not window.session_tools_stack.isVisible()
+            window.show_product_page(window.PAGE_CONVERSATION)
+            assert window.session_tools_stack.currentWidget() == current.header_tools
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events, "markdown": json.loads(metrics),
+                      "theme_preview_persisted": False}
+            print(json.dumps(report, ensure_ascii=False), flush=True)
+            assert not audit.events, audit.events
+            audit.active = False
+            finish()
+            return
         if writing_pages:
             import json
             from PySide6.QtGui import QInputMethodEvent
@@ -185,8 +474,29 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
         if message_context:
             capture("message-context")
             user_bubble.begin_inline_edit()
+            pasted = QMimeData()
+            pasted.setText("产品讨论的补充资料。\n" * 100)
+            user_bubble.user_content_edit.insertFromMimeData(pasted)
+            assert len(user_bubble.edit_attachment_paths) == len(attachments) + 1
+            assert not current.prompt_files
+            manager.apply_profile(builtin_theme("default", dark=mode != "dark"), preview=True)
+            settle()
+            manager.apply_profile(builtin_theme("default", dark=mode == "dark"), preview=True)
             capture("message-context-edit")
+            from PySide6.QtWidgets import QPushButton
+            assert all(user_bubble.edit_controls.rect().contains(button.geometry())
+                       for button in user_bubble.edit_controls.findChildren(QPushButton))
             user_bubble.cancel_inline_edit()
+            assert window.input_field.toPlainText().startswith("保留的草稿")
+            audit.active = False
+            import json
+            report = {"platform": app.platformName(), "qt_scale_factor": scale,
+                      "device_pixel_ratio": window.devicePixelRatioF(),
+                      "logical_dpi": app.primaryScreen().logicalDotsPerInch(),
+                      "native_window_events": audit.events}
+            (output / f"validation-{mode}-{scale}{'-windows' if native else ''}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            assert not audit.events, audit.events
         if focused:
             QTest.mouseMove(user_bubble, user_bubble.rect().center())
             capture("conversation-hover")
@@ -241,23 +551,7 @@ def render(mode="light", scale=1, compact=False, focused=False, message_context=
                 QTest.keyClick(page.settings_search, Qt.Key_Return)
                 assert page._page_labels[page._active_settings_row] == "外观与阅读"
                 page.settings_search.clear()
-        assert (state_path.read_bytes() if state_path.exists() else None) == saved_before
-        manager.restore_saved_theme(reason="preview_finished")
-        manager.stop()
-        window.close()
-        deadline = time.monotonic() + 5
-        while not getattr(window, "_checkpoint_close_ready", False) and time.monotonic() < deadline:
-            app.processEvents()
-            time.sleep(.01)
-        assert window._checkpoint_close_ready
-        window.file_model.directoryLoaded.disconnect()
-        window.deleteLater()
-        app.processEvents()
-        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-        if writing_pages:
-            # WebEngine releases its cache writers after page/profile teardown.
-            QTest.qWait(500)
-        background_patch.stop()
+        finish()
 
 
 if __name__ == "__main__":
@@ -269,5 +563,9 @@ if __name__ == "__main__":
     parser.add_argument("--message-context", action="store_true", help="Capture sent attachments and conversation references inside the user message")
     parser.add_argument("--writing-pages", action="store_true", help="Verify writing pages, expanded conversation tabs and compact browser controls")
     parser.add_argument("--native", action="store_true", help="Use real Windows widgets instead of offscreen rendering")
+    parser.add_argument("--composer-context", action="store_true", help="Verify typed composer tags and knowledge selection without external services")
+    parser.add_argument("--composer-mode", action="store_true", help="Verify the removable mode capsule, draft isolation and toolbar layout")
+    parser.add_argument("--compact-workspace", action="store_true", help="Verify aligned headers, Markdown reading/editing and theme continuity")
+    parser.add_argument("--usage", action="store_true", help="Verify usage overview, inline limits, save failure and theme continuity")
     args = parser.parse_args()
-    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native)
+    render(args.mode, args.scale, args.compact, args.focused or args.message_context, args.message_context, args.writing_pages, args.native, args.composer_context, args.composer_mode, args.compact_workspace, args.usage)

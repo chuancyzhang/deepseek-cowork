@@ -264,7 +264,7 @@ def parse_mcp_servers_json(value):
 
 
 class ConfigManager:
-    def __init__(self):
+    def __init__(self, *, migrate_legacy=True):
         self.config_file = "config.json"
         
         # Use centralized data directory logic
@@ -281,7 +281,7 @@ class ConfigManager:
         
         # If old config exists and new config doesn't, migrate it.
         # Check inequality to avoid copy error if paths are same (e.g. portable mode setup)
-        if os.path.abspath(old_config_path) != os.path.abspath(self.config_path):
+        if migrate_legacy and os.path.abspath(old_config_path) != os.path.abspath(self.config_path):
              if os.path.exists(old_config_path) and not os.path.exists(self.config_path):
                 print(f"[Config] Migrating config from {old_config_path} to {self.config_path}")
                 try:

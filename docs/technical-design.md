@@ -7,6 +7,7 @@
 ## 目录
 
 - [架构与源码入口](#架构与源码入口)
+- [Electron 工作台](#electron-工作台)
 - [Agent Loop 与模型协议](#agent-loop-与模型协议)
 - [上下文与缓存](#上下文与缓存)
 - [消息保存与界面投影](#消息保存与界面投影)
@@ -88,6 +89,65 @@ flowchart TB
 非 Windows 的提示词差异限于已确认的能力范围：直接使用完整 Agent，停用能力不进入运行目录，历史向量工具不注册，语音指导明确仅支持主动配置的远程接口。Windows 的既有工具定义、顺序及极简启动选择不改变；不修改模型协议与历史消息格式。
 
 企业服务端、企业专属分发和跨平台企业接入不在当前改造范围内。Mac／统信使用全新用户环境；最低 macOS 版本及统信 V25 补丁、显示服务、输入法、托盘和睡眠恢复需在目标设备验收。
+
+## Electron 工作台
+
+`desktop/` 是独立的 React / TypeScript 界面和 Electron 宿主。`core/desktop_service.py` 以 UTF‑8 JSONL 提供本地 RPC，`core/desktop_store.py` 在现有消息数据库旁增加提交记录与视图状态。Python 服务继续复用 `DaemonState`、`LLMWorker`、Provider、Tool Registry 和文件编辑服务，暂以 `QCoreApplication` 驱动既有 Worker 信号，不创建 Qt 界面。
+
+```mermaid
+flowchart LR
+    React[React 界面] --> IPC[受限 preload IPC]
+    IPC --> Host[Electron 宿主]
+    Host --> RPC[Python JSONL 服务]
+    RPC --> Agent[现有 Agent 与工具]
+    RPC --> DB[SQLite 消息与提交事务]
+    Agent --> Journal[持久运行事件]
+    Plugin[隔离的写作插件] --> Document[当前文档读写接口]
+    Document --> React
+```
+
+消息和提交记录在同一个 `BEGIN IMMEDIATE` 事务提交，使用请求标识与内容指纹防止重复接受；SQLite 使用 WAL 和 FULL 同步。运行事件独立落盘，已提交的事件仍保留，以恢复中断片段、用量和问卷记录。界面刷新不重启 Worker；切换聊天只改变展示和草稿。插件版本应用不重启运行中的任务。事件日志目前随对话保留，尚未做长期归档压缩。
+
+新版默认数据目录与原版隔离。显式 `COWORK_APP_DATA_DIR` 可用于测试；不得把新旧进程指向同一数据目录。模型设置导入不复制旧工作目录、历史路径或企业登录状态。Python 内部回环通道使用启动时随机凭据，前端和插件拿不到该凭据。生产包必须使用随包服务，服务缺失时明确报错，不改用开发机的 Python。
+
+稳定系统提示词、工具定义及其顺序、Provider 消息投影沿用现有实现。能力选择与上下文策略通过原有运行参数传递，并在任务接受时冻结；用量页面只读取观测事件。它没有为新界面增加系统提示词或插件源码前缀。
+
+### 开发与 Windows 构建
+
+准备现有 Python 依赖和固定运行时后，安装前端依赖并启动：
+
+```powershell
+npm --prefix desktop ci
+.\.venv\Scripts\python.exe scripts/run_desktop.py
+# 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
+```
+
+Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；构建脚本以 `COWORK_BUILD_DESKTOP_SERVICE=1` 选择独立服务入口，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
+
+```powershell
+$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+npm --prefix desktop run package:win
+```
+
+输出为 `desktop/out/Cowork-win32-x64/Cowork.exe`，必须保留相邻文件和 `resources/service`。目前只组装 Windows x64 目录包，尚未接入正式发布、签名和自动更新；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
+npm --prefix desktop test
+npm --prefix desktop run build
+# 在与源码无关的工作目录验证冻结服务：
+$env:COWORK_TEST_DESKTOP_SERVICE = (Resolve-Path desktop/out/Cowork-win32-x64/resources/service/cowork-service.exe).Path
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
+Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
+```
+
+### 写作插件接口
+
+插件由 `manifest.json` 与单文件 `index.html` 构成。清单声明 `id`、`name`、语义版本 `version`、`hostApi: 1`、`entry: "index.html"` 和能力列表。当前提供 `document.read` / `document.edit`；默认写作槽使用 `cowork.writing`。更广泛的插件贡献点尚未实现。
+
+宿主用只允许脚本的 sandbox iframe 和独立 `cowork-plugin:` 页面加载内容，禁止网络、原生接口和任意文件访问。插件发送 `{channel: "cowork-plugin-v1", id, method, params}`，宿主回复 `{channel: "cowork-host-v1", id, result, error}`。`ready` 获取初始文稿；`document.read` 读取当前文稿；`document.change` 更新草稿；`document.save` 通过原子保存与文件指纹冲突检查写入；`document.render` 返回宿主生成的安全 GFM 预览。主题变更通过 `theme` 事件传递。
+
+预览与安装使用同一份已校验快照；预览后继续改源码不会偷偷改变待安装内容。版本存储以内容摘要定位，应用通过原子索引替换完成；恢复版本不替换用户文稿。预览使用独立内存文稿和相同接口，不具备真实文件的保存权限。
 
 ## Agent Loop 与模型协议
 

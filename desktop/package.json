@@ -1,0 +1,33 @@
+{
+  "name": "cowork-desktop",
+  "productName": "Cowork",
+  "version": "5.3.3",
+  "private": true,
+  "description": "Local, extensible Cowork desktop",
+  "author": "Cowork contributors",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "package:win": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "lucide-react": "1.70.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "18.4.4",
+    "@types/node": "22.19.11",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "45.2.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.6"
+  }
+}

@@ -477,6 +477,7 @@ class InlineInteractionCard(QFrame):
     """Conversation-owned response card for approval and input tool requests."""
 
     resolved = Signal(object)
+    receiptChanged = Signal()
 
     def __init__(self, request, parent=None):
         super().__init__(parent)
@@ -820,3 +821,4 @@ class InlineInteractionCard(QFrame):
         self.receipt.show()
         self.refresh_theme()
         self.updateGeometry()
+        self.receiptChanged.emit()

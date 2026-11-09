@@ -6,7 +6,7 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前分支正在适配 **Apple Silicon Mac 与统信 V25 x86_64 个人桌面端**，保留 Windows 原有功能。新平台代码与构建入口已加入，尚未完成目标桌面实机验收，也未发布新平台安装包。功能边界见[用户手册](docs/user-guide.md#mac-与统信的功能范围)，架构和构建方法见[技术文档](docs/technical-design.md#平台适配边界)。
+当前分支采用 **Electron + React / TypeScript + Python + SQLite** 推进新桌面工作台，先验证 Windows 的对话与写作流程。原 Qt 入口继续提供完整功能；新版入口、已迁移范围和使用方法见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。此前加入的 Apple Silicon Mac 与统信 V25 适配仍保留，新宿主的目标系统实机验收和安装包尚未完成。
 
 文档适用版本：**5.3.3** · [本版说明](docs/releases/5.3.3.md) · [发布记录](docs/releases/index.md)
 

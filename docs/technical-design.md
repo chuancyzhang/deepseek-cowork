@@ -39,7 +39,10 @@ flowchart TB
 
 | 源码入口 | 职责 |
 | --- | --- |
-| `main.py`、`ui/` | 桌面页面、会话呈现、输入与工作区 |
+| `main.py`、`scripts/run_desktop.py` | Electron 开发启动入口 |
+| `desktop/src/`、`desktop/electron/` | React 页面、受控 IPC、原生窗口与网页宿主 |
+| `core/desktop_service.py`、`core/desktop_*.py` | 本地 RPC、领域接口、提交回执、草稿与界面恢复 |
+| `core/runtime_tasks.py` | 原生线程、事件、取消及退出生命周期 |
 | `core/agent.py`、`core/llm/` | Agent Loop、上下文、流式事件与模型协议 |
 | `core/tool_registry.py`、`core/tool_tasks.py` | 工具注册、可见性、执行及后台工具任务 |
 | `core/skill_manager.py` | 能力目录、指导披露、脚本、经验与 MCP |
@@ -49,7 +52,7 @@ flowchart TB
 | `core/filesystem_ops.py`、`core/apply_patch.py` | 文件读取凭据与补丁提交 |
 | `core/deliverable_editing.py`、`core/file_capabilities.py` | 文件能力、编辑会话与保存 |
 | `core/workbench.py`、`core/workbench_transport.py` | 标签状态及桌面工具请求 |
-| `ui/browser_workbench.py`、`ui/browser_panes.py` | 文件、网页与终端表面 |
+| `desktop/src/Workspace.tsx`、`desktop/electron/browser.cjs` | 统一标签、浮动文件与任务导航、网页表面 |
 | `core/document_preview.py`、`core/preview_versions.py` | Office/PDF 预览及内容版本 |
 | `core/im_gateway_registry.py`、`core/im_gateway/` | 消息渠道注册与运行 |
 | `core/theme_package.py`、`core/theme_service.py` | 主题包与预览事务 |
@@ -62,7 +65,8 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    UI[共享 Qt 页面] --> Core[共享业务与任务执行]
+    UI[共享 React 页面] --> Host[Electron 宿主]
+    Host --> Core[Python 业务与任务执行]
     Policy[平台能力策略] --> UI
     Policy --> Catalog[工具目录与组件准备]
     Catalog --> Core
@@ -81,10 +85,10 @@ flowchart TB
 | 发行范围与功能限制 | `core/platform_capabilities.py`；目录、设置、依赖准备和执行同时校验，不能只隐藏按钮 |
 | 敏感数据 | `core/credential_protection.py` 提供 `protect/unprotect`；Windows 原 DPAPI 格式兼容，POSIX 使用系统密钥环保存 AES-256-GCM 密钥，密文带版本与认证信息；解密缺密钥不自动生成 |
 | 并发保存 | `core/file_write_locks.py`；Windows Mutex／POSIX flock 锁定稳定的路径键，不锁会被原子替换的目标 inode；支持同线程嵌套并设等待上限 |
-| 终端 | `core/workbench_terminal.py` 保留公共会话生命周期，`core/posix_terminal.py` 通过独立会话和控制终端启动 Shell，避免在线程化 Qt 进程里使用 `preexec_fn`；清理覆盖该终端会话的前后台进程组 |
+| 终端 | `core/workbench_terminal.py` 保留公共会话生命周期，`core/posix_terminal.py` 通过独立会话和控制终端启动 Shell，避免在线程化进程里使用 `preexec_fn`；清理覆盖该终端会话的前后台进程组 |
 | 外部程序 | `core/process_utils.py`；POSIX 冻结态恢复外部程序的库搜索环境，避免 PyInstaller 的动态库覆盖系统 LibreOffice |
 | 运行时 | `core/runtime_manifest.py` 固定目标、下载地址和 SHA-256；在线／离线准备复用校验，tar 解压保留内部链接和执行权限并拒绝越界路径 |
-| 默认字体 | 未配置字体时，新平台使用 Qt 系统正文／等宽字体；自定义主题的显式字体仍校验，不绕过预览事务 |
+| 默认字体 | `core/system_fonts.py` 枚举系统字体，`desktop/src/theme.ts` 映射正文／等宽字体和主题 token；自定义主题的显式字体仍校验，不绕过预览事务 |
 
 非 Windows 的提示词差异限于已确认的能力范围：直接使用完整 Agent，停用能力不进入运行目录，历史向量工具不注册，语音指导明确仅支持主动配置的远程接口。Windows 的既有工具定义、顺序及极简启动选择不改变；不修改模型协议与历史消息格式。
 
@@ -92,7 +96,7 @@ flowchart TB
 
 ## Electron 工作台
 
-`desktop/` 是独立的 React / TypeScript 界面和 Electron 宿主。`core/desktop_service.py` 以 UTF‑8 JSONL 提供本地 RPC，`core/desktop_store.py` 在现有消息数据库旁增加提交记录与视图状态。Python 服务继续复用 `DaemonState`、`LLMWorker`、Provider、Tool Registry 和文件编辑服务，暂以 `QCoreApplication` 驱动既有 Worker 信号，不创建 Qt 界面。
+`desktop/` 是独立的 React / TypeScript 界面和 Electron 宿主。`core/desktop_service.py` 以 UTF‑8 JSONL 提供本地 RPC，`core/desktop_store.py` 在现有消息数据库旁增加提交记录与视图状态。Python 服务继续复用 `DaemonState`、`LLMWorker`、Provider、Tool Registry 和文件编辑服务，通过原生线程和有序事件订阅运行 Worker，运行路径不加载 Qt。`main.py` 统一启动 Electron；PyInstaller 仅构建 `cowork-service`。
 
 ```mermaid
 flowchart LR
@@ -108,9 +112,15 @@ flowchart LR
 
 消息和提交记录在同一个 `BEGIN IMMEDIATE` 事务提交，使用请求标识与内容指纹防止重复接受；SQLite 使用 WAL 和 FULL 同步。运行事件独立落盘，已提交的事件仍保留，以恢复中断片段、用量和问卷记录。界面刷新不重启 Worker；切换聊天只改变展示和草稿。插件版本应用不重启运行中的任务。事件日志目前随对话保留，尚未做长期归档压缩。
 
-新版默认数据目录与原版隔离。显式 `COWORK_APP_DATA_DIR` 可用于测试；不得把新旧进程指向同一数据目录。模型设置导入不复制旧工作目录、历史路径或企业登录状态。Python 内部回环通道使用启动时随机凭据，前端和插件拿不到该凭据。生产包必须使用随包服务，服务缺失时明确报错，不改用开发机的 Python。
+开发目录与正式数据隔离；Windows 正式包复用原应用数据目录（便携版优先使用可执行文件旁的 `user_data`）。第一次升级前以 SQLite 备份 API 保存含 WAL 的一致副本，检查完整性与历史事实，失败即停止启动。显式 `COWORK_APP_DATA_DIR` 可用于测试；不要并行运行指向同一目录的旧 Qt 应用。模型设置导入不复制旧工作目录、历史路径或企业登录状态。Python 内部回环通道使用启动时随机凭据，前端和插件拿不到该凭据。生产包必须使用随包服务，服务缺失时明确报错，不改用开发机的 Python。
 
 稳定系统提示词、工具定义及其顺序、Provider 消息投影沿用现有实现。能力选择与上下文策略通过原有运行参数传递，并在任务接受时冻结；用量页面只读取观测事件。它没有为新界面增加系统提示词或插件源码前缀。
+
+工作区中的终端由服务持有，界面切换或重连只重读带游标的缓冲输出，不重新启动 Shell。用户接管与交还更新控制版本，旧输入不能在控制权变化后执行。xterm 的 DA/DSR 协议应答经过独立白名单，不作为用户命令，避免 ConPTY 等待协议应答时阻塞输入。
+
+内置网页由 Electron 的独立 `WebContentsView` 承载，每个对话使用单独浏览会话。Agent 请求只能消费原任务的一次性授权；操作前再次核对取消状态、控制权和页面版本。文本观察失败与截图失败分别反馈，不能把没有截图的结果用于坐标猜测。本地 HTML 通过限定目录的独立协议提供资源，不开放 Node 或任意本机文件读取。
+
+Office 编辑器复用内置 Web 编辑器，改用限定命令的父页面桥接；保存前等待最后一版编辑快照。外部修改冲突保留草稿，“另存副本”保留原文件格式并拒绝覆盖已有文件。传输上限为 64 MiB，覆盖 25 MiB Office 文件经 base64 编码后的体积。
 
 ### 开发与 Windows 构建
 
@@ -118,18 +128,19 @@ flowchart LR
 
 ```powershell
 npm --prefix desktop ci
+npm --prefix web/editors ci
 .\.venv\Scripts\python.exe scripts/run_desktop.py
 # 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
 ```
 
-Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；构建脚本以 `COWORK_BUILD_DESKTOP_SERVICE=1` 选择独立服务入口，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
+Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
 
 ```powershell
 $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-输出为 `desktop/out/Cowork-win32-x64/Cowork.exe`，必须保留相邻文件和 `resources/service`。目前只组装 Windows x64 目录包，尚未接入正式发布、签名和自动更新；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
+输出为 `desktop/out/Cowork-win32-x64/Cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。打包检查排除用户数据与 Qt 运行时。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
@@ -342,19 +353,19 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 开发态读取仓库资源，PyInstaller onedir 冻结态从 `sys._MEIPASS` 读取随包资源。运行时准备脚本获取固定版本的 Git、ripgrep 与组件；spec 扫描动态 Skill 的 `core.*` 导入并加入 hidden imports。编辑器分发资源位于 `web/editors/dist/`。
 
-`scripts/package_release.py` 读取当前版本说明，生成完整 ZIP、审计报告及 `latest.json`。语音组件使用单独的 `scripts/package_speech_to_text_component.py --offline` 打包入口。
+`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，生成完整目录、ZIP 与 `latest-desktop-windows-x64.json`。旧 `scripts/package_release.py` 面向 Qt 版布局，不用于当前工作台。语音组件继续使用单独的 `scripts/package_speech_to_text_component.py --offline` 打包入口。
 
 ### 更新清单
 
-Mac／统信使用相同版本、大小和 SHA-256 校验字段，但清单和安装包按目标隔离：`updates/macos-arm64/latest.json` 对应 `deepseek-cowork-v版本号-macos-arm64.dmg`，`updates/linux-x64/latest.json` 对应 `deepseek-cowork-v版本号-linux-x64.deb`。GitHub 附件名为 `latest-macos-arm64.json`／`latest-linux-x64.json`。下载后不进入 Windows 解包和自动安装流程；尚无对应发行物时明确提示当前平台安装包未发布。
+新版 Windows 更新清单与旧 Qt 包隔离，必须标记 `app_layout: electron`。Mac／统信的新版构建与更新交付尚未完成，不能复用旧平台安装包或进入 Windows 自动安装流程；尚无对应发行物时明确提示当前平台安装包未发布。
 
 普通版读取公共更新地址；地址为空时使用 GitHub。企业版通过所属中心的推荐版本接口取得安装包。
 
 静态公共服务器的目录为：
 
 ```text
-updates/windows-x64/latest.json
-updates/windows-x64/deepseek-cowork-v5.3.3.zip
+updates/desktop-windows-x64/latest.json
+updates/desktop-windows-x64/cowork-desktop-v5.3.3-windows-x64.zip
 ```
 
 清单字段如下：
@@ -362,11 +373,12 @@ updates/windows-x64/deepseek-cowork-v5.3.3.zip
 | 字段 | 值或来源 |
 | --- | --- |
 | `schema_version` | `1` |
+| `app_layout` | `electron` |
 | `version` | `APP_VERSION`，不带 `v` |
 | `target_os` / `arch` | `windows` / `x64` |
-| `filename` | `deepseek-cowork-v版本号.zip` |
+| `filename` | `cowork-desktop-v版本号-windows-x64.zip` |
 | `size` / `sha256` | ZIP 实际字节数和 SHA-256 |
-| `notes` | `docs/releases/版本号.md` 的内容 |
+| `notes` | 构建脚本中的发行摘要；公开发布前同步正式版本说明 |
 
 发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
 
@@ -374,21 +386,11 @@ updates/windows-x64/deepseek-cowork-v5.3.3.zip
 
 ### Mac 与统信原生构建
 
-在目标 CPU 和系统构建，不使用 Windows 交叉打包。建议使用 Python 3.12 的独立构建环境；基础工具运行时固定为 Python Build Standalone 3.12.16、Node 24.14.1、ripgrep 15.1.0。其发布地址和哈希统一在运行时清单，更新清单时须同步验收原生依赖。Mac 与统信的构建／签名／安装结果仍待各自目标桌面确认，Linux 容器检查不能替代统信实机验收。
+本轮交付范围为 Windows。Mac 与统信保留共享业务和平台边界，Electron 安装包、签名、公证和更新仍需在目标系统实现与验收；Linux 容器检查不能替代统信实机验收。
 
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt 'PySide6==6.10.1' 'PySide6-Addons==6.10.1'
-.venv/bin/python scripts/posix_release.py prepare
-.venv/bin/python scripts/posix_release.py build
-.venv/bin/python scripts/posix_release.py package
-```
+仓库中的 `scripts/posix_release.py` 和原生 spec 属于此前 Qt 构建流程，尚未适配当前 Electron 入口，不作为新版构建命令。后续构建应在目标 CPU 和系统进行，使用不含 Qt 的 Python 服务与对应 Electron 运行时，沿用运行时清单的来源和摘要校验。
 
-构建缓存统一位于 `.tmp/native-build/<目标>/`，正式安装包与清单位于 `dist/`。`prepare --offline /路径/组件包` 从该目录读取清单中的固定归档，并从 `wheels/` 安装该平台的文档工具依赖，禁止联网；在线和离线归档使用同一 SHA-256。`build` 使用原生 spec，复制完整的独立运行时并保留符号链接；Windows spec 与发行流程独立保留。
-
-Mac 的开发构建可使用临时签名；正式 `package` 必须提供 `COWORK_CODESIGN_IDENTITY` 和已配置到钥匙串的 `COWORK_NOTARY_PROFILE`，依次签名内部程序与 Bundle、生成 DMG、提交公证并附加票据。统信构建机需要 `dpkg-deb`，DEB 安装到 `/opt/deepseek-cowork` 并提供桌面入口。不要将签名密钥或公证凭据写入仓库，也不要将构建成功视为发布验收通过。
-
-每个目标桌面的验收应覆盖首次启动、WebEngine 编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。新平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；前者的真实 POSIX 项在 Windows 跳过。
+每个目标桌面的验收应覆盖首次启动、网页编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。底层平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；其中依赖旧 Qt 界面的用例需迁移后用于新宿主，真实 POSIX 项在 Windows 跳过。
 
 ## 开发与测试
 
@@ -408,10 +410,9 @@ $env:TMP = "$taskRoot/temp"
 $env:APPDATA = "$taskRoot/appdata"
 $env:LOCALAPPDATA = "$taskRoot/localappdata"
 $env:PYTHONDONTWRITEBYTECODE = '1'
-$env:QT_QPA_PLATFORM = 'offscreen'
 $env:COWORK_EXTERNAL_BACKGROUND_SERVICES = '0'
 $env:COWORK_QA_ROOT = $taskRoot
-.\.venv\Scripts\python.exe -X utf8 -B -m pytest --collect-only -q -p no:cacheprovider test
+.\.venv\Scripts\python.exe -X utf8 -B -m pytest --collect-only -q -p no:cacheprovider test/test_desktop_service.py test/test_desktop_management.py test/test_desktop_workbench.py
 ```
 
 按改动选择相应测试组：
@@ -419,11 +420,11 @@ $env:COWORK_QA_ROOT = $taskRoot
 | 范围 | 入口 |
 | --- | --- |
 | 文档结构、链接、图片与版本 | `scripts/check_docs.py`、`test/test_documentation.py` |
-| 消息与运行 | `test/test_conversation_integrity.py`、`test/test_conversation_linear_interactions.py`、`test/test_conversation_render.py` |
-| 历史、项目与界面 | `test/test_history_paging.py`、`test/test_history_performance.py`、`test/test_chat_workspace.py` |
-| 文件与编辑器 | `test/test_deliverables.py`、`test/test_browser_workbench.py`、`test/test_deliverable_editor_web.py` |
-| 模型与能力 | `test/test_model_configuration_flow.py`、`test/test_tool_registry.py`、`test/test_skill_runtime.py` |
-| 打包与更新 | `test/test_package_release.py`、`test/test_packaging_runtime.py`、`test/test_updater.py` |
+| 消息与运行 | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_subagent_reliable_runtime.py` |
+| 历史、项目与界面 | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs` |
+| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/browser.test.mjs`、`desktop/tests/editor-bridge.test.mjs` |
+| 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_runtime.py` |
+| 打包与更新 | `test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
 | 企业中心 | `test/test_enterprise_platform.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
 
 例如文档维护使用：
@@ -434,4 +435,4 @@ $env:COWORK_QA_ROOT = $taskRoot
 git diff --check
 ```
 
-原生窗口、Office、浏览器和进程生命周期使用对应的 `scripts/smoke_*.py` 或专用检查工具；这些入口按实际环境单独运行。截图、性能与诊断工具默认输出到 `.tmp/<脚本名>/`；`COWORK_QA_ROOT` 可指定本次任务的临时根目录，`--output` 等原有参数可指定具体结果位置。正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
+Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。仓库仍保留旧 Qt 页面和测试作为迁移对照，不进入默认运行或发行包，也不能用其通过结果代替新版界面验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。

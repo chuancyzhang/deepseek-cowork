@@ -378,10 +378,10 @@ def _collect_app_files(root_dir):
     return files
 
 
-def build_update_plan(install_dir, staged_app_dir, progress_callback=None):
+def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, layout="qt"):
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
-    if not _is_valid_app_dir(staged_app_dir):
+    if not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
     if not os.path.isdir(install_dir):
         raise UpdaterError("当前安装目录不存在。")
@@ -583,17 +583,22 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
     return zip_path
 
 
-def find_staged_app_dir(root_dir):
-    if _is_valid_app_dir(root_dir):
+def find_staged_app_dir(root_dir, *, layout="qt"):
+    if _is_valid_app_dir(root_dir, layout=layout):
         return root_dir
     for current_root, dirs, _files in os.walk(root_dir):
-        if _is_valid_app_dir(current_root):
+        if _is_valid_app_dir(current_root, layout=layout):
             return current_root
         dirs[:] = [name for name in dirs if name not in {"__MACOSX", ".git"}]
-    raise UpdaterError("更新包结构无效：未找到 deepseek-cowork.exe 和 _internal 目录。")
+    raise UpdaterError("更新包结构无效：未找到当前工作台对应的完整应用。")
 
 
-def _is_valid_app_dir(path):
+def _is_valid_app_dir(path, *, layout="qt"):
+    if layout == "electron":
+        return all(os.path.isfile(os.path.join(path, name)) for name in (
+            "Cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"))
+    if layout != "qt":
+        raise UpdaterError("未知的应用安装结构。")
     return (
         os.path.isfile(os.path.join(path, APP_EXE_NAME))
         and os.path.isdir(os.path.join(path, INTERNAL_DIR_NAME))
@@ -609,7 +614,7 @@ def _safe_extractall(archive, target_dir):
     archive.extractall(target_root)
 
 
-def extract_update_zip(zip_path, target_dir=None, progress_callback=None):
+def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, layout="qt"):
     if not os.path.isfile(zip_path):
         raise UpdaterError("更新包不存在。")
     target_dir = target_dir or updates_dir()
@@ -624,7 +629,7 @@ def extract_update_zip(zip_path, target_dir=None, progress_callback=None):
         raise UpdaterError("更新包不是有效的 zip 文件。") from exc
     except Exception as exc:
         raise UpdaterError(f"解压更新包失败：{exc}") from exc
-    app_dir = find_staged_app_dir(extract_dir)
+    app_dir = find_staged_app_dir(extract_dir, layout=layout)
     _emit(progress_callback, "更新包校验完成", None)
     return app_dir
 
@@ -745,13 +750,13 @@ def prepare_local_update(
 
 
 
-def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version=""):
+def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt"):
     from core.update_installer import write_installer
     if sys.platform != "win32":
         raise UpdaterError("自动安装更新仅支持 Windows。")
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
-    if not _is_valid_app_dir(staged_app_dir):
+    if not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
     with open(change_plan_path, encoding="utf-8") as handle:
         plan = json.load(handle)

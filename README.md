@@ -21,10 +21,10 @@ Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New 
 
 ## Get started
 
-This branch introduces an Electron + React/TypeScript + Python + SQLite workspace, starting with the Windows conversation and writing workflow. The original Qt entry retains the full feature set. See the [new workspace guide and migration scope](docs/user-guide.md#新版-windows-工作台) and [development/build instructions](docs/technical-design.md#electron-工作台). Earlier Apple Silicon macOS and UOS V25 adapters remain; native validation and releases for the new host are pending.
+This branch uses Electron + React/TypeScript + Python + SQLite. The default entry launches Electron; the runtime and Windows service package do not require Qt. Conversations, workspace tools, categorized Skills and SkillHub, management pages, and appearance settings use the new host. See the [workspace guide](docs/user-guide.md#新版-windows-工作台) and [development/build instructions](docs/technical-design.md#electron-工作台). Native validation and releases for Apple Silicon macOS and UOS V25 are pending.
 
-1. Download the Windows ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases), extract it fully, and run `deepseek-cowork.exe`.
-2. Enter a DeepSeek API key in onboarding, or add a service and model under Settings → Models & Services. Enterprise clients can also sign in to their organization.
+1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` build and run `Cowork.exe`. Local builds are not automatically published to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); older releases retain their old entry point.
+2. Add a service and model under Settings → Models & Services, or sign in to an enterprise account. Production builds reuse the established data directory and back up the database before its first upgrade.
 3. Start a chat, attach source material, and describe the task. Select a project directory when working on an existing project.
 4. Follow the answer and execution, then open, edit, and save deliverables in the workspace.
 
@@ -39,6 +39,8 @@ git clone https://github.com/chuancyzhang/deepseek-cowork.git
 cd deepseek-cowork
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm --prefix desktop ci
+npm --prefix web/editors ci
 .\.venv\Scripts\python.exe main.py
 ```
 
@@ -48,11 +50,11 @@ Prepare the pinned runtimes in a Windows build environment, then build the execu
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-.\.venv\Scripts\python.exe -m PyInstaller deepseek-cowork.spec --noconfirm --clean
-.\.venv\Scripts\python.exe scripts/package_release.py
+$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+npm --prefix desktop run package:win
 ```
 
-Packaging produces the versioned ZIP, audit report, and `latest.json`. Update notes come from `docs/releases/VERSION.md`. See [build and release instructions](docs/technical-design.md#构建与发布).
+Packaging produces `desktop/out/Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#electron-工作台).
 
 ## Design principles
 

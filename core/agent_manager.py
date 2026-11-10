@@ -6,7 +6,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QObject, Qt, Signal
+from core.runtime_tasks import EventSource
 from core.chat_storage import AGENT_TERMINAL_STATUSES
 from core.env_utils import get_app_data_dir
 from core.process_utils import runtime_debug_logging_enabled
@@ -35,11 +35,11 @@ def _debug_worker_summary(worker):
     summary = {
         "worker_class": worker.__class__.__name__,
         "worker_id": hex(id(worker)),
-        "has_qthread_finished": bool(getattr(worker, "finished", None) is not None),
+        "has_lifecycle_finished": bool(getattr(worker, "finished", None) is not None),
         "has_finished_signal": bool(getattr(worker, "finished_signal", None) is not None),
     }
     try:
-        summary["is_running"] = bool(worker.isRunning())
+        summary["is_running"] = bool(worker.is_running())
     except Exception as exc:
         summary["is_running_error"] = _short_debug_value(exc)
     return summary
@@ -61,20 +61,19 @@ def _log_agent_runtime(event, **fields):
             return
 
 
-class _ManagerEventBridge(QObject):
-    step_message = Signal(str)
-    agent_event = Signal(dict)
+class _ManagerEventBridge:
 
     def __init__(self, owner_worker=None):
-        super().__init__()
+        self.step_message = EventSource()
+        self.agent_event = EventSource()
         self.owner_worker = owner_worker
         if owner_worker is not None:
             try:
-                self.step_message.connect(owner_worker.relay_agent_step, Qt.DirectConnection)
+                self.step_message.subscribe(owner_worker.relay_agent_step)
             except Exception as exc:
                 _log_agent_runtime("event_bridge_step_connect_failed", error=_short_debug_value(exc))
             try:
-                self.agent_event.connect(owner_worker.relay_agent_state, Qt.DirectConnection)
+                self.agent_event.subscribe(owner_worker.relay_agent_state)
             except Exception as exc:
                 _log_agent_runtime("event_bridge_agent_connect_failed", error=_short_debug_value(exc))
 
@@ -406,7 +405,7 @@ class SessionAgentManager:
 
     def _worker_has_thread_finished_signal(self, worker):
         finished = getattr(worker, "finished", None)
-        return bool(finished is not None and hasattr(finished, "connect"))
+        return bool(finished is not None and hasattr(finished, "subscribe"))
 
     def _connect_worker_signals(self, record):
         worker, run_id = record.worker, record.run_id
@@ -429,7 +428,7 @@ class SessionAgentManager:
                                            agent_id=record.agent_id, run_id=run_id, error=str(exc))
                         worker.stop()
                         self._condition.notify_all()
-            signal.connect(guarded, Qt.DirectConnection)
+            signal.subscribe(guarded)
         def content(delta):
             if record.storage_error:
                 return
@@ -631,7 +630,6 @@ class SessionAgentManager:
                 record.worker = None
                 record.worker_cleanup_pending = False
                 record.pending_restart = False
-                worker.deleteLater()
                 self._condition.notify_all()
             self._schedule_ready()
 
@@ -890,29 +888,11 @@ class SessionAgentManager:
                         agent_id=record.agent_id,
                         error=_short_debug_value(exc),
                     )
-                try:
-                    worker.quit()
-                    worker.wait(300)
-                except Exception as exc:
-                    _log_agent_runtime(
-                        "close_agent_worker_quit_failed",
-                        conversation_id=self.conversation_id,
-                        agent_id=record.agent_id,
-                        error=_short_debug_value(exc),
-                    )
-                if force:
-                    try:
-                        if worker.isRunning():
-                            worker.terminate()
-                            worker.wait(300)
-                    except Exception as exc:
-                        _log_agent_runtime(
-                            "close_agent_worker_terminate_failed",
-                            conversation_id=self.conversation_id,
-                            agent_id=record.agent_id,
-                            error=_short_debug_value(exc),
-                        )
-                if not worker.isRunning():
+                # Completion callbacks acquire this manager lock. Cancellation
+                # is cooperative; joining or killing here would block saving.
+                record.status = "stopping"
+                self._persist_record_unlocked(record)
+                if not worker.is_running():
                     record.worker = None
                     record.status = "killed" if force else "closed"
                     record.finished_at = int(time.time())

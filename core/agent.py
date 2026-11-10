@@ -8,7 +8,7 @@ import threading
 import hashlib
 import inspect
 from datetime import datetime
-from PySide6.QtCore import QThread, Signal, Slot
+from core.runtime_tasks import EventSource, TaskWorker
 from core.skill_manager import SkillManager
 from core.env_utils import get_python_executable, get_runtime_snapshot
 from core.im_gateway_registry import (
@@ -643,20 +643,8 @@ def sanitize_llm_messages(
         }
     return cleaned
 
-class LLMWorker(QThread):
+class LLMWorker(TaskWorker):
     """后台调用 LLM API 的线程，支持 Tool Calls 和多轮思考"""
-    finished_signal = Signal(dict)
-    step_signal = Signal(str) # 用于输出中间步骤日志
-    thinking_signal = Signal(str) # 用于实时输出思考过程
-    skill_used_signal = Signal(str) # Signal to report active skill usage
-    tool_call_signal = Signal(dict)
-    tool_result_signal = Signal(dict)
-    content_signal = Signal(str)
-    content_snapshot_signal = Signal(str)
-    output_signal = Signal(str) # For generic output/errors
-    agent_state_signal = Signal(dict) # Signal to report sub-agent status
-    observability_signal = Signal(dict)
-    abort_signal = Signal() # Signal emitted when the worker is stopped
 
     def __init__(
         self,
@@ -677,6 +665,18 @@ class LLMWorker(QThread):
         data_security_policy=None,
     ):
         super().__init__()
+        self.finished_signal = EventSource()
+        self.step_signal = EventSource()
+        self.thinking_signal = EventSource()
+        self.skill_used_signal = EventSource()
+        self.tool_call_signal = EventSource()
+        self.tool_result_signal = EventSource()
+        self.content_signal = EventSource()
+        self.content_snapshot_signal = EventSource()
+        self.output_signal = EventSource()
+        self.agent_state_signal = EventSource()
+        self.observability_signal = EventSource()
+        self.abort_signal = EventSource()
         self.messages, self.excluded_provider_message_ids = project_provider_messages(messages)
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
@@ -755,7 +755,7 @@ class LLMWorker(QThread):
                 change_publisher=self._publish_skill_change,
             )
             skill_catalog_service.subscribe(self._on_skill_catalog_changed)
-            self.finished.connect(self._detach_skill_catalog)
+            self.finished.subscribe(self._detach_skill_catalog)
         else:
             # Compatibility path for direct unit construction; production request paths pass a catalog.
             self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
@@ -1159,14 +1159,12 @@ class LLMWorker(QThread):
             data_security_policy=self.data_security_run.policy,
         )
 
-    @Slot(str)
     def relay_agent_step(self, text):
         try:
             self.step_signal.emit(str(text))
         except Exception:
             pass
 
-    @Slot(dict)
     def relay_agent_state(self, payload):
         try:
             if isinstance(payload, dict):
@@ -3352,7 +3350,7 @@ class LLMWorker(QThread):
         generated_messages = []
 
         # Invalid/missing scope is a visible failure before any bootstrap or
-        # context append. A QThread exception alone would leave the UI running.
+        # context append. An unhandled worker exception alone would leave the UI running.
         try:
             from core.team_spaces import resolve_run_binding
             space_binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
@@ -3394,7 +3392,7 @@ class LLMWorker(QThread):
             # Check Control Flags
             while self.is_paused:
                 if self.is_stopped: break
-                self.msleep(100)
+                time.sleep(0.1)
             if self.is_stopped: 
                 final_content = "⚠️ Operation stopped by user."
                 break
@@ -3688,7 +3686,7 @@ class LLMWorker(QThread):
                             # Check Pause/Stop during stream
                             while self.is_paused:
                                  if self.is_stopped: break
-                                 self.msleep(100)
+                                 time.sleep(0.1)
                             if self.is_stopped: break
 
                             type_ = chunk.get("type")
@@ -4449,7 +4447,7 @@ class LLMWorker(QThread):
                             # Check Control Flags inside tool loop
                             while self.is_paused:
                                 if self.is_stopped: break
-                                self.msleep(100)
+                                time.sleep(0.1)
                             if self.is_stopped: break
                             
                             name = str(tool.function.name or "").strip()

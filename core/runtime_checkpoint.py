@@ -5,7 +5,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from PySide6.QtCore import QThread, Signal
+from core.runtime_tasks import EventSource, TaskWorker
 
 
 @dataclass(frozen=True)
@@ -23,12 +23,12 @@ class CheckpointRequest:
         return self.session_id, self.run_id, self.instance_id
 
 
-class RuntimeCheckpointWorker(QThread):
-    completed = Signal(object, str, str)
-    measured = Signal(object)
+class RuntimeCheckpointWorker(TaskWorker):
 
     def __init__(self, journal, parent=None):
-        super().__init__(parent)
+        super().__init__()
+        self.completed = EventSource()
+        self.measured = EventSource()
         self.journal = journal
         self._condition = threading.Condition()
         self._pending = OrderedDict()

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: qrc:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
   <title>Word 文字与修订</title>
   <link rel="stylesheet" href="editor.css">
   <link rel="stylesheet" href="docx-review.css">
@@ -22,7 +22,7 @@
       <aside id="word-revisions" aria-label="文档修订" hidden></aside>
     </div>
   </main>
-  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="desktop-bridge.js"></script>
   <script src="docx-review-editor.js"></script>
 </body>
 </html>

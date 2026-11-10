@@ -1,8 +1,8 @@
 """Versioned desktop RPC, reusing the existing Agent/provider execution path.
 
-stdout is exclusively JSONL. Electron owns the process, not a renderer window;
-reloading a view cannot cancel an Agent. The legacy Qt worker is an adapter in
-this migration, with a QCoreApplication and no GUI application or widgets.
+The persistent service owns tasks independently of Electron. A JSONL stdio
+adapter is also available for diagnostics. Workers use native Python threads and ordered event subscriptions;
+no GUI framework is loaded by the service.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import io
+import hashlib
 import json
 import logging
 import os
@@ -28,13 +29,20 @@ PROTOCOL_VERSION = 1
 
 class DesktopService:
     def __init__(self, publish):
-        from core.config_manager import ConfigManager
+        # Initialize the Office native extension chain before creating RPC
+        # workers. On Windows/Python 3.14, first NumPy initialization from a
+        # worker can block inside the DLL loader and leave file.open pending.
+        import openpyxl
+        from core.env_utils import get_app_data_dir
+        from core.desktop_upgrade import DesktopUpgrade
+        from core.desktop_config import DesktopConfigManager
         from core.daemon import DaemonState, DaemonServer, DaemonRequestHandler
         from core.desktop_store import DesktopChatStorage, DesktopStore
         self.publish = publish
-        # Explicit import copies only model settings. Legacy migration may carry
-        # absolute history/workspace paths and must not join the two data stores.
-        self.config = ConfigManager(migrate_legacy=False)
+        upgrade = DesktopUpgrade(get_app_data_dir())
+        # The host resolves the existing production directory before startup.
+        # Development directories must never import a user's history implicitly.
+        self.config = DesktopConfigManager(migrate_legacy=False)
         self.state = DaemonState(self.config)
         from core.runtime_journal import RuntimeJournal
         # The Web view reconstructs the timeline from committed events, including
@@ -43,10 +51,31 @@ class DesktopService:
         self.state.chat_storage = DesktopChatStorage(self.state.chat_storage.db_path)
         self.storage = self.state.chat_storage
         self.store = DesktopStore(self.storage)
+        upgrade.complete()
         self.lock = threading.RLock()
+        from core.desktop_conversations import ConversationActions
+        self.conversations = ConversationActions(self)
         self.file_sessions = {}
         self.streams = {}
         self.closing = False
+        from core.desktop_jobs import DesktopJobs
+        from core.desktop_management import Management
+        from core.desktop_scheduler import DesktopScheduler
+        self.jobs = DesktopJobs(self)
+        self.management = Management(self)
+        from core.desktop_settings import DesktopSettings
+        self.settings_pages = DesktopSettings(self)
+        from core.desktop_updates import DesktopUpdates
+        self.updates = DesktopUpdates(self)
+        from core.desktop_models import DesktopModels
+        self.models = DesktopModels(self)
+        from core.desktop_skillhub import DesktopSkillHub
+        self.skillhub = DesktopSkillHub(self)
+        self.scheduler = DesktopScheduler(self)
+        from core.desktop_connections import Connections
+        self.connections = Connections(self)
+        from core.desktop_workbench import DesktopWorkbench
+        self.workbench = DesktopWorkbench(self)
         token = uuid.uuid4().hex + uuid.uuid4().hex
         self.token = token
 
@@ -70,6 +99,8 @@ class DesktopService:
 
         self.server = DaemonServer(("127.0.0.1", 0), AuthenticatedHandler, self.state)
         self.port = self.server.server_address[1]
+        from core.desktop_messaging import DesktopMessaging
+        self.messaging = DesktopMessaging(self)
         threading.Thread(target=self.server.serve_forever, name="desktop-agent-host", daemon=True).start()
         for run in self.store.active_runs():
             journal_run = self.state.runtime_journal.get_run(run["conversation_id"], run["id"]) or {}
@@ -94,23 +125,28 @@ class DesktopService:
             models.append({key: profile.get(key) for key in ("id", "display_name", "model_name", "channel_id", "channel_display_name", "provider_type", "base_url", "reasoning_effort", "reasoning_efforts")}
                           | {"configured": bool(profile.get("api_key")), "label": self.config.get_model_label(profile["id"])})
         return {"models": models, "selected_model_id": self.config.get_selected_model_id(),
-                "god_mode": self.config.get_god_mode(), "theme": self.store.get_state("theme", "light"),
-                "data_dir": self.config.data_dir, "projects": self.config.get("projects", []),
+                "god_mode": self.config.get_god_mode(), "theme": self.management.themes.load_appearance()["mode"],
+                "data_dir": self.config.data_dir, "projects": self.config.get_projects(),
                 "context_policy": desktop_policy(self.config)}
 
-    def conversation(self, conversation_id):
+    def conversation(self, conversation_id, *, before=None, limit=80):
         record = self.storage.get_conversation_record(conversation_id)
         if not record:
             raise ValueError("对话不存在。")
         run = self.store.latest_run(conversation_id)
+        window = self.store.message_window(conversation_id, before=before, limit=limit)
+        visible_turns = {str((message.get("meta") or {}).get("turn_id") or "") for message in window["messages"]}
         events = []
         for historical_run in self.store.conversation_runs(conversation_id):
-            if self.state.runtime_journal.get_run(conversation_id, historical_run["id"]):
+            if historical_run["id"] in visible_turns and self.state.runtime_journal.get_run(conversation_id, historical_run["id"]):
                 events.extend(self.state.runtime_journal.read_events(conversation_id, historical_run["id"]))
-        return {**record, "messages": self.storage.get_messages(conversation_id),
+        from core.conversation_render import project_visible_messages
+        draft = self.store.versioned_state("draft:" + conversation_id, {"text": "", "attachments": []})
+        view = self.store.versioned_state("view:" + conversation_id, {})
+        return {**record, **window, "render_messages": project_visible_messages(window["messages"], timeline_events=record["meta"].get("ui_timeline_v1", [])),
                 "run": self.public_run(run), "events": events,
-                "draft": self.store.get_state("draft:" + conversation_id, {"text": "", "attachments": []}),
-                "view": self.store.get_state("view:" + conversation_id, {})}
+                "draft": draft["value"], "draft_revision": draft["revision"],
+                "view": view["value"], "view_revision": view["revision"]}
 
     def attachment_content(self, cid, text, attachments):
         content = str(text or "").strip()
@@ -129,7 +165,12 @@ class DesktopService:
         record = self.storage.get_conversation_record(conversation_id)
         if not record:
             raise ValueError("对话不存在。")
-        return Path(record["meta"]["workspace_dir"]).resolve()
+        path = record["meta"].get("workspace_dir") or record["meta"].get("workspace_path")
+        if not path:
+            # Old chat-only histories have no project. Resolve their established
+            # per-conversation workspace without rewriting any historical row.
+            path = Path(self.config.get_chat_workspace_root()) / conversation_id
+        return Path(path).resolve()
 
     def checked_file(self, conversation_id, path):
         root = self.workspace(conversation_id)
@@ -152,10 +193,7 @@ class DesktopService:
         run_id, conversation_id = payload["request_id"], payload["conversation_id"]
         try:
             self.store.set_run(run_id, "running")
-            context = {"selected_model_profile": profile, "mode": "normal",
-                       "desktop_long_context": payload.get("context_policy", {})}
-            if payload.get("skills"):
-                context["selected_skill_names"] = payload["skills"]
+            context = {**payload.get("runtime_context", {}), "selected_model_profile": profile}
             request = {"action": "send_message_stream", "desktop_token": self.token,
                        "session_id": conversation_id, "request_id": run_id, "turn_id": run_id,
                        "user_message_id": payload["message_id"], "content": payload["content"],
@@ -197,30 +235,72 @@ class DesktopService:
             claim = self.request_agent({**identity, "action": "workbench_claim"})
             if claim.get("status") != "ok":
                 return
-            self.publish({"event": "workbench", "data": {**identity, **claim}})
+            try:
+                result = self.workbench.agent_request(identity, claim)
+            except Exception as exc:
+                log.exception("workbench_action_failed session=%s action=%s", identity["session_id"], claim["action"])
+                result = {"ok": False, "status": getattr(exc, "code", "failed"), "error": str(exc)}
+            self.request_agent({**identity, "token": claim["token"], "action": "workbench_result", "result": result})
         except Exception:
             log.exception("workbench_claim_failed session=%s", identity["session_id"])
 
     def dispatch(self, method, params):
+        if method == "conversation.send":
+            with self.lock:
+                identity = str((params or {}).get("request_id") or "")
+                rejected = self.store.get_state("submission_rejected:" + identity)
+                if rejected:
+                    raise ValueError(rejected["error"])
+                try:
+                    return self._dispatch(method, params)
+                except Exception as exc:
+                    if identity and not self.store.get_run(identity):
+                        self.store.put_state("submission_rejected:" + identity, {"conversation_id": (params or {}).get("conversation_id"), "error": str(exc)})
+                    raise
+        return self._dispatch(method, params)
+
+    def _dispatch(self, method, params):
         p = params or {}
+        if not isinstance(p, dict):
+            raise ValueError("无效的操作参数。")
+        if method in self.workbench.methods:
+            return self.workbench.dispatch(method, p)
+        if method in self.conversations.methods:
+            return self.conversations.dispatch(method, p)
+        if method in self.management.methods:
+            return self.management.dispatch(method, p)
+        if method in self.settings_pages.methods:
+            return self.settings_pages.dispatch(method, p)
+        if method in self.messaging.methods:
+            return self.messaging.dispatch(method, p)
+        if method in self.updates.methods:
+            return self.updates.dispatch(method, p)
+        if method in self.models.methods:
+            return self.models.dispatch(method, p)
+        if method in self.skillhub.methods:
+            return self.skillhub.dispatch(method, p)
+        if method in self.connections.methods:
+            return self.connections.dispatch(method, p)
         cid = str(p.get("conversation_id") or "")
         if method == "app.bootstrap":
             return {"protocol": PROTOCOL_VERSION, "settings": self.public_settings(),
                     "conversations": self.storage.list_conversation_summaries(limit=500),
                     "active_runs": [self.public_run(run) for run in self.store.active_runs()],
-                    "last_conversation": self.store.get_state("last_conversation", "")}
+                    "last_conversation": self.store.get_state("last_conversation", ""),
+                    "home_draft": self.store.versioned_state("draft:", {"text": "", "attachments": []})}
         if method == "conversation.create":
             cid = uuid.uuid4().hex
             root = Path(p.get("workspace_dir") or (Path(self.config.get_chat_workspace_root()) / cid)).resolve()
             root.mkdir(parents=True, exist_ok=True)
-            self.storage.upsert_conversation(cid, title="新对话", meta={"workspace_dir": str(root), "workspace_path": str(root), "desktop": True})
+            self.storage.upsert_conversation(cid, title="新对话", meta={"workspace_dir": str(root), "workspace_path": str(root),
+                "workspace_source": "project" if p.get("workspace_dir") else "chat", "desktop": True})
             self.store.put_state("last_conversation", cid)
             return self.conversation(cid)
         if method == "conversation.list":
-            return self.storage.list_conversation_summaries(limit=500)
+            return self.storage.list_conversation_summaries(limit=min(500, max(1, int(p.get("limit", 500)))), offset=max(0, int(p.get("offset", 0))))
         if method == "conversation.get":
             self.store.put_state("last_conversation", cid)
-            return self.conversation(cid)
+            return self.conversation(cid, before=p.get("before"), limit=p.get("limit", 80))
         if method == "conversation.rename":
             if not self.storage.has_conversation(cid):
                 raise ValueError("对话不存在。")
@@ -235,15 +315,29 @@ class DesktopService:
             self.storage.update_conversation_meta(cid, {"archived": True})
             return {"saved": True}
         if method in {"draft.save", "view.save"}:
-            self.workspace(cid)
-            return self.store.put_state(("draft:" if method == "draft.save" else "view:") + cid, p["value"])
+            if cid:
+                self.workspace(cid)
+            return self.store.put_state(("draft:" if method == "draft.save" else "view:") + cid, p["value"], p.get("revision"))
         if method == "view.get":
             self.workspace(cid)
             return self.store.get_state("view:" + cid, {})
+        if method == "conversation.receipt":
+            run = self.store.get_run(str(p["request_id"]))
+            if run and run["conversation_id"] != cid:
+                raise ValueError("发送记录不属于当前对话。")
+            rejected = self.store.get_state("submission_rejected:" + str(p["request_id"]))
+            return {"accepted": bool(run), "rejected": bool(rejected and rejected["conversation_id"] == cid), "run": self.public_run(run), "draft": self.store.versioned_state("draft:" + cid, {"text": "", "attachments": []})}
         if method == "conversation.send":
             with self.lock:
                 if self.closing:
                     raise ValueError("应用正在退出，输入内容已保留。")
+                input_hash = hashlib.sha256(json.dumps(p, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                existing = self.store.get_run(str(p["request_id"]))
+                if existing:
+                    accepted = json.loads(existing["payload"])
+                    if existing["conversation_id"] != cid or accepted.get("input_hash") != input_hash:
+                        raise ValueError("请求标识已用于另一条消息，请重新发送。")
+                    return {"accepted": True, "run": self.public_run(existing), "draft": self.store.versioned_state("draft:" + cid)}
                 profile = self.config.get_model_profile(p.get("model_id"))
                 if not profile or not profile.get("api_key"):
                     raise ValueError("请先在“模型与服务”中填写 API Key，或导入现有设置。输入内容已保留。")
@@ -251,22 +345,52 @@ class DesktopService:
                 attachments = p.get("attachments") or []
                 if not text and not attachments:
                     raise ValueError("请输入消息或添加附件。")
-                content = self.attachment_content(cid, text, attachments)
+                from core.desktop_submission import user_payload, run_context
+                record = self.storage.get_conversation_record(cid)
+                if not record:
+                    raise ValueError("对话不存在。")
+                from core.desktop_conversations import PREFERENCE_KEYS
+                preferences = {key: value for key, value in {**record["meta"], **(p.get("preferences") or {})}.items() if key in PREFERENCE_KEYS}
+                workspace = self.workspace(cid)
+                if not workspace.is_dir():
+                    if record["meta"].get("workspace_source") == "chat" or not (record["meta"].get("workspace_dir") or record["meta"].get("workspace_path")):
+                        workspace.mkdir(parents=True, exist_ok=True)
+                    else:
+                        raise ValueError("原项目目录暂时不可用，请恢复该目录后继续。输入和历史记录已保留。")
+                prior_attachments = set()
+                if p.get("rewrite"):
+                    source = next((message for message in self.storage.get_messages(cid) if message["id"] == p["rewrite"].get("message_id")), {})
+                    prior_attachments = {str(Path(path).resolve()) for path in (source.get("meta") or {}).get("user_added_files", [])}
+                paths = []
+                for item in attachments:
+                    path = str(Path(item["path"]).resolve())
+                    paths.append(path if path in prior_attachments else str(self.checked_file(cid, path)))
+                message = user_payload(text, paths, workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
+                    keep_audio_local=bool(preferences.get("keep_audio_local")),
+                    audio_transcription_backend=preferences.get("audio_transcription_backend", "local"),
+                    references=preferences.get("conversation_refs", []), branch_file_map=record["meta"].get("branch_file_map"))
+                from core.enterprise_client import submission
+                question = submission(profile, text)
+                message_meta = {**(message.get("meta") or {})}
+                if "conversation_agent" in preferences:
+                    message_meta["conversation_agent"] = preferences["conversation_agent"]
+                if question:
+                    message_meta["enterprise_submission"] = question
                 payload = {"conversation_id": cid, "request_id": str(p["request_id"]),
-                           "message_id": str(p["message_id"]), "content": content, "display_text": text,
+                           "message_id": str(p["message_id"]), "content": message["content"], "display_text": text,
                            "workspace_dir": str(self.workspace(cid)), "model_id": profile["id"],
-                           "skills": p.get("skills") or [], "attachments": attachments}
-                # Freeze policy at acceptance. An idempotent retry must use the
-                # original policy even after settings have changed.
-                existing = self.store.get_run(payload["request_id"])
-                from core.long_context import desktop_policy
-                payload["context_policy"] = (json.loads(existing["payload"]).get("context_policy", {})
-                                             if existing else desktop_policy(self.config))
+                           "skills": p.get("skills", preferences.get("selected_skill_names", [])), "attachments": attachments,
+                           "preferences": preferences, "input_hash": input_hash, "draft_revision": p.get("draft_revision"),
+                           "content_parts": message.get("content_parts"), "message_meta": message_meta, "rewrite": p.get("rewrite")}
+                if payload["rewrite"]:
+                    self.conversations.idle(cid)
+                payload["runtime_context"] = run_context(self, cid, payload, profile)
                 run, created = self.store.accept(payload)
                 log.info("message_accepted session=%s run=%s created=%s", cid, run["id"], created)
                 if created:
                     self.start_stream(payload, copy.deepcopy(profile))
-                return {"accepted": True, "run": self.public_run(run)}
+                return {"accepted": True, "run": self.public_run(run), "draft": self.store.versioned_state("draft:" + cid),
+                        "undo": run["id"] if payload.get("rewrite") else None}
         if method == "conversation.stop":
             run = self.store.get_run(str(p["run_id"]))
             if not run or run["conversation_id"] != cid:
@@ -289,8 +413,27 @@ class DesktopService:
             return result
         if method == "conversation.steer":
             message = copy.deepcopy(p["message"])
-            message["content"] = self.attachment_content(cid, message.get("content"), p.get("attachments") or [])
-            message.setdefault("meta", {})["desktop_attachments"] = p.get("attachments") or []
+            run = self.store.get_run(str(p["run_id"]))
+            if not run or run["conversation_id"] != cid:
+                raise ValueError("任务不属于当前对话。补充内容已保留。")
+            accepted = json.loads(run["payload"])
+            profile = self.config.get_model_profile(accepted["model_id"])
+            if not profile:
+                raise ValueError("本轮模型配置已不可用，请停止后重新选择模型。补充内容已保留。")
+            preferences = accepted.get("preferences") or {}
+            from core.desktop_submission import user_payload
+            from core.enterprise_client import submission
+            text = str(message.get("content") or "")
+            attachments = p.get("attachments") or []
+            built = user_payload(text, [str(self.checked_file(cid, item["path"])) for item in attachments],
+                workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
+                keep_audio_local=bool(preferences.get("keep_audio_local")),
+                audio_transcription_backend=preferences.get("audio_transcription_backend", "local"))
+            message.update(content=built["content"], content_parts=built["content_parts"])
+            message["meta"] = {**(message.get("meta") or {}), **(built.get("meta") or {}), "desktop_attachments": attachments}
+            question = submission(profile, text)
+            if question:
+                message["meta"]["enterprise_submission"] = question
             return self.request_agent({"action": "steer_message", "session_id": cid, "expected_turn_id": p["run_id"], "message": message})
         if method == "interaction.respond":
             # The shared interaction service also checks the request identity.
@@ -308,13 +451,23 @@ class DesktopService:
             channel_id = str(p.get("channel_id") or uuid.uuid4().hex)
             channels = self.config.get_model_channels()
             existing = next((c for c in channels if c.get("channel_id") == channel_id), {})
-            key = str(p.get("api_key") or "").strip() or existing.get("api_key", "")
+            api_key = str(p.get("api_key") or "").strip() or existing.get("api_key", "")
             model_id = str(p.get("model_id") or uuid.uuid4().hex)
-            channel = {**existing, "channel_id": channel_id, "display_name": p.get("name") or "模型服务",
-                       "provider_type": p.get("provider_type") or "openai", "base_url": p["base_url"], "api_key": key,
-                       "models": [{"id": model_id, "model_name": p["model_name"], "display_name": p["model_name"],
-                                   "api_protocol": p.get("api_protocol") or "chat_completions"}]}
-            channels = [c for c in channels if c.get("channel_id") != channel_id] + [channel]
+            previous_model = next((model for model in existing.get("models", []) if model.get("id") == model_id), {})
+            model = {**previous_model, "id": model_id, "model_name": p["model_name"], "display_name": p.get("display_name") or p["model_name"],
+                     "api_protocol": p.get("api_protocol") or previous_model.get("api_protocol") or "chat_completions"}
+            for key in ("supports_vision", "supports_tools", "supports_reasoning", "reasoning_effort", "context_length", "max_tokens", "temperature"):
+                if key in p:
+                    model[key] = p[key]
+            models = [model if item.get("id") == model_id else item for item in existing.get("models", [])]
+            if not previous_model:
+                models.append(model)
+            channel = {**existing, "channel_id": channel_id, "display_name": p.get("name") or existing.get("display_name") or "模型服务",
+                       "provider_type": p.get("provider_type") or existing.get("provider_type") or "openai", "base_url": p["base_url"], "api_key": api_key,
+                       "models": models}
+            channels = [channel if item.get("channel_id") == channel_id else item for item in channels]
+            if not existing:
+                channels.append(channel)
             self.config.set_model_channels(channels, model_id)
             return self.public_settings()
         if method == "settings.select_model":
@@ -324,7 +477,9 @@ class DesktopService:
             self.config.set_god_mode(bool(p["enabled"]))
             return self.public_settings()
         if method == "settings.theme":
-            self.store.put_state("theme", p["theme"])
+            appearance = self.management.themes.load_appearance()
+            self.management.themes.save_appearance({**appearance, "mode": p["theme"]})
+            self.publish({"event": "appearance_changed"})
             return {"saved": True}
         if method == "settings.context":
             from core.long_context import TARGETS
@@ -384,9 +539,23 @@ class DesktopService:
                 handle.flush()
                 os.fsync(handle.fileno())
             return self.dispatch("file.open", {"conversation_id": cid, "path": str(path)})
+        if method == "file.describe":
+            from core.deliverable_editing import sha256_file
+            path = self.checked_file(cid, p["path"])
+            return {"path": str(path), "fingerprint": sha256_file(path)}
         if method == "file.open":
             from core.deliverable_editing import create_edit_session, load_editor_payload
             path = self.checked_file(cid, p["path"])
+            from core.file_capabilities import file_capability
+            capability = file_capability(str(path))
+            if capability and not capability.editable:
+                from core.deliverable_editing import sha256_file
+                payload = {"kind": "preview", "preview_kind": capability.preview_kind, "read_only": True}
+                if capability.preview_kind == "pptx":
+                    from core.deliverable_preview import render_pptx_preview
+                    payload["preview_html"] = render_pptx_preview(str(path))["html"]
+                return {"id": uuid.uuid4().hex, "path": str(path), "name": path.name,
+                        "fingerprint": sha256_file(path), "payload": payload}
             session, report = create_edit_session(str(path))
             if not report.allowed:
                 raise ValueError(report.message)
@@ -402,12 +571,39 @@ class DesktopService:
             if isinstance(payload.get("binary"), bytes):
                 payload["binary"] = base64.b64encode(payload["binary"]).decode()
             return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": session.initial_fingerprint, "payload": payload, "conflict": conflict}
-        if method == "file.save":
+        if method in {"file.save", "file.save_copy"}:
             from core.deliverable_editing import serialize_editor_payload, atomic_save_session
             owner, session = self.file_sessions.get(p["id"], (None, None))
             if owner != cid or session is None:
                 raise ValueError("编辑会话已失效，请保留内容并重新打开文件。")
-            data = serialize_editor_payload(session, p["payload"])
+            payload = p["payload"]
+            if isinstance(payload, dict) and set(payload) == {"kind", "value"}:
+                kind = payload["kind"]
+                expected = "docx_review" if session.metadata.get("docx_review") else session.descriptor.kind
+                if kind != expected:
+                    raise ValueError("编辑器类型与文件不匹配。")
+                payload = base64.b64decode(payload["value"], validate=True) if kind == "docx" else json.loads(payload["value"])
+            data = serialize_editor_payload(session, payload)
+            if method == "file.save_copy":
+                import tempfile
+                destination = self.checked_file(cid, p["name"])
+                if destination.suffix.lower() != Path(session.path).suffix.lower():
+                    raise ValueError("副本必须保留原文件格式。")
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".cowork-copy-", delete=False) as handle:
+                        temporary = handle.name
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    # Atomically publish the complete file, never replace an
+                    # existing destination or touch the changed source.
+                    os.link(temporary, destination)
+                finally:
+                    if temporary:
+                        os.unlink(temporary)
+                log.info("file_copy_saved session=%s file_session=%s", cid, p["id"])
+                return self.dispatch("file.open", {"conversation_id": cid, "path": str(destination)})
             result = atomic_save_session(session, data, event_logger=lambda event, **details: log.info("file_save session=%s file_session=%s stage=%s", cid, p["id"], event))
             return {"saved": True, "fingerprint": result.fingerprint, "path": result.path}
         if method == "skills.list":
@@ -416,6 +612,8 @@ class DesktopService:
         if method == "workbench.result":
             return self.request_agent({**p, "action": "workbench_result"})
         if method == "app.shutdown":
+            with self.lock:
+                self.closing = True
             for run in self.store.active_runs():
                 try:
                     self.dispatch("conversation.stop", {"conversation_id": run["conversation_id"], "run_id": run["id"]})
@@ -425,8 +623,13 @@ class DesktopService:
             while self.streams and time.monotonic() < deadline:
                 time.sleep(.05)
             if self.streams:
+                self.closing = False
                 raise RuntimeError("任务仍在结束处理中，请稍后再退出。")
-            self.closing = True
+            self.scheduler.close()
+            self.messaging.close()
+            self.workbench.close()
+            self.jobs.close()
+            self.models.close()
             return {"stopped": True}
         raise ValueError("不支持的操作：" + method)
 
@@ -439,9 +642,15 @@ def main():
             stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--serve", action="store_true", help="Keep tasks alive across desktop reconnects")
+    parser.add_argument("--im-gateway", action="store_true")
     args = parser.parse_args()
     os.environ["COWORK_APP_DATA_DIR"] = str(Path(args.data_dir).resolve())
     os.environ["COWORK_EXTERNAL_BACKGROUND_SERVICES"] = "0"
+    if args.im_gateway:
+        from core.im_gateway.runtime import run
+        run()
+        return 0
     wire = sys.stdout
     sys.stdout = sys.stderr
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -450,9 +659,33 @@ def main():
         with output_lock:
             wire.write(json.dumps(value, ensure_ascii=False, default=str) + "\n")
             wire.flush()
-    from PySide6.QtCore import QCoreApplication, QTimer
-    app = QCoreApplication([])
-    service = DesktopService(publish)
+    from core.desktop_upgrade import DataLease
+    lease = DataLease(args.data_dir)
+    transport = None
+    if args.serve:
+        from core.desktop_transport import DesktopTransport
+        transport = DesktopTransport(args.data_dir, PROTOCOL_VERSION)
+        publish = transport.publish
+    try:
+        service = DesktopService(publish)
+    except BaseException:
+        lease.close()
+        raise
+    if transport:
+        transport.start(service)
+        service.scheduler.start()
+        service.messaging.restart()
+        try:
+            while not service.closing or service.streams:
+                time.sleep(.1)
+        finally:
+            service.scheduler.close()
+            service.jobs.close()
+            transport.close()
+            service.server.shutdown()
+            service.state.skill_catalog.stop_watching()
+            lease.close()
+        return 0
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="desktop-rpc")
     def handle(request):
         identity = request.get("id")
@@ -481,14 +714,16 @@ def main():
                     log.exception("host_disconnected_stop_failed")
     threading.Thread(target=read_commands, name="desktop-commands", daemon=True).start()
     publish({"event": "ready", "protocol": PROTOCOL_VERSION})
-    timer = QTimer()
-    timer.setInterval(100)
-    timer.timeout.connect(lambda: app.quit() if service.closing and not service.streams else None)
-    timer.start()
-    result = app.exec()
+    service.scheduler.start()
+    while not service.closing or service.streams:
+        time.sleep(0.05)
+    result = 0
     executor.shutdown(wait=False, cancel_futures=True)
+    service.scheduler.close()
+    service.jobs.close()
     service.server.shutdown()
     service.state.skill_catalog.stop_watching()
+    lease.close()
     return result
 
 

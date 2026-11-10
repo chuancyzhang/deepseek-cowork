@@ -41,7 +41,6 @@ WECOM_CLI_SHA256 = "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B9354029
 
 python_prefix = sys.exec_prefix
 python_runtime_prefix = getattr(sys, "base_prefix", "") or python_prefix
-PYSIDE6_ROOT = os.path.join(python_prefix, "Lib", "site-packages", "PySide6")
 
 
 def _env_flag(name, default=False):
@@ -52,8 +51,7 @@ def _env_flag(name, default=False):
 
 
 ALLOW_MISSING_MCP = _env_flag("COWORK_ALLOW_MISSING_MCP", False)
-DESKTOP_SERVICE = _env_flag("COWORK_BUILD_DESKTOP_SERVICE", False)
-EXECUTABLE_NAME = "cowork-service" if DESKTOP_SERVICE else "deepseek-cowork"
+EXECUTABLE_NAME = "cowork-service"
 
 
 def _add_data_file(store, src, dest):
@@ -257,45 +255,13 @@ def _collect_dynamic_skill_core_hiddenimports(*skill_roots):
     return sorted(hiddenimports)
 
 
-QT_TRANSLATION_ALLOWLIST = {
-    "qt_en.qm",
-    "qt_zh_CN.qm",
-    "qtbase_en.qm",
-    "qtbase_zh_CN.qm",
-}
-QTWEBENGINE_LOCALE_ALLOWLIST = {
-    "en-GB.pak",
-    "en-US.pak",
-    "zh-CN.pak",
-    "zh-TW.pak",
-}
-
-
 def _normalized_bundle_path(path):
     return str(path or "").replace("\\", "/").lstrip("./")
 
 
-def _allow_qt_bundle_entry(entry):
-    dest = _normalized_bundle_path(entry[0])
-    lowered = dest.lower()
-    # Qt uses the unversioned Windows ICU API. A foreign ICU copied from PATH to the
-    # bundle root exports versioned symbols and prevents QtCore from loading.
-    # Keep each runtime's own nested ICU, and let Qt resolve the Windows DLL.
-    if "/" not in lowered and lowered.startswith(("icuuc", "icuin", "icudt")) and lowered.endswith(".dll"):
-        return False
-    if not lowered.startswith("pyside6/"):
-        return True
-    if lowered.startswith("pyside6/qml/"):
-        return False
-    if lowered.startswith("pyside6/resources/"):
-        basename = os.path.basename(dest).lower()
-        if ".debug." in basename or basename.endswith(".debug"):
-            return False
-    if lowered.startswith("pyside6/translations/qtwebengine_locales/"):
-        return os.path.basename(dest) in QTWEBENGINE_LOCALE_ALLOWLIST
-    if lowered.startswith("pyside6/translations/"):
-        return os.path.basename(dest) in QT_TRANSLATION_ALLOWLIST
-    return True
+def _allow_native_bundle_entry(entry):
+    parts = _normalized_bundle_path(entry[0]).lower().split("/")
+    return not any(part.startswith(("pyside", "pyqt", "shiboken", "qtawesome", "qdarktheme", "qt6")) for part in parts)
 
 
 def _allow_python_env_entry(entry):
@@ -691,44 +657,6 @@ ripgrep_env = [
 ]
 
 
-def _collect_minimal_pyside6():
-    datas = []
-    if not os.path.isdir(PYSIDE6_ROOT):
-        return datas
-
-    plugin_dirs = [
-        "platforms",
-        "styles",
-        "imageformats",
-        "iconengines",
-        "platforminputcontexts",
-    ]
-    for plugin_dir in plugin_dirs:
-        datas.extend(
-            _collect_tree_for_analysis(
-                os.path.join(PYSIDE6_ROOT, "plugins", plugin_dir),
-                f"PySide6/plugins/{plugin_dir}",
-            )
-        )
-
-    translation_files = [
-        "qtbase_zh_CN.qm",
-        "qtbase_en.qm",
-        "qt_zh_CN.qm",
-        "qt_en.qm",
-    ]
-    for name in translation_files:
-        _add_analysis_data_file(
-            datas,
-            os.path.join(PYSIDE6_ROOT, "translations", name),
-            "PySide6/translations",
-        )
-
-    return datas
-
-
-qt_minimal_datas = _collect_minimal_pyside6()
-
 application_datas = []
 _add_analysis_data_file(application_datas, os.path.join(SPEC_DIR, "resources", "enterprise_capabilities.json"), ".")
 application_datas.extend(copy_metadata("pywinpty"))
@@ -745,7 +673,6 @@ for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editor
 application_datas.extend(
     [
         (os.path.join(SPEC_DIR, "config.json"), "."),
-        (os.path.join(SPEC_DIR, "qt.conf"), "."),
     ]
 )
 application_datas.extend(_collect_browser_skill_bundle_for_analysis())
@@ -768,26 +695,6 @@ print(
     + ", ".join(DYNAMIC_SKILL_CORE_HIDDENIMPORTS)
 )
 
-pyside6_hidden = [
-    "PySide6.QtCore",
-    "PySide6.QtGui",
-    "PySide6.QtNetwork",
-    "PySide6.QtPositioning",
-    "PySide6.QtPdf",
-    "PySide6.QtPdfWidgets",
-    # QQuickWidget's Python bindings import QtQuick -> QtOpenGL and QtQml.
-    # Shipping the Qt DLLs alone does not satisfy this import chain.
-    "PySide6.QtOpenGL",
-    "PySide6.QtQml",
-    "PySide6.QtQuick",
-    "PySide6.QtQuickWidgets",
-    "PySide6.QtSvg",
-    "PySide6.QtWebChannel",
-    "PySide6.QtWidgets",
-    "PySide6.QtTest",
-    "PySide6.QtWebEngineCore",
-    "PySide6.QtWebEngineWidgets",
-]
 try:
     qqbot_dist = _require_distribution("qqbot-agent-sdk")
 except RuntimeError as exc:
@@ -814,13 +721,12 @@ if os.name == "nt":
         os.path.join(windows_root, "System32"), windows_root,
     ])
 a = Analysis(
-    ['scripts/desktop_service_entry.py' if DESKTOP_SERVICE else 'main.py'],
+    ['scripts/desktop_service_entry.py'],
     pathex=[],
     binaries=collect_dynamic_libs("winpty"),
-    datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
+    datas=application_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
     hiddenimports=(
-        pyside6_hidden
-        + qqbot_hidden
+        qqbot_hidden
         + MCP_ANALYSIS_HIDDENIMPORTS
         + DYNAMIC_SKILL_CORE_HIDDENIMPORTS
         + collect_submodules("bundled_plugins.data_security")
@@ -830,7 +736,6 @@ a = Analysis(
             'yaml',
             'requests',
             'markdown',
-            'qtawesome',
             'anthropic',
             'openai',
             'lark_oapi',
@@ -853,48 +758,7 @@ a = Analysis(
         'duckduckgo_search', 
         'matplotlib',
         'scipy',
-        'PySide6.Qt3DAnimation',
-        'PySide6.Qt3DCore',
-        'PySide6.Qt3DExtras',
-        'PySide6.Qt3DInput',
-        'PySide6.Qt3DLogic',
-        'PySide6.Qt3DRender',
-        'PySide6.QtCharts',
-        'PySide6.QtConcurrent',
-        'PySide6.QtDataVisualization',
-        'PySide6.QtDesigner',
-        'PySide6.QtGraphs',
-        'PySide6.QtHttpServer',
-        'PySide6.QtLocation',
-        'PySide6.QtMultimedia',
-        'PySide6.QtMultimediaWidgets',
-        'PySide6.QtNetworkAuth',
-        'PySide6.QtOpenGLWidgets',
-        'PySide6.QtQmlCompiler',
-        'PySide6.QtQuick3D',
-        'PySide6.QtQuickControls2',
-        'PySide6.QtQuickDialogs2',
-        'PySide6.QtQuickEffects',
-        'PySide6.QtQuickLayouts',
-        'PySide6.QtQuickParticles',
-        'PySide6.QtQuickShapes',
-        'PySide6.QtQuickTemplates2',
-        'PySide6.QtQuickTest',
-        'PySide6.QtRemoteObjects',
-        'PySide6.QtScxml',
-        'PySide6.QtSensors',
-        'PySide6.QtSerialBus',
-        'PySide6.QtSerialPort',
-        'PySide6.QtSpatialAudio',
-        'PySide6.QtStateMachine',
-        'PySide6.QtSvgWidgets',
-        'PySide6.QtTextToSpeech',
-        'PySide6.QtUiTools',
-        'PySide6.QtWebEngineQuick',
-        'PySide6.QtWebSockets',
-        'PySide6.QtWebView',
-        'PySide6.QtXml',
-        'PySide6.QtXmlPatterns',
+        'PySide6', 'PyQt5', 'PyQt6', 'shiboken6', 'qtawesome', 'qdarktheme', 'ui',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -902,8 +766,8 @@ a = Analysis(
     noarchive=False,
 )
 os.environ["PATH"] = original_build_path
-a.datas = _filter_entries(a.datas, _allow_qt_bundle_entry, "Qt data")
-a.binaries = _filter_entries(a.binaries, _allow_qt_bundle_entry, "Qt binary")
+a.datas = _filter_entries(a.datas, _allow_native_bundle_entry, "native service data")
+a.binaries = _filter_entries(a.binaries, _allow_native_bundle_entry, "native service binary")
 print(f"Bundled minimal python env entries: {len(python_env)}")
 print(f"Runtime slim mode: {'ON' if RUNTIME_SLIM else 'OFF'}")
 print(f"Bundled node env entries: {len(node_env)}")
@@ -921,7 +785,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=DESKTOP_SERVICE,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

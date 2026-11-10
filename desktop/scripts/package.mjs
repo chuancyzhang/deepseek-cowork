@@ -17,6 +17,7 @@ function run(command, args) {
   if (result.status !== 0) throw new Error(`构建失败：${path.basename(command)}（${result.status}）`);
 }
 run(process.execPath, [path.join(desktop,'node_modules/typescript/bin/tsc'), '--noEmit', '--project', path.join(desktop,'tsconfig.json')]);
+run(process.execPath, [path.join(root, 'web/editors/build.mjs')]);
 const build = spawnSync(process.execPath, [path.join(desktop,'node_modules/vite/bin/vite.js'), 'build'], {cwd:desktop, env, stdio:'inherit', windowsHide:true});
 if (build.status !== 0) throw new Error('界面构建失败。');
 run(python, ['-m','PyInstaller','deepseek-cowork.spec','--noconfirm','--distpath',path.join(qa,'service-dist'),'--workpath',path.join(qa,'pyinstaller')]);
@@ -36,6 +37,32 @@ const outputs = await packager({dir:desktop, out:path.join(desktop,'out'), name:
 });
 for (const output of outputs) {
   await fs.cp(path.join(qa,'service-dist/cowork-service'),path.join(output,'resources/service'),{recursive:true});
+  await fs.cp(path.join(root,'web/editors/dist'),path.join(output,'resources/web/editors/dist'),{recursive:true});
   await fs.copyFile(path.join(root,'LICENSE'),path.join(output,'LICENSE-Cowork.txt'));
+  await fs.copyFile(path.join(root,'images/logo.ico'),path.join(output,'resources/logo.ico'));
+  await fs.writeFile(path.join(output,'desktop-release.json'), JSON.stringify({schema_version:1, app_layout:'electron', target:'windows-x64', version},null,2));
+  run(python, ['-X', 'utf8', '-c', String.raw`
+import hashlib, json, pathlib, sys, zipfile
+source = pathlib.Path(sys.argv[1])
+version = sys.argv[2]
+files = sorted(p for p in source.rglob('*') if p.is_file())
+for entry in files:
+    parts = {part.lower() for part in entry.relative_to(source).parts}
+    if parts & {'user_data', 'pyside6', 'shiboken6', '.env'} or entry.name.lower().startswith('qt6'):
+        raise RuntimeError('发行包含用户数据或旧 UI 运行时：' + str(entry.relative_to(source)))
+archive = source.parent / f'cowork-desktop-v{version}-windows-x64.zip'
+pending = archive.with_suffix('.zip.partial')
+with zipfile.ZipFile(pending, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as target:
+    for entry in files:
+        target.write(entry, source.name + '/' + entry.relative_to(source).as_posix())
+pending.replace(archive)
+with archive.open('rb') as stream:
+    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+manifest = {'schema_version': 1, 'app_layout': 'electron', 'target_os': 'windows', 'arch': 'x64',
+    'version': version, 'filename': archive.name, 'size': archive.stat().st_size, 'sha256': digest,
+    'notes': 'Electron 工作台：对话、能力管理、文件编辑、浏览器与终端，以及本地数据升级。'}
+(source.parent / 'latest-desktop-windows-x64.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+print('发行 ZIP：' + str(archive))
+`, output, version]);
   console.log(`Windows 工作台：${path.join(output,'Cowork.exe')}`);
 }

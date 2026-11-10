@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtGui import QColor, QImage
+from PIL import Image
 
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.config_manager import ConfigManager
@@ -174,9 +174,8 @@ class ThemeToolTests(unittest.TestCase):
 
     def test_asset_tools_increment_revision_and_preserve_reference_safety(self):
         image_path = os.path.join(self.temp_dir, "theme-bg.png")
-        image = QImage(24, 18, QImage.Format_ARGB32)
-        image.fill(QColor("#445588"))
-        self.assertTrue(image.save(image_path, "PNG"))
+        image = Image.new("RGBA", (24, 18), "#445588")
+        image.save(image_path, "PNG")
         preview = self.manager.call_tool(
             "preview_ui_theme",
             {"name": "Assets", "overrides": {}},

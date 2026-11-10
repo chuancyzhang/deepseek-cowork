@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from core.runtime_tasks import EventSource
 
 log = logging.getLogger(__name__)
 
@@ -161,11 +161,10 @@ class WorkbenchRequest:
                      "error": str(exc), "executed": self.started})
 
 
-class WorkbenchBridge(QObject):
-    requested = Signal(object)
+class WorkbenchBridge:
 
     def __init__(self):
-        super().__init__()
+        self.requested = EventSource()
         self.store = WorkbenchStore()
         self.available = False
         self.pending: dict[str, WorkbenchRequest] = {}

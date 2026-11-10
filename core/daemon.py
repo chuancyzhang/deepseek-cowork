@@ -7,8 +7,6 @@ import threading
 import time
 import uuid
 import hashlib
-from PySide6.QtCore import QEventLoop, QTimer, Qt, QThread
-from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.chat_storage import ChatStorage, ConversationWriteConflict
@@ -580,11 +578,11 @@ class DaemonState:
                 "created_at": time.time(),
             }
         try:
-            worker.finished.connect(cleanup, Qt.DirectConnection)
+            worker.finished.subscribe(cleanup)
         except Exception as e:
             _log_daemon(f"detach worker connect finished failed session_id={session_id} error={e}")
         try:
-            is_running = bool(worker.isRunning())
+            is_running = bool(worker.is_running())
         except Exception:
             is_running = True
         if not is_running:
@@ -694,7 +692,7 @@ class DaemonState:
             deadline = time.monotonic() + max(0.0, int(release_timeout_ms or 0) / 1000.0)
             for candidate in release_targets:
                 remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-                if remaining_ms <= 0 or not candidate.wait(remaining_ms):
+                if remaining_ms <= 0 or not candidate.join(remaining_ms / 1000.0):
                     released = False
                     break
                 # The model worker can exit before a background tool finishes
@@ -857,7 +855,7 @@ class DaemonState:
         request_id=None,
     ):
         result_holder = {}
-        loop = QEventLoop()
+        done = threading.Event()
 
         def on_finished(result):
             result_holder["result"] = result
@@ -866,7 +864,7 @@ class DaemonState:
                 expected_worker=worker,
                 expected_run_id=request_id,
             )
-            loop.quit()
+            done.set()
 
         worker = LLMWorker(
             worker_messages,
@@ -882,7 +880,13 @@ class DaemonState:
         if worker.agent_manager is not None:
             worker.agent_manager.execution_owner = "daemon"
 
-        worker.finished_signal.connect(on_finished)
+        worker.finished_signal.subscribe(on_finished)
+        def on_thread_exit():
+            if not done.is_set():
+                on_finished({"error": str(worker.failure or "运行线程未返回结果"),
+                             "error_type": "WorkerExited", "generated_messages": [],
+                             "turn_id": turn_id, "request_id": request_id})
+        worker.finished.subscribe(on_thread_exit)
         activated = self.set_active_worker(
             session_id,
             worker,
@@ -899,7 +903,8 @@ class DaemonState:
                 "_runtime_terminal": "interrupted",
             }
         worker.start()
-        loop.exec()
+        done.wait()
+        worker.join()
         return result_holder.get("result") or {"error": "No response"}
 
     def _is_context_overflow_error(self, result):
@@ -1531,8 +1536,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 active_worker_running = bool(
                     active_worker
                     and (
-                        active_worker.isRunning()
-                        or not active_worker.isFinished()
+                        active_worker.is_running()
+                        or not active_worker.is_finished()
                     )
                 )
             except Exception:
@@ -1880,20 +1885,25 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             self._stream_pipeline = pipeline
             self._stream_worker = worker
             worker._runtime_stream_pipeline = pipeline
-            worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
-            worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
+            worker.thinking_signal.subscribe(lambda text: send_stream({"type": "thinking", "delta": text}))
+            worker.content_signal.subscribe(lambda text: send_stream({"type": "content", "delta": text}))
             content_snapshot_signal = getattr(worker, "content_snapshot_signal", None)
             if content_snapshot_signal is not None:
-                content_snapshot_signal.connect(
+                content_snapshot_signal.subscribe(
                     lambda text: send_stream({"type": "content_snapshot", "content": text}),
-                    Qt.DirectConnection,
                 )
-            worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
-            worker.tool_result_signal.connect(lambda data: send_stream({"type": "tool_result", "data": data}), Qt.DirectConnection)
-            worker.agent_state_signal.connect(lambda data: send_stream({"type": "agent_state", "data": data}), Qt.DirectConnection)
-            worker.observability_signal.connect(lambda data: send_stream({"type": "observability", "data": data}), Qt.DirectConnection)
-            worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
-            worker.finished_signal.connect(on_finished, Qt.DirectConnection)
+            worker.tool_call_signal.subscribe(lambda data: send_stream({"type": "tool_call", "data": data}))
+            worker.tool_result_signal.subscribe(lambda data: send_stream({"type": "tool_result", "data": data}))
+            worker.agent_state_signal.subscribe(lambda data: send_stream({"type": "agent_state", "data": data}))
+            worker.observability_signal.subscribe(lambda data: send_stream({"type": "observability", "data": data}))
+            worker.output_signal.subscribe(lambda text: send_stream({"type": "log", "data": text}))
+            worker.finished_signal.subscribe(on_finished)
+            def on_thread_exit():
+                if not done.is_set():
+                    on_finished({"error": str(worker.failure or "运行线程未返回结果"),
+                                 "error_type": "WorkerExited", "generated_messages": [],
+                                 "turn_id": turn_id, "request_id": request_id})
+            worker.finished.subscribe(on_thread_exit)
 
             def route_interaction(payload, event_type):
                 if (payload or {}).get("session_id") != session_id:
@@ -1902,7 +1912,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 if request_run_id:
                     if request_run_id != worker.execution_authorization.run_id:
                         return
-                elif QThread.currentThread() != worker:
+                elif not worker.is_current_thread():
                     return
                 request_payload = dict(payload or {})
                 send_stream({"type": event_type, "data": request_payload})
@@ -1920,8 +1930,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             route_key = (worker.execution_authorization.session_id, worker.execution_authorization.run_id)
             with workbench_host._lock:
                 workbench_host.remote_routes[route_key] = lambda act, args, ctx, timeout: dispatch_workbench(send_stream, act, args, ctx, timeout)
-            interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
-            interaction_service.interaction_finished.connect(handle_interaction_finished, Qt.DirectConnection)
+            interaction_service.interaction_requested.subscribe(handle_interaction_request)
+            interaction_service.interaction_finished.subscribe(handle_interaction_finished)
             activated = state.set_active_worker(
                 session_id,
                 worker,
@@ -1937,10 +1947,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         worker.start()
                         _log_daemon(
                             f"send_message_stream worker_started session_id={session_id} "
-                            f"turn_id={turn_id} is_running={worker.isRunning()}"
+                            f"turn_id={turn_id} is_running={worker.is_running()}"
                         )
                         done.wait()
-                        if not worker.wait(2000):
+                        if not worker.join(2.0):
                             state.detach_worker_until_finished(
                                 session_id,
                                 worker,
@@ -1965,14 +1975,14 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         )
                 finally:
                     try:
-                        interaction_service.interaction_requested.disconnect(handle_interaction_request)
-                        interaction_service.interaction_finished.disconnect(handle_interaction_finished)
+                        interaction_service.interaction_requested.unsubscribe(handle_interaction_request)
+                        interaction_service.interaction_finished.unsubscribe(handle_interaction_finished)
                     except Exception as e:
                         _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
             else:
                 try:
-                    interaction_service.interaction_requested.disconnect(handle_interaction_request)
-                    interaction_service.interaction_finished.disconnect(handle_interaction_finished)
+                    interaction_service.interaction_requested.unsubscribe(handle_interaction_request)
+                    interaction_service.interaction_finished.unsubscribe(handle_interaction_finished)
                 except Exception as e:
                     _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
                 result_holder["result"] = {
@@ -2410,13 +2420,16 @@ def request_idle_daemon_shutdown(client, expected_ping, wait_timeout=2.0):
 
 
 class DaemonClient:
-    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=3, send_timeout=600):
+    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=3, send_timeout=600, desktop_token=""):
         self.host = host
         self.port = port
         self.timeout = timeout
         self.send_timeout = send_timeout
+        self.desktop_token = desktop_token
 
     def _request(self, payload, timeout=None):
+        if self.desktop_token:
+            payload = {**payload, "desktop_token": self.desktop_token}
         effective_timeout = self.timeout if timeout is None else timeout
         with socket.create_connection((self.host, self.port), timeout=effective_timeout) as sock:
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -2496,6 +2509,8 @@ class DaemonClient:
                 payload["writer_owner"] = str(writer_owner)
             if messages:
                 payload["messages"] = messages
+            if self.desktop_token:
+                payload["desktop_token"] = self.desktop_token
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             with sock.makefile("r", encoding="utf-8") as reader:
                 for line in reader:
@@ -2611,46 +2626,16 @@ class DaemonClient:
 
 
 def run_daemon(host=DEFAULT_HOST, port=DEFAULT_PORT):
-    app = QApplication([])
-    app.setQuitOnLastWindowClosed(False)
-    config_manager = ConfigManager()
-    state = DaemonState(config_manager)
+    state = DaemonState(ConfigManager())
     server = DaemonServer((host, port), DaemonRequestHandler, state)
-
-    def serve():
+    server.timeout = 0.1
+    next_maintenance = time.monotonic() + 5
+    try:
         while not server.shutdown_requested:
             server.handle_request()
-        server.server_close()
-
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
-
-    timer = QTimer()
-    timer.setInterval(5000)
-    timer.timeout.connect(state.maybe_suspend)
-    timer.start()
-
-    shutdown_timer = QTimer()
-    shutdown_timer.setInterval(100)
-    shutdown_timer.timeout.connect(
-        lambda: _poll_daemon_shutdown(app, server)
-    )
-    shutdown_timer.start()
-
-    try:
-        app.exec()
+            if time.monotonic() >= next_maintenance:
+                state.maybe_suspend()
+                next_maintenance = time.monotonic() + 5
     finally:
-        shutdown_timer.stop()
-        timer.stop()
-        server.shutdown_requested = True
         state.skill_catalog.stop_watching()
         server.server_close()
-        thread.join(timeout=2)
-
-
-def _poll_daemon_shutdown(app, server):
-    """Quit from the Qt thread once the socket server accepts shutdown."""
-    if not bool(getattr(server, "shutdown_requested", False)):
-        return False
-    app.quit()
-    return True

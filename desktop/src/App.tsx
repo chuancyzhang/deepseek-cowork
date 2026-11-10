@@ -1,74 +1,67 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { ArrowUp, Square, Plus, Search, Settings as SettingsIcon, PanelsTopLeft, Folder, FileText, ChevronRight, ChevronDown, X, Copy, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Puzzle, Check, LoaderCircle, Paperclip, ShieldCheck, Sun, Moon, RefreshCw, ArrowLeft, Download, Code2, BookOpen, Sparkles, ExternalLink } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense } from 'react';
+import { ArrowUp, Square, Plus, Search, ChartColumn, History, Settings as SettingsIcon, PanelsTopLeft, Folder, FileText, ChevronRight, ChevronDown, X, Copy, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Puzzle, Check, LoaderCircle, Paperclip, ShieldCheck, Sun, Moon, RefreshCw, ArrowLeft, Download, Code2, BookOpen, Sparkles, ExternalLink } from 'lucide-react';
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from './types';
 import { displayMessages, isActive, mergeEvents, messageText, runErrorSummary, unwrapEvents } from './runtime';
 import PluginEditor from './PluginEditor';
 import Usage from './Usage';
+import { Drafts, type Draft } from './drafts';
+import DraftRecovery from './DraftRecovery';
+import Sidebar from './Sidebar';
+import MessageBubble from './MessageBubble';
+import HistoryEditor from './HistoryEditor';
+import Dialog from './Dialog';
+import OfficeEditor from './OfficeEditor';
+import FilePreview from './FilePreview';
+import Workspace, { emptyWorkspace, type WorkspaceView } from './Workspace';
+import Composer from './Composer';
+import Interaction from './Interaction';
+import { themeStyle } from './theme';
+import ThemePreview from './ThemePreview';
+const Management = lazy(() => import('./Management'));
+const managementNames: Record<string, string> = { settings: '设置', capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间' };
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Ask = { title: string; detail: string; choices: string[]; resolve: (index: number) => void };
 type Editor = { file: FileSession; text: string; saved: string; plugin: Plugin };
 
-function Markdown({ text }: { text: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <button className="text-link" onClick={() => { if (href?.match(/^https?:/)) void call('external.open', { url: href }); }}>{children}<ExternalLink size={12}/></button> }}>{text}</ReactMarkdown>;
-}
-function Bubble({ message }: { message: Message }) {
-  const [copied, setCopied] = useState(false);
-  const text = messageText(message.content);
-  if (message.role === 'tool') return <details className="tool-entry"><summary><PanelsTopLeft size={14}/><span>{message.meta?.tool_name || '工具结果'}</span><ChevronDown size={13}/></summary><pre>{typeof message.result_obj === 'object' ? JSON.stringify(message.result_obj, null, 2) : text}</pre></details>;
-  return <article className={`message ${message.role}`}>
-    {message.role === 'assistant' && <div className="assistant-name"><span className="brand-symbol small">✳</span>Cowork{message.live && <LoaderCircle className="spin" size={13}/>}</div>}
-    {!!message.reasoning_content && <details className="thinking"><summary><Sparkles size={13}/>深度思考<ChevronDown size={13}/></summary><div className="markdown"><Markdown text={message.reasoning_content}/></div></details>}
-    {!!message.tool_calls?.length && <details className="tool-entry"><summary><PanelsTopLeft size={14}/>工具调用 · {message.tool_calls.length}<ChevronDown size={13}/></summary>{message.tool_calls.map((tool, index) => <div key={tool.id || index}><strong>{tool.function?.name || tool.name || '工具'}</strong><pre>{typeof tool.function?.arguments === 'string' ? tool.function.arguments : JSON.stringify(tool.arguments || tool, null, 2)}</pre></div>)}</details>}
-    {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : <Markdown text={text}/>}</div>}
-    {message.role === 'assistant' && text && <div className="message-actions"><button title="复制回答" onClick={async () => { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button></div>}
-  </article>;
-}
-
-function Interaction({ request, conversationId, done, error }: { request: any; conversationId: string; done: () => void; error: (message: string) => void }) {
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function respond(value: any) {
-    setBusy(true);
-    try { const result = await call('interaction.respond', { conversation_id: conversationId, request_id: request.request_id, value }); if (result.status === 'error') throw new Error(result.error); done(); }
-    catch (failure) { error((failure as Error).message); } finally { setBusy(false); }
-  }
-  return <section className="interaction"><div className="interaction-title">{request.title || (request.kind === 'approval' ? '需要你的确认' : '补充一些信息')}</div><p>{request.message}</p>
-    {request.kind === 'approval' ? <div className="button-row"><button disabled={busy} className="secondary" onClick={() => void respond(false)}>拒绝</button><button disabled={busy} className="primary" onClick={() => void respond(true)}>允许这次操作</button></div> : <>
-      {request.kind === 'questionnaire' ? request.questions?.map((question: any) => <fieldset key={question.id}><legend>{question.question}</legend>{question.options?.map((option: any) => <label className="choice" key={option.value}><input type="radio" name={question.id} checked={answers[question.id] === option.value} onChange={() => setAnswers(previous => ({ ...previous, [question.id]: option.value }))}/><span>{option.label}{option.description && <small>{option.description}</small>}</span></label>)}<input placeholder="补充或填写其他回答" value={question.options?.some((o: any) => o.value === answers[question.id]) ? '' : answers[question.id] || ''} onChange={e => setAnswers(previous => ({ ...previous, [question.id]: e.target.value }))}/></fieldset>) : <><div className="button-row">{request.options?.map((option: any) => <button key={option.value} className={text === option.value ? 'secondary selected' : 'secondary'} onClick={() => setText(option.value)}>{option.label}</button>)}</div><textarea rows={3} placeholder="输入回答" value={text} onChange={e => setText(e.target.value)}/></>}
-      <button disabled={busy} className="primary" onClick={() => void respond(request.kind === 'questionnaire' ? { answers } : text)}>{busy ? '正在提交…' : '提交回答'}</button>
-    </>}
-  </section>;
-}
-
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [hasMoreConversations, setHasMoreConversations] = useState(false);
+  const [runningConversations, setRunningConversations] = useState<Set<string>>(new Set());
   const [current, setCurrent] = useState<Conversation | null>(null);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [route, setRoute] = useState('chat');
   const [loading, setLoading] = useState(true);
   const [serviceError, setServiceError] = useState('');
   const [notice, setNotice] = useState('');
-  const [draft, setDraft] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [draft, updateDraftText] = useState('');
+  const [attachments, updateAttachments] = useState<Attachment[]>([]);
+  const [drafts] = useState(() => new Drafts(call, localStorage));
+  const [draftConflict, setDraftConflict] = useState(false);
   const [sending, setSending] = useState(false);
   const [query, setQuery] = useState('');
   const [sidebar, setSidebar] = useState(true);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceExpanded, setWorkspaceExpanded] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(emptyWorkspace);
+  const changeWorkspace = useCallback((value: Partial<WorkspaceView>) => setWorkspaceView(previous => ({...previous, ...value})), []);
   const [fileTree, setFileTree] = useState<any>({ files: [] });
   const [editors, setEditors] = useState<Editor[]>([]);
   const [activeFile, setActiveFile] = useState('');
+  const [fileChanged, setFileChanged] = useState(false);
   const [interaction, setInteraction] = useState<any>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
+  const [historyEdit, setHistoryEdit] = useState<{ conversationId: string; prepared: any } | null>(null);
+  const [historyUndo, setHistoryUndo] = useState<{ conversationId: string; token: string } | null>(null);
+  const [olderLoading, setOlderLoading] = useState(false);
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [pluginPreview, setPluginPreview] = useState<Plugin | null>(null);
+  const [themeCandidate, setThemeCandidate] = useState<any>(null), [themePreview, setThemePreview] = useState<any>(null);
   const [previewText, setPreviewText] = useState('# 让想法成为成果\n\n这里是独立的预览内容。\n\n## 今天的工作\n\n- 整理资料\n- 写下结论\n\n**继续完善。**');
   const [showUsage, setShowUsage] = useState(false);
+  const [headerPanel, setHeaderPanel] = useState('');
+  const [messageQuery, setMessageQuery] = useState('');
   const [skills, setSkills] = useState<any[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [showSkills, setShowSkills] = useState(false);
@@ -83,31 +76,154 @@ export default function App() {
   const loadGeneration = useRef(0);
   const draftRef = useRef({ text: '', attachments: [] as Attachment[] });
   const editorsRef = useRef<Editor[]>([]);
-  const stateRef = useRef({ current, settings, workspaceOpen, activeFile, selectedSkills });
-  stateRef.current = { current, settings, workspaceOpen, activeFile, selectedSkills };
+  const editorFlush = useRef(new Map<string, () => Promise<string>>());
+  const registerEditorFlush = useCallback((path: string, flush?: () => Promise<string>) => { if (flush) editorFlush.current.set(path, flush); else editorFlush.current.delete(path); }, []);
+  const stateRef = useRef({ current, settings, workspaceOpen, activeFile, selectedSkills, workspaceView });
+  stateRef.current = { current, settings, workspaceOpen, activeFile, selectedSkills, workspaceView };
   editorsRef.current = editors;
   draftRef.current = { text: draft, attachments };
-  const pendingSubmission = useRef<{ id: string; message: string; content: string } | null>(null);
   const pendingSteering = useRef<{ id: string; signature: string } | null>(null);
   const closePending = useRef(false);
-  const draftQueue = useRef(Promise.resolve<any>(null));
+  const viewRevisions = useRef(new Map<string, number>());
+  const viewQueue = useRef(Promise.resolve<any>(null));
   const theme = settings?.theme || 'light';
+  const leaveManagement = useRef<() => Promise<boolean>>(async () => true);
+  const registerLeave = useCallback((callback: () => Promise<boolean>) => { leaveManagement.current = callback; }, []);
   const active = isActive(current?.run?.status);
+  useEffect(() => {
+    setFileChanged(false);
+    if (!activeFile || !current?.id || !workspaceOpen) return;
+    let alive = true;
+    const check = async () => {
+      const item = editorsRef.current.find(item => item.file.path === activeFile);
+      if (!item || item.file.unavailable) return;
+      try { const result = await call('file.describe', {conversation_id: current.id, path: activeFile}); if (alive) setFileChanged(result.fingerprint !== item.file.fingerprint); }
+      catch { if (alive) setFileChanged(true); }
+    };
+    const timer = setInterval(() => void check(), 5000);
+    return () => {alive = false; clearInterval(timer);};
+  }, [activeFile, current?.id, workspaceOpen]);
   const error = useCallback((message: string) => setNotice(message), []);
   const confirm = useCallback((title: string, detail: string, choices: string[]) => new Promise<number>(resolve => setAsk({ title, detail, choices, resolve })), []);
 
-  const refreshList = useCallback(async () => { setConversations(await call('conversation.list')); }, []);
-  const saveDraft = useCallback((id = stateRef.current.current?.id || '', value = draftRef.current) => {
-    if (!id) return Promise.resolve();
-    draftQueue.current = draftQueue.current.catch(() => undefined).then(() => call('draft.save', { conversation_id: id, value }));
-    return draftQueue.current;
+  function applyDraft(value: Draft, dirty = true) {
+    draftRef.current = value;
+    updateDraftText(value.text); updateAttachments(value.attachments);
+    if (dirty) {
+      try { drafts.change(selectedId.current, value); }
+      catch { error('本机草稿缓存无法写入，请保存或复制当前内容。'); }
+    }
+  }
+  function setDraft(text: string) { applyDraft({ ...draftRef.current, text }); }
+  function setAttachments(value: Attachment[] | ((previous: Attachment[]) => Attachment[])) {
+    applyDraft({ ...draftRef.current, attachments: typeof value === 'function' ? value(draftRef.current.attachments) : value });
+  }
+
+  const refreshList = useCallback(async () => {
+    const page = await call<Conversation[]>('conversation.list');
+    setConversations(previous => [...page, ...previous.slice(500).filter(item => !page.some(next => next.id === item.id))]);
+    setHasMoreConversations(page.length === 500);
+  }, []);
+  async function moreConversations() {
+    try {
+      const page = await call<Conversation[]>('conversation.list', { offset: conversations.length });
+      setConversations(previous => [...previous, ...page.filter(item => !previous.some(current => current.id === item.id))]);
+      setHasMoreConversations(page.length === 500);
+    } catch (failure) { error((failure as Error).message); }
+  }
+  async function loadOlder() {
+    const conversation = stateRef.current.current;
+    if (!conversation?.has_more || olderLoading) return;
+    setOlderLoading(true);
+    const element = scroll.current, oldHeight = element?.scrollHeight || 0, oldTop = element?.scrollTop || 0;
+    nearBottom.current = false;
+    try {
+      const older = await call<Conversation>('conversation.get', { conversation_id: conversation.id, before: conversation.before });
+      if (selectedId.current !== conversation.id) return;
+      setCurrent(previous => {
+        if (!previous || previous.id !== conversation.id) return previous;
+        const prepend = (old: Message[] = [], recent: Message[] = []) => [...old.filter(item => !recent.some(next => next.id === item.id)), ...recent];
+        return { ...previous, before: older.before, has_more: older.has_more, messages: prepend(older.messages, previous.messages),
+          render_messages: prepend(older.render_messages, previous.render_messages), message_positions: { ...older.message_positions, ...previous.message_positions } };
+      });
+      setEvents(previous => mergeEvents(unwrapEvents(older.events || []), previous));
+      requestAnimationFrame(() => { if (element) element.scrollTop = oldTop + element.scrollHeight - oldHeight; });
+    } catch (failure) { error((failure as Error).message); } finally { setOlderLoading(false); }
+  }
+  const messageActionRef = useRef<(action: string, message: Message) => Promise<void>>(async () => {});
+  const fileActionRef = useRef<(path: string) => Promise<void>>(async () => {});
+  const onMessageAction = useCallback((action: string, message: Message) => { void messageActionRef.current(action, message); }, []);
+  const onMessageFile = useCallback((path: string) => { void fileActionRef.current(path); }, []);
+  messageActionRef.current = async (action, message) => {
+    const id = selectedId.current;
+    if (action === 'tool') { setWorkspaceOpen(true); changeWorkspace({tasksOpen: true, task: {...stateRef.current.workspaceView.task, section: 'calls', callId: message.tool_call_id, runId: message.meta?.turn_id, agentId: undefined}}); return; }
+    try {
+      await saveDraft(); await saveView();
+      if (action === 'branch') {
+        const result = await call<Conversation>('conversation.branch', { conversation_id: id, message_id: message.id });
+        await refreshList(); await switchConversation(result.id); return;
+      }
+      const prepared = await call('history.prepare', { conversation_id: id, message_id: message.id });
+      if (selectedId.current !== id) return;
+      if (action === 'edit') { setHistoryEdit({ conversationId: id, prepared }); return; }
+      const retry = action === 'retry';
+      if (await confirm(retry ? '从这里重新生成？' : '删除此处及后续对话？', retry
+        ? '将替换这一轮回答及后续对话。已生成的文件会保留，重新生成可能再次执行工具。'
+        : `将移除此处及后续 ${prepared.downstream} 条消息。工作目录中的文件会保留。`, ['取消', retry ? '替换并重新生成' : '删除']) !== 1) return;
+      if (retry) {
+        const source = prepared.source_user;
+        const result = await drafts.submit(id, { text: source.meta?.display_content ?? source.content,
+          attachments: source.meta?.desktop_attachments || (source.meta?.user_added_files || []).map((path: string) => ({ path, name: path.split(/[\\/]/).pop() })),
+          model_id: stateRef.current.current?.meta.selected_model_id || stateRef.current.settings?.selected_model_id,
+          skills: stateRef.current.selectedSkills, consume_draft: false,
+          rewrite: { hash: prepared.hash, revision: prepared.revision, message_id: prepared.rewrite_message_id } });
+        if (result.undo) setHistoryUndo({ conversationId: id, token: result.undo });
+        await loadConversation(id, true);
+      } else {
+        const result = await call('history.delete', { conversation_id: id, message_id: message.id, guard: { hash: prepared.hash, revision: prepared.revision } });
+        setHistoryUndo({ conversationId: id, token: result.undo }); setCurrent(result.conversation); setEvents(unwrapEvents(result.conversation.events || []));
+      }
+    } catch (failure) { error((failure as Error).message); }
+  };
+  fileActionRef.current = openFile;
+  async function addProject() {
+    try {
+      const path = await call<string | null>('dialog.workspace');
+      if (!path) return;
+      await call('project.save', { path }); setSettings(await call('settings.get')); await newConversation(path);
+    } catch (failure) { error((failure as Error).message); }
+  }
+  async function conversationAction(action: string, item: Conversation) {
+    try {
+      if (action === 'rename') { await switchConversation(item.id); setTitle(item.title); setRename(true); return; }
+      if (action === 'delete' && await confirm('移到回收站？', '聊天将从列表移除，可以在归档中恢复。工作目录中的文件会保留。', ['取消', '移到回收站']) !== 1) return;
+      await saveDraft(); await saveView();
+      await call('conversation.' + action, { conversation_id: item.id, ...(action === 'pin' ? { pinned: !item.meta.pinned } : {}) });
+      if (selectedId.current === item.id && ['archive', 'delete'].includes(action)) {
+        selectedId.current = ''; setCurrent(null); setEvents([]); setInteraction(null); setEditors([]); setActiveFile(''); setWorkspaceOpen(false);
+        const state = await call('app.bootstrap');
+        const entry = drafts.restore('', state.home_draft); applyDraft(entry.value, false); setDraftConflict(entry.conflict);
+      }
+      await refreshList();
+    } catch (failure) { error((failure as Error).message); }
+  }
+  const saveDraft = useCallback((id = selectedId.current, value?: Draft) => {
+    if (value) drafts.change(id, value);
+    return drafts.save(id);
   }, []);
   const saveView = useCallback(async () => {
     const id = stateRef.current.current?.id;
     if (!id) return;
-    await call('view.save', { conversation_id: id, value: { workspaceOpen: stateRef.current.workspaceOpen,
+    const snapshots = new Map<string, string>();
+    for (const [path, flush] of editorFlush.current) snapshots.set(path, await flush());
+    const value = { workspaceOpen: stateRef.current.workspaceOpen, workspace: stateRef.current.workspaceView,
       activeFile: stateRef.current.activeFile, selectedSkills: stateRef.current.selectedSkills, scrollTop: scroll.current?.scrollTop || 0,
-      editors: editorsRef.current.map(editor => ({ path: editor.file.path, text: editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) } });
+      editors: editorsRef.current.map(editor => ({ path: editor.file.path, text: snapshots.get(editor.file.path) ?? editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) };
+    viewQueue.current = viewQueue.current.catch(() => undefined).then(async () => {
+      const receipt = await call('view.save', { conversation_id: id, value, revision: viewRevisions.current.get(id) ?? -1 });
+      viewRevisions.current.set(id, receipt.revision);
+    });
+    await viewQueue.current;
   }, []);
   async function refreshFiles(id = selectedId.current, path?: string) {
     if (!id) return;
@@ -118,16 +234,26 @@ export default function App() {
     const generation = ++loadGeneration.current;
     const value = await call<Conversation>('conversation.get', { conversation_id: id });
     if (selectedId.current !== id || generation !== loadGeneration.current) return;
-    setCurrent(value); setEvents(previous => preserve ? mergeEvents(unwrapEvents(value.events || []), previous) : unwrapEvents(value.events || []));
+    const prior = stateRef.current.current;
+    const retained = preserve && prior?.id === id ? (prior.messages || []).filter(message => (prior.message_positions?.[message.id] ?? Infinity) < (value.ledger_start || 0)) : [];
+    const retainedIds = new Set(retained.map(message => message.id));
+    const combined = { ...value, messages: [...retained, ...(value.messages || [])],
+      render_messages: [...(prior?.render_messages || []).filter(message => retainedIds.has(message.id)), ...(value.render_messages || value.messages || [])],
+      message_positions: { ...(retained.length ? prior?.message_positions : {}), ...value.message_positions },
+      ...(retained.length ? { before: prior?.before, has_more: prior?.has_more } : {}) };
+    const visibleRuns = new Set(combined.messages.map(message => message.meta?.turn_id));
+    setCurrent(combined); setEvents(previous => preserve ? mergeEvents(unwrapEvents(value.events || []), previous.filter(event => visibleRuns.has(event.run_id))) : unwrapEvents(value.events || []));
     const pending = [...unwrapEvents(value.events || [])].reverse().find(event => event.type === 'interaction_request');
     const finished = pending && unwrapEvents(value.events || []).some(event => event.type === 'interaction_finished' && event.data?.request_id === pending.data?.request_id);
     setInteraction(isActive(value.run?.status) && !finished ? pending?.data || null : null);
     if (!preserve) {
-      const local = localStorage.getItem('draft:' + id);
-      const restoredDraft = local ? JSON.parse(local) : value.draft;
-      setDraft(restoredDraft?.text || ''); setAttachments(restoredDraft?.attachments || []);
+      drafts.restore(id, { value: value.draft || { text: '', attachments: [] }, revision: value.draft_revision ?? -1 });
+      await drafts.recoverSubmission(id);
+      if (selectedId.current !== id || generation !== loadGeneration.current) return;
+      applyDraft(drafts.get(id).value, false); setDraftConflict(drafts.get(id).conflict);
+      viewRevisions.current.set(id, value.view_revision ?? -1);
       setSelectedSkills(value.view?.selectedSkills || []);
-      setWorkspaceOpen(Boolean(value.view?.workspaceOpen)); setEditors([]); setActiveFile('');
+      setWorkspaceOpen(Boolean(value.view?.workspaceOpen)); setWorkspaceView({...emptyWorkspace(), ...value.view?.workspace}); setEditors([]); setActiveFile('');
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       const restored: Editor[] = [];
       for (const item of value.view?.editors || []) {
@@ -145,6 +271,7 @@ export default function App() {
     void refreshFiles(id);
   }
   async function switchConversation(id: string) {
+    if (!await leaveManagement.current()) return;
     if (id === selectedId.current) { setRoute('chat'); return; }
     try {
       await saveDraft(); await saveView();
@@ -153,9 +280,13 @@ export default function App() {
     } catch (failure) { error((failure as Error).message); } finally { setLoading(false); }
   }
   async function newConversation(workspace?: string) {
+    if (!await leaveManagement.current()) return;
     await saveDraft(); await saveView();
     const value = await call<Conversation>('conversation.create', { workspace_dir: workspace });
-    selectedId.current = value.id; setCurrent(value); setEvents([]); setDraft(''); setAttachments([]); setEditors([]); setActiveFile('');
+    selectedId.current = value.id; setCurrent(value); setEvents([]);
+    drafts.restore(value.id, { value: { text: '', attachments: [] }, revision: -1 });
+    applyDraft({ text: '', attachments: [] }, false); setDraftConflict(false); viewRevisions.current.set(value.id, -1);
+    setEditors([]); setActiveFile(''); setWorkspaceView(emptyWorkspace());
     setSelectedSkills([]); setShowUsage(false);
     setWorkspaceOpen(false); setWorkspaceExpanded(false); setInteraction(null); setRoute('chat'); nearBottom.current = true;
     await refreshList(); composer.current?.focus();
@@ -167,35 +298,65 @@ export default function App() {
     call('app.bootstrap').then(async value => {
       if (!mounted) return;
       setSettings(value.settings); setConversations(value.conversations);
+      setHasMoreConversations(value.conversations.length === 500);
+      setRunningConversations(new Set(value.active_runs.map((run: any) => run.conversation_id)));
       const id = value.last_conversation;
       if (id && value.conversations.some((c: Conversation) => c.id === id && !c.meta.archived)) { selectedId.current = id; await loadConversation(id); }
-      else { const cached = localStorage.getItem('draft:'); if (cached) { const value = JSON.parse(cached); setDraft(value.text || ''); setAttachments(value.attachments || []); } }
+      else { const entry = drafts.restore('', value.home_draft); applyDraft(entry.value, false); setDraftConflict(entry.conflict); }
       setLoading(false);
+      requestAnimationFrame(() => { void call('app.ready').catch(failure => error(failure.message)); });
     }).catch(failure => { if (mounted) { setServiceError(failure.message); setLoading(false); } });
     return () => { mounted = false; };
   }, []);
-  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  useEffect(() => {
+    const media = matchMedia('(prefers-color-scheme: dark)');
+    let mounted = true;
+    async function apply() {
+      try { const inventory = await call('themes.list');
+        if (mounted) setThemeCandidate(inventory.preview);
+        const mode = inventory.appearance.mode;
+        const dark = mode === 'dark' || mode === 'system' && media.matches;
+        const resolved = await call('themes.resolve', { dark });
+        if (!mounted) return;
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.density = resolved.density || 'standard';
+        for (const [key, value] of Object.entries(themeStyle(resolved))) document.documentElement.style.setProperty(key, String(value));
+      } catch (failure) { if (mounted) error('外观加载失败：' + (failure as Error).message); }
+    }
+    void apply(); media.addEventListener('change', apply);
+    const unsubscribe = window.cowork.onEvents(events => {
+      if (events.some(event => event.event === 'appearance_changed')) void apply();
+      else if (events.some(event => event.event === 'runtime' && ['tool_result', 'final'].includes(event.data?.type))) void call('themes.preview').then(value => {if (mounted) setThemeCandidate(value.preview);}).catch(failure => error(failure.message));
+    });
+    return () => { mounted = false; media.removeEventListener('change', apply); unsubscribe(); };
+  }, [theme]);
   useEffect(() => {
     if (loading) return;
     const id = current?.id || '';
-    const value = { text: draft, attachments };
-    try { localStorage.setItem('draft:' + id, JSON.stringify(value)); }
-    catch { error('本地草稿空间不足，请先保存当前内容。'); }
-    const timer = setTimeout(() => { void saveDraft(id, value).catch(failure => error('草稿尚未保存：' + failure.message)); }, 400);
+    const timer = setTimeout(() => { void saveDraft(id).catch(failure => error('草稿尚未保存：' + failure.message)); }, 400);
     return () => clearTimeout(timer);
   }, [draft, attachments, current?.id, saveDraft, error, loading]);
   useEffect(() => {
-    if (loading || (!editors.length && !current?.view?.editors?.length && !selectedSkills.length)) return;
+    if (loading || !current) return;
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
     return () => clearTimeout(timer);
-  }, [editors, activeFile, workspaceOpen, selectedSkills, saveView, error, loading]);
+  }, [editors, activeFile, workspaceOpen, workspaceView, selectedSkills, saveView, error, loading]);
   useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, interaction]);
 
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
     const relevant: RuntimeEvent[] = [];
     for (const event of batch) {
+      if (event.conversation_id && ['runtime', 'run_error'].includes(event.event)) setRunningConversations(previous => {
+        const next = new Set(previous);
+        if (event.event === 'run_error' || event.data?.type === 'final') next.delete(event.conversation_id!); else next.add(event.conversation_id!);
+        return next;
+      });
       if (event.event === 'service_error') setServiceError(event.error || '本地服务已断开。');
+      if (event.event === 'service_reconnecting') setServiceError('连接暂时中断，正在重新连接后台…');
+      if (event.event === 'service_reconnected') { setServiceError(''); void refreshList(); if (selectedId.current) void loadConversation(selectedId.current, true).catch(failure => error(failure.message)); }
+      if (event.event === 'window_hidden') void (async () => { try { await saveDraft(); await saveView(); } catch (failure) { error((failure as Error).message); } })();
       if (event.event === 'close_requested') void closeApp();
+      if (event.event === 'update_install_requested') void closeApp(true);
       if (event.event === 'reload_requested') void (async () => { try { await saveDraft(); await saveView(); await call('app.reload'); } catch (failure) { error('暂时不能重载，输入和编辑仍保留：' + (failure as Error).message); } })();
       if (event.event === 'runtime' && event.conversation_id === selectedId.current) {
         relevant.push(event.data);
@@ -205,37 +366,31 @@ export default function App() {
       }
       if (event.event === 'conversation_changed') { void refreshList(); if (event.conversation_id === selectedId.current) void loadConversation(event.conversation_id!, true).catch(failure => error(failure.message)); }
       if (event.event === 'run_error' && event.conversation_id === selectedId.current) { error(event.error!); void loadConversation(event.conversation_id!, true); }
-      if (event.event === 'workbench') void respondWorkbench(event.data);
     }
     if (relevant.length) setEvents(previous => mergeEvents(previous, relevant));
   }), [refreshList, error]);
 
-  async function respondWorkbench(request: any) {
-    // Execution requests are claimed once by the service; replayed events never execute actions.
-    let result: any = { ok: false, status: 'unavailable', error: '当前 Web 工作台尚未迁移这项桌面工具。已保存内容不受影响。' };
-    try {
-      if (request.action === 'list_tabs') {
-        const tabs = request.session_id === selectedId.current
-          ? editorsRef.current.map(e => ({ id: e.file.id, title: e.file.name, path: e.file.path, kind: 'file' }))
-          : ((await call('view.get', {conversation_id: request.session_id})).editors || []).map((item: any) => ({id: item.path, title: item.path.split(/[\\/]/).pop(), path: item.path, kind: 'file'}));
-        result = {ok: true, tabs};
-      }
-    } finally { await call('workbench.result', { request_id: request.request_id, session_id: request.session_id, run_id: request.run_id, token: request.token, result }); }
-  }
-  async function closeApp() {
+  async function closeApp(installUpdate = false) {
     if (closePending.current) return;
     closePending.current = true;
     try {
       await saveDraft(); await saveView();
       const unsaved = editorsRef.current.some(e => e.text !== e.saved);
       const state = await call('app.bootstrap');
+      if (installUpdate) {
+        if (state.active_runs.length) {error('请等后台任务结束后再更新；草稿和编辑已保留。'); return;}
+        if (!await leaveManagement.current()) return;
+        if (await confirm('重启并更新 Cowork？', '草稿和未保存编辑已保留。应用将关闭，安装完成后自动重新打开。', ['继续工作', '重启并更新']) !== 1) return;
+        await call('app.install_update'); return;
+      }
       if (unsaved || state.active_runs.length) {
-        const choice = await confirm('退出 Cowork？', `${state.active_runs.length ? '正在运行的任务将停止，已保存的回答会保留。' : ''}${unsaved ? '未保存的编辑将作为草稿保留，下次打开可以继续。' : ''}`, ['继续工作', '保存草稿并退出']);
+        const choice = await confirm('退出 Cowork？', `${state.active_runs.length ? '后台任务会继续运行，重新打开后可以查看进度。' : ''}${unsaved ? '未保存的编辑已作为草稿保留，下次打开可以继续。' : ''}`, ['继续工作', '退出界面']);
         if (choice !== 1) return;
       }
       await call('app.quit');
     } catch (failure) {
       error((failure as Error).message);
+      if (installUpdate) return;
       if (await confirm('保存未完成', '本地服务无法确认保存。输入草稿已保留在界面缓存中；建议继续工作并复制未保存的编辑。', ['继续工作', '仍然退出']) === 1) await call('app.quit');
     } finally { closePending.current = false; }
   }
@@ -245,7 +400,13 @@ export default function App() {
     const submittedText = draft; const submittedAttachments = attachments;
     try {
       let conversation = current;
-      if (!conversation) { conversation = await call('conversation.create'); selectedId.current = conversation!.id; setCurrent(conversation); }
+      if (!conversation) {
+        await saveDraft('');
+        conversation = await call('conversation.create'); selectedId.current = conversation!.id; setCurrent(conversation);
+        drafts.restore(conversation!.id, { value: { text: '', attachments: [] }, revision: -1 });
+        drafts.change(conversation!.id, drafts.get('').value);
+        viewRevisions.current.set(conversation!.id, -1);
+      }
       const id = conversation!.id;
       if (isActive(conversation?.run?.status)) {
         const signature = JSON.stringify([id, conversation!.run!.id, submittedText, submittedAttachments]);
@@ -254,19 +415,16 @@ export default function App() {
         const accepted = result.result || result;
         if (!accepted.accepted && !accepted.message_committed) throw new Error('补充消息未被接收，内容已保留。');
         pendingSteering.current = null;
+        const value = drafts.get(id).value;
+        drafts.change(id, { text: value.text === submittedText ? '' : value.text,
+          attachments: value.attachments.filter(file => !submittedAttachments.some(sent => sent.path === file.path)) });
       } else {
-        const signature = JSON.stringify([id, submittedText, submittedAttachments, settings?.selected_model_id]);
-        if (!pendingSubmission.current || pendingSubmission.current.content !== signature) pendingSubmission.current = { id: crypto.randomUUID(), message: crypto.randomUUID(), content: signature };
-        const response = await call('conversation.send', { conversation_id: id, request_id: pendingSubmission.current.id, message_id: pendingSubmission.current.message,
-          text: submittedText, attachments: submittedAttachments, model_id: settings?.selected_model_id, skills: selectedSkills });
-        if (!response.accepted) throw new Error('消息未被接收，输入内容已保留。');
-        pendingSubmission.current = null;
+        await drafts.submit(id, { text: submittedText, attachments: submittedAttachments,
+          model_id: conversation?.meta?.selected_model_id || settings?.selected_model_id, skills: selectedSkills });
       }
-      const storedDraft = JSON.parse(localStorage.getItem('draft:' + id) || '{"text":"","attachments":[]}');
-      const cleared = selectedId.current === id ? { text: draftRef.current.text === submittedText ? '' : draftRef.current.text, attachments: draftRef.current.attachments.filter(a => !submittedAttachments.some(s => s.path === a.path)) } : { text: storedDraft.text === submittedText ? '' : storedDraft.text, attachments: (storedDraft.attachments || []).filter((a: Attachment) => !submittedAttachments.some(s => s.path === a.path)) };
-      localStorage.setItem('draft:' + id, JSON.stringify(cleared));
-      if (selectedId.current === id) { setDraft(cleared.text); setAttachments(cleared.attachments); }
-      await saveDraft(id, cleared);
+      if (selectedId.current === id) applyDraft(drafts.get(id).value, false);
+      await saveDraft(id);
+      if (!current) { drafts.change('', { text: '', attachments: [] }); await saveDraft(''); }
       nearBottom.current = true; await loadConversation(id, true); await refreshList();
     } catch (failure) { error((failure as Error).message); } finally { setSending(false); composer.current?.focus(); }
   }
@@ -276,43 +434,98 @@ export default function App() {
     try { setCurrent(previous => previous ? { ...previous, run: previous.run ? { ...previous.run, status: 'stopping' } : null } : null); await call('conversation.stop', { conversation_id: id, run_id: current.run.id }); await loadConversation(id, true); }
     catch (failure) { error((failure as Error).message); }
   }
-  async function attach() {
+  async function resolveDraft(keepLocal: boolean) {
+    const id = selectedId.current;
     try {
-      let id = current?.id;
-      if (!id) { const value = await call<Conversation>('conversation.create'); id = value.id; selectedId.current = id; setCurrent(value); await refreshList(); }
-      const added = await call<Attachment[]>('dialog.attach', { conversation_id: id });
-      if (selectedId.current === id) setAttachments(previous => [...previous, ...added]);
-    }
+      const data = id ? await call('conversation.get', { conversation_id: id }) : await call('app.bootstrap');
+      const remote = id ? { value: data.draft, revision: data.draft_revision } : data.home_draft;
+      const value = drafts.resolve(id, keepLocal, remote);
+      if (id === selectedId.current) { applyDraft(value, false); setDraftConflict(false); }
+      if (keepLocal) await saveDraft(id);
+    } catch (failure) { error((failure as Error).message); }
+  }
+  async function recoverSend(retry = false) {
+    const id = selectedId.current;
+    try {
+      const pending = drafts.get(id).pending;
+      if (!pending) return;
+      const receipt = retry ? await drafts.submit(id, JSON.parse(pending.signature)) : await drafts.recoverSubmission(id);
+      if (receipt?.accepted) {
+        if (selectedId.current === id) { applyDraft(drafts.get(id).value, false); setDraftConflict(false); }
+        await loadConversation(id, true); await saveDraft(id);
+      } else error('尚未找到接收记录，可重试原消息。当前新输入会保留。');
+    } catch (failure) { error((failure as Error).message); }
+  }
+  const creatingConversation = useRef<Promise<string> | null>(null);
+  async function ensureConversation(): Promise<string> {
+    if (selectedId.current) return selectedId.current;
+    if (creatingConversation.current) return creatingConversation.current;
+    creatingConversation.current = (async () => {
+      await saveDraft('');
+      const value = await call<Conversation>('conversation.create');
+      drafts.restore(value.id, {value: {text: '', attachments: []}, revision: -1});
+      drafts.change(value.id, draftRef.current); viewRevisions.current.set(value.id, -1);
+      selectedId.current = value.id; setCurrent(value); await refreshList();
+      return value.id;
+    })();
+    try { return await creatingConversation.current; } finally { creatingConversation.current = null; }
+  }
+  async function preferences(value: Record<string, any>) {
+    const id = await ensureConversation();
+    const result = await call('conversation.preferences', {conversation_id: id, value});
+    if (selectedId.current === id) setCurrent(previous => previous?.id === id ? {...previous, meta: {...previous.meta, ...result.meta}} : previous);
+  }
+  async function attach() {
+    try { const id = await ensureConversation(); const added = await call<Attachment[]>('dialog.attach', {conversation_id: id}); if (selectedId.current === id) setAttachments(previous => [...previous, ...added.filter(item => !previous.some(old => old.path === item.path))]); }
     catch (failure) { error((failure as Error).message); }
   }
+  async function activateFile(path: string) {
+    try { await saveView(); setActiveFile(path); changeWorkspace({selected: 'file:' + path}); } catch (failure) { error((failure as Error).message); }
+  }
   async function openFile(path: string) {
-    if (editors.some(e => e.file.path === path)) { setActiveFile(path); setWorkspaceOpen(true); return; }
+    try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
+    if (editors.some(e => e.file.path === path)) { setActiveFile(path); changeWorkspace({selected: 'file:' + path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true); return; }
     try {
       const id = selectedId.current;
       const file = await call<FileSession>('file.open', { conversation_id: id, path });
-      if (!['text', 'html'].includes(file.payload.kind)) throw new Error('此版本先提供文本与 Markdown 编辑，Office 编辑器正在迁移。文件内容未改变。');
+
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       if (selectedId.current !== id) return;
       const text = file.payload.text ?? file.payload.content ?? '';
-      setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); setWorkspaceOpen(true);
+      setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true);
     } catch (failure) { error((failure as Error).message); }
   }
   async function saveEditor(path: string) {
     const editor = editorsRef.current.find(e => e.file.path === path);
-    if (!editor) return;
-    const text = editor.text;
+    if (!editor || editor.file.payload.read_only) return;
+    const text = editorFlush.current.has(path) ? await editorFlush.current.get(path)!() : editor.text;
+    if (!text && !['text', 'html'].includes(editor.file.payload.kind)) return;
     const id = selectedId.current;
-    const result = await call('file.save', { conversation_id: id, id: editor.file.id, payload: text });
+    const result = await call('file.save', { conversation_id: id, id: editor.file.id, payload: ['text', 'html'].includes(editor.file.payload.kind) ? text : JSON.parse(text) });
     if (selectedId.current !== id) return;
     setEditors(previous => previous.map(e => e.file.path === path ? { ...e, saved: text, file: { ...e.file, fingerprint: result.fingerprint } } : e));
     void refreshFiles();
   }
+  async function reloadFile() {
+    const id = selectedId.current, item = editorsRef.current.find(item => item.file.path === activeFile);
+    if (!item) return;
+    if (item.text !== item.saved && await confirm('重新载入文件？', '将用磁盘上的内容替换此文件的编辑草稿。可以取消并先另存副本。', ['取消', '重新载入']) !== 1) return;
+    try {
+      const file = await call<FileSession>('file.open', {conversation_id: id, path: item.file.path});
+      if (selectedId.current !== id) return;
+      const text = file.payload.text ?? file.payload.content ?? '';
+      setEditors(previous => previous.map(editor => editor.file.path === item.file.path ? {...editor, file, text, saved: text} : editor));
+      setFileChanged(false);
+    } catch (failure) {error('刷新未完成，已有预览和草稿仍保留。' + (failure as Error).message);}
+  }
   async function saveCopy() {
     if (!editor) return;
     try {
-      const name = editor.file.name.replace(/\.[^.]+$/, '') + '-恢复-' + Date.now() + '.md';
-      const file = await call<FileSession>('workspace.create', { conversation_id: selectedId.current, name, text: editor.text });
-      setEditors(previous => previous.map(e => e.file.path === editor.file.path ? { ...e, file, saved: e.text } : e));
+      const text = editorFlush.current.has(editor.file.path) ? await editorFlush.current.get(editor.file.path)!() : editor.text;
+      const extension = editor.file.name.match(/\.[^.]+$/)?.[0] || '.txt';
+      const name = editor.file.name.replace(/\.[^.]+$/, '') + '-恢复-' + Date.now() + extension;
+      const file = await call<FileSession>('file.save_copy', { conversation_id: selectedId.current, id: editor.file.id, name, payload: ['text', 'html'].includes(editor.file.payload.kind) ? text : JSON.parse(text) });
+      setEditors(previous => previous.map(e => e.file.path === editor.file.path ? { ...e, file, text, saved: text } : e));
       setActiveFile(file.path); await refreshFiles();
     } catch (failure) { error((failure as Error).message); }
   }
@@ -321,6 +534,7 @@ export default function App() {
     setEditors(editorsRef.current);
   }
   async function closeEditor(path: string) {
+    try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
     const editor = editors.find(e => e.file.path === path);
     if (editor && editor.saved !== editor.text) {
       const choice = await confirm('保存修改？', editor.file.name + ' 中有尚未保存的内容。', ['取消', '不保存并关闭', '保存并关闭']);
@@ -328,17 +542,19 @@ export default function App() {
       if (choice === 2) { try { await saveEditor(path); } catch (failure) { error((failure as Error).message); return; } }
     }
     setEditors(previous => previous.filter(e => e.file.path !== path));
-    if (activeFile === path) setActiveFile(editors.find(e => e.file.path !== path)?.file.path || '');
+    if (activeFile === path) { const next = editors.find(e => e.file.path !== path)?.file.path || ''; setActiveFile(next); changeWorkspace({selected: next ? 'file:' + next : 'new', newOpen: true}); }
   }
   async function createDocument() {
     try {
-      const id = current?.id || (await newConversation()).id;
+      const id = await ensureConversation();
+      if (!id) return;
       const name = '写作-' + new Date().toLocaleString('sv').replace(/[: ]/g, '-');
       const file = await call<FileSession>('workspace.create', { conversation_id: id, name: name + '.md' });
       await openFile(file.path); await refreshFiles(id);
     } catch (failure) { error((failure as Error).message); }
   }
   async function goRoute(next: string) {
+    if (next !== route && !await leaveManagement.current()) return;
     try {
       await saveDraft(); await saveView(); setRoute(next); setShowUsage(false);
       if (next === 'plugins') setPlugins(await call('plugins.list'));
@@ -351,47 +567,78 @@ export default function App() {
     catch (failure) { error((failure as Error).message); }
   }
 
-  const messages = displayMessages(current?.messages || [], events, active ? current?.run?.id : undefined);
-  const receipts = events.filter(event => event.type === 'interaction_request').map(event => ({ request: event.data,
-    outcome: events.find(item => item.type === 'interaction_finished' && item.data?.request_id === event.data?.request_id)?.data })).filter(item => item.outcome);
+  const messages = useMemo(() => displayMessages(current?.render_messages || current?.messages || [], events, active ? current?.run?.id : undefined), [current?.render_messages, current?.messages, events, active, current?.run?.id]);
+  const questions = events.filter(event => event.type === 'interaction_request').filter((event, index, all) => all.findIndex(item => item.data?.request_id === event.data?.request_id) === index).map(event => ({request: event.data, runId: event.run_id,
+    outcome: events.find(item => item.type === 'interaction_finished' && item.data?.request_id === event.data?.request_id)?.data}));
   const editor = editors.find(e => e.file.path === activeFile);
   const filtered = conversations.filter(c => !c.meta.archived && (!query || c.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
-    {sidebar && <aside className="sidebar"><div className="brand"><span className="brand-symbol">✳</span><strong>Cowork</strong><button className="icon-button" title="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose size={17}/></button></div>
-      <button className="new-chat" onClick={() => void newConversation().catch(failure => error(failure.message))}><Plus size={18}/>新建聊天</button>
-      <label className="search"><Search size={15}/><input aria-label="搜索对话" placeholder="搜索对话" value={query} onChange={e => setQuery(e.target.value)}/></label>
-      <div className="sidebar-section">项目与对话<button title="选择项目目录" onClick={async () => { const folder = await call<string | null>('dialog.workspace'); if (folder) await newConversation(folder); }}><Folder size={14}/></button></div>
-      <nav className="conversation-list">{filtered.map(c => <button key={c.id} className={`conversation-row ${c.id === current?.id && route === 'chat' ? 'selected' : ''}`} onClick={() => void switchConversation(c.id)}><span>{c.title}</span><small>{c.id === current?.id && active ? <span className="running-dot"/> : new Date(c.updated_at * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}</small></button>)}{!filtered.length && <p className="sidebar-empty">{query ? '没有匹配的对话' : '从一个新想法开始'}</p>}</nav>
-      <div className="sidebar-bottom"><button className={route === 'plugins' ? 'selected' : ''} onClick={() => void goRoute('plugins')}><Puzzle size={17}/>插件与工作台</button><button className={route === 'settings' ? 'selected' : ''} onClick={() => void goRoute('settings')}><SettingsIcon size={17}/>设置<span className="nav-dot" hidden={settings?.models.some(m => m.configured)}/></button></div>
-    </aside>}
-    <main className="main-shell"><header className="app-header"><div className="header-title">{!sidebar && <button className="icon-button" title="展开侧栏" onClick={() => setSidebar(true)}><PanelLeftOpen size={18}/></button>}
-      {route === 'chat' ? rename ? <input autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => setRename(false)} onKeyDown={async e => { if (e.key === 'Escape') setRename(false); if (e.key === 'Enter' && current) { await call('conversation.rename', { conversation_id: current.id, title }); setCurrent({ ...current, title }); await refreshList(); setRename(false); } }}/> : <button className="title-button" title="点击修改标题" onClick={() => { if (current) { setTitle(current.title); setRename(true); } }}>{current?.title || '今天，想一起完成什么？'}</button> : <h1>{route === 'settings' ? '设置' : '插件与工作台'}</h1>}
-      </div><div className="header-actions">{route === 'chat' && current && <><button className={workspaceOpen ? 'toolbar-button selected' : 'toolbar-button'} onClick={() => { setWorkspaceOpen(!workspaceOpen); void refreshFiles(); }}><PanelsTopLeft size={16}/>工作区</button><button className="icon-button" title="归档对话" onClick={async () => { if (await confirm('归档这段对话？', '历史内容会保留，对话将从最近列表中移除。', ['取消', '归档']) === 1) { try { await call('conversation.archive', { conversation_id: current.id }); selectedId.current = ''; setCurrent(null); setDraft(''); setEvents([]); await refreshList(); } catch (failure) { error((failure as Error).message); } } }}><MoreHorizontal size={19}/></button></>}
+    {sidebar && <Sidebar conversations={conversations} projects={settings?.projects || []} selected={current?.id || ''} route={route} running={runningConversations}
+      onSelect={id => void switchConversation(id)} onNew={workspace => void newConversation(workspace).catch(failure => error(failure.message))}
+      onRoute={next => void goRoute(next)} onCollapse={() => setSidebar(false)} onProject={() => void addProject()}
+      onAction={(action, item) => void conversationAction(action, item)} onMore={moreConversations} hasMore={hasMoreConversations}/>}
+    <main className={`main-shell ${route === 'chat' && workspaceOpen ? 'chat-workspace' : ''} ${workspaceExpanded && route === 'chat' ? 'workspace-expanded' : ''}`}><header className="app-header"><div className="header-title">{!sidebar && <button className="icon-button" title="展开侧栏" onClick={() => setSidebar(true)}><PanelLeftOpen size={18}/></button>}
+      {route === 'chat' ? rename ? <input autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => setRename(false)} onKeyDown={async e => { if (e.key === 'Escape') setRename(false); if (e.key === 'Enter' && current) { await call('conversation.rename', { conversation_id: current.id, title }); setCurrent({ ...current, title }); await refreshList(); setRename(false); } }}/> : <button className="title-button" title="点击修改标题" onClick={() => { if (current) { setTitle(current.title); setRename(true); } }}>{current?.has_messages || current?.messages?.length ? current.title : ''}</button> : <h1>{managementNames[route] || '插件与工作台'}</h1>}
+      </div><div className="header-actions">{themeCandidate && <button className="toolbar-button" title="查看 AI 主题候选" onClick={async () => {try {const value = await call('themes.preview'); setThemeCandidate(value.preview); if (value.preview) setThemePreview(value);} catch (failure) {error((failure as Error).message);}}}><Sparkles size={16}/>主题预览</button>}{route === 'chat' && <>
+      {messages.length > 0 && <><button className="icon-button" title="用量" aria-expanded={showUsage} onClick={() => {setShowUsage(!showUsage); setHeaderPanel('');}}><ChartColumn size={17}/></button><button className="icon-button" title="搜索当前对话" onClick={() => {setHeaderPanel(headerPanel === 'search' ? '' : 'search'); setShowUsage(false);}}><Search size={17}/></button><button className="icon-button" title="历史提问" onClick={() => {setHeaderPanel(headerPanel === 'history' ? '' : 'history'); setShowUsage(false);}}><History size={17}/></button></>}
+      {!workspaceOpen && <button className="toolbar-button" onClick={async () => {try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles();} catch (failure) {error((failure as Error).message);}}}><Folder size={16}/>工作区</button>}
+      </>}
+
       <button className="icon-button" title={theme === 'dark' ? '切换浅色' : '切换深色'} onClick={async () => { const next = theme === 'dark' ? 'light' : 'dark'; await call('settings.theme', { theme: next }); setSettings(previous => previous ? { ...previous, theme: next } : null); }}>{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button></div></header>
-      {serviceError && <div className="service-error"><strong>本地服务连接中断</strong><span>{serviceError}</span><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
+      {route === 'chat' && settings && <div className="header-popovers">{showUsage && <Usage visible={showUsage} events={events} settings={settings} onClose={() => setShowUsage(false)} onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}/>} {headerPanel && <section className="history-popover"><div className="navigator-heading"><strong>{headerPanel === 'search' ? '搜索当前对话' : '历史提问'}</strong><button className="icon-button" title="关闭" onClick={() => setHeaderPanel('')}><X size={15}/></button></div>{headerPanel === 'search' && <input autoFocus aria-label="搜索当前对话" placeholder="输入关键词" value={messageQuery} onChange={event => setMessageQuery(event.target.value)}/>}<div>{messages.filter(message => headerPanel === 'history' ? message.role === 'user' : messageQuery.trim() && messageText(message.content).toLowerCase().includes(messageQuery.toLowerCase())).map(message => <button key={message.id} onClick={() => {document.getElementById('message-' + message.id)?.scrollIntoView({block: 'center'}); setHeaderPanel('');}}>{messageText(message.content).slice(0,160)}</button>)}</div>{current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}</section>}</div>}
+      {serviceError && <div className="service-error"><strong>本地服务连接中断</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
       {loading ? <div className="loading"><LoaderCircle size={23} className="spin"/><p>正在打开你的工作台…</p></div> : route === 'chat' ? <div className={`work-layout ${workspaceOpen ? 'with-workspace' : ''} ${workspaceExpanded ? 'expanded' : ''}`}>
-        <section className="conversation" style={workspaceExpanded ? {display:'none'} : undefined}><div className="message-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 120; }}>
-          {!messages.length ? <div className="welcome"><div className="welcome-eyebrow"><span className="brand-symbol">✳</span>从一个想法，开始今天的工作</div><h2>今天，想一起完成什么？</h2><p>整理资料、分析内容，或把一个想法做出来。</p><div className="welcome-options"><button onClick={() => { setDraft('帮我整理这些资料，提炼重点并给出下一步建议。'); composer.current?.focus(); }}><BookOpen size={18}/><span>整理资料<small>从信息到清楚的结论</small></span><ChevronRight size={15}/></button><button onClick={() => void createDocument()}><FileText size={18}/><span>开始写作<small>边讨论，边完善成果</small></span><ChevronRight size={15}/></button></div></div> : <div className="messages">{messages.map(message => <Bubble key={message.id} message={message}/>)}
+        <section className={`conversation ${!messages.length ? 'home-conversation' : ''}`} style={workspaceExpanded && workspaceView.selected !== 'conversation' ? {display:'none'} : undefined}><div className="message-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 120; }}>
+          {!messages.length ? <div className="welcome"><div className="welcome-eyebrow">从一个想法，开始今天的工作</div><h2>今天，想一起完成什么？</h2><p>整理资料、分析数据，或把一个想法做出来。</p></div> : <div className="messages">
+{current?.has_more && <button className="load-history" disabled={olderLoading} onClick={() => void loadOlder()}>{olderLoading ? <LoaderCircle size={14} className="spin"/> : <ChevronDown size={14}/>}更早的消息</button>}
+{messages.map(message => historyEdit?.conversationId === current?.id && historyEdit?.prepared.message.id === message.id ? <div className="message-edit-container" key={message.id}><HistoryEditor conversationId={historyEdit.conversationId} prepared={historyEdit.prepared} onClose={() => setHistoryEdit(null)} onError={error} submit={async value => {
+      const result = await drafts.submit(historyEdit.conversationId, {...value,
+        model_id: current?.meta.selected_model_id || settings?.selected_model_id, skills: selectedSkills, consume_draft: false,
+        rewrite: {hash: historyEdit.prepared.hash, revision: historyEdit.prepared.revision, message_id: historyEdit.prepared.message.id}});
+      return {...result, conversation: await call<Conversation>('conversation.get', {conversation_id: historyEdit.conversationId})};
+    }} onSaved={result => {
+      setHistoryUndo({ conversationId: historyEdit.conversationId, token: result.undo });
+      if (selectedId.current === historyEdit.conversationId) { setCurrent(result.conversation); setEvents(unwrapEvents(result.conversation.events || [])); }
+      setHistoryEdit(null); void refreshList();
+    }}/></div> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>) }
             {active && <div className="run-state"><LoaderCircle size={14} className="spin"/>{current?.run?.status === 'stopping' ? '正在停止，保留已完成内容…' : interaction ? '等待你的回答' : '正在处理…'}</div>}
             {!active && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务已停止' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
-            {receipts.map(({request, outcome}) => <details className="interaction-receipt" key={request.request_id}><summary><Check size={14}/>{request.title || '问卷与确认'} · {outcome.answered ? '已回答' : outcome.status === 'timeout' ? '已超时' : '已结束'}<ChevronDown size={13}/></summary><p>{request.message}</p>{request.questions?.map((question: any) => <p key={question.id}>{question.question}</p>)}</details>)}
-            {interaction && current && <Interaction key={interaction.request_id} request={interaction} conversationId={current.id} done={() => setInteraction(null)} error={error}/>}</div>}
-        </div><div className="composer-container">{selectedSkills.length > 0 && <div className="context-tags" aria-label="已选能力">{selectedSkills.map(name => <button key={name} title={`移除能力 ${name}`} onClick={() => setSelectedSkills(previous => previous.filter(item => item !== name))}><Puzzle size={12}/>{name}<X size={12}/></button>)}</div>}{attachments.length > 0 && <div className="attachments">{attachments.map(a => <div key={a.path}><Paperclip size={13}/><span title={a.name}>{a.name}</span><button title="移除附件" onClick={() => setAttachments(previous => previous.filter(item => item.path !== a.path))}><X size={13}/></button></div>)}</div>}
-          <div className="composer"><textarea ref={composer} aria-label="消息输入" placeholder={active ? '补充要求，或留下下一步想法…' : '描述任务，或添加文件开始工作…'} value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }}/>
-            <div className="composer-toolbar"><div className="composer-left"><button title="添加附件" className="icon-button" onClick={() => void attach()}><Plus size={18}/></button><button className="text-tool" title="选择任务能力" onClick={async () => { try { setSkills(await call('skills.list')); setShowSkills(true); } catch (failure) { error((failure as Error).message); } }}><Puzzle size={14}/><span>能力{selectedSkills.length ? ` ${selectedSkills.length}` : ''}</span></button><button className="text-tool" title="执行授权" onClick={async () => { const enabled = !settings?.god_mode; if (enabled && await confirm('启用完全访问？', '当前用户权限范围内的工具操作将不再逐次请求批准。可以随时切回请求批准。', ['取消', '启用完全访问']) !== 1) return; setSettings(await call('settings.permission', { enabled })); }}><ShieldCheck size={14}/><span>{settings?.god_mode ? '完全访问' : '请求批准'}</span></button></div>
-            <div className="composer-right"><select aria-label="选择模型" value={settings?.selected_model_id || ''} onChange={async e => setSettings(await call('settings.select_model', { model_id: e.target.value }))}>{settings?.models.map(model => <option key={model.id} value={model.id}>{model.label}{model.configured ? '' : ' · 未配置'}</option>)}</select>{active && (draft.trim() || attachments.length) && <button className="icon-button" title="停止当前任务" onClick={() => void stop()}><Square size={14}/></button>}<button className="send-button" title={active && !draft.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || current?.run?.status === 'stopping' || (!active && !draft.trim() && !attachments.length)} onClick={() => void (active && !draft.trim() && !attachments.length ? stop() : send())}>{sending ? <LoaderCircle size={18} className="spin"/> : active && !draft.trim() && !attachments.length ? <Square size={16} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
-          </div><div className="composer-footer"><span title={current?.meta.workspace_dir}><Folder size={12}/>{current ? current.meta.workspace_dir?.split(/[\\/]/).pop() : '独立聊天工作目录'}</span><button className="usage-trigger" aria-expanded={showUsage} onClick={() => setShowUsage(!showUsage)}>用量<ChevronDown size={12}/></button><span>Enter 发送 · Shift+Enter 换行</span></div>{settings && <Usage visible={showUsage} events={events} settings={settings} onClose={() => setShowUsage(false)} onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}/>}</div>
+            {current && questions.map(({request, outcome, runId}) => <Interaction key={request.request_id} request={request} outcome={outcome} conversationId={current.id} active={active && runId === current.run?.id} done={() => setInteraction(null)}/>)}</div>}
+        </div><div className="composer-container">
+<DraftRecovery conflict={draftConflict} pending={Boolean(drafts.get(selectedId.current).pending)} resolve={keep => void resolveDraft(keep)} recover={retry => void recoverSend(retry)}/>
+          <Composer conversation={current} conversations={conversations} settings={settings} text={draft} setText={setDraft} attachments={attachments} setAttachments={setAttachments} skills={selectedSkills} setSkills={setSelectedSkills} active={active} sending={sending} textarea={composer} ensureConversation={ensureConversation} preferences={preferences} send={send} stop={stop} attach={attach} route={goRoute} error={error}
+            selectModel={async id => {await preferences({selected_model_id: id}); setSettings(await call('settings.select_model', {model_id: id}));}}
+            permission={async () => {const enabled = !settings?.god_mode; if (enabled && await confirm('启用完全访问？', '当前用户权限范围内的工具操作将不再逐次请求批准。可以随时切回请求批准。', ['取消', '启用完全访问']) !== 1) return; setSettings(await call('settings.permission', {enabled}));}}/>
+        </div>
+
+          {!messages.length && <div className="home-followup"><div className="home-shortcuts">{[['PPT 助手', '帮我制作一份演示文稿。'], ['金融分析', '帮我分析这些金融资料。'], ['数据分析', '帮我分析这份数据，找出关键趋势。'], ['浏览器自动化', '帮我在浏览器中完成这个任务。']].map(([label, text]) => <button className="secondary" key={label} onClick={() => {setDraft(text); composer.current?.focus();}}><Sparkles size={16}/>{label}</button>)}</div><div className="recent-heading"><span>继续最近的任务</span><button onClick={() => setSidebar(true)}>查看全部</button></div>{conversations.filter(item => !item.meta.archived && item.id !== current?.id && item.has_messages).slice(0,3).map(item => <button key={item.id} className="recent-task" onClick={() => void switchConversation(item.id)}><FileText size={17}/><span>{item.title}<small>{item.meta.project_name || '独立聊天'} · {new Date(item.updated_at * 1000).toLocaleDateString()}</small></span><ChevronRight size={15}/></button>)}<details className="home-options"><summary>工作台选项</summary><button onClick={() => void goRoute('plugins')}>界面插件</button><button onClick={() => void goRoute('settings')}>外观与设置</button></details></div>}
         </section>
-        {workspaceOpen && <section className="workspace"><div className="workspace-header"><span><PanelsTopLeft size={15}/>工作区</span><div><button className="icon-button" title="新建写作页" onClick={() => void createDocument()}><Plus size={16}/></button><button className="icon-button" title={workspaceExpanded ? '恢复分栏' : '展开工作区'} onClick={() => setWorkspaceExpanded(!workspaceExpanded)}>{workspaceExpanded ? <Minimize2 size={16}/> : <Maximize2 size={16}/>}</button><button className="icon-button" title="收起工作区" onClick={() => { setWorkspaceOpen(false); setWorkspaceExpanded(false); }}><X size={16}/></button></div></div>
-          <div className="file-tabs"><button className={!activeFile ? 'active' : ''} onClick={() => setActiveFile('')}><Folder size={13}/>文件</button>{editors.map(e => <button key={e.file.path} className={activeFile === e.file.path ? 'active' : ''} onClick={() => setActiveFile(e.file.path)}><FileText size={13}/><span>{e.file.name}{e.text !== e.saved ? ' •' : ''}</span><span role="button" tabIndex={0} aria-label={`关闭 ${e.file.name}`} onClick={event => { event.stopPropagation(); void closeEditor(e.file.path); }} onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); void closeEditor(e.file.path); } }}><X size={12}/></span></button>)}</div>
+        {workspaceOpen && current && <Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={() => {setWorkspaceOpen(false); setWorkspaceExpanded(false);}} obscured={Boolean(ask || historyEdit || showSkills || pluginPreview || themePreview)} dark={theme === 'dark'} editors={editors} fileTree={fileTree} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument} error={error} confirm={confirm} fileContent={<>
+          {editor && <div className="file-toolbar"><span title={editor.file.path}>{editor.file.name}</span><button className="icon-button" title="在文件夹中显示" onClick={() => void call('file.reveal', {conversation_id:current.id,path:editor.file.path}).catch(failure => error(failure.message))}><Folder size={15}/></button><button className="icon-button" title="复制文件路径" onClick={() => void call('clipboard.write',{text:editor.file.path}).catch(failure => error(failure.message))}><Copy size={15}/></button><button className="icon-button" title="用本机应用打开" onClick={() => void call<string>('file.external', {conversation_id: current.id, path: editor.file.path}).then(message => {if (message) error(message);}).catch(failure => error(failure.message))}><ExternalLink size={15}/></button><button className="icon-button" title="重新载入文件" onClick={() => void reloadFile()}><RefreshCw size={15}/></button>{!editor.file.payload.read_only && <button className="secondary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}</div>}
+          {editor && fileChanged && <div className="file-update-notice" role="status">文件已更新<button className="text-link" onClick={() => void reloadFile()}>刷新</button></div>}
           {editor && (editor.file.conflict || editor.file.unavailable) && <div className="run-error">原文件已变化或暂时无法打开。当前编辑仍保留，可以复制内容或<button className="secondary" onClick={() => void saveCopy()}>另存副本</button>。</div>}
-          {editor ? <PluginEditor file={editor.file} plugin={editor.plugin} text={editor.text} theme={theme} onChange={text => changeEditor(editor.file.path, text)} onSave={() => saveEditor(editor.file.path)} error={error}/> : <div className="files"><div className="file-location"><span title={fileTree.folder}>{fileTree.folder?.split(/[\\/]/).pop()}</span><button title="返回工作目录" className="icon-button" onClick={() => void refreshFiles()}><ArrowLeft size={15}/></button><button title="刷新文件" className="icon-button" onClick={() => void refreshFiles(selectedId.current, fileTree.folder)}><RefreshCw size={14}/></button></div>{fileTree.files.map((file: any) => <button className="file-row" key={file.path} onClick={() => void (file.directory ? refreshFiles(selectedId.current, file.path) : openFile(file.path))}>{file.directory ? <Folder size={16}/> : <FileText size={16}/>}<span>{file.name}</span>{file.directory && <ChevronRight size={13}/>}</button>)}{!fileTree.files.length && <div className="empty-workspace"><FileText size={30}/><h3>成果从这里开始</h3><p>生成的文件会出现在这里，也可以直接开始写作。</p><button className="secondary" onClick={() => void createDocument()}><Plus size={14}/>新建写作页</button></div>}</div>}
-        </section>}
-      </div> : route === 'settings' ? <div className="management"><div className="page-intro"><h2>让工作台适合你</h2><p>连接模型，调整外观，继续熟悉的工作方式。</p></div><section className="settings-section"><div className="section-heading"><h3>模型与服务</h3><button className="secondary" onClick={async () => { try { const value = await call<Settings | null>('dialog.import_settings'); if (value) setSettings(value); } catch (failure) { error((failure as Error).message); } }}><Download size={14}/>导入旧版模型设置</button></div><div className="model-list">{settings?.models.map(model => <div className="model-row" key={model.id}><span className="model-icon">✳</span><div><strong>{model.display_name || model.model_name}</strong><small>{model.channel_display_name} · {model.configured ? '已配置' : '需要 API Key'}</small></div>{model.id === settings.selected_model_id ? <span className="subtle-badge">当前使用</span> : <button className="secondary" onClick={async () => setSettings(await call('settings.select_model', { model_id: model.id }))}>使用</button>}</div>)}</div>
-        <form className="model-form" onSubmit={async e => { e.preventDefault(); setFormBusy(true); try { setSettings(await call('settings.save_model', modelForm)); setModelForm(previous => ({ ...previous, api_key: '' })); } catch (failure) { error((failure as Error).message); } finally { setFormBusy(false); } }}><h4>添加模型服务</h4><div className="form-grid"><label>服务名称<input required value={modelForm.name} onChange={e => setModelForm({ ...modelForm, name: e.target.value })}/></label><label>模型名称<input required value={modelForm.model_name} onChange={e => setModelForm({ ...modelForm, model_name: e.target.value })}/></label><label className="wide">接口地址<input required type="url" value={modelForm.base_url} onChange={e => setModelForm({ ...modelForm, base_url: e.target.value })}/></label><label className="wide">API Key<input required type="password" autoComplete="off" value={modelForm.api_key} onChange={e => setModelForm({ ...modelForm, api_key: e.target.value })} placeholder="只保存在本机，不显示在对话中"/></label><label>接口协议<select value={modelForm.api_protocol} onChange={e => setModelForm({ ...modelForm, api_protocol: e.target.value })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label></div><button className="primary" disabled={formBusy}>{formBusy ? '正在保存…' : '保存并使用'}</button></form></section><section className="settings-section"><h3>外观</h3><div className="theme-options">{['light', 'dark'].map(mode => <button key={mode} className={theme === mode ? 'theme-option selected' : 'theme-option'} onClick={async () => { await call('settings.theme', { theme: mode }); setSettings(previous => previous ? { ...previous, theme: mode } : null); }}><div className={`theme-sample ${mode}`}><span/><main><i/><i/><i/></main></div>{mode === 'light' ? '柔和浅色' : '专注深色'}{theme === mode && <Check size={14}/>}</button>)}</div></section><section className="settings-section"><h3>本机数据</h3><p className="muted">新版对话和草稿保存在独立目录，旧版数据保持原样。</p><code className="data-path">{settings?.data_dir}</code><button className="secondary" onClick={() => void call('app.logs')}>打开诊断日志</button></section></div> : <div className="management"><div className="page-intro"><h2>让工作台随想法生长</h2><p>修改一个界面，增加一种工作方式。已有内容继续保留。</p></div><div className="section-heading"><h3>已安装的插件</h3><button className="primary" onClick={async () => { try { const value = await call<Plugin | null>('plugins.preview'); if (value) setPluginPreview(value); } catch (failure) { error((failure as Error).message); } }}><Plus size={15}/>添加本地插件</button></div><div className="plugin-list">{plugins.map(plugin => <section className="plugin-card" key={plugin.id}><div className="plugin-icon"><FileText size={24}/></div><div><h3>{plugin.name}<small>v{plugin.version}</small></h3><p>{plugin.description}</p><div className="button-row"><button className="secondary" onClick={async () => { try { const result = await call('plugins.export', { id: plugin.id }); if (result) setNotice('可编辑源码已保存到：' + result.path + '。可以让 AI 修改后再添加为新版本。'); } catch (failure) { error((failure as Error).message); } }}><Code2 size={14}/>导出可编辑源码</button>{!plugin.builtin && <button className="secondary" onClick={async () => { try { setPlugins(await call('plugins.rollback', { id: plugin.id })); const loaded = await call<Plugin>('plugins.load', { id: 'cowork.writing' }); setEditors(previous => previous.map(e => ({ ...e, plugin: loaded }))); } catch (failure) { error((failure as Error).message); } }}><RefreshCw size={14}/>{plugin.previous ? '恢复上一版' : '恢复内置版本'}</button>}</div></div></section>)}</div><div className="plugin-explainer"><h3>从自己的工作流开始</h3><p>导出写作工作台的源码到项目目录，让 AI 按你的要求修改。选择修改后的文件夹，预览并应用，就能继续使用新版本。</p><p>插件界面与对话运行独立，切换编辑器版本不会重启任务。</p></div></div>}
+          {editor ? (['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <PluginEditor file={editor.file} plugin={editor.plugin} text={editor.text} theme={theme} onChange={text => changeEditor(editor.file.path, text)} onSave={() => saveEditor(editor.file.path)} error={error}/>) : <div className="empty-workspace">选择一个文件开始查看。</div>}
+        </>}/>}
+
+      </div> : managementNames[route] ? <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management key={route} route={route} settings={settings} updateSettings={setSettings} openPlugins={() => void goRoute('plugins')} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
+        onReference={async ref => {
+          let target = stateRef.current.current;
+          if (!target) { target = await call<Conversation>('conversation.create', {}); await refreshList(); selectedId.current = target!.id; await loadConversation(target!.id); }
+          const refs = [...(target!.meta.knowledge_refs || []).filter((item: any) => JSON.stringify(item) !== JSON.stringify(ref)), ref];
+          await call('conversation.preferences', { conversation_id: target!.id, value: { knowledge_refs: refs } });
+          setCurrent(previous => previous?.id === target!.id ? { ...previous, meta: { ...previous.meta, knowledge_refs: refs } } : previous);
+        }}/></Suspense> : <div className="management"><button className="back-link" onClick={() => void goRoute('capabilities')}>返回能力</button><div className="page-intro"><h2>让工作台随想法生长</h2><p>修改一个界面，增加一种工作方式。已有内容继续保留。</p></div><div className="section-heading"><h3>已安装的插件</h3><button className="primary" onClick={async () => { try { const value = await call<Plugin | null>('plugins.preview'); if (value) setPluginPreview(value); } catch (failure) { error((failure as Error).message); } }}><Plus size={15}/>添加本地插件</button></div><div className="plugin-list">{plugins.map(plugin => <section className="plugin-card" key={plugin.id}><div className="plugin-icon"><FileText size={24}/></div><div><h3>{plugin.name}<small>v{plugin.version}</small></h3><p>{plugin.description}</p><div className="button-row"><button className="secondary" onClick={async () => { try { const result = await call('plugins.export', { id: plugin.id }); if (result) setNotice('可编辑源码已保存到：' + result.path + '。可以让 AI 修改后再添加为新版本。'); } catch (failure) { error((failure as Error).message); } }}><Code2 size={14}/>导出可编辑源码</button>{!plugin.builtin && <button className="secondary" onClick={async () => { try { setPlugins(await call('plugins.rollback', { id: plugin.id })); const loaded = await call<Plugin>('plugins.load', { id: 'cowork.writing' }); setEditors(previous => previous.map(e => ({ ...e, plugin: loaded }))); } catch (failure) { error((failure as Error).message); } }}><RefreshCw size={14}/>{plugin.previous ? '恢复上一版' : '恢复内置版本'}</button>}</div></div></section>)}</div><div className="plugin-explainer"><h3>从自己的工作流开始</h3><p>导出写作工作台的源码到项目目录，让 AI 按你的要求修改。选择修改后的文件夹，预览并应用，就能继续使用新版本。</p><p>插件界面与对话运行独立，切换编辑器版本不会重启任务。</p></div></div>}
       {notice && <div className="notice" role="status"><span>{notice}</span><button className="icon-button" title="关闭提示" onClick={() => setNotice('')}><X size={15}/></button></div>}
     </main>
-    {ask && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label={ask.title}><h2>{ask.title}</h2><p>{ask.detail}</p><div className="button-row">{ask.choices.map((choice, index) => <button key={choice} autoFocus={index === 0} className={index === ask.choices.length - 1 ? 'primary' : 'secondary'} onClick={() => { const resolve = ask.resolve; setAsk(null); resolve(index); }}>{choice}</button>)}</div></div></div>}
+
+    {historyUndo && <div className="undo-toast" role="status"><span>历史已更新</span><button onClick={async () => {
+      try { const value = await call<Conversation>('history.undo', { conversation_id: historyUndo.conversationId, undo: historyUndo.token });
+        if (selectedId.current === value.id) { setCurrent(value); setEvents(unwrapEvents(value.events || [])); }
+        setHistoryUndo(null); await refreshList();
+      } catch (failure) { error((failure as Error).message); }
+    }}>撤销</button><button aria-label="关闭撤销提示" onClick={() => setHistoryUndo(null)}><X size={14}/></button></div>}
+    {themePreview && <ThemePreview candidate={themePreview} close={() => setThemePreview(null)} changed={async () => {const value = await call("themes.preview"); setThemeCandidate(value.preview);}}/>}
+    {ask && <Dialog title={ask.title} onClose={() => { const resolve = ask.resolve; setAsk(null); resolve(0); }}><p>{ask.detail}</p><div className="button-row">{ask.choices.map((choice, index) => <button key={choice} autoFocus={index === 0} className={index === ask.choices.length - 1 ? 'primary' : 'secondary'} onClick={() => { const resolve = ask.resolve; setAsk(null); resolve(index); }}>{choice}</button>)}</div></Dialog>}
     {showSkills && <div className="modal-backdrop" onClick={() => setShowSkills(false)}><div className="modal skill-modal" onClick={e => e.stopPropagation()}><div className="section-heading"><h2>为当前任务选择能力</h2><button className="icon-button" title="关闭" onClick={() => setShowSkills(false)}><X size={18}/></button></div><div className="skill-list">{skills.map(skill => <label key={skill.name}><input type="checkbox" checked={selectedSkills.includes(skill.name)} onChange={e => setSelectedSkills(previous => e.target.checked ? [...previous, skill.name] : previous.filter(name => name !== skill.name))}/><span><strong>{skill.display_name || skill.name}</strong><small>{skill.description}</small></span></label>)}</div><button className="primary" onClick={() => setShowSkills(false)}>完成</button></div></div>}
     {pluginPreview && <div className="modal-backdrop"><div className="modal preview-modal"><div className="section-heading"><div><h2>{pluginPreview.name}</h2><p>v{pluginPreview.version} · 预览使用示例内容，不修改你的文档</p></div><button className="icon-button" title="取消预览" onClick={() => setPluginPreview(null)}><X size={18}/></button></div><div className="preview-frame"><PluginEditor file={{id: 'preview', name: '预览文稿.md', path: '', fingerprint: '', payload: {}}} plugin={pluginPreview} text={previewText} theme={theme} onChange={setPreviewText} onSave={async () => {}} error={error}/></div><div className="button-row"><button className="secondary" onClick={() => setPluginPreview(null)}>取消</button><button className="primary" onClick={() => void applyPlugin()}>应用这个版本</button></div></div></div>}
   </div>;

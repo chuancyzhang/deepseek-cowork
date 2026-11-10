@@ -6,7 +6,7 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前分支采用 **Electron + React / TypeScript + Python + SQLite** 推进新桌面工作台，先验证 Windows 的对话与写作流程。原 Qt 入口继续提供完整功能；新版入口、已迁移范围和使用方法见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。此前加入的 Apple Silicon Mac 与统信 V25 适配仍保留，新宿主的目标系统实机验收和安装包尚未完成。
+当前分支使用 **Electron + React / TypeScript + Python + SQLite** 桌面架构，默认入口已切换，Windows 运行与打包不再依赖 Qt。对话、工作区、技能分类与 SkillHub、管理页面及外观设置的入口见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。新宿主的 Apple Silicon Mac 与统信 V25 安装包仍待目标系统验收。
 
 文档适用版本：**5.3.3** · [本版说明](docs/releases/5.3.3.md) · [发布记录](docs/releases/index.md)
 
@@ -23,8 +23,8 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 ## 开始使用
 
-1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载 Windows ZIP，完整解压后运行 `deepseek-cowork.exe`。
-2. 在首次启动向导填写 DeepSeek API Key，或到“设置 → 模型与服务”添加服务和模型。也可使用企业提供的客户端登录企业账号。
+1. 新架构构建包为 `cowork-desktop-v版本号-windows-x64.zip`，完整解压后运行 `Cowork.exe`。本地构建不会自动发布到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，旧版下载包仍使用旧入口。
+2. 到“设置 → 模型与服务”添加服务和模型，也可登录企业账号。正式包沿用原数据目录；首次升级自动备份并检查历史数据库。
 3. 新建聊天，添加资料并描述任务；处理固定项目时先选择项目目录。
 4. 查看回答与执行过程，在右侧工作区打开、编辑和保存成果。
 
@@ -39,6 +39,8 @@ git clone https://github.com/chuancyzhang/deepseek-cowork.git
 cd deepseek-cowork
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm --prefix desktop ci
+npm --prefix web/editors ci
 .\.venv\Scripts\python.exe main.py
 ```
 
@@ -48,13 +50,13 @@ python -m venv .venv
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-.\.venv\Scripts\python.exe -m PyInstaller deepseek-cowork.spec --noconfirm --clean
-.\.venv\Scripts\python.exe scripts/package_release.py
+$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+npm --prefix desktop run package:win
 ```
 
-打包生成版本 ZIP、审计报告和 `latest.json`。更新说明读取 `docs/releases/版本号.md`；具体格式和发布步骤见[技术文档](docs/technical-design.md#构建与发布)。
+打包生成 `desktop/out/Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，签名和公开发布需另行执行；具体步骤见[技术文档](docs/technical-design.md#electron-工作台)。
 
-Mac／统信必须在目标系统及 CPU 上构建，使用独立的 `deepseek-cowork-posix.spec` 与 `scripts/posix_release.py`；Windows 命令保持不变。新平台暂不适配企业专属客户端与企业分发服务。
+Mac／统信必须在目标系统及 CPU 上构建和验收；现有 POSIX 构建脚本不代表新宿主发行物已经就绪。
 
 ## 设计思路
 

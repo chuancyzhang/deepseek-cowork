@@ -14,7 +14,7 @@ class Signal:
     def __init__(self):
         self.callbacks = []
 
-    def connect(self, callback, *_):
+    def subscribe(self, callback):
         self.callbacks.append(callback)
 
     def emit(self, *args):
@@ -36,7 +36,7 @@ class Worker:
     def stop(self):
         self.stopped = True
 
-    def isRunning(self):
+    def is_running(self):
         return self.running
 
     def deleteLater(self):

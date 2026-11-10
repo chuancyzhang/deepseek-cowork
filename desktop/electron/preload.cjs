@@ -1,5 +1,6 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('cowork', Object.freeze({
+  pathForFile: file => webUtils.getPathForFile(file),
   call: (method, params) => ipcRenderer.invoke('cowork:call', method, params),
   onEvents: callback => {
     const listener = (_event, events) => callback(events);

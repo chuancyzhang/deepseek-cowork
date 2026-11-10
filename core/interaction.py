@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from PySide6.QtCore import QObject, Signal
+from core.runtime_tasks import EventSource
 import logging
 import threading
 import time
@@ -349,12 +349,11 @@ class InteractionResponse:
         return asdict(self)
 
 
-class InteractionService(QObject):
-    interaction_requested = Signal(dict)
-    interaction_finished = Signal(dict)
+class InteractionService:
 
     def __init__(self):
-        super().__init__()
+        self.interaction_requested = EventSource()
+        self.interaction_finished = EventSource()
         self._lock = threading.Lock()
         self._pending: dict[str, dict[str, Any]] = {}
 
@@ -393,8 +392,7 @@ class InteractionService(QObject):
         if callable(abort_check) and abort_check():
             return InteractionResponse(request_id="", status="cancelled", approved=False).to_dict()
         if require_receiver:
-            from PySide6.QtCore import QMetaMethod
-            if not self.isSignalConnected(QMetaMethod.fromSignal(self.interaction_requested)):
+            if not self.interaction_requested.has_subscribers:
                 return InteractionResponse(request_id="", status="unavailable", approved=False).to_dict()
         request = InteractionRequest(
             request_id=uuid.uuid4().hex,

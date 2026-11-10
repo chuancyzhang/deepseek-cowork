@@ -52,7 +52,20 @@ class ServiceClient:
         self.events = []
         self.log = (self.directory / "service.log").open("a", encoding="utf-8")
         frozen = os.environ.get("COWORK_TEST_DESKTOP_SERVICE")
-        command = [frozen] if frozen else [sys.executable, "-X", "utf8", "-B", "-m", "core.desktop_service"]
+        # Reject even lazy Qt imports, regardless of what the developer's
+        # interpreter happens to have installed. Exercise the real service.
+        bootstrap = '''import importlib.abc, runpy, sys
+class NoQt(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'PySide6', 'PyQt5', 'PyQt6', 'shiboken6', 'qtawesome', 'qdarktheme'}:
+            raise ImportError('Desktop service must not import Qt: ' + fullname)
+sys.meta_path.insert(0, NoQt())
+import os, faulthandler
+if os.environ.get('COWORK_TEST_TRACE_TIMEOUT'):
+    faulthandler.dump_traceback_later(12)
+runpy.run_module('core.desktop_service', run_name='__main__')
+'''
+        command = [frozen] if frozen else [sys.executable, "-X", "utf8", "-B", "-c", bootstrap]
         self.proc = subprocess.Popen([*command, "--data-dir", str(self.directory)],
                                      cwd=self.directory if frozen else ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
                                      text=True, encoding="utf-8", env={**os.environ, "TEMP": str(QA_ROOT), "TMP": str(QA_ROOT), "NO_PROXY": "127.0.0.1,localhost,::1"},
@@ -217,8 +230,71 @@ class DesktopIntegrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.client.call("file.open", conversation_id=cid, path=str(ROOT / "README.md"))
 
+    def test_history_edit_guard_undo_branch_and_reference(self):
+        cid = self.client.call("conversation.create")["id"]
+        params = self.submit(cid)
+        original = self.client.wait_run(cid)
+        prepared = self.client.call("history.prepare", conversation_id=cid, message_id=params["message_id"])
+        guard = {key: prepared[key] for key in ("hash", "revision")}
+        edited = self.client.call("history.edit", conversation_id=cid, message_id=params["message_id"], guard=guard, text="修改后的输入")
+        self.assertEqual(len(edited["conversation"]["messages"]), 1)
+        self.assertEqual(edited["conversation"]["messages"][0]["content"], "修改后的输入")
+        self.assertEqual(edited["conversation"]["events"], [])
+        self.assertIsNone(edited["conversation"]["run"])
+        with self.assertRaises(RuntimeError):
+            self.client.call("history.delete", conversation_id=cid, message_id=params["message_id"], guard=guard)
+        restored = self.client.call("history.undo", conversation_id=cid, undo=edited["undo"])
+        self.assertEqual(restored["messages"], original["messages"])
+        answer = next(message for message in reversed(original["messages"]) if message["role"] == "assistant")
+        branch = self.client.call("conversation.branch", conversation_id=cid, message_id=answer["id"])
+        self.assertFalse({message["id"] for message in branch["messages"]} & {message["id"] for message in original["messages"]})
+        reference = self.client.call("conversation.reference", conversation_id=branch["id"], source_id=cid)
+        self.assertTrue(Path(reference["snapshot_path"]).is_relative_to(Path(branch["meta"]["workspace_dir"])))
+        self.assertIn("普通验证", Path(reference["snapshot_path"]).read_text(encoding="utf-8"))
+
+    def test_draft_revisions_and_multiple_models_survive_updates(self):
+        cid = self.client.call("conversation.create")["id"]
+        saved = self.client.call("draft.save", conversation_id=cid, revision=-1, value={"text": "初稿", "attachments": []})
+        self.assertEqual(saved["revision"], 0)
+        with self.assertRaises(RuntimeError):
+            self.client.call("draft.save", conversation_id=cid, revision=-1, value={"text": "过时草稿", "attachments": []})
+        self.assertEqual(self.client.call("conversation.get", conversation_id=cid)["draft"]["text"], "初稿")
+        settings = self.client.call("settings.get")
+        selected = next(model for model in settings["models"] if model["id"] == self.model_id)
+        updated = self.client.call("settings.save_model", channel_id=selected["channel_id"], model_name="fixture-second", base_url=selected["base_url"])
+        self.assertTrue(any(model["id"] == self.model_id for model in updated["models"]))
+        self.assertTrue(any(model["model_name"] == "fixture-second" for model in updated["models"]))
+        params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                      model_id=self.model_id, text="发送初稿", draft_revision=saved["revision"])
+        receipt = self.client.call("conversation.send", **params)
+        self.assertEqual(receipt["draft"]["value"]["text"], "")
+        self.assertEqual(receipt["draft"]["revision"], 1)
+        self.client.call("draft.save", conversation_id=cid, revision=1, value={"text": "下一条消息", "attachments": []})
+        self.client.call("conversation.send", **params)
+        self.assertEqual(self.client.call("conversation.get", conversation_id=cid)["draft"]["text"], "下一条消息")
+        self.client.wait_run(cid)
+
 
 class DesktopTransactionTests(unittest.TestCase):
+    def test_regeneration_rolls_back_history_when_dispatch_cannot_commit(self):
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        from core.conversation_integrity import canonical_ledger_messages_hash
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            storage = DesktopChatStorage(str(Path(directory) / "history.db"))
+            store = DesktopStore(storage)
+            storage.upsert_conversation("chat", title="保留原历史", meta={})
+            original = [{"id": "user", "role": "user", "content": "原请求"}, {"id": "answer", "role": "assistant", "content": "原成果"}]
+            storage.replace_messages("chat", original)
+            original = storage.get_messages("chat")
+            with storage._connect() as db:
+                db.execute("CREATE TRIGGER fail_dispatch BEFORE INSERT ON desktop_runs BEGIN SELECT RAISE(ABORT, 'simulated disk error'); END")
+            with self.assertRaises(Exception):
+                store.accept({"conversation_id": "chat", "request_id": "retry", "message_id": "replacement", "content": "新请求", "display_text": "新请求",
+                    "rewrite": {"hash": canonical_ledger_messages_hash(original), "revision": 0, "message_id": "user"}})
+            self.assertEqual(storage.get_messages("chat"), original)
+            self.assertIsNone(store.get_run("retry"))
+            self.assertIsNone(store.get_state("history_undo:retry"))
+
     def test_message_and_run_roll_back_together(self):
         from core.desktop_store import DesktopChatStorage, DesktopStore
         with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:

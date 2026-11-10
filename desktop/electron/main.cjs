@@ -1,26 +1,42 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, protocol, Tray, net, clipboard } = require('electron');
 const path = require('node:path');
+const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { Backend } = require('./backend.cjs');
 const { PluginHost } = require('./plugins.cjs');
-protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-plugin', privileges: { standard: true, secure: true } }]);
+const { BrowserHost } = require('./browser.cjs');
+const { FileHost } = require('./files.cjs');
+const fileHost = new FileHost();
+const { resolveDataDirectory } = require('./data-path.cjs');
+protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true } }, { scheme: 'cowork-plugin', privileges: { standard: true, secure: true } }, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const pluginPages = new Map();
+const visualizationPages = new Map();
 function servePlugin(plugin) {
   pluginPages.set(plugin.hash, plugin.html);
   return { ...plugin, html: undefined, url: `cowork-plugin://editor/${plugin.hash}` };
 }
 
 const root = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '../..');
-const dataDir = process.env.COWORK_APP_DATA_DIR || path.join(app.getPath('appData'), 'DeepSeekCoworkNext');
-app.setPath('userData', dataDir);
+const dataDir = resolveDataDirectory({ explicit: process.env.COWORK_APP_DATA_DIR,
+  packaged: app.isPackaged, executable: app.getPath('exe'), repository: root, appData: app.getPath('appData') });
+app.setPath('userData', path.join(dataDir, 'desktop-browser'));
 const entry = pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename',
   'conversation.archive', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond',
   'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list',
   'workspace.create', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
-let window, backend, plugins, quitting = false;
+for (const method of ['project.list', 'project.save', 'project.archive', 'project.restore', 'conversation.search',
+  'conversation.pin', 'conversation.restore', 'conversation.delete', 'conversation.preferences', 'conversation.export',
+  'conversation.reference', 'conversation.branch', 'history.prepare', 'history.edit', 'history.delete', 'history.undo',
+  'agent.list', 'agent.get', 'agent.stop', 'agent.resume', 'conversation.receipt']) allowed.add(method);
+for (const method of require('./management-methods.cjs')) allowed.add(method);
+allowed.add('task.inspect');
+allowed.add('visualization.get'); allowed.add('visualization.state');
+for (const method of ['workbench.list', 'workbench.profiles', 'workbench.open', 'workbench.close', 'workbench.control', 'workbench.read', 'workbench.input', 'workbench.reply', 'workbench.resize', 'workbench.activate', 'file.save_copy']) allowed.add(method);
+let window, backend, plugins, tray, browserHost, quitting = false;
 let eventQueue = [], batch;
 function publish(event) {
+  if (event.event === 'browser_host') { void browserHost?.handle(event.data); return; }
   eventQueue.push(event);
   if (!batch) batch = setTimeout(() => {
     const events = eventQueue; eventQueue = []; batch = null;
@@ -30,7 +46,7 @@ function publish(event) {
 async function quit() {
   if (quitting) return;
   try {
-    await backend.stop(); quitting = true; app.quit();
+    backend.detach(); quitting = true; tray?.destroy(); app.quit();
   } catch (error) { await dialog.showMessageBox(window, { type: 'error', title: '尚未完成退出', message: error.message, detail: '应用保持打开，已完成内容和草稿不会被清除。' }); }
 }
 async function createWindow() {
@@ -44,7 +60,8 @@ async function createWindow() {
   window.on('close', event => {
     if (quitting) return;
     event.preventDefault();
-    window.webContents.send('cowork:events', [{ event: 'close_requested' }]);
+    window.hide();
+    window.webContents.send('cowork:events', [{ event: 'window_hidden' }]);
   });
   await window.loadURL(entry);
 }
@@ -52,25 +69,70 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (window) { window.restore(); window.show(); window.focus(); } });
   app.whenReady().then(async () => {
+    protocol.handle('cowork-local', request => fileHost.response(request, net.fetch));
+    protocol.handle('cowork-editor', request => {
+      const url = new URL(request.url);
+      const filename = decodeURIComponent(url.pathname.slice(1));
+      if (url.host !== 'builtin' || !/^[a-zA-Z0-9_.-]+$/.test(filename)) return new Response('Not found', { status: 404 });
+      return net.fetch(pathToFileURL(path.join(root, 'web/editors/dist', filename)).href);
+    });
     protocol.handle('cowork-plugin', request => {
       const url = new URL(request.url);
-      const html = url.host === 'editor' && pluginPages.get(url.pathname.slice(1));
+      const html = (url.host === 'editor' ? pluginPages : url.host === 'visualization' ? visualizationPages : new Map()).get(url.pathname.slice(1));
       return new Response(html || 'Plugin page not available', { status: html ? 200 : 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Cowork', submenu: [
       { label: '重新载入界面', accelerator: 'CmdOrCtrl+R', click: () => publish({ event: 'reload_requested' }) },
       { label: '打开诊断日志', click: () => shell.openPath(path.join(dataDir, 'logs')) },
-      { type: 'separator' }, { label: '退出', accelerator: 'Alt+F4', click: () => window.close() }
+      { type: 'separator' }, { label: '退出', click: () => publish({ event: 'close_requested' }) }
     ] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
       { label: '视图', submenu: [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }]));
     plugins = new PluginHost(dataDir, path.join(__dirname, '../plugins/writing'));
     try { backend = new Backend({ root, dataDir, resources: app.isPackaged ? process.resourcesPath : null, publish }); }
     catch (error) { await dialog.showMessageBox({ type: 'error', message: error.message }); quitting = true; app.quit(); return; }
     backend.ready.catch(error => publish({ event: 'service_error', error: error.message }));
+    browserHost = new BrowserHost({ root, backend, getWindow: () => window });
+    tray = new Tray(path.join(root, app.isPackaged ? 'logo.ico' : 'images/logo.ico'));
+    tray.setToolTip('Cowork');
+    const showWindow = () => { window?.restore(); window?.show(); window?.focus(); };
+    tray.on('double-click', showWindow);
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '打开 Cowork', click: showWindow },
+      { type: 'separator' },
+      { label: '退出界面（后台任务继续）', click: () => { showWindow(); publish({ event: 'close_requested' }); } }
+    ]));
     ipcMain.handle('cowork:call', async (event, method, params = {}) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
+      if (['file.open', 'file.save_copy', 'workspace.create'].includes(method)) return fileHost.register(await backend.call(method, params));
+      if (method === 'file.external') {
+        const file = await backend.call('file.describe', params);
+        return shell.openPath(file.path);
+      }
+      if (method === 'file.reveal') { const file = await backend.call('file.describe', params); shell.showItemInFolder(file.path); return { revealed: true }; }
+      if (method === 'file.describe') return backend.call(method, params);
+      if (method === 'file.preview_draft') return fileHost.draft(params.url, params.text);
+      if (method === 'visualization.get') {
+        const value = await backend.call(method, params);
+        visualizationPages.set(value.token, value.html);
+        return {...value, html: undefined, url: `cowork-plugin://visualization/${value.token}`};
+      }
+      if (method === 'visualization.release') { visualizationPages.delete(params.token); return {released:true}; }
       if (allowed.has(method)) return backend.call(method, params);
+      if (['browser.open', 'browser.navigate', 'browser.close', 'browser.command'].includes(method)) return backend.call(method, params);
+      if (method === 'browser.surface') return browserHost.show(params);
+      if (method === 'clipboard.read') return clipboard.readText();
+      if (method === 'clipboard.write') { clipboard.writeText(String(params.text || '')); return { ok: true }; }
+      if (method === 'dialog.choose') {
+        const filters = params.kind === 'skill' ? [{ name: '技能包', extensions: ['zip'] }]
+          : params.kind === 'theme' ? [{ name: '主题', extensions: ['cowork-theme', 'json'] }] : [];
+        const result = await dialog.showOpenDialog(window, { title: '选择文件', filters, properties: ['openFile'] });
+        return result.canceled ? null : result.filePaths[0];
+      }
+      if (method === 'dialog.save') {
+        const result = await dialog.showSaveDialog(window, { title: '保存文件', defaultPath: path.basename(String(params.name || '导出文件')) });
+        return result.canceled ? null : result.filePath;
+      }
       if (method === 'dialog.workspace') {
         const result = await dialog.showOpenDialog(window, { title: '选择工作目录', properties: ['openDirectory', 'createDirectory'] });
         return result.canceled ? null : result.filePaths[0];
@@ -97,7 +159,29 @@ else {
       }
       if (method === 'app.quit') { void quit(); return { accepted: true }; }
       if (method === 'app.reload') { window.webContents.reload(); return { accepted: true }; }
+      if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; publish({ event: 'service_reconnected' }); return { connected: true }; }
+      if (method === 'app.ready') return backend.call('updates.acknowledge');
+      if (method === 'app.install_update') {
+        let transaction;
+        try {
+          transaction = await backend.call('updates.prepare_install', { host_pid: process.pid });
+          await backend.call('updates.commit_install', transaction);
+          await quit();
+          return { accepted: true };
+        } catch (error) {
+          if (transaction) await backend.call('updates.abort_install', transaction).catch(() => {});
+          throw error;
+        }
+      }
       if (method === 'app.logs') return shell.openPath(path.join(dataDir, 'logs'));
+      if (method === 'system.open_path') {
+        const base = await fs.realpath(dataDir), target = await fs.realpath(String(params.path || ''));
+        const relative = path.relative(base, target);
+        if (relative.startsWith('..') || path.isAbsolute(relative) || !(await fs.stat(target)).isDirectory()) throw new Error('只能打开应用的数据目录。');
+        const error = await shell.openPath(target);
+        if (error) throw new Error(error);
+        return { opened: true };
+      }
       if (method === 'external.open') {
         const url = new URL(params.url);
         if (!['https:', 'http:'].includes(url.protocol)) throw new Error('链接协议不受支持。');
@@ -108,5 +192,5 @@ else {
     await createWindow();
   });
 }
-app.on('before-quit', event => { if (!quitting && backend) { event.preventDefault(); window?.close(); } });
+app.on('before-quit', event => { if (!quitting && backend) { event.preventDefault(); window?.show(); publish({ event: 'close_requested' }); } });
 app.on('window-all-closed', () => { if (quitting) app.quit(); });

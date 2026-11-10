@@ -7,9 +7,9 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QColor, QImage
+from PIL import Image
 
-from core.theme import default_design_tokens
+from core.theme_tokens import default_design_tokens
 from core.theme_package import build_asset_record
 from core.theme_service import ThemeRepository, theme_manifest_schema, validate_theme_manifest
 
@@ -37,9 +37,8 @@ class ThemePackageTests(unittest.TestCase):
 
     def _image_path(self):
         path = os.path.join(self.temp_dir.name, "background.png")
-        image = QImage(64, 48, QImage.Format_ARGB32)
-        image.fill(QColor("#336699"))
-        self.assertTrue(image.save(path, "PNG"))
+        image = Image.new("RGBA", (64, 48), "#336699")
+        image.save(path, "PNG")
         return path
 
     def _animated_path(self, suffix, data):

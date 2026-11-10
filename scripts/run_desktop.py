@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from core.process_utils import subprocess_kwargs_no_window
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -26,12 +29,16 @@ def main():
     if args.data_dir:
         env["COWORK_APP_DATA_DIR"] = str(args.data_dir.resolve())
     if not args.no_build:
+        subprocess.run([node, str(ROOT / 'web/editors/build.mjs')], cwd=ROOT, env=env, check=True, **subprocess_kwargs_no_window())
         for script, extra in [("typescript/bin/tsc", ["--noEmit"]), ("vite/bin/vite.js", ["build"])]:
-            subprocess.run([node, str(desktop / "node_modules" / script), *extra], cwd=desktop, env=env, check=True)
+            subprocess.run([node, str(desktop / "node_modules" / script), *extra], cwd=desktop, env=env, check=True, **subprocess_kwargs_no_window())
     electron = desktop / "node_modules/electron/dist" / ("electron.exe" if os.name == "nt" else "Electron.app/Contents/MacOS/Electron" if sys.platform == "darwin" else "electron")
     if not electron.is_file():
         raise SystemExit("Electron 运行时不完整，请在 desktop 目录运行 npm rebuild electron。")
-    return subprocess.call([str(electron), str(desktop)], cwd=ROOT, env=env)
+    # Electron is a GUI process: SW_HIDE also suppresses its first application
+    # window. CREATE_NO_WINDOW suppresses consoles without hiding the workbench.
+    return subprocess.call([str(electron), str(desktop)], cwd=ROOT, env=env,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ window.coworkTerminal = {
   fit: resize,
   focus() { terminal.focus(); }
 };
-new QWebChannel(qt.webChannelTransport, channel => {
-  bridge = channel.objects.terminalBridge;
+window.connectDesktopBridge("terminalBridge", nativeBridge => {
+  bridge = nativeBridge;
   bridge.ready(); resize();
 });

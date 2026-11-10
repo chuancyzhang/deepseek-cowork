@@ -304,7 +304,7 @@ def publish_visualization_fragment(conversation_id, filename, title="", requeste
     }
 
 
-def build_visualization_document(fragment, initial_state=None, read_only=False, theme_css="", origins=None):
+def build_visualization_document(fragment, initial_state=None, read_only=False, theme_css="", origins=None, *, frame_only=False):
     state_json = json.dumps(initial_state if isinstance(initial_state, dict) else {}, ensure_ascii=False).replace("<", "\\u003c")
     token = hashlib.sha256(os.urandom(32)).hexdigest()
     content_security_policy = _content_security_policy(origins)
@@ -318,6 +318,11 @@ def build_visualization_document(fragment, initial_state=None, read_only=False, 
     saveState: (state) => {{
       if ({str(bool(read_only)).lower()}) return;
       parent.postMessage({{ token, type: 'state', state }}, '*');
+    }}
+  }});
+  addEventListener('message', event => {{
+    if (event.source === parent && event.data?.token === token && event.data?.type === 'theme') {{
+      document.getElementById('cowork-theme').textContent = String(event.data.css || '');
     }}
   }});
   const report = () => parent.postMessage({{
@@ -351,7 +356,9 @@ def build_visualization_document(fragment, initial_state=None, read_only=False, 
 }})();
 </script>
 """
-    inner = f"""<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{html.escape(content_security_policy, quote=True)}\"><style>{theme_css}</style></head><body>{child_bootstrap}{fragment}</body></html>"""
+    inner = f"""<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{html.escape(content_security_policy, quote=True)}\"><style id=\"cowork-theme\">{theme_css}</style></head><body>{child_bootstrap}{fragment}</body></html>"""
+    if frame_only:
+        return {"html": inner, "token": token}
     readonly_overlay = '<div id="readonly" aria-label="历史可视化只读模式"></div>' if read_only else ""
     readonly_style = "iframe{pointer-events:none}" if read_only else ""
     iframe_tabindex = "-1" if read_only else "0"

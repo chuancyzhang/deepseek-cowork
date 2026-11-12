@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 import threading
+import uuid
 
 log = logging.getLogger("desktop.settings")
 
@@ -280,3 +281,86 @@ class DesktopSettings:
             content = result["content"] if isinstance(result, dict) else result
             return {"draft_values": {"summary": content}, "message": "记忆草稿已生成，核对后点击保存。"}
         return self.s.jobs.submit("从历史整理记忆", generate)
+
+
+class DesktopSettingsAPI:
+    methods = frozenset(['settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'settings.import'])
+
+    def __init__(self, config, themes, publish, public_settings, store):
+        self.config, self.themes, self.publish, self.public_settings, self.store = config, themes, publish, public_settings, store
+        self.methods = self.methods | {"host.recovery.get", "host.recovery.save"}
+
+    def dispatch(self, method, p):
+        cid = str(p.get("conversation_id") or "")
+        if method in {"host.recovery.get", "host.recovery.save"}:
+            import base64
+            from core.credential_protection import create_credential_protector
+            protector = create_credential_protector(self.config.data_dir)
+            if method == "host.recovery.get":
+                saved = self.store.versioned_state("host_forms", None)
+                value = json.loads(protector.unprotect(base64.b64decode(saved["value"]))) if saved["value"] else {}
+                return {"value": value, "revision": saved["revision"]}
+            value = p.get("value")
+            if not isinstance(value, dict):
+                raise ValueError("表单恢复副本格式无效。")
+            raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+            if len(raw) > 16 * 1024 * 1024:
+                raise ValueError("表单恢复副本超过保存上限，当前输入仍保留。")
+            encrypted = base64.b64encode(protector.protect(raw)).decode("ascii")
+            result = self.store.put_state("host_forms", encrypted, p.get("revision"))
+            log.info("host_forms_preserved forms=%s", len(value))
+            return result
+        if method == "settings.get":
+            return self.public_settings()
+        if method == "settings.save_model":
+            channel_id = str(p.get("channel_id") or uuid.uuid4().hex)
+            channels = self.config.get_model_channels()
+            existing = next((c for c in channels if c.get("channel_id") == channel_id), {})
+            api_key = str(p.get("api_key") or "").strip() or existing.get("api_key", "")
+            model_id = str(p.get("model_id") or uuid.uuid4().hex)
+            previous_model = next((model for model in existing.get("models", []) if model.get("id") == model_id), {})
+            model = {**previous_model, "id": model_id, "model_name": p["model_name"], "display_name": p.get("display_name") or p["model_name"],
+                     "api_protocol": p.get("api_protocol") or previous_model.get("api_protocol") or "chat_completions"}
+            for key in ("supports_vision", "supports_tools", "supports_reasoning", "reasoning_effort", "context_length", "max_tokens", "temperature"):
+                if key in p:
+                    model[key] = p[key]
+            models = [model if item.get("id") == model_id else item for item in existing.get("models", [])]
+            if not previous_model:
+                models.append(model)
+            channel = {**existing, "channel_id": channel_id, "display_name": p.get("name") or existing.get("display_name") or "模型服务",
+                       "provider_type": p.get("provider_type") or existing.get("provider_type") or "openai", "base_url": p["base_url"], "api_key": api_key,
+                       "models": models}
+            channels = [channel if item.get("channel_id") == channel_id else item for item in channels]
+            if not existing:
+                channels.append(channel)
+            self.config.set_model_channels(channels, model_id)
+            return self.public_settings()
+        if method == "settings.select_model":
+            self.config.set_selected_model_id(p["model_id"])
+            return self.public_settings()
+        if method == "settings.permission":
+            self.config.set_god_mode(bool(p["enabled"]))
+            return self.public_settings()
+        if method == "settings.theme":
+            appearance = self.themes.load_appearance()
+            self.themes.save_appearance({**appearance, "mode": p["theme"]})
+            self.publish({"event": "appearance_changed"})
+            return {"saved": True}
+        if method == "settings.context":
+            from core.long_context import TARGETS
+            target = p.get("target_tokens")
+            if target not in (0, *TARGETS) or type(target) is not int:
+                raise ValueError("请选择未启用、300K 或 1M。")
+            self.config.set_experimental_long_context({"enabled": bool(target), "target_tokens": target or TARGETS[0]})
+            log.info("context_policy_saved target=%s next_run=true", target)
+            return self.public_settings()
+        if method == "settings.import":
+            source = Path(p["path"]).resolve()
+            if source.name != "config.json" or source == Path(self.config.config_path).resolve():
+                raise ValueError("请选择旧版数据目录中的 config.json。")
+            config = json.loads(source.read_text(encoding="utf-8-sig"))
+            if not isinstance(config.get("model_channels"), list):
+                raise ValueError("文件中没有可导入的模型服务。")
+            self.config.set_model_channels(config["model_channels"], config.get("selected_model_id"))
+            return self.public_settings()
+        raise ValueError("不支持的操作：" + method)

@@ -14,7 +14,7 @@ from .conversation_integrity import canonical_ledger_messages_hash
 RUNTIME_JOURNAL_VERSION = 2
 PENDING_COMMIT_FORMAT_APPEND_V1 = "ledger_append_v1"
 RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
-RUN_NONTERMINAL_STATUSES = {"running", "finalizing"}
+RUN_NONTERMINAL_STATUSES = {"queued", "running", "stopping", "finalizing"}
 RUN_STATUSES = RUN_NONTERMINAL_STATUSES | RUN_TERMINAL_STATUSES
 
 
@@ -110,6 +110,9 @@ class RuntimeJournal:
         path = os.path.join(self._session_dir(session_id), category)
         os.makedirs(path, exist_ok=True)
         return path
+
+    def _list_records(self, directory):
+        return os.listdir(directory)
 
     def _manifest_path(self, session_id):
         return os.path.join(self._session_dir(session_id), "manifest.json")
@@ -557,7 +560,7 @@ class RuntimeJournal:
 
         directory = self._category_dir(session_id, "runs")
         records = []
-        for filename in os.listdir(directory):
+        for filename in self._list_records(directory):
             if not filename.endswith(".json"):
                 continue
             record = self._read(os.path.join(directory, filename), default=None)
@@ -607,7 +610,8 @@ class RuntimeJournal:
             )
             incoming = dict(patch or {})
             if record.get("stop_requested"):
-                incoming.pop("status", None)
+                if incoming.get("status") != "interrupted":
+                    incoming.pop("status", None)
                 incoming.pop("terminal_error", None)
                 incoming.pop("finished_at", None)
             current_status = str(record.get("status") or "running")
@@ -879,7 +883,7 @@ class RuntimeJournal:
         directory = self._category_dir(session_id, "tools")
         with self.session_lock(session_id):
             records = []
-            for filename in os.listdir(directory):
+            for filename in self._list_records(directory):
                 if filename.endswith(".json"):
                     record = self._read(os.path.join(directory, filename), default=None)
                     if isinstance(record, dict) and record.get("background_tool"):
@@ -898,7 +902,7 @@ class RuntimeJournal:
         directory = self._category_dir(session_id, "tools")
         allowed = {str(item) for item in (statuses or []) if str(item)}
         newest = None
-        for filename in os.listdir(directory):
+        for filename in self._list_records(directory):
             if not filename.endswith(".json"):
                 continue
             path = os.path.join(directory, filename)
@@ -1004,7 +1008,7 @@ class RuntimeJournal:
             manifest["updated_at"] = time.time()
             self._atomic_write(self._manifest_path(session_id), manifest)
             tools_dir = self._category_dir(session_id, "tools")
-            for filename in os.listdir(tools_dir):
+            for filename in self._list_records(tools_dir):
                 if not filename.endswith(".json"):
                     continue
                 path = os.path.join(tools_dir, filename)

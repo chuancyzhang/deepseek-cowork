@@ -2,6 +2,11 @@
 import logging
 import re
 import threading
+import base64
+import json
+import os
+import shutil
+import uuid
 from pathlib import Path
 
 from core.workbench import WorkbenchError, WorkbenchStore
@@ -166,3 +171,146 @@ class DesktopWorkbench:
             for terminal in self.terminals.values():
                 terminal.close()
             self.terminals.clear()
+
+
+class DesktopFiles:
+    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy'])
+
+    def __init__(self, storage, config):
+        self.storage, self.config = storage, config
+        self.file_sessions = {}
+
+    def dispatch(self, method, p):
+        cid = str(p.get("conversation_id") or "")
+        if method == "workspace.list":
+            root = self.workspace(cid)
+            folder = self.checked_file(cid, p.get("path") or ".")
+            if not folder.is_dir():
+                log.warning('workspace_unavailable session=%s', cid)
+                raise ValueError("工作目录暂时不可用：" + str(folder) + "。请恢复目录，或重新选择工作目录；已打开的内容仍保留。")
+            result = []
+            for entry in sorted(folder.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    resolved = entry.resolve()
+                    if not resolved.is_relative_to(root):
+                        continue
+                    result.append({"name": entry.name, "path": str(resolved), "relative": str(resolved.relative_to(root)), "directory": entry.is_dir(), "size": entry.stat().st_size})
+                except OSError:
+                    continue
+                if len(result) >= 500:
+                    break
+            return {"root": str(root), "folder": str(folder), "files": result}
+        if method == "workspace.attach":
+            root = self.workspace(cid) / "attachments"
+            root.mkdir(exist_ok=True)
+            result = []
+            for source_name in p["paths"]:
+                source = Path(source_name).resolve()
+                if not source.is_file() or source.stat().st_size > 50 * 1024 * 1024:
+                    raise ValueError("附件不存在或超过 50 MiB。")
+                target = root / (uuid.uuid4().hex[:8] + "-" + source.name)
+                with source.open("rb") as src, target.open("xb") as dest:
+                    shutil.copyfileobj(src, dest)
+                    dest.flush()
+                    os.fsync(dest.fileno())
+                result.append({"name": source.name, "path": str(target), "size": target.stat().st_size})
+            return result
+        if method == "workspace.create":
+            path = self.checked_file(cid, p.get("name") or "未命名.md")
+            if path.suffix.lower() not in {".md", ".txt", ".html", ".json", ".csv"}:
+                raise ValueError("请选择 Markdown、文本、HTML、JSON 或 CSV 文件。")
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(str(p.get("text") or ""))
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.storage.update_conversation_meta(cid, {"has_file_changes": True})
+            return self.dispatch("file.open", {"conversation_id": cid, "path": str(path)})
+        if method == "file.describe":
+            from core.deliverable_editing import sha256_file
+            path = self.checked_file(cid, p["path"])
+            return {"path": str(path), "fingerprint": sha256_file(path)}
+        if method == "file.open":
+            from core.deliverable_editing import create_edit_session, load_editor_payload
+            path = self.checked_file(cid, p["path"])
+            from core.file_capabilities import file_capability
+            capability = file_capability(str(path))
+            if capability and not capability.editable:
+                from core.deliverable_editing import sha256_file
+                payload = {"kind": "preview", "preview_kind": capability.preview_kind, "read_only": True}
+                if capability.preview_kind == "pptx":
+                    from core.deliverable_preview import render_pptx_preview
+                    payload["preview_html"] = render_pptx_preview(str(path))["html"]
+                return {"id": uuid.uuid4().hex, "path": str(path), "name": path.name,
+                        "fingerprint": sha256_file(path), "payload": payload}
+            session, report = create_edit_session(str(path))
+            if not report.allowed:
+                raise ValueError(report.message)
+            payload = load_editor_payload(session)
+            expected = str(p.get("expected_fingerprint") or "")
+            # Preserve the original edit base across restart, so a recovered
+            # draft cannot overwrite a file changed by another application.
+            conflict = bool(expected and expected != session.initial_fingerprint)
+            if expected:
+                session.initial_fingerprint = expected
+            session_id = uuid.uuid4().hex
+            self.file_sessions[session_id] = (cid, session)
+            if isinstance(payload.get("binary"), bytes):
+                payload["binary"] = base64.b64encode(payload["binary"]).decode()
+            return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": session.initial_fingerprint, "payload": payload, "conflict": conflict}
+        if method in {"file.save", "file.save_copy"}:
+            from core.deliverable_editing import serialize_editor_payload, atomic_save_session
+            owner, session = self.file_sessions.get(p["id"], (None, None))
+            if owner != cid or session is None:
+                raise ValueError("编辑会话已失效，请保留内容并重新打开文件。")
+            payload = p["payload"]
+            if isinstance(payload, dict) and set(payload) == {"kind", "value"}:
+                kind = payload["kind"]
+                expected = "docx_review" if session.metadata.get("docx_review") else session.descriptor.kind
+                if kind != expected:
+                    raise ValueError("编辑器类型与文件不匹配。")
+                payload = base64.b64decode(payload["value"], validate=True) if kind == "docx" else json.loads(payload["value"])
+            data = serialize_editor_payload(session, payload)
+            if method == "file.save_copy":
+                import tempfile
+                destination = self.checked_file(cid, p["name"])
+                if destination.suffix.lower() != Path(session.path).suffix.lower():
+                    raise ValueError("副本必须保留原文件格式。")
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".cowork-copy-", delete=False) as handle:
+                        temporary = handle.name
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    # Atomically publish the complete file, never replace an
+                    # existing destination or touch the changed source.
+                    os.link(temporary, destination)
+                finally:
+                    if temporary:
+                        os.unlink(temporary)
+                log.info("file_copy_saved session=%s file_session=%s", cid, p["id"])
+                return self.dispatch("file.open", {"conversation_id": cid, "path": str(destination)})
+            result = atomic_save_session(session, data, event_logger=lambda event, **details: log.info("file_save session=%s file_session=%s stage=%s", cid, p["id"], event))
+            return {"saved": True, "fingerprint": result.fingerprint, "path": result.path}
+        raise ValueError("不支持的操作：" + method)
+
+    def workspace(self, conversation_id):
+        record = self.storage.get_conversation_record(conversation_id)
+        if not record:
+            raise ValueError("对话不存在。")
+        path = record["meta"].get("workspace_dir") or record["meta"].get("workspace_path")
+        if not path:
+            # Old chat-only histories have no project. Resolve their established
+            # per-conversation workspace without rewriting any historical row.
+            path = Path(self.config.get_chat_workspace_root()) / conversation_id
+        return Path(path).resolve()
+
+    def checked_file(self, conversation_id, path):
+        root = self.workspace(conversation_id)
+        target = Path(path)
+        target = (root / target).resolve() if not target.is_absolute() else target.resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("文件不属于当前工作目录，请先切换工作目录。")
+        return target

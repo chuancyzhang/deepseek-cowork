@@ -1,0 +1,11 @@
+{
+  "id":"example.task-notes", "name":"任务笔记", "version":"2.0.0", "hostApi":2, "stateVersion":1,
+  "description":"任务面板、文本编辑器与菜单命令示例，共用宿主编辑会话。",
+  "entry":"index.html", "capabilities":["conversations.read","document.read","document.edit","navigation"],
+  "contributes":[
+    {"id":"notes", "kind":"panel", "target":"tasks", "mode":"append"},
+    {"id":"editor", "kind":"editor", "target":"text"},
+    {"id":"inspect", "kind":"command", "target":"workspace", "command":"example.task-notes.inspect", "title":"查看任务笔记"},
+    {"id":"menu", "kind":"menu", "target":"workspace", "command":"example.task-notes.inspect", "title":"查看任务笔记"}
+  ]
+}

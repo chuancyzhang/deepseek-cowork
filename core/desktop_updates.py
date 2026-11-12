@@ -48,7 +48,7 @@ class DesktopUpdates:
 
     def page(self):
         from core.desktop_settings import action
-        result = {"title": "更新与关于", "values": {}, "revision": "", "sections": [{"title": "Cowork", "status": "当前版本 " + APP_VERSION,
+        result = {"title": "更新与关于", "values": {}, "revision": "", "sections": [{"title": "DeepSeek Cowork", "status": "当前版本 " + APP_VERSION,
             "actions": [action("update.check", "检查更新"), action("update.local", "选择本地安装包", open_kind="update")]}]}
         if self.prepared:
             result["sections"].append({"title": "版本 " + self.prepared["version"], "status": "已下载并校验" + (" · 开发运行请使用完整安装包" if not self.packaged else ""),
@@ -113,7 +113,7 @@ class DesktopUpdates:
                 plan = updater.build_update_plan(str(self.install_dir), self.prepared["staged"], layout="electron")
                 plan_path = updater.write_update_plan(plan, str(self.root))
                 script = updater.create_windows_update_script(str(self.install_dir), self.prepared["staged"], plan_path,
-                    current_pid=int(p["host_pid"]), exe_name="Cowork.exe", target_dir=str(self.root), extra_wait_pids=[os.getpid()],
+                    current_pid=int(p["host_pid"]), exe_name=updater.desktop_executable(self.prepared["staged"]), target_dir=str(self.root), extra_wait_pids=[os.getpid()],
                     version=self.prepared["version"], layout="electron")
                 transaction = Path(script).parent
                 process = updater.launch_windows_update_script(script)

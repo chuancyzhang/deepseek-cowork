@@ -66,7 +66,7 @@ class TestUpdater(unittest.TestCase):
         with self.assertRaises(UpdaterError):
             find_staged_app_dir(str(legacy), layout="electron")
         staged = root / "staged"
-        for name in ("Cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"):
+        for name in ("deepseek-cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"):
             file = staged / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b"new")
@@ -77,6 +77,10 @@ class TestUpdater(unittest.TestCase):
         plan = build_update_plan(str(install), str(staged), layout="electron")
         changed_paths = {item["path"] for kind in ("added", "modified", "deleted") for item in plan[kind]}
         self.assertIn("Cowork.exe", changed_paths)
+        self.assertIn("deepseek-cowork.exe", changed_paths)
+        from core.updater import desktop_executable
+        self.assertEqual(desktop_executable(staged), "deepseek-cowork.exe")
+        self.assertEqual(desktop_executable(install), "Cowork.exe")
         self.assertFalse(any(name.startswith("user_data/") for name in changed_paths))
         self.assertEqual((install / "user_data/config.json").read_bytes(), b"user preferences")
         self.assertEqual(find_staged_app_dir(str(staged), layout="electron"), str(staged))

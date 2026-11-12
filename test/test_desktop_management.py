@@ -13,6 +13,7 @@ class ManagementTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(dir=QA_ROOT)
         cls.client = ServiceClient(cls.temp.name)
+        cls.data = Path(cls.client.call("settings.get")["data_dir"])
 
     @classmethod
     def tearDownClass(cls):
@@ -39,9 +40,9 @@ class ManagementTests(unittest.TestCase):
         source = Path(self.temp.name) / "chart.html"
         source.write_text('<div id="chart">交互图表</div>', encoding="utf-8")
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        storage = ChatStorage(str(Path(self.temp.name) / "chat_history" / "chat_history.sqlite"))
+        storage = ChatStorage(str(self.data / "chat_history" / "chat_history.sqlite"))
         storage.register_inline_visualization(cid, {"file":"chart.html", "path":str(source), "sha256":digest, "title":"图表", "origins":[]})
-        skill = Path(self.temp.name) / "skills" / "visualize" / "SKILL.md"
+        skill = self.data / "skills" / "visualize" / "SKILL.md"
         skill.parent.mkdir(parents=True)
         skill.write_text("---\nname: visualize\ndescription: Local visualization fixture\n---\nRender the published visualization.\n", encoding="utf-8")
         c.call("skills.enable", name="visualize", enabled=True)
@@ -87,7 +88,7 @@ class ManagementTests(unittest.TestCase):
     def test_theme_candidate_is_isolated_and_stale_apply_is_rejected(self):
         from core.theme_service import ThemeRepository
         from core.theme_tokens import default_design_tokens
-        repository = ThemeRepository(self.temp.name)
+        repository = ThemeRepository(str(self.data))
         before = self.client.call("themes.list")["active"]
         candidate = repository.write_preview(name="候选验收", overrides={"font_scale": 1.1}, default_tokens=default_design_tokens())
         preview = self.client.call("themes.preview")

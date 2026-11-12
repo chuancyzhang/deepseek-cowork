@@ -4,6 +4,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 from core.runtime_tasks import EventSource
@@ -133,6 +134,7 @@ class AgentRuntimeRecord:
     run_context: dict = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
     worker: object = None
+    stream: object = field(default=None, repr=False)
     messages: list = field(default_factory=list)
     pending_inputs: list = field(default_factory=list)
     pending_restart: bool = False
@@ -187,7 +189,7 @@ class SessionAgentManager:
         self.execution_owner = "local"
         self._loaded = False
         from core.runtime_journal import RuntimeJournal
-        self.journal = RuntimeJournal(os.path.dirname(chat_storage.db_path))
+        self.journal = getattr(config_manager, "runtime_journal", None) or RuntimeJournal(os.path.dirname(chat_storage.db_path))
         _log_agent_runtime(
             "manager_init",
             conversation_id=self.conversation_id,
@@ -264,12 +266,21 @@ class SessionAgentManager:
         payload.update(extra or {})
         payload.update(conversation_id=self.conversation_id, run_id=record.run_id,
                        runtime_status=record.status, pending_count=len(record.pending_inputs))
+        if record.stream is not None:
+            record.stream.enqueue({**payload, "type": "agent_state"})
+            if status not in {"content", "thinking", "log"}:
+                record.stream.flush()
+            return
         if record.run_id:
             event = self.journal.append_event(self._journal_id(record), record.run_id, "agent_state", payload)
             payload["sequence"] = event["sequence"]
+        self._publish_agent_state(payload)
+
+    def _publish_agent_state(self, payload):
+        status = payload["status"]
         _log_agent_runtime("child_" + status, conversation_id=self.conversation_id,
-                           agent_id=record.agent_id, run_id=record.run_id,
-                           message_id=extra.get("message_id", record.assistant_id))
+                           agent_id=payload["agent_id"], run_id=payload["run_id"],
+                           message_id=payload.get("message_id", ""))
         if not self.agent_state_signal:
             if self._event_bridge is None:
                 return
@@ -281,7 +292,7 @@ class SessionAgentManager:
             _log_agent_runtime(
                 "emit_agent_state_signal_failed",
                 conversation_id=self.conversation_id,
-                agent_id=record.agent_id,
+                agent_id=payload["agent_id"],
                 status=status,
                 error=_short_debug_value(exc),
             )
@@ -292,7 +303,7 @@ class SessionAgentManager:
                 _log_agent_runtime(
                     "emit_agent_state_bridge_failed",
                     conversation_id=self.conversation_id,
-                    agent_id=record.agent_id,
+                    agent_id=payload["agent_id"],
                     status=status,
                     error=_short_debug_value(exc),
                 )
@@ -529,6 +540,20 @@ class SessionAgentManager:
             worker.request_id = record.run_id
             record.worker = worker
             self._connect_worker_signals(record)
+            if hasattr(self.journal, "ledger"):
+                from core.runtime_stream import RuntimeStream
+                run_id = record.run_id
+                def publish(payload, sequence):
+                    if record.run_id == run_id:
+                        self._publish_agent_state({**payload, "sequence": sequence})
+                    return True
+                def failed(error):
+                    record.storage_error = str(error)
+                    worker.stop()
+                    _log_agent_runtime("child_stream_failed", agent_id=record.agent_id, run_id=run_id, error=str(error))
+                record.stream = RuntimeStream(self.journal, self._journal_id(record), run_id,
+                    write=publish, detach=lambda reason: _log_agent_runtime("child_subscriber_detached", agent_id=record.agent_id, run_id=run_id, reason=reason),
+                    failed=failed, report=lambda **values: _log_agent_runtime("child_stream_batch", agent_id=record.agent_id, run_id=run_id, **values))
             self._emit_agent_state(record, "running")
             worker.start()
         except Exception as exc:
@@ -550,6 +575,11 @@ class SessionAgentManager:
             if record.worker_result_received:
                 return
             record.final_result = _json_copy(result, {})
+            if record.stream is not None:
+                record.stream.close()
+                if record.stream.error:
+                    record.storage_error = str(record.stream.error)
+                record.stream = None
             generated = [dict(m) for m in result.get("generated_messages", []) if isinstance(m, dict)]
             # Only the child's new output is merged; queued user messages remain untouched.
             for index, message in enumerate(generated):
@@ -565,28 +595,29 @@ class SessionAgentManager:
                 generated.append({"id": record.assistant_id, "role": "assistant",
                     "content": result.get("content") or record.draft_content,
                     "reasoning_content": result.get("reasoning") or record.draft_reasoning})
-            if generated:
-                self.chat_storage.merge_agent_messages(agent_id, generated, run_id=record.run_id)
-            if record.closing_requested:
-                record.status = "killed" if record.force_close else "closed"
-            elif record.interrupted:
-                record.status = "interrupted"
-            elif result.get("error") or record.storage_error:
-                record.status = "failed"
-                record.paused = True
-            else:
-                record.status = "completed"
-            record.last_result = str(result.get("content") or record.draft_content or "")
-            record.last_error = record.last_error if record.closing_requested else str(record.storage_error or result.get("error") or "")
-            record.finished_at = time.time()
-            elapsed = max(0, record.finished_at - record.meta["run_started_at"])
-            record.meta["last_duration"] = elapsed
-            record.meta["total_duration"] = record.meta.get("run_total_base", 0) + elapsed
-            self.chat_storage.settle_agent_input(agent_id, record.run_id, record.status)
-            self.journal.update_run(self._journal_id(record), record.run_id, {
-                "status": "interrupted" if record.status in {"closed", "killed", "interrupted"} else record.status,
-                "finished_at": record.finished_at})
-            self._persist_record_unlocked(record)
+            with self.journal.session_lock(self._journal_id(record), record.run_id) if hasattr(self.journal, "ledger") else nullcontext():
+                if generated:
+                    self.chat_storage.merge_agent_messages(agent_id, generated, run_id=record.run_id)
+                if record.closing_requested:
+                    record.status = "killed" if record.force_close else "closed"
+                elif record.interrupted:
+                    record.status = "interrupted"
+                elif result.get("error") or record.storage_error:
+                    record.status = "failed"
+                    record.paused = True
+                else:
+                    record.status = "completed"
+                record.last_result = str(result.get("content") or record.draft_content or "")
+                record.last_error = record.last_error if record.closing_requested else str(record.storage_error or result.get("error") or "")
+                record.finished_at = time.time()
+                elapsed = max(0, record.finished_at - record.meta["run_started_at"])
+                record.meta["last_duration"] = elapsed
+                record.meta["total_duration"] = record.meta.get("run_total_base", 0) + elapsed
+                self.chat_storage.settle_agent_input(agent_id, record.run_id, record.status)
+                self.journal.update_run(self._journal_id(record), record.run_id, {
+                    "status": "interrupted" if record.status in {"closed", "killed", "interrupted"} else record.status,
+                    "finished_at": record.finished_at})
+                self._persist_record_unlocked(record)
             self._emit_agent_state(record, record.status, content=record.last_result, error=record.last_error)
             record.worker_result_received = True
             record.final_result = None
@@ -696,10 +727,10 @@ class SessionAgentManager:
             record.paused = True
             record.interrupted = True
             record.status = "stopping" if record.worker is not None and not record.worker_result_received else "interrupted"
-            self._persist_record_unlocked(record)
-            self._emit_agent_state(record, record.status)
             if record.worker is not None:
                 record.worker.stop()
+            self._persist_record_unlocked(record)
+            self._emit_agent_state(record, record.status)
             self._condition.notify_all()
             return self._build_summary(record)
 

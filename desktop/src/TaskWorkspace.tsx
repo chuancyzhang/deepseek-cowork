@@ -15,6 +15,16 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
   const scroll = useRef<HTMLDivElement>(null), latest = useRef({value, change}); latest.current = {value, change};
   const route = [value.section, value.callId || '', value.agentId || '', value.runId || ''].join(':');
   const [revision, setRevision] = useState(0);
+  const [request, setRequest] = useState<any>(null), [requestError, setRequestError] = useState(''), [requestBusy, setRequestBusy] = useState(false);
+  useEffect(() => {setRequest(null); setRequestError(''); setRequestBusy(false);}, [cid, value.runId]);
+  const contextScope = useRef(''); contextScope.current = cid + ':' + (value.runId || '');
+  async function readRequest() {
+    const scope = contextScope.current;
+    setRequestBusy(true); setRequestError('');
+    try {const result = await call('task.context', {conversation_id: cid, run_id: value.runId}); if (contextScope.current === scope) setRequest(result);}
+    catch (failure) {if (contextScope.current === scope) setRequestError((failure as Error).message);}
+    finally {if (contextScope.current === scope) setRequestBusy(false);}
+  }
   useEffect(() => {
     let stopped = false, timer: ReturnType<typeof setTimeout>;
     async function update() {
@@ -38,7 +48,7 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
     if (scroll.current && snapshot) scroll.current.scrollTop = latest.current.value.scroll?.[route] || 0;
   }, [route, Boolean(snapshot), Boolean(child)]);
   async function copy(key: string, text: string) { try { await call('clipboard.write', {text}); setCopied(key); } catch (failure) { error((failure as Error).message); } }
-  function copyButton(key: string, text: string) { return <button className="icon-button" title="复制完整内容" onClick={() => void copy(key, text)}>{copied === key ? <Check size={14}/> : <Copy size={14}/>}</button>; }
+  function copyButton(key: string, text: string) { return <button className="icon-button" title="复制完整内容" onClick={event => {event.preventDefault(); event.stopPropagation(); void copy(key, text);}}>{copied === key ? <Check size={14}/> : <Copy size={14}/>}</button>; }
   function disclosure(id: string, title: string, content: any, defaultOpen = false) {
     const text = stringify(content);
     return <details open={value.open?.[id] ?? defaultOpen} onToggle={event => { if ((value.open?.[id] ?? defaultOpen) !== event.currentTarget.open) change({open: {...value.open, [id]: event.currentTarget.open}}); }}><summary>{title}{copyButton(id, text)}</summary><pre>{text}</pre></details>;
@@ -71,16 +81,18 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
         {selectedAgent?.control_error && <div className="inline-error">{selectedAgent.control_error}</div>}
         {child?.has_more && <button className="load-history" disabled={busy} onClick={async () => { setBusy(true); try { const older = await call('agent.get', {conversation_id: cid, agent_id: agentId, before: child.before}); setChild((prior: any) => ({...prior, before: older.before, has_more: older.has_more, messages: [...older.messages, ...prior.messages]})); } catch (failure) { error((failure as Error).message); } finally { setBusy(false); } }}>更早的消息</button>}
         {child?.messages?.map((message: any) => <article className={'child-message ' + message.role} key={message.id}><strong>{message.role === 'user' ? '你' : selectedAgent?.name || '子任务'}</strong>{message.reasoning_content && disclosure('thinking:' + message.id, '深度思考', message.reasoning_content)}<div className="markdown"><Markdown text={messageText(message.content)}/></div></article>)}
-        {child?.inbox?.filter((item: any) => item.status === 'pending').map((item: any) => <p className="muted" key={item.message_id}>待处理：{item.content}</p>)}
+        {child?.inbox?.filter((item: any) => ['pending','queued','claimed'].includes(item.status || item.state)).map((item: any) => <p className="muted" key={item.message_id}>待处理：{item.content}</p>)}
       </> : value.section === 'calls' ? <>
         {value.runId && <button className="task-current" onClick={() => change({runId: undefined, callId: undefined})}><ArrowLeft size={13}/>返回当前任务</button>}
         {snapshot?.calls?.length ? snapshot.calls.map((item: any) => <button className="call-row" key={item.id} onClick={() => change({callId: item.id})}><Wrench size={16}/><span><strong>{item.name}</strong><small>{statuses[item.status] || item.status}{item.elapsed_ms != null ? ` · ${(item.elapsed_ms / 1000).toFixed(1)} 秒` : ''}</small>{item.error && <small className="error-text">{item.error}</small>}</span><ChevronRight size={14}/></button>) : <p className="task-empty"><ListChecks size={22}/>本轮还没有工具调用</p>}
       </> : value.section === 'agents' ? snapshot?.agents?.length ? snapshot.agents.map((agent: any) => <button className="call-row" key={agent.id || agent.agent_id} onClick={() => change({agentId: agent.id || agent.agent_id})}><Users size={17}/><span><strong>{agent.name || agent.task_name || '子任务'}</strong><small>{statuses[agent.status] || agent.status}</small><small>{agent.description || agent.task || agent.meta?.task}</small></span><ChevronRight size={14}/></button>) : <p className="task-empty"><Users size={22}/>还没有子任务</p> : <div className="execution-context">
         <div className="context-heading"><strong>当前选择</strong>{copyButton('current-context', stringify(snapshot?.current_context))}</div>
-        <dl>{[['项目', conversation.meta.project_name || '独立聊天'], ['工作目录', snapshot?.current_context?.workspace], ['模型', snapshot?.current_context?.model], ['专家', snapshot?.current_context?.conversation_agent?.name || 'Cowork'], ['任务方式', snapshot?.current_context?.mode || '普通任务'], ['能力', snapshot?.current_context?.skills?.join('、') || '自动选择']].map(([label, text]) => <div key={label}><dt>{label}</dt><dd>{text || '未设置'}</dd></div>)}</dl>
+        <dl>{[['项目', conversation.meta.project_name || '独立聊天'], ['工作目录', snapshot?.current_context?.workspace], ['模型', snapshot?.current_context?.model], ['专家', snapshot?.current_context?.conversation_agent?.name || 'DeepSeek Cowork'], ['任务方式', snapshot?.current_context?.mode || '普通任务'], ['能力', snapshot?.current_context?.skills?.join('、') || '自动选择']].map(([label, text]) => <div key={label}><dt>{label}</dt><dd>{text || '未设置'}</dd></div>)}</dl>
         {disclosure('selected-references', '引用与资料', {conversations: snapshot?.current_context?.conversation_refs || [], knowledge: snapshot?.current_context?.knowledge_refs || []})}
-        <div className="context-heading"><strong>最近实际提交</strong>{snapshot?.submitted_context && copyButton('submitted-context', stringify(snapshot.submitted_context))}</div>
+        <div className="context-heading"><strong>本轮任务提交</strong>{snapshot?.submitted_context && copyButton('submitted-context', stringify(snapshot.submitted_context))}</div>
         {snapshot?.submitted_context ? <>{disclosure('submitted-context', '查看完整提交上下文', snapshot.submitted_context)}<p className="muted">来自本轮已接收的提交记录，当前选择将在下次任务生效。</p></> : <p className="muted">还没有提交任务。</p>}
+        <div className="context-heading"><strong>最近模型请求</strong>{request && copyButton('request-context', stringify(request))}<button className="text-link" disabled={requestBusy} onClick={() => void readRequest()}>{requestBusy ? '读取中…' : request ? '刷新' : '查看完整请求'}</button></div>
+        {requestError && <p className="error-text" role="alert">{requestError}</p>}{request && <>{disclosure('request-context', '请求原文', request, true)}<p className="muted">{request.scope}</p></>}
       </div>}
     </div>
     {value.agentId && selectedAgent && !childReadOnly && <div className="child-composer"><textarea aria-label="补充子任务" placeholder="给这个子任务补充要求…" value={draft.text} onChange={event => updateDraft({...draft, text: event.target.value})}/><div><span>{statuses[selectedAgent.status] || selectedAgent.status}</span>{childRunning ? <button className="icon-button" title="停止子任务" disabled={busy || selectedAgent.status === 'stopping'} onClick={() => void agentAction('agent.stop')}><Square size={14}/></button> : selectedAgent.status === 'interrupted' && <button className="secondary" disabled={busy} onClick={() => void agentAction('agent.resume')}><Play size={13}/>继续</button>}<button className="send-button" title={draft.messageId ? '重试原补充' : '发送给子任务'} disabled={busy || !draft.text.trim() && !draft.messageId} onClick={() => void agentAction('agent.send')}><ArrowUp size={17}/></button></div></div>}

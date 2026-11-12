@@ -127,6 +127,89 @@ runpy.run_module('core.desktop_service', run_name='__main__')
             self.log.close()
 
 
+class DesktopShutdownTests(unittest.TestCase):
+    def test_shutdown_completion_waits_for_saving_and_failure_keeps_retry_available(self):
+        from core.desktop_service import DesktopService
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        service = DesktopService.__new__(DesktopService)
+        service.lock = threading.RLock()
+        service.shutdown_lock = threading.Lock()
+        service.shutdown_complete = service.closing = False
+        service.streams = {}
+        service.store = SimpleNamespace(active_runs=lambda: [])
+        service.state = SimpleNamespace(update_preparing=False, prepare_update_shutdown=lambda: {"saved": True})
+        for name in ("scheduler", "messaging", "workbench", "jobs", "models", "ledger"):
+            setattr(service, name, Mock())
+        entered, release = threading.Event(), threading.Event()
+        def fail_save():
+            entered.set()
+            self.assertTrue(release.wait(5))
+            raise OSError("injected save failure")
+        service.ledger.close.side_effect = fail_save
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(service.shutdown)
+            self.assertTrue(entered.wait(5))
+            self.assertFalse(service.shutdown_complete)
+            release.set()
+            with self.assertRaisesRegex(OSError, "save failure"):
+                future.result(timeout=5)
+        self.assertFalse(service.closing)
+        self.assertFalse(service.state.update_preparing)
+        self.assertFalse(service.shutdown_complete)
+        service.ledger.close.side_effect = None
+        self.assertEqual(service.shutdown(), {"stopped": True})
+        self.assertTrue(service.shutdown_complete)
+        self.assertEqual(service.shutdown(), {"stopped": True})
+        self.assertEqual(service.ledger.close.call_count, 2)
+
+
+class DesktopStartupTests(unittest.TestCase):
+    def test_long_legacy_paths_are_reused_without_copy_or_import(self):
+        from core.chat_storage import ChatStorage
+        from core.platform_runtime import platform_runtime
+        from core.runtime_journal import RuntimeJournal
+        import sqlite3
+        from contextlib import closing
+        import shutil
+        import stat
+        directory = tempfile.mkdtemp(dir=QA_ROOT)
+        self.assertTrue(Path(directory).resolve().is_relative_to(QA_ROOT.resolve()))
+        def remove_readonly(function, path, error):
+            if not isinstance(error, PermissionError):
+                raise error
+            os.chmod(path, stat.S_IWRITE)
+            function(path)
+        self.addCleanup(shutil.rmtree, platform_runtime.filesystem_path(directory), onexc=remove_readonly)
+        root = Path(directory) / ("production-profile-" + "x" * 45)
+        history = root / "chat_history"
+        history.mkdir(parents=True)
+        original = ChatStorage(str(history / "chat_history.sqlite"))
+        original.upsert_conversation("existing", title="原历史仍在")
+        relative = Path("runtime_journal_v2/sessions") / ("a" * 64) / "attempts" / (("b" * 64) + ".json")
+        encoded = json.dumps(RuntimeJournal._envelope({"status": "completed", "text": "原运行记录"}), ensure_ascii=False).encode("utf-8")
+        source = platform_runtime.filesystem_path(history / relative)
+        source.parent.mkdir(parents=True)
+        source.write_bytes(encoded)
+        os.chmod(source, stat.S_IREAD)
+        self.assertGreater(len(str(history / relative)), 260)
+        for _ in range(2):
+            client = ServiceClient(root)
+            try:
+                self.assertEqual(Path(client.call("settings.get")["data_dir"]), root)
+                self.assertEqual(client.call("conversation.get", conversation_id="existing")["title"], "原历史仍在")
+                self.assertFalse((root / "desktop-v2").exists())
+                self.assertFalse((root / "updates/data-backups").exists())
+                with closing(sqlite3.connect(history / "chat_history.sqlite")) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM runtime_records").fetchone()[0], 0)
+                self.assertEqual(source.read_bytes(), encoded)
+                self.assertFalse(source.stat().st_mode & stat.S_IWUSR)
+            finally:
+                client.close()
+        self.assertEqual(ChatStorage(str(history / "chat_history.sqlite")).get_conversation_record("existing")["title"], "原历史仍在")
+
+
 class DesktopIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -274,8 +357,114 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertEqual(self.client.call("conversation.get", conversation_id=cid)["draft"]["text"], "下一条消息")
         self.client.wait_run(cid)
 
+    def test_host_forms_restore_encrypted_without_saving_configuration(self):
+        before = self.client.call("settings.get")
+        value = {"form:model": {"value": {"api_key": "unsaved-test-secret", "name": "待保存"}, "saved": {"name": "原设置"}}}
+        receipt = self.client.call("host.recovery.save", value=value, revision=-1)
+        self.assertEqual(self.client.call("settings.get"), before)
+        with self.assertRaises(RuntimeError):
+            self.client.call("host.recovery.save", value={}, revision=-1)
+        self.client.close()
+        self.client = ServiceClient(self.temp.name)
+        restored = self.client.call("host.recovery.get")
+        self.assertEqual(restored, {"value": value, "revision": receipt["revision"]})
+        import sqlite3
+        from contextlib import closing
+        database = Path(self.temp.name) / "chat_history/chat_history.sqlite"
+        with closing(sqlite3.connect(database)) as db:
+            encoded = db.execute("SELECT value FROM desktop_view_state WHERE key='host_forms'").fetchone()[0]
+        self.assertNotIn("unsaved-test-secret", encoded)
+
 
 class DesktopTransactionTests(unittest.TestCase):
+    def test_child_controls_keep_session_and_submission_identity(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        from core.desktop_conversations import ConversationActions
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            storage = DesktopChatStorage(str(Path(directory) / 'history.db'))
+            storage.upsert_conversation('chat', title='当前任务', meta={})
+            storage.upsert_conversation('other', title='其他任务', meta={})
+            storage.upsert_agent('child', 'chat', name='核对资料', status='running', meta={'execution_owner':'daemon'})
+            service = SimpleNamespace(storage=storage, store=DesktopStore(storage), config=Mock(),
+                request_agent=Mock(return_value={'result':{'accepted':True,'message_id':'supplement'}}))
+            actions = ConversationActions(service)
+            request = {'conversation_id':'chat','agent_id':'child','message_id':'supplement','content':'保留来源'}
+            result = actions.dispatch('agent.send', request)
+            self.assertTrue(result['accepted'])
+            self.assertEqual(service.request_agent.call_args.args[0], {
+                'action':'subagent_control','session_id':'chat','operation':'send',
+                'agent_id':'child','message_id':'supplement','content':'保留来源'})
+            with self.assertRaisesRegex(ValueError, '不属于当前会话'):
+                actions.dispatch('agent.send', {**request,'conversation_id':'other'})
+            self.assertEqual(service.request_agent.call_count, 1)
+            service.request_agent.side_effect = ConnectionError('暂时断开')
+            with self.assertRaises(ConnectionError):
+                actions.dispatch('agent.send', request)
+            self.assertEqual(service.request_agent.call_count, 2)
+            service.request_agent.side_effect = None
+            actions.dispatch('agent.stop', {'conversation_id':'chat','agent_id':'child','run_id':'child-run'})
+            self.assertEqual(service.request_agent.call_args.args[0]['run_id'], 'child-run')
+            self.assertEqual(service.request_agent.call_args.args[0]['operation'], 'interrupt')
+
+    def test_history_projection_uses_durable_draft_and_preferences_without_mutation(self):
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            storage = DesktopChatStorage(str(Path(directory) / 'history.db'))
+            store = DesktopStore(storage)
+            for cid in ['empty', 'draft', 'skills', 'cleared', 'file']:
+                storage.upsert_conversation(cid, title='新对话', meta={'workspace_dir': directory})
+            storage.update_conversation_meta('skills', {'selected_skill_names':['chosen']})
+            storage.update_conversation_meta('cleared', {'selected_skill_names':[]})
+            store.put_state('view:cleared', {'selectedSkills':['stale']})
+            store.put_state('draft:draft', {'text':'保留我的输入', 'attachments':[]})
+            store.put_state('view:file', {'editors':[{'text':'未保存', 'saved':''}]})
+            before = storage.list_conversation_summaries()
+            result = {item['id']: item for item in store.summarize_conversations(before)}
+            self.assertFalse(result['empty']['has_content'])
+            self.assertFalse(result['cleared']['has_content'])
+            self.assertTrue(result['skills']['has_content'])
+            self.assertTrue(result['file']['has_content'])
+            self.assertEqual(result['draft']['display_title'], '草稿 · 保留我的输入')
+            self.assertEqual(storage.list_conversation_summaries(), before)
+
+    def test_task_inspection_returns_call_details_and_keeps_request_snapshot_scoped(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        from core.desktop_conversations import ConversationActions
+        from core.request_snapshot import RequestSnapshotStore
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            storage = DesktopChatStorage(str(Path(directory) / 'history.db'))
+            store = DesktopStore(storage)
+            storage.upsert_conversation('chat', title='核对', meta={'selected_skill_names':['selected-now']})
+            storage.upsert_conversation('other', title='其他', meta={})
+            storage.replace_messages('chat', [
+                {'id':'a','role':'assistant','tool_calls':[{'id':'call','function':{'name':'read_file','arguments':'{"path":"a.txt"}'}}]},
+                {'id':'t','role':'tool','tool_call_id':'call','content':'读取失败','result_obj':{'error':'文件不存在'},'meta':{'duration':1.2}},
+            ])
+            service = SimpleNamespace(storage=storage, store=store, config=Mock(),
+                state=SimpleNamespace(runtime_journal=Mock()), public_run=lambda run: run, workspace=lambda cid: Path(directory))
+            service.config.get_chat_history_dir.return_value = directory
+            service.config.get_selected_model_id.return_value = 'model'
+            actions = ConversationActions(service)
+            snapshot = actions.dispatch('task.inspect', {'conversation_id':'chat'})
+            self.assertEqual(snapshot['calls'][0]['arguments'], {'path':'a.txt'})
+            self.assertEqual(snapshot['calls'][0]['status'], 'failed')
+            self.assertEqual(snapshot['calls'][0]['elapsed_ms'], 1200)
+            self.assertEqual(snapshot['current_context']['skills'], ['selected-now'])
+            self.assertIsNone(snapshot['submitted_context'])
+            requests = RequestSnapshotStore(directory)
+            requests.capture('chat','run','request','responses',{'model':'model','input':[{'role':'user','content':'完整内容'}],'api_key':'never-return'})
+            full = actions.dispatch('task.context', {'conversation_id':'chat','run_id':'run'})
+            self.assertEqual(full['parameters']['input'][0]['content'], '完整内容')
+            self.assertNotIn('api_key', full['parameters'])
+            with self.assertRaisesRegex(ValueError, '后续请求'):
+                actions.dispatch('task.context', {'conversation_id':'chat','run_id':'old'})
+            with self.assertRaises(ValueError):
+                actions.dispatch('task.context', {'conversation_id':'other'})
+
     def test_regeneration_rolls_back_history_when_dispatch_cannot_commit(self):
         from core.desktop_store import DesktopChatStorage, DesktopStore
         from core.conversation_integrity import canonical_ledger_messages_hash

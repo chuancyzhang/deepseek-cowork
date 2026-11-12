@@ -774,8 +774,8 @@ class LLMWorker(TaskWorker):
         try:
             history_dir = self.config_manager.get_chat_history_dir()
             db_path = os.path.join(history_dir, "chat_history.sqlite")
-            self.chat_storage = ChatStorage(db_path)
-            self.runtime_journal = RuntimeJournal(history_dir)
+            self.chat_storage = getattr(config_manager, "runtime_storage", None) or ChatStorage(db_path)
+            self.runtime_journal = getattr(config_manager, "runtime_journal", None) or RuntimeJournal(history_dir)
             self.runtime_run_managed = bool(
                 self.session_id
                 and self.request_id

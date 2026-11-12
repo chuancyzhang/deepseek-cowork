@@ -22,22 +22,25 @@ class AgentInboxStorage:
             raise ValueError("消息不能为空")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            previous = conn.execute("SELECT * FROM agent_inbox WHERE message_id=?", (message_id,)).fetchone()
-            if previous:
-                message = conn.execute("SELECT content FROM agent_messages WHERE id=?", (message_id,)).fetchone()
-                if previous["agent_id"] != agent_id or message["content"] != content or previous["source"] != source:
-                    raise ValueError("消息 ID 已用于另一条输入")
-                return dict(previous), False
-            owner = conn.execute("SELECT status FROM agents WHERE id=?", (agent_id,)).fetchone()
-            if not owner or owner["status"] in {"closed", "killed"}:
-                raise ValueError("子任务不存在或已关闭")
-            position = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM agent_messages WHERE agent_id=?", (agent_id,)).fetchone()[0]
-            now = time.time()
-            self._insert_message_row(conn, "agent_messages", "agent_id", agent_id,
-                                     {"id": message_id, "role": "user", "content": content, "created_at": now}, position, now)
-            conn.execute("INSERT INTO agent_inbox(message_id,agent_id,source,created_at) VALUES(?,?,?,?)", (message_id, agent_id, source, now))
-            row = conn.execute("SELECT * FROM agent_inbox WHERE message_id=?", (message_id,)).fetchone()
-            return dict(row), True
+            return self._enqueue_agent_input(conn, agent_id, content, message_id, source)
+
+    def _enqueue_agent_input(self, conn, agent_id, content, message_id, source="human"):
+        previous = conn.execute("SELECT * FROM agent_inbox WHERE message_id=?", (message_id,)).fetchone()
+        if previous:
+            message = conn.execute("SELECT content FROM agent_messages WHERE id=?", (message_id,)).fetchone()
+            if previous["agent_id"] != agent_id or message["content"] != content or previous["source"] != source:
+                raise ValueError("消息 ID 已用于另一条输入")
+            return dict(previous), False
+        owner = conn.execute("SELECT status FROM agents WHERE id=?", (agent_id,)).fetchone()
+        if not owner or owner["status"] in {"closed", "killed"}:
+            raise ValueError("子任务不存在或已关闭")
+        position = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM agent_messages WHERE agent_id=?", (agent_id,)).fetchone()[0]
+        now = time.time()
+        self._insert_message_row(conn, "agent_messages", "agent_id", agent_id,
+                                 {"id": message_id, "role": "user", "content": content, "created_at": now}, position, now)
+        conn.execute("INSERT INTO agent_inbox(message_id,agent_id,source,created_at) VALUES(?,?,?,?)", (message_id, agent_id, source, now))
+        row = conn.execute("SELECT * FROM agent_inbox WHERE message_id=?", (message_id,)).fetchone()
+        return dict(row), True
 
     def agent_inbox(self, agent_id):
         with self._connect() as conn:
@@ -46,37 +49,46 @@ class AgentInboxStorage:
     def claim_agent_input(self, agent_id, run_id):
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM agent_inbox WHERE agent_id=? AND state='queued' ORDER BY sequence LIMIT 1", (agent_id,)).fetchone()
-            if row is None:
-                return None
-            conn.execute("UPDATE agent_inbox SET state='claimed',run_id=? WHERE message_id=?", (run_id, row["message_id"]))
-            return dict(row)
+            return self._claim_agent_input(conn, agent_id, run_id)
+
+    def _claim_agent_input(self, conn, agent_id, run_id):
+        row = conn.execute("SELECT * FROM agent_inbox WHERE agent_id=? AND state='queued' ORDER BY sequence LIMIT 1", (agent_id,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE agent_inbox SET state='claimed',run_id=? WHERE message_id=?", (run_id, row["message_id"]))
+        return dict(row)
 
     def settle_agent_input(self, agent_id, run_id, outcome):
         with self._connect() as conn:
-            conn.execute("UPDATE agent_inbox SET state=? WHERE agent_id=? AND run_id=? AND state='claimed'", (outcome, agent_id, run_id))
+            return self._settle_agent_input(conn, agent_id, run_id, outcome)
+
+    def _settle_agent_input(self, conn, agent_id, run_id, outcome):
+        conn.execute("UPDATE agent_inbox SET state=? WHERE agent_id=? AND run_id=? AND state='claimed'", (outcome, agent_id, run_id))
 
     def merge_agent_messages(self, agent_id, messages, run_id=""):
         """Update only named messages, preserving positions and concurrently admitted inputs."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            position = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM agent_messages WHERE agent_id=?", (agent_id,)).fetchone()[0]
-            for ordinal, original in enumerate(messages):
-                msg = dict(original)
-                existing = conn.execute("SELECT agent_id,position,created_at FROM agent_messages WHERE id=?", (msg["id"],)).fetchone()
-                if existing and existing["agent_id"] != agent_id:
-                    raise ValueError("子任务消息身份冲突")
-                if existing:
-                    index = existing["position"]
-                    msg["created_at"] = existing["created_at"]
-                    # UPDATE through the shared serializer, within this transaction.
-                    conn.execute("DELETE FROM agent_messages WHERE id=?", (msg["id"],))
-                else:
-                    index = position
-                    position += 1
-                self._insert_message_row(conn, "agent_messages", "agent_id", agent_id, msg, index, time.time())
-                if run_id:
-                    conn.execute("INSERT OR REPLACE INTO agent_message_runs VALUES(?,?,?,?)", (msg["id"], agent_id, run_id, ordinal))
+            return self._merge_agent_messages(conn, agent_id, messages, run_id)
+
+    def _merge_agent_messages(self, conn, agent_id, messages, run_id=""):
+        position = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM agent_messages WHERE agent_id=?", (agent_id,)).fetchone()[0]
+        for ordinal, original in enumerate(messages):
+            msg = dict(original)
+            existing = conn.execute("SELECT agent_id,position,created_at FROM agent_messages WHERE id=?", (msg["id"],)).fetchone()
+            if existing and existing["agent_id"] != agent_id:
+                raise ValueError("子任务消息身份冲突")
+            if existing:
+                index = existing["position"]
+                msg["created_at"] = existing["created_at"]
+                # UPDATE through the shared serializer, within this transaction.
+                conn.execute("DELETE FROM agent_messages WHERE id=?", (msg["id"],))
+            else:
+                index = position
+                position += 1
+            self._insert_message_row(conn, "agent_messages", "agent_id", agent_id, msg, index, time.time())
+            if run_id:
+                conn.execute("INSERT OR REPLACE INTO agent_message_runs VALUES(?,?,?,?)", (msg["id"], agent_id, run_id, ordinal))
 
     def agent_execution_messages(self, agent_id):
         """Rebuild completed turns without moving queued user messages in the visible ledger."""

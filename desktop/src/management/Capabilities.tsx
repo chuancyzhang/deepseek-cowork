@@ -7,8 +7,8 @@ import SkillHub from './SkillHub';
 
 type Props = { kind: string; onError: (message: string) => void; onDirty: (value: boolean) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; openConversation: (id: string) => void };
-const titles: Record<string, string> = { skills: '技能', mcp: '工具连接', experts: '专家', favorites: '常用任务', schedule_history: '运行记录' };
-const descriptions: Record<string, string> = { skills: '按任务选择能力，也可以安装自己的技能。', mcp: '连接已有工具与服务，让 Cowork 在你的工作环境中完成任务。', experts: '保存角色、工作方法与可用技能，在对话中随时选择。', favorites: '把经常做的事保存下来，一键运行或安排时间。', schedule_history: '查看任务结果、错过的计划和需要恢复的操作。' };
+const titles: Record<string, string> = { skills: '技能', mcp: 'MCP 服务', experts: '专家', favorites: '常用任务', schedule_history: '运行记录' };
+const descriptions: Record<string, string> = { skills: '按任务选择能力，也可以安装自己的技能。', mcp: '连接已有工具与服务，让 DeepSeek Cowork 在你的工作环境中完成任务。', experts: '保存角色、工作方法与可用技能，在对话中随时选择。', favorites: '把经常做的事保存下来，一键运行或安排时间。', schedule_history: '查看任务结果、错过的计划和需要恢复的操作。' };
 
 export default function Capabilities(props: Props) {
   const { kind, onError, confirm, openConversation } = props;
@@ -32,13 +32,13 @@ export default function Capabilities(props: Props) {
   const candidates = kind === 'skills' ? items.filter(item => skillInMode(item, mode) && skillMatches(item, query)) : items.filter(item => [item.name, item.display_name, item.description, item.user_description, item.favorite_name].some(value => String(value || '').toLowerCase().includes(query.toLowerCase())));
   const rows = candidates.filter(item => kind !== 'skills' || mode !== 'library' || !scene || item.presentation?.category === scene);
   return <>
-    <PageHead title={titles[kind]} detail={descriptions[kind]}>{kind !== 'schedule_history' && <button className="primary" disabled={busy} onClick={async () => {
+    <PageHead title={titles[kind]}>{kind !== 'schedule_history' && <button className="primary" disabled={busy} onClick={async () => {
       if (kind !== 'skills') { setSelected({}); return; }
       const path = await rpc('dialog.choose', { kind: 'skill' }); if (path) await act('skills.import', { path });
     }}><Plus size={16}/>{kind === 'skills' ? '导入技能' : '新建'}</button>}</PageHead>
     {kind === 'skills' && <div className="skill-modes"><div className="segmented">{[['library','发现技能'],['mine','我的能力']].map(([key,label]) => <button key={key} className={mode === key ? 'selected' : ''} onClick={() => setMode(key)}>{label}<small>{items.filter(item => skillInMode(item,key)).length}</small></button>)}</div><button className={mode === 'builtin' ? 'selected' : ''} onClick={() => setMode('builtin')}>内置技能</button></div>}
     <div className="page-search"><Search size={17}/><input aria-label="搜索" placeholder={kind === 'skills' ? '搜索想完成的任务，例如：读 PDF、查资料、分析股票' : '搜索名称或用途'} value={query} onChange={e => setQuery(e.target.value)}/></div>
-    {kind === 'skills' && mode === 'library' && <div className="skill-categories" aria-label="技能分类">{[['','全部任务'],...skillScenes].map(([key,label]) => <button key={key} aria-pressed={scene === key} className={scene === key ? 'selected' : ''} onClick={() => setScene(key)}>{label}<small>{candidates.filter(item => !key || item.presentation?.category === key).length}</small></button>)}</div>}
+    {kind === 'skills' && mode === 'library' && <label className="skill-category-select"><span>分类</span><select aria-label="技能分类" value={scene} onChange={event => setScene(event.target.value)}>{[['','全部任务'],...skillScenes].map(([key,label]) => <option key={key} value={key}>{label} · {candidates.filter(item => !key || item.presentation?.category === key).length}</option>)}</select></label>}
     <JobProgress job={job}/>{failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {busy && !items.length ? <div className="loading"><LoaderCircle className="spin"/>正在载入…</div> : !rows.length ? <Empty title={query ? '没有匹配的内容' : '从你的第一项开始'} detail={query ? '换一个名称或用途试试。' : descriptions[kind]}/> :
     <div className={kind === 'skills' ? 'capability-grid' : 'resource-list'}>{rows.map(item => <article className="resource-card" key={item.id || item.name}>

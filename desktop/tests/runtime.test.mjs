@@ -1,10 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents } from '../src/runtime.ts';
+import { displayMessages, mergeEvents, messageGroups, replyParts } from '../src/runtime.ts';
 
 test('event cursor is scoped by run and duplicate batches are harmless', () => {
   const events = mergeEvents([{run_id:'a', sequence:1}], [{run_id:'b', sequence:1}, {run_id:'b', sequence:1}]);
   assert.equal(events.length, 2);
+});
+
+test('reply folding preserves stage text, tools, final output and user guidance order', () => {
+  const messages = [
+    {id:'u',role:'user',content:'整理资料'},
+    {id:'a',role:'assistant',content:'先读取资料',reasoning_content:'逐项检查',tool_calls:[{id:'call',function:{name:'read_file'}}],meta:{turn_id:'r'}},
+    {id:'t',role:'tool',tool_call_id:'call',content:'原文',meta:{turn_id:'r'}},
+    {id:'g',role:'user',content:'保留来源',meta:{same_turn_guidance:true,turn_id:'r'}},
+    {id:'b',role:'assistant',content:'整理完成',meta:{turn_id:'r'}},
+    {id:'c',role:'assistant',content:'下一轮',meta:{turn_id:'r2'}}
+  ];
+  const groups=messageGroups(messages);
+  assert.deepEqual(groups.map(group=>group.messages.map(message=>message.id)),[['u'],['a','t'],['g'],['b'],['c']]);
+  const parts=replyParts([messages[1],messages[2],messages[4]]);
+  assert.equal(parts.answer,messages[4]);
+  assert.equal(parts.results.get('call'),messages[2]);
+  assert.equal(parts.hasProcess,true);
+  assert.equal(replyParts([messages[1],messages[2]]).answer,undefined);
+  assert.equal(replyParts([messages[4]]).hasProcess,false);
+});
+
+test('attachment-only user messages stay visible after projection',()=>{
+  const message={id:'attachment',role:'user',content:'',meta:{desktop_attachments:[{path:'a.pdf',name:'a.pdf'}]}};
+  assert.deepEqual(displayMessages([message],[]),[message]);
+});
+
+test('reply folding retains an attachment-only answer and an empty tool result',()=>{
+  const answer={id:'file',role:'assistant',content:'',meta:{desktop_attachments:[{path:'report.pdf',name:'report.pdf'}]}};
+  const result={id:'tool',role:'tool',tool_call_id:'call',content:''};
+  assert.equal(replyParts([answer]).answer,answer);
+  const parts=replyParts([result,answer]);
+  assert.equal(parts.answer,answer);
+  assert.equal(parts.hasProcess,true);
+  assert.equal(parts.results.get('call'),result);
 });
 test('interrupted output stays before the next turn, without a false running state', () => {
   const messages = displayMessages([

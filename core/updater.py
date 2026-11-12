@@ -29,6 +29,7 @@ PUBLIC_UPDATE_PATH = "/updates/windows-x64"
 _github_api_retry_at = 0.0
 APP_EXE_NAME = "deepseek-cowork.exe"
 INTERNAL_DIR_NAME = "_internal"
+DESKTOP_EXE_NAMES = ("deepseek-cowork.exe", "Cowork.exe")
 UPDATE_DIR_NAME = "updates"
 UPDATE_PLAN_FORMAT = 1
 UPDATE_EXCLUDED_ROOTS = {"user_data"}
@@ -595,14 +596,19 @@ def find_staged_app_dir(root_dir, *, layout="qt"):
 
 def _is_valid_app_dir(path, *, layout="qt"):
     if layout == "electron":
-        return all(os.path.isfile(os.path.join(path, name)) for name in (
-            "Cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"))
+        return bool(desktop_executable(path)) and all(os.path.isfile(os.path.join(path, name)) for name in (
+            "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"))
     if layout != "qt":
         raise UpdaterError("未知的应用安装结构。")
     return (
         os.path.isfile(os.path.join(path, APP_EXE_NAME))
         and os.path.isdir(os.path.join(path, INTERNAL_DIR_NAME))
     )
+
+
+def desktop_executable(path):
+    """Resolve the branded entry while allowing updates from earlier builds."""
+    return next((name for name in DESKTOP_EXE_NAMES if os.path.isfile(os.path.join(path, name))), None)
 
 
 def _safe_extractall(archive, target_dir):

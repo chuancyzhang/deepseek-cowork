@@ -1,13 +1,14 @@
-"""Upgrade preserves existing facts and never replaces an unavailable ledger."""
+"""Direct data reuse preserves history and refuses unavailable configured paths."""
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from core.chat_storage import ChatStorage
 from core.desktop_store import DesktopChatStorage, DesktopStore
-from core.desktop_upgrade import DataLease, DesktopUpgrade
+from core.desktop_upgrade import DataLease, existing_database
 
 
 class DesktopUpgradeTests(unittest.TestCase):
@@ -25,40 +26,40 @@ class DesktopUpgradeTests(unittest.TestCase):
             self.storage._insert_message_row(db, "messages", "conversation_id", "existing",
                 {"id": "message", "role": "user", "content": "必须保留的内容", "meta": {"attachments": ["原附件.pdf"]}}, 0, 1)
 
-    def test_additive_upgrade_retains_content_and_backup_and_is_repeatable(self):
+    def test_original_database_and_resource_paths_are_reused(self):
+        managed = self.root / "conversation_workspaces" / "existing"
+        managed.mkdir(parents=True)
+        attachment = managed / "原附件.txt"
+        attachment.write_text("附件内容", encoding="utf-8")
+        original = DesktopStore(DesktopChatStorage(str(self.database)))
+        original.put_state("draft:existing", {"text": "未发送草稿", "attachments": [{"path": str(attachment)}]})
         before = self.storage.get_messages("existing")
-        upgrade = DesktopUpgrade(self.root)
-        DesktopStore(DesktopChatStorage(str(self.database)))
-        upgrade.complete()
-        self.assertEqual(self.storage.get_messages("existing"), before)
-        backup = ChatStorage(str(upgrade.backup / "chat_history.sqlite"))
-        self.assertEqual(backup.get_messages("existing"), before)
-        self.assertEqual(json.loads((upgrade.backup / "config.json").read_text())["chat_history_dir"], str(self.history))
-        self.assertIsNone(DesktopUpgrade(self.root).backup)
-
-    def test_history_change_fails_verification_and_keeps_backup(self):
-        upgrade = DesktopUpgrade(self.root)
-        with self.storage._connect() as db:
-            db.execute("UPDATE messages SET content='bad change' WHERE id='message'")
-        with self.assertRaisesRegex(RuntimeError, "历史内容变化"):
-            upgrade.complete()
-        self.assertFalse(upgrade.marker.exists())
-        backup = ChatStorage(str(upgrade.backup / "chat_history.sqlite"))
-        self.assertEqual(backup.get_messages("existing")[0]["content"], "必须保留的内容")
+        config = (self.root / "config.json").read_bytes()
+        for _ in range(2):
+            self.assertEqual(existing_database(self.root), self.database)
+            current = DesktopStore(DesktopChatStorage(str(existing_database(self.root))))
+            self.assertEqual(current.storage.get_messages("existing"), before)
+            self.assertEqual(current.get_state("draft:existing")["attachments"][0]["path"], str(attachment))
+        self.assertEqual((self.root / "config.json").read_bytes(), config)
+        self.assertFalse((self.root / "desktop-v2").exists())
+        self.assertFalse((self.root / "updates").exists())
+        current.storage.upsert_conversation("new", title="新版新增")
+        self.assertEqual(ChatStorage(str(self.database)).get_conversation_record("new")["title"], "新版新增")
 
     def test_missing_custom_history_is_not_recreated(self):
         missing = self.root / "disconnected-drive"
         (self.root / "config.json").write_text(json.dumps({"chat_history_dir": str(missing)}), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "原历史目录"):
-            DesktopUpgrade(self.root)
+            existing_database(self.root)
         self.assertFalse(missing.exists())
 
-    def test_missing_previous_database_is_not_replaced_with_empty_history(self):
-        upgrade = DesktopUpgrade(self.root)
-        upgrade.complete()
+    def test_incomplete_prior_copy_does_not_redirect_original_data(self):
+        (self.root / ".desktop-v2-abandoned").mkdir()
+        (self.root / ".desktop-upgrade.json").write_text(json.dumps({"upgrade": "native-desktop-1", "database": str(self.database)}))
+        self.assertEqual(existing_database(self.root), self.database)
         self.database.unlink()
         with self.assertRaisesRegex(RuntimeError, "历史数据库不存在"):
-            DesktopUpgrade(self.root)
+            existing_database(self.root)
         self.assertFalse(self.database.exists())
 
     def test_live_data_owner_prevents_another_service(self):

@@ -23,12 +23,14 @@ Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New 
 
 This branch uses Electron + React/TypeScript + Python + SQLite. The default entry launches Electron; the runtime and Windows service package do not require Qt. Conversations, workspace tools, categorized Skills and SkillHub, management pages, and appearance settings use the new host. See the [workspace guide](docs/user-guide.md#新版-windows-工作台) and [development/build instructions](docs/technical-design.md#electron-工作台). Native validation and releases for Apple Silicon macOS and UOS V25 are pending.
 
-1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` build and run `Cowork.exe`. Local builds are not automatically published to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); older releases retain their old entry point.
-2. Add a service and model under Settings → Models & Services, or sign in to an enterprise account. Production builds reuse the established data directory and back up the database before its first upgrade.
+1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` build and run `deepseek-cowork.exe`. Local builds are not automatically published to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); older releases retain their old entry point.
+2. Add a service and model under Settings → Models & Services, or sign in to an enterprise account. Production builds use the original configuration, conversation database, attachments, and workspaces in place; no copy or manual import is required.
 3. Start a chat, attach source material, and describe the task. Select a project directory when working on an existing project.
 4. Follow the answer and execution, then open, edit, and save deliverables in the workspace.
 
 See the [user guide](docs/user-guide.md) for detailed instructions in Chinese.
+
+The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels, editors, commands, and menus. The stable host preserves drafts and unsaved edits while background tasks continue through plugin changes.
 
 ## Run from source
 
@@ -54,7 +56,7 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-Packaging produces `desktop/out/Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#electron-工作台).
+Packaging produces `desktop/out/DeepSeek Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#electron-工作台).
 
 ## Design principles
 

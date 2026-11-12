@@ -10,12 +10,20 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 /** SQLite is authoritative; the browser journal contains only unsaved work. */
 export class Drafts {
+  listeners = new Map<string,Set<()=>void>>();
+  allListeners = new Set<()=>void>();
+  versions = new Map<string,number>();
   entries = new Map<string, Entry>();
   queues = new Map<string, Promise<any>>();
   rpc: (method: string, params: any) => Promise<any>;
   journal: Journal;
   constructor(rpc: (method: string, params: any) => Promise<any>, journal: Journal) { this.rpc = rpc; this.journal = journal; }
   key(id: string) { return 'cowork-pending-draft:' + id; }
+  subscribe(id:string, listener:()=>void) {
+    if (!this.listeners.has(id)) this.listeners.set(id,new Set());
+    this.listeners.get(id)!.add(listener); return ()=>{this.listeners.get(id)?.delete(listener);};
+  }
+  subscribeAll(listener:()=>void) {this.allListeners.add(listener);return ()=>{this.allListeners.delete(listener);};}
   get(id: string): Entry {
     if (!this.entries.has(id)) this.entries.set(id, { value: empty(), revision: -1, dirty: false, conflict: false, generation: 0 });
     return this.entries.get(id)!;
@@ -34,6 +42,9 @@ export class Drafts {
     const entry = this.get(id);
     if (entry.dirty || entry.pending) this.journal.setItem(this.key(id), JSON.stringify(entry));
     else this.journal.removeItem(this.key(id));
+    this.versions.set(id,(this.versions.get(id)||0)+1);
+    for (const listener of this.listeners.get(id)||[]) listener();
+    for (const listener of this.allListeners) listener();
   }
   change(id: string, value: Draft) {
     const entry = this.get(id);

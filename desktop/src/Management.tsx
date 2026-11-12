@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, BookOpen, Boxes, CircleUserRound, Clock3, KeyRound, LoaderCircle, Palette, Plug, Puzzle, Settings2, SlidersHorizontal, Sparkles, Star, Users, X, Check, MessageSquare, ShieldCheck, Folder, Wrench, Search } from 'lucide-react';
 import { rpc } from './managementApi';
 import type { Settings } from './types';
+import {useHostField} from './host/context';
 const Capabilities = lazy(() => import('./management/Capabilities'));
 const Preferences = lazy(() => import('./management/Preferences'));
 const Library = lazy(() => import('./management/Library'));
@@ -10,7 +11,7 @@ const Enterprise = lazy(() => import('./management/Enterprise'));
 
 export const managementNames: Record<string, string> = { capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间', settings: '设置' };
 const groups: Record<string, [string, string, any][]> = {
-  capabilities: [['skills', '技能', Sparkles], ['mcp', '工具连接', Plug], ['experts', '专家', CircleUserRound]],
+  capabilities: [['skills', '技能', Sparkles], ['mcp', 'MCP 服务', Plug], ['experts', '专家', CircleUserRound]],
   favorites: [['favorites', '常用任务', Star], ['schedule_history', '运行记录', Clock3]],
   settings: [['appearance', '外观与阅读', Palette], ['preferences', '回答偏好', MessageSquare], ['models', '模型与服务', Boxes],
     ['im', '消息连接', Plug], ['enterprise', '企业账号', Users], ['security', '数据安全', ShieldCheck], ['variables', '变量与凭据', KeyRound],
@@ -25,14 +26,14 @@ export default function Management({ route, settings, updateSettings, openConver
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
   const tabs = groups[route] || groups.settings;
-  const [tab, setTab] = useState(tabs[0][0]);
+  const [tab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
   const [dirty, setDirty] = useState(false), [query, setQuery] = useState('');
   const leave = useCallback(async () => !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1, [dirty, confirm]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
-  return <div className="management-layout">
-    {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}</nav>}
-    <div className="management-content">{route === 'capabilities' && <button className="back-link" onClick={openPlugins}><Puzzle size={16}/>界面插件与工作台</button>}<Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
+  return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>
+    {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}{route === 'capabilities' && <button className="management-plugins" onClick={openPlugins}><Puzzle size={16}/>界面插件</button>}</nav>}
+    <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'library' ? <Library {...common} onReference={onReference}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
@@ -60,15 +61,28 @@ export function JobProgress({ job }: { job: any }) {
 }
 
 export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean) => void, secrets: string[] = []) {
-  const [value, setValue] = useState<any>(() => { const saved = localStorage.getItem('form:' + key); return saved ? { ...initial, ...JSON.parse(saved) } : initial; });
-  const [saved, setSaved] = useState(initial);
+  const [entry,setEntry] = useHostField<any>('form:' + key, () => {
+    const cached=localStorage.getItem('form:' + key);
+    return {value:cached ? {...initial,...JSON.parse(cached)} : initial, saved:initial};
+  });
+  const {value,saved}=entry;
   const dirty = JSON.stringify(value) !== JSON.stringify(saved);
+  useEffect(()=>{if(!dirty&&JSON.stringify(initial)!==JSON.stringify(saved))setEntry({value:initial,saved:initial});},[initial,dirty,saved]);
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
   function change(next: any) {
-    setValue(next);
+    setEntry({...entry,value:next});
     const publicDraft = { ...next }; for (const key of secrets) delete publicDraft[key];
     localStorage.setItem('form:' + key, JSON.stringify(publicDraft));
   }
-  function done(next = value) { setSaved(next); setValue(next); localStorage.removeItem('form:' + key); onDirty(false); }
-  return { value, change, done, dirty, reset: () => done(saved) };
+  function done(next = value) {
+    let remaining = false;
+    setEntry((previous:any)=>{
+      const current=JSON.stringify(previous.value)===JSON.stringify(value)?next:previous.value;
+      remaining=JSON.stringify(current)!==JSON.stringify(next);
+      if(remaining){const cached={...current};for(const name of secrets)delete cached[name];localStorage.setItem('form:'+key,JSON.stringify(cached));}
+      else localStorage.removeItem('form:'+key);
+      return {value:current,saved:next};
+    });onDirty(remaining);
+  }
+  return { value, change, done, dirty, reset: () => {setEntry({value:saved,saved});localStorage.removeItem('form:'+key);onDirty(false);} };
 }

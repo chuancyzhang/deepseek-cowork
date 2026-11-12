@@ -2,11 +2,28 @@ import json
 import os
 import tempfile
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from core.memory_store import MemoryStore, workspace_key
 
 
 class TestMemoryStore(unittest.TestCase):
+    def test_concurrent_initialization_imports_once_without_rewriting_layout(self):
+        from core.memory_store import _atomic_write
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, 'memories.md'), 'w', encoding='utf-8') as handle:
+                handle.write('existing memory')
+            gate = threading.Barrier(8)
+            def initialize(_):
+                gate.wait()
+                return MemoryStore(root).read_summary()
+            with patch('core.memory_store._atomic_write', wraps=_atomic_write) as write:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    self.assertEqual(list(pool.map(initialize, range(8))), ['existing memory\n'] * 8)
+                self.assertEqual(write.call_count, 2)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = MemoryStore(self.temp_dir.name)

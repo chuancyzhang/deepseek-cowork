@@ -128,8 +128,8 @@ class TestAgentBootstrap(unittest.TestCase):
                 execution_authorization=authorization or ExecutionAuthorization(
                     "bootstrap-test", "run", True, ""),
             )
-            worker.observability_signal.connect(events.append)
-            worker.finished_signal.connect(finished.append)
+            worker.observability_signal.subscribe(events.append)
+            worker.finished_signal.subscribe(finished.append)
             if on_worker_ready is not None:
                 on_worker_ready(worker)
             worker.run()

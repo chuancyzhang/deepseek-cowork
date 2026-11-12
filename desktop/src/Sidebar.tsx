@@ -47,13 +47,13 @@ export default function Sidebar(props: Props) {
     menuElement.current?.querySelector('button')?.focus();
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', key); };
   }, [menu]);
-  const visible = (query.trim() ? hits : props.conversations).filter(item => archive ? item.meta.archived : !item.meta.archived);
+  const visible = (query.trim() ? hits : props.conversations).filter(item => archive ? item.meta.archived : !item.meta.archived && (query.trim() || item.has_content !== false));
   const projects = useMemo(() => {
     const groups = new Map<string, any>();
     for (const project of props.projects) if (!project.hidden && !project.archived) groups.set(pathKey(project.path), { ...project, sessions: [] });
     for (const item of props.conversations) {
       const path = item.meta.workspace_dir || item.meta.workspace_path;
-      if (!path || item.meta.workspace_source === 'chat' || item.meta.team_space_required || item.meta.archived) continue;
+      if (!path || item.has_content === false || item.meta.workspace_source === 'chat' || item.meta.team_space_required || item.meta.archived) continue;
       const key = pathKey(path);
       if (!groups.has(key)) groups.set(key, { path, name: path.split(/[\\/]/).pop(), sessions: [] });
       groups.get(key).sessions.push(item);
@@ -66,9 +66,9 @@ export default function Sidebar(props: Props) {
   function row(item: Conversation) {
     return <div key={item.id} className={`history-row ${item.id === props.selected && props.route === 'chat' ? 'selected' : ''}`}
       onContextMenu={event => { event.preventDefault(); setMenu({ item, x: Math.min(event.clientX, innerWidth - 190), y: Math.min(event.clientY, innerHeight - 210) }); }}>
-      <button className="history-select" title={item.title || '新对话'} onClick={() => props.onSelect(item.id)}>
+      <button className="history-select" title={item.display_title || item.title || '新对话'} onClick={() => props.onSelect(item.id)}>
         {props.running.has(item.id) ? <LoaderCircle size={14} className="spin" aria-label="正在运行"/> : <MessageSquare size={14}/>}
-        <span>{item.title || '新对话'}</span>
+        <span>{item.display_title || item.title || '新对话'}</span>
       </button>
       <button className="row-more icon-button" title="对话操作" aria-haspopup="menu" onClick={event => {
         const box = event.currentTarget.getBoundingClientRect(); setMenu({ item, x: box.left, y: Math.min(box.bottom + 4, innerHeight - 210) });
@@ -76,7 +76,7 @@ export default function Sidebar(props: Props) {
     </div>;
   }
   return <aside className="sidebar">
-    <div className="brand"><span className="brand-symbol">✳</span><strong>Cowork</strong><button className="icon-button" title="收起侧栏" onClick={props.onCollapse}><PanelLeftClose size={17}/></button></div>
+    <div className="brand"><span className="brand-symbol">✳</span><strong>DeepSeek Cowork</strong><button className="icon-button" title="收起侧栏" onClick={props.onCollapse}><PanelLeftClose size={17}/></button></div>
     <button className="new-chat" onClick={() => props.onNew()}><Plus size={18}/>新建聊天</button>
     <label className="search"><Search size={15}/><input aria-label="搜索项目和聊天内容" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)}/>{query && <button title="清除搜索" onClick={() => setQuery('')}><X size={13}/></button>}</label>
     <nav className="conversation-list" aria-label="项目与对话">

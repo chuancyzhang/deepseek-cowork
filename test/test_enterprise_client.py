@@ -1,7 +1,6 @@
 """Desktop boundary tests: identity binding, protected credentials, unchanged prompts."""
 import json
 import os
-import threading
 import time
 from unittest.mock import patch
 
@@ -188,10 +187,9 @@ def test_model_change_stops_old_transport_before_network(tmp_path):
 
 
 def test_invalid_enterprise_package_does_not_start_github_update(tmp_path):
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
+
     from core.update_coordinator import UpdateCoordinator
-    app = QApplication.instance() or QApplication([])
+
     (tmp_path / "enterprise_connection.json").write_text('{"unknown":1}', encoding="utf-8")
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
         coordinator = UpdateCoordinator(str(tmp_path), False, root=str(tmp_path / "updates"))
@@ -208,56 +206,6 @@ def test_broken_optional_store_does_not_hide_personal_models(tmp_path):
         personal = manager.iter_model_profiles()
         (tmp_path / "enterprise.sqlite3").write_bytes(b"broken database")
         assert manager.iter_model_profiles() == personal
-
-
-def test_enterprise_first_start_offers_login_without_contacting_center(tmp_path):
-    from types import SimpleNamespace
-    from unittest.mock import Mock
-    from ui.enterprise_connection import offer_enterprise_onboarding
-    values = {}
-    config = SimpleNamespace(data_dir=str(tmp_path), get=values.get, set=values.__setitem__)
-    parent = Mock()
-    with patch("core.enterprise_client.read_connection", return_value=CONNECTION), patch("ui.enterprise_connection.ProductMessageDialog") as dialog, patch("httpx.Client", side_effect=AssertionError("unexpected network")):
-        dialog.return_value.exec_result.return_value = "login"
-        assert offer_enterprise_onboarding(config, parent)
-        parent.open_settings.assert_called_once_with("企业账号")
-        assert values["enterprise_intro_seen"] == "company"
-        assert not offer_enterprise_onboarding(config, parent)
-    assert not (tmp_path / "enterprise.sqlite3").exists()
-
-
-def test_employee_page_has_one_browser_login_and_no_configuration_forms(tmp_path):
-    from types import SimpleNamespace
-    from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QPushButton
-    from ui.account_connections import AccountConnectionsPage
-    app = QApplication.instance() or QApplication([])
-    store = EnterpriseStore(tmp_path)
-    store.write({"connection": CONNECTION, "generation": "one", "client_id": "one-installation"})
-    with patch("httpx.Client", side_effect=AssertionError("opening the page made a network request")):
-        page = AccountConnectionsPage(config_manager=SimpleNamespace(data_dir=str(tmp_path)))
-        page.show()
-        app.processEvents()
-    try:
-        assert not page.findChildren(QComboBox)
-        assert not page.findChildren(QLineEdit)
-        assert [b.text() for b in page.findChildren(QPushButton) if b.isVisible()] == ["登录企业账号"]
-        calls = []
-        def login(provider, cancel, open_browser):
-            calls.append(provider)
-            raise EnterpriseError("模拟认证失败，重新登录即可。")
-        page.enterprise.client.login = login
-        page.enterprise.login_button.click()
-        page.enterprise.jobs.pool.shutdown(wait=True)
-        app.processEvents()
-        assert calls == [None]
-        assert page.enterprise.login_button.isVisible()
-        assert "模拟认证失败" in page.enterprise.status.text()
-        assert not page.has_pending_input()
-    finally:
-        page.enterprise.jobs.pool.shutdown(wait=True)
-        page.close()
-        page.deleteLater()
-        app.processEvents()
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8788", "http://127.0.0.1:8788", "http://[::1]:8788", "http://192.168.1.10:8788", "http://enterprise.example/cowork", "https://enterprise.example"])

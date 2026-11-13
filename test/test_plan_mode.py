@@ -321,7 +321,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION, "clarify_round_count": 2},
                 )
-                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             self.assertTrue(events)
@@ -396,7 +396,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION, "selected_skill_names": ["browser-automation"]},
                 )
-                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             prompt_event = next(event for event in events if event.get("type") == "system_prompt")
@@ -456,7 +456,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                         "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
                     },
                 )
-                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             prompt_event = next(event for event in events if event.get("type") == "system_prompt")
@@ -523,7 +523,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                         "ppt_agent_preference": PPT_AGENT_PREFERENCE_BUSINESS,
                     },
                 )
-                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             prompt_event = next(event for event in events if event.get("type") == "system_prompt")
@@ -595,7 +595,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                         "selected_skill_names": ["huashu-design"],
                     },
                 )
-                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             request_system_text = "\n".join(provider_events[0][1])
@@ -669,7 +669,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(lambda data: results.append(data))
+                worker.finished_signal.subscribe(lambda data: results.append(data))
                 worker.run()
 
             self.assertTrue(results)
@@ -887,7 +887,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(lambda payload: finished_payloads.append(payload))
+                worker.finished_signal.subscribe(lambda payload: finished_payloads.append(payload))
                 worker.run()
 
             self.assertEqual(len(provider_calls), 1)
@@ -1208,7 +1208,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION, "clarify_round_count": 3},
                 )
-                worker.finished_signal.connect(lambda payload: results.append(payload))
+                worker.finished_signal.subscribe(lambda payload: results.append(payload))
                 worker.run()
 
             self.assertTrue(results)
@@ -1303,7 +1303,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_GRILLING, "grill_round_count": round_count},
                 )
-                worker.finished_signal.connect(results.append)
+                worker.finished_signal.subscribe(results.append)
                 worker.run()
             tool_messages = [
                 msg for msg in results[0]["generated_messages"] if msg.get("role") == "tool"
@@ -1562,7 +1562,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_GRILLING, "grill_round_count": 2},
                 )
-                worker.finished_signal.connect(results.append)
+                worker.finished_signal.subscribe(results.append)
                 worker.run()
 
             self.assertEqual(provider.calls, 2)
@@ -1660,7 +1660,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_GRILLING},
                 )
-                worker.finished_signal.connect(results.append)
+                worker.finished_signal.subscribe(results.append)
                 worker.run()
 
             self.assertEqual(provider.calls, 1)

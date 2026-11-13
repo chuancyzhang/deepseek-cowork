@@ -3,24 +3,16 @@ import os
 import sqlite3
 import tempfile
 import threading
-import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("COWORK_EXTERNAL_BACKGROUND_SERVICES", "0")
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
 
 from core.chat_storage import ChatStorage
-from core.sidebar_projects import page_sidebar_search
 from core.sidebar_search import SearchCancelled, search_tokens
-from ui.history_search import HistorySearchController
-from ui.worker_lifecycle import pending_ui_workers
 
 
 class SidebarSearchStorageTests(unittest.TestCase):
@@ -216,124 +208,3 @@ class SidebarSearchStorageTests(unittest.TestCase):
         rows = self.storage.list_conversation_summaries(conversation_ids=ids, offset=3, limit=5)
         self.assertEqual([row["id"] for row in rows], [f"c{i}" for i in range(406, 401, -1)])
         self.assertEqual(self.storage.list_conversation_summaries(conversation_ids=[]), [])
-
-
-class SidebarSearchControllerTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
-    def setUp(self):
-        self.owner = QObject()
-        self.results = []
-        self.events = []
-        self.controller = HistorySearchController(self.owner, log_event=lambda *a, **k: self.events.append((a, k)))
-        self.controller.completed.connect(self.results.append)
-
-    def wait_for(self, predicate, timeout=3):
-        deadline = time.monotonic() + timeout
-        while not predicate() and time.monotonic() < deadline:
-            QTest.qWait(10)
-        self.assertTrue(predicate())
-
-    def tearDown(self):
-        self.controller.cancel()
-        worker = self.controller.worker
-        if worker:
-            worker.wait(3000)
-        self.app.processEvents()
-        self.owner.deleteLater()
-        self.app.processEvents()
-
-    def test_slow_search_does_not_block_events_and_only_latest_request_runs(self):
-        entered, release = threading.Event(), threading.Event()
-        calls = []
-
-        class Storage:
-            def search_sidebar_conversations(self, query, projects, **kwargs):
-                calls.append(query)
-                if query == "old":
-                    entered.set()
-                    release.wait(3)  # Simulate an operation that cannot be cancelled yet.
-                return [{"id": query}], {query}
-
-        ticks = []
-        timer = QTimer(self.owner)
-        timer.setInterval(5)
-        timer.timeout.connect(lambda: ticks.append(1))
-        timer.start()
-        storage = Storage()
-        self.controller.submit(storage, "old")
-        self.assertTrue(entered.wait(1))
-        self.assertTrue(pending_ui_workers(self.owner))
-        try:
-            self.controller.submit(storage, "intermediate")
-            self.controller.submit(storage, "latest")
-            QTest.qWait(80)
-            self.assertGreater(len(ticks), 3)
-            self.assertEqual(calls, ["old"])
-        finally:
-            release.set()
-        self.wait_for(lambda: self.controller.worker is None)
-        self.assertEqual(calls, ["old", "latest"])
-        self.assertEqual([result["query"] for result in self.results], ["latest"])
-        self.assertTrue(any(event[0] == ("history_search_cancelled",) for event in self.events))
-
-    def test_clear_invalidates_already_finished_queued_result(self):
-        class Storage:
-            def search_sidebar_conversations(self, *args, **kwargs):
-                return [], set()
-
-        self.controller.submit(Storage(), "query")
-        self.assertTrue(self.controller.worker.wait(1000))
-        self.controller.cancel()
-        self.app.processEvents()
-        self.assertEqual(self.results, [])
-
-    def test_failure_is_visible_and_explicit_retry_can_succeed(self):
-        class Storage:
-            fail = True
-
-            def search_sidebar_conversations(self, *args, **kwargs):
-                if self.fail:
-                    raise sqlite3.OperationalError("database is locked")
-                return [{"id": "recovered"}], {"recovered"}
-
-        storage = Storage()
-        self.controller.submit(storage, "query")
-        self.wait_for(lambda: len(self.results) == 1)
-        self.assertFalse(self.results[0]["ok"])
-        self.assertNotIn("conversations", self.results[0])
-        storage.fail = False
-        self.controller.submit(storage, "query")
-        self.wait_for(lambda: len(self.results) == 2)
-        self.assertTrue(self.results[1]["ok"])
-
-    def test_shutdown_does_not_start_pending_search(self):
-        class Storage:
-            def search_sidebar_conversations(self, *args, **kwargs):
-                return [], set()
-
-        self.controller.submit(Storage(), "first")
-        self.assertTrue(self.controller.worker.wait(1000))
-        self.controller.submit(Storage(), "pending")
-        self.controller.can_start = lambda: False
-        self.app.processEvents()
-        self.assertIsNone(self.controller.worker)
-        self.assertIsNone(self.controller.pending)
-        self.assertEqual(self.results, [])
-
-
-class SidebarSearchPageTests(unittest.TestCase):
-    def test_page_preserves_pins_and_empty_projects_without_duplicate_hits(self):
-        sessions = [{"id": str(i), "updated_at": i, "pinned": i == 1} for i in range(5)]
-        projects = [{"path": "project", "sessions": sessions}, {"path": "empty", "sessions": []}]
-        unassigned = [{"id": "solo", "pinned": True}]
-        first_projects, first_chats, hidden = page_sidebar_search(projects, unassigned, 3)
-        ids = [s["id"] for p in first_projects for s in p["sessions"]] + [s["id"] for s in first_chats]
-        self.assertEqual(set(ids), {"1", "solo", "0"})
-        self.assertEqual(hidden, 4)
-        all_projects, all_chats, hidden = page_sidebar_search(projects, unassigned, 50)
-        self.assertEqual(all_projects, projects)
-        self.assertEqual(all_chats, unassigned)
-        self.assertEqual(hidden, 0)

@@ -13,7 +13,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[1]
-QA_ROOT = ROOT / ".tmp" / "desktop" / "tests"
+QA_ROOT = Path(os.environ.get("COWORK_QA_ROOT", ROOT / ".tmp" / "desktop" / "tests"))
 QA_ROOT.mkdir(parents=True, exist_ok=True)
 
 

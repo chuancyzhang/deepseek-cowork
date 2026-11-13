@@ -2,9 +2,7 @@
 import hashlib
 import io
 import json
-import os
 import threading
-import time
 import zipfile
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,12 +12,9 @@ from unittest.mock import patch
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication
 
 from core import updater
 from core.update_coordinator import UpdateCoordinator, UpdateWorker, load_prepared, prepare_online, update_log_directory
-from ui.update_panel import UpdatePanel
 
 
 CONNECTION = {"schema_version": 1, "config_version": 1, "platform_id": "company",
@@ -44,11 +39,6 @@ def installed(path, connection=None):
     if connection:
         (path / "enterprise_connection.json").write_text(json.dumps(connection))
     return str(path)
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @contextmanager
@@ -94,7 +84,7 @@ def prepare(root, connection):
                           connection=connection, retry_delays=())
 
 
-def test_http_enterprise_download_and_install_plan_bypass_loopback_proxy(tmp_path, monkeypatch, app):
+def test_http_enterprise_download_and_install_plan_bypass_loopback_proxy(tmp_path, monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("NO_PROXY", "")
@@ -170,7 +160,7 @@ def test_invalid_download_cannot_be_prepared(tmp_path, failure):
         assert not list(tmp_path.rglob("*.download"))
 
 
-def test_community_distribution_ignores_previous_enterprise_login(tmp_path, app):
+def test_community_distribution_ignores_previous_enterprise_login(tmp_path):
     install = installed(tmp_path / "install")
     staged = installed(tmp_path / "staged")
     with patch("core.enterprise_client.EnterpriseStore.read", side_effect=AssertionError("community must not read enterprise state")):
@@ -183,7 +173,7 @@ def test_community_distribution_ignores_previous_enterprise_login(tmp_path, app)
         updater.build_update_plan(install, staged)
 
 
-def test_enterprise_source_cache_isolation_and_confirmed_connection(tmp_path, app):
+def test_enterprise_source_cache_isolation_and_confirmed_connection(tmp_path):
     install = installed(tmp_path / "install", CONNECTION)
     coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"))
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}), patch.object(coordinator, "_start"):
@@ -203,8 +193,9 @@ def test_enterprise_source_cache_isolation_and_confirmed_connection(tmp_path, ap
     assert coordinator.root == str(tmp_path / "updates")
 
 
-def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monkeypatch, app):
-    from ui.update_lifecycle import UpdateLifecycleMixin
+def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monkeypatch):
+    from core.update_startup import acknowledge_update_request, update_startup_request
+    from core.app_version import APP_VERSION
     install = installed(tmp_path / "install", CONNECTION)
     root = str(tmp_path / "updates")
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
@@ -226,11 +217,11 @@ def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monk
         (receipt.parent / "config.json").write_text(json.dumps({"id": identity, "install_dir": install}))
         (receipt.parent / "commit.json").write_text(json.dumps({"id": identity, "saved": True}))
         (receipt.parent / "transaction.json").write_text(json.dumps({"id": identity, "phase": "installed"}))
-        UpdateLifecycleMixin.acknowledge_update_startup(SimpleNamespace(update_coordinator=restarted))
+        assert acknowledge_update_request(update_startup_request(install), restarted.root, install, APP_VERSION)
         assert json.loads(receipt.read_text())["id"] == identity
 
 
-def test_account_change_before_install_requires_new_check(tmp_path, app):
+def test_account_change_before_install_requires_new_check(tmp_path):
     install = installed(tmp_path / "install", CONNECTION)
     payload = {"update_source": "online", "connection": CONNECTION, "staged_app_dir": "unused"}
     other = {**CONNECTION, "platform_id": "other"}
@@ -249,35 +240,7 @@ def test_account_change_before_install_requires_new_check(tmp_path, app):
         assert "更新来源已改变" in coordinator.state["message"]
 
 
-def test_enterprise_button_waits_for_download_then_emits_install_and_keeps_local(tmp_path, app):
-    with platform() as (connection, state), patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
-        install = installed(tmp_path / "install", connection)
-        coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"))
-        panel = UpdatePanel(coordinator)
-        installation = []
-        coordinator.installation_ready.connect(installation.append)
-        coordinator.check()
-        # The click expresses install intent while downloading; no browser is involved.
-        coordinator.publish(phase="downloading", result={"update_available": True, "release": {"tag_name": "9.0.0"}})
-        with patch("ui.update_panel.QDesktopServices.openUrl") as browser:
-            panel.act()
-            deadline = time.monotonic() + 5
-            while coordinator.worker is not None and time.monotonic() < deadline:
-                app.processEvents()
-                time.sleep(0.01)
-            assert coordinator.worker is None
-            browser.assert_not_called()
-        assert len(installation) == 1
-        assert installation[0]["change_plan"]
-        coordinator.install_aborted()
-        assert not panel.local.isHidden()
-        assert panel.local.isEnabled()
-        assert panel.primary.text() == "重启并更新"
-        panel.close()
-        panel.deleteLater()
-
-
-def test_local_enterprise_zip_needs_no_network(tmp_path, app):
+def test_local_enterprise_zip_needs_no_network(tmp_path):
     install = installed(tmp_path / "install", CONNECTION)
     path = tmp_path / "deepseek-cowork-v9.0.0.zip"
     path.write_bytes(package(CONNECTION))

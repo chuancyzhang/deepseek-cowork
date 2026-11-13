@@ -379,7 +379,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 开发态读取仓库资源，PyInstaller onedir 冻结态从 `sys._MEIPASS` 读取随包资源。运行时准备脚本获取固定版本的 Git、ripgrep 与组件；spec 扫描动态 Skill 的 `core.*` 导入并加入 hidden imports。编辑器分发资源位于 `web/editors/dist/`。
 
-`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，生成完整目录、ZIP 与 `latest-desktop-windows-x64.json`。旧 `scripts/package_release.py` 面向 Qt 版布局，不用于当前工作台。语音转文字技能、组件与打包脚本已下线；技能发现拒绝旧版残留的同名技能，历史音频文件和转写结果不删除。Word/PPT 预览由可选 LibreOffice 组件生成 PDF，通过会话绑定的异步任务发布。Windows x64 组件使用固定版本、大小与 SHA-256 校验，MSI 管理提取到应用数据目录，验证启动后原子发布，不设置系统关联。预览使用独立源文件副本与用户配置目录，缓存按源指纹及渲染程序版本隔离；取消、转换失败或源版本变化均显式报错，不转用文本预览。
+`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，生成完整目录、ZIP 与 `latest-desktop-windows-x64.json`。随后调用 `scripts/package_release.py` 审计 Electron 宿主、冻结服务、运行时、许可证、空白默认配置及两份离线编辑器的一致性；通过后生成确定性 ZIP 和带 `app_layout: electron` 的更新清单。审计报告仅在显式传入 `--report` 时生成。语音转文字技能、组件与打包脚本已下线；技能发现拒绝旧版残留的同名技能，历史音频文件和转写结果不删除。Word/PPT 预览由可选 LibreOffice 组件生成 PDF，通过会话绑定的异步任务发布。Windows x64 组件使用固定版本、大小与 SHA-256 校验，MSI 管理提取到应用数据目录，验证启动后原子发布，不设置系统关联。预览使用独立源文件副本与用户配置目录，缓存按源指纹及渲染程序版本隔离；取消、转换失败或源版本变化均显式报错，不转用文本预览。
 
 ### 更新清单
 
@@ -414,9 +414,9 @@ updates/desktop-windows-x64/cowork-desktop-v5.3.3-windows-x64.zip
 
 本轮交付范围为 Windows。Mac 与统信保留共享业务和平台边界，Electron 安装包、签名、公证和更新仍需在目标系统实现与验收；Linux 容器检查不能替代统信实机验收。
 
-仓库中的 `scripts/posix_release.py` 和原生 spec 属于此前 Qt 构建流程，尚未适配当前 Electron 入口，不作为新版构建命令。后续构建应在目标 CPU 和系统进行，使用不含 Qt 的 Python 服务与对应 Electron 运行时，沿用运行时清单的来源和摘要校验。
+Mac／统信的新宿主发行流程尚待实现。构建应在目标 CPU 和系统进行，组合 Python 服务与对应 Electron 运行时，沿用运行时清单的来源和摘要校验；旧发行流程可通过 Git 历史查阅。
 
-每个目标桌面的验收应覆盖首次启动、网页编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。底层平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；其中依赖旧 Qt 界面的用例需迁移后用于新宿主，真实 POSIX 项在 Windows 跳过。
+每个目标桌面的验收应覆盖首次启动、网页编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。底层平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；真实 POSIX 项在 Windows 跳过，不能把跳过结果作为目标平台已通过验收。
 
 ## 开发与测试
 
@@ -449,19 +449,19 @@ $env:COWORK_QA_ROOT = $taskRoot
 | 消息与运行 | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_runtime_ledger.py`、`test/test_subagent_reliable_runtime.py` |
 | 历史、项目与界面 | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs`、`desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs`、`desktop/tests/plugin-page.test.mjs` |
 | 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/browser.test.mjs`、`desktop/tests/editor-bridge.test.mjs` |
-| 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_runtime.py` |
+| 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_system_v2.py` |
 | 打包与更新 | `test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
 | 企业中心 | `test/test_enterprise_platform.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
 
-例如文档维护使用：
+文档检查覆盖当前手册、UI SDK、维护规范、本地链接及明确列出的源码路径。跨代码和文档的维护跳过仅用于纯文档任务的保护路径检查：
 
 ```powershell
-.\.venv\Scripts\python.exe -X utf8 -B scripts/check_docs.py
+.\.venv\Scripts\python.exe -X utf8 -B scripts/check_docs.py --skip-protected-diff
 .\.venv\Scripts\python.exe -X utf8 -B -m pytest -q -p no:cacheprovider test/test_documentation.py
 git diff --check
 ```
 
-Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。仓库仍保留旧 Qt 页面和测试作为迁移对照，不进入默认运行或发行包，也不能用其通过结果代替新版界面验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
+Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。Python 测试使用原生线程和事件接口，界面行为通过现行 Electron 测试验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
 
 本地并发与持久化压力使用确定性模型输出和真实文件工具，包含子任务及慢界面消费者；它不代表真实模型或网络吞吐：
 

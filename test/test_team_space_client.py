@@ -100,7 +100,7 @@ class TeamSpaceClientTests(unittest.TestCase):
                 workspace_dir=self.binding["workspace_dir"], session_id="conversation", turn_id="turn", request_id="run",
                 run_context={"team_space": {"version": 0}},
                 execution_authorization=ExecutionAuthorization("conversation", "run", True, ""))
-            worker.finished_signal.connect(results.append)
+            worker.finished_signal.subscribe(results.append)
             worker.run()
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["error_type"], "TeamSpaceError")

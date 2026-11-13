@@ -33,7 +33,6 @@ MANIFEST
 *.manifest
 *.spec
 !deepseek-cowork.spec
-!deepseek-cowork-posix.spec
 
 # Installer logs
 pip-log.txt

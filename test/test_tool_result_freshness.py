@@ -85,8 +85,8 @@ class ToolResultFreshnessTests(unittest.TestCase):
                 workspace_dir=self.root, session_id=session, request_id=run, turn_id=run,
                 run_context={"mode": "execution"},
             )
-            worker.finished_signal.connect(finished.append)
-            worker.observability_signal.connect(events.append)
+            worker.finished_signal.subscribe(finished.append)
+            worker.observability_signal.subscribe(events.append)
             worker.run()
         self.assertTrue(finished)
         self.assertNotIn("error", finished[0])

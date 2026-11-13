@@ -1,3 +1,4 @@
+from core.runtime_tasks import EventSource, TaskWorker
 import importlib.util
 import os
 import shutil
@@ -7,80 +8,36 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QObject, QCoreApplication, QThread, Signal
 
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, SessionAgentManager
 from core.chat_storage import ChatStorage
 from core.execution_authorization import ExecutionAuthorization, bind_authorization, current_authorization
 
 
-class _Signal:
-    def __init__(self):
-        self._handlers = []
-
-    def connect(self, handler, *_args, **_kwargs):
-        self._handlers.append(handler)
-
-    def emit(self, payload):
-        for handler in list(self._handlers):
-            handler(payload)
-
-
-class _FakeWorker:
+class _FakeWorker(TaskWorker):
     def __init__(self, messages, result_delay=0.05):
+        super().__init__()
         self.messages = messages
-        self.step_signal = _Signal()
-        self.thinking_signal = _Signal()
-        self.tool_call_signal = _Signal()
-        self.tool_result_signal = _Signal()
-        self.finished_signal = _Signal()
         self._result_delay = result_delay
-        self._running = False
-        self._stopped = False
+        self._stopped = threading.Event()
+        self.step_signal = EventSource()
+        self.thinking_signal = EventSource()
+        self.tool_call_signal = EventSource()
+        self.tool_result_signal = EventSource()
+        self.finished_signal = EventSource()
 
-    def start(self):
-        self._running = True
-
-        def _run():
-            time.sleep(self._result_delay)
-            if self._stopped:
-                payload = {"error": "stopped", "content": ""}
-            else:
-                last_user = ""
-                for msg in reversed(self.messages):
-                    if isinstance(msg, dict) and msg.get("role") == "user":
-                        last_user = msg.get("content") or ""
-                        break
-                payload = {
-                    "content": f"done:{last_user}",
-                    "generated_messages": [
-                        {
-                            "id": f"a-{int(time.time() * 1000)}",
-                            "role": "assistant",
-                            "content": f"done:{last_user}",
-                        }
-                    ],
-                }
-            self._running = False
-            self.finished_signal.emit(payload)
-
-        threading.Thread(target=_run, daemon=True).start()
+    def run(self):
+        self._stopped.wait(self._result_delay)
+        if self._stopped.is_set():
+            result = {"error": "stopped", "content": ""}
+        else:
+            last = next((m.get("content", "") for m in reversed(self.messages) if m.get("role") == "user"), "")
+            result = {"content": f"done:{last}", "generated_messages": [
+                {"id": f"a-{time.time_ns()}", "role": "assistant", "content": f"done:{last}"}]}
+        self.finished_signal.emit(result)
 
     def stop(self):
-        self._stopped = True
-
-    def quit(self):
-        return None
-
-    def wait(self, _timeout=0):
-        return True
-
-    def terminate(self):
-        self._stopped = True
-        self._running = False
-
-    def isRunning(self):
-        return self._running
+        self._stopped.set()
 
 
 class _ConfigStub:
@@ -112,94 +69,61 @@ class _AgentStateCapture:
             self.items.append(payload)
 
 
-class _QtEmitter(QObject):
-    finished_signal = Signal(dict)
-    step_signal = Signal(str)
-    thinking_signal = Signal(str)
-    content_signal = Signal(str)
-    output_signal = Signal(str)
-    tool_call_signal = Signal(dict)
-    tool_result_signal = Signal(dict)
-
-
-class _QtWorker:
+class _NativeWorker(TaskWorker):
     def __init__(self, messages):
+        super().__init__()
         self.messages = messages
-        self._running = False
-        self._thread = None
-        self._emitter = _QtEmitter()
-        self.finished_signal = self._emitter.finished_signal
-        self.step_signal = self._emitter.step_signal
-        self.thinking_signal = self._emitter.thinking_signal
-        self.content_signal = self._emitter.content_signal
-        self.output_signal = self._emitter.output_signal
-        self.tool_call_signal = self._emitter.tool_call_signal
-        self.tool_result_signal = self._emitter.tool_result_signal
+        self.step_signal = EventSource()
+        self.thinking_signal = EventSource()
+        self.content_signal = EventSource()
+        self.output_signal = EventSource()
+        self.tool_call_signal = EventSource()
+        self.tool_result_signal = EventSource()
+        self.finished_signal = EventSource()
 
-    def start(self):
-        self._running = True
-
-        def _run():
-            self.step_signal.emit("Turn 1: Requesting LLM...")
-            self.output_signal.emit("Provider Start: test-provider")
-            self.tool_call_signal.emit({"id": "tool-1", "name": "text_file_read", "args": {"path": "demo.txt"}})
-            self.tool_result_signal.emit(
-                {
-                    "id": "tool-1",
-                    "name": "text_file_read",
-                    "args": {"path": "demo.txt"},
-                    "result": "{\"ok\": true}",
-                    "result_obj": {"ok": True},
-                    "meta": {"duration": 0.12},
-                }
-            )
-            self.content_signal.emit("partial-output")
-            self.finished_signal.emit(
-                {
-                    "content": "done",
-                    "generated_messages": [
-                        {
-                            "id": f"qt-{int(time.time() * 1000)}",
-                            "role": "assistant",
-                            "content": "done",
-                        }
-                    ],
-                }
-            )
-            self._running = False
-
-        self._thread = threading.Thread(target=_run, daemon=True)
-        self._thread.start()
+    def run(self):
+        self.step_signal.emit("Turn 1: Requesting LLM...")
+        self.output_signal.emit("Provider Start: test-provider")
+        self.tool_call_signal.emit({"id": "tool-1", "name": "text_file_read", "args": {"path": "demo.txt"}})
+        self.tool_result_signal.emit(
+            {
+                "id": "tool-1",
+                "name": "text_file_read",
+                "args": {"path": "demo.txt"},
+                "result": "{\"ok\": true}",
+                "result_obj": {"ok": True},
+                "meta": {"duration": 0.12},
+            }
+        )
+        self.content_signal.emit("partial-output")
+        self.finished_signal.emit(
+            {
+                "content": "done",
+                "generated_messages": [
+                    {
+                        "id": f"qt-{int(time.time() * 1000)}",
+                        "role": "assistant",
+                        "content": "done",
+                    }
+                ],
+            }
+        )
 
     def stop(self):
-        return None
-
-    def quit(self):
-        return None
-
-    def wait(self, _timeout=0):
-        if self._thread:
-            self._thread.join(timeout=max((_timeout or 0) / 1000.0, 0.01))
-        return not self._running
-
-    def terminate(self):
-        self._running = False
-
-    def isRunning(self):
-        return self._running
+        pass
 
 
-class _DelayedFinishQThread(QThread):
-    finished_signal = Signal(dict)
-    step_signal = Signal(str)
-    thinking_signal = Signal(str)
-    content_signal = Signal(str)
-    output_signal = Signal(str)
-    tool_call_signal = Signal(dict)
-    tool_result_signal = Signal(dict)
+class _DelayedFinishWorker(TaskWorker):
 
     def __init__(self, messages, finish_delay=0.25):
         super().__init__()
+        self.finished_signal = EventSource()
+        self.step_signal = EventSource()
+        self.thinking_signal = EventSource()
+        self.content_signal = EventSource()
+        self.output_signal = EventSource()
+        self.tool_call_signal = EventSource()
+        self.tool_result_signal = EventSource()
         self.messages = messages
         self.finish_delay = finish_delay
         self.custom_finished_event = threading.Event()
@@ -230,19 +154,16 @@ class _DelayedFinishQThread(QThread):
 
 def _wait_until(predicate, timeout=2.0):
     deadline = time.time() + timeout
-    app = QCoreApplication.instance()
     while time.time() < deadline:
         if predicate():
             return True
-        if app:
-            app.processEvents()
         time.sleep(0.01)
     return bool(predicate())
 
 
 class TestAgentManagerTools(unittest.TestCase):
     def setUp(self):
-        self.app = QCoreApplication.instance() or QCoreApplication([])
+
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "chat_history.sqlite")
         self.storage = ChatStorage(self.db_path)
@@ -264,10 +185,6 @@ class TestAgentManagerTools(unittest.TestCase):
             self.manager.wait_agent([], timeout_ms=2000, return_when="all")
         except Exception:
             pass
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            self.app.processEvents()
-            time.sleep(0.01)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_spawn_agent_persists_record_and_transcript(self):
@@ -381,8 +298,11 @@ class TestAgentManagerTools(unittest.TestCase):
         spawned = self.manager.spawn_agent(message="close me")
         close_reason = "user requested stop"
         closed = self.manager.close_agent(spawned["agent_id"], force=True, reason=close_reason)
-        self.assertIn(closed["status"], {"closed", "killed"})
+        self.assertIn(closed["status"], {"stopping", "closed", "killed"})
+        waited = self.manager.wait_agent([spawned["agent_id"]], timeout_ms=2000, return_when="all")
+        self.assertFalse(waited["timed_out"])
         stored = self.storage.get_agent(spawned["agent_id"])
+        self.assertIn(stored["status"], {"closed", "killed"})
         self.assertEqual(stored["last_error"], close_reason)
         with self.assertRaises(ValueError):
             self.manager.send_input(spawned["agent_id"], "after close")
@@ -445,11 +365,11 @@ class TestAgentManagerTools(unittest.TestCase):
         with self.assertRaises(PermissionError):
             module.spawn_agent("x", _context={"is_subagent": True})
 
-    def test_qt_worker_logs_and_completion_are_relayed(self):
+    def test_native_worker_logs_and_completion_are_relayed(self):
         capture = _AgentStateCapture()
 
         def _factory(messages, *_args, **_kwargs):
-            return _QtWorker(messages)
+            return _NativeWorker(messages)
 
         manager = SessionAgentManager(
             self.conversation_id,
@@ -461,7 +381,7 @@ class TestAgentManagerTools(unittest.TestCase):
             max_live_agents=8,
         )
 
-        spawned = manager.spawn_agent(message="qt task", name="qt-agent")
+        spawned = manager.spawn_agent(message="native task", name="native-agent")
         waited = manager.wait_agent([spawned["agent_id"]], timeout_ms=3000, return_when="all")
         self.assertFalse(waited["timed_out"])
 
@@ -473,11 +393,11 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertIn("content", statuses)
         self.assertIn("completed", statuses)
 
-    def test_qthread_worker_is_retained_until_native_thread_finished(self):
+    def test_native_worker_is_retained_until_native_thread_finished(self):
         workers = []
 
         def _factory(messages, *_args, **_kwargs):
-            worker = _DelayedFinishQThread(messages, finish_delay=0.35)
+            worker = _DelayedFinishWorker(messages, finish_delay=0.35)
             workers.append(worker)
             return worker
 
@@ -490,7 +410,7 @@ class TestAgentManagerTools(unittest.TestCase):
             max_live_agents=8,
         )
 
-        spawned = manager.spawn_agent(message="qthread task", name="qthread-agent")
+        spawned = manager.spawn_agent(message="native thread task", name="native thread-agent")
         worker = workers[0]
         self.assertTrue(worker.custom_finished_event.wait(1.0))
 
@@ -500,19 +420,21 @@ class TestAgentManagerTools(unittest.TestCase):
             self.assertTrue(record.worker_result_received)
             self.assertTrue(record.worker_cleanup_pending)
             self.assertEqual(record.status, "completed")
-        self.assertTrue(worker.isRunning())
+        self.assertTrue(worker.is_running())
 
-        self.assertTrue(worker.wait(1500))
+        self.assertTrue(worker.join(1.5))
         self.assertTrue(_wait_until(lambda: manager._agents[spawned["agent_id"]].worker is None))
 
-    def test_pending_input_waits_for_qthread_cleanup_before_restart(self):
+    def test_pending_input_waits_for_thread_cleanup_before_restart(self):
         workers = []
         overlap_flags = []
 
         def _factory(messages, *_args, **_kwargs):
             if workers:
-                overlap_flags.append(workers[-1].isRunning())
-            worker = _DelayedFinishQThread(messages, finish_delay=0.35)
+                # Native completion observers run on the finishing thread,
+                # after run() has released its resources.
+                overlap_flags.append(not workers[-1].run_returned_event.is_set())
+            worker = _DelayedFinishWorker(messages, finish_delay=0.35)
             workers.append(worker)
             return worker
 
@@ -525,26 +447,26 @@ class TestAgentManagerTools(unittest.TestCase):
             max_live_agents=8,
         )
 
-        spawned = manager.spawn_agent(message="first qthread task", name="restart-agent")
+        spawned = manager.spawn_agent(message="first native thread task", name="restart-agent")
         first_worker = workers[0]
         self.assertTrue(first_worker.custom_finished_event.wait(1.0))
 
-        queued = manager.send_input(spawned["agent_id"], "second qthread task")
+        queued = manager.send_input(spawned["agent_id"], "second native thread task")
         self.assertEqual(queued["status"], "queued")
         time.sleep(0.05)
         self.assertEqual(len(workers), 1)
-        self.assertTrue(first_worker.isRunning())
+        self.assertTrue(first_worker.is_running())
 
-        self.assertTrue(first_worker.wait(1500))
+        self.assertTrue(first_worker.join(1.5))
         self.assertTrue(_wait_until(lambda: len(workers) == 2, timeout=2.0))
         waited = manager.wait_agent([spawned["agent_id"]], timeout_ms=3000, return_when="all")
         self.assertFalse(waited["timed_out"])
         for worker in workers:
-            worker.wait(1500)
+            worker.join(1.5)
 
         self.assertEqual(overlap_flags, [False])
         messages = self.storage.get_agent_messages(spawned["agent_id"])
-        self.assertTrue(any(msg.get("content") == "second qthread task" for msg in messages))
+        self.assertTrue(any(msg.get("content") == "second native thread task" for msg in messages))
 
 
 if __name__ == "__main__":

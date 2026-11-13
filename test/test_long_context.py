@@ -2,15 +2,11 @@ import copy
 import json
 import os
 import tempfile
-import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker, ContextSaveRequest
 from core.chat_storage import ChatStorage
 from core.context_storage import source_fingerprints
@@ -27,7 +23,7 @@ def checkpoint(refs=(), goal="finish the corrected task"):
 
 class ContextFixture(unittest.TestCase):
     def setUp(self):
-        self.app = QApplication.instance() or QApplication([])
+
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.storage = ChatStorage(os.path.join(self.temp.name, "chat_history.sqlite"))

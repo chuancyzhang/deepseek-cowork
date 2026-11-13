@@ -23,7 +23,7 @@
 
 截图用于理解布局与气质；精确参数以当前源码为准。用户明确要求优先于本文件的默认约定。只授权 UI/UX 时，复用现有事件处理与业务流程，不能借界面整理改变权限范围、消息协议、模型请求或保存规则。
 
-本文件随仓库维护，集中记录可复用的视觉、交互和实现规则；具体缺陷的原因、检查结果及截图留在对应验证记录中。引用的必要文档应随仓库提供，不能依赖未提交的本地笔记。
+本文件随仓库维护，集中记录可复用的视觉、交互和实现规则；验证结果在交付回复中说明，临时截图按仓库产物规范隔离。引用的必要文档应随仓库提供，不能依赖未提交的本地笔记。
 
 ## 2. 信息架构与任务路径
 
@@ -260,7 +260,7 @@
 - iframe 所在根容器具有明确高度；整体工作台、页面与局部面板分别使用对应的布局边界，不能依赖 iframe 默认尺寸。
 - 原生 `BrowserWindow`、`WebContentsView`、终端进程和订阅由 Electron／Python 宿主管理；React 卸载只取消对应视图订阅，不重启后台任务。
 - 回收前移除事件监听并使旧实例失效；原生网页表面在面板隐藏、插件切换及弹层显示时由宿主更新边界和可见性，避免覆盖恢复操作。
-- 旧 Qt 组件仅作迁移对照，不用于新版入口、主题刷新或生命周期验收。维护历史 Qt 代码时仍限制 QSS 作用域、显式控件归属及销毁顺序。
+- 界面生命周期通过当前 Electron 宿主和 React 组件验收；历史实现通过 Git 查阅。
 
 ## 10. 交付与验收
 
@@ -291,7 +291,7 @@ npm --prefix desktop test
 npm --prefix desktop run build
 ```
 
-服务行为使用 `test/test_desktop_service.py`、`test/test_desktop_workbench.py`、`test/test_runtime_ledger.py`；状态及插件使用 `desktop/tests/host.test.mjs`、`plugins.test.mjs` 和真实 Electron 的 `plugin-page.test.mjs`。实际窗口覆盖浅深色、小窗口、缩放、键盘、未保存编辑及插件失败恢复。旧 `render_workspace_ui_screenshots.py`、Qt 生命周期检查只保留迁移对照价值，不是新版截图或验收命令。
+服务行为使用 `test/test_desktop_service.py`、`test/test_desktop_workbench.py`、`test/test_runtime_ledger.py`；状态及插件使用 `desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs` 和真实 Electron 的 `desktop/tests/plugin-page.test.mjs`。实际窗口覆盖浅深色、小窗口、缩放、键盘、未保存编辑及插件失败恢复。
 
 截图、计时和窗口审计输出默认放在 `.tmp/<脚本名>/`，也可通过 `COWORK_QA_ROOT` 指定本次任务的临时根目录；正式操作配图经审阅后放入 `docs/images/`。验证结果在交付时报告，不保留历史验证报告与截图集。
 

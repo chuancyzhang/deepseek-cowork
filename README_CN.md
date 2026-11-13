@@ -56,9 +56,9 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，签名和公开发布需另行执行；具体步骤见[技术文档](docs/technical-design.md#electron-工作台)。
+打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，构建会审计宿主、服务、资源和默认配置后再生成 ZIP；签名和公开发布需另行执行。具体步骤见[技术文档](docs/technical-design.md#electron-工作台)。
 
-Mac／统信必须在目标系统及 CPU 上构建和验收；现有 POSIX 构建脚本不代表新宿主发行物已经就绪。
+Mac／统信的新宿主发行流程尚待实现，必须在目标系统及 CPU 上构建和验收。
 
 ## 设计思路
 

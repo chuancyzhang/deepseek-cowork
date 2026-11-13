@@ -8,7 +8,7 @@ const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const root = path.dirname(desktop);
 if (process.platform !== 'win32') throw new Error('Windows 包需要在 Windows 上构建。');
 const python = process.env.COWORK_PYTHON || path.join(root, '.venv/Scripts/python.exe');
-const qa = path.join(root, '.tmp/desktop-build');
+const qa = process.env.COWORK_QA_ROOT ? path.resolve(process.env.COWORK_QA_ROOT) : path.join(root, '.tmp/desktop-build');
 await fs.mkdir(qa, {recursive: true});
 const env = {...process.env, COWORK_BUILD_DESKTOP_SERVICE:'1', TEMP:qa, TMP:qa,
   PYINSTALLER_CONFIG_DIR:path.join(qa,'pyinstaller-cache')};
@@ -42,28 +42,7 @@ for (const output of outputs) {
   await fs.copyFile(path.join(root,'LICENSE'),path.join(output,'LICENSE-Cowork.txt'));
   await fs.copyFile(path.join(root,'images/logo.ico'),path.join(output,'resources/logo.ico'));
   await fs.writeFile(path.join(output,'desktop-release.json'), JSON.stringify({schema_version:1, app_layout:'electron', target:'windows-x64', version},null,2));
-  run(python, ['-X', 'utf8', '-c', String.raw`
-import hashlib, json, pathlib, sys, zipfile
-source = pathlib.Path(sys.argv[1])
-version = sys.argv[2]
-files = sorted(p for p in source.rglob('*') if p.is_file())
-for entry in files:
-    parts = {part.lower() for part in entry.relative_to(source).parts}
-    if parts & {'user_data', 'pyside6', 'shiboken6', '.env'} or entry.name.lower().startswith('qt6'):
-        raise RuntimeError('发行包含用户数据或旧 UI 运行时：' + str(entry.relative_to(source)))
-archive = source.parent / f'cowork-desktop-v{version}-windows-x64.zip'
-pending = archive.with_suffix('.zip.partial')
-with zipfile.ZipFile(pending, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as target:
-    for entry in files:
-        target.write(entry, source.name + '/' + entry.relative_to(source).as_posix())
-pending.replace(archive)
-with archive.open('rb') as stream:
-    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-manifest = {'schema_version': 1, 'app_layout': 'electron', 'target_os': 'windows', 'arch': 'x64',
-    'version': version, 'filename': archive.name, 'size': archive.stat().st_size, 'sha256': digest,
-    'notes': 'DeepSeek Cowork：直接复用原数据，修复启动与完整退出，支持界面插件。'}
-(source.parent / 'latest-desktop-windows-x64.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-print('发行 ZIP：' + str(archive))
-`, output, version]);
+  run(python, ['-X', 'utf8', '-B', 'scripts/package_release.py', '--dist-dir', output,
+    '--output', path.join(path.dirname(output), `cowork-desktop-v${version}-windows-x64.zip`)]);
   console.log(`Windows 工作台：${path.join(output,'deepseek-cowork.exe')}`);
 }

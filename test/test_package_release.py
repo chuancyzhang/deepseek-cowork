@@ -1,5 +1,7 @@
 import importlib.util
+from contextlib import redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -62,9 +64,11 @@ class PackageReleaseTests(unittest.TestCase):
         for relative in package_release.REQUIRED_PATHS:
             path = dist / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
-            if relative.startswith("_internal/ripgrep_env/"):
+            if relative == "desktop-release.json":
+                path.write_text(json.dumps({"schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": package_release.APP_VERSION}))
+            elif relative.startswith("resources/service/_internal/ripgrep_env/"):
                 path.write_bytes(self.rg_fixtures[path.name])
-            elif relative == "_internal/enterprise_capabilities.json":
+            elif relative == "resources/service/_internal/enterprise_capabilities.json":
                 path.write_text(json.dumps({"supported_connection_schemas": [1], "supported_platform_api_versions": [1]}), encoding="utf-8")
             elif relative.endswith("wecom_cli/bundle.json"):
                 manifest = json.loads((ROOT / "resources/wecom_cli/bundle.json").read_text(encoding="utf-8"))
@@ -110,7 +114,9 @@ class PackageReleaseTests(unittest.TestCase):
                 path.write_bytes(self.EXTENSION_FIXTURE)
             else:
                 path.write_bytes(f"fixture:{relative}".encode("utf-8"))
-        (dist / "_internal/winpty/_winpty.cp314-win_amd64.pyd").write_bytes(b"native-extension-fixture")
+        import shutil
+        shutil.copytree(dist / package_release.EDITOR_ASSET_PREFIX, dist / "resources/web/editors/dist", dirs_exist_ok=True)
+        (dist / "resources/service/_internal/winpty/_winpty.cp314-win_amd64.pyd").write_bytes(b"native-extension-fixture")
         return dist
 
     def test_audit_reports_components_and_required_runtime(self):
@@ -120,8 +126,8 @@ class PackageReleaseTests(unittest.TestCase):
             report = package_release.audit_distribution(dist)
 
             self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS) + 1)
-            self.assertTrue(any(item["name"] == "_internal/PySide6" for item in report["components"]))
-            self.assertIn("_internal/python_env/python.exe", report["required_paths"])
+            self.assertTrue(any(item["name"] == "resources/service/_internal/python_env" for item in report["components"]))
+            self.assertIn("resources/service/_internal/python_env/python.exe", report["required_paths"])
             self.assertLessEqual(
                 report["editor_assets"]["unpacked_bytes"],
                 package_release.EDITOR_MAX_UNPACKED_BYTES,
@@ -138,7 +144,7 @@ class PackageReleaseTests(unittest.TestCase):
             for missing in (False, True):
                 with self.subTest(name=name, missing=missing), tempfile.TemporaryDirectory() as temp_dir:
                     dist = self._create_minimal_dist(temp_dir)
-                    target = dist / "_internal/ripgrep_env" / name
+                    target = dist / "resources/service/_internal/ripgrep_env" / name
                     if missing:
                         target.unlink()
                     else:
@@ -165,7 +171,7 @@ class PackageReleaseTests(unittest.TestCase):
                         package_release.audit_distribution(dist)
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = self._create_minimal_dist(temp_dir)
-            (dist / "_internal/git_bash_env/mingw64/bin/libSkiaSharp.dll").unlink()
+            (dist / "resources/service/_internal/git_bash_env/mingw64/bin/libSkiaSharp.dll").unlink()
             with self.assertRaisesRegex(package_release.PackageAuditError, "libSkiaSharp"):
                 package_release.audit_distribution(dist)
 
@@ -178,6 +184,8 @@ class PackageReleaseTests(unittest.TestCase):
                 dist = self._create_minimal_dist(temp_dir)
                 artifact = (
                     dist
+                    / "resources"
+                    / "service"
                     / "_internal"
                     / "resources"
                     / "browser_skill"
@@ -188,14 +196,14 @@ class PackageReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(package_release.PackageAuditError, "SHA256"):
                     package_release.audit_distribution(dist)
 
-    def test_audit_rejects_debug_qt_resources_and_extra_locales(self):
+    def test_audit_rejects_retired_qt_and_development_resources(self):
         cases = (
-            "_internal/PySide6/resources/qtwebengine_resources.debug.pak",
-            "_internal/PySide6/translations/qtbase_fr.qm",
-            "_internal/PySide6/translations/qtwebengine_locales/fr.pak",
-            "_internal/PySide6/qml/QtQuick/qmldir",
-            "_internal/icuuc.dll",
-            "_internal/python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
+            "resources/service/_internal/PySide6/resources/qtwebengine_resources.debug.pak",
+            "resources/service/_internal/PySide6/translations/qtbase_fr.qm",
+            "resources/service/_internal/PySide6/translations/qtwebengine_locales/fr.pak",
+            "resources/service/_internal/PySide6/qml/QtQuick/qmldir",
+            "resources/service/_internal/Qt6Core.dll",
+            "resources/service/_internal/python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
         )
         for relative in cases:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp_dir:
@@ -210,25 +218,37 @@ class PackageReleaseTests(unittest.TestCase):
     def test_native_terminal_extension_is_required(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = self._create_minimal_dist(temp_dir)
-            (dist / "_internal/winpty/_winpty.cp314-win_amd64.pyd").unlink()
+            (dist / "resources/service/_internal/winpty/_winpty.cp314-win_amd64.pyd").unlink()
             with self.assertRaisesRegex(package_release.PackageAuditError, "pywinpty"):
                 package_release.audit_distribution(dist)
 
-    def test_window_render_surface_requires_python_bindings_and_qt_libraries(self):
-        for name in ("QtOpenGL.pyd", "QtQml.pyd", "QtQuick.pyd", "QtQuickWidgets.pyd",
-                     "Qt6OpenGL.dll", "Qt6Qml.dll", "Qt6Quick.dll", "Qt6QuickWidgets.dll"):
+    def test_electron_host_and_service_are_both_required(self):
+        for name in ("deepseek-cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
                 dist = self._create_minimal_dist(temp_dir)
-                (dist / "_internal/PySide6" / name).unlink()
-                with self.assertRaisesRegex(package_release.PackageAuditError, name):
+                (dist / name).unlink()
+                with self.assertRaisesRegex(package_release.PackageAuditError, "Missing required"):
                     package_release.audit_distribution(dist)
+
+    def test_electron_identity_and_editor_copies_must_agree(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dist = self._create_minimal_dist(temp_dir)
+            identity = dist / "desktop-release.json"
+            original = identity.read_text()
+            identity.write_text(original.replace('electron', 'qt'))
+            with self.assertRaisesRegex(package_release.PackageAuditError, "identity"):
+                package_release.audit_distribution(dist)
+            identity.write_text(original)
+            (dist / "resources/web/editors/dist/terminal.js").write_bytes(b"stale")
+            with self.assertRaisesRegex(package_release.PackageAuditError, "copies differ"):
+                package_release.audit_distribution(dist)
 
     def test_audit_rejects_editor_source_maps_node_modules_and_cdn_imports(self):
         cases = (
-            ("_internal/web/editors/dist/sheet-editor.js.map", b"{}"),
-            ("_internal/web/editors/node_modules/runtime.js", b"dev"),
+            ("resources/service/_internal/web/editors/dist/sheet-editor.js.map", b"{}"),
+            ("resources/service/_internal/web/editors/node_modules/runtime.js", b"dev"),
             (
-                "_internal/web/editors/dist/remote.html",
+                "resources/service/_internal/web/editors/dist/remote.html",
                 b'<script src="https://cdn.example.test/editor.js"></script>',
             ),
         )
@@ -265,7 +285,7 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
-            translation = dist / "_internal/PySide6/translations/qtbase_zh_CN.qm"
+            translation = dist / "locales/zh-CN.pak"
             translation.parent.mkdir(parents=True, exist_ok=True)
             translation.write_bytes(b"zh")
             first = root / "first.zip"
@@ -280,7 +300,7 @@ class PackageReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(first) as archive:
                 names = archive.namelist()
                 self.assertTrue(names)
-                self.assertTrue(all(name.startswith("deepseek-cowork/") for name in names))
+                self.assertTrue(all(name.startswith(package_release.ARCHIVE_ROOT + "/") for name in names))
                 self.assertEqual(
                     archive.getinfo(names[0]).date_time,
                     package_release.FIXED_ZIP_TIMESTAMP,
@@ -290,7 +310,7 @@ class PackageReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
-            output = root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip"
+            output = root / f"cowork-desktop-v{package_release.APP_VERSION}-windows-x64.zip"
             report_path = root / "report.json"
 
             report = package_release.package_release(
@@ -302,18 +322,30 @@ class PackageReleaseTests(unittest.TestCase):
             saved = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["zip_sha256"], report["zip_sha256"])
             self.assertEqual(saved["zip_bytes"], output.stat().st_size)
-            manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+            manifest = json.loads((root / "latest-desktop-windows-x64.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
             self.assertEqual(manifest["size"], output.stat().st_size)
             self.assertEqual(manifest["filename"], output.name)
             self.assertEqual(manifest["version"], package_release.APP_VERSION)
             self.assertEqual(manifest["notes"], (ROOT / "docs/releases" / f"{package_release.APP_VERSION}.md").read_text(encoding="utf-8"))
 
+    def test_packaging_entrypoint_succeeds_without_optional_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist = self._create_minimal_dist(root)
+            output = root / f"cowork-desktop-v{package_release.APP_VERSION}-windows-x64.zip"
+            with redirect_stdout(io.StringIO()) as stdout:
+                code = package_release.main(["--dist-dir", str(dist), "--output", str(output)])
+            self.assertEqual(code, 0)
+            self.assertTrue(output.is_file())
+            self.assertTrue((root / "latest-desktop-windows-x64.json").is_file())
+            self.assertNotIn("Report:", stdout.getvalue())
+
     def test_failed_archive_write_preserves_existing_release(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             dist = self._create_minimal_dist(root)
-            output = root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip"
+            output = root / f"cowork-desktop-v{package_release.APP_VERSION}-windows-x64.zip"
             output.write_bytes(b"previous-release")
 
             with patch.object(package_release, "create_deterministic_zip", side_effect=OSError("disk full")), self.assertRaises(OSError):
@@ -332,8 +364,8 @@ class PackageReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(package_release.PackageAuditError, "filename"):
                 package_release.package_release(root, root / "wrong.zip", root / "report.json")
             with patch.object(package_release, "ROOT", root), self.assertRaisesRegex(package_release.PackageAuditError, "notes"):
-                package_release.package_release(root, root / f"deepseek-cowork-v{package_release.APP_VERSION}.zip", root / "report.json")
-            self.assertFalse((root / "latest.json").exists())
+                package_release.package_release(root, root / f"cowork-desktop-v{package_release.APP_VERSION}-windows-x64.zip", root / "report.json")
+            self.assertFalse((root / "latest-desktop-windows-x64.json").exists())
 
 
 if __name__ == "__main__":

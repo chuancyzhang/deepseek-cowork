@@ -233,10 +233,9 @@ class ExecutionAuthorizationTests(unittest.TestCase):
         execute.assert_not_called()
 
     def test_atomic_response_and_cancellation_without_ui(self):
-        from PySide6.QtCore import Qt
         service = InteractionService()
         captured = []
-        service.interaction_requested.connect(captured.append, Qt.DirectConnection)
+        service.interaction_requested.subscribe(captured.append)
         stopped = threading.Event()
         result = []
         thread = threading.Thread(target=lambda: result.append(service.create_request(

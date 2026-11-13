@@ -269,7 +269,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
                                run_context={"mode": "execution"},
                                execution_authorization=ExecutionAuthorization("session-a", "test", True, ""))
-            worker.finished_signal.connect(finished.append)
+            worker.finished_signal.subscribe(finished.append)
             worker.run()
         self.assertEqual(len(finished), 1)
         self.assertNotIn("error", finished[0])
@@ -337,46 +337,6 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertEqual(merge_messages_by_id(merged, generated), merged)
         self.assertEqual(original[0]["content"], "看看这篇资料")
 
-    def test_history_restore_keeps_knowledge_context_hidden_and_one_answer(self):
-        from main import MainWindow
-        from types import SimpleNamespace, MethodType
-        from unittest.mock import Mock, MagicMock
-        from core.conversation_render import build_conversation_render_spans
-        context = knowledge_context_message({"sources": {"weknora": self.scope},
-                                             "default_source": "weknora"}, "request-a")
-        context["id"] = "context-a"
-        final_meta = {"ui_turn_group_id": "group-a", "ui_stage_id": "final-a", "ui_reply_kind": "final"}
-        messages = [
-            {"id": "user-a", "role": "user", "content": "看看这篇资料"},
-            {"id": "live-a", "role": "assistant", "content": "能看到，正文已读取。", "meta": {
-                **final_meta, "ui_visible_fragment": True, "ui_source_message_id": "answer-a"}},
-            context,
-            {"id": "answer-a", "role": "assistant", "content": "能看到，正文已读取。", "meta": final_meta},
-        ]
-        state = SimpleNamespace(session_id="history-a", messages=json.loads(json.dumps(messages)),
-                                ui_timeline_events=[], chat_layout=MagicMock())
-        state.chat_layout.count.return_value = 0
-        # Exercise the real history routing; stub only widget construction.
-        host = SimpleNamespace(render_message_batch=Mock(return_value=1),
-                               _render_history_assistant_summary=Mock(return_value=1),
-                               _message_is_office_draft_request=lambda _: False,
-                               _register_render_node=Mock(), get_session=lambda _: state,
-                               _submit_session_request=Mock(side_effect=AssertionError("History must not submit")))
-        host._render_projected_history_summary = MethodType(MainWindow._render_projected_history_summary, host)
-        for _ in range(2):
-            host.render_message_batch.reset_mock()
-            host._render_history_assistant_summary.reset_mock()
-            for span in build_conversation_render_spans(state.messages):
-                MainWindow._render_history_span(host, state, span)
-            host.render_message_batch.assert_called_once()
-            self.assertEqual(host.render_message_batch.call_args.args[0], [messages[0]])
-            host._render_history_assistant_summary.assert_called_once()
-            summary = host._render_history_assistant_summary.call_args.args[1]
-            self.assertEqual(len(summary), 1)
-            self.assertEqual(summary[0]["content"], "能看到，正文已读取。")
-            self.assertEqual(state.messages, messages)
-        self.assertEqual(MainWindow.render_message_batch(host, [context], state.session_id), 0)
-        host._submit_session_request.assert_not_called()
 
     def test_worker_result_merges_with_knowledge_context(self):
         from core.conversation_integrity import merge_messages_by_id
@@ -392,7 +352,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
             worker = LLMWorker(original, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
                                run_context={"knowledge_context": self.scope},
                                execution_authorization=ExecutionAuthorization("session-a", "test", True, ""))
-            worker.finished_signal.connect(results.append)
+            worker.finished_signal.subscribe(results.append)
             worker.run()
         self.assertTrue(results)
         self.assertNotIn("error", results[-1])
@@ -402,74 +362,6 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         merged = merge_messages_by_id(original, generated)
         self.assertEqual(merged[0], original[0])
 
-    def test_ordinary_chat_does_not_inject_knowledge_context_for_saved_connection(self):
-        from main import MainWindow
-        from types import SimpleNamespace
-        from core.knowledge_sources import MultiSourceKnowledgeService
-        from test_plan_mode import _ConfigStub
-        facade = MultiSourceKnowledgeService(self.service.store, {"weknora": self.service})
-        host = SimpleNamespace(_knowledge_service=lambda: facade)
-        state = SimpleNamespace(session_id="ordinary-chat", knowledge_refs=[], selected_skill_names=[],
-                                messages=[{"id": "user", "role": "user", "content": "分析今天的股市行情"}])
-        before = copy.deepcopy(state.messages)
-        scope = MainWindow._knowledge_snapshot(host, state)
-        self.assertIsNone(scope)
-        results, requests = [], []
-        class Provider:
-            provider_name, model_name, base_url, thinking_enabled = "stub", "stub", "", False
-            def chat_stream(self, messages, tools=None):
-                requests.append(copy.deepcopy(messages))
-                yield {"type": "content", "content": "普通回答"}
-        with patch("core.agent.SkillManager", return_value=self.manager()), patch("core.agent.LLMFactory.create_provider", return_value=Provider()):
-            worker = LLMWorker(state.messages, _ConfigStub(self.temp.name), workspace_dir=self.temp.name,
-                               run_context={"knowledge_context": scope},
-                               execution_authorization=ExecutionAuthorization("ordinary-chat", "test", True, ""))
-            worker.finished_signal.connect(results.append)
-            worker.run()
-        self.assertTrue(requests)
-        self.assertTrue(results)
-        self.assertNotIn("error", results[-1])
-        for messages in requests + [results[-1]["generated_messages"]]:
-            self.assertFalse(any((m.get("meta") or {}).get("source") == "knowledge_submission" for m in messages))
-            self.assertFalse(any("本次任务资料库范围" in str(m.get("content", "")) for m in messages))
-        self.assertEqual(state.messages, before)
-
-    def test_chat_scope_requires_refs_or_explicit_source_not_previous_messages(self):
-        from main import MainWindow
-        from types import SimpleNamespace
-        from core.knowledge_sources import MultiSourceKnowledgeService
-        facade = MultiSourceKnowledgeService(self.service.store, {"weknora": self.service})
-        host = SimpleNamespace(_knowledge_service=lambda: facade)
-        state = SimpleNamespace(session_id="chat", knowledge_refs=[], selected_skill_names=[], messages=[
-            {"role": "user", "content": "在 WeKnora 中搜索资料"},
-            {"role": "user", "content": "帮我写一首诗"},
-            knowledge_context_message(self.scope, "previous"),
-        ])
-        self.assertIsNone(MainWindow._knowledge_snapshot(host, state))
-        state.messages.append({"role": "user", "content": "在 WeKnora 中搜索产品说明"})
-        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["default_source"], "weknora")
-        state.messages.append({"role": "user", "content": "总结所选资料"})
-        state.knowledge_refs = [self.service.reference(self.scope, "kb-a", "文档", "doc-a")]
-        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["refs"], state.knowledge_refs)
-        state.knowledge_refs = []
-        self.assertIsNone(MainWindow._knowledge_snapshot(host, state))
-        state.selected_skill_names = ["weknora"]
-        self.assertEqual(MainWindow._knowledge_snapshot(host, state)["default_source"], "weknora")
-
-    def test_batch_reference_creates_one_conversation_and_saves_once(self):
-        from main import MainWindow
-        from types import SimpleNamespace
-        from unittest.mock import Mock
-        state = SimpleNamespace(session_id="batch-session", knowledge_refs=[])
-        host = SimpleNamespace(new_conversation=Mock(), get_session=lambda: state,
-                               save_chat_history=Mock(), show_conversation_page=Mock(),
-                               refresh_context_badges=Mock(), add_system_toast=Mock())
-        refs = [self.service.reference(self.scope, "kb-a", "甲", "doc-a"),
-                self.service.reference(self.scope, "kb-a", "乙", "doc-b")]
-        MainWindow.use_knowledge_reference(host, refs, "new")
-        host.new_conversation.assert_called_once()
-        host.save_chat_history.assert_called_once_with(session_id="batch-session")
-        self.assertEqual(state.knowledge_refs, refs)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration")
     def test_real_windows_dpapi_roundtrip(self):

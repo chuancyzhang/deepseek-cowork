@@ -245,7 +245,8 @@ class RuntimeCoordinator:
             self.runtime_journal.append_event(session_id, run_id, "terminal", {"status": terminal, "error": result.get("error", ""), "source": "runtime"})
             if not ui_owned:
                 self.runtime_journal.acknowledge_commit(session_id, run_id, messages)
-            payload = {"type": "final", "result": result, "session_id": session_id, "run_id": run_id}
+            payload = {"type": "final", "result": result, "session_id": session_id, "run_id": run_id,
+                       "created_at": time.time()}
             if execution_policy is not None:
                 payload["execution_policy"] = execution_policy
             event = self.runtime_journal.append_event(session_id, run_id, "final", payload)
@@ -1980,7 +1981,7 @@ class RuntimeRequest:
             except Exception as exc:
                 self._update_save_error = str(exc)
                 _log_daemon(f"runtime_finalize_failed session_id={session_id} run_id={request_id} error={exc}")
-                failure = {"type": "final", "session_id": session_id, "run_id": request_id,
+                failure = {"type": "final", "session_id": session_id, "run_id": request_id, "created_at": time.time(),
                     "result": {**result, "error": "运行结果保存失败，已持久化内容保留。",
                                "_runtime_journal_warning": str(exc)}}
                 sequence = 0

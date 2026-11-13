@@ -1,6 +1,41 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents, messageGroups, replyParts } from '../src/runtime.ts';
+import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime } from '../src/runtime.ts';
+
+test('run and reasoning durations use recorded boundaries and stay isolated by run', () => {
+  const event = (type, created_at, source_message_id='a', run_id='r') => ({type,created_at,source_message_id,run_id});
+  const events = [event('turn_started',100),event('thinking',102),event('thinking',103),event('log',104),
+    event('content',105),event('tool_call',106),event('thinking',108,'b'),event('content',110,'b'),event('final',112,'b'),
+    event('turn_started',200,'c','other'),event('thinking',202,'c','other')];
+  const turns = turnTimings(events), done = turns.get('r'), live = turns.get('other');
+  assert.equal(elapsedTime(done.start,done.end),12);
+  assert.equal(thinkingTime(done,'a'),3);
+  assert.equal(thinkingTime(done,'b'),2);
+  assert.equal(thinkingTime(live,'c'),undefined);
+  assert.equal(thinkingTime(live,'c',205),3);
+  assert.equal(elapsedTime(live.start,live.end),undefined);
+  assert.equal(elapsedTime(100,99),undefined);
+  assert.equal(turnTimings([{type:'turn_started',run_id:'old'}]).size,0);
+});
+
+test('message time survives live deltas and journal replay, with saved time authoritative', () => {
+  const first = {type:'thinking', run_id:'r', source_message_id:'a', delta:'分析', created_at:1700000000};
+  const events = [first, {type:'content',run_id:'r',source_message_id:'a',delta:'完成',created_at:1700000010}];
+  const projection = new MessageProjection();
+  assert.equal(projection.project([], [first], 'r')[0].created_at, first.created_at);
+  assert.equal(projection.project([], events, 'r')[0].created_at, first.created_at);
+  const replay = unwrapEvents(events.map((payload, i) => {const {created_at,...rest}=payload; return {payload:rest,created_at,sequence:i+1};}));
+  assert.equal(displayMessages([], replay)[0].created_at, first.created_at);
+  const saved = {id:'a',role:'assistant',content:'完成',created_at:1700000005};
+  assert.deepEqual(projection.project([saved], events), [saved]);
+  assert.equal(unwrapEvents([{payload:first,created_at:1800000000,sequence:1}])[0].created_at, first.created_at);
+});
+
+test('missing or invalid message time is never replaced with the current date', () => {
+  for (const value of [undefined, null, 0, -1, NaN, Infinity, 1e20, '1700000000']) assert.equal(messageTime(value), null);
+  assert.equal(messageTime(1700000000).iso, '2023-11-14T22:13:20.000Z');
+  assert.equal(displayMessages([], [{type:'content',run_id:'r',delta:'旧记录'}])[0].created_at, undefined);
+});
 
 test('event cursor is scoped by run and duplicate batches are harmless', () => {
   const events = mergeEvents([{run_id:'a', sequence:1}], [{run_id:'b', sequence:1}, {run_id:'b', sequence:1}]);

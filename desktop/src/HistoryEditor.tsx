@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Paperclip, Plus, X } from 'lucide-react';
 import type { Attachment } from './types';
 import { receiveAttachments } from './attachments';
@@ -14,6 +14,11 @@ export default function HistoryEditor({ conversationId, prepared, onClose, onSav
     try { const value = JSON.parse(saved); return typeof value?.text === 'string' && Array.isArray(value.attachments) ? value : {...fallback, text: saved}; } catch { return {...fallback, text: saved}; }
   });
   const latest = useRef(draft); latest.current = draft;
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const field = textarea.current;
+    if (field) {field.style.height = 'auto'; field.style.height = field.scrollHeight + 'px';}
+  }, [draft.text]);
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
   useEffect(() => { try {localStorage.setItem(key, JSON.stringify(draft));} catch {setFailure('编辑内容尚未写入本机缓存，请保存或复制当前内容。');} }, [key, draft]);
   function add(files: Attachment[]) { setDraft(previous => ({...previous, attachments: [...previous.attachments, ...files.filter(file => !previous.attachments.some(old => old.path === file.path))]})); }
@@ -24,7 +29,7 @@ export default function HistoryEditor({ conversationId, prepared, onClose, onSav
   }
   return <section className="history-editor inline-history-editor" aria-label="编辑已发送消息" onDragOver={event => event.preventDefault()} onDrop={event => {event.preventDefault(); void receiveAttachments(conversationId, [...event.dataTransfer.files]).then(add).catch(failure => onError(failure.message));}}>
     <div className="composer-contexts">{draft.attachments.map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} disabled={busy} onClick={() => setDraft({...draft, attachments: draft.attachments.filter(item => item.path !== file.path)})}><X size={12}/></button></div>)}</div>
-    <textarea aria-label="编辑消息内容" autoFocus rows={6} value={draft.text} onChange={event => setDraft({...draft, text: event.target.value})} disabled={busy} onKeyDown={event => {if (event.key === 'Escape' && !busy) onClose();}} onPaste={event => {
+    <textarea ref={textarea} aria-label="编辑消息内容" autoFocus rows={3} value={draft.text} onChange={event => setDraft({...draft, text: event.target.value})} disabled={busy} onKeyDown={event => {if (event.key === 'Escape' && !busy) onClose();}} onPaste={event => {
       const files = [...event.clipboardData.files], value = event.clipboardData.getData('text/plain');
       if (files.length) {event.preventDefault(); void receiveAttachments(conversationId, files).then(add).catch(failure => onError(failure.message));}
       else if (value.length >= 4000 || value.split('\n').length > 80) {event.preventDefault(); void receiveAttachments(conversationId, [new File([value], '粘贴文本-' + Date.now() + '.txt')]).then(add).catch(failure => {setDraft({...latest.current, text: latest.current.text + value}); onError('文字附件未保存，原文已保留在编辑区。' + failure.message);});}

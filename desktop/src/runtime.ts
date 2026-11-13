@@ -6,7 +6,62 @@ export function messageText(content: any): string {
   return '';
 }
 export function unwrapEvents(events: any[]): RuntimeEvent[] {
-  return events.map(event => event.payload ? { ...event.payload, sequence: event.sequence } : event).filter(event => typeof event.type === 'string');
+  return events.map(event => event.payload ? { ...event.payload, sequence: event.sequence, created_at: event.payload.created_at ?? event.created_at } : event).filter(event => typeof event.type === 'string');
+}
+function messageDate(createdAt?: number) {
+  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) return null;
+  const date = new Date(createdAt * 1000);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+export function messageTime(createdAt?: number) {
+  const date = messageDate(createdAt);
+  if (!date) return null;
+  return {iso: date.toISOString(), label: date.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23'}),
+    full: date.toLocaleString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'})};
+}
+type TimeInterval = {start: number; end?: number};
+export type TurnTiming = {id: string; start?: number; end?: number; thinking: Record<string, TimeInterval[]>};
+/** Measure recorded stream boundaries; missing history never starts a new clock. */
+export function turnTimings(events: RuntimeEvent[]) {
+  const turns = new Map<string, TurnTiming>(), thinking = new Map<string, {source: string; interval: TimeInterval}>();
+  for (const event of events) {
+    if (!event.run_id || !messageDate(event.created_at)) continue;
+    const time = event.created_at!;
+    const turn = turns.get(event.run_id) || {id:event.run_id, thinking:{}};
+    turns.set(event.run_id, turn);
+    if (event.type === 'turn_started') turn.start ??= time;
+    if (event.type === 'final') turn.end ??= time;
+    const source = event.source_message_id || '';
+    const open = thinking.get(event.run_id);
+    if (open && (['content', 'content_snapshot', 'tool_call', 'tool_result', 'final'].includes(event.type) || event.type === 'thinking' && source !== open.source)) {
+      if (time >= open.interval.start) open.interval.end = time;
+      thinking.delete(event.run_id);
+    }
+    if (event.type === 'thinking' && source && !thinking.has(event.run_id)) {
+      const interval = {start:time};
+      (turn.thinking[source] ||= []).push(interval);
+      thinking.set(event.run_id, {source, interval});
+    }
+  }
+  return turns;
+}
+export function elapsedTime(start?: number, end?: number) {
+  return typeof start === 'number' && typeof end === 'number' && Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : undefined;
+}
+export function thinkingTime(timing: TurnTiming | undefined, source: string, now?: number) {
+  const intervals = timing?.thinking[source];
+  if (!intervals?.length) return undefined;
+  let total = 0;
+  for (const interval of intervals) {
+    const seconds = elapsedTime(interval.start, interval.end ?? now);
+    if (seconds == null) return undefined;
+    total += seconds;
+  }
+  return total;
+}
+export function formatDuration(seconds: number) {
+  if (seconds < .1) return '<0.1 秒';
+  return seconds < 60 ? `${seconds.toFixed(1)} 秒` : `${Math.floor(seconds / 60)} 分 ${Math.floor(seconds % 60)} 秒`;
 }
 export function mergeEvents(previous: RuntimeEvent[], incoming: RuntimeEvent[]): RuntimeEvent[] {
   const key = (e: RuntimeEvent) => `${e.run_id}:${e.sequence}`;
@@ -41,7 +96,8 @@ export class MessageProjection {
       continue;
     }
     const id = event.source_message_id || `live-${event.run_id || ''}`;
-    const message = {...(live.get(id)||{ id, role: 'assistant', content: '', reasoning_content: '', tool_calls: [], live:false, meta: { turn_id: event.run_id } })};
+    const message: Message = {...(live.get(id)||{ id, role: 'assistant', content: '', reasoning_content: '', tool_calls: [], live:false, meta: { turn_id: event.run_id } })};
+    if (!messageDate(message.created_at) && messageDate(event.created_at)) message.created_at = event.created_at;
     if (event.type === 'content') message.content += event.delta || '';
     if (event.type === 'content_snapshot') message.content = event.content || '';
     if (event.type === 'thinking') message.reasoning_content += event.delta || '';

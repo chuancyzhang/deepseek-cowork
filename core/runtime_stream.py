@@ -157,6 +157,7 @@ class RuntimeStream:
     def enqueue(self, payload, *, terminal=False):
         created_at, queued_at = time.time(), time.monotonic()
         payload = copy.deepcopy(payload)
+        payload.setdefault("created_at", created_at)
         size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         urgent = payload.get("type") in self.BOUNDARIES
         with self._condition:

@@ -40,6 +40,7 @@ class RuntimeStreamTests(unittest.TestCase):
         def write(payload, sequence):
             durable = self.journal.read_events("session", "run")
             self.assertEqual(durable[sequence - 1]["payload"], payload)
+            self.assertEqual(durable[sequence - 1]["created_at"], payload["created_at"])
             sent.append((payload, sequence))
             return True
 
@@ -47,6 +48,7 @@ class RuntimeStreamTests(unittest.TestCase):
         for i in range(160):
             payload = {"type": "content", "delta": str(i), "data": {"source": i}}
             stream.enqueue(payload)
+            self.assertNotIn("created_at", payload)
             payload["data"]["source"] = -1
         stream.enqueue({"type": "tool_call", "data": {"id": "tool-1"}})
         stream.enqueue({"type": "final", "result": {"content": "done"}}, terminal=True)

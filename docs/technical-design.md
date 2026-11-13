@@ -209,7 +209,7 @@ assistant(tool_calls) → tool(A) → tool(B) → assistant(next response)
 
 Responses 的原生 Items 保存在 assistant 消息协议元数据中，下一轮按协议回放。官方 DeepSeek Responses 由服务地址与协议共同识别，处理 reasoning、message、function call 和服务端搜索；标准 OpenAI Responses 保持自己的请求配置。
 
-图片生成是模型的显式能力配置。Responses 的 `image_generation` 工具加入既有工具序列，生成图片校验后写入会话附件目录，消息保存本地图片引用与协议调用标识。
+模型原生图片生成暂时下线。`LLMFactory` 创建模型实例时统一停用此能力，旧配置、运行快照和企业模型不再自动附加 Responses `image_generation` 工具；保存的旧配置不被改写。图片输入、普通函数工具及历史图片引用与协议回放保留。受影响模型的工具前缀会变化，后续请求重新建立对应缓存。
 
 `core/llm/chat_completions_stream.py` 负责解析流分片，Provider 管理连接和请求，Agent 负责工具调度。这三个层次分别维护协议转换、传输和任务状态。
 

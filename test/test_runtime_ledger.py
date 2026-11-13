@@ -237,11 +237,14 @@ class RuntimeLedgerTests(unittest.TestCase):
         self.open()
         state = self.coordinator()
         messages = state.prepare_stream("chat", "run", "run", "daemon:test", "输入", "user", None)
-        state.finalize("chat", "run", "run", messages, {"content": "完整回复", "message_id": "answer"})
+        payload, sequence = state.finalize("chat", "run", "run", messages, {"content": "完整回复", "message_id": "answer"})
+        self.assertGreater(payload["created_at"], 0)
+        self.assertEqual(self.journal.read_events("chat", "run")[-1]["payload"], payload)
         self.assertEqual([m["content"] for m in self.storage.get_messages("chat")], ["输入", "完整回复"])
         received = []
         state.replay_stream("chat", "run", received.append)
         self.assertEqual(received[-1]["result"]["content"], "完整回复")
+        self.assertEqual(received[-1]["created_at"], payload["created_at"])
 
     def test_guidance_deduplicates_even_after_final_and_rejects_identity_reuse(self):
         self.open()

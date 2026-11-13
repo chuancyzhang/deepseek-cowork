@@ -64,6 +64,21 @@ async function createWindow() {
     backgroundColor: '#fafafa', title: 'DeepSeek Cowork', show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('context-menu', (_event, params) => {
+    if (!params.isEditable && !params.selectionText) return;
+    const flags = params.editFlags;
+    const actions = params.isEditable ? [
+      {label:'撤销', role:'undo', enabled:flags.canUndo},
+      {label:'重做', role:'redo', enabled:flags.canRedo},
+      {type:'separator'},
+      {label:'剪切', role:'cut', enabled:flags.canCut},
+      {label:'复制', role:'copy', enabled:flags.canCopy},
+      {label:'粘贴', role:'paste', enabled:flags.canPaste},
+      {type:'separator'},
+      {label:'全选', role:'selectAll', enabled:flags.canSelectAll},
+    ] : [{label:'复制', role:'copy', enabled:flags.canCopy}];
+    Menu.buildFromTemplate(actions).popup({window, frame:params.frame || undefined});
+  });
   window.webContents.on('did-start-loading', () => { uiReady = false; });
   window.webContents.on('will-navigate', (event, url) => { if (url !== entry) event.preventDefault(); });
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -139,7 +154,7 @@ else {
       if (['browser.open', 'browser.navigate', 'browser.close', 'browser.command'].includes(method)) return backend.call(method, params);
       if (method === 'browser.surface') return browserHost.show(params);
       if (method === 'clipboard.read') return clipboard.readText();
-      if (method === 'clipboard.write') { clipboard.writeText(String(params.text || '')); return { ok: true }; }
+      if (method === 'clipboard.write') { await clipboard.writeText(String(params.text || '')); return { ok: true }; }
       if (method === 'dialog.choose') {
         const filters = params.kind === 'skill' ? [{ name: '技能包', extensions: ['zip'] }]
           : params.kind === 'theme' ? [{ name: '主题', extensions: ['cowork-theme', 'json'] }] : [];

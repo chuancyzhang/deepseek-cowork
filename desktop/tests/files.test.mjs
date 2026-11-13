@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { FileHost } from '../electron/files.cjs';
 import { skillInMode, skillMatches } from '../src/skills.ts';
-import { markdownUrl, markdownFilePath } from '../src/attachments.ts';
+import { markdownUrl, markdownFilePath, remarkFileReferences } from '../src/attachments.ts';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import Markdown from 'react-markdown';
@@ -19,6 +19,17 @@ test('Markdown file links retain Windows paths while script URLs stay blocked', 
   assert.equal(markdownFilePath('进度100%.md'), '进度100%.md');
   assert.equal(markdownUrl('javascript:alert(1)'), '');
   assert.equal(markdownUrl('https://example.org'), 'https://example.org');
+});
+
+test('validated file paths link in prose and inline code without changing fenced commands', () => {
+  const path='C:\\工作目录\\文章.docx', url='file:///C:/%E5%B7%A5%E4%BD%9C%E7%9B%AE%E5%BD%95/%E6%96%87%E7%AB%A0.docx';
+  const files=[{path,url,references:[path]}];
+  const text=`文件：${path}\n\n\`${path}\`\n\n[下载](<${url}>)\n\n\`\`\`powershell\nGet-Content ${path}\n\`\`\``;
+  const rendered=renderToStaticMarkup(createElement(Markdown,{urlTransform:markdownUrl,remarkPlugins:[[remarkFileReferences,files]]},text));
+  assert.equal((rendered.match(/<a /g)||[]).length,3,rendered);
+  assert.ok(rendered.includes('<code>C:\\工作目录\\文章.docx</code></a>'),rendered);
+  assert.ok(rendered.includes('Get-Content C:\\工作目录\\文章.docx\n</code></pre>'),rendered);
+  assert.equal(markdownFilePath(url),'C:/工作目录/文章.docx');
 });
 
 test('preview URLs only expose the authorized document and bounded page assets', async () => {

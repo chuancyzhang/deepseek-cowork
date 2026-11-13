@@ -1,4 +1,4 @@
-import type { Message, RuntimeEvent } from './types';
+import type { Message, Run, RuntimeEvent } from './types';
 
 export function messageText(content: any): string {
   if (typeof content === 'string') return content;
@@ -257,6 +257,10 @@ export function replyParts(messages: Message[]) {
   const answer = last && !last.tool_calls?.length && last.meta?.ui_reply_kind !== 'stage' ? last : undefined;
   const results = new Map(messages.filter(message => message.role === 'tool').map(message => [message.tool_call_id, message]));
   return {answer, results, hasProcess: messages.some(message => message.role === 'tool' || message.reasoning_content || message.tool_calls?.length || message !== answer && messageText(message.content))};
+}
+
+export function isUserStopped(run?: Pick<Run, 'status' | 'error'> | null) {
+  return run?.status === 'interrupted' && /^(?:run )?interrupted by user\.?$/i.test(run.error.trim());
 }
 
 export function runErrorSummary(error: string) {

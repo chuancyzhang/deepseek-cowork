@@ -2,11 +2,11 @@ import { memo, useRef, useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, GitBranch, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
-import type { Message } from './types';
+import type { FileReference, Message } from './types';
 import { messageText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
-import { markdownFilePath, markdownUrl } from './attachments';
+import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
 
 function CodeBlock({ children }: { children?: React.ReactNode }) {
@@ -19,8 +19,8 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
   }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button><pre ref={source}>{children}</pre>{failure && <p className="error-text" role="alert">{failure}</p>}</div>;
 }
 
-export function Markdown({ text, onFile }: { text: string; onFile?: (path: string) => void }) {
-  return <ReactMarkdown urlTransform={markdownUrl} remarkPlugins={[remarkGfm]} components={{
+export function Markdown({ text, onFile, files = [] }: { text: string; onFile?: (path: string) => void; files?: FileReference[] }) {
+  return <ReactMarkdown urlTransform={markdownUrl} remarkPlugins={[remarkGfm, [remarkFileReferences, files]]} components={{
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     a: ({ href, children }) => <button className="text-link" onClick={() => {
       if (!href) return;
@@ -45,6 +45,7 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const [filesExpanded, setFilesExpanded] = useHostField('message-files:' + cid + ':' + message.id, false);
   const [more, setMore] = useState(false), [failure, setFailure] = useState('');
   const menu = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -58,6 +59,8 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   const files = message.meta?.desktop_attachments || (message.meta?.user_added_files || []).map((path: string) => ({ path, name: path.split(/[\\/]/).pop() }));
   const references = message.role === 'user' ? message.meta?.conversation_refs || [] : [];
   const context = message.role === 'user' ? message.meta?.ui_context || {} : {};
+  const referencedFiles = (message.file_references || []).filter(file => file.references.some(reference => text.includes(reference)));
+  const documents = referencedFiles.filter(file => file.kind !== 'image');
   if (message.role === 'tool') return <button className="message-tool-link" onClick={() => onAction('tool', message)}><Wrench size={14}/><span>{message.meta?.tool_name || '工具结果'}</span><ChevronDown size={13}/></button>;
   return <article id={'message-' + message.id} className={`message ${message.role}`}>
     <div className="message-body">
@@ -69,7 +72,8 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
     {!answerOnly && !!message.reasoning_content && <Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<><Sparkles size={13}/>深度思考</>}><div className="markdown"><Markdown text={message.reasoning_content} onFile={onFile}/></div></Disclosure>}
     {!answerOnly && !!message.tool_calls?.length && <div className="message-tool-calls">{message.tool_calls.map((tool, index) => <button className="message-tool-link" key={tool.id || index} onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><Wrench size={14}/><span>{tool.function?.name || tool.name || '工具调用'}</span><ChevronDown size={13}/></button>)}</div>}
     {!!files.length && <div className="message-files">{files.map((file: any) => <button key={file.path} title={file.path} onClick={() => onFile(file.path)}><FileText size={14}/>{file.name}</button>)}</div>}
-    {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} onFile={onFile}/>)}</div>}
+    {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} onFile={onFile} files={referencedFiles}/>)}</div>}
+    {documents.length > 0 && <section className="message-file-table" aria-label="回复中的文件"><strong>共 {documents.length} 个文件</strong>{(filesExpanded ? documents : documents.slice(0,3)).map(file => <button key={file.path} title={file.path} aria-label={'打开文件 ' + file.name} onClick={() => onFile(file.path)}><FileText size={16}/><span>{file.name}</span><small>{file.label}</small></button>)}{documents.length > 3 && <button className="message-files-toggle" onClick={() => setFilesExpanded(!filesExpanded)}>{filesExpanded ? '收起文件列表' : `再显示 ${documents.length - 3} 个文件`}</button>}</section>}
     </div>
     <div className="message-footer"><MessageTimestamp createdAt={message.created_at}/><div className="message-actions">
       <button title="复制消息" aria-label="复制消息" onClick={async () => { try {await window.cowork.call('clipboard.write', {text}); setCopied(true); setFailure(''); setTimeout(() => setCopied(false), 1500);} catch (error) {setFailure('复制未完成：' + (error as Error).message);} }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
@@ -82,8 +86,8 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
 });
 export default MessageBubble;
 
-export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}}: {
-  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: () => void;
+export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}}: {
+  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: () => void;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const hasProcess = messageProcess || questions.length > 0;
@@ -116,14 +120,14 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
   }
   return <section className="assistant-turn">
     {expert && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}
-    {hasProcess && <div className="reply-process"><button className="process-summary" aria-expanded={open} disabled={pending} onClick={() => setExpanded(!open)}>{running ? <LoaderCircle className="spin" size={14}/> : <Sparkles size={14}/>}<span>{running ? statusLabel : '执行过程'}</span>{duration != null && <small className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</small>}<ChevronRight size={13} className={open ? 'rotated' : ''}/></button>{open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
+    {hasProcess && <div className="reply-process"><button className="process-summary" aria-expanded={open} disabled={pending} onClick={() => setExpanded(!open)}>{running ? <LoaderCircle className="spin" size={14}/> : <Sparkles size={14}/>}<span>{running ? statusLabel : stopped ? '已停止' : '执行过程'}</span>{duration != null && <small className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</small>}<ChevronRight size={13} className={open ? 'rotated' : ''}/></button>{open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
       {!!message.reasoning_content && <div className="process-step"><Sparkles className="timeline-node" size={14}/><Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<>深度思考{thoughtDuration(message)}</>}><div className="markdown"><Markdown text={message.reasoning_content} onFile={onFile}/><button className="text-link" onClick={() => void window.cowork.call('clipboard.write', {text: message.reasoning_content})}>复制思考原文</button></div></Disclosure></div>}
-      {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} onFile={onFile}/></div>}
+      {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} onFile={onFile} files={message.file_references}/></div>}
       {message.tool_calls?.map(tool => toolRow(message, tool, results.get(tool.id)))}
       {message.role === 'tool' && !callIds.has(message.tool_call_id) && toolRow(message, {id: message.tool_call_id}, message)}
       {questions.filter(question => !question.callId && question.sourceId === (message.meta?.ui_source_message_id || message.id)).map(questionRow)}
     </div>)}{questions.filter(question => question.callId ? !callIds.has(question.callId) && !messages.some(message => message.tool_call_id === question.callId) : !messages.some(message => (message.meta?.ui_source_message_id || message.id) === question.sourceId)).map(questionRow)}</div>}</div>}
-    {!hasProcess && duration != null && <div className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</div>}
+    {!hasProcess && (stopped || duration != null) && <div className="process-duration">{stopped && '已停止'}{duration != null && <>{stopped && ' · '}{running ? '已用时' : '用时'} {formatDuration(duration)}</>}</div>}
     {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly/>}
   </section>;
 }

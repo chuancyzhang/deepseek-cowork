@@ -481,11 +481,16 @@ export function useWorkbenchController() {
     try { await saveView(); setActiveFile(path); changeWorkspace({selected: 'file:' + path}); } catch (failure) { error((failure as Error).message); }
   }
   async function openFile(path: string) {
+    const id = selectedId.current;
     try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
+    if (selectedId.current !== id) return;
     if (editors.some(e => e.file.path === path)) { setActiveFile(path); changeWorkspace({selected: 'file:' + path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true); return; }
     try {
-      const id = selectedId.current;
       const file = await call<FileSession>('file.open', { conversation_id: id, path });
+      if (selectedId.current !== id) return;
+      if (editorsRef.current.some(item => item.file.path === file.path)) {
+        setActiveFile(file.path); changeWorkspace({selected:'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen:false} : {})}); setWorkspaceOpen(true); return;
+      }
 
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       if (selectedId.current !== id) return;

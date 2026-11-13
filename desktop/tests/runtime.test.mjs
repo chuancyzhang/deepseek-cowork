@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords } from '../src/runtime.ts';
+import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped } from '../src/runtime.ts';
+
+test('only explicit user cancellation suppresses the error notice', () => {
+  for (const error of ['interrupted by user', 'Run interrupted by user.']) assert.equal(isUserStopped({status:'interrupted',error}),true);
+  for (const error of ['应用上次退出时任务尚未结束', '对话保存冲突', 'connection timeout', '']) assert.equal(isUserStopped({status:'interrupted',error}),false);
+  assert.equal(isUserStopped({status:'failed',error:'Run interrupted by user.'}),false);
+  assert.equal(isUserStopped(null),false);
+});
 
 test('run and reasoning durations use recorded boundaries and stay isolated by run', () => {
   const event = (type, created_at, source_message_id='a', run_id='r') => ({type,created_at,source_message_id,run_id});

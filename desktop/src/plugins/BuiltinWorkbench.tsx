@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense } from 'react';
 import { ArrowUp, Square, Plus, Search, ChartColumn, History, Settings as SettingsIcon, PanelsTopLeft, Folder, FileText, ChevronRight, ChevronDown, X, Copy, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Puzzle, Check, LoaderCircle, Paperclip, ShieldCheck, Sun, Moon, RefreshCw, ArrowLeft, Download, Code2, BookOpen, Sparkles, ExternalLink } from 'lucide-react';
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
-import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, unwrapEvents, turnTimings, replyParts } from '../runtime';
+import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
 import PluginSlot from './PluginSlot';
 import PluginManager from './PluginManager';
 import Usage from '../Usage';
@@ -35,6 +35,9 @@ export default function BuiltinWorkbench() {
   const activeGroup = active && latestGroup?.assistant && latestGroup.messages.some(message =>
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id) ? latestGroup.id : undefined;
   const activeProcess = activeGroup && latestGroup && (replyParts(latestGroup.messages).hasProcess || latestGroup.questions?.length);
+  const userStopped = !active && isUserStopped(current?.run);
+  const stoppedGroup = userStopped ? [...groups].reverse().find(group => group.assistant && group.messages.some(message =>
+    (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id)) : undefined;
   const layout = useRef<HTMLDivElement>(null);
   const [, setSettingsTab] = useHostField('management:tab:settings', 'appearance');
   function resizeWorkspace(clientX: number) {
@@ -84,9 +87,10 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       setHistoryUndo(null);
       if (selectedId.current === historyEdit.conversationId) { setCurrent(result.conversation); setEvents(unwrapEvents(result.conversation.events || [])); }
       setHistoryEdit(null); void refreshList();
-    }}/></div> : group.assistant ? <AssistantTurn statusLabel={runLabel} key={group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)} activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions} interactionRun={active ? current?.run?.id : undefined} showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))} onInteractionDone={() => setInteraction(null)} messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
+    }}/></div> : group.assistant ? <AssistantTurn stopped={group.id === stoppedGroup?.id} statusLabel={runLabel} key={group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)} activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions} interactionRun={active ? current?.run?.id : undefined} showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))} onInteractionDone={() => setInteraction(null)} messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
             {active && !activeProcess && <div className="run-state"><LoaderCircle size={14} className="spin"/>{runLabel}</div>}
-            {!active && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务已停止' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
+            {userStopped && !stoppedGroup && <div className="run-state" role="status">已停止</div>}
+            {!active && !userStopped && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
             </div>}
         </div><div className="composer-container">
 <DraftRecovery conflict={draftConflict} pending={Boolean(drafts.get(selectedId.current).pending)} resolve={keep => void resolveDraft(keep)} recover={retry => void recoverSend(retry)}/>

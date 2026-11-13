@@ -154,7 +154,8 @@ class DesktopService:
         view = self.store.versioned_state("view:" + conversation_id, {})
         from core.skill_manager import RETIRED_SKILLS
         record["meta"]["selected_skill_names"] = [name for name in record["meta"].get("selected_skill_names", []) if name not in RETIRED_SKILLS]
-        return {**record, **window, "render_messages": project_visible_messages(window["messages"], timeline_events=record["meta"].get("ui_timeline_v1", [])),
+        rendered = project_visible_messages(window["messages"], timeline_events=record["meta"].get("ui_timeline_v1", []))
+        return {**record, **window, "render_messages": self.files.message_files(conversation_id, rendered),
                 "run": self.public_run(run), "events": events,
                 "draft": draft["value"], "draft_revision": draft["revision"],
                 "view": view["value"], "view_revision": view["revision"]}

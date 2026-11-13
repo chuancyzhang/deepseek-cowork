@@ -1,4 +1,4 @@
-import type { Attachment } from './types';
+import type { Attachment, FileReference } from './types';
 import { defaultUrlTransform } from 'react-markdown';
 
 export function markdownUrl(url: string): string {
@@ -14,6 +14,31 @@ export function markdownFilePath(url: string): string {
   // A literal percent is valid in a file name; decode only well-formed escapes.
   try { value = decodeURIComponent(value); } catch { /* Already a literal path. */ }
   return value.replace(/^\/([a-z]:[\\/])/i, '$1');
+}
+
+/** Link validated file references in prose/inline code, never fenced commands. */
+export function remarkFileReferences(files: FileReference[] = []) {
+  const references = files.flatMap(file => file.references.map(text => ({text, url:file.url})))
+    .filter(item => item.text).sort((a,b) => b.text.length - a.text.length);
+  return (tree: any) => {
+    const visit = (node: any) => {
+      if (!node.children || ['link','linkReference','code','html'].includes(node.type)) return;
+      node.children = node.children.flatMap((child: any) => {
+        if (!['text','inlineCode'].includes(child.type)) {visit(child); return [child];}
+        const result = []; let remaining = child.value;
+        while (remaining) {
+          const match = references.map(item => ({...item,index:remaining.indexOf(item.text)})).filter(item => item.index >= 0)
+            .sort((a,b) => a.index - b.index || b.text.length - a.text.length)[0];
+          if (!match) {result.push({...child,value:remaining}); break;}
+          if (match.index) result.push({...child,value:remaining.slice(0,match.index)});
+          result.push({type:'link',url:match.url,children:[{type:child.type,value:match.text}]});
+          remaining = remaining.slice(match.index + match.text.length);
+        }
+        return result.length ? result : [child];
+      });
+    };
+    visit(tree);
+  };
 }
 
 export async function receiveAttachments(conversationId: string, files: File[]): Promise<Attachment[]> {

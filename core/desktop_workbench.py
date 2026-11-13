@@ -358,6 +358,33 @@ class DesktopFiles:
             path = Path(self.config.get_chat_workspace_root()) / conversation_id
         return Path(path).resolve()
 
+    def message_files(self, conversation_id, messages):
+        """Annotate display copies only; provider history remains untouched."""
+        from core.deliverable_preview import iter_local_file_references, normalize_workspace_file, DELIVERABLE_TYPES
+        root = self.workspace(conversation_id)
+        projected = []
+        for message in messages:
+            content = message.get("content") or ""
+            if isinstance(content, list):
+                content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") in {"text", "output_text"})
+            files = {}
+            if message.get("role") == "assistant":
+                for _start, _end, reference in iter_local_file_references(content):
+                    path = normalize_workspace_file(reference, str(root))
+                    if not path:
+                        continue
+                    target = Path(path)
+                    key = os.path.normcase(path)
+                    if key not in files:
+                        kind, label, _icon = DELIVERABLE_TYPES[target.suffix.lower()]
+                        files[key] = {"path": path, "url": target.as_uri(), "name": target.relative_to(root).as_posix(),
+                                      "kind": kind, "label": label, "references": []}
+                    files[key]["references"].append(reference.strip("<>"))
+            projected.append({**message, "file_references": list(files.values())})
+        log.debug("message_file_references session=%s messages=%s files=%s", conversation_id, len(projected),
+                  sum(len(message["file_references"]) for message in projected))
+        return projected
+
     def checked_file(self, conversation_id, path):
         root = self.workspace(conversation_id)
         target = Path(path)

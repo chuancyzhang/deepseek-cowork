@@ -12,3 +12,5 @@
 .inline-visualization{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:16px 0;padding:12px}.inline-visualization>strong{display:block;margin-bottom:8px}.inline-visualization iframe{display:block;width:100%;border:0;background:var(--bg)}
 
 .message-time{opacity:0;transition:opacity 100ms}.message:hover .message-time,.message:focus-within .message-time{opacity:1}.message.assistant .message-time{order:2;margin-left:auto}@media(hover:none){.message-time{opacity:1}}
+
+.message-file-table{margin-top:16px;border:1px solid var(--line);border-radius:calc(8px * var(--radius-scale,1));overflow:hidden}.message-file-table>strong{display:block;padding:10px 14px;font-weight:600}.message-file-table>button{display:flex;align-items:center;gap:10px;width:100%;padding:10px 14px;border-top:1px solid var(--line);text-align:left}.message-file-table>button:hover{background:var(--hover)}.message-file-table>button>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.message-file-table>button>svg,.message-file-table>button>small{flex-shrink:0;color:var(--muted)}.message-file-table>.message-files-toggle{color:var(--muted)}

@@ -31,6 +31,36 @@ class ManagementTests(unittest.TestCase):
         c.call("themes.activate", id="builtin_mist")
         self.assertEqual(c.call("themes.resolve")["id"], "builtin_mist")
 
+    def test_message_files_restore_existing_references_without_mutating_history(self):
+        from core.chat_storage import ChatStorage
+        c = self.client
+        conversation = c.call("conversation.create")
+        cid = conversation["id"]
+        workspace = Path(conversation["meta"]["workspace_dir"])
+        folder = workspace / "公众号文章 AI安全"
+        folder.mkdir()
+        document = folder / "公众号文章.docx"
+        document.write_bytes(b"fixture")
+        outside = self.data / "other.txt"
+        outside.write_text("another conversation", encoding="utf-8")
+        storage = ChatStorage(str(self.data / "chat_history" / "chat_history.sqlite"))
+        storage.replace_messages(cid, [
+            {"id":"user", "role":"user", "content":"整理文章"},
+            {"id":"answer", "role":"assistant", "content":f"[文件](<{document.as_uri()}>)\n\n`{document}`\n\n[不存在](missing.docx)\n\n{outside}"},
+        ])
+        before = storage.get_messages(cid)
+        value = c.call("conversation.get", conversation_id=cid)
+        files = value["render_messages"][1]["file_references"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual(Path(files[0]["path"]), document)
+        self.assertEqual(files[0]["name"], "公众号文章 AI安全/公众号文章.docx")
+        self.assertEqual(files[0]["label"], "DOCX")
+        self.assertIn(str(document), files[0]["references"])
+        self.assertEqual(value["messages"], before)
+        self.assertEqual(storage.get_messages(cid), before)
+        document.unlink()
+        self.assertEqual(c.call("conversation.get", conversation_id=cid)["render_messages"][1]["file_references"], [])
+
     def test_visualization_state_is_bound_to_conversation_and_file_hash(self):
         import hashlib
         from core.chat_storage import ChatStorage

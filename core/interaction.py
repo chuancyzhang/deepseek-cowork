@@ -462,6 +462,7 @@ class InteractionService:
                 "status": status,
                 "approved": bool(outcome.get("approved")),
                 "answered": bool(entry.get("answered")),
+                "response": dict(outcome),
             })
 
     @staticmethod

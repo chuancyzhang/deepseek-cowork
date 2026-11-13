@@ -12,7 +12,7 @@ Documented version: **5.3.3** · [Version notes](docs/releases/5.3.3.md) · [Rel
 
 - **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
 - **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Office/PDF output.
-- **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, browser automation, and speech transcription.
+- **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
 - **Knowledge and collaboration**: WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.

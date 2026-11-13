@@ -401,8 +401,8 @@ class TestSandboxRuntime(unittest.TestCase):
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
                  patch("core.sandbox_runtime.subprocess.check_output", return_value="installed") as check_output:
                 result = sandbox_runtime.install_skill_dependencies(
-                    "speech-to-text",
-                    node_dependencies=["sherpa-onnx-node@1.12.33"],
+                    "fixture-node-skill",
+                    node_dependencies=["fixture-package@1.0.0"],
                     node_registry_url="https://registry.npmmirror.com/",
                     force=True,
                 )

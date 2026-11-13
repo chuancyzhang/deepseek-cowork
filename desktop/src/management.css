@@ -40,6 +40,21 @@ body{font-family:var(--font-family);font-size:calc(14px * var(--font-scale))}
 .page-head{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:28px}
 .page-head h2{font-size:26px;font-weight:550;letter-spacing:-.6px;margin-bottom:9px}.page-head p{color:var(--muted);font-size:13px;margin:0}
 .page-head>.button-row{flex-shrink:0}.back-link{color:var(--muted);font-size:13px;padding:4px 0;margin-bottom:18px}
+.management-toolbar{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:12px;margin-bottom:24px;min-width:0}
+.management-toolbar>.page-search{flex:1 1 260px;margin:0;min-width:0}
+.management-toolbar>.segmented{margin:0 auto 0 0}
+.management-toolbar>button,.management-toolbar>.button-row{flex-shrink:0}
+.page-head-compact{margin-bottom:20px}
+.page-head-compact h2.sr-only{margin:-1px}
+.connection-channels{margin:0;gap:6px}
+.connection-channels button{white-space:nowrap}
+.settings-section:has(.connection-channels){padding-top:0;border-top:0}
+.settings-section .advanced-fields{margin-bottom:20px}
+.settings-section .advanced-fields>summary{color:var(--muted);font-size:13px;padding:8px 0;cursor:pointer}
+.settings-section .advanced-fields[open]>summary{margin-bottom:12px}
+.project-add{opacity:0;pointer-events:none;flex-shrink:0}
+.project-heading:hover>.project-add,.project-heading:focus-within>.project-add{opacity:1;pointer-events:auto}
+@media(hover:none){.project-add{opacity:1;pointer-events:auto}}
 .page-search{display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:8px;padding:0 12px;margin-bottom:25px;max-width:100%;color:var(--muted)}
 .page-search input{width:100%;min-width:0;border:0;background:transparent;padding:11px 0;color:var(--text);outline:0}.page-search:focus-within{outline:1px solid var(--muted)}
 .capability-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr));gap:14px}

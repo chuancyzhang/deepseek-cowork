@@ -1619,14 +1619,6 @@ def main_run():
             else:
                 window.resize(1280, 800)
             window.component_task_manager._component_statuses = {
-                main.SPEECH_TO_TEXT_COMPONENT_ID: {
-                    "known": True,
-                    "installed": False,
-                    "healthy": False,
-                    "needs_update": False,
-                    "needs_repair": False,
-                    "updated_at": 1787587200,
-                },
                 "documents": {
                     "known": True,
                     "bundled": True,
@@ -1648,7 +1640,7 @@ def main_run():
             settings._automatic_update_check_started = True
             select_settings_page(settings, "组件与依赖")
             settings.components_scroll_area.ensureWidgetVisible(
-                settings.component_rows[main.SPEECH_TO_TEXT_COMPONENT_ID]["status"],
+                settings.component_rows["documents"]["status"],
                 24,
                 160,
             )

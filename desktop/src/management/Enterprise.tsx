@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Building2, Check, ChevronRight, ExternalLink, FileText, Folder, LoaderCircle, LogOut, MessageSquare, Plus, RefreshCw, Users } from 'lucide-react';
-import { Empty, ErrorState, Field, JobProgress, PageHead, useFormDraft } from '../Management';
+import { Empty, ErrorState, Field, JobProgress, PageHead, PageToolbar, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 type Props = { kind: string; onError: (message: string) => void; onDirty: (value: boolean) => void; openConversation: (id: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number> };
@@ -32,8 +32,8 @@ function TeamSpaces(props: Props) {
   async function open(id: string) { const value = await act('team.detail', { space_id: id }); if (value) { setSpace(value); setTab('plans'); setObject(null); setForm(null); } }
   useEffect(() => { if (space) void act('team.collection', { collection: tab }).then(result => { if (result) setItems(result.items || []); }); }, [space?.id, tab, space?.revision]);
   if (form) return <TeamForm {...props} item={form} space={space} back={() => setForm(null)} saved={async result => { setForm(null); await open(result.id || space.id); }}/ >;
-  return <><PageHead title={space?.name || '团队空间'} detail={space?.description || '围绕共同的项目，组织计划、资料与成果。'} back={space ? () => { setSpace(null); setObject(null); void load(); } : undefined}>
-    <button className="primary" disabled={busy} onClick={() => setForm({ action: space ? 'conversation' : 'space.create' })}><Plus size={16}/>{space ? '新建任务' : '创建空间'}</button></PageHead>
+  const createButton = <button className="primary" disabled={busy} onClick={() => setForm({ action: space ? 'conversation' : 'space.create' })}><Plus size={16}/>{space ? '新建任务' : '创建空间'}</button>;
+  return <>{space ? <PageHead title={space.name} detail={space.description} back={() => { setSpace(null); setObject(null); void load(); }}>{createButton}</PageHead> : <PageToolbar title="团队空间">{createButton}</PageToolbar>}
     <JobProgress job={job}/>{failure && <ErrorState message={failure} retry={() => void (space ? open(space.id) : load())}/>}
     {!space ? <div className="capability-grid">{spaces.map(item => <button className="library-collection" key={item.id} onClick={() => void open(item.id)}><Users size={24}/><span><strong>{item.name}</strong><small>{item.description || (item.state === 'archived' ? '已归档' : '团队协作')}</small></span><ChevronRight size={17}/></button>)}</div> : <>
       <div className="segmented">{[['plans','计划'],['assets','资料'],['shares','成果'],['snapshots','任务快照'],['members','成员'],['events','动态']].map(([id,label]) => <button key={id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setObject(null); }}>{label}</button>)}</div>

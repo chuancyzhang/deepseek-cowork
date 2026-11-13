@@ -277,6 +277,29 @@ class RuntimeLedgerTests(unittest.TestCase):
         state.finalize("chat", "run", "run", messages, {"content": "回答", "message_id": "answer"})
         self.assertEqual([m["id"] for m in self.storage.get_messages("chat")], ["user", "late", "answer"])
 
+    def test_guidance_receipt_matches_real_worker_append_and_final_save(self):
+        from core.agent import LLMWorker
+        from core.conversation_integrity import canonical_ledger_message
+        from types import SimpleNamespace
+        self.open()
+        state = self.coordinator()
+        messages = state.prepare_stream("chat", "run", "run", "daemon:test", "输入", "user", None)
+        worker = Mock()
+        worker.steer.return_value = {"accepted": True, "turn_id": "run"}
+        state.set_active_worker("chat", worker, "run", "run", "daemon:test")
+        state.steer_session("chat", "run", {"id": "guidance", "role": "user", "content": "补充",
+                                           "meta": {"kind": "user_guidance", "turn_id": "run"}})
+        queued = worker.steer.call_args.args[0]
+        saved = next(m for m in self.storage.get_messages("chat") if m["id"] == "guidance")
+        appended = LLMWorker._append_ledger_message(SimpleNamespace(turn_id="run", request_id="run"),
+                                                      messages, [], queued)
+        self.assertEqual(canonical_ledger_message(saved), canonical_ledger_message(appended))
+        self.assertEqual(saved["created_at"], appended["created_at"])
+        self.assertTrue(saved["meta"]["same_turn_guidance"])
+        state.finalize("chat", "run", "run", messages, {"content": "完成", "message_id": "answer"})
+        self.assertEqual(self.journal.get_run("chat", "run")["status"], "completed")
+        self.assertEqual(sum(m["id"] == "guidance" for m in self.storage.get_messages("chat")), 1)
+
     def test_stop_before_registration_blocks_worker_and_late_cleanup_is_fenced(self):
         self.open()
         state = self.coordinator()

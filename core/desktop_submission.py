@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 
-from core.audio_attachments import partition_model_visible_attachments
+from core.audio_attachments import is_audio_attachment
 from core.clarify_mode import normalize_run_context, normalize_selected_skill_names
 from core.conversation_actions import append_reference_context
 from core.conversation_agents import agent_role_context, builtin_agent_profiles
@@ -42,7 +42,7 @@ def referenced_images(text, workspace, existing):
 
 
 def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_local=False,
-                 audio_transcription_backend="local", references=(), branch_file_map=None):
+                 references=(), branch_file_map=None):
     text = str(text or "").strip()
     paths = list(dict.fromkeys(os.path.normpath(str(path)) for path in paths))
     if any(not Path(path).is_file() for path in paths):
@@ -52,42 +52,35 @@ def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_lo
     images = [path for path in paths if is_image(path)]
     if images and not supports_vision:
         raise ValueError("当前模型未配置图片理解。图片已保留，请切换到支持图片的模型后再发送。")
-    visible, local_audio = partition_model_visible_attachments(paths, keep_audio_local=keep_audio_local)
+    if keep_audio_local and any(is_audio_attachment(path) for path in paths):
+        raise ValueError("语音转文字已下线，该音频原先仅用于转写，尚未向模型发送。请移除音频后发送文字；输入与附件仍保留。")
+    visible = paths
     blocks = []
     if visible:
         lines = ["[用户添加的文件]", "以下文件由用户通过“添加文件”手动附加，请优先视为本轮任务的重要输入："]
         for path in visible:
             lines.extend([f"- 文件名: {os.path.basename(path) or path}", f"  路径: {path}"])
         blocks.append("\n".join(lines))
-    remote_audio = audio_transcription_backend == "openai_compatible"
-    if local_audio:
-        blocks.append("[语音转文字专用附件]\n本轮音频附件仅授权给用户已配置的语音转文字服务；未向当前对话模型提供文件名、路径、大小或音频内容。" if remote_audio else
-                      "[本地音频附件]\n本轮音频附件仅授权给本地语音转文字工具；未向当前模型提供文件名、路径、大小或音频内容。")
     if text:
         blocks.append(text)
     parts = [{"type": "text", "text": text}] if text else []
     for path in [path for path in visible if path in images] + [path for path in visible if path not in images]:
         parts.append({"type": "input_image" if path in images else "input_file", "path": path,
                       "name": os.path.basename(path) or path, "source": "user_added"})
-    meta = {"display_content": text} if text else {}
+    meta = {"display_content": text}
     if paths:
         meta["user_added_files"] = paths
     if images:
         meta.update(user_added_images=images, vision_requested=bool(supports_vision))
     if images_from_text:
         meta["workspace_referenced_images"] = images_from_text
-    if local_audio:
-        prefix = "transcription_only_audio" if remote_audio else "local_only_audio"
-        meta[prefix + "_files"] = local_audio
-        meta[prefix + "_count"] = len(local_audio)
-        if remote_audio:
-            meta["audio_transcription_backend"] = "openai_compatible"
     return append_reference_context({"content": "\n\n".join(blocks).strip(), "display_content": text,
         "attachments": [{"path": path, "name": os.path.basename(path)} for path in paths],
         "content_parts": parts or None, "meta": meta or None}, references, branch_file_map)
 
 
 def run_context(service, cid, payload, profile):
+    from core.skill_manager import RETIRED_SKILLS
     from core.long_context import desktop_policy
     from core.knowledge_sources import MultiSourceKnowledgeService
     meta = service.storage.get_conversation_meta(cid) or {}
@@ -100,7 +93,8 @@ def run_context(service, cid, payload, profile):
     skills = normalize_selected_skill_names(payload.get("skills", preferences.get("selected_skill_names", [])))
     if expert and expert.get("skill_names"):
         skills = normalize_selected_skill_names(skills + expert["skill_names"])
-        agent["allowed_skill_names"] = skills
+        agent["allowed_skill_names"] = [name for name in skills if name not in RETIRED_SKILLS]
+    skills = [name for name in skills if name not in RETIRED_SKILLS]
     binding = service.storage.get_team_space_binding(cid)
     if meta.get("team_space_required") and not binding:
         raise ValueError("空间会话归属不完整。历史已保留，请恢复原绑定后继续。")

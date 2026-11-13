@@ -91,7 +91,7 @@ export default function Sidebar(props: Props) {
           return <section className="project-group" key={key}>
             <div className="project-heading"><button title={project.path} aria-expanded={open} onClick={() => setExpanded(previous => ({ ...previous, [key]: !open }))}>
               {open ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<Folder size={15}/><span>{project.name}</span>{project.pinned && <Pin size={11}/>}</button>
-              <button className="icon-button" title={`在 ${project.name} 中新建聊天`} onClick={() => props.onNew(project.path)}><Plus size={14}/></button></div>
+              <button className="project-add icon-button" title={`在 ${project.name} 中新建聊天`} onClick={() => props.onNew(project.path)}><Plus size={14}/></button></div>
             {open && <div className="project-conversations">{project.sessions.filter((item: Conversation) => !item.meta.pinned).slice(0, limit).map(row)}{!project.sessions.length && <button className="sidebar-empty" onClick={() => props.onNew(project.path)}>开始第一段聊天</button>}</div>}
           </section>;
         })}

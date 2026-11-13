@@ -1,6 +1,6 @@
 import {useCallback,useEffect,useLayoutEffect,useRef,useState,useMemo} from 'react';
 import type {Attachment,Conversation,FileSession,HostEvent,Message,Plugin,Run,RuntimeEvent,Settings} from '../types';
-import {MessageProjection,isActive,mergeEvents,unwrapEvents,messageText} from '../runtime';
+import {MessageProjection,isActive,mergeEvents,unwrapEvents,messageText,interactionRecords} from '../runtime';
 import {Drafts,type Draft} from '../drafts';
 import {emptyWorkspace,type WorkspaceView} from '../Workspace';
 import {themeStyle} from '../theme';
@@ -257,7 +257,7 @@ export function useWorkbenchController() {
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       const restored: Editor[] = [];
       for (const item of value.view?.editors || []) {
-        try { const file = await call<FileSession>('file.open', { conversation_id: id, path: item.path, expected_fingerprint: item.fingerprint }); restored.push({ file, text: item.text, saved: item.saved, plugin }); }
+        try { const file = await call<FileSession>('file.open', { conversation_id: id, path: item.path, expected_fingerprint: item.fingerprint, recover_draft: item.text !== item.saved }); restored.push({ file, text: item.text, saved: item.saved, plugin }); }
         catch (failure) {
           restored.push({ file: { id: '', path: item.path, name: item.path.split(/[\\/]/).pop(), fingerprint: item.fingerprint, payload: { kind: 'text' }, unavailable: true }, text: item.text, saved: item.saved, plugin });
           error('有文件暂时无法重新打开，草稿仍可查看、复制或另存。' + (failure as Error).message);
@@ -495,7 +495,11 @@ export function useWorkbenchController() {
   }
   async function saveEditor(path: string) {
     const editor = editorsRef.current.find(e => e.file.path === path);
-    if (!editor || editor.file.payload.read_only) return;
+    if (!editor) return;
+    if (editor.file.payload.read_only) {
+      if (editor.text !== editor.saved) throw new Error('请先保存恢复副本，再关闭文件。原草稿仍保留。');
+      return;
+    }
     const text = editorFlush.current.has(path) ? await editorFlush.current.get(path)!() : editor.text;
     if (!text && !['text', 'html'].includes(editor.file.payload.kind)) return;
     const id = selectedId.current;
@@ -566,8 +570,7 @@ export function useWorkbenchController() {
 
   const projection = host.get(host.sessionKey('messageProjection'),() => new MessageProjection());
   const messages = useMemo(() => projection.project(current?.render_messages || current?.messages || [], events, active ? current?.run?.id : undefined), [projection,current?.render_messages, current?.messages, events, active, current?.run?.id]);
-  const questions = events.filter(event => event.type === 'interaction_request').filter((event, index, all) => all.findIndex(item => item.data?.request_id === event.data?.request_id) === index).map(event => ({request: event.data, runId: event.run_id,
-    outcome: events.find(item => item.type === 'interaction_finished' && item.data?.request_id === event.data?.request_id)?.data}));
+  const questions = useMemo(() => interactionRecords(events, messages), [events, messages]);
   const editor = editors.find(e => e.file.path === activeFile);
   const filtered = conversations.filter(c => !c.meta.archived && (!query || c.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   useEffect(() => saves.register('conversation-work', async () => {

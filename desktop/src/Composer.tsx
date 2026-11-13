@@ -23,15 +23,17 @@ export default function Composer(props: Props) {
   const [placement, setPlacement] = useState({above:true, height:420, right:0});
   const root = useRef<HTMLDivElement>(null), latest = useRef(props); latest.current = props;
   const previousId = useRef(conversation?.id), hover = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const lists = useRef(new Map<string, Promise<any[]>>());
   const prefs = conversation?.meta || {}, refs: any[] = prefs.conversation_refs || [], knowledge: any[] = prefs.knowledge_refs || [];
   const model = settings?.models.find(model => model.id === (prefs.selected_model_id || settings.selected_model_id));
-  function close() { clearTimeout(hover.current); setMenu(''); setSection(''); setQuery(''); setPending(null); }
-  function open(target: string, part = '') { setMenu(target); setSection(part); setQuery(''); setFailure(''); }
+  function close() { clearTimeout(hover.current); lists.current.clear(); setMenu(''); setSection(''); setQuery(''); setPending(null); }
+  function open(target: string, part = '') { clearTimeout(hover.current); lists.current.clear(); setMenu(target); setSection(part); setQuery(''); setFailure(''); }
+  function enterSection(id: string) { clearTimeout(hover.current); if (id !== section) {setSection(id); setQuery('');} }
   useEffect(() => {
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) close(); };
     const blur = () => close();
     document.addEventListener('pointerdown', outside); window.addEventListener('blur', blur);
-    return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('blur', blur); };
+    return () => { clearTimeout(hover.current); document.removeEventListener('pointerdown', outside); window.removeEventListener('blur', blur); };
   }, []);
   useEffect(() => { if (previousId.current) close(); previousId.current = conversation?.id; }, [conversation?.id]);
   useLayoutEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = Math.min(180, Math.max(70, textarea.current.scrollHeight)) + 'px'; } }, [text, textarea]);
@@ -43,7 +45,7 @@ export default function Composer(props: Props) {
       setPlacement({above:up, height:Math.min(menu === 'model' ? 420 : 500, up ? above : below), right});};
     place(); const observer = new ResizeObserver(place); observer.observe(root.current); window.addEventListener('resize',place);
     return () => {observer.disconnect(); window.removeEventListener('resize',place);};
-  }, [menu, section]);
+  }, [menu]);
   useEffect(() => {if (menu === 'model') root.current?.querySelector<HTMLInputElement>('[aria-label="搜索模型"]')?.focus();}, [menu]);
   useEffect(() => {
     if (menu !== 'model') return;
@@ -55,7 +57,13 @@ export default function Composer(props: Props) {
     if (!menu || !section || ['mode', 'conversations', 'library'].includes(section)) return;
     let alive = true; setLoading(true);
     const method = section === 'experts' ? 'experts.list' : section === 'variables' ? 'variables.list' : 'skills.list';
-    void call<any[]>(method).then(value => { if (alive) setItems(value); }).catch(failure => { if (alive) setFailure(failure.message); }).finally(() => { if (alive) setLoading(false); });
+    let request = lists.current.get(method);
+    if (!request) {request = call<any[]>(method); lists.current.set(method, request);}
+    const currentRequest = request;
+    void request.then(value => { if (alive) setItems(value); }).catch(failure => {
+      if (lists.current.get(method) === currentRequest) lists.current.delete(method);
+      if (alive) setFailure(failure.message);
+    }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [menu, section]);
   async function applyPreference(value: Record<string, any>, dismiss = false) { setBusy(true); setFailure(''); try { await props.preferences(value); if (dismiss) close(); } catch (failure) { setFailure((failure as Error).message); } finally { setBusy(false); } }
@@ -121,9 +129,9 @@ export default function Composer(props: Props) {
       </div><div className="composer-right"><button className="model-trigger" aria-expanded={menu === 'model'} aria-haspopup="dialog" title={model?.label || '选择模型'} onClick={() => menu === 'model' ? close() : open('model')}><span>{model?.label || '选择模型'}{prefs.reasoning_effort ? ' · ' + prefs.reasoning_effort : ''}</span><ChevronDown size={12}/></button><button className="send-button" title={active && !text.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || conversation?.run?.status === 'stopping' || !active && !text.trim() && !attachments.length} onClick={() => void (active && !text.trim() && !attachments.length ? props.stop() : props.send()).catch(failure => error(failure.message))}>{sending ? <LoaderCircle className="spin" size={18}/> : active && !text.trim() && !attachments.length ? <Square size={15} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
     </div>
     <div className="composer-footer"><button title={prefs.workspace_dir || '聊天工作目录'} onClick={async () => {try {const path = await call<string | null>('dialog.workspace'); if (path) {const cid = await props.ensureConversation(); await call('conversation.workspace', {conversation_id: cid, path});}} catch (failure) {error((failure as Error).message);}}}><Folder size={13}/><span>工作目录 · {prefs.workspace_source === 'chat' || !prefs.workspace_dir ? '聊天工作目录' : prefs.workspace_dir.split(/[\\/]/).pop()}</span></button><span>Enter 发送 · Shift+Enter 换行</span></div>
-    {menu && <div className={'composer-menu ' + menu + '-menu'} style={{maxHeight:placement.height, ...(menu === 'model' ? {left:'auto',right:placement.right,maxWidth:'100%'} : {}), ...(placement.above ? {bottom:'calc(100% + 6px)'} : {bottom:'auto',top:'calc(100% + 6px)'})}} role="dialog" aria-label={menu === 'model' ? '选择模型' : menu === 'permission' ? '执行权限' : '添加上下文'}>
+    {menu && <div className={'composer-menu ' + menu + '-menu'} style={{maxHeight:placement.height, ...(['add','mention'].includes(menu) ? {height:Math.min(420,placement.height)} : {}), ...(menu === 'model' ? {left:'auto',right:placement.right,maxWidth:'100%'} : {}), ...(placement.above ? {bottom:'calc(100% + 6px)'} : {bottom:'auto',top:'calc(100% + 6px)'})}} role="dialog" aria-label={menu === 'model' ? '选择模型' : menu === 'permission' ? '执行权限' : '添加上下文'}>
       {['add','mention'].includes(menu) ? <>
-        <nav className="composer-menu-nav">{categories.filter(([id]) => menu !== 'mention' || ['experts','skills','connectors','conversations'].includes(id)).map(([id,label,Icon]) => <button key={id} className={section === id ? 'selected' : ''} onMouseEnter={() => {clearTimeout(hover.current); if (menu === 'add' && !busy) hover.current = setTimeout(() => {setSection(id); setQuery('');}, 140);}} onMouseLeave={() => clearTimeout(hover.current)} onClick={() => {setSection(id); setQuery('');}} onKeyDown={event => {if (event.key === 'ArrowRight') setSection(id);}}><Icon size={15}/><span>{label}</span><ChevronRight size={13}/></button>)}{menu === 'add' && <><hr/><button onClick={() => {close(); void props.attach();}}><Paperclip size={15}/>添加文件</button>{active && <button onClick={() => {close(); void props.stop();}}><Square size={14}/>停止当前任务</button>}</>}</nav>
+        <nav className="composer-menu-nav">{categories.filter(([id]) => menu !== 'mention' || ['experts','skills','connectors','conversations'].includes(id)).map(([id,label,Icon]) => <button key={id} className={section === id ? 'selected' : ''} onMouseEnter={() => {clearTimeout(hover.current); if (menu === 'add' && section !== id) hover.current = setTimeout(() => enterSection(id), 100);}} onMouseLeave={() => clearTimeout(hover.current)} onClick={() => enterSection(id)} onKeyDown={event => {if (event.key === 'ArrowRight') {event.preventDefault(); enterSection(id);}}}><Icon size={15}/><span>{label}</span><ChevronRight size={13}/></button>)}{menu === 'add' && <><hr/><button onClick={() => {close(); void props.attach();}}><Paperclip size={15}/>添加文件</button>{active && <button onClick={() => {close(); void props.stop();}}><Square size={14}/>停止当前任务</button>}</>}</nav>
         {section && <section className="composer-submenu"><div className="submenu-heading"><button className="icon-button submenu-back" title="返回" onClick={() => setSection('')}><ArrowLeft size={14}/></button><strong>{categories.find(([id]) => id === section)?.[1]}</strong></div>
           {section === 'mode' ? modes.map(([id, label, detail]) => <button className="picker-row" disabled={active || busy} key={id} onClick={() => void applyPreference({mode: id, grill_execution_confirmed: false}, true)}>{id === 'grilling' ? <MessageCircleQuestion size={16}/> : <Play size={16}/>}<span>{label}<small>{detail}</small></span>{(prefs.mode || 'execution') === id && <Check size={14}/>}</button>) : section === 'library' ? <><p className="muted">{knowledge.length ? `已选择 ${knowledge.length} 项资料` : '选择本次任务需要的资料'}</p><button className="picker-row" onClick={() => {close(); void props.route('library');}}><BookOpen size={16}/><span>浏览资料库</span><ChevronRight size={14}/></button></> : <>
             <label className="picker-search"><Search size={14}/><input aria-label="搜索上下文" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)}/></label>

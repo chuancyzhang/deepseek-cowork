@@ -137,6 +137,24 @@ class ManagementTests(unittest.TestCase):
             c.call("settings.page", page="memory", context="D:/unregistered-project")
         self.assertEqual(c.call("settings.page", page="memory")["values"]["summary"].strip(), "全局事实")
 
+    def test_retired_controls_do_not_overwrite_settings_or_restore_speech(self):
+        c = self.client
+        c.call("settings.context", target_tokens=1000000)
+        page = c.call("settings.page", page="experiments")
+        self.assertNotIn("context_target", page["values"])
+        c.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "context_target": 0})
+        self.assertEqual(c.call("settings.get")["context_policy"]["target_tokens"], 1000000)
+        components = c.call("settings.page", page="components")
+        self.assertNotIn("node_source", components["values"])
+        items = [item["id"] for section in components["sections"] for item in section.get("items", [])]
+        self.assertEqual(items, ["documents", "data-analysis"])
+        for action in ("source.node", "node.install", "component.install:speech", "component.install:finance"):
+            with self.assertRaisesRegex(RuntimeError, "不可用"):
+                c.call("settings.action", page="components", action=action)
+        self.assertNotIn("speech-to-text", [item["name"] for item in c.call("skills.inventory")])
+        with self.assertRaisesRegex(RuntimeError, "已下线"):
+            c.call("skills.enable", name="speech-to-text", enabled=True)
+
     def test_settings_reject_invalid_changes_without_partial_save(self):
         c = self.client
         before = c.call("settings.page", page="storage")

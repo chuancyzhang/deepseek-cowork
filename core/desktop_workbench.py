@@ -174,14 +174,50 @@ class DesktopWorkbench:
 
 
 class DesktopFiles:
-    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy'])
+    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
+                         'file.render', 'file.render_result', 'file.install_renderer'])
 
-    def __init__(self, storage, config):
+    def __init__(self, storage, config, jobs=None):
         self.storage, self.config = storage, config
         self.file_sessions = {}
+        self.jobs = jobs
 
     def dispatch(self, method, p):
         cid = str(p.get("conversation_id") or "")
+        if method == "file.install_renderer":
+            self.workspace(cid)
+            from core.libreoffice_component import install
+            return self.jobs.submit("安装 LibreOffice", install)
+        if method == "file.render":
+            from core.document_preview import render_office_pdf
+            from core.deliverable_editing import sha256_file
+            path = self.checked_file(cid, p["path"])
+            expected = str(p.get("fingerprint") or "")
+            if path.suffix.lower() not in {".doc", ".docx", ".ppt", ".pptx"}:
+                raise ValueError("此文件不使用文档版式预览。")
+            def render(cancelled, progress):
+                if expected and sha256_file(path) != expected:
+                    raise ValueError("文件已变化，请刷新后再预览。")
+                progress("正在生成页面预览…")
+                try:
+                    preview, fingerprint = render_office_pdf(path, cancel=cancelled, renderer="libreoffice")
+                except WorkbenchError as exc:
+                    if cancelled.is_set():
+                        from core.desktop_jobs import JobCancelled
+                        raise JobCancelled(str(exc)) from exc
+                    raise
+                log.info("file_preview_completed session=%s version=%s", cid, fingerprint[:12])
+                return {"kind": "office_preview", "conversation_id": cid, "path": str(path),
+                        "preview_path": preview, "fingerprint": fingerprint}
+            return self.jobs.submit("生成文档预览", render)
+        if method == "file.render_result":
+            job = self.jobs.get(str(p["job_id"]))
+            result = job.get("result") or {}
+            if job["status"] != "completed" or result.get("kind") != "office_preview" or result.get("conversation_id") != cid:
+                raise ValueError("文档预览尚未完成或不属于当前对话。")
+            path = self.checked_file(cid, result["path"])
+            return {"id": job["id"], "path": str(path), "name": path.name, "fingerprint": result["fingerprint"],
+                    "payload": {"kind": "preview", "preview_kind": "pdf", "read_only": True, "preview_path": result["preview_path"]}}
         if method == "workspace.list":
             root = self.workspace(cid)
             folder = self.checked_file(cid, p.get("path") or ".")
@@ -236,12 +272,25 @@ class DesktopFiles:
             path = self.checked_file(cid, p["path"])
             from core.file_capabilities import file_capability
             capability = file_capability(str(path))
+            if capability and capability.office_family in {"word", "powerpoint"}:
+                from core.libreoffice_component import status
+                from core.deliverable_editing import sha256_file
+                session_id = uuid.uuid4().hex
+                recovery = bool(p.get("recover_draft") and capability.editable)
+                if recovery:
+                    # Old unsaved Word drafts remain exportable after inline editing retires.
+                    session, report = create_edit_session(str(path))
+                    if not report.allowed:
+                        raise ValueError(report.message)
+                    load_editor_payload(session)
+                    session.metadata["recovery_only"] = True
+                    self.file_sessions[session_id] = (cid, session)
+                return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": sha256_file(path),
+                        "payload": {"kind": "preview", "preview_kind": "office", "office_family": capability.office_family,
+                                    "read_only": True, "recovery_available": recovery, "renderer": status()}}
             if capability and not capability.editable:
                 from core.deliverable_editing import sha256_file
                 payload = {"kind": "preview", "preview_kind": capability.preview_kind, "read_only": True}
-                if capability.preview_kind == "pptx":
-                    from core.deliverable_preview import render_pptx_preview
-                    payload["preview_html"] = render_pptx_preview(str(path))["html"]
                 return {"id": uuid.uuid4().hex, "path": str(path), "name": path.name,
                         "fingerprint": sha256_file(path), "payload": payload}
             session, report = create_edit_session(str(path))
@@ -264,6 +313,8 @@ class DesktopFiles:
             owner, session = self.file_sessions.get(p["id"], (None, None))
             if owner != cid or session is None:
                 raise ValueError("编辑会话已失效，请保留内容并重新打开文件。")
+            if session.metadata.get("recovery_only") and method != "file.save_copy":
+                raise ValueError("Word 编辑已改为本机应用，请先将恢复草稿另存副本。")
             payload = p["payload"]
             if isinstance(payload, dict) and set(payload) == {"kind", "value"}:
                 kind = payload["kind"]

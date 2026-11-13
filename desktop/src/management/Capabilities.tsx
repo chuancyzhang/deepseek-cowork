@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Check, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, Pencil, Play, Plus, Search, Sparkles, Star, Trash2, Upload } from 'lucide-react';
-import { Empty, ErrorState, Field, JobProgress, PageHead, useFormDraft } from '../Management';
+import { Empty, ErrorState, Field, JobProgress, PageHead, PageToolbar, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import { skillInMode, skillMatches, skillScenes } from '../skills';
 import SkillHub from './SkillHub';
@@ -32,12 +32,11 @@ export default function Capabilities(props: Props) {
   const candidates = kind === 'skills' ? items.filter(item => skillInMode(item, mode) && skillMatches(item, query)) : items.filter(item => [item.name, item.display_name, item.description, item.user_description, item.favorite_name].some(value => String(value || '').toLowerCase().includes(query.toLowerCase())));
   const rows = candidates.filter(item => kind !== 'skills' || mode !== 'library' || !scene || item.presentation?.category === scene);
   return <>
-    <PageHead title={titles[kind]}>{kind !== 'schedule_history' && <button className="primary" disabled={busy} onClick={async () => {
+    {kind === 'skills' && <div className="skill-modes"><div className="segmented">{[['library','发现技能'],['mine','我的能力']].map(([key,label]) => <button key={key} className={mode === key ? 'selected' : ''} onClick={() => setMode(key)}>{label}<small>{items.filter(item => skillInMode(item,key)).length}</small></button>)}</div><button className={mode === 'builtin' ? 'selected' : ''} onClick={() => setMode('builtin')}>内置技能</button></div>}
+    <PageToolbar title={titles[kind]}><div className="page-search"><Search size={17}/><input aria-label={'搜索' + titles[kind]} placeholder={kind === 'skills' ? '搜索想完成的任务，例如：读 PDF、查资料、分析股票' : '搜索名称或用途'} value={query} onChange={e => setQuery(e.target.value)}/></div>{kind !== 'schedule_history' && <button className="primary" disabled={busy} onClick={async () => {
       if (kind !== 'skills') { setSelected({}); return; }
       const path = await rpc('dialog.choose', { kind: 'skill' }); if (path) await act('skills.import', { path });
-    }}><Plus size={16}/>{kind === 'skills' ? '导入技能' : '新建'}</button>}</PageHead>
-    {kind === 'skills' && <div className="skill-modes"><div className="segmented">{[['library','发现技能'],['mine','我的能力']].map(([key,label]) => <button key={key} className={mode === key ? 'selected' : ''} onClick={() => setMode(key)}>{label}<small>{items.filter(item => skillInMode(item,key)).length}</small></button>)}</div><button className={mode === 'builtin' ? 'selected' : ''} onClick={() => setMode('builtin')}>内置技能</button></div>}
-    <div className="page-search"><Search size={17}/><input aria-label="搜索" placeholder={kind === 'skills' ? '搜索想完成的任务，例如：读 PDF、查资料、分析股票' : '搜索名称或用途'} value={query} onChange={e => setQuery(e.target.value)}/></div>
+    }}><Plus size={16}/>{kind === 'skills' ? '导入技能' : '新建'}</button>}</PageToolbar>
     {kind === 'skills' && mode === 'library' && <label className="skill-category-select"><span>分类</span><select aria-label="技能分类" value={scene} onChange={event => setScene(event.target.value)}>{[['','全部任务'],...skillScenes].map(([key,label]) => <option key={key} value={key}>{label} · {candidates.filter(item => !key || item.presentation?.category === key).length}</option>)}</select></label>}
     <JobProgress job={job}/>{failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {busy && !items.length ? <div className="loading"><LoaderCircle className="spin"/>正在载入…</div> : !rows.length ? <Empty title={query ? '没有匹配的内容' : '从你的第一项开始'} detail={query ? '换一个名称或用途试试。' : descriptions[kind]}/> :

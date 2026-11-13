@@ -69,6 +69,9 @@ class Management:
             snapshot = catalog.snapshot()
             manager = snapshot.manager
             name = str(p.get("name") or "")
+            from core.skill_manager import RETIRED_SKILLS
+            if name in RETIRED_SKILLS:
+                raise ValueError(RETIRED_SKILLS[name])
             if action == "inventory":
                 items = snapshot.display_skills()
                 for item in items:

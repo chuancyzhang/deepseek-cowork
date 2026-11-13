@@ -14,6 +14,8 @@ import copy
 import threading
 import hashlib
 
+RETIRED_SKILLS = {"speech-to-text": "语音转文字已下线，已有音频与转写记录保留。"}
+
 from .env_utils import get_app_data_dir
 from .mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
@@ -480,6 +482,8 @@ class SkillManager:
         }
 
     def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        if skill_name in RETIRED_SKILLS:
+            return False
         from .platform_capabilities import skill_unavailable_reason
         if skill_unavailable_reason(skill_name):
             return False
@@ -1580,13 +1584,6 @@ class SkillManager:
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
         fields = json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
-        from .platform_capabilities import is_windows
-        if skill_name == "speech-to-text" and not is_windows():
-            for field in fields:
-                if field.get("name") == "ASR_BACKEND":
-                    field["default"] = "openai_compatible"
-                    field["options"] = [option for option in field.get("options", []) if option.get("value") != "local"]
-                    field["help"] = "此平台仅支持主动配置的远程接口；转录时音频将上传到该接口。"
         return fields
 
     def get_skill_mcp_server_presets(self, skill_name):
@@ -2145,9 +2142,6 @@ class SkillManager:
             if skill_name == "history-query":
                 meta["allowed-tools"] = ", ".join(tool_refs)
                 body = "Use query_history to search local chat history by keywords and date ranges. Vector indexing and vector search are unavailable on this platform."
-            elif skill_name == "speech-to-text":
-                body = ("On this platform only the explicitly configured remote transcription endpoint is available. "
-                        "Do not install or call the local transcription pipeline. Audio upload requires the saved remote configuration.\n\n" + body)
         kind = self._normalize_skill_kind(meta, spec)
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
@@ -2364,7 +2358,7 @@ class SkillManager:
 
     def _find_skill_path(self, skill_name):
         normalized_name = str(skill_name or "").strip()
-        if not normalized_name:
+        if not normalized_name or normalized_name in RETIRED_SKILLS:
             return None
         loaded_path = getattr(self, "loaded_skill_sources", {}).get(normalized_name)
         if loaded_path and os.path.isdir(loaded_path):
@@ -2423,7 +2417,7 @@ class SkillManager:
 
     def _find_user_skill_path(self, skill_name):
         normalized_name = str(skill_name or "").strip()
-        if not normalized_name:
+        if not normalized_name or normalized_name in RETIRED_SKILLS:
             return None
         for skills_dir in self._skill_roots_in_load_order():
             root = os.path.abspath(skills_dir)
@@ -2635,6 +2629,8 @@ class SkillManager:
                                  on_commit=None):
         from .skillhub import ORIGIN_FILE, file_hashes, read_origin
         skill_name = self._read_skill_name_from_path(source_path)
+        if skill_name in RETIRED_SKILLS:
+            raise ValueError(RETIRED_SKILLS[skill_name])
         from core.skill_from_conversation import is_valid_skill_name
         if not is_valid_skill_name(skill_name):
             raise ValueError("Invalid skill name")
@@ -2967,7 +2963,7 @@ class SkillManager:
                 continue
             is_ai_dir = os.path.basename(skills_dir) == "ai_skills"
             for skill_name in sorted(os.listdir(skills_dir)):
-                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
+                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen or skill_name in RETIRED_SKILLS:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not self._is_skill_directory(skill_path):
@@ -3281,7 +3277,7 @@ class SkillManager:
             if not os.path.exists(skills_dir):
                 continue
             for skill_name in sorted(os.listdir(skills_dir)):
-                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
+                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen or skill_name in RETIRED_SKILLS:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not self._is_skill_directory(skill_path):

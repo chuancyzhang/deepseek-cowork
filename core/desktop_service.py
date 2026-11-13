@@ -85,7 +85,7 @@ class DesktopService:
         from core.desktop_workbench import DesktopFiles
         from core.desktop_conversations import ConversationRuntime
         from core.desktop_settings import DesktopSettingsAPI
-        self.files = DesktopFiles(self.storage, self.config)
+        self.files = DesktopFiles(self.storage, self.config, self.jobs)
         self.conversation_runtime = ConversationRuntime(config=self.config, storage=self.storage, store=self.store,
             state=self.state, files=self.files, actions=self.conversations, publish=self.publish,
             start=self.start_stream, view=self.conversation, request=self.request_agent)
@@ -152,6 +152,8 @@ class DesktopService:
         from core.conversation_render import project_visible_messages
         draft = self.store.versioned_state("draft:" + conversation_id, {"text": "", "attachments": []})
         view = self.store.versioned_state("view:" + conversation_id, {})
+        from core.skill_manager import RETIRED_SKILLS
+        record["meta"]["selected_skill_names"] = [name for name in record["meta"].get("selected_skill_names", []) if name not in RETIRED_SKILLS]
         return {**record, **window, "render_messages": project_visible_messages(window["messages"], timeline_events=record["meta"].get("ui_timeline_v1", [])),
                 "run": self.public_run(run), "events": events,
                 "draft": draft["value"], "draft_revision": draft["revision"],

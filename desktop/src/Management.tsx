@@ -32,7 +32,7 @@ export default function Management({ route, settings, updateSettings, openConver
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
   return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>
-    {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}{route === 'capabilities' && <button className="management-plugins" onClick={openPlugins}><Puzzle size={16}/>界面插件</button>}</nav>}
+    {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} aria-current={tab === id ? 'page' : undefined} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}{route === 'capabilities' && <button className="management-plugins" onClick={openPlugins}><Puzzle size={16}/>界面插件</button>}</nav>}
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'library' ? <Library {...common} onReference={onReference}/>
@@ -43,8 +43,11 @@ export default function Management({ route, settings, updateSettings, openConver
   </div>;
 }
 
-export function PageHead({ title, detail, children, back }: { title: string; detail?: string; children?: React.ReactNode; back?: () => void }) {
-  return <header className="page-head"><div>{back && <button className="back-link" onClick={back}><ArrowLeft size={16}/>返回</button>}<h2>{title}</h2>{detail && <p>{detail}</p>}</div><div className="button-row">{children}</div></header>;
+export function PageHead({ title, detail, children, back, compact = false }: { title: string; detail?: string; children?: React.ReactNode; back?: () => void; compact?: boolean }) {
+  return <header className={'page-head' + (compact ? ' page-head-compact' : '')}><div>{back && <button className="back-link" onClick={back}><ArrowLeft size={16}/>返回</button>}<h2 className={compact ? 'sr-only' : undefined}>{title}</h2>{detail && <p>{detail}</p>}</div><div className="button-row">{children}</div></header>;
+}
+export function PageToolbar({ title, children }: { title: string; children?: React.ReactNode }) {
+  return <header className="management-toolbar"><h2 className="sr-only">{title}</h2>{children}</header>;
 }
 export function ErrorState({ message, retry }: { message: string; retry?: () => void }) {
   return <div className="inline-error" role="alert"><p>{message}</p>{retry && <button className="secondary" onClick={retry}>重试</button>}</div>;

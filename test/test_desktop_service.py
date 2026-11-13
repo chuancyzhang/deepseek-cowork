@@ -27,12 +27,13 @@ class Provider(BaseHTTPRequestHandler):
         value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append(value)
         slow = any("SLOW" in str(m.get("content")) for m in value["messages"] if m["role"] == "user")
+        guidance_check = any("GUIDANCE-CHECK" in str(m.get("content")) for m in value["messages"] if m["role"] == "user")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
         self.end_headers()
         try:
-            for text in (["已收到。", "这是本地流式验证。"] if not slow else ["保留这部分回答。"] + ["继续输出。"] * 200):
+            for text in (["阶段输出。"] * 12 if guidance_check else ["已收到。", "这是本地流式验证。"] if not slow else ["保留这部分回答。"] + ["继续输出。"] * 200):
                 chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                          "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
                 self.wfile.write(("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n").encode())
@@ -235,6 +236,33 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.client.call("conversation.send", **params)
         return params
 
+    def test_message_context_snapshot_is_stable_and_absent_from_provider_projection(self):
+        from core.agent import _clean_reasoning_content_by_turn
+        cid = self.client.call("conversation.create")["id"]
+        source = self.client.call("conversation.create")["id"]
+        self.submit(source)
+        self.client.wait_run(source)
+        reference = self.client.call("conversation.reference", conversation_id=cid, source_id=source)
+        preferences = {"selected_skill_names": ["document-reader"], "conversation_refs": [reference],
+                       "knowledge_refs": [{"source": "weknora", "title": "发送时的资料"}]}
+        params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                      text="记录本轮选择", model_id=self.model_id, preferences=preferences)
+        self.client.call("conversation.send", **params)
+        self.client.wait_run(cid)
+        original = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
+        self.assertEqual(original["meta"]["ui_context"], {"skills": ["document-reader"], "knowledge": [{"title": "发送时的资料"}]})
+        self.assertEqual(original["meta"]["conversation_refs"][0]["id"], reference["id"])
+        self.client.call("conversation.preferences", conversation_id=cid, value={"selected_skill_names": [], "knowledge_refs": []})
+        reopened = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
+        self.assertEqual(reopened["meta"]["ui_context"], original["meta"]["ui_context"])
+        without = {**original, "meta": {key: value for key, value in original["meta"].items() if key != "ui_context"}}
+        self.assertEqual(_clean_reasoning_content_by_turn([original], drop_meta=True),
+                         _clean_reasoning_content_by_turn([without], drop_meta=True))
+        request = next(value for value in reversed(Provider.requests)
+                       if any("记录本轮选择" in str(message.get("content")) for message in value["messages"]))
+        self.assertNotIn("ui_context", json.dumps(request))
+        self.assertTrue(all("meta" not in message for message in request["messages"]))
+
     def test_durable_send_deduplication_and_isolation(self):
         first = self.client.call("conversation.create")
         second = self.client.call("conversation.create")
@@ -273,6 +301,24 @@ class DesktopIntegrationTests(unittest.TestCase):
         recovered = self.client.call("conversation.get", conversation_id=cid)
         self.assertEqual(recovered["run"]["status"], "interrupted")
         self.assertTrue(any(e.get("payload", {}).get("delta", "").startswith("保留") for e in recovered["events"]))
+
+    def test_guidance_finishes_without_conflicting_with_its_durable_receipt(self):
+        cid = self.client.call("conversation.create")["id"]
+        params = self.submit(cid, "GUIDANCE-CHECK")
+        self.client.until(lambda v: v.get("event") == "runtime" and v.get("data", {}).get("type") == "content")
+        message = {"id": uuid.uuid4().hex, "role": "user", "content": "按补充要求继续",
+                   "meta": {"kind": "user_guidance", "turn_id": params["request_id"]}}
+        result = self.client.call("conversation.steer", conversation_id=cid, run_id=params["request_id"], message=message)
+        self.assertTrue(result["accepted"] and result["message_committed"])
+        value = self.client.wait_run(cid)
+        self.assertEqual(value["run"]["status"], "completed", value["run"].get("error"))
+        saved = [m for m in value["messages"] if m["id"] == message["id"]]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["content"], message["content"])
+        self.assertEqual(saved[0]["meta"]["request_id"], params["request_id"])
+        self.client.close()
+        self.client = ServiceClient(self.temp.name)
+        self.assertEqual(self.client.call("conversation.get", conversation_id=cid)["messages"], value["messages"])
 
     def test_stop_immediately_after_acceptance(self):
         cid = self.client.call("conversation.create")["id"]

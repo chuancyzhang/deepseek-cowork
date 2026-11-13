@@ -31,6 +31,7 @@ for (const method of ['project.list', 'project.save', 'project.archive', 'projec
 for (const method of require('./management-methods.cjs')) allowed.add(method);
 allowed.add('task.inspect');
 allowed.add('task.context');
+for (const method of ['file.render', 'file.render_result', 'file.install_renderer']) allowed.add(method);
 allowed.add('host.recovery.get'); allowed.add('host.recovery.save');
 allowed.add('visualization.get'); allowed.add('visualization.state');
 for (const method of ['workbench.list', 'workbench.profiles', 'workbench.open', 'workbench.close', 'workbench.control', 'workbench.read', 'workbench.input', 'workbench.reply', 'workbench.resize', 'workbench.activate', 'file.save_copy']) allowed.add(method);
@@ -136,7 +137,7 @@ else {
     ipcMain.handle('cowork:call', async (event, method, params = {}) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
-      if (['file.open', 'file.save_copy', 'workspace.create'].includes(method)) return fileHost.register(await backend.call(method, params));
+      if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result'].includes(method)) return fileHost.register(await backend.call(method, params));
       if (method === 'file.external') {
         const file = await backend.call('file.describe', params);
         return shell.openPath(file.path);

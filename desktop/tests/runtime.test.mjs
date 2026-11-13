@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime } from '../src/runtime.ts';
+import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords } from '../src/runtime.ts';
 
 test('run and reasoning durations use recorded boundaries and stay isolated by run', () => {
   const event = (type, created_at, source_message_id='a', run_id='r') => ({type,created_at,source_message_id,run_id});
@@ -99,4 +99,53 @@ test('tool results survive streaming and reconcile once canonical messages arriv
     {id:'t1',role:'tool',content:'file content',tool_call_id:'c1',meta:{turn_id:'a'}},
     {id:'m2',role:'assistant',content:'done',meta:{turn_id:'a'}}],events);
   assert.deepEqual(restored.map(m=>m.id),['u1','m1','t1','m2']);
+});
+
+test('guidance divides live and saved output at receipt time without altering provider history', () => {
+  const user={id:'u',role:'user',content:'开始',created_at:100,meta:{turn_id:'r'}};
+  const guidance={id:'g',role:'user',content:'补充',created_at:103,meta:{turn_id:'r',kind:'user_guidance',ui_submitted_at:103.5}};
+  const event=(type,time,extra={})=>({type,run_id:'r',source_message_id:'a',created_at:time,...extra});
+  const events=[event('thinking',101,{delta:'先思考'}),event('content',102,{delta:'已完成第一步。'}),
+    event('content',104,{delta:'继续第二步。'}),event('tool_call',105,{data:{id:'call',name:'read'}}),
+    event('tool_result',106,{data:{id:'call',result:'结果'}}),event('content',108,{source_message_id:'b',delta:'完成'})];
+  const projection=new MessageProjection();
+  const before=projection.project([user],events.slice(0,2),'r');
+  assert.equal(before[1].content,'已完成第一步。');
+  const during=projection.project([user,guidance],events.slice(0,2),'r');
+  assert.deepEqual(during.map(m=>m.id),['u','a:before:g','g']);
+  assert.equal(during[1].live,false);
+  const live=projection.project([user,guidance],events,'r');
+  assert.deepEqual(live.map(m=>m.id),['u','a:before:g','g','a','tool:r:call','b']);
+  assert.equal(live[1].content,'已完成第一步。');
+  assert.equal(live[3].content,'继续第二步。');
+  assert.equal(replyParts([live[1]]).answer,undefined);
+  const saved=[user,guidance,{id:'a',role:'assistant',content:'已完成第一步。继续第二步。',reasoning_content:'先思考',tool_calls:[{id:'call',name:'read'}],meta:{turn_id:'r'}},
+    {id:'t',role:'tool',content:'结果',tool_call_id:'call',meta:{turn_id:'r'}}, {id:'b',role:'assistant',content:'完成',meta:{turn_id:'r'}}];
+  const original=structuredClone(saved), restored=displayMessages(saved,events);
+  assert.deepEqual(restored.map(m=>[m.role,m.content]),live.map(m=>[m.role,m.content]));
+  assert.deepEqual(saved,original);
+  assert.equal(restored.filter(m=>m.live).length,0);
+  // Missing event pages preserve all saved text and do not make up a split.
+  const partial=displayMessages(saved,events.slice(2));
+  assert.equal(partial.filter(m=>m.id==='a').length,1);
+  assert.equal(partial.find(m=>m.id==='a').content,saved[2].content);
+});
+
+test('question receipts follow their tool stage across guidance and keep accepted answers on replay',()=>{
+  const request={request_id:'q',kind:'choice',metadata:{tool_call_id:'call'},message:'确认方式'};
+  const response={request_id:'q',status:'completed',text:'manual',selected_options:['manual']};
+  const events=[{type:'interaction_finished',run_id:'r',data:{request_id:'q',answered:true,status:'completed'}},
+    {type:'interaction_request',run_id:'r',source_message_id:'a',data:request},
+    {type:'tool_result',run_id:'r',data:{id:'call',result_obj:{interaction_response:response}}}];
+  const questions=interactionRecords(events);
+  assert.deepEqual(questions[0].outcome.response,response);
+  const groups=messageGroups([{id:'a',role:'assistant',tool_calls:[{id:'call'}],meta:{turn_id:'r'}},
+    {id:'g',role:'user',content:'继续',meta:{turn_id:'r',same_turn_guidance:true}},
+    {id:'b',role:'assistant',content:'完成',meta:{turn_id:'r'}},
+    {id:'u2',role:'user',content:'下一轮',meta:{turn_id:'r2'}}],questions);
+  assert.deepEqual(groups[0].questions,questions);
+  assert.ok(groups.slice(1).every(group=>!group.questions));
+  const durable=interactionRecords([{type:'interaction_request',run_id:'r',data:request},
+    {type:'interaction_finished',run_id:'r',data:{request_id:'q',answered:true,status:'completed',response}}]);
+  assert.deepEqual(durable[0].outcome.response,response);
 });

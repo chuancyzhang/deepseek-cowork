@@ -14,7 +14,7 @@ from core.conversation_integrity import canonical_ledger_messages_hash
 
 log = logging.getLogger("desktop.conversations")
 PREFERENCE_KEYS = frozenset({"selected_model_id", "selected_skill_names", "conversation_agent", "knowledge_refs",
-    "conversation_refs", "mode", "reasoning_effort", "keep_audio_local", "audio_transcription_backend",
+    "conversation_refs", "mode", "reasoning_effort", "keep_audio_local",
     "clarify_mode_state", "pending_clarify_questions", "grill_round_count", "grill_cycle_count", "grill_execution_confirmed",
     "workflow_mode", "office_output_profile", "office_conversion_target", "office_source_files", "office_template_file",
     "ppt_agent_mode", "ppt_agent_strategy", "ppt_agent_selected_strategy", "ppt_agent_preference", "ppt_agent_template_file", "ppt_agent_output_format"})
@@ -263,8 +263,7 @@ class ConversationActions:
                 old_meta = old.get("meta") or {}
                 replacement = user_payload(p.get("text"), files, workspace=self.service.workspace(cid), supports_vision=True,
                     references=old_meta.get("conversation_refs", []), branch_file_map=record["meta"].get("branch_file_map"),
-                    keep_audio_local=bool(old_meta.get("local_only_audio_files") or old_meta.get("transcription_only_audio_files")),
-                    audio_transcription_backend=old_meta.get("audio_transcription_backend", "local"))
+                    keep_audio_local=bool(old_meta.get("local_only_audio_files") or old_meta.get("transcription_only_audio_files")))
                 from core.enterprise_client import submission
                 if old_meta.get("enterprise_submission"):
                     previous = old_meta["enterprise_submission"]
@@ -401,17 +400,18 @@ class ConversationRuntime:
                     workspace.mkdir(parents=True, exist_ok=True)
                 else:
                     raise ValueError("原项目目录暂时不可用，请恢复该目录后继续。输入和历史记录已保留。")
+            protected_audio = bool(preferences.get("keep_audio_local"))
             prior_attachments = set()
             if p.get("rewrite"):
                 source = next((message for message in self.storage.get_messages(cid) if message["id"] == p["rewrite"].get("message_id")), {})
+                protected_audio = protected_audio or bool((source.get("meta") or {}).get("local_only_audio_files") or (source.get("meta") or {}).get("transcription_only_audio_files"))
                 prior_attachments = {str(Path(path).resolve()) for path in (source.get("meta") or {}).get("user_added_files", [])}
             paths = []
             for item in attachments:
                 path = str(Path(item["path"]).resolve())
                 paths.append(path if path in prior_attachments else str(self.checked_file(cid, path)))
             message = user_payload(text, paths, workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
-                keep_audio_local=bool(preferences.get("keep_audio_local")),
-                audio_transcription_backend=preferences.get("audio_transcription_backend", "local"),
+                keep_audio_local=protected_audio,
                 references=preferences.get("conversation_refs", []), branch_file_map=record["meta"].get("branch_file_map"))
             from core.enterprise_client import submission
             question = submission(profile, text)
@@ -429,6 +429,12 @@ class ConversationRuntime:
             if payload["rewrite"]:
                 self.conversations.idle(cid)
             payload["runtime_context"] = run_context(self, cid, payload, profile)
+            # Display-only snapshot; provider projection ignores message metadata.
+            message_meta["ui_context"] = {
+                "skills": list(payload["runtime_context"].get("selected_skill_names") or []),
+                "knowledge": [{"title": ref.get("title") or ref.get("name") or "资料"}
+                              for ref in preferences.get("knowledge_refs") or []],
+            }
             draft = self.store.versioned_state("draft:" + cid, {"text": "", "attachments": []})
             run, created = self.state.accept(payload)
             if created and payload.get("draft_revision") is not None and draft["revision"] == payload["draft_revision"]:
@@ -469,8 +475,7 @@ class ConversationRuntime:
             attachments = p.get("attachments") or []
             built = user_payload(text, [str(self.checked_file(cid, item["path"])) for item in attachments],
                 workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
-                keep_audio_local=bool(preferences.get("keep_audio_local")),
-                audio_transcription_backend=preferences.get("audio_transcription_backend", "local"))
+                keep_audio_local=bool(preferences.get("keep_audio_local")))
             message.update(content=built["content"], content_parts=built["content_parts"])
             message["meta"] = {**(message.get("meta") or {}), **(built.get("meta") or {}), "desktop_attachments": attachments}
             question = submission(profile, text)

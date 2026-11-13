@@ -124,16 +124,6 @@ class PlatformContractTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 desktop_target(system, machine)
 
-    def test_non_windows_speech_requires_explicit_remote_configuration(self):
-        from core.speech_to_text_config import validate_speech_to_text_config
-        with patch("core.speech_to_text_config.is_windows", return_value=False):
-            with self.assertRaisesRegex(ValueError, "还缺少"):
-                validate_speech_to_text_config({})
-            with self.assertRaisesRegex(ValueError, "尚未上传"):
-                validate_speech_to_text_config({"ASR_BACKEND": "local"})
-            self.assertEqual(validate_speech_to_text_config(dict(
-                ASR_API_URL="https://example.test/transcribe", ASR_MODEL_NAME="asr", ASR_API_KEY="key"))["backend"], "openai_compatible")
-
     def test_runtime_archive_rejects_escape_and_preserves_executable(self):
         from core.runtime_components import safe_extract_runtime_tar
         with tempfile.TemporaryDirectory() as root:

@@ -38,22 +38,28 @@ class DesktopMessaging:
         from core.im_gateway_status import read_im_gateway_status
         config = self.configuration()
         values = {"enabled_provider": next(iter(config["enabled_providers"]), "")}
-        sections = [{"fields": [field("enabled_provider", "接收消息的渠道", "select", options=[{"value": "", "label": "暂不接收"}] + [
+        sections = [{"id": "channels", "fields": [field("enabled_provider", "接收消息的渠道", "select", options=[{"value": "", "label": "暂不接收"}] + [
                     {"value": item.provider_id, "label": item.title} for item in IM_PROVIDER_SPECS])]}]
         status = read_im_gateway_status()
         states = {"stopped": "已停止", "connecting": "正在连接", "connected": "已连接", "reconnecting": "正在重连", "disconnected": "连接已断开", "error": "连接失败"}
         for spec in IM_PROVIDER_SPECS:
             current = config["providers"][spec.provider_id]
-            sections.append({"id": spec.provider_id, "title": spec.title, "description": spec.description,
+            sections.append({"id": spec.provider_id, "provider": spec.provider_id, "title": spec.title,
+                "description": spec.subtitle if spec.auth_kind == "qr" else "",
                 "fields": [field(spec.provider_id + ":" + item.key, item.label, "password" if item.secret else "text",
-                    placeholder="已保存，留空保留" if item.secret and current.get(item.key) else item.placeholder, help=item.help_text)
+                    placeholder="已保存，留空保留" if item.secret and current.get(item.key) else "" if item.placeholder.startswith("粘贴") else item.placeholder,
+                    help=item.help_text, advanced=item.advanced and not item.required)
                     for item in spec.fields],
                 "status": (states.get(status.get("state"), "尚未连接") + (" · " + status["error"] if status.get("error") else "")) if status.get("provider") == spec.provider_id else "已保存凭据" if spec.is_configured(current) else "尚未配置",
                 "actions": [action("im.qr:" + spec.provider_id, spec.reconnect_label if spec.is_configured(current) else spec.connect_label)] if spec.auth_kind == "qr" else []})
             for item in spec.fields:
                 values[spec.provider_id + ":" + item.key] = "" if item.secret else current.get(item.key, "")
-        sections.append({"actions": [action("im.restart", "重新连接"), action("im.disconnect", "停止接收")]})
-        return {"title": "消息连接", "description": "选择一个聊天软件接收任务，回复仍保存在本机对话中。", "values": values,
+        active = get_provider_spec(values["enabled_provider"])
+        sections.append({"id": "connection", "status": (active.title + " · " + states.get(status.get("state"), "尚未连接")
+                         + (" · " + status["error"] if status.get("error") else "")) if active else "",
+                         "actions": [action("im.restart", "重新连接", requires_saved=True, disabled=not active),
+                                     action("im.disconnect", "停止接收", requires_saved=True, disabled=not active)]})
+        return {"title": "消息连接", "description": "", "values": values,
                 "sections": sections, "revision": DesktopSettings.revision(config)}
 
     def save(self, values, p):

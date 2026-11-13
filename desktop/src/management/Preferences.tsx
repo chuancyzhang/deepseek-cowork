@@ -26,7 +26,7 @@ function Models(props: Props) {
   useEffect(() => { void reload(); }, [reload]);
   if (accountSetup) return <GatewaySetup back={() => {setAccountSetup(false); void reload();}} saved={updateSettings} confirm={confirm}/>;
   if (edit) return <ModelForm {...props} item={edit} back={() => { setEdit(null); void reload(); }}/>;
-  return <><PageHead title="模型与服务" detail="在熟悉的服务中选择模型。企业模型会随登录状态同步。"><button className="secondary" onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
+  return <><PageHead compact title="模型与服务" detail="在熟悉的服务中选择模型。企业模型会随登录状态同步。"><button className="secondary" onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
     {failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {!settings?.models.length && <Empty title="连接第一个模型" detail="填写服务地址和 API Key 后，即可开始对话。"/>}
     {channels.map(channel => <section className="settings-section" key={channel.channel_id}><div className="section-heading"><h3>{channel.display_name}</h3><button className="secondary" onClick={() => setEdit(channel)}><Pencil size={15}/>编辑服务</button></div>
@@ -79,7 +79,7 @@ function Appearance({ onError, settings, updateSettings, confirm }: Props) {
   const dark = value?.appearance.mode === 'dark' || value?.appearance.mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches;
   useEffect(() => { if (selected) void rpc('themes.resolve', { id: selected, dark }).then(setPreview).catch(error => setFailure(error.message)); }, [selected, dark, value?.appearance.reading]);
   async function appearance(next: any) { try { setValue(await rpc('themes.appearance', { value: next })); if (settings) updateSettings({ ...settings, theme: next.mode }); } catch (error) { setFailure((error as Error).message); } }
-  return <><PageHead title="外观与阅读" detail="先在右侧预览，找到适合你的颜色与阅读节奏。"><button className="secondary" onClick={async () => { const path = await rpc('dialog.choose', { kind: 'theme' }); if (path) { try { await rpc('themes.import', { path }); await load(); } catch (error) { setFailure((error as Error).message); } } }}><Download size={15}/>导入主题</button></PageHead>
+  return <><PageHead compact title="外观与阅读" detail="先在右侧预览，找到适合你的颜色与阅读节奏。"><button className="secondary" onClick={async () => { const path = await rpc('dialog.choose', { kind: 'theme' }); if (path) { try { await rpc('themes.import', { path }); await load(); } catch (error) { setFailure((error as Error).message); } } }}><Download size={15}/>导入主题</button></PageHead>
     {failure && <ErrorState message={failure} retry={() => void load()}/>}{value && <>
       <div className="segmented" aria-label="明暗模式">{[['system','跟随系统'],['light','浅色'],['dark','深色']].map(([mode,label]) => <button key={mode} className={value.appearance.mode === mode ? 'selected' : ''} onClick={() => void appearance({ ...value.appearance, mode })}>{label}</button>)}</div>
       <div className="appearance-layout"><div className="theme-inventory">{value.themes.map((theme: any) => <button className={`theme-tile ${selected === theme.id ? 'selected' : ''}`} key={theme.id} onClick={() => setSelected(theme.id)}><span className={'theme-swatch ' + theme.id}/><span><strong>{theme.name}</strong><small>{theme.description || '自定义主题'}</small></span>{value.active === theme.id && <Check size={16}/>}</button>)}</div>
@@ -94,7 +94,7 @@ function Variables(props: Props) {
   const load = useCallback(() => rpc('variables.list').then(setItems).catch(error => setFailure(error.message)), []);
   useEffect(() => { void load(); }, [load]);
   if (edit) return <VariableForm {...props} item={edit} back={() => { setEdit(null); void load(); }}/>;
-  return <><PageHead title="变量与凭据" detail="重复使用的信息只需保存一次，敏感凭据单独控制读取权限。"><button className="primary" onClick={() => setEdit({})}><Plus size={16}/>添加变量</button></PageHead>{failure && <ErrorState message={failure}/>}
+  return <><PageHead compact title="变量与凭据" detail="重复使用的信息只需保存一次，敏感凭据单独控制读取权限。"><button className="primary" onClick={() => setEdit({})}><Plus size={16}/>添加变量</button></PageHead>{failure && <ErrorState message={failure}/>}
     {!items.length && <Empty icon={KeyRound} title="保存常用信息" detail="例如项目编号、常用地址或服务凭据。"/>}{items.map(item => <div className="model-row" key={item.id}><KeyRound size={19}/><div><strong>{item.name}</strong><small>{item.kind === 'secret' ? '敏感凭据' : item.value} · {item.description}</small></div><button className="icon-button" title="编辑" onClick={() => setEdit(item)}><Pencil size={16}/></button><button className="icon-button" title="删除" onClick={async () => { if (await props.confirm('删除这个变量？', '使用此变量的技能下次需要重新配置。', ['取消','删除']) === 1) { try { await rpc('variables.delete', { id: item.id }); await load(); } catch (error) { setFailure((error as Error).message); } } }}><Trash2 size={16}/></button></div>)}
     <button className="secondary" onClick={async () => { if (await props.confirm('恢复上一版变量？', '当前变量列表将被上一版替换。', ['取消','恢复']) === 1) { try { await rpc('variables.undo'); await load(); } catch (error) { setFailure((error as Error).message); } } }}><RefreshCw size={15}/>恢复上一版</button></>;
 }
@@ -107,12 +107,12 @@ function VariableForm({ item, back, onDirty }: Props & { item: any; back: () => 
 function Jobs({ onError }: Props) {
   const [jobs, setJobs] = useState<any[]>([]), [failure, setFailure] = useState('');
   useEffect(() => { void rpc('jobs.list').then(setJobs).catch(error => setFailure(error.message)); return window.cowork.onEvents(events => { for (const event of events) if (event.event === 'job') setJobs(previous => [event.data, ...previous.filter(item => item.id !== event.data.id)].slice(0,100)); }); }, []);
-  return <><PageHead title="后台操作" detail="界面关闭后，运行记录仍然保留。"/>{failure && <ErrorState message={failure}/>} {!jobs.length && <Empty title="还没有后台操作" detail="导入、连接测试和资料处理的进度会显示在这里。"/>}{jobs.map(job => <div className="model-row" key={job.id}><div><strong>{job.title}</strong><small>{job.message} · {new Date(job.created_at*1000).toLocaleString()}</small>{job.error && <p className="error-text">{job.error}</p>}</div>{['running','queued','stopping'].includes(job.status) ? <button className="secondary" onClick={() => void rpc('jobs.cancel', { id: job.id }).catch(error => onError(error.message))}>取消</button> : <span className="subtle-badge">{({ completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' } as any)[job.status]}</span>}</div>)}</>;
+  return <><PageHead compact title="后台操作" detail="界面关闭后，运行记录仍然保留。"/>{failure && <ErrorState message={failure}/>} {!jobs.length && <Empty title="还没有后台操作" detail="导入、连接测试和资料处理的进度会显示在这里。"/>}{jobs.map(job => <div className="model-row" key={job.id}><div><strong>{job.title}</strong><small>{job.message} · {new Date(job.created_at*1000).toLocaleString()}</small>{job.error && <p className="error-text">{job.error}</p>}</div>{['running','queued','stopping'].includes(job.status) ? <button className="secondary" onClick={() => void rpc('jobs.cancel', { id: job.id }).catch(error => onError(error.message))}>取消</button> : <span className="subtle-badge">{({ completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' } as any)[job.status]}</span>}</div>)}</>;
 }
 function General({ settings, onError, onDirty }: Props) {
   const [value, setValue] = useState<any>(null), [failure, setFailure] = useState('');
   useEffect(() => { void rpc('settings.general').then(setValue).catch(error => setFailure(error.message)); }, []);
-  return <><PageHead title="工作偏好" detail="选择工作文件的位置，管理本机数据。"/>{failure && <ErrorState message={failure}/>}{value && <GeneralForm initial={value} onDirty={onDirty} onError={onError}/>}
+  return <><PageHead compact title="工作偏好" detail="选择工作文件的位置，管理本机数据。"/>{failure && <ErrorState message={failure}/>}{value && <GeneralForm initial={value} onDirty={onDirty} onError={onError}/>}
     <section className="settings-section"><h3>本机数据</h3><p>正式版沿用原有数据目录；开发版使用隔离目录。</p><code className="data-path">{settings?.data_dir}</code><button className="secondary" onClick={() => void rpc('app.logs')}>打开诊断日志</button></section></>;
 }
 function GeneralForm({ initial, onDirty, onError }: any) {

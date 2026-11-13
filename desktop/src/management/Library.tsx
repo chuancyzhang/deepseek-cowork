@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, Check, ChevronRight, ExternalLink, FileText, Folder, Link2, LoaderCircle, LogOut, Plus, RefreshCw, Search, Upload, X } from 'lucide-react';
-import { Empty, ErrorState, Field, JobProgress, PageHead } from '../Management';
+import { Empty, ErrorState, Field, JobProgress, PageToolbar } from '../Management';
 import { operation, rpc } from '../managementApi';
 
 const sources = [['weknora','WeKnora'], ['tencent-docs','腾讯文档'], ['lexiang','腾讯乐享']];
@@ -39,9 +39,8 @@ export default function Library({ onError, onReference, confirm }: { onError: (m
       item: entire ? '' : item.item_id || item.id, title: item.title || item.name });
     if (ref) { try {await onReference(ref); setReferenceNotice('已添加到当前对话：' + (item.title || item.name));} catch (error) {setFailure((error as Error).message);} }
   }
-  return <><PageHead title="资料库"><button className="icon-button" title="刷新" disabled={busy} onClick={() => collection ? void children() : void execute('library.catalog').then(setCatalog)}><RefreshCw size={17}/></button>
-    {connected && <button className="secondary" onClick={async () => { if (await confirm('断开当前资料来源？', '已选择的资料仍保留，重新连接原账号后可以继续使用。', ['取消','断开']) === 1) { await execute('library.logout'); await loadStatus(); } }}><LogOut size={16}/>断开</button>}</PageHead>
-    <div className="segmented">{sources.map(([id,name]) => <button key={id} className={source === id ? 'selected' : ''} onClick={() => { setSource(id); void rpc('library.select', { source: id }).catch(error => setFailure(error.message)); }}>{name}</button>)}</div>
+  return <><PageToolbar title="资料库"><div className="segmented" role="group" aria-label="资料来源">{sources.map(([id,name]) => <button key={id} aria-pressed={source === id} className={source === id ? 'selected' : ''} onClick={() => { setSource(id); void rpc('library.select', { source: id }).catch(error => setFailure(error.message)); }}>{name}</button>)}</div><div className="button-row"><button className="icon-button" title="刷新" disabled={busy} onClick={() => collection ? void children() : void execute('library.catalog').then(setCatalog)}><RefreshCw size={17}/></button>
+    {connected && <button className="secondary" onClick={async () => { if (await confirm('断开当前资料来源？', '已选择的资料仍保留，重新连接原账号后可以继续使用。', ['取消','断开']) === 1) { await execute('library.logout'); await loadStatus(); } }}><LogOut size={16}/>断开</button>}</div></PageToolbar>
     <JobProgress job={job}/>{failure && <ErrorState message={failure}/>} {referenceNotice && <p className="muted" role="status">{referenceNotice}</p>}
     {!connected ? <section className="connection-form"><Empty icon={BookOpen} title={'连接' + sources.find(item => item[0] === source)?.[1]} detail="连接后可浏览目录、引用资料和上传文件。"/>
       {source === 'tencent-docs' ? <div className="button-row"><button className="primary" disabled={busy} onClick={async () => { const result = await execute('library.authorize'); if (result) { setAuthUrl(result.url); await rpc('external.open', { url: result.url }); } }}><ExternalLink size={16}/>在浏览器授权</button>{authUrl && <button className="secondary" disabled={busy} onClick={async () => { await execute('library.confirm'); await loadStatus(); }}>已完成授权</button>}</div> :

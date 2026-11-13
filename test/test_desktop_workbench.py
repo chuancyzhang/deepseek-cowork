@@ -76,3 +76,104 @@ def test_agent_cannot_write_after_user_takes_control():
     result = workbench.agent_request({'session_id': 'a'}, {'token': 't', 'action': 'terminal_input', 'arguments': {'tab_id': tab.id}})
     assert result['status'] == 'cancelled'
     terminal.write.assert_not_called()
+
+
+def test_office_preview_job_is_read_only_versioned_and_conversation_scoped(tmp_path, monkeypatch):
+    import hashlib
+    import pytest
+    from core.desktop_workbench import DesktopFiles
+    from core import document_preview, libreoffice_component
+    source = tmp_path / 'slides.pptx'
+    source.write_bytes(b'original')
+    rendered = tmp_path / 'cache.pdf'
+    rendered.write_bytes(b'%PDF-fixture')
+    storage = SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(tmp_path)}})
+    jobs = SimpleNamespace(submit=Mock(return_value={'job_id': 'preview'}), get=Mock())
+    files = DesktopFiles(storage, None, jobs)
+    monkeypatch.setattr(libreoffice_component, 'status', lambda: {'available': True})
+    before = source.read_bytes()
+    opened = files.dispatch('file.open', {'conversation_id': 'a', 'path': str(source)})
+    assert opened['payload']['preview_kind'] == 'office'
+    assert opened['payload']['read_only'] and opened['payload']['office_family'] == 'powerpoint'
+    convert = Mock(return_value=(str(rendered), opened['fingerprint']))
+    monkeypatch.setattr(document_preview, 'render_office_pdf', convert)
+    files.dispatch('file.render', {'conversation_id': 'a', 'path': str(source), 'fingerprint': opened['fingerprint']})
+    import threading
+    operation = jobs.submit.call_args.args[1]
+    result = operation(threading.Event(), Mock())
+    assert convert.call_args.kwargs['renderer'] == 'libreoffice'
+    jobs.get.return_value = {'id': 'preview', 'status': 'completed', 'result': result}
+    ready = files.dispatch('file.render_result', {'conversation_id': 'a', 'job_id': 'preview'})
+    assert ready['path'] == str(source)
+    assert ready['payload']['preview_path'] == str(rendered)
+    assert source.read_bytes() == before
+    with pytest.raises(ValueError, match='不属于'):
+        files.dispatch('file.render_result', {'conversation_id': 'b', 'job_id': 'preview'})
+    source.write_bytes(b'changed')
+    with pytest.raises(ValueError, match='已变化'):
+        operation(threading.Event(), Mock())
+    assert convert.call_count == 1
+
+
+def test_libreoffice_install_checks_package_before_starting_program(tmp_path, monkeypatch):
+    import threading
+    import pytest
+    from core import libreoffice_component as component
+    monkeypatch.setattr(component, 'component_root', lambda: tmp_path)
+    monkeypatch.setattr(component, 'can_install', lambda: True)
+    monkeypatch.setattr(component, 'managed_executable', lambda: None)
+    start = Mock()
+    monkeypatch.setattr(component, 'popen_external_program', start)
+    package = tmp_path / 'bad.msi'
+    package.write_bytes(b'invalid')
+    with pytest.raises(ValueError, match='校验失败'):
+        component.install(threading.Event(), Mock(), package=package)
+    start.assert_not_called()
+    assert package.read_bytes() == b'invalid'
+    assert not list(tmp_path.glob('install-*'))
+    from core.desktop_jobs import JobCancelled
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(JobCancelled):
+        component.install(cancelled, Mock(), package=package)
+    start.assert_not_called()
+
+
+def test_old_word_draft_can_only_be_recovered_as_copy(tmp_path, monkeypatch):
+    import base64
+    import io
+    import pytest
+    from docx import Document
+    from core.desktop_workbench import DesktopFiles
+    from core import libreoffice_component
+    source = tmp_path / 'draft.docx'
+    original = Document()
+    original.add_paragraph('原内容')
+    original.save(source)
+    before = source.read_bytes()
+    storage = SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(tmp_path)}})
+    files = DesktopFiles(storage, None)
+    monkeypatch.setattr(libreoffice_component, 'status', lambda: {'available': False})
+    opened = files.dispatch('file.open', {'conversation_id': 'a', 'path': str(source), 'recover_draft': True})
+    assert opened['payload']['read_only'] and opened['payload']['recovery_available']
+    edited = Document()
+    edited.add_paragraph('恢复的未保存内容')
+    binary = io.BytesIO()
+    edited.save(binary)
+    payload = {'kind': 'docx', 'value': base64.b64encode(binary.getvalue()).decode()}
+    with pytest.raises(ValueError, match='另存副本'):
+        files.dispatch('file.save', {'conversation_id': 'a', 'id': opened['id'], 'payload': payload})
+    copied = files.dispatch('file.save_copy', {'conversation_id': 'a', 'id': opened['id'], 'name': 'recovered.docx', 'payload': payload})
+    assert Document(copied['path']).paragraphs[0].text == '恢复的未保存内容'
+    assert source.read_bytes() == before
+    assert copied['payload']['read_only'] and not copied['payload']['recovery_available']
+
+
+def test_office_preview_cleans_deep_extension_cache(tmp_path):
+    from core.document_preview import _libreoffice_staging
+    from core.platform_runtime import platform_runtime
+    with _libreoffice_staging(tmp_path) as staging:
+        nested = platform_runtime.filesystem_path(staging / ('extensions-' + 'a' * 60) / ('help-' + 'b' * 60) / ('cache-' + 'c' * 60))
+        nested.mkdir(parents=True)
+        (nested / 'payload.xml').write_text('cache', encoding='utf-8')
+    assert not staging.exists()

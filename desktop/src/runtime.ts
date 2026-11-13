@@ -120,14 +120,110 @@ export class MessageProjection {
     if (next < 0) next = result.length;
     result.splice(next, 0, message);
   }
-  return result.filter(m => messageText(m.content) || m.reasoning_content || m.tool_calls?.length || m.role === 'tool' || m.meta?.desktop_attachments?.length || m.meta?.user_added_files?.length);
+  return interleaveGuidance(result, events).filter(m => messageText(m.content) || m.reasoning_content || m.tool_calls?.length || m.role === 'tool' || m.meta?.desktop_attachments?.length || m.meta?.user_added_files?.length);
   }
 }
 export const isActive = (status?: string) => ['queued', 'running', 'stopping'].includes(status || '');
 
-export type MessageGroup = {id: string; messages: Message[]; assistant: boolean};
+const messageRun = (message: Message) => message.meta?.turn_id || message.meta?.ui_turn_id;
+const guidanceTime = (message: Message) => message.meta?.ui_submitted_at || message.created_at;
+const isGuidance = (message: Message) => message.role === 'user' && (message.meta?.same_turn_guidance || message.meta?.kind === 'user_guidance');
+
+/** Presentation only: receipt time divides streamed stages; provider history stays intact. */
+export function interleaveGuidance(messages: Message[], events: RuntimeEvent[]): Message[] {
+  const runs = new Set(messages.filter(isGuidance).map(messageRun).filter(Boolean));
+  if (!runs.size) return messages;
+  const result = [...messages];
+  for (const run of runs) {
+    const entries = result.filter(message => messageRun(message) === run);
+    const guidance = entries.filter(message => isGuidance(message) && messageDate(guidanceTime(message)))
+      .sort((a, b) => guidanceTime(a) - guidanceTime(b));
+    // Qt histories already contain explicit display anchors around guidance.
+    if (!guidance.length || entries.some(message => message.meta?.ui_visible_fragment)) continue;
+    const bucket = (time: number) => guidance.filter(message => guidanceTime(message) <= time).length;
+    const sourceEvents = new Map<string, RuntimeEvent[]>(), toolTimes = new Map<string, number>();
+    for (const event of events) {
+      if (event.run_id !== run || !messageDate(event.created_at)) continue;
+      if (event.type === 'tool_result' && event.data?.id) toolTimes.set(event.data.id, event.created_at!);
+      if (event.source_message_id && ['content', 'content_snapshot', 'thinking', 'tool_call'].includes(event.type)) {
+        const list = sourceEvents.get(event.source_message_id) || [];
+        list.push(event); sourceEvents.set(event.source_message_id, list);
+      }
+    }
+    const ordered: {message: Message; time: number; order: number}[] = [];
+    for (const [order, message] of entries.entries()) {
+      if (isGuidance(message)) {ordered.push({message, time:guidanceTime(message), order}); continue;}
+      if (message.role === 'user') {ordered.push({message, time:-Infinity, order}); continue;}
+      const stream = sourceEvents.get(message.meta?.ui_source_message_id || message.id) || [];
+      const first = stream[0]?.created_at ?? toolTimes.get(message.tool_call_id || '') ?? message.created_at;
+      if (!stream.length || message.role !== 'assistant') {
+        ordered.push({message, time:first ?? Infinity, order}); continue;
+      }
+      const pieces = new Map<number, {content:string; thinking:string; calls:any[]; time:number}>();
+      let text = '', thoughts = '', valid = true;
+      for (const event of stream) {
+        const part = bucket(event.created_at!);
+        const piece = pieces.get(part) || {content:'', thinking:'', calls:[], time:event.created_at!};
+        if (event.type === 'content_snapshot') {
+          if (!(event.content || '').startsWith(text)) {valid = false; break;}
+          piece.content += (event.content || '').slice(text.length); text = event.content || '';
+        } else if (event.type === 'content') {piece.content += event.delta || ''; text += event.delta || '';}
+        else if (event.type === 'thinking') {piece.thinking += event.delta || ''; thoughts += event.delta || '';}
+        else if (event.type === 'tool_call' && event.data) piece.calls.push(event.data);
+        pieces.set(part, piece);
+      }
+      // Incomplete event pages or corrected snapshots cannot replace saved text.
+      if (!valid || text !== messageText(message.content) || thoughts !== (message.reasoning_content || '') ||
+          (message.tool_calls || []).some(call => ![...pieces.values()].some(piece => piece.calls.some(item => item.id === call.id)))) {
+        ordered.push({message, time:first ?? Infinity, order}); continue;
+      }
+      const last = [...pieces.keys()].at(-1);
+      for (const [part, piece] of pieces) {
+        const beforeGuidance = part < guidance.length;
+        ordered.push({time:piece.time, order, message:{...message,
+          id:beforeGuidance ? `${message.id}:before:${guidance[part].id}` : message.id,
+          content:piece.content, reasoning_content:piece.thinking,
+          tool_calls:piece.calls.map(call => message.tool_calls?.find(item => item.id === call.id) || call),
+          live:message.live && !beforeGuidance,
+          meta:{...message.meta, ui_source_message_id:message.meta?.ui_source_message_id || message.id,
+            ...(pieces.size > 1 ? {ui_split_reasoning:true} : {}),
+            ...(beforeGuidance ? {ui_reply_kind:'stage'} : {}),
+            ...(part !== last ? {desktop_attachments:[], user_added_files:[]} : {})}}});
+      }
+    }
+    const sorted = ordered.sort((a, b) => a.time - b.time || a.order - b.order).map(item => item.message);
+    const positions = result.flatMap((message, index) => messageRun(message) === run ? [index] : []);
+    // Never move a fragment across another conversation turn.
+    if (positions.at(-1)! - positions[0] + 1 !== positions.length) continue;
+    result.splice(positions[0], positions.length, ...sorted);
+  }
+  return result;
+}
+
+export type QuestionRecord = {request:any; outcome?:any; runId?:string; sourceId?:string; callId?:string};
+export function interactionRecords(events: RuntimeEvent[], messages: Message[] = []): QuestionRecord[] {
+  const records = new Map<string, QuestionRecord>(), outcomes = new Map<string, any>();
+  for (const event of events) {
+    if (event.type === 'interaction_request' && event.data?.request_id && !records.has(event.data.request_id))
+      records.set(event.data.request_id, {request:event.data, runId:event.run_id,
+        sourceId:event.source_message_id, callId:event.data.metadata?.tool_call_id});
+    if (event.type === 'interaction_finished' && event.data?.request_id) outcomes.set(event.data.request_id, event.data);
+  }
+  const responses = new Map<string, any>();
+  for (const value of [...events.filter(event => event.type === 'tool_result').map(event => event.data?.result_obj), ...messages.map(message => message.result_obj)]) {
+    const response = value?.interaction_response;
+    if (response?.request_id) responses.set(response.request_id, response);
+  }
+  return [...records].map(([id, record]) => {
+    const outcome = outcomes.get(id), response = outcome?.response || responses.get(id);
+    return {...record, outcome: outcome || response ? {...outcome, status:outcome?.status || response?.status,
+      answered:outcome?.answered ?? response?.status === 'completed', response} : undefined};
+  });
+}
+
+export type MessageGroup = {id: string; messages: Message[]; assistant: boolean; questions?: QuestionRecord[]};
 /** Presentation groups preserve every message and guidance boundary in ledger order. */
-export function messageGroups(messages: Message[]): MessageGroup[] {
+export function messageGroups(messages: Message[], questions: QuestionRecord[] = []): MessageGroup[] {
   const groups: MessageGroup[] = [];
   for (const message of messages) {
     const assistant = ['assistant', 'tool'].includes(message.role), previous = groups.at(-1);
@@ -135,6 +231,21 @@ export function messageGroups(messages: Message[]): MessageGroup[] {
     const priorTurn = previous?.messages[0].meta?.turn_id || previous?.messages[0].meta?.ui_turn_id;
     if (assistant && previous?.assistant && (!turn || !priorTurn || turn === priorTurn)) previous.messages.push(message);
     else groups.push({id: message.id, assistant, messages: [message]});
+  }
+  for (const question of questions) {
+    const candidates = groups.filter(group => group.assistant && group.messages.some(message => messageRun(message) === question.runId));
+    let group = candidates.find(group => group.messages.some(message =>
+      question.callId && (message.tool_call_id === question.callId || message.tool_calls?.some(call => call.id === question.callId))));
+    group ||= [...candidates].reverse().find(group => group.messages.some(message =>
+      question.sourceId && (message.id === question.sourceId || message.meta?.ui_source_message_id === question.sourceId)));
+    group ||= candidates.at(-1);
+    if (!group) {
+      group = {id:'interaction:' + question.request.request_id, assistant:true, messages:[{
+        id:'interaction:' + question.request.request_id, role:'assistant', content:'', meta:{turn_id:question.runId}}]};
+      const index = groups.map(item => item.messages.some(message => messageRun(message) === question.runId)).lastIndexOf(true);
+      groups.splice(index < 0 ? groups.length : index + 1, 0, group);
+    }
+    (group.questions ||= []).push(question);
   }
   return groups;
 }

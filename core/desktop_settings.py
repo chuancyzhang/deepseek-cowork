@@ -73,41 +73,30 @@ class DesktopSettings:
                          field("data_dir", "应用数据目录", "path", read_only=True)],
                          "actions": [action("storage.open", "打开数据目录")]}]
         elif name == "experiments":
-            from core.long_context import normalize_policy
             from core.browser_backend import normalize_policy as browser_policy
-            policy = normalize_policy(self.config.get("experimental_long_context"))
-            values = {"context_target": policy["target_tokens"] if policy["enabled"] else 0,
-                      "external_browser": browser_policy(self.config.get("experimental_browser_automation"))["enabled"]}
+            values = {"external_browser": browser_policy(self.config.get("experimental_browser_automation"))["enabled"]}
             title, description = "实验功能", "按需启用，设置从下一轮任务生效。"
-            sections = [{"title": "长上下文", "fields": [field("context_target", "目标上限", "select", options=[
-                         {"value": 0, "label": "未启用"}, {"value": 300000, "label": "300K"}, {"value": 1000000, "label": "1M"}])]},
-                        {"title": "浏览器", "fields": [field("external_browser", "使用外部 Chrome / Edge", "toggle",
+            sections = [{"title": "浏览器", "fields": [field("external_browser", "使用外部 Chrome / Edge", "toggle",
                          help="关闭后使用工作区内置网页。正在运行的浏览任务结束后才能切换。")]}]
         elif name == "components":
             from core import runtime_components as runtime
             title = "组件与依赖"
             sources = runtime.normalize_download_sources(self.config.get("download_sources"))
-            values = {kind + "_source": sources[kind]["selected"] for kind in ("python", "node")}
+            values = {"python_source": sources["python"]["selected"]}
             values["dependency_timeout"] = self.config.get("skill_dependency_install_timeout_seconds", 600)
-            sections = [{"title": "下载来源", "fields": [field(kind + "_source", label, "select", options=[
-                         {"value": item["id"], "label": item["name"]} for item in runtime.source_options(kind, sources)])
-                         for kind, label in (("python", "Python 依赖"), ("node", "Node.js"))] + [
+            sections = [{"title": "下载来源", "fields": [field("python_source", "Python 依赖", "select", options=[
+                         {"value": item["id"], "label": item["name"]} for item in runtime.source_options("python", sources)]),
                          field("dependency_timeout", "技能依赖安装超时（秒）", "number", min=30, max=7200)],
-                         "actions": [action("source.python", "测试 Python 来源"), action("source.node", "测试 Node.js 来源")]}]
+                         "actions": [action("source.python", "测试 Python 来源")]}]
             items = []
-            for identity, spec in runtime.TOOLKITS.items():
+            for identity in ("documents", "data-analysis"):
+                spec = runtime.TOOLKITS[identity]
                 status = runtime.toolkit_status(identity)
                 items.append({"id": identity, "name": spec["name"], "description": spec["description"],
                               "status": "已就绪" if status["healthy"] else "需要修复" if status["installed"] else "未安装",
                               "error": status.get("health_error", ""), "actions": [] if spec.get("bundled") else [
                               action("component.install:" + identity, "修复" if status["installed"] else "安装"),
                               *([action("component.remove:" + identity, "卸载", title="卸载组件？", confirm="仅移除此工具包，不删除对话或工作文件。") ] if status["installed"] else [])]})
-            node = runtime.node_runtime_status()
-            items.append({"id": "node", "name": "Node.js", "status": node.get("version") or "未安装", "actions": [action("component.install:node", "重新安装" if node["installed"] else "安装")]})
-            speech = runtime.speech_to_text_component_status()
-            items.append({"id": "speech", "name": "本地语音转文字", "status": "已安装" if speech.get("installed") else "未安装", "error": speech.get("health_error", ""),
-                          "actions": [action("component.install:speech", "修复" if speech.get("installed") else "安装"),
-                                      *([action("component.remove:speech", "卸载", title="卸载语音组件？", confirm="本地识别模型将移除，已有音频和转写结果保留。") ] if speech.get("installed") else [])]})
             sections.append({"title": "运行组件", "items": items})
         elif name == "logs":
             title = "运行日志"
@@ -132,7 +121,10 @@ class DesktopSettings:
         current = self.page(name, context)
         if p.get("revision") != current["revision"]:
             raise ValueError("设置已被其他操作修改。编辑已保留，请刷新后合并。")
-        values = p.get("value") or {}
+        # Older local form drafts can still contain controls retired from these pages.
+        # Do not let them overwrite runtime settings now managed elsewhere.
+        retired = {"experiments": {"context_target"}, "components": {"node_source"}}
+        values = {key: value for key, value in (p.get("value") or {}).items() if key not in retired.get(name, set())}
         if set(values) - set(current["values"]):
             raise ValueError("不支持的设置项。")
         v = {**current["values"], **values}
@@ -151,19 +143,14 @@ class DesktopSettings:
                         raise ValueError("目录不存在，请选择已有目录。")
                     self.config.set(key, value)
         elif name == "experiments":
-            target = int(v["context_target"])
-            if target not in (0, 300000, 1000000):
-                raise ValueError("请选择有效的上下文目标。")
             # Keep the original backend coordinator and task-snapshot semantics.
             self.config.set_experimental_browser_automation({"enabled": bool(v["external_browser"])})
-            self.config.set_experimental_long_context({"enabled": target != 0, "target_tokens": target or 300000})
         elif name == "components":
             from core import runtime_components as runtime
             sources = runtime.normalize_download_sources(self.config.get("download_sources"))
-            for kind in ("python", "node"):
-                if v[kind + "_source"] not in {item["id"] for item in runtime.source_options(kind, sources)}:
-                    raise ValueError("下载来源不存在。")
-                sources[kind]["selected"] = v[kind + "_source"]
+            if v["python_source"] not in {item["id"] for item in runtime.source_options("python", sources)}:
+                raise ValueError("下载来源不存在。")
+            sources["python"]["selected"] = v["python_source"]
             timeout = int(v["dependency_timeout"])
             if not 30 <= timeout <= 7200:
                 raise ValueError("安装超时应为 30 到 7200 秒。")
@@ -232,14 +219,10 @@ class DesktopSettings:
                     result = runtime.test_source(kind, runtime.selected_source(kind, sources))
                     return {"detail": {"title": "下载来源测试", "text": str(result)}}
                 operation, component = identity.split(":")
-                if component not in {*runtime.TOOLKITS, "node", "speech"}:
+                if component not in {"documents", "data-analysis"}:
                     raise ValueError("组件不存在。")
                 if operation == "component.remove":
-                    result = runtime.uninstall_speech_to_text_component() if component == "speech" else runtime.uninstall_toolkit(component)
-                elif component == "node":
-                    result = runtime.install_node_runtime(runtime.selected_source("node", sources), progress_callback=report)
-                elif component == "speech":
-                    result = runtime.install_speech_to_text_component(progress_callback=report, force=True)
+                    result = runtime.uninstall_toolkit(component)
                 else:
                     result = runtime.install_toolkit(component, runtime.selected_source("python", sources), progress_callback=report, force=True)
                 log.info("component_completed action=%s", identity)

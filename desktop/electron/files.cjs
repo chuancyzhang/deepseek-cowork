@@ -9,9 +9,10 @@ class FileHost {
   constructor() { this.files = new Map(); }
   register(file) {
     const token = randomUUID();
-    this.files.set(token, { path: file.path, generated: file.payload.preview_html });
-    return { ...file, payload: { ...file.payload, preview_html: undefined,
-      url: `cowork-local://file/${token}/${encodeURIComponent(path.basename(file.path))}` } };
+    const preview = file.payload.preview_path || file.path;
+    this.files.set(token, { path: preview, generated: file.payload.preview_html, pdf: file.payload.preview_kind === 'pdf' });
+    return { ...file, payload: { ...file.payload, preview_html: undefined, preview_path: undefined,
+      url: `cowork-local://file/${token}/${encodeURIComponent(path.basename(preview))}` } };
   }
   draft(url, text) {
     const parsed = new URL(url);
@@ -32,6 +33,20 @@ class FileHost {
     const relation = path.relative(directory, target);
     if (relation.startsWith('..') || path.isAbsolute(relation)) return new Response('不允许访问该文件。', { status: 403 });
     const isDocument = target === await fs.realpath(entry.path);
+    if (entry.pdf) {
+      if (!isDocument) return new Response('不允许访问该文件。', { status: 403 });
+      const file = await fs.open(target, 'r');
+      try {
+        const signature = Buffer.alloc(5);
+        await file.read(signature, 0, signature.length, 0);
+        if (signature.toString('ascii') !== '%PDF-') return new Response('PDF 文件无效，请重新生成预览。', { status: 415 });
+      } finally { await file.close(); }
+      const response = await fetch(pathToFileURL(target).href, { headers: request.headers });
+      const headers = new Headers(response.headers);
+      headers.set('Content-Type', 'application/pdf');
+      headers.set('X-Content-Type-Options', 'nosniff');
+      return new Response(response.body, { status: response.status, headers });
+    }
     if (!isDocument && !/\.(?:css|js|mjs|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|mp4|webm|mp3|wav|json)$/i.test(target))
       return new Response('不支持的页面资源。', { status: 403 });
     if (isDocument && entry.generated) return new Response(entry.generated, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });

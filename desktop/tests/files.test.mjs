@@ -40,6 +40,19 @@ test('preview URLs only expose the authorized document and bounded page assets',
     const draft = host.draft(file.payload.url, '<p>draft</p>');
     assert.equal(await (await host.response(new Request(draft),fetch)).text(),'<p>draft</p>');
     assert.equal(await fs.readFile(html,'utf8'),'<p>saved</p>');
+    const pdf = path.join(folder,'rendered.pdf');
+    await fs.writeFile(pdf, '%PDF-readonly');
+    const office = host.register({path:html,payload:{kind:'preview',preview_kind:'pdf',preview_path:pdf}});
+    assert.equal(office.path, html, 'file operations retain the original source path');
+    assert.equal(office.payload.preview_path, undefined, 'cache path stays in the host');
+    const rendered = await host.response(new Request(office.payload.url),fetch);
+    assert.equal(rendered.headers.get('Content-Type'), 'application/pdf');
+    assert.equal(rendered.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.equal(await rendered.text(), '%PDF-readonly');
+    assert.equal((await host.response(new Request(new URL('style.css',office.payload.url)),fetch)).status,403);
+    await fs.writeFile(pdf, '<html><script>window.parent.document</script></html>');
+    assert.equal((await host.response(new Request(office.payload.url),fetch)).status,415);
+    assert.equal(await fs.readFile(html,'utf8'),'<p>saved</p>');
   } finally {await fs.rm(folder,{recursive:true,force:true});}
 });
 

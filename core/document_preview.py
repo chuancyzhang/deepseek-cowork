@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -259,8 +260,10 @@ def _finish_office_helper(process, paths):
                 log.exception("office_preview.cleanup_error helper_pid=%s", process.pid)
 
 
-def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False):
-    if os.name != "nt":
+def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto"):
+    if renderer not in {"auto", "libreoffice"}:
+        raise ValueError("不支持的文档渲染器。")
+    if renderer == "libreoffice" or os.name != "nt":
         return _render_libreoffice_pdf(path, cancel=cancel, timeout=timeout, root=root, force=force)
     source = Path(path).resolve()
     family = OFFICE_FAMILIES.get(source.suffix.lower())
@@ -401,11 +404,31 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
 
 
 def _libreoffice_executable():
-    for candidate in (os.environ.get("COWORK_LIBREOFFICE_EXE"), shutil.which("soffice"),
-                      shutil.which("libreoffice"), "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
+    from .libreoffice_component import managed_executable
+    candidates = [os.environ.get("COWORK_LIBREOFFICE_EXE"), managed_executable(), shutil.which("soffice"),
+                  shutil.which("libreoffice"), "/Applications/LibreOffice.app/Contents/MacOS/soffice"]
+    if os.name == "nt":
+        candidates.extend(str(Path(folder) / "LibreOffice/program/soffice.com")
+                          for folder in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")) if folder)
+    for candidate in candidates:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return str(Path(candidate).resolve())
-    raise WorkbenchError("renderer_unavailable", "未安装 LibreOffice，无法生成版式预览。请安装后重试，或选择简化预览、用系统应用打开。")
+    raise WorkbenchError("renderer_unavailable", "需要安装 LibreOffice 才能预览页面版式。也可以用本机应用打开原文件。")
+
+
+@contextmanager
+def _libreoffice_staging(root):
+    from .platform_runtime import platform_runtime
+    root = Path(root).resolve()
+    staging = Path(tempfile.mkdtemp(prefix="libreoffice-", dir=root)).resolve()
+    if not staging.is_relative_to(root):
+        raise ValueError("文档预览临时目录无效。")
+    try:
+        yield staging
+    finally:
+        # Keep normal paths for soffice/file URIs, extended paths only for I/O:
+        # LibreOffice creates deeply nested extension caches on Windows.
+        shutil.rmtree(platform_runtime.filesystem_path(staging))
 
 
 def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=False):
@@ -429,8 +452,7 @@ def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=
     log.info("office_preview.start renderer=libreoffice source_version=%s", fingerprint[:12])
     process = None
     try:
-        with tempfile.TemporaryDirectory(prefix="libreoffice-", dir=root) as temp:
-            staging = Path(temp)
+        with _libreoffice_staging(root) as staging:
             snapshot = staging / ("source" + source.suffix)
             snapshot.write_bytes(data)
             profile = staging / "profile"
@@ -440,7 +462,7 @@ def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=
                     [executable, "-env:UserInstallation=" + profile.as_uri(), "--headless", "--nologo",
                      "--nodefault", "--norestore", "--convert-to", "pdf", "--outdir", str(staging), str(snapshot)],
                     stdin=subprocess.DEVNULL, stdout=trace, stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                    start_new_session=os.name != "nt", **subprocess_kwargs_no_window(),
                 )
                 deadline = time.monotonic() + timeout
                 try:
@@ -453,7 +475,7 @@ def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=
                     if process.poll() is None:
                         terminate_process_tree(process)
                 if process.returncode != 0 or not output.is_file():
-                    raise WorkbenchError("renderer_failed", "LibreOffice 未能转换此文档。源文件未修改，可选择简化预览或用系统应用打开。")
+                    raise WorkbenchError("renderer_failed", "LibreOffice 未能转换此文档。源文件未修改，请重试或用本机应用打开。")
             from pypdf import PdfReader
             try:
                 if not PdfReader(str(output)).pages:

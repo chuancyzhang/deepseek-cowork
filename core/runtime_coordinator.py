@@ -910,6 +910,15 @@ class RuntimeCoordinator:
                 "expected_turn_id": expected,
                 "turn_id": active_turn_id,
             }
+        # The receipt and worker must share one canonical message. In particular,
+        # _append_ledger_message adds request_id; adding it only after the receipt
+        # was saved makes an otherwise identical input conflict during finalize.
+        message["role"] = "user"
+        message.setdefault("created_at", int(time.time()))
+        message["meta"] = {**(message.get("meta") or {}), "turn_id": active_turn_id,
+                           "request_id": str(run.get("run_id") or expected),
+                           "same_turn_guidance": True}
+        message["meta"].setdefault("ui_submitted_at", time.time())
         ui_owned_history = writer_owner.startswith("ui:")
         if not ui_owned_history:
             messages = self.get_session_messages(session_id)

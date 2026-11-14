@@ -1,13 +1,10 @@
 """Platform policy must agree across discovery, execution and update UI state."""
 import hashlib
-import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 class PlatformIntegrationTests(unittest.TestCase):

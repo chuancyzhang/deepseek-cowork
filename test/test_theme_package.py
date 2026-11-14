@@ -5,8 +5,6 @@ import tempfile
 import unittest
 import zipfile
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 from PIL import Image
 
 from core.theme_tokens import default_design_tokens

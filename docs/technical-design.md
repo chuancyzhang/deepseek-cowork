@@ -1,6 +1,6 @@
 # DeepSeek Cowork 技术文档
 
-文档适用版本：**5.3.3**
+文档适用版本：**5.4.0**
 
 本文集中维护运行模型、能力开发、构建发布和测试入口。桌面操作见[用户手册](user-guide.md)，企业中心部署见[平台说明](../web/platform/README.md)。
 
@@ -62,6 +62,14 @@ flowchart TB
 | `core/theme_package.py`、`core/theme_service.py` | 主题包与预览事务 |
 | `web/editors/` | 离线编辑器源码及分发资源 |
 | `web/platform/` | 独立部署的企业中心 |
+
+### 选型依据与不变量
+
+这次改造同时解决界面可替换和任务生命周期独立两个问题。Electron 提供统一的网页宿主与原生桌面入口；React/TypeScript 负责可组合界面和 SDK 契约；Python 保留模型、工具、文档和连接器生态；SQLite 继续承担本机事务与历史查询。选择不以“框架更新”或“插件更多”为目标。
+
+职责分为三层：运行事实归 Python 核心，草稿与编辑恢复归稳定宿主，布局与局部交互归界面插件。移除 Qt 后仍使用 Python 原生线程、队列和事件，不同时重写成熟业务为另一套异步框架。新增执行能力继续使用 Tool／Skill／MCP，界面插件不另建运行引擎。
+
+验收不变量是消息可靠、过程连续、会话隔离、失败可恢复、用户可控制。替换页面不重启任务，恢复界面不回滚用户数据，模型上下文不夹带布局状态。Electron 的资源开销和平台发行验证是实际成本；共享源码不能代替 Mac／统信的构建、签名与实机验收。
 
 ### 平台适配边界
 
@@ -250,6 +258,33 @@ Skill 指导使用内容哈希与目录版本管理披露。用户选定能力�
 
 运行中补充输入由所属任务接收，在安全节点进入消息序列。首次保存前统一补充消息的 `turn_id`、`request_id` 和接收时间，保存与 Worker 入账复用同一身份，防止结束时产生已提交账本冲突。前端按持久化事件时间展示补充消息；只在完整事件可验证正文、思考和工具调用时拆分展示，部分日志保留原有内容，显示片段不写入模型历史。问卷回执按请求与工具调用身份归位，答案来自实际提交结果。待处理队列与运行回调使用会话、运行和消息身份校验。`LLMWorker.stop()` 先发出工具取消，再处理模型流关闭；已发生的工具和消息继续按原身份保存。
 
+### 一次对话的完整路径
+
+```mermaid
+sequenceDiagram
+    participant U as 界面与稳定宿主
+    participant S as DesktopService / RuntimeCoordinator
+    participant L as RuntimeLedger
+    participant W as LLMWorker / Tool Registry
+    participant D as SQLite
+    U->>S: 固定 request_id 提交输入与上下文
+    S->>L: 用户消息、接收回执和运行登记
+    L-->>S: 日志同步成功
+    S-->>U: 接收确认
+    S->>W: 启动所属运行
+    loop 模型与工具循环
+        W->>S: 正文、过程、工具及交互事件
+        S->>L: 保存对应事实
+        L-->>U: 发布已持久化事件
+        L->>D: 批量整理完整事件与游标
+    end
+    W->>S: 最终结果或失败
+    S->>L: 结果与运行终态一同提交
+    L-->>U: 终态与保留内容
+```
+
+接收回执丢失时按原请求查询，连接恢复不自动重发命令；同会话维持一个顶层活动运行，运行中输入通过补充进入原任务。停止先取消所属执行，再收尾保存，不能排在普通输出积压之后。进程重启恢复已保存事实并标记中断，不自动重做可能已经生效的外部操作。恢复阅读与恢复执行是两个不同边界。
+
 ### 后台工具
 
 `core/tool_tasks.py` 为长工具维护任务身份。达到等待窗口后返回 `background_tool`、`task_id`、状态及耗时，原操作继续；模型可通过 `wait_tool` 等待或请求取消。
@@ -357,7 +392,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 `core/im_gateway_registry.py` 用 `ProviderSpec` 注册消息渠道及其配置、启动和交付能力。
 
-资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
+本地资料库按已登记项目及聊天工作目录汇总文件，按规范路径去重并排除已归档项目，不搬动原文件；添加到聊天复用附件提交边界。远程资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
 
 企业中心采用 FastAPI、PostgreSQL 和同源静态页面，处理认证、模型授权与代理、提问记录、客户端分发及团队空间。空间共享对象保存在中心，本机任务在桌面运行。服务部署和配置见[企业平台说明](../web/platform/README.md)。
 
@@ -365,7 +400,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 主题包使用 Schema、资产清单及稳定 Surface/Component ID。`preview_id + revision` 标识用户预览的候选，确认后提交已保存主题；界面使用统一 token 和共享控件。
 
-设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。
+设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。管理表单将浏览位置、保存基准和实际修改分开：切换消息渠道不会改变启停配置；新草稿只恢复相对基准的修改字段。缺少可信基准的旧消息连接草稿由用户主动恢复或丢弃，不自动覆盖已保存配置。密码不写入持久化恢复副本。
 
 `VariableStore` 独立保存变量，敏感值通过共享凭据保护接口加密。`lookup_app_variable` 按明确名称和授权读取变量。资料库和脱敏映射复用该接口，企业账号在本轮继续沿用 Windows 实现。
 
@@ -375,7 +410,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 ### 桌面发行包
 
-构建命令见[项目首页](../README_CN.md#构建发行包)。`core/app_version.py` 的 `APP_VERSION` 是代码版本来源。
+构建命令见[项目首页](../README_CN.md#构建发行包)。`core/app_version.py` 的 `APP_VERSION` 是代码版本来源；升版同步 `desktop/package.json`、`desktop/package-lock.json` 的根包版本、现行手册声明与版本说明，不修改依赖包自身的版本。历史发布说明保持原貌。
 
 开发态读取仓库资源，PyInstaller onedir 冻结态从 `sys._MEIPASS` 读取随包资源。运行时准备脚本获取固定版本的 Git、ripgrep 与组件；spec 扫描动态 Skill 的 `core.*` 导入并加入 hidden imports。编辑器分发资源位于 `web/editors/dist/`。
 
@@ -391,7 +426,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 ```text
 updates/desktop-windows-x64/latest.json
-updates/desktop-windows-x64/cowork-desktop-v5.3.3-windows-x64.zip
+updates/desktop-windows-x64/cowork-desktop-v5.4.0-windows-x64.zip
 ```
 
 清单字段如下：
@@ -436,6 +471,7 @@ $env:TMP = "$taskRoot/temp"
 $env:APPDATA = "$taskRoot/appdata"
 $env:LOCALAPPDATA = "$taskRoot/localappdata"
 $env:PYTHONDONTWRITEBYTECODE = '1'
+$env:PYTHONUTF8 = '1'
 $env:COWORK_EXTERNAL_BACKGROUND_SERVICES = '0'
 $env:COWORK_QA_ROOT = $taskRoot
 .\.venv\Scripts\python.exe -X utf8 -B -m pytest --collect-only -q -p no:cacheprovider test/test_desktop_service.py test/test_desktop_management.py test/test_desktop_workbench.py
@@ -448,9 +484,9 @@ $env:COWORK_QA_ROOT = $taskRoot
 | 文档结构、链接、图片与版本 | `scripts/check_docs.py`、`test/test_documentation.py` |
 | 消息与运行 | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_runtime_ledger.py`、`test/test_subagent_reliable_runtime.py` |
 | 历史、项目与界面 | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs`、`desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs`、`desktop/tests/plugin-page.test.mjs` |
-| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/browser.test.mjs`、`desktop/tests/editor-bridge.test.mjs` |
+| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/editor-bridge.test.mjs` |
 | 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_system_v2.py` |
-| 打包与更新 | `test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
+| 打包与更新 | `test/test_package_release.py`、`test/test_package_default_config.py`、`test/test_packaging_runtime.py`、`test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
 | 企业中心 | `test/test_enterprise_platform.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
 
 文档检查覆盖当前手册、UI SDK、维护规范、本地链接及明确列出的源码路径。跨代码和文档的维护跳过仅用于纯文档任务的保护路径检查：
@@ -462,6 +498,10 @@ git diff --check
 ```
 
 Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。Python 测试使用原生线程和事件接口，界面行为通过现行 Electron 测试验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
+
+当前回归范围不再包含退役 Qt smoke 入口与 WebEngine 性能选项。默认配置审计使用 Electron 的 `resources/service/_internal/config.json`，继续拒绝私有配置、旧路径和大小写变体；验证禁止打包 Qt 的负向测试仍保留。Anthropic 真实 SDK 的请求快照／团队模型集成用例，以及真实 Electron 浏览器交互夹具已暂时移除，留待后续专项处理。已知 SDK 初始化兼容问题和浏览器点击后页面结果未变化的问题尚未修复，剩余测试通过不代表这两项能力通过验收。
+
+`PYTHONUTF8=1` 同时传给子进程；仅给父解释器加 `-X utf8` 不会自动改变子进程编码。前端开发需要带 npm 的 Node.js；若依赖已经安装，也可用随包 Node 直接执行 `node --test tests/*.test.mjs`，不要把精简运行时误认为完整 npm 开发环境。版本号与文档编辑完成后再运行一致性检查，避免测试进程读到混合的新旧版本。
 
 本地并发与持久化压力使用确定性模型输出和真实文件工具，包含子任务及慢界面消费者；它不代表真实模型或网络吞吐：
 

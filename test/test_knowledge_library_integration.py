@@ -7,8 +7,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 from core.agent import LLMWorker
 from core.knowledge_library import KnowledgeService, KnowledgeStore, knowledge_context_message
 from core.message_persistence import filter_persistable_messages

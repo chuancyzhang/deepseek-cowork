@@ -8,18 +8,18 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 当前分支使用 **Electron + React / TypeScript + Python + SQLite** 桌面架构，默认入口已切换，Windows 运行与打包不再依赖 Qt。对话、工作区、技能分类与 SkillHub、管理页面及外观设置的入口见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。新宿主的 Apple Silicon Mac 与统信 V25 安装包仍待目标系统验收。
 
-文档适用版本：**5.3.3** · [本版说明](docs/releases/5.3.3.md) · [发布记录](docs/releases/index.md)
+文档适用版本：**5.4.0** · [本版说明](docs/releases/5.4.0.md) · [发布记录](docs/releases/index.md)
 
 ## 可以完成什么
 
 - **对话与项目工作**：独立聊天目录、项目会话、历史搜索、运行中补充要求、执行详情与子任务。
 - **文件与交付物**：文件和图片附件、办公文档预览、文本与表格编辑、HTML 工作稿、Markdown 写作页及 Office/PDF 输出。
 - **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家和浏览器自动化。
-- **资料与协作**：WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
+- **资料与协作**：本地项目资料汇总、WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
 - **重复任务**：常用任务、定时计划、消息渠道与计划结果投递。
 - **个性化**：主题、AI 主题设计、Visualize、长期记忆与经验系统。
 
-5.3.3 增加工作区展开与 Markdown 写作页、sub2api / New API 模型服务接入，并改进问卷、文件链接、预览与更新提示。
+5.4.0 将桌面迁入 Electron 工作台，统一任务运行与持久化，提供可替换的界面插件，并完善资料库、文件编辑和管理交互。版本说明记录源码状态；新版本安装包仍需重新构建和验收，不表示已经公开发布。
 
 ## 开始使用
 
@@ -34,7 +34,7 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 ## 从源码运行
 
-使用 Python 3.10+，在仓库根目录执行：
+使用 Python 3.10+ 和带 npm 的 Node.js 22.12+，在仓库根目录执行。应用随包的 `node_env` 是执行运行时，不能据此假定已经安装 npm：
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git

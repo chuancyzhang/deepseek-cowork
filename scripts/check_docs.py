@@ -229,7 +229,11 @@ def run_checks(include_protected_diff: bool = True) -> list[str]:
     errors.extend(validate_current_versions())
     errors.extend(validate_legacy_paths_removed())
     errors.extend(validate_document_assets())
-    result = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True)
+    # Validate new documents before staging too, but never accept ignored local notes.
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, check=True,
+    )
     tracked = set(result.stdout.decode("utf-8").split("\0"))
     errors.extend(validate_repository_references(files, tracked))
     if include_protected_diff:

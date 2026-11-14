@@ -6,18 +6,18 @@ DeepSeek Cowork is a local Windows desktop agent workspace that brings conversat
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
-Documented version: **5.3.3** · [Version notes](docs/releases/5.3.3.md) · [Release history](docs/releases/index.md)
+Documented version: **5.4.0** · [Version notes](docs/releases/5.4.0.md) · [Release history](docs/releases/index.md)
 
 ## What you can do
 
 - **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
 - **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Office/PDF output.
 - **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
-- **Knowledge and collaboration**: WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
+- **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 
-Version 5.3.3 adds an expanded workspace, Markdown writing pages, sub2api / New API model service onboarding, and improvements to questionnaires, file links, previews, and update notifications.
+Version 5.4.0 introduces the Electron workspace, a shared task runtime and durable event pipeline, replaceable UI plugins, and updated library, editing, and management workflows. These notes describe source changes; a new package must still be built and validated before publication.
 
 ## Get started
 
@@ -34,7 +34,7 @@ The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels
 
 ## Run from source
 
-Use Python 3.10+ and run these commands from the repository root:
+Use Python 3.10+ and Node.js 22.12+ with npm. The bundled `node_env` is an execution runtime and does not imply npm is installed. Run these commands from the repository root:
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git

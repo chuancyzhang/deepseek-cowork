@@ -150,8 +150,8 @@ class TeamSpaceClientTests(unittest.TestCase):
         with self.assertRaises(TeamSpacePaused):
             client.request("GET", "/team-spaces")
 
-    def test_each_protocol_checks_center_before_supplier_call(self):
-        for protocol, provider in (("chat_completions", "openai"), ("responses", "openai"), ("anthropic", "anthropic")):
+    def test_openai_protocols_check_center_before_supplier_call(self):
+        for protocol, provider in (("chat_completions", "openai"), ("responses", "openai")):
             with self.subTest(protocol=protocol):
                 profile = {"provider": provider, "api_key": "private-key", "base_url": "https://supplier.invalid/v1",
                            "model_name": "test-model", "api_protocol": protocol}

@@ -2,8 +2,7 @@
 
 The benchmark creates disposable fixtures: a 100-page, roughly 10 MiB DOCX
 with one image per page and an XLSX with 100,000 populated cells.  It measures
-Python preflight plus payload preparation and can optionally run the real
-offline WebEngine round-trip against the large DOCX.
+Python preflight plus payload preparation, independently of the desktop UI.
 """
 
 from __future__ import annotations
@@ -13,10 +12,8 @@ QA_ROOT = prepare_qa_directory(__file__)
 
 import argparse
 import io
-import os
 from pathlib import Path
 import random
-import subprocess
 import sys
 import tempfile
 import time
@@ -79,11 +76,6 @@ def measure(path: Path) -> tuple[float, float, dict]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--budget-seconds", type=float, default=8.0)
-    parser.add_argument(
-        "--with-webengine",
-        action="store_true",
-        help="Also load and export the large DOCX in the real offline editor.",
-    )
     args = parser.parse_args(argv)
 
     with tempfile.TemporaryDirectory(prefix="cowork-editor-benchmark-") as directory:
@@ -105,35 +97,6 @@ def main(argv=None) -> int:
             if total > args.budget_seconds:
                 failures.append(
                     f"{path.name} core load {total:.3f}s exceeds {args.budget_seconds:.3f}s"
-                )
-
-        if args.with_webengine:
-            environment = os.environ.copy()
-            environment.setdefault("QT_QPA_PLATFORM", "offscreen")
-            environment.setdefault("QT_QUICK_BACKEND", "software")
-            environment.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts" / "smoke_deliverable_editors.py"),
-                    "--docx-path",
-                    str(docx_path),
-                    "--model-budget-seconds",
-                    str(args.budget_seconds),
-                ],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if completed.stdout:
-                print(completed.stdout.rstrip())
-            if completed.stderr:
-                print(completed.stderr.rstrip(), file=sys.stderr)
-            if completed.returncode:
-                failures.append(
-                    f"WebEngine round-trip failed with exit code {completed.returncode}"
                 )
 
         if failures:

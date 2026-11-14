@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 import threading
 import time
@@ -11,12 +12,13 @@ from core.theme_service import ThemeRepository, resolve_theme
 from core.theme_tokens import default_design_tokens
 from core.theme_presets import BUILTIN_THEMES, builtin_theme
 
+log = logging.getLogger("desktop.management")
 
 class Management:
     methods = frozenset({
         "jobs.list", "jobs.get", "jobs.cancel", "skills.inventory", "skills.get", "skills.enable",
         "skills.configure", "skills.read", "skills.write", "skills.import", "skills.export", "skills.delete",
-        "mcp.list", "mcp.save", "mcp.delete", "mcp.test", "experts.list", "experts.save", "experts.delete",
+        "mcp.list", "mcp.parse", "mcp.save", "mcp.delete", "mcp.test", "experts.list", "experts.save", "experts.delete",
         "favorites.list", "favorites.save", "favorites.delete", "favorites.history", "favorites.run",
         "variables.list", "variables.save", "variables.delete", "variables.undo",
         "themes.list", "themes.resolve", "themes.activate", "themes.appearance", "themes.delete",
@@ -125,6 +127,27 @@ class Management:
                 self.skill_change("deleted", [name])
                 return result
         if method.startswith("mcp."):
+            if action == "parse":
+                from core.config_manager import parse_mcp_servers_json, normalize_mcp_servers
+                try:
+                    value = p.get("value", "")
+                    incoming = parse_mcp_servers_json(value.lstrip("\ufeff") if isinstance(value, str) else value)
+                    if not incoming:
+                        raise ValueError("JSON 中没有 MCP 服务。")
+                    if any(not isinstance(server, dict) for server in incoming):
+                        raise ValueError("每项 MCP 服务都必须是 JSON 对象。")
+                    for server in incoming:
+                        transport = str(server.get("transport") or server.get("type") or "").strip().lower()
+                        if transport not in {"", "stdio", "http", "streamable-http", "streamable_http", "streamablehttp"}:
+                            raise ValueError("目前支持 stdio 和 Streamable HTTP，请使用对应的服务配置。")
+                    parsed = normalize_mcp_servers(incoming)
+                    if any(not server["command"] if server["transport"] == "stdio" else not server["url"] for server in parsed):
+                        raise ValueError("本机服务需要 command，远程服务需要 url。")
+                except (ValueError, TypeError, OverflowError) as exc:
+                    log.info("mcp_json_parse_failed reason=%s", type(exc).__name__)
+                    raise ValueError("MCP JSON 解析失败：" + str(exc)) from exc
+                log.info("mcp_json_parsed count=%s transports=%s", len(parsed), ",".join(sorted({server["transport"] for server in parsed})))
+                return parsed
             servers = self.config.get_mcp_servers()
             if action == "list":
                 return servers

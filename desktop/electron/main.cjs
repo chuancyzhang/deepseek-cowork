@@ -23,7 +23,7 @@ const entry = pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename',
   'conversation.archive', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond',
   'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list',
-  'workspace.create', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
+  'workspace.create', 'workspace.attach', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
 for (const method of ['project.list', 'project.save', 'project.archive', 'project.restore', 'conversation.search',
   'conversation.pin', 'conversation.restore', 'conversation.delete', 'conversation.preferences', 'conversation.export',
   'conversation.reference', 'conversation.branch', 'history.prepare', 'history.edit', 'history.delete', 'history.undo',
@@ -138,7 +138,14 @@ else {
     ipcMain.handle('cowork:call', async (event, method, params = {}) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
-      if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result'].includes(method)) return fileHost.register(await backend.call(method, params));
+      if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.preview'].includes(method)) return fileHost.register(await backend.call(method, params));
+      if (method === 'library.read' && params.source === 'local') return fileHost.register(await backend.call(method, params));
+      if (method === 'library.external' && params.source === 'local') {
+        const item = await backend.call('library.reference', params);
+        const failure = await shell.openPath(item.path);
+        if (failure) throw new Error(failure);
+        return {opened:true};
+      }
       if (method === 'file.external') {
         const file = await backend.call('file.describe', params);
         return shell.openPath(file.path);

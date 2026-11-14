@@ -3,7 +3,6 @@ import { ArrowUp, Square, Plus, Search, ChartColumn, History, Settings as Settin
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
 import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
 import PluginSlot from './PluginSlot';
-import PluginManager from './PluginManager';
 import Usage from '../Usage';
 import { Drafts, type Draft } from '../drafts';
 import DraftRecovery from '../DraftRecovery';
@@ -107,16 +106,23 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
           {editor && fileChanged && <div className="file-update-notice" role="status">文件已更新<button className="text-link" onClick={() => void reloadFile()}>刷新</button></div>}
           {editor?.file.payload.recovery_available && editor.text !== editor.saved && <div className="file-update-notice" role="status">上次未保存的编辑已恢复。请保存恢复副本，再用本机应用继续编辑。</div>}
           {editor && (editor.file.conflict || editor.file.unavailable) && <div className="run-error">原文件已变化或暂时无法打开。当前编辑仍保留，可以复制内容或<button className="secondary" onClick={() => void saveCopy()}>另存副本</button>。</div>}
-          {editor ? <PluginSlot kind="editor" target={editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <textarea className="plain-editor" aria-label="文档正文" value={editor.text} onChange={event => changeEditor(editor.file.path,event.target.value)}/> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
+          {editor ? <PluginSlot kind="editor" target={editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <textarea className="plain-editor" aria-label="文档正文" value={editor.text} onChange={event => changeEditor(editor.file.path,event.target.value)}/> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
         </>}/></PluginSlot>}
 
-      </div> : managementNames[route] ? <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management key={route} route={route} settings={settings} updateSettings={setSettings} openPlugins={() => void goRoute('plugins')} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
+      </div> : <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management key={route} route={route} settings={settings} updateSettings={setSettings} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
         onReference={async ref => {
           const id = await ensureConversation();
+          if (ref.source === 'local') {
+            const added = await call<Attachment[]>('workspace.attach', {conversation_id:id, paths:[ref.path]});
+            const value = drafts.get(id).value;
+            drafts.change(id, {...value, attachments:[...value.attachments, ...added]});
+            await drafts.save(id);
+            return;
+          }
           const target = await call<Conversation>('conversation.get', {conversation_id: id});
           const refs = [...(target.meta.knowledge_refs || []).filter((item: any) => JSON.stringify(item) !== JSON.stringify(ref)), ref];
           await preferences({knowledge_refs: refs}, id);
-        }}/></Suspense> : <PluginManager/>}
+        }}/></Suspense>}
       </PluginSlot>
     </main>
 

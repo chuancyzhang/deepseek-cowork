@@ -175,7 +175,7 @@ class DesktopWorkbench:
 
 class DesktopFiles:
     methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
-                         'file.render', 'file.render_result', 'file.install_renderer'])
+                         'file.render', 'file.render_result', 'file.install_renderer', 'file.preview'])
 
     def __init__(self, storage, config, jobs=None):
         self.storage, self.config = storage, config
@@ -308,7 +308,7 @@ class DesktopFiles:
             if isinstance(payload.get("binary"), bytes):
                 payload["binary"] = base64.b64encode(payload["binary"]).decode()
             return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": session.initial_fingerprint, "payload": payload, "conflict": conflict}
-        if method in {"file.save", "file.save_copy"}:
+        if method in {"file.save", "file.save_copy", "file.preview"}:
             from core.deliverable_editing import serialize_editor_payload, atomic_save_session
             owner, session = self.file_sessions.get(p["id"], (None, None))
             if owner != cid or session is None:
@@ -323,6 +323,13 @@ class DesktopFiles:
                     raise ValueError("编辑器类型与文件不匹配。")
                 payload = base64.b64decode(payload["value"], validate=True) if kind == "docx" else json.loads(payload["value"])
             data = serialize_editor_payload(session, payload)
+            if method == "file.preview":
+                from core.deliverable_editing import decode_text_bytes
+                if session.descriptor.kind != "html":
+                    raise ValueError("此文件不支持 HTML 草稿预览。")
+                html, *_ = decode_text_bytes(data, session.encoding)
+                log.info("html_preview_ready session=%s file_session=%s", cid, p["id"])
+                return {"path": session.path, "payload": {"kind": "preview", "preview_kind": "html", "preview_html": html}}
             if method == "file.save_copy":
                 import tempfile
                 destination = self.checked_file(cid, p["name"])

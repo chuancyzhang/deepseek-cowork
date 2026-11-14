@@ -28,6 +28,8 @@ export function useWorkbenchController() {
   const [loading, setLoading] = useHostField('loading', true);
   const [serviceError, setServiceError] = useHostField('serviceError', '');
   const [notice, setNotice] = useState('');
+  useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 6000); return () => clearTimeout(timer); }, [notice]);
+  useEffect(() => { setNotice(''); }, [current?.id, route]);
   const [drafts] = useState(() => new Drafts(call, localStorage));
   const draftEntry = useDraft(drafts, selectedConversationId);
   const draft = draftEntry.value.text, attachments = draftEntry.value.attachments, draftConflict = draftEntry.conflict;
@@ -496,7 +498,7 @@ export function useWorkbenchController() {
       if (selectedId.current !== id) return;
       const text = file.payload.text ?? file.payload.content ?? '';
       setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true);
-    } catch (failure) { error((failure as Error).message); }
+    } catch (failure) { if (selectedId.current === id) error((failure as Error).message); }
   }
   async function saveEditor(path: string) {
     const editor = editorsRef.current.find(e => e.file.path === path);
@@ -562,8 +564,8 @@ export function useWorkbenchController() {
   async function goRoute(next: string) {
     if (next !== route && !await leaveManagement.current()) return;
     try {
+      if (next === 'plugins') { host.set('management:tab:capabilities', 'plugins'); next = 'capabilities'; }
       await saveDraft(); await saveView(); setRoute(next); setShowUsage(false);
-      if (next === 'plugins') await host.get<import('../plugins/registry').PluginRegistry>('pluginRegistry').refresh();
       if (next === 'settings') setSettings(await call('settings.get'));
     } catch (failure) { error((failure as Error).message); }
   }

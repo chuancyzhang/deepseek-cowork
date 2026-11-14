@@ -78,7 +78,10 @@ export default function Workspace(props: Props) {
   return <section className="workspace" ref={root} aria-label="工作区">
     <div className="workspace-bar">
       <button data-workspace-toggle className={'icon-button ' + (value.filesOpen ? 'selected' : '')} title="工作区文件" aria-label="工作区文件" aria-expanded={value.filesOpen} onClick={() => { change({filesOpen: !value.filesOpen, tasksOpen: false}); void props.refreshFiles(); }}><Folder size={17}/></button>
-      <button data-workspace-toggle className={'icon-button ' + (showTasks ? 'selected' : '')} title="任务" aria-label="任务" aria-expanded={showTasks} onClick={() => change({selected: 'tasks', tasksPinned: true, tasksOpen: false, ...(!value.filesPinned ? {filesOpen: false} : {})})}><ListChecks size={17}/></button>
+      {!value.tasksPinned && <button data-workspace-toggle className="icon-button" title="任务" aria-label="打开任务" onClick={() => {
+        change({selected: 'tasks', tasksPinned: true, tasksOpen: false, ...(!value.filesPinned ? {filesOpen: false} : {})});
+        requestAnimationFrame(() => root.current?.querySelector<HTMLButtonElement>('[role="tab"][title="任务"]')?.focus());
+      }}><ListChecks size={17}/></button>}
       <div className="workspace-tabs" role="tablist" aria-label="工作区标签">
         {expanded && tabButton('conversation', '对话', <MessageSquare size={14}/>, () => change({selected: 'conversation'}))}
         {value.tasksPinned && tabButton('tasks', '任务', <ListChecks size={14}/>, () => change({selected: 'tasks'}), () => change({tasksPinned: false, ...(showTasks ? {selected: 'new', newOpen: true} : {})}))}

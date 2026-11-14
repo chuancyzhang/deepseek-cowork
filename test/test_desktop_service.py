@@ -502,12 +502,16 @@ class DesktopTransactionTests(unittest.TestCase):
             self.assertEqual(snapshot['current_context']['skills'], ['selected-now'])
             self.assertIsNone(snapshot['submitted_context'])
             requests = RequestSnapshotStore(directory)
+            requests.capture('chat','old','previous-request','responses',{'model':'model','input':[]})
             requests.capture('chat','run','request','responses',{'model':'model','input':[{'role':'user','content':'完整内容'}],'api_key':'never-return'})
             full = actions.dispatch('task.context', {'conversation_id':'chat','run_id':'run'})
             self.assertEqual(full['parameters']['input'][0]['content'], '完整内容')
             self.assertNotIn('api_key', full['parameters'])
-            with self.assertRaisesRegex(ValueError, '后续请求'):
-                actions.dispatch('task.context', {'conversation_id':'chat','run_id':'old'})
+            with self.assertLogs('desktop.conversations', level='INFO') as logs:
+                with self.assertRaisesRegex(ValueError, '后续请求.*返回当前任务'):
+                    actions.dispatch('task.context', {'conversation_id':'chat','run_id':'old'})
+            self.assertIn('requested_run=old snapshot_run=run reason=run_mismatch', logs.output[0])
+            self.assertEqual(actions.dispatch('task.context', {'conversation_id':'chat','run_id':'run'}), full)
             with self.assertRaises(ValueError):
                 actions.dispatch('task.context', {'conversation_id':'other'})
 

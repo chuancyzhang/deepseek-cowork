@@ -44,6 +44,7 @@ module.exports = [
   "library.uploads",
   "mcp.delete",
   "mcp.list",
+  "mcp.parse",
   "mcp.save",
   "mcp.test",
   "settings.channel_save",

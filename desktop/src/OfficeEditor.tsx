@@ -7,6 +7,12 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
   latest.current = { text, onChange, error };
   const [ready, setReady] = useState(false);
   useEffect(() => {
+    if (!ready || file.payload.kind !== 'html' || !frame.current) return;
+    const style = getComputedStyle(frame.current);
+    const theme = Object.fromEntries(Object.entries({'bg-primary':'--bg','bg-secondary':'--soft','text-primary':'--text','text-secondary':'--muted','border-subtle':'--line','selection':'--hover'}).map(([key, token]) => [key, style.getPropertyValue(token).trim()]));
+    frame.current.contentWindow?.postMessage({channel:'cowork-editor-host-v1',method:'setTheme',args:[theme]}, '*');
+  });
+  useEffect(() => {
     let loaded = false, dirty = false, chunks: string[] = [], expected = 0, kind = '', timer: ReturnType<typeof setTimeout>;
     let pending: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
     let exporting = false, generation = 0, exportedGeneration = 0;
@@ -26,6 +32,16 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
       const { method, args = [] } = event.data;
       if (method === 'ready') {
         try {
+        if (file.payload.kind === 'html') {
+          const document = new DOMParser().parseFromString(latest.current.text, 'text/html');
+          const base = document.querySelector('base[data-cowork-edit-base]');
+          if (base) base.setAttribute('href', new URL('.', file.payload.url).href);
+          const content = '<!doctype html>\n' + document.documentElement.outerHTML;
+          const size = 192 * 1024, count = Math.max(1, Math.ceil(content.length / size));
+          send('beginLoad', file.id, count);
+          for (let i = 0; i < count; i++) send('appendLoadChunk', i, content.slice(i*size, (i+1)*size));
+          send('finishLoad'); return;
+        }
         let payload = file.payload;
         if (latest.current.text) {
           const saved = JSON.parse(latest.current.text);
@@ -49,7 +65,8 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
       } else if (method === 'appendPayload' && args[0] === file.id && Number.isInteger(args[1]) && args[1] >= 0 && args[1] < expected && typeof args[2] === 'string') chunks[args[1]] = args[2];
       else if (method === 'finishPayload' && args[0] === file.id) {
         if (!expected || Array.from(chunks).some(chunk => typeof chunk !== 'string')) { latest.current.error('文档传输不完整，请重新保存。'); return; }
-        const value = JSON.stringify({ kind, value: chunks.join('') }); chunks = []; expected = 0; exporting = false;
+        if (kind !== file.payload.kind) { latest.current.error('编辑器返回的文件类型不匹配。'); return; }
+        const value = kind === 'html' ? chunks.join('') : JSON.stringify({ kind, value: chunks.join('') }); chunks = []; expected = 0; exporting = false;
         dirty = generation !== exportedGeneration;
         latest.current.text = value; latest.current.onChange(value);
         if (dirty) { exporting = true; exportedGeneration = generation; send('requestSave'); }

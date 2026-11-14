@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Check, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, Pencil, Play, Plus, Search, Sparkles, Star, Trash2, Upload } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, Pencil, Play, Plus, Search, Sparkles, Star, Trash2, Upload } from 'lucide-react';
 import { Empty, ErrorState, Field, JobProgress, PageHead, PageToolbar, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import { skillInMode, skillMatches, skillScenes } from '../skills';
@@ -61,32 +61,36 @@ export default function Capabilities(props: Props) {
 }
 
 function ItemEditor({ item, kind, onDirty, onError, confirm, back }: Props & { item: any; back: () => void }) {
-  const initial = kind === 'mcp' ? { name: '', transport: 'stdio', command: '', args: [], url: '', enabled: true, ...item }
+  const initial = kind === 'mcp' ? { name: '', transport: 'stdio', command: '', args: [], url: '', enabled: true, ...item,
+    _importJson: '', _connectionJson: JSON.stringify({ env: item.env || {}, headers: item.headers || {}, auth: item.auth || {} }, null, 2) }
     : kind === 'experts' ? { name: '', description: '', system_prompt: '', skill_names: [], enabled: true, ...item }
     : { name: '', description: '', prompt: '', skill_names: [], execution_mode: 'chat', workspace_dir: '', schedule: null, ...item };
-  const form = useFormDraft(kind + ':' + (item.id || 'new'), initial, onDirty, ['api_key', 'headers', 'env']);
+  const form = useFormDraft(kind + ':' + (item.id || 'new'), initial, onDirty, ['api_key', 'headers', 'env', 'auth', '_importJson', '_connectionJson']);
   const v = form.value, set = (key: string, value: any) => form.change({ ...v, [key]: value });
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState(''), [skills, setSkills] = useState<any[]>([]);
-  const [advanced, setAdvanced] = useState(JSON.stringify({ env: item.env || {}, headers: item.headers || {}, auth: item.auth || {} }, null, 2));
   useEffect(() => { if (kind !== 'mcp') void rpc('skills.list').then(setSkills).catch(error => onError(error.message)); }, [kind]);
   const schedule = v.schedule || {};
   const setSchedule = (values: any) => set('schedule', { ...schedule, ...values, next_run_at: 0 });
   async function leave() { if (!form.dirty || await confirm('保留编辑草稿？', '下次打开可以继续编辑。', ['继续编辑', '保留并返回']) === 1) back(); }
-  return <><PageHead title={(item.id ? '编辑' : '新建') + titles[kind]} back={() => void leave()}/>
-    <form className="detail-form" onSubmit={async e => { e.preventDefault(); setBusy(true); setFailure('');
-      try { const value = kind === 'mcp' ? { ...v, ...JSON.parse(advanced) } : v;
+  return <><header className="item-editor-heading"><button className="icon-button" title={'返回' + titles[kind]} aria-label={'返回' + titles[kind]} onClick={() => void leave()}><ArrowLeft size={18}/></button><h2>{item.id ? v.name || titles[kind] : '新建' + titles[kind]}</h2></header>
+    <form className={'detail-form' + (kind === 'mcp' ? ' mcp-form' : '')} onSubmit={async e => { e.preventDefault(); setBusy(true); setFailure('');
+      try { const { _importJson, _connectionJson, ...fields } = v;
+        const value = kind === 'mcp' ? { ...fields, ...JSON.parse(_connectionJson) } : v;
         await rpc(kind + '.save', { value }); form.done(); back();
       } catch (error) { setFailure((error as Error).message); } finally { setBusy(false); }
-    }}><div className="form-grid">
+    }}>{kind === 'mcp' && <McpJsonImport value={v._importJson} change={text => set('_importJson', text)} apply={server => form.change({
+      ...initial, ...server, id: item.id || crypto.randomUUID(), _importJson: '',
+      _connectionJson: JSON.stringify({env: server.env, headers: server.headers, auth: server.auth}, null, 2),
+    })}/>}<div className="form-grid">
       <Field label="名称" wide><input required value={v.name} onChange={e => set('name', e.target.value)}/></Field>
       {kind !== 'mcp' && <Field label="用途" wide><input value={v.description} onChange={e => set('description', e.target.value)}/></Field>}
       {kind === 'mcp' ? <>
-        <Field label="连接方式"><select value={v.transport} onChange={e => set('transport', e.target.value)}><option value="stdio">本机程序</option><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option></select></Field>
-        {v.transport === 'stdio' ? <><Field label="程序"><input required value={v.command} onChange={e => set('command', e.target.value)}/></Field><Field label="启动参数" help="每行一个参数" wide><textarea rows={4} value={v.args.join('\n')} onChange={e => set('args', e.target.value.split('\n'))}/></Field></> : <Field label="服务地址"><input type="url" required value={v.url} onChange={e => set('url', e.target.value)}/></Field>}
-        <details className="wide"><summary>环境变量、请求头与认证</summary><textarea aria-label="连接配置 JSON" className="code-input" rows={10} value={advanced} onChange={e => { setAdvanced(e.target.value); onDirty(true); }}/><small>敏感凭据不会保存在表单草稿中。</small></details>
+        <Field label="连接方式"><select value={v.transport} onChange={e => set('transport', e.target.value)}><option value="stdio">本机程序</option><option value="streamable_http">Streamable HTTP</option></select></Field>
+        {v.transport === 'stdio' ? <><Field label="程序"><input required value={v.command} onChange={e => set('command', e.target.value)}/></Field><Field label="启动参数" wide><textarea rows={3} placeholder="每行一个参数" value={v.args.join('\n')} onChange={e => set('args', e.target.value.split('\n'))}/></Field></> : <Field label="服务地址"><input type="url" required value={v.url} onChange={e => set('url', e.target.value)}/></Field>}
+        <details className="wide"><summary>环境变量、请求头与认证</summary><textarea aria-label="连接配置 JSON" className="code-input" rows={10} value={v._connectionJson} onChange={e => set('_connectionJson', e.target.value)}/><small>敏感凭据只在当前应用内保留，未保存时退出应用需重新填写。</small></details>
       </> : <>
         <Field label={kind === 'experts' ? '工作指引' : '任务内容'} wide><textarea rows={9} required value={v[kind === 'experts' ? 'system_prompt' : 'prompt']} onChange={e => set(kind === 'experts' ? 'system_prompt' : 'prompt', e.target.value)}/></Field>
-        <details className="wide"><summary>指定可用技能 · {v.skill_names.length} 项</summary><div className="skill-picker">{skills.map(skill => <label key={skill.name}><input type="checkbox" checked={v.skill_names.includes(skill.name)} onChange={e => set('skill_names', e.target.checked ? [...v.skill_names, skill.name] : v.skill_names.filter((name: string) => name !== skill.name))}/>{skill.display_name || skill.name}</label>)}</div></details>
+        <details className="wide"><summary>指定可用技能 · {v.skill_names.length} 项</summary><div className="skill-picker">{skills.map(skill => <label key={skill.name} className={v.skill_names.includes(skill.name) ? 'selected' : ''}><input type="checkbox" checked={v.skill_names.includes(skill.name)} onChange={e => set('skill_names', e.target.checked ? [...v.skill_names, skill.name] : v.skill_names.filter((name: string) => name !== skill.name))}/><span>{skill.display_name || skill.name}</span></label>)}</div></details>
         {kind === 'favorites' && <>
           <Field label="工作目录" wide><div className="input-action"><input readOnly placeholder="自动创建独立工作目录" value={v.workspace_dir}/><button type="button" className="secondary" onClick={async () => { const path = await rpc('dialog.workspace'); if (path) form.change({ ...v, workspace_dir: path, execution_mode: 'workspace' }); }}><FolderOpen size={16}/>选择</button></div></Field>
           <label className="check-line wide"><input type="checkbox" checked={Boolean(schedule.enabled)} onChange={e => setSchedule({ enabled: e.target.checked, schedule_type: schedule.schedule_type || 'daily' })}/>按计划运行</label>
@@ -104,6 +108,35 @@ function ItemEditor({ item, kind, onDirty, onError, confirm, back }: Props & { i
       </>}
     </div>{failure && <ErrorState message={failure}/>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16}/> : <Check size={16}/>}保存</button></div></form>
   </>;
+}
+
+function McpJsonImport({ value, change, apply }: {value: string; change: (text: string) => void; apply: (server: any) => void}) {
+  const [busy, setBusy] = useState(false), [failure, setFailure] = useState(''), [servers, setServers] = useState<any[]>([]);
+  const file = useRef<HTMLInputElement>(null), panel = useRef<HTMLDetailsElement>(null), sequence = useRef(0);
+  useEffect(() => () => {sequence.current++;}, []);
+  function edit(text: string) {sequence.current++; change(text); setBusy(false); setFailure(''); setServers([]);}
+  function fill(server: any) {apply(server); setServers([]); if (panel.current) panel.current.open = false;}
+  async function parse(text: string) {
+    const current = ++sequence.current;
+    setBusy(true); setFailure(''); setServers([]);
+    try {const result = await rpc<any[]>('mcp.parse', {value: text});
+      if (current !== sequence.current) return;
+      if (result.length === 1) fill(result[0]); else setServers(result);
+    } catch (error) {if (current === sequence.current) setFailure((error as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));}
+    finally {if (current === sequence.current) setBusy(false);}
+  }
+  return <details ref={panel} className="mcp-json-import"><summary><Upload size={15}/>导入 JSON<ChevronRight size={15} className="disclosure-arrow"/></summary>
+    <textarea aria-label="MCP 配置 JSON" className="code-input" rows={3} value={value} onChange={event => edit(event.target.value)} placeholder="粘贴 MCP 配置 JSON"/>
+    <input ref={file} type="file" accept=".json,application/json" hidden aria-label="选择 MCP JSON 文件" onChange={async event => {
+      const selected = event.target.files?.[0]; event.target.value = ''; if (!selected) return;
+      const current = ++sequence.current; setBusy(true); setFailure('');
+      try {const text = await selected.text(); if (current !== sequence.current) return; change(text); await parse(text);}
+      catch (error) {if (current === sequence.current) {setFailure('文件读取失败：' + (error as Error).message); setBusy(false);}}
+    }}/>
+    <div className="button-row"><button type="button" className="secondary" disabled={busy} onClick={() => file.current?.click()}><FolderOpen size={15}/>选择 JSON 文件</button><button type="button" className="secondary" disabled={busy || !value.trim()} onClick={() => void parse(value)}>{busy ? <LoaderCircle className="spin" size={15}/> : <Check size={15}/>}解析并填入</button></div>
+    {servers.length > 1 && <div className="mcp-import-choice" role="group" aria-label="选择导入的 MCP 服务">{servers.map((server, index) => <button key={index} type="button" aria-label={'导入' + server.name} onClick={() => fill(server)}><FileCode2 size={16}/><span>{server.name}</span><ChevronRight size={15}/></button>)}</div>}
+    {failure && <p className="error-text" role="alert">{failure}</p>}
+  </details>;
 }
 
 function SkillEditor({ item, onDirty, onError, confirm, back, saved }: Props & { item: any; back: () => void; saved: () => Promise<void> }) {

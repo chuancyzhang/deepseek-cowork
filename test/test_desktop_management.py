@@ -115,6 +115,30 @@ class ManagementTests(unittest.TestCase):
         self.assertFalse(server["enabled"])
         c.call("mcp.delete", id=server["id"])
 
+    def test_mcp_json_parse_normalizes_imports_without_saving_or_connecting(self):
+        c = self.client
+        before = c.call("mcp.list")
+        parsed = c.call("mcp.parse", value='\ufeff' + json.dumps({"mcpServers": {
+            "local": {"command": "npx", "args": ["-y", "fixture-package", "C:/sample folder"], "env": {"TOKEN": "fixture-token"}, "enabled": False},
+            "remote": {"url": "https://example.invalid/mcp", "headers": {"Authorization": "fixture-header"}},
+        }}))
+        self.assertEqual([server["name"] for server in parsed], ["local", "remote"])
+        self.assertEqual([server["transport"] for server in parsed], ["stdio", "streamable_http"])
+        self.assertEqual(parsed[0]["args"][-1], "C:/sample folder")
+        self.assertEqual(parsed[0]["env"], {"TOKEN": "fixture-token"})
+        self.assertFalse(parsed[0]["enabled"])
+        self.assertEqual(parsed[1]["headers"], {"Authorization": "fixture-header"})
+        for value in ({"name": "single", "url": "https://example.invalid/mcp"},
+                      {"mcp_servers": [{"name": "array", "command": "fixture-command"}]},
+                      [{"name": "list", "command": "fixture-command"}]):
+            self.assertEqual(len(c.call("mcp.parse", value=value)), 1)
+        for value in ('{"mcpServers":', {"mcpServers": {}}, [None], {"name": "incomplete"}):
+            with self.assertRaisesRegex(RuntimeError, "MCP JSON 解析失败"):
+                c.call("mcp.parse", value=value)
+        self.assertEqual(c.call("mcp.list"), before)
+        with self.assertRaisesRegex(RuntimeError, "目前支持 stdio 和 Streamable HTTP"):
+            c.call("mcp.parse", value={"type": "sse", "url": "https://example.invalid/sse"})
+
     def test_theme_candidate_is_isolated_and_stale_apply_is_rejected(self):
         from core.theme_service import ThemeRepository
         from core.theme_tokens import default_design_tokens
@@ -262,3 +286,40 @@ def test_config_save_failure_preserves_disk_and_memory(tmp_path, monkeypatch):
         pass
     assert config.get("fixture") == "original"
     assert Path(config.config_path).read_bytes() == before
+
+def test_local_library_aggregates_projects_and_keeps_file_scope(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import pytest
+    from core.local_library import LocalLibrary
+    from core.desktop_jobs import JobCancelled
+    first, second = tmp_path / 'one', tmp_path / 'two'
+    first.mkdir(); second.mkdir()
+    (first / 'notes.md').write_text('# first', encoding='utf-8')
+    (second / 'notes.md').write_text('# second', encoding='utf-8')
+    (first / 'node_modules').mkdir()
+    (first / 'node_modules' / 'hidden.md').write_text('excluded')
+    nested = first / 'folder'; nested.mkdir()
+    (nested / 'detail.txt').write_text('detail')
+    service = SimpleNamespace(config=SimpleNamespace(get_projects=lambda:[{'path':str(first),'name':'项目一'},{'path':str(second),'name':'项目二'}]),storage=SimpleNamespace(list_conversations_by_workspace=lambda:{}))
+    library = LocalLibrary(service)
+    progress, cancelled = Mock(), threading.Event()
+    items = library.files({}, cancelled, progress)['items']
+    assert {item['title'] for item in items} == {'notes.md','detail.txt'}
+    assert len(items) == 3
+    projects = library.projects()
+    pid = projects[0]['id']
+    result = library.files({'collection':pid},cancelled,progress)
+    assert any(item['is_folder'] and item['title']=='folder' for item in result['items'])
+    assert library.read({'collection':pid,'item':str(first/'notes.md')})['text']=='# first'
+    assert library.files({'query':'detail'},cancelled,progress)['total']==1
+    with pytest.raises(ValueError,match='不属于'):
+        library.read({'collection':pid,'item':str(second/'notes.md')})
+    (first/'notes.md').unlink()
+    with pytest.raises(ValueError,match='暂时不可用'):
+        library.read({'collection':pid,'item':str(first/'notes.md')})
+    cancelled.set()
+    with pytest.raises(JobCancelled):
+        library.files({},cancelled,progress)
+    assert (second/'notes.md').read_text()=='# second'

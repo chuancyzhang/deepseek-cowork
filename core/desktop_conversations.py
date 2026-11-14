@@ -298,7 +298,8 @@ class ConversationActions:
             self.record(cid)
             snapshot = RequestSnapshotStore(self.config.get_chat_history_dir()).read(cid)
             if p.get('run_id') and snapshot.get('run_id') != p['run_id']:
-                raise ValueError('该轮的模型请求快照已被后续请求替换，不能显示为该轮上下文。')
+                log.info('request_context_unavailable session=%s requested_run=%s snapshot_run=%s reason=run_mismatch', cid, p['run_id'], snapshot.get('run_id'))
+                raise ValueError('该轮的模型请求快照已被后续请求替换。请点击“返回当前任务”查看最新请求。')
             log.info('request_context_opened session=%s run=%s', cid, snapshot.get('run_id'))
             return snapshot
         if method == "agent.list":

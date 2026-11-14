@@ -177,3 +177,25 @@ def test_office_preview_cleans_deep_extension_cache(tmp_path):
         nested.mkdir(parents=True)
         (nested / 'payload.xml').write_text('cache', encoding='utf-8')
     assert not staging.exists()
+
+def test_html_visual_draft_preview_and_save_preserve_scripts_and_head(tmp_path):
+    from core.desktop_workbench import DesktopFiles
+    import pytest
+    source = tmp_path / 'deck.html'
+    original = '<!doctype html><html><head><style>h1{color:red}</style></head><body><h1>Original</h1><script>window.fixture=7;</script></body></html>'
+    source.write_text(original, encoding='utf-8')
+    storage = SimpleNamespace(get_conversation_record=lambda cid: {'meta':{'workspace_dir':str(tmp_path)}})
+    files = DesktopFiles(storage,None)
+    opened = files.dispatch('file.open',{'conversation_id':'a','path':str(source)})
+    edited = opened['payload']['content'].replace('Original','Edited')
+    assert 'window.fixture=7' not in edited
+    params = {'conversation_id':'a','id':opened['id'],'payload':edited}
+    preview = files.dispatch('file.preview',params)['payload']['preview_html']
+    assert 'Edited' in preview and 'window.fixture=7' in preview and 'h1{color:red}' in preview
+    assert source.read_text()==original
+    with pytest.raises(ValueError,match='编辑会话已失效'):
+        files.dispatch('file.preview',{**params,'conversation_id':'b'})
+    files.dispatch('file.save',params)
+    assert 'Edited' in source.read_text() and 'window.fixture=7' in source.read_text()
+    with pytest.raises(Exception,match='缺少受保护'):
+        files.dispatch('file.preview',{**params,'payload':'<html><body>broken</body></html>'})

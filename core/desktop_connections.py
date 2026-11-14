@@ -17,6 +17,8 @@ class Connections:
     def __init__(self, service):
         self.s = service
         self.library = MultiSourceKnowledgeService(KnowledgeStore(service.config.data_dir))
+        from core.local_library import LocalLibrary
+        self.local = LocalLibrary(service)
         self.enterprise = EnterpriseClient(EnterpriseStore(service.config.data_dir))
 
     def dispatch(self, method, p):
@@ -25,6 +27,16 @@ class Connections:
             if action == "status":
                 return {"active": self.library.source, "sources": {name: provider.snapshot() for name, provider in self.library.providers.items()}}
             source = p.get("source") or self.library.source
+            if source == "local":
+                if action == "catalog":
+                    return {"mine": self.local.projects()}
+                if action in {"children", "search"}:
+                    return self.s.jobs.submit("读取本地资料", lambda cancelled, progress: self.local.files(p, cancelled, progress))
+                if action == "read":
+                    return self.local.read(p)
+                if action == "reference":
+                    return {"source": "local", **self.local.describe(p)}
+                raise ValueError("本地资料使用项目目录，无需连接或上传。")
             provider = self.library.provider(source)
             if action == "select":
                 self.library.select_source(source)

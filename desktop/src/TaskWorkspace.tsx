@@ -11,25 +11,30 @@ const statuses: Record<string, string> = { queued: '排队中', running: '运行
 const stringify = (value: any) => typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
 
 export default function TaskWorkspace({ cid, conversation, value, change, error }: Props) {
+  const runId = value.runId || conversation.run?.id;
+  const historical = Boolean(value.runId && value.runId !== conversation.run?.id);
   const [snapshot, setSnapshot] = useState<any>(null), [child, setChild] = useState<any>(null), [failure, setFailure] = useState(''), [busy, setBusy] = useState(false), [copied, setCopied] = useState('');
   const scroll = useRef<HTMLDivElement>(null), latest = useRef({value, change}); latest.current = {value, change};
-  const route = [value.section, value.callId || '', value.agentId || '', value.runId || ''].join(':');
+  const route = [value.section, value.callId || '', value.agentId || '', runId || ''].join(':');
   const [revision, setRevision] = useState(0);
   const [request, setRequest] = useState<any>(null), [requestError, setRequestError] = useState(''), [requestBusy, setRequestBusy] = useState(false);
-  useEffect(() => {setRequest(null); setRequestError(''); setRequestBusy(false);}, [cid, value.runId]);
-  const contextScope = useRef(''); contextScope.current = cid + ':' + (value.runId || '');
+  const requestSequence = useRef(0);
+  useEffect(() => {requestSequence.current++; setRequest(null); setRequestError(''); setRequestBusy(false);}, [cid, runId]);
+  const contextScope = useRef(''); contextScope.current = cid + ':' + (runId || '');
   async function readRequest() {
     const scope = contextScope.current;
+    const sequence = ++requestSequence.current;
+    const current = () => contextScope.current === scope && requestSequence.current === sequence;
     setRequestBusy(true); setRequestError('');
-    try {const result = await call('task.context', {conversation_id: cid, run_id: value.runId}); if (contextScope.current === scope) setRequest(result);}
-    catch (failure) {if (contextScope.current === scope) setRequestError((failure as Error).message);}
-    finally {if (contextScope.current === scope) setRequestBusy(false);}
+    try {const result = await call('task.context', {conversation_id: cid, run_id: runId}); if (current()) setRequest(result);}
+    catch (failure) {if (current()) setRequestError((failure as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));}
+    finally {if (current()) setRequestBusy(false);}
   }
   useEffect(() => {
     let stopped = false, timer: ReturnType<typeof setTimeout>;
     async function update() {
       try {
-        const result = await call('task.inspect', {conversation_id: cid, run_id: value.runId});
+        const result = await call('task.inspect', {conversation_id: cid, run_id: runId});
         const agent = value.agentId ? await call('agent.get', {conversation_id: cid, agent_id: value.agentId}) : null;
         if (stopped) return;
         setSnapshot(result); setChild((previous: any) => {
@@ -43,7 +48,7 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
     }
     setSnapshot(null); setChild(null); void update();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [cid, value.runId, value.agentId, revision]);
+  }, [cid, runId, value.agentId, revision]);
   useLayoutEffect(() => {
     if (scroll.current && snapshot) scroll.current.scrollTop = latest.current.value.scroll?.[route] || 0;
   }, [route, Boolean(snapshot), Boolean(child)]);
@@ -75,6 +80,7 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
   }
   return <div className="task-workspace">
     {value.callId || value.agentId ? <div className="task-detail-heading"><button className="icon-button" title={value.callId ? '返回调用记录' : '返回子任务'} onClick={() => change({callId: undefined, agentId: undefined})}><ArrowLeft size={17}/></button><strong>{selected?.name || selectedAgent?.name || (value.callId ? '调用详情' : '子任务')}</strong><span>{statuses[selected?.status || selectedAgent?.status] || selectedAgent?.status || ''}</span>{selected?.elapsed_ms != null && <small>{(selected.elapsed_ms / 1000).toFixed(1)} 秒</small>}</div> : <div className="task-sections" role="tablist" aria-label="任务视图">{([['calls', '调用记录'], ['agents', '子任务'], ['context', '执行上下文']] as const).map(([id, name]) => <button key={id} role="tab" aria-selected={value.section === id} className={value.section === id ? 'active' : ''} onClick={() => change({section: id})}>{name}</button>)}</div>}
+    {historical && <div className="task-scope"><span>正在查看历史任务</span><button className="text-link" onClick={() => change({runId: undefined, callId: undefined, agentId: undefined})}>返回当前任务</button></div>}
     {failure && <div className="inline-error" role="alert">{failure}<button onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13}/>重试</button></div>}
     <div className="task-scroll" ref={scroll} onScroll={event => { const top = event.currentTarget.scrollTop; change({scroll: {...value.scroll, [route]: top}}); }}>
       {!snapshot && !failure ? <div className="loading"><LoaderCircle size={18} className="spin"/>正在读取任务…</div> : value.callId ? selected ? <div className="call-detail">{selected.error && <p className="run-error">{selected.error}</p>}{disclosure('arguments:' + selected.id, '参数', selected.arguments, true)}{disclosure('result:' + selected.id, '结果', selected.result ?? '尚未收到结果', true)}{disclosure('info:' + selected.id, '运行信息', {id: selected.id, run_id: snapshot.run?.id, started_at: selected.started_at, elapsed_ms: selected.elapsed_ms})}</div> : <p className="task-empty">尚未找到这次调用的记录。<button onClick={() => setRevision(previous => previous + 1)}>重新读取</button></p> : value.agentId ? <>
@@ -83,15 +89,14 @@ export default function TaskWorkspace({ cid, conversation, value, change, error 
         {child?.messages?.map((message: any) => <article className={'child-message ' + message.role} key={message.id}><strong>{message.role === 'user' ? '你' : selectedAgent?.name || '子任务'}</strong>{message.reasoning_content && disclosure('thinking:' + message.id, '深度思考', message.reasoning_content)}<div className="markdown"><Markdown text={messageText(message.content)}/></div></article>)}
         {child?.inbox?.filter((item: any) => ['pending','queued','claimed'].includes(item.status || item.state)).map((item: any) => <p className="muted" key={item.message_id}>待处理：{item.content}</p>)}
       </> : value.section === 'calls' ? <>
-        {value.runId && <button className="task-current" onClick={() => change({runId: undefined, callId: undefined})}><ArrowLeft size={13}/>返回当前任务</button>}
         {snapshot?.calls?.length ? snapshot.calls.map((item: any) => <button className="call-row" key={item.id} onClick={() => change({callId: item.id})}><Wrench size={16}/><span><strong>{item.name}</strong><small>{statuses[item.status] || item.status}{item.elapsed_ms != null ? ` · ${(item.elapsed_ms / 1000).toFixed(1)} 秒` : ''}</small>{item.error && <small className="error-text">{item.error}</small>}</span><ChevronRight size={14}/></button>) : <p className="task-empty"><ListChecks size={22}/>本轮还没有工具调用</p>}
       </> : value.section === 'agents' ? snapshot?.agents?.length ? snapshot.agents.map((agent: any) => <button className="call-row" key={agent.id || agent.agent_id} onClick={() => change({agentId: agent.id || agent.agent_id})}><Users size={17}/><span><strong>{agent.name || agent.task_name || '子任务'}</strong><small>{statuses[agent.status] || agent.status}</small><small>{agent.description || agent.task || agent.meta?.task}</small></span><ChevronRight size={14}/></button>) : <p className="task-empty"><Users size={22}/>还没有子任务</p> : <div className="execution-context">
         <div className="context-heading"><strong>当前选择</strong>{copyButton('current-context', stringify(snapshot?.current_context))}</div>
         <dl>{[['项目', conversation.meta.project_name || '独立聊天'], ['工作目录', snapshot?.current_context?.workspace], ['模型', snapshot?.current_context?.model], ['专家', snapshot?.current_context?.conversation_agent?.name || 'DeepSeek Cowork'], ['任务方式', snapshot?.current_context?.mode || '普通任务'], ['能力', snapshot?.current_context?.skills?.join('、') || '自动选择']].map(([label, text]) => <div key={label}><dt>{label}</dt><dd>{text || '未设置'}</dd></div>)}</dl>
         {disclosure('selected-references', '引用与资料', {conversations: snapshot?.current_context?.conversation_refs || [], knowledge: snapshot?.current_context?.knowledge_refs || []})}
-        <div className="context-heading"><strong>本轮任务提交</strong>{snapshot?.submitted_context && copyButton('submitted-context', stringify(snapshot.submitted_context))}</div>
-        {snapshot?.submitted_context ? <>{disclosure('submitted-context', '查看完整提交上下文', snapshot.submitted_context)}<p className="muted">来自本轮已接收的提交记录，当前选择将在下次任务生效。</p></> : <p className="muted">还没有提交任务。</p>}
-        <div className="context-heading"><strong>最近模型请求</strong>{request && copyButton('request-context', stringify(request))}<button className="text-link" disabled={requestBusy} onClick={() => void readRequest()}>{requestBusy ? '读取中…' : request ? '刷新' : '查看完整请求'}</button></div>
+        <div className="context-heading"><strong>{historical ? '该轮任务提交' : '本轮任务提交'}</strong>{snapshot?.submitted_context && copyButton('submitted-context', stringify(snapshot.submitted_context))}</div>
+        {snapshot?.submitted_context ? <>{disclosure('submitted-context', '查看完整提交上下文', snapshot.submitted_context)}<p className="muted">来自{historical ? '该轮' : '本轮'}已接收的提交记录，当前选择将在下次任务生效。</p></> : <p className="muted">还没有提交任务。</p>}
+        <div className="context-heading"><strong>{historical ? '该轮最近模型请求' : '最近模型请求'}</strong>{request && copyButton('request-context', stringify(request))}<button className="text-link" disabled={requestBusy} onClick={() => void readRequest()}>{requestBusy ? '读取中…' : request ? '刷新' : '查看完整请求'}</button></div>
         {requestError && <p className="error-text" role="alert">{requestError}</p>}{request && <>{disclosure('request-context', '请求原文', request, true)}<p className="muted">{request.scope}</p></>}
       </div>}
     </div>

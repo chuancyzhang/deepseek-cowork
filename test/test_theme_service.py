@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import zipfile
 
-from core.theme import default_design_tokens
+from core.theme_tokens import default_design_tokens
 from core.theme_presets import BUILTIN_THEMES, builtin_theme
 from core.theme_service import (
     DEFAULT_THEME_ID,

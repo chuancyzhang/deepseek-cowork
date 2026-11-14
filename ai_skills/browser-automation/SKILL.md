@@ -7,10 +7,10 @@ source_type: bundled_plugin
 default_enabled: false
 metadata:
   author: deepseek-cowork team
-  version: "3.2.0"
+  version: "3.1.1"
   upstream: "Tencent/BrowserSkill"
-  upstream_cli: "0.4.2"
-  upstream_extension: "0.4.2"
+  upstream_cli: "0.3.3"
+  upstream_extension: "0.3.3"
   permissions: ["screen_access", "internet"]
 security_level: high
 allowed-tools: [browser_skill_cli]
@@ -20,10 +20,8 @@ allowed-tools: [browser_skill_cli]
 
 Use `browser_skill_cli` to invoke Tencent BrowserSkill's `bsk` CLI. The plugin requires
 the application-managed CLI and the BrowserSkill Chrome/Edge extension. If the tool
-reports a browser availability failure, preserve completed work and let Cowork
-present recovery. Do not retry setup commands, switch backends, or ask the user
-to manage CLI versions, daemon processes, or session cleanup.
-This backend is available only when **设置 → 实验功能 → 使用内置浏览器** is off.
+reports `browser_skill_not_ready`, direct the user to **AI 能力商城 → 浏览器自动化**.
+This backend is available only when **设置 → 实验功能 → 内置浏览器自动化** is off.
 Do not switch backends or invoke a CLI through other tools to bypass the current
 run's backend selection. A pending switch blocks new browser tasks until existing
 tasks release their sessions.
@@ -46,25 +44,13 @@ list global sessions, or stop all sessions. Never restart the shared daemon.
 ## Interaction loop
 
 1. Navigate or create/select the target tab. Keep its returned tab id and session id.
-2. Run `["cooperate", "sync", "--session", "<id>", "--tab-id", "<tab-id>"]`.
-   Retain its `context_id`, top-level `observation_id`, and observed `@eN` refs.
-   While `ready` is false, wait with `cooperate wait` and sync again; do not act.
-3. Pass the returned `context_id` as `--context` for page actions. The default
-   target policy lets DOM actions reuse this context across completed actions
-   and supplementary reads. Use only observed refs or unambiguous selectors.
-4. Protect relevant business facts with `--expect`, using observed literal text,
-   values or attributes. Scripts, untargeted keys and visual actions also need
-   the sync reply's top-level `observation_id` as `--observation`.
-5. After navigation or human intervention, sync and reconcile the page before
-   continuing. Do not repeat work the person already completed. Ordinary reads
-   use `observe`, `snapshot` or `get-html`; unrelated page updates alone do not
-   require resynchronization. Verify the result and stop at visible success.
-
-Examples: `["click", "@e3", "--session", "<id>", "--context", "<context_id>"]`;
-`["fill", "@e3", "--value", "text", "--session", "<id>", "--context", "<context_id>"]`.
-`user_aborted` means stop, not wait or automatically resume. An unknown effect
-requires checking the application's actual result before considering another
-action; a new context never authorizes replay of an uncertain operation.
+2. Run `["observe", "--session", "<id>", "--tab-id", "<tab-id>"]` to obtain the
+   current page and `@eN` refs. `snapshot` is also supported for accessibility snapshots.
+3. Use refs from the latest observation of that same tab and session. Do not infer
+   a URL or CSS selector from a navigation label; use the observed target.
+4. Click, fill, select, or press the smallest required action.
+5. Observe again after navigation or DOM changes, then verify the result before
+   acting. A new observation is required even when its arguments are unchanged.
 
 If a ref is unknown or stale, run `observe` for that tab and retry the intended
 action once with a newly returned ref. If it still fails, inspect the current
@@ -72,7 +58,7 @@ page and report the obstacle instead of looping. Use current refs before
 continuing an observation with `--cursor`.
 
 Use only supported command options. If uncertain, call `["<command>", "--help"]`
-through this tool before executing. Do not invent flags such as `snapshot --live`.
+through this tool before executing. `snapshot --live` does not exist in CLI 0.3.3.
 After a navigation timeout, inspect the reported final URL and observe the page
 before deciding whether another navigation is needed; a timeout does not prove
 that navigation had no effect.
@@ -123,12 +109,12 @@ images automatically. Continue browser actions after inspecting the screenshot.
 
 - Exit code 1: check command help for argument errors; refresh unknown/stale refs
   with `observe` on the same tab and session as described above.
-- Exit code 2: the browser connection is unavailable; let Cowork handle recovery.
+- Exit code 2: run `doctor`; the daemon or extension transport is unavailable.
 - Exit code 3: browser execution failed; confirm the tab is still open.
-- Exit code 4: command timeout; preserve progress and let Cowork handle recovery.
-- Exit code 5: components are incompatible; let Cowork handle recovery.
+- Exit code 4: command timeout; increase the timeout only when justified.
+- Exit code 5: CLI and extension versions do not match; repair the component in settings.
 
-If Cowork reports an outer CLI timeout, it stops further execution and manages
-owned-session cleanup in the background. Pending cleanup does not confirm that
-the browser action stopped. Do not replay the timed-out action automatically. After the user resumes,
-inspect the actual page result before deciding what remains to be done.
+If Cowork reports an outer CLI timeout, inspect `session_cleanup`: a successful
+cleanup means Cowork deliberately ended the session, not that the Agent Window
+crashed. A BrowserSkill-native timeout is returned as a normal CLI error and the
+session remains available for one focused retry before the required final stop.

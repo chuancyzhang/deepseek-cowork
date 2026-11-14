@@ -35,18 +35,14 @@ def init_abort_state(context):
         return state
     signal = state.context.get("abort_signal")
     if signal is not None:
-        from PySide6.QtCore import QObject, Qt
-
-        class Bridge(QObject):
-            def trigger(self):
-                target = reference()
-                if target is not None:
-                    target["aborted"] = True
-
         reference = weakref.ref(state)
-        bridge = Bridge()
-        signal.connect(bridge.trigger, Qt.DirectConnection)
-        state["bridge"] = bridge
+        def trigger():
+            target = reference()
+            if target is not None:
+                target["aborted"] = True
+        unsubscribe = signal.subscribe(trigger)
+        weakref.finalize(state, unsubscribe)
+        state["bridge"] = trigger
     return state
 
 

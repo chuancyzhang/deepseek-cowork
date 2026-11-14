@@ -1,0 +1,7 @@
+{
+  "id":"example.focus", "name":"专注工作台", "version":"2.0.0", "hostApi":2, "stateVersion":1,
+  "description":"可直接安装的整体界面示例：共享宿主会话、草稿和运行。",
+  "entry":"index.html",
+  "capabilities":["conversations.read","conversations.write","runs.control","drafts.read","drafts.write","navigation","theme","dialogs"],
+  "contributes":[{"id":"focus", "kind":"workbench", "target":"main"}]
+}

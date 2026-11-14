@@ -411,8 +411,8 @@ class ToolTasksWorkerTest(unittest.TestCase):
                 worker = LLMWorker(history or [{"role": "user", "content": "work"}],
                     _DaemonConfigStub(root, values={"api_key": "test-key"}), workspace_dir=root,
                     session_id="session", turn_id="turn", request_id="run", run_context={"mode": "execution"})
-                worker.finished_signal.connect(finished.append)
-                worker.tool_result_signal.connect(events.append)
+                worker.finished_signal.subscribe(finished.append)
+                worker.tool_result_signal.subscribe(events.append)
                 if on_ready:
                     on_ready(worker)
                 worker.run()

@@ -10,18 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication
 from core import updater
 from core.update_coordinator import UpdateCoordinator, UpdateWorker, prepare_online, release_notes_text, load_prepared
-from ui.update_panel import UpdatePanel
 
 
 class UpdatePreparationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = self.temp.name
@@ -125,7 +118,7 @@ class UpdatePreparationTests(unittest.TestCase):
 
     def test_coordinator_cancels_download_before_local_and_no_duplicate_install(self):
         coordinator = UpdateCoordinator(self.root, True, root=self.root)
-        worker = SimpleNamespace(cancel=threading.Event(), deleteLater=lambda: None, error=None, result={})
+        worker = SimpleNamespace(cancel=threading.Event(), failure=None, error=None, result={})
         coordinator.worker = worker
         with patch.object(coordinator, "_start") as start:
             coordinator.select_local(self.package())
@@ -142,9 +135,9 @@ class UpdatePreparationTests(unittest.TestCase):
     def test_cancel_after_worker_completes_never_installs(self):
         coordinator = UpdateCoordinator(self.root, True, root=self.root)
         cancel = threading.Event(); cancel.set()
-        coordinator.worker = SimpleNamespace(cancel=cancel, error=None, result={"staged_app_dir": self.root}, operation="plan", deleteLater=lambda: None)
+        coordinator.worker = SimpleNamespace(cancel=cancel, failure=None, error=None, result={"staged_app_dir": self.root}, operation="plan")
         installed = []
-        coordinator.installation_ready.connect(installed.append)
+        coordinator.installation_ready.subscribe(installed.append)
         coordinator._finished()
         self.assertEqual(installed, [])
 
@@ -159,7 +152,7 @@ class UpdatePreparationTests(unittest.TestCase):
         coordinator = UpdateCoordinator(staged, True, current_version="8.0.0", root=self.root)
         coordinator.worker = worker
         installed = []
-        coordinator.installation_ready.connect(installed.append)
+        coordinator.installation_ready.subscribe(installed.append)
         coordinator._finished()
         self.assertEqual(installed, [])
         self.assertEqual(coordinator.state["phase"], "error")
@@ -192,26 +185,23 @@ class UpdatePreparationTests(unittest.TestCase):
     def test_download_retry_does_not_grant_install_permission(self):
         coordinator = UpdateCoordinator(self.root, True, root=self.root)
         coordinator.publish(phase="error", result={"update_available": True, "release": {"tag_name": "9.0.0"}})
-        panel = UpdatePanel(coordinator)
-        with patch.object(coordinator, "check") as check, patch.object(coordinator, "request_install") as install:
-            panel.act()
-        check.assert_called_once()
+        with patch.object(coordinator, "_start") as start, patch.object(coordinator, "request_install") as install:
+            coordinator.check()
+        start.assert_called_once_with("online")
+        self.assertFalse(coordinator.snapshot()["install_requested"])
         install.assert_not_called()
-        panel.close(); panel.deleteLater()
 
-    def test_panel_recreated_uses_same_job_and_plain_text_notes(self):
+    def test_reconnected_view_reads_same_job_and_plain_text_notes(self):
         coordinator = UpdateCoordinator(self.root, True, root=self.root)
         result = {"release": {"tag_name": "9.0.0", "body": "文字 ![图](https://example.invalid/img)"}, "update_available": True}
         coordinator.publish(phase="downloading", result=result, percent=45)
         with patch.object(coordinator, "_start") as start:
-            panel = UpdatePanel(coordinator)
-            panel.close(); panel.deleteLater()
-            other = UpdatePanel(coordinator)
-            self.assertEqual(other.notes.text(), "文字")
-            self.assertEqual(other.progress.value(), 45)
-            self.assertTrue(other.details.isHidden())
+            first = coordinator.snapshot()
+            second = coordinator.snapshot()
+            self.assertEqual(first, second)
+            self.assertEqual(release_notes_text(second["result"]["release"]["body"]), "文字")
+            self.assertEqual(second["percent"], 45)
             start.assert_not_called()
-            other.close(); other.deleteLater()
 
     def test_source_mode_checks_without_download(self):
         with patch.object(updater, "fetch_latest_release", return_value=self.release()), patch.object(updater, "download_asset") as download:

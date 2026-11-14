@@ -6,10 +6,11 @@ import os
 import threading
 import time
 import uuid
+from functools import wraps
 
 import markdown
 from bs4 import BeautifulSoup
-from PySide6.QtCore import QObject, QThread, Signal
+from core.runtime_tasks import EventSource, TaskWorker
 
 from core.app_version import APP_VERSION, is_newer_version
 from core import updater as backend
@@ -79,8 +80,11 @@ def load_prepared(root, current_version, connection=None, source_config=None):
     if result.get("sha256") != backend._hash_file(zip_path):
         return None
     # The ZIP is verified; staging may have been modified since the previous run.
-    result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
-    backend.validate_online_package(result["staged_app_dir"], connection)
+    if backend.is_windows():
+        result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
+        backend.validate_online_package(result["staged_app_dir"], connection)
+    else:
+        result["manual_install"] = True
     result["cache_reused"] = True
     return result
 
@@ -112,7 +116,7 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                     return result
                 result["asset"] = backend.select_release_asset(release).as_dict()
                 emit("available", message="发现新版本", result=result)
-            if not install_enabled:
+            if not install_enabled and backend.is_windows():
                 return result
             expected = backend.expected_asset_path(result["asset"], downloads)
             identity_path = os.path.join(downloads, "asset.json")
@@ -138,6 +142,10 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                                         "source_name": result["source_name"], "fallback_reason": result["fallback_reason"]})
             backend.check_cancel(cancel)
             emit("validating", message="正在准备安装包…", percent=-1)
+            if not backend.is_windows():
+                result.update(zip_path=zip_path, sha256=backend._hash_file(zip_path), manual_install=True)
+                atomic_json(os.path.join(root, "prepared.json"), result)
+                return result
             staged = backend.extract_update_zip(zip_path, target_dir=root)
             backend.validate_online_package(staged, connection)
             backend.check_cancel(cancel)
@@ -167,11 +175,10 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
     raise AssertionError("retry budget exhausted")
 
 
-class UpdateWorker(QThread):
-    event = Signal(object)
-
+class UpdateWorker(TaskWorker):
     def __init__(self, operation, root, install_dir, current_version, install_enabled, payload=None, parent=None, connection=None, source_config=None):
-        super().__init__(parent)
+        super().__init__()
+        self.event = EventSource()
         self.operation, self.root, self.install_dir = operation, root, install_dir
         self.current_version, self.install_enabled = current_version, install_enabled
         self.payload = payload
@@ -198,7 +205,7 @@ class UpdateWorker(QThread):
                 try:
                     # Enterprise caches are reused only after checking the current recommendation.
                     cached = None if self.connection else load_prepared(self.root, self.current_version, source_config=self.source_config)
-                    if cached:
+                    if cached and not cached.get("manual_install"):
                         self.emit_state("ready", message="更新已准备好", result=cached)
                 except (ValueError, KeyError, OSError, backend.UpdaterError) as exc:
                     update_log(self.root, "cache_invalid", error=str(exc))
@@ -246,13 +253,21 @@ class UpdateWorker(QThread):
             update_log(self.root, "cancelled" if isinstance(exc, backend.UpdateCancelled) else "error", update_id=self.update_id, operation=self.operation, error=str(exc))
 
 
-class UpdateCoordinator(QObject):
-    changed = Signal(object)
-    installation_ready = Signal(object)
-    installation_cancel_requested = Signal()
+def _serialized(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return invoke
+
+
+class UpdateCoordinator:
 
     def __init__(self, install_dir, install_enabled, current_version=APP_VERSION, root=None, parent=None):
-        super().__init__(parent)
+        self._lock = threading.RLock()
+        self.changed = EventSource()
+        self.installation_ready = EventSource()
+        self.installation_cancel_requested = EventSource()
         self.install_dir, self.install_enabled = install_dir, install_enabled
         self.current_version = current_version
         self.root = root or backend.updates_dir()
@@ -271,13 +286,16 @@ class UpdateCoordinator(QObject):
         except backend.UpdaterError as exc:
             self.state.update(phase="error", message=str(exc), error=str(exc), source="online")
 
+    @_serialized
     def snapshot(self):
         return copy.deepcopy({**self.state, "busy": self.worker is not None, "install_requested": self.install_requested})
 
+    @_serialized
     def publish(self, **fields):
         self.state.update(fields)
         self.changed.emit(self.snapshot())
 
+    @_serialized
     def start_automatic(self):
         if self.automatic_started:
             return
@@ -285,6 +303,7 @@ class UpdateCoordinator(QObject):
         if self.worker is None:
             self.check()
 
+    @_serialized
     def check(self):
         self.automatic_started = True
         if self.worker is None:
@@ -309,18 +328,20 @@ class UpdateCoordinator(QObject):
                 self.cache_root = self.root
             self._start("online")
 
+    @_serialized
     def _start(self, operation, payload=None):
         work_root = self.cache_root if operation == "online" else self.root
         self.worker = UpdateWorker(operation, work_root, self.install_dir, self.current_version, self.install_enabled, payload, self,
                                    connection=self.connection, source_config=self.source_config)
-        self.worker.event.connect(self._event)
-        self.worker.finished.connect(self._finished)
+        self.worker.event.subscribe(self._event)
+        self.worker.finished.subscribe(self._finished)
         fields = {"error": "", "source": "local" if operation == "local" else "online" if operation == "online" else self.state.get("source", "online")}
         if operation in {"online", "local"}:
             fields["fallback_reason"] = ""
         self.publish(**fields)
         self.worker.start()
 
+    @_serialized
     def _event(self, event):
         if self.pending or (self.worker and self.worker.cancel.is_set()):
             return
@@ -334,6 +355,7 @@ class UpdateCoordinator(QObject):
             return
         self.publish(**event)
 
+    @_serialized
     def request_install(self):
         if not self.install_enabled or self.state["phase"] == "installing" or self.install_requested:
             return
@@ -348,6 +370,7 @@ class UpdateCoordinator(QObject):
             self.check()
         self.publish()
 
+    @_serialized
     def select_local(self, path):
         if not self.install_enabled or self.state["phase"] == "installing":
             return
@@ -362,6 +385,7 @@ class UpdateCoordinator(QObject):
         else:
             self._start("local", os.path.abspath(path))
 
+    @_serialized
     def cancel(self):
         if self.state.get("phase") == "installing":
             if self.state.get("can_cancel_install"):
@@ -374,9 +398,10 @@ class UpdateCoordinator(QObject):
         else:
             self.publish(phase="ready" if self.prepared else "idle", message="更新已准备好" if self.prepared else "已取消本次更新")
 
+    @_serialized
     def _finished(self):
         worker, self.worker = self.worker, None
-        worker.deleteLater()
+        worker.error = worker.error or worker.failure
         if self.pending:
             operation, payload = self.pending
             self.pending = None
@@ -401,6 +426,11 @@ class UpdateCoordinator(QObject):
             self.publish(phase="ready" if self.prepared else "error", message=message, error=str(worker.error), percent=-1)
             return
         result = worker.result
+        if result.get("manual_install"):
+            self.prepared = None
+            self.install_requested = False
+            self.publish(phase="downloaded", message="安装包已下载并校验。请关闭应用后手动安装。", result=result, percent=100)
+            return
         if result.get("staged_app_dir"):
             self.prepared = result
             self.publish(phase="ready", message="更新已准备好", result=result, percent=100)
@@ -416,6 +446,7 @@ class UpdateCoordinator(QObject):
             self.publish(phase="available" if result["update_available"] else "current",
                          message=result.get("message") or ("发现新版本" if result["update_available"] else "当前已是最新版本"), result=result, percent=-1)
 
+    @_serialized
     def install_aborted(self, message="更新已准备好，尚未安装"):
         self.install_requested = False
         self.publish(phase="ready", message=message, percent=-1, can_cancel_install=False)

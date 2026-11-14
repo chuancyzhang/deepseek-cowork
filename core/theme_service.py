@@ -793,7 +793,7 @@ class ThemeRepository:
         reading = value.get("reading") or {}
         if not isinstance(reading, dict) or set(reading) - {"font_family", "mono_font_family", "font_scale", "density"}:
             raise ValueError("阅读偏好包含未知字段。")
-        from .theme import default_design_tokens
+        from .theme_tokens import default_design_tokens
         normalized = validate_theme_overrides(reading, default_design_tokens())
         return {"mode": mode, "reading": {key: normalized[key] for key in reading}}
 
@@ -875,7 +875,7 @@ class ThemeRepository:
 
     def load(self) -> ThemeStoreSnapshot:
         payload = self._read_store()
-        from .theme import default_design_tokens
+        from .theme_tokens import default_design_tokens
 
         defaults = default_design_tokens()
         raw_themes: list[dict[str, Any]] = []
@@ -925,7 +925,7 @@ class ThemeRepository:
 
     def _save(self, snapshot: ThemeStoreSnapshot, *, default_tokens: dict[str, Any] | None = None) -> ThemeStoreSnapshot:
         if default_tokens is None:
-            from .theme import default_design_tokens
+            from .theme_tokens import default_design_tokens
             default_tokens = default_design_tokens()
         os.makedirs(self.themes_dir, exist_ok=True)
         desired_ids = set()
@@ -1342,7 +1342,7 @@ class ThemeRepository:
 
     def load_preview(self) -> dict[str, Any] | None:
         if os.path.exists(self.preview_path):
-            from .theme import default_design_tokens
+            from .theme_tokens import default_design_tokens
             preview, _assets = self._read_preview_package(default_design_tokens())
             return preview
         if os.path.exists(self.legacy_preview_path):

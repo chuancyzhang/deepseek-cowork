@@ -20,124 +20,104 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.app_version import APP_VERSION  # noqa: E402
-from core.update_manifest import validate_manifest  # noqa: E402
 from web.platform.server.package_policy import (  # noqa: E402
-    DEFAULT_CONFIG_PATH, MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
+    MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
 )
 from scripts.bundled_runtime_checks import (  # noqa: E402
     GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
 )
 
 
-ARCHIVE_ROOT = "deepseek-cowork"
+ARCHIVE_ROOT = "DeepSeek Cowork-win32-x64"
+SERVICE_DIR = "resources/service"
+DEFAULT_CONFIG_PATH = SERVICE_DIR + "/_internal/config.json"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
 EDITOR_MAX_UNPACKED_BYTES = 30 * 1024 * 1024
 EDITOR_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
-EDITOR_ASSET_PREFIX = "_internal/web/editors/dist/"
-BROWSER_SKILL_ASSET_PREFIX = "_internal/resources/browser_skill/"
-BROWSER_SKILL_CLI_ARCHIVE = "bsk-v0.4.2-x86_64-pc-windows-msvc.zip"
-BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.4.2-chrome.zip"
+EDITOR_ASSET_PREFIX = "resources/service/_internal/web/editors/dist/"
+BROWSER_SKILL_ASSET_PREFIX = "resources/service/_internal/resources/browser_skill/"
+BROWSER_SKILL_CLI_ARCHIVE = "bsk-v0.3.3-x86_64-pc-windows-msvc.zip"
+BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.3.3-chrome.zip"
 BROWSER_SKILL_PINNED_ARTIFACTS = {
     "cli": {
-        "version": "0.4.2",
+        "version": "0.3.3",
         "archive": BROWSER_SKILL_CLI_ARCHIVE,
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.4.2/bsk-v0.4.2-x86_64-pc-windows-msvc.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.3.3/bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
     },
     "extension": {
-        "version": "0.4.2",
+        "version": "0.3.3",
         "archive": BROWSER_SKILL_EXTENSION_ARCHIVE,
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.4.2/browser-skill-extension-v0.4.2-chrome.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.3.3/browser-skill-extension-v0.3.3-chrome.zip",
     },
 }
 BROWSER_SKILL_ARTIFACT_HASHES = {
-    BROWSER_SKILL_CLI_ARCHIVE: "CC1594E62B4D97CA6C96D33E47F8D1D2B8FA2E2B8B8F6987C5B284EC1C437362",
-    BROWSER_SKILL_EXTENSION_ARCHIVE: "5360EF01EC8FCD3550215E12C417D8B98814BFF0E54D478E6B867D693C1D4D76",
+    BROWSER_SKILL_CLI_ARCHIVE: "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02",
+    BROWSER_SKILL_EXTENSION_ARCHIVE: "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA",
 }
 WECOM_CLI_VERSION = "1.1.0"
 WECOM_CLI_SHA256 = "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B"
 
-QT_TRANSLATION_ALLOWLIST = {
-    "qt_en.qm",
-    "qt_zh_CN.qm",
-    "qtbase_en.qm",
-    "qtbase_zh_CN.qm",
-}
-QTWEBENGINE_LOCALE_ALLOWLIST = {
-    "en-GB.pak",
-    "en-US.pak",
-    "zh-CN.pak",
-    "zh-TW.pak",
-}
-
 REQUIRED_PATHS = (
     "deepseek-cowork.exe",
-    "_internal/enterprise_capabilities.json",
-    "_internal/python_env/python.exe",
-    "_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
-    "_internal/python_env/Lib/site-packages/xlrd/__init__.py",
-    "_internal/python_env/Lib/site-packages/docx/__init__.py",
-    "_internal/python_env/Lib/site-packages/pptx/__init__.py",
-    "_internal/python_env/Lib/site-packages/PIL/__init__.py",
-    "_internal/python_env/Lib/site-packages/pypdf/__init__.py",
-    "_internal/python_env/Lib/site-packages/reportlab/__init__.py",
-    *(f"_internal/git_bash_env/{name}" for name in GIT_REQUIRED_FILES),
-    *(f"_internal/ripgrep_env/{name}" for name in RIPGREP_FILE_HASHES),
-    "_internal/PySide6/Qt6WebEngineCore.dll",
-    "_internal/PySide6/QtWebEngineCore.pyd",
-    "_internal/PySide6/QtWebEngineWidgets.pyd",
-    "_internal/PySide6/Qt6Pdf.dll",
-    "_internal/PySide6/QtPdf.pyd",
-    "_internal/PySide6/QtPdfWidgets.pyd",
-    "_internal/PySide6/QtOpenGL.pyd",
-    "_internal/PySide6/QtQml.pyd",
-    "_internal/PySide6/QtQuick.pyd",
-    "_internal/PySide6/QtQuickWidgets.pyd",
-    "_internal/PySide6/Qt6OpenGL.dll",
-    "_internal/PySide6/Qt6Qml.dll",
-    "_internal/PySide6/Qt6Quick.dll",
-    "_internal/PySide6/Qt6QuickWidgets.dll",
-    "_internal/PySide6/QtWebChannel.pyd",
-    "_internal/PySide6/QtTest.pyd",
-    "_internal/PySide6/QtWebEngineProcess.exe",
-    "_internal/winpty/conpty.dll",
-    "_internal/winpty/OpenConsole.exe",
-    "_internal/pywinpty-3.0.5.dist-info/licenses/LICENSE.txt",
-    "_internal/ai_skills/workbench/SKILL.md",
-    "_internal/ai_skills/workbench/impl.py",
-    "_internal/web/editors/dist/terminal.html",
-    "_internal/web/editors/dist/terminal.js",
-    "_internal/web/editors/dist/terminal.css",
-    "_internal/web/editors/dist/browser-automation.js",
-    "_internal/web/editors/dist/LICENSE-XTERM.txt",
-    "_internal/web/editors/dist/LICENSE-XTERM-FIT.txt",
-    "_internal/web/editors/dist/docx.html",
-    "_internal/web/editors/dist/docx-editor.js",
-    "_internal/web/editors/dist/docx-review.html",
-    "_internal/web/editors/dist/docx-review.css",
-    "_internal/web/editors/dist/docx-review-editor.js",
-    "_internal/web/editors/dist/html.html",
-    "_internal/web/editors/dist/html-editor.js",
-    "_internal/web/editors/dist/sheet.html",
-    "_internal/web/editors/dist/sheet-editor.js",
-    "_internal/web/editors/dist/sheet-editor.css",
-    "_internal/web/editors/dist/editor.css",
-    "_internal/web/editors/dist/THIRD_PARTY_NOTICES.md",
-    "_internal/web/editors/dist/THIRD_PARTY_LICENSES.txt",
-    "_internal/web/editors/dist/LICENSE-CANVAS-EDITOR.txt",
-    "_internal/web/editors/dist/LICENSE-CANVAS-EDITOR-DOCX.txt",
-    "_internal/web/editors/dist/LICENSE-UNIVER.txt",
-    "_internal/web/editors/dist/LICENSE-BUFFER.txt",
-    "_internal/resources/browser_skill/bundle.json",
-    "_internal/resources/browser_skill/LICENSE.txt",
-    f"_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_CLI_ARCHIVE}",
-    f"_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_EXTENSION_ARCHIVE}",
-    "_internal/resources/wecom_cli/bundle.json",
-    "_internal/resources/wecom_cli/LICENSE.txt",
-    "_internal/resources/wecom_cli/bin/wecom-cli.exe",
-    "_internal/ai_skills/wecom-unified/SKILL.md",
-    "_internal/ai_skills/wecom-unified/skill.json",
-    "_internal/ai_skills/wecom-unified/LICENSE",
+    "resources/app.asar",
+    "resources/service/cowork-service.exe",
+    "desktop-release.json",
+    "LICENSE-Cowork.txt",
+    "LICENSE",
+    "LICENSES.chromium.html",
+    "resources/service/_internal/enterprise_capabilities.json",
+    "resources/service/_internal/python_env/python.exe",
+    "resources/service/_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/xlrd/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/docx/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/pptx/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/PIL/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/pypdf/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/reportlab/__init__.py",
+    *(f"resources/service/_internal/git_bash_env/{name}" for name in GIT_REQUIRED_FILES),
+    *(f"resources/service/_internal/ripgrep_env/{name}" for name in RIPGREP_FILE_HASHES),
+    "resources/service/_internal/winpty/conpty.dll",
+    "resources/service/_internal/winpty/OpenConsole.exe",
+    "resources/service/_internal/pywinpty-3.0.5.dist-info/licenses/LICENSE.txt",
+    "resources/service/_internal/ai_skills/workbench/SKILL.md",
+    "resources/service/_internal/ai_skills/workbench/impl.py",
+    "resources/service/_internal/web/editors/dist/terminal.html",
+    "resources/service/_internal/web/editors/dist/terminal.js",
+    "resources/service/_internal/web/editors/dist/terminal.css",
+    "resources/service/_internal/web/editors/dist/browser-automation.js",
+    "resources/service/_internal/web/editors/dist/LICENSE-XTERM.txt",
+    "resources/service/_internal/web/editors/dist/LICENSE-XTERM-FIT.txt",
+    "resources/service/_internal/web/editors/dist/docx.html",
+    "resources/service/_internal/web/editors/dist/docx-editor.js",
+    "resources/service/_internal/web/editors/dist/docx-review.html",
+    "resources/service/_internal/web/editors/dist/docx-review.css",
+    "resources/service/_internal/web/editors/dist/docx-review-editor.js",
+    "resources/service/_internal/web/editors/dist/html.html",
+    "resources/service/_internal/web/editors/dist/html-editor.js",
+    "resources/service/_internal/web/editors/dist/sheet.html",
+    "resources/service/_internal/web/editors/dist/sheet-editor.js",
+    "resources/service/_internal/web/editors/dist/sheet-editor.css",
+    "resources/service/_internal/web/editors/dist/editor.css",
+    "resources/service/_internal/web/editors/dist/THIRD_PARTY_NOTICES.md",
+    "resources/service/_internal/web/editors/dist/THIRD_PARTY_LICENSES.txt",
+    "resources/service/_internal/web/editors/dist/LICENSE-CANVAS-EDITOR.txt",
+    "resources/service/_internal/web/editors/dist/LICENSE-CANVAS-EDITOR-DOCX.txt",
+    "resources/service/_internal/web/editors/dist/LICENSE-UNIVER.txt",
+    "resources/service/_internal/web/editors/dist/LICENSE-BUFFER.txt",
+    "resources/service/_internal/resources/browser_skill/bundle.json",
+    "resources/service/_internal/resources/browser_skill/LICENSE.txt",
+    f"resources/service/_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_CLI_ARCHIVE}",
+    f"resources/service/_internal/resources/browser_skill/artifacts/{BROWSER_SKILL_EXTENSION_ARCHIVE}",
+    "resources/service/_internal/resources/wecom_cli/bundle.json",
+    "resources/service/_internal/resources/wecom_cli/LICENSE.txt",
+    "resources/service/_internal/resources/wecom_cli/bin/wecom-cli.exe",
+    "resources/service/_internal/ai_skills/wecom-unified/SKILL.md",
+    "resources/service/_internal/ai_skills/wecom-unified/skill.json",
+    "resources/service/_internal/ai_skills/wecom-unified/LICENSE",
 )
+REQUIRED_PATHS += tuple(path.replace(EDITOR_ASSET_PREFIX, "resources/web/editors/dist/", 1)
+                        for path in REQUIRED_PATHS if path.startswith(EDITOR_ASSET_PREFIX))
+
 
 
 class PackageAuditError(RuntimeError):
@@ -166,37 +146,27 @@ def _forbidden_reason(relative: Path) -> str:
         return "local identity, credentials or user data"
     if "node_modules" in {part.lower() for part in relative.parts}:
         return "Node development dependency"
-    if lowered.startswith(EDITOR_ASSET_PREFIX) and lowered.endswith(".map"):
+    if "/web/editors/dist/" in "/" + lowered and lowered.endswith(".map"):
         return "editor source map"
     if "/__pycache__/" in f"/{lowered}/" or lowered.endswith((".pyc", ".pyo")):
         return "Python cache file"
-    if lowered.startswith("_internal/python_env/lib/site-packages/pythonwin/"):
+    if lowered.startswith("resources/service/_internal/python_env/lib/site-packages/pythonwin/"):
         return "PythonWin IDE runtime"
     if lowered.endswith(".chm"):
         return "compiled help file"
-    if lowered.startswith("_internal/pyside6/qml/"):
-        return "unused Qt QML tree"
-    if relative.parent.as_posix().lower() == "_internal" and basename.lower().startswith(("icuuc", "icuin", "icudt")) and lowered.endswith(".dll"):
-        return "root ICU shadows the Windows ICU required by Qt"
-    if lowered.startswith("_internal/pyside6/resources/"):
-        if ".debug." in basename.lower() or basename.lower().endswith(".debug"):
-            return "Qt debug resource"
-    locale_prefix = "_internal/pyside6/translations/qtwebengine_locales/"
-    if lowered.startswith(locale_prefix):
-        if basename not in QTWEBENGINE_LOCALE_ALLOWLIST:
-            return "non-target QtWebEngine locale"
-    translation_prefix = "_internal/pyside6/translations/"
-    if lowered.startswith(translation_prefix) and not lowered.startswith(locale_prefix):
-        if basename not in QT_TRANSLATION_ALLOWLIST:
-            return "non-target Qt translation"
+    parts = {part.lower() for part in relative.parts}
+    if parts & {"pyside6", "pyqt5", "pyqt6", "shiboken6", "ui"} or basename.lower().startswith("qt6"):
+        return "retired Qt runtime or UI"
+    if basename.lower() == ".env" or basename.lower().startswith(("chat_history.sqlite", "runtime_journal")):
+        return "local runtime data"
     return ""
 
 
-def _audit_editor_assets(dist_dir: Path, files: list[Path]) -> dict:
+def _audit_editor_assets(dist_dir: Path, files: list[Path], prefix=EDITOR_ASSET_PREFIX) -> dict:
     editor_files = [
         relative
         for relative in files
-        if relative.as_posix().lower().startswith(EDITOR_ASSET_PREFIX)
+        if relative.as_posix().lower().startswith(prefix)
     ]
     unpacked_bytes = sum((dist_dir / relative).stat().st_size for relative in editor_files)
     if unpacked_bytes > EDITOR_MAX_UNPACKED_BYTES:
@@ -240,8 +210,8 @@ def _audit_editor_assets(dist_dir: Path, files: list[Path]) -> dict:
 
 def _component_name(relative: Path) -> str:
     parts = relative.parts
-    if len(parts) >= 2 and parts[0] == "_internal":
-        return f"_internal/{parts[1]}"
+    if len(parts) >= 4 and parts[:3] == ("resources", "service", "_internal"):
+        return "/".join(parts[:4])
     return parts[0] if parts else "(root)"
 
 
@@ -254,7 +224,7 @@ def _file_sha256(path: Path) -> str:
 
 
 def _audit_browser_skill_assets(dist_dir: Path) -> dict:
-    bundle_root = dist_dir / "_internal" / "resources" / "browser_skill"
+    bundle_root = dist_dir / SERVICE_DIR / "_internal" / "resources" / "browser_skill"
     manifest_path = bundle_root / "bundle.json"
     license_path = bundle_root / "LICENSE.txt"
     try:
@@ -307,7 +277,7 @@ def _audit_browser_skill_assets(dist_dir: Path) -> dict:
 
 
 def _audit_wecom_cli_assets(dist_dir: Path) -> dict:
-    bundle_root = dist_dir / "_internal" / "resources" / "wecom_cli"
+    bundle_root = dist_dir / SERVICE_DIR / "_internal" / "resources" / "wecom_cli"
     manifest_path = bundle_root / "bundle.json"
     executable_path = bundle_root / "bin" / "wecom-cli.exe"
     license_path = bundle_root / "LICENSE.txt"
@@ -350,18 +320,25 @@ def audit_distribution(dist_dir: Path) -> dict:
     if not dist_dir.is_dir():
         raise PackageAuditError(f"Distribution directory does not exist: {dist_dir}")
 
+    try:
+        identity = json.loads((dist_dir / "desktop-release.json").read_text(encoding="utf-8"))
+        if identity != {"schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": APP_VERSION}:
+            raise ValueError("layout, target or version mismatch")
+    except (OSError, ValueError) as exc:
+        raise PackageAuditError(f"Invalid Electron release identity: {exc}") from exc
+
     files = _relative_files(dist_dir)
     paths = {path.as_posix() for path in files}
     missing = [path for path in REQUIRED_PATHS if path not in paths]
     if missing:
         raise PackageAuditError("Missing required packaged files: " + ", ".join(missing))
     try:
-        capabilities = json.loads((dist_dir / "_internal/enterprise_capabilities.json").read_text(encoding="utf-8"))
+        capabilities = json.loads((dist_dir / "resources/service/_internal/enterprise_capabilities.json").read_text(encoding="utf-8"))
         if capabilities != {"supported_connection_schemas": [1], "supported_platform_api_versions": [1]}:
             raise ValueError()
     except (ValueError, OSError):
         raise PackageAuditError("Invalid enterprise capability declaration in standard package.") from None
-    if not any(path.startswith("_internal/winpty/_winpty") and path.endswith(".pyd") for path in paths):
+    if not any(path.startswith("resources/service/_internal/winpty/_winpty") and path.endswith(".pyd") for path in paths):
         raise PackageAuditError("Missing native pywinpty extension in _internal/winpty.")
 
     forbidden = [
@@ -379,14 +356,22 @@ def audit_distribution(dist_dir: Path) -> dict:
             with default_config.open("rb") as handle:
                 validate_default_config(handle.read(MAX_DEFAULT_CONFIG_BYTES + 1))
         except (ValueError, UnicodeError):
-            raise PackageAuditError("_internal/config.json is not the empty shipped default; rebuild with the default configuration.") from None
+            raise PackageAuditError("resources/service/_internal/config.json is not the empty shipped default; rebuild with the default configuration.") from None
 
     editor_assets = _audit_editor_assets(dist_dir, files)
+    host_editor_assets = _audit_editor_assets(dist_dir, files, "resources/web/editors/dist/")
+    service_editors = dist_dir / EDITOR_ASSET_PREFIX
+    host_editors = dist_dir / "resources/web/editors/dist"
+    if _relative_files(service_editors) != _relative_files(host_editors):
+        raise PackageAuditError("Editor resource copies have different file lists.")
+    for relative in _relative_files(service_editors):
+        if _file_sha256(service_editors / relative) != _file_sha256(host_editors / relative):
+            raise PackageAuditError(f"Editor resource copies differ: {relative}")
     browser_skill_assets = _audit_browser_skill_assets(dist_dir)
     wecom_cli_assets = _audit_wecom_cli_assets(dist_dir)
     try:
-        git_runtime = validate_git_bundle(dist_dir / "_internal/git_bash_env")
-        ripgrep_runtime = validate_ripgrep_bundle(dist_dir / "_internal/ripgrep_env")
+        git_runtime = validate_git_bundle(dist_dir / "resources/service/_internal/git_bash_env")
+        ripgrep_runtime = validate_ripgrep_bundle(dist_dir / "resources/service/_internal/ripgrep_env")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise PackageAuditError(str(exc)) from exc
     components: dict[str, dict[str, int]] = {}
@@ -421,6 +406,7 @@ def audit_distribution(dist_dir: Path) -> dict:
         "components": ordered_components,
         "required_paths": list(REQUIRED_PATHS),
         "editor_assets": editor_assets,
+        "host_editor_assets": host_editor_assets,
         "browser_skill_assets": browser_skill_assets,
         "wecom_cli_assets": wecom_cli_assets,
         "git_runtime": git_runtime,
@@ -475,10 +461,10 @@ def create_deterministic_zip(dist_dir: Path, output_path: Path) -> str:
 def package_release(
     dist_dir: Path,
     output_path: Path,
-    report_path: Path,
+    report_path: Path | None = None,
 ) -> dict:
-    if output_path.name != f"deepseek-cowork-v{APP_VERSION}.zip":
-        raise PackageAuditError(f"Release filename must be deepseek-cowork-v{APP_VERSION}.zip")
+    if output_path.name != f"cowork-desktop-v{APP_VERSION}-windows-x64.zip":
+        raise PackageAuditError(f"Release filename must be cowork-desktop-v{APP_VERSION}-windows-x64.zip")
     notes_path = ROOT / "docs" / "releases" / f"{APP_VERSION}.md"
     if not notes_path.is_file():
         raise PackageAuditError(f"Release notes are required: {notes_path}")
@@ -495,10 +481,10 @@ def package_release(
     finally:
         candidate_path.unlink(missing_ok=True)
     report["zip_path"] = str(output_path)
-    manifest = validate_manifest({"schema_version": 1, "version": APP_VERSION, "target_os": "windows", "arch": "x64",
+    manifest = {"schema_version": 1, "app_layout": "electron", "version": APP_VERSION, "target_os": "windows", "arch": "x64",
                                   "filename": output_path.name, "size": report["zip_bytes"],
-                                  "sha256": report["zip_sha256"], "notes": notes})
-    manifest_path = output_path.with_name("latest.json")
+                                  "sha256": report["zip_sha256"], "notes": notes}
+    manifest_path = output_path.with_name("latest-desktop-windows-x64.json")
     handle, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".tmp", dir=output_path.parent)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
@@ -511,12 +497,10 @@ def package_release(
         Path(temporary).unlink(missing_ok=True)
     report["update_manifest_path"] = str(manifest_path)
 
-    report_path = report_path.resolve()
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if report_path is not None:
+        report_path = report_path.resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
 
@@ -525,17 +509,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dist-dir",
         type=Path,
-        default=ROOT / "dist" / "deepseek-cowork",
+        default=ROOT / "desktop/out" / ARCHIVE_ROOT,
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "dist" / f"deepseek-cowork-v{APP_VERSION}.zip",
+        default=ROOT / "desktop/out" / f"cowork-desktop-v{APP_VERSION}-windows-x64.zip",
     )
     parser.add_argument(
         "--report",
         type=Path,
-        default=ROOT / "dist" / "deepseek-cowork-package-report.json",
+        help="Optional audit report path; routine packaging only emits the ZIP and update manifest.",
     )
     parser.add_argument(
         "--audit-only",
@@ -569,7 +553,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.audit_only:
         print(f"[OK] ZIP: {report['zip_mb']:.2f} MB")
         print(f"[OK] SHA-256: {report['zip_sha256']}")
-        print(f"[OK] Report: {args.report.resolve()}")
+        if args.report is not None:
+            print(f"[OK] Report: {args.report.resolve()}")
         print(f"[OK] Update manifest: {report['update_manifest_path']}")
     return 0
 

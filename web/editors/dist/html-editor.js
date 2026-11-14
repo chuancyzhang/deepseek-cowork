@@ -141,8 +141,8 @@
       });
     });
 
-  new QWebChannel(qt.webChannelTransport, (channel) => {
-    bridge = channel.objects.deliverableEditorBridge;
+  window.connectDesktopBridge("deliverableEditorBridge", nativeBridge => {
+    bridge = nativeBridge;
     bridge.ready("html");
   });
 }());

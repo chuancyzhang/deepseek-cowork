@@ -178,8 +178,8 @@ window.coworkEditor = {
   setTheme
 };
 
-new QWebChannel(qt.webChannelTransport, (channel) => {
-  bridge = channel.objects.deliverableEditorBridge;
+window.connectDesktopBridge("deliverableEditorBridge", nativeBridge => {
+  bridge = nativeBridge;
   if (!sheetEditorStylesReady()) {
     bridge.reportError("表格编辑器样式资源加载失败，请修复安装后重试。");
     return;

@@ -9,7 +9,7 @@ import httpx
 
 from core.request_snapshot import RequestSnapshotStore, capture_provider_request
 from core.task_details import redact_diagnostic, parsed_result, tool_result_status, tool_result_summary
-from core.llm.providers import OpenAIProvider, AnthropicProvider
+from core.llm.providers import OpenAIProvider
 
 
 class RequestSnapshotTests(unittest.TestCase):
@@ -66,10 +66,9 @@ class RequestSnapshotTests(unittest.TestCase):
             LLMWorker._capture_request_snapshot(worker, "responses", {}, "child")
             events.emit.assert_not_called()
 
-    def test_real_sdk_400_401_capture_final_parameters_before_network(self):
+    def test_openai_sdk_400_401_capture_final_parameters_before_network(self):
         from openai import OpenAI
-        from anthropic import Anthropic
-        for protocol in ("chat_completions", "responses", "anthropic"):
+        for protocol in ("chat_completions", "responses"):
             for status in (400, 401):
                 with self.subTest(protocol=protocol, status=status), tempfile.TemporaryDirectory() as root:
                     store = RequestSnapshotStore(root)
@@ -85,14 +84,9 @@ class RequestSnapshotTests(unittest.TestCase):
                         return httpx.Response(status, json={"error": {"message": "invalid model", "type": "invalid_request_error", "code": "invalid_model"}})
 
                     with httpx.Client(transport=httpx.MockTransport(handle)) as http_client:
-                        if protocol == "anthropic":
-                            provider = AnthropicProvider("test-key", "https://mock.invalid", "model")
-                            provider.client.close()
-                            provider.client = Anthropic(api_key="test-key", base_url="https://mock.invalid", max_retries=0, http_client=http_client)
-                        else:
-                            provider = OpenAIProvider("test-key", "https://mock.invalid/v1", "model", api_protocol=protocol)
-                            provider.client.close()
-                            provider.client = OpenAI(api_key="test-key", base_url="https://mock.invalid/v1", max_retries=0, http_client=http_client)
+                        provider = OpenAIProvider("test-key", "https://mock.invalid/v1", "model", api_protocol=protocol)
+                        provider.client.close()
+                        provider.client = OpenAI(api_key="test-key", base_url="https://mock.invalid/v1", max_retries=0, http_client=http_client)
                         messages = [{"role": "system", "content": "stable prefix"}, {"role": "user", "content": "hi"}]
                         before = copy.deepcopy(messages)
                         events = list(provider.chat_stream(messages, request_context={"capture_request": capture, "client_request_id": "req"}))
@@ -103,8 +97,6 @@ class RequestSnapshotTests(unittest.TestCase):
                         params = store.read("A")["parameters"]
                         body = dict(params)
                         body.update(body.pop("extra_body", {}))
-                        if protocol == "anthropic":
-                            body["stream"] = True  # Added by the SDK's messages.stream wrapper.
                         self.assertEqual(sent[0], body)
                         provider.client.close()
 

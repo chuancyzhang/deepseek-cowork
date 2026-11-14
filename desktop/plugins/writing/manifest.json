@@ -1,0 +1,9 @@
+{
+  "id": "cowork.writing",
+  "name": "写作工作台",
+  "version": "1.0.0",
+  "hostApi": 1,
+  "description": "专注写作、即时预览；内容由宿主保存，可独立修改和替换。",
+  "entry": "index.html",
+  "capabilities": ["document.read", "document.edit"]
+}

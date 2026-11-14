@@ -4,8 +4,6 @@ import threading
 import unittest
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 from core.runtime_journal import RuntimeJournal
 from core.runtime_stream import RuntimeStream
 from core.runtime_checkpoint import CheckpointRequest, RuntimeCheckpointWorker
@@ -42,6 +40,7 @@ class RuntimeStreamTests(unittest.TestCase):
         def write(payload, sequence):
             durable = self.journal.read_events("session", "run")
             self.assertEqual(durable[sequence - 1]["payload"], payload)
+            self.assertEqual(durable[sequence - 1]["created_at"], payload["created_at"])
             sent.append((payload, sequence))
             return True
 
@@ -49,6 +48,7 @@ class RuntimeStreamTests(unittest.TestCase):
         for i in range(160):
             payload = {"type": "content", "delta": str(i), "data": {"source": i}}
             stream.enqueue(payload)
+            self.assertNotIn("created_at", payload)
             payload["data"]["source"] = -1
         stream.enqueue({"type": "tool_call", "data": {"id": "tool-1"}})
         stream.enqueue({"type": "final", "result": {"content": "done"}}, terminal=True)
@@ -122,7 +122,7 @@ class RuntimeStreamTests(unittest.TestCase):
         self.assertFalse(worker.enqueue(CheckpointRequest("session", "run", "instance", 102, "late", "")))
         worker.request_stop()
         worker.start()
-        self.assertTrue(worker.wait(5000))
+        self.assertTrue(worker.join(5))
         self.assertEqual(self.journal.get_run("session", "run")["draft_content"], "final draft")
         self.assertEqual(len(self.journal.read_events("session", "run")), 2)
 
@@ -141,71 +141,11 @@ class RuntimeStreamTests(unittest.TestCase):
         worker.enqueue(CheckpointRequest("session", "run", "instance", 2, "visible answer", "thought", "stop"))
         worker.request_stop()
         worker.start()
-        self.assertTrue(worker.wait(5000))
+        self.assertTrue(worker.join(5))
         run = self.journal.get_run("session", "run")
         self.assertEqual(run["status"], "interrupted")
         self.assertEqual(run["draft_content"], "visible answer")
         self.assertEqual(run["draft_reasoning"], "thought")
-
-
-class HiddenBodyTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from PySide6.QtWidgets import QApplication
-        cls.app = QApplication.instance() or QApplication([])
-
-    def test_hidden_body_renders_latest_once_when_shown(self):
-        import main
-        bubble = main.ChatBubble("Agent", "", thinking="...")
-        self.addCleanup(bubble.deleteLater)
-        with patch("main.render_markdown_or_html_with_cache", wraps=main.render_markdown_or_html_with_cache) as render:
-            for i in range(100):
-                bubble.set_main_content(f"**answer {i}**")
-            bubble.set_main_content("**final answer**", final=True)
-            self.app.processEvents()
-            self.assertEqual(render.call_count, 0)
-            self.assertTrue(bubble._pending_main_content_final)
-            bubble.show()
-            for _ in range(4):
-                self.app.processEvents()
-            self.assertEqual(render.call_count, 1)
-            self.assertEqual(bubble.content_edit.toPlainText().strip(), "final answer")
-            self.assertTrue(bubble._rendered_main_content_final)
-        bubble.hide()
-
-    def test_plain_append_preserves_user_selection(self):
-        import main
-        from PySide6.QtGui import QTextCursor
-        bubble = main.ChatBubble("Agent", "", thinking="...")
-        self.addCleanup(bubble.deleteLater)
-        bubble.show()
-        text = "abcdefghij " * 250
-        bubble.set_main_content(text)
-        bubble._flush_pending_main_content_render()
-        cursor = bubble.content_edit.textCursor()
-        cursor.setPosition(1)
-        cursor.setPosition(7, QTextCursor.KeepAnchor)
-        bubble.content_edit.setTextCursor(cursor)
-        selection = cursor.selectedText()
-        bubble.set_main_content(text + "tail")
-        bubble._flush_pending_main_content_render()
-        self.assertEqual(bubble.content_edit.textCursor().selectedText(), selection)
-        self.assertTrue(bubble.content_edit.toPlainText().endswith("tail"))
-        bubble.hide()
-
-    def test_hidden_result_completes_process_without_rendering(self):
-        import main
-        from PySide6.QtWidgets import QWidget
-        host = QWidget()
-        self.addCleanup(host.deleteLater)
-        group = main.AssistantTurnGroup("hidden-result", parent=host)
-        bubble = main.ChatBubble("Agent", "", thinking="...")
-        group.add_stage(bubble)
-        self.assertFalse(group.request_process_finalization(bubble))
-        bubble.set_main_content("final result", final=True)
-        self.assertTrue(group.process_finalized)
-        self.assertFalse(group.process_finalization_pending)
-        self.assertFalse(bubble._rendered_main_content_final)
 
 
 if __name__ == "__main__":

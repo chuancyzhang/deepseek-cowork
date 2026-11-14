@@ -6,39 +6,44 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前应用版本：**5.3.4** · [本版说明](docs/releases/5.3.4.md) · [发布记录](docs/releases/index.md)
+当前分支使用 **Electron + React / TypeScript + Python + SQLite** 桌面架构，默认入口已切换，Windows 运行与打包不再依赖 Qt。对话、工作区、技能分类与 SkillHub、管理页面及外观设置的入口见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。新宿主的 Apple Silicon Mac 与统信 V25 安装包仍待目标系统验收。
 
-文档适用版本：**5.3.3**；5.3.4 的新增变化见本版说明。
+文档适用版本：**5.4.0** · [本版说明](docs/releases/5.4.0.md) · [发布记录](docs/releases/index.md)
 
 ## 可以完成什么
 
 - **对话与项目工作**：独立聊天目录、项目会话、历史搜索、运行中补充要求、执行详情与子任务。
 - **文件与交付物**：文件和图片附件、办公文档预览、文本与表格编辑、HTML 工作稿、Markdown 写作页及 Office/PDF 输出。
-- **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家、浏览器自动化和语音转文字。
-- **资料与协作**：WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
+- **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家和浏览器自动化。
+- **资料与协作**：本地项目资料汇总、WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
 - **重复任务**：常用任务、定时计划、消息渠道与计划结果投递。
 - **个性化**：主题、AI 主题设计、Visualize、长期记忆与经验系统。
 
-5.3.4 支持历史消息编辑附件、资料引用标签和可关闭的拷问模式胶囊，统一任务工作区，改进浏览器任务恢复，并修复历史加载、对话收尾与更新安装问题。
+5.4.0 将桌面迁入 Electron 工作台，统一任务运行与持久化，提供可替换的界面插件，并完善资料库、文件编辑和管理交互。版本说明记录源码状态；新版本安装包仍需重新构建和验收，不表示已经公开发布。
 
 ## 开始使用
 
-1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载 Windows ZIP，完整解压后运行 `deepseek-cowork.exe`。
-2. 在首次启动向导填写 DeepSeek API Key，或到“设置 → 模型与服务”添加服务和模型。也可使用企业提供的客户端登录企业账号。
+1. 新架构构建包为 `cowork-desktop-v版本号-windows-x64.zip`，完整解压后运行 `deepseek-cowork.exe`。本地构建不会自动发布到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，旧版下载包仍使用旧入口。
+2. 到“设置 → 模型与服务”添加服务和模型，也可登录企业账号。正式包直接使用原配置、会话库、附件和工作区，保留历史及草稿，无需复制或手工导入。
 3. 新建聊天，添加资料并描述任务；处理固定项目时先选择项目目录。
 4. 查看回答与执行过程，在右侧工作区打开、编辑和保存成果。
 
 详细操作见[用户手册](docs/user-guide.md)。
 
+界面可通过 [UI SDK](desktop/sdk/README.md) 整体替换工作台，或组合页面、面板、编辑器及菜单。运行、草稿和未保存编辑由稳定宿主持有，切换插件不重启任务。
+
 ## 从源码运行
 
-使用 Python 3.10+，在仓库根目录执行：
+使用 Python 3.10+ 和带 npm 的 Node.js 22.12+，在仓库根目录执行。应用随包的 `node_env` 是执行运行时，不能据此假定已经安装 npm：
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
 cd deepseek-cowork
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+npm --prefix desktop ci
+npm --prefix web/editors ci
+node desktop/node_modules/electron/install.js
 .\.venv\Scripts\python.exe main.py
 ```
 
@@ -48,11 +53,13 @@ python -m venv .venv
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-.\.venv\Scripts\python.exe -m PyInstaller deepseek-cowork.spec --noconfirm --clean
-.\.venv\Scripts\python.exe scripts/package_release.py
+$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+npm --prefix desktop run package:win
 ```
 
-打包生成版本 ZIP、审计报告和 `latest.json`。更新说明读取 `docs/releases/版本号.md`；具体格式和发布步骤见[技术文档](docs/technical-design.md#构建与发布)。
+打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，构建会审计宿主、服务、资源和默认配置后再生成 ZIP；签名和公开发布需另行执行。具体步骤见[技术文档](docs/technical-design.md#electron-工作台)。
+
+Mac／统信的新宿主发行流程尚待实现，必须在目标系统及 CPU 上构建和验收。
 
 ## 设计思路
 

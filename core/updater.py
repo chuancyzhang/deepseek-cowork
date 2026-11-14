@@ -19,6 +19,7 @@ from core.app_version import APP_VERSION, compare_versions, is_newer_version
 from core.process_utils import subprocess_kwargs_no_window, popen_external_program
 from core.env_utils import get_app_data_dir
 from core.update_manifest import validate_manifest
+from core.platform_capabilities import desktop_target, is_windows
 
 PUBLIC_UPDATE_BASE_URL = ""
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/chuancyzhang/deepseek-cowork/releases/latest"
@@ -28,6 +29,7 @@ PUBLIC_UPDATE_PATH = "/updates/windows-x64"
 _github_api_retry_at = 0.0
 APP_EXE_NAME = "deepseek-cowork.exe"
 INTERNAL_DIR_NAME = "_internal"
+DESKTOP_EXE_NAMES = ("deepseek-cowork.exe", "Cowork.exe")
 UPDATE_DIR_NAME = "updates"
 UPDATE_PLAN_FORMAT = 1
 UPDATE_EXCLUDED_ROOTS = {"user_data"}
@@ -122,7 +124,10 @@ def community_source_config():
             parsed.port
         except ValueError:
             raise UpdaterError("公共更新地址端口无效。") from None
-    return {"public_base_url": base, "github_releases_url": GITHUB_RELEASES_URL, "manifest_schema": 1}
+    config = {"public_base_url": base, "github_releases_url": GITHUB_RELEASES_URL, "manifest_schema": 1}
+    if not is_windows():
+        config["target"] = desktop_target()
+    return config
 
 
 def github_asset_url(version, filename):
@@ -163,8 +168,10 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
     source = source or ("public" if config["public_base_url"] else "github")
     if source not in {"public", "github"}:
         raise UpdaterError("未知更新来源。")
-    base = config["public_base_url"] + PUBLIC_UPDATE_PATH
-    url = base + "/latest.json" if source == "public" else GITHUB_MANIFEST_URL
+    target = "windows-x64" if is_windows() else desktop_target()
+    base = config["public_base_url"] + (PUBLIC_UPDATE_PATH if is_windows() else "/updates/" + target)
+    github_manifest = GITHUB_MANIFEST_URL if is_windows() else GITHUB_RELEASES_URL + f"/latest/download/latest-{target}.json"
+    url = base + "/latest.json" if source == "public" else github_manifest
     try:
         with requests.get(url, headers={"User-Agent": "deepseek-cowork-updater", "Cache-Control": "no-cache"}, timeout=timeout) as response:
             # Compatibility is limited to a genuinely missing attachment.
@@ -172,7 +179,7 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
                 return _fetch_github_api_release(timeout)
             response.raise_for_status()
             try:
-                manifest = validate_manifest(response.json())
+                manifest = validate_manifest(response.json(), target)
             except (ValueError, TypeError) as exc:
                 raise UpdaterError(str(exc) if isinstance(exc, ValueError) else "更新清单格式无效。") from exc
     except UpdaterError:
@@ -190,6 +197,8 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
 
 def update_connection(install_dir):
     """The installed distribution chooses the channel, not a past account login."""
+    if not is_windows():
+        return None  # Enterprise distributions remain Windows-only in this release.
     from core.enterprise_connection import read_connection, validate_connection
     from core.enterprise_client import EnterpriseStore
     import sqlite3
@@ -274,6 +283,15 @@ def fetch_enterprise_release(connection, timeout=12):
 
 
 def select_release_asset(release):
+    if not is_windows():
+        from core.update_manifest import release_filename
+        version = str(release.get("tag_name") or "").lstrip("vV")
+        expected = release_filename(version, desktop_target())
+        for asset in release.get("assets") or []:
+            if asset.get("name") == expected and re.fullmatch(r"sha256:[a-fA-F0-9]{64}", str(asset.get("digest") or "")):
+                return ReleaseAsset(expected, str(asset.get("browser_download_url") or ""),
+                                    int(asset.get("size") or 0), str(asset.get("id") or ""), asset["digest"].lower())
+        raise UpdaterError("该版本尚未发布当前平台的已校验安装包，请稍后再检查。")
     assets = release.get("assets") if isinstance(release, dict) else None
     if not isinstance(assets, list):
         assets = []
@@ -361,10 +379,10 @@ def _collect_app_files(root_dir):
     return files
 
 
-def build_update_plan(install_dir, staged_app_dir, progress_callback=None):
+def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, layout="qt"):
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
-    if not _is_valid_app_dir(staged_app_dir):
+    if not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
     if not os.path.isdir(install_dir):
         raise UpdaterError("当前安装目录不存在。")
@@ -468,6 +486,8 @@ def is_cached_asset_valid(asset, zip_path):
     digest = str((asset.get("digest") if isinstance(asset, dict) else getattr(asset, "digest", "")) or "")
     if digest.startswith("sha256:") and _hash_file(zip_path) != digest[7:]:
         return False
+    if not is_windows():
+        return expected_size > 0 and bool(re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
     try:
         with zipfile.ZipFile(zip_path) as archive:
             return archive.testzip() is None
@@ -564,21 +584,31 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
     return zip_path
 
 
-def find_staged_app_dir(root_dir):
-    if _is_valid_app_dir(root_dir):
+def find_staged_app_dir(root_dir, *, layout="qt"):
+    if _is_valid_app_dir(root_dir, layout=layout):
         return root_dir
     for current_root, dirs, _files in os.walk(root_dir):
-        if _is_valid_app_dir(current_root):
+        if _is_valid_app_dir(current_root, layout=layout):
             return current_root
         dirs[:] = [name for name in dirs if name not in {"__MACOSX", ".git"}]
-    raise UpdaterError("更新包结构无效：未找到 deepseek-cowork.exe 和 _internal 目录。")
+    raise UpdaterError("更新包结构无效：未找到当前工作台对应的完整应用。")
 
 
-def _is_valid_app_dir(path):
+def _is_valid_app_dir(path, *, layout="qt"):
+    if layout == "electron":
+        return bool(desktop_executable(path)) and all(os.path.isfile(os.path.join(path, name)) for name in (
+            "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"))
+    if layout != "qt":
+        raise UpdaterError("未知的应用安装结构。")
     return (
         os.path.isfile(os.path.join(path, APP_EXE_NAME))
         and os.path.isdir(os.path.join(path, INTERNAL_DIR_NAME))
     )
+
+
+def desktop_executable(path):
+    """Resolve the branded entry while allowing updates from earlier builds."""
+    return next((name for name in DESKTOP_EXE_NAMES if os.path.isfile(os.path.join(path, name))), None)
 
 
 def _safe_extractall(archive, target_dir):
@@ -590,7 +620,7 @@ def _safe_extractall(archive, target_dir):
     archive.extractall(target_root)
 
 
-def extract_update_zip(zip_path, target_dir=None, progress_callback=None):
+def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, layout="qt"):
     if not os.path.isfile(zip_path):
         raise UpdaterError("更新包不存在。")
     target_dir = target_dir or updates_dir()
@@ -605,7 +635,7 @@ def extract_update_zip(zip_path, target_dir=None, progress_callback=None):
         raise UpdaterError("更新包不是有效的 zip 文件。") from exc
     except Exception as exc:
         raise UpdaterError(f"解压更新包失败：{exc}") from exc
-    app_dir = find_staged_app_dir(extract_dir)
+    app_dir = find_staged_app_dir(extract_dir, layout=layout)
     _emit(progress_callback, "更新包校验完成", None)
     return app_dir
 
@@ -726,13 +756,13 @@ def prepare_local_update(
 
 
 
-def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version=""):
+def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt"):
     from core.update_installer import write_installer
     if sys.platform != "win32":
         raise UpdaterError("自动安装更新仅支持 Windows。")
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
-    if not _is_valid_app_dir(staged_app_dir):
+    if not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
     with open(change_plan_path, encoding="utf-8") as handle:
         plan = json.load(handle)

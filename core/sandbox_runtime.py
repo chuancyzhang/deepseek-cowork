@@ -55,7 +55,8 @@ def _simple_exec_env(extra_paths=None):
         env["PATH"] = os.pathsep.join(_dedupe_paths(list(extra_paths) + [env.get("PATH", "")]))
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
-    return env
+    from .process_utils import posix_external_environment
+    return posix_external_environment(env, preserve_path=True)
 
 
 def _is_frozen():
@@ -216,6 +217,9 @@ def _probe_executable(executable, args=None, extra_paths=None, timeout=8):
     try:
         out = subprocess.check_output(
             [executable] + list(args or []),
+            # Version probes have no input. In a stdio service, inheriting the
+            # command pipe can block MSYS startup and consume protocol bytes.
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -359,8 +363,10 @@ def _bash_candidate_paths():
             ],
         )
     )
-    if not _is_frozen():
+    if not _is_frozen() or os.name != "nt":
         candidates.append(shutil.which("bash"))
+    if os.name != "nt":
+        candidates.extend(["/bin/bash", "/usr/bin/bash"])
     return _dedupe_paths(candidates)
 
 
@@ -558,11 +564,14 @@ def _python_dll_dirs(runtime, skill_id=None):
     dll_dirs = list(_BASE_NATIVE_LIBRARY_DIRS_CACHE[base_cache_key])
     if skill_id:
         skill_key = str(skill_id or "")
-        if skill_key not in _SKILL_NATIVE_LIBRARY_DIRS_CACHE:
-            _SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key] = _collect_native_library_dirs(
-                _skill_python_path(skill_key)
-            )
-        dll_dirs.extend(_SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key])
+        skill_path = _skill_python_path(skill_key)
+        path_key = os.path.normcase(os.path.abspath(skill_path))
+        cached = _SKILL_NATIVE_LIBRARY_DIRS_CACHE.get(skill_key)
+        if cached is None or cached[0] != path_key:
+            # A skill name may be reused in a different application data directory.
+            cached = (path_key, _collect_native_library_dirs(skill_path))
+            _SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key] = cached
+        dll_dirs.extend(cached[1])
     return _dedupe_paths(dll_dirs)
 
 
@@ -587,6 +596,8 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
     env["npm_config_cache"] = os.path.join(cache_dir, "npm")
     env["npm_config_prefix"] = os.path.join(root, "node-prefix")
     env["TMP"] = temp_dir
+    if os.name != "nt":
+        env["TMPDIR"] = temp_dir
     env["TEMP"] = temp_dir
 
     pythonpath_entries = [bootstrap_dir]
@@ -609,7 +620,8 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
 
     if workspace_dir:
         env["COWORK_WORKSPACE_DIR"] = os.path.abspath(workspace_dir)
-    return env
+    from .process_utils import posix_external_environment
+    return posix_external_environment(env, preserve_path=True)
 
 
 def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=None, timeout=None, text=False, extra_env=None):
@@ -683,6 +695,8 @@ def build_skill_script_command(runtime, script_path, args=None):
         return [node_exe, script_path] + arg_list, "exec"
 
     if runtime_key == "bash":
+        if os.name != "nt" and ext in {".ps1", ".bat", ".cmd"}:
+            raise RuntimeError("此脚本依赖 Windows Shell，当前平台不能执行。请选择支持当前系统的 Skill。")
         if ext == ".ps1":
             command = "powershell.exe -ExecutionPolicy Bypass -File " + " ".join([_shell_quote(script_path)] + [_shell_quote(arg) for arg in arg_list])
             return command, "bash"
@@ -850,6 +864,10 @@ def install_skill_dependencies(
     timeout_seconds=300,
     node_registry_url=None,
 ):
+    from .platform_capabilities import skill_unavailable_reason
+    issue = skill_unavailable_reason(skill_id)
+    if issue:
+        return {"ok": False, "message": issue, "unsupported_platform": True}
     python_dependencies = [p for p in (python_dependencies or []) if isinstance(p, str) and p.strip()]
     node_dependencies = [p for p in (node_dependencies or []) if isinstance(p, str) and p.strip()]
     if not python_dependencies and not node_dependencies:

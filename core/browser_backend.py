@@ -12,9 +12,9 @@ import json
 import logging
 import os
 from pathlib import Path
+from .platform_capabilities import is_windows
 import sqlite3
 import threading
-import time
 import uuid
 
 log = logging.getLogger(__name__)
@@ -26,8 +26,6 @@ SHARED_TOOLS = frozenset({"browser_tabs", "browser_open", "browser_close"})
 INTERNAL_TOOLS = WEB_TOOLS | SHARED_TOOLS
 _PROCESS_TOKEN = uuid.uuid4().hex
 _binding_lock = threading.RLock()
-_recovery_lock = threading.Lock()
-_recovery_jobs = {}
 
 
 class BrowserBackendError(Exception):
@@ -37,8 +35,7 @@ class BrowserBackendError(Exception):
 
 
 def normalize_policy(value):
-    # Missing preferences use the built-in browser. Preserve explicit choices.
-    return {"enabled": value.get("enabled", True) is True if isinstance(value, dict) else True}
+    return {"enabled": isinstance(value, dict) and value.get("enabled") is True}
 
 
 def _alive(pid):
@@ -102,6 +99,8 @@ class BrowserBackendCoordinator:
             db.close()
 
     def _desired(self):
+        if not is_windows():
+            return INTERNAL
         if self.config_path and self.config_path.exists():
             with self.config_path.open(encoding="utf-8") as stream:
                 value = json.load(stream).get(CONFIG_KEY)
@@ -133,50 +132,15 @@ class BrowserBackendCoordinator:
             rows = db.execute("SELECT * FROM leases").fetchall()
             result["cleanup_errors"] = [row["error"] for row in rows if row["error"]]
             result["recoverable"] = any(row["finished"] or self._orphaned(row) for row in rows)
-            result["running_tasks"] = [{"session": row["session"], "run": row["run"]}
-                                       for row in rows if not row["finished"] and not self._orphaned(row)]
-            result["running_runs"] = len(result["running_tasks"])
-            result["cleanup_runs"] = len(rows) - result["running_runs"]
-            with _recovery_lock:
-                result["recovering"] = str(self.path.resolve()) in _recovery_jobs
             return result
-
-    def request_recovery(self):
-        """Retry owned, finished sessions off the run/UI thread, at most 3 times.
-
-        Polling snapshot never starts a new batch. Only a task boundary, a switch
-        or an explicit retry can request another batch after this one finishes.
-        """
-        key = str(self.path.resolve())
-        with _recovery_lock:
-            if key in _recovery_jobs:
-                return _recovery_jobs[key]
-            def work():
-                try:
-                    for attempt, delay in enumerate((0, 1, 3), 1):
-                        if delay:
-                            threading.Event().wait(delay)
-                        log.info("browser.recovery_started attempt=%s", attempt)
-                        state = self.recover(prepare=True)
-                        if not state["recoverable"]:
-                            log.info("browser.recovery_completed attempt=%s", attempt)
-                            return
-                    log.warning("browser.recovery_exhausted cleanup_runs=%s", state["cleanup_runs"])
-                except Exception:
-                    log.exception("browser.recovery_failed")
-                finally:
-                    with _recovery_lock:
-                        _recovery_jobs.pop(key, None)
-            thread = threading.Thread(target=work, daemon=True, name="browser-recovery")
-            _recovery_jobs[key] = thread
-            thread.start()
-            return thread
 
     @staticmethod
     def _orphaned(row):
         return (row["pid"] == os.getpid() and row["process_token"] != _PROCESS_TOKEN) or not _alive(row["pid"])
 
     def save(self, enabled):
+        if not is_windows() and enabled is not True:
+            raise BrowserBackendError("unsupported", "此平台首版只支持内置浏览器自动化。")
         if self.config is None:
             raise BrowserBackendError("unavailable", "浏览器设置存储不可用。")
         # Serialize preference writes against lease acquisition in both processes.
@@ -197,6 +161,8 @@ class BrowserBackendCoordinator:
         return result
 
     def acquire(self, session, run, snapshot, backend):
+        if not is_windows() and backend != INTERNAL:
+            raise BrowserBackendError("unsupported", "此平台首版不支持外部浏览器自动化。")
         with self._transaction() as db:
             if db.execute("SELECT 1 FROM finished_runs WHERE session=? AND run=?", (session, run)).fetchone():
                 raise BrowserBackendError("browser_run_finished", "本轮浏览器任务已结束，旧调用不会再次执行。")
@@ -219,7 +185,7 @@ class BrowserBackendCoordinator:
             db.execute("UPDATE leases SET calls=MAX(0,calls-1) WHERE session=? AND run=?", (session, run))
             row = db.execute("SELECT * FROM leases WHERE session=? AND run=?", (session, run)).fetchone()
         if row and row["finished"] and not row["calls"]:
-            self.finish(session, run, background=True)
+            self._cleanup(session, run)
 
     def track_session(self, session, run, external_id, *, stopped=False):
         with self._transaction() as db:
@@ -235,32 +201,19 @@ class BrowserBackendCoordinator:
             row = db.execute("SELECT sessions FROM leases WHERE session=? AND run=?", (session, run)).fetchone()
             return bool(row and external_id in json.loads(row[0]))
 
-    def finish(self, session, run, *, background=False):
+    def finish(self, session, run):
         with self._transaction() as db:
             db.execute("INSERT OR IGNORE INTO finished_runs VALUES (?,?)", (session, run))
             db.execute("UPDATE leases SET finished=1 WHERE session=? AND run=?", (session, run))
-            row = db.execute("SELECT * FROM leases WHERE session=? AND run=?", (session, run)).fetchone()
-            if not row:
-                return
-            if not row["calls"] and not json.loads(row["sessions"]):
-                db.execute("DELETE FROM leases WHERE session=? AND run=?", (session, run))
-                self._state(db)
-                log.info("browser.run_released session=%s run=%s", session, run)
-                return
-            if row["calls"]:
-                return  # complete_call schedules cleanup once the call settles.
-        if background:
-            self.request_recovery()
-        else:
-            self._cleanup(session, run)
+        self._cleanup(session, run)
 
-    def _cleanup(self, session, run, *, deadline=None):
+    def _cleanup(self, session, run):
         # Keep the row until cleanup is confirmed, so a switch cannot race it.
         from .file_write_locks import file_write_lock
         with file_write_lock(str(self.path) + ".cleanup"):
-            self._cleanup_locked(session, run, deadline=deadline)
+            self._cleanup_locked(session, run)
 
-    def _cleanup_locked(self, session, run, *, deadline=None):
+    def _cleanup_locked(self, session, run):
         with self._transaction() as db:
             row = db.execute("SELECT * FROM leases WHERE session=? AND run=?", (session, run)).fetchone()
             if not row or row["calls"] or not row["finished"]:
@@ -269,35 +222,30 @@ class BrowserBackendCoordinator:
         errors = []
         for external_id in ids:
             try:
-                remaining = 10 if deadline is None else min(10, int(deadline - time.monotonic()))
-                if remaining < 1:
-                    raise TimeoutError("本次浏览器恢复已超时，已有内容已保留。")
                 from .browser_skill_component import _stop_session_after_interruption, _run_bsk, _parse_json_output
                 if external_id.startswith("request:"):
-                    cancellation = _run_bsk(["--json", "--quiet", "session", "request", external_id[len("request:"):], "--cancel"], timeout=remaining)
+                    cancellation = _run_bsk(["--json", "--quiet", "session", "request", external_id[len("request:"):], "--cancel"], timeout=10)
                     payload = _parse_json_output(cancellation["stdout"], cancellation["stderr"])
                     result = {"stopped": cancellation["returncode"] == 0
                               and isinstance(payload, dict) and payload.get("state") == "closed"
-                              and payload.get("request_id") == external_id[len("request:"):],
-                              "error": cancellation["stderr"] or cancellation["stdout"]}
+                              and payload.get("request_id") == external_id[len("request:"):]}
                 else:
-                    result = (_stop_session_after_interruption(external_id) if deadline is None else
-                              _stop_session_after_interruption(external_id, timeout_seconds=remaining))
+                    result = _stop_session_after_interruption(external_id)
                 if not result.get("stopped"):
-                    raise RuntimeError(result.get("error") or "浏览器操作尚未确认结束。")
+                    raise RuntimeError("外部浏览器会话尚未确认结束，请检查连接后重试释放。")
                 self.track_session(session, run, external_id, stopped=True)
             except Exception as exc:
                 errors.append(str(exc))
         with self._transaction() as db:
             if errors:
                 db.execute("UPDATE leases SET error=? WHERE session=? AND run=?", ("；".join(errors), session, run))
-                log.warning("browser.cleanup_failed session=%s run=%s error=%s", session, run, "；".join(errors))
+                log.warning("browser.cleanup_failed session=%s run=%s", session, run)
             else:
                 db.execute("DELETE FROM leases WHERE session=? AND run=? AND finished=1 AND calls=0", (session, run))
                 self._state(db)
                 log.info("browser.run_released session=%s run=%s", session, run)
 
-    def recover(self, *, prepare=False):
+    def recover(self):
         with self._transaction() as db:
             rows = db.execute("SELECT * FROM leases").fetchall()
             keys = []
@@ -307,12 +255,8 @@ class BrowserBackendCoordinator:
                     db.execute("INSERT OR IGNORE INTO finished_runs VALUES (?,?)", (row["session"], row["run"]))
                     db.execute("UPDATE leases SET finished=1, calls=0 WHERE session=? AND run=?", (row["session"], row["run"]))
                     keys.append((row["session"], row["run"]))
-        if prepare and keys and any(json.loads(row["sessions"]) for row in rows if (row["session"], row["run"]) in keys):
-            from .browser_skill_component import prepare_browser_recovery
-            prepare_browser_recovery()
-        deadline = time.monotonic() + 20
         for key in keys:
-            self._cleanup(*key, deadline=deadline)
+            self._cleanup(*key)
         return self.snapshot()
 
     def run_active(self, session, run):
@@ -333,7 +277,7 @@ def bind_run(config, authorization, *, snapshot=None, worker=False):
         return dict(state["snapshot"])
 
 
-def finish_run(authorization, *, background=False):
+def finish_run(authorization):
     with _binding_lock:
         state = authorization._browser_state
         if not state or state.get("finished"):
@@ -342,7 +286,7 @@ def finish_run(authorization, *, background=False):
         if state["workers"]:
             return
         state["finished"] = True
-    state["coordinator"].finish(authorization.session_id, authorization.run_id, background=background)
+    state["coordinator"].finish(authorization.session_id, authorization.run_id)
 
 
 @contextmanager
@@ -364,11 +308,13 @@ def browser_operation(context, backend):
 
 
 def run_backend(run_context=None, config=None):
+    if not is_windows():
+        return INTERNAL
     value = (run_context or {}).get("browser_backend")
     if isinstance(value, dict) and value.get("backend") in {INTERNAL, EXTERNAL}:
         return value["backend"]
     if config is None:
-        return INTERNAL
+        return EXTERNAL
     if not isinstance(getattr(config, "config_path", None), (str, Path)):
         getter = getattr(config, "get", None)
         return INTERNAL if callable(getter) and normalize_policy(getter(CONFIG_KEY, {}))["enabled"] else EXTERNAL

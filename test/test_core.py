@@ -1,3 +1,4 @@
+from core.runtime_tasks import EventSource, TaskWorker
 import unittest
 import base64
 import copy
@@ -26,7 +27,7 @@ from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION, WORKFLOW_MODE_OFFICE_HTML_FIRST
 from core.agent import LLMWorker
 from core.execution_authorization import ExecutionAuthorization
-from core import daemon as daemon_module
+from core.runtime_coordinator import _normalize_worker_error
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.mcp_client import (
     McpOperationError,
@@ -38,14 +39,10 @@ from core.mcp_client import (
     list_mcp_server_tools,
     prepare_mcp_server_config,
 )
-from core.single_instance import (
-    UiSingleInstanceServer,
-    build_ui_server_name,
-    notify_existing_ui,
-    notify_existing_ui_with_retries,
-)
 from core.chat_storage import ChatStorage
 from core.message_persistence import filter_persistable_messages
+from core.runtime_ledger import RuntimeLedger, LedgerJournal
+from core.desktop_store import DesktopChatStorage, DesktopStore
 from core.runtime_journal import RuntimeJournal
 from core.ppt_agent import validate_pptx_structure
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
@@ -1454,24 +1451,47 @@ class TestInteractionService(unittest.TestCase):
 
 
 class TestDaemonState(unittest.TestCase):
-    def test_daemon_shutdown_is_handled_by_qt_thread_poll(self):
-        app = MagicMock()
-        server = types.SimpleNamespace(shutdown_requested=True)
-        self.assertTrue(daemon_module._poll_daemon_shutdown(app, server))
-        app.quit.assert_called_once_with()
 
-    def test_daemon_shutdown_poll_is_inert_while_running(self):
-        app = MagicMock()
-        server = types.SimpleNamespace(shutdown_requested=False)
-        self.assertFalse(daemon_module._poll_daemon_shutdown(app, server))
-        app.quit.assert_not_called()
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.state = DaemonState(_DaemonConfigStub(self.temp_dir))
+        storage = DesktopChatStorage(os.path.join(self.temp_dir, "chat_history.sqlite"))
+        self.ledger = RuntimeLedger(storage)
+        storage.runtime_ledger = self.ledger
+        self.state = DaemonState(_DaemonConfigStub(self.temp_dir), storage=storage, journal=LedgerJournal(self.ledger))
+        self.state.desktop_store = DesktopStore(storage)
 
     def tearDown(self):
+        self.state.skill_catalog.stop_watching()
+        self.ledger.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _patch_worker_result(self, callback):
+        class Worker(TaskWorker):
+            agent_manager = None
+
+            def __init__(self, messages, config, workspace_dir, **kwargs):
+                super().__init__()
+                for name in ("thinking_signal", "content_signal", "tool_call_signal", "tool_result_signal",
+                             "observability_signal", "agent_state_signal", "output_signal", "finished_signal"):
+                    setattr(self, name, EventSource())
+                self.messages = messages
+                self.workspace_dir = workspace_dir
+                self.options = kwargs
+                self.execution_authorization = ExecutionAuthorization.start(
+                    config, kwargs["session_id"], kwargs["request_id"], workspace_dir)
+
+            def stop(self):
+                self.execution_authorization.cancel()
+
+            def run(self):
+                self.finished_signal.emit(callback(self.options["session_id"], self.messages, self.workspace_dir,
+                    run_context=self.options.get("run_context"), turn_id=self.options["turn_id"],
+                    request_id=self.options["request_id"]))
+
+        replacement = patch("core.runtime_coordinator.LLMWorker", Worker)
+        replacement.start()
+        self.addCleanup(replacement.stop)
 
     def test_is_context_overflow_error(self):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
@@ -1507,7 +1527,7 @@ class TestDaemonState(unittest.TestCase):
         self.assertEqual([message.get("id") for message in messages], ["u1", "a1", "t1"])
 
     def test_empty_worker_error_is_normalized_at_daemon_boundary(self):
-        result = daemon_module._normalize_worker_error({
+        result = _normalize_worker_error({
             "error": "",
             "error_type": "PermissionError",
         })
@@ -1560,6 +1580,7 @@ class TestDaemonState(unittest.TestCase):
             },
         }
 
+        self.state.ensure_runtime_run(session_id, "7", "7", "daemon:test", self.state.sessions[session_id])
         result = self.state.steer_session(session_id, "7", message)
 
         self.assertTrue(result["accepted"])
@@ -1596,6 +1617,7 @@ class TestDaemonState(unittest.TestCase):
             "writer_owner": "ui:1234",
         }
 
+        self.state.ensure_runtime_run(session_id, "8", "8", "ui:1234", committed)
         with patch.object(self.state, "save_session") as save_session:
             result = self.state.steer_session(
                 session_id,
@@ -1627,7 +1649,7 @@ class TestDaemonState(unittest.TestCase):
             captured["request_id"] = request_id
             return {"generated_messages": [{"id": "assistant-done", "role": "assistant", "content": "done"}]}
 
-        self.state._run_worker_once = run_once
+        self._patch_worker_result(run_once)
 
         self.state.run_llm_sync(
             session_id,
@@ -1646,12 +1668,12 @@ class TestDaemonState(unittest.TestCase):
 
     def test_ui_owned_run_llm_sync_leaves_history_commit_to_ui(self):
         session_id = "ui-owned-sync"
-        self.state._run_worker_once = lambda *_args, **_kwargs: {
+        self._patch_worker_result(lambda *_args, **_kwargs: {
             "content": "done",
             "generated_messages": [
                 {"id": "assistant-ui-sync", "role": "assistant", "content": "done"}
             ],
-        }
+        })
 
         result = self.state.run_llm_sync(
             session_id,
@@ -1673,10 +1695,10 @@ class TestDaemonState(unittest.TestCase):
 
     def test_run_llm_sync_classifies_provider_error_as_failed(self):
         session_id = "desktop-provider-failed"
-        self.state._run_worker_once = lambda *_args, **_kwargs: {
+        self._patch_worker_result(lambda *_args, **_kwargs: {
             "error": "upstream unavailable",
             "generated_messages": [],
-        }
+        })
 
         result = self.state.run_llm_sync(
             session_id,
@@ -1713,7 +1735,7 @@ class TestDaemonState(unittest.TestCase):
                 }],
             }
 
-        self.state._run_worker_once = late_success
+        self._patch_worker_result(late_success)
 
         result = self.state.run_llm_sync(
             session_id,
@@ -2057,7 +2079,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         try:
             worker = self._build_prompt_worker(temp_dir)
             events = []
-            worker.observability_signal.connect(events.append)
+            worker.observability_signal.subscribe(events.append)
             previous = [
                 {"role": "system", "content": "stable"},
                 {"role": "user", "content": "hello"},
@@ -2299,7 +2321,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
             worker = self._build_prompt_worker(temp_dir)
             worker.api_key = "test-key"
             results = []
-            worker.finished_signal.connect(results.append)
+            worker.finished_signal.subscribe(results.append)
 
             with patch("core.agent.LLMFactory.create_provider") as create_provider:
                 worker.run()
@@ -2553,31 +2575,6 @@ class TestAgentSystemPrompt(unittest.TestCase):
 
 
 class TestLLMWorkerToolLoopGuard(unittest.TestCase):
-    def test_browser_unavailable_finishes_once_with_content_and_tool_receipt_preserved(self):
-        from test_agent_bootstrap import TestAgentBootstrap, SkillStub, tool_call
-        from core.browser_skill_component import browser_unavailable
-        calls = []
-        def execute(_skills, name, args, context=None):
-            calls.append(name)
-            return browser_unavailable("extension protocol 1.3", not_executed=True)
-        definitions = [{"type": "function", "function": {"name": "browser_skill_cli", "description": "browser",
-                       "parameters": {"type": "object", "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}}]
-        with patch.object(SkillStub, "get_tool_definitions", return_value=definitions), \
-                patch.object(SkillStub, "call_tool", execute):
-            requests, result, events, _, _, _ = TestAgentBootstrap().run_worker(
-                [[{"type": "content", "content": "已完成资料整理，接下来读取网页。"},
-                  tool_call("browser_skill_cli", arguments='{"args":["session","start"]}')]],
-                profile={"provider_type": "openai", "model_name": "test", "base_url": "https://example.invalid/v1"},
-            )
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(calls, ["browser_skill_cli"])
-        self.assertEqual(result["error_type"], "BrowserUnavailable")
-        self.assertTrue(any("已完成资料整理" in str(m.get("content")) for m in result["generated_messages"]))
-        receipts = [m for m in result["generated_messages"] if m.get("role") == "tool"]
-        self.assertEqual(len(receipts), 1)
-        self.assertTrue(receipts[0]["result_obj"]["not_executed"])
-        self.assertFalse(any(e.get("type") == "tool_repair_round_isolated" for e in events))
-
     def test_deepseek_empty_reasoning_tool_round_continues_after_success_or_error(self):
         from core.llm.providers import OpenAIProvider
         from core.chat_storage import ChatStorage
@@ -2630,8 +2627,8 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                         turn_id="turn-1", request_id="run-1",
                         run_context={"mode": RUN_MODE_EXECUTION},
                     )
-                    worker.finished_signal.connect(finished.append)
-                    worker.observability_signal.connect(events.append)
+                    worker.finished_signal.subscribe(finished.append)
+                    worker.observability_signal.subscribe(events.append)
                     worker.run()
                 self.assertEqual(len(finished), 1)
                 self.assertNotIn("error", finished[0])
@@ -2742,7 +2739,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     return real_record_tool(session_id, execution_id, payload)
 
                 worker.runtime_journal.record_tool = fail_finished_record
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(len(skill_manager.calls), 1)
@@ -2840,7 +2837,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                         "ppt_agent_strategy": "should-not-reach-provider",
                     },
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(finished[0].get("content"), "done")
@@ -2938,7 +2935,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-1",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(provider.call_count, 1)
@@ -3013,7 +3010,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(lambda data: finished.append(data))
+                worker.finished_signal.subscribe(lambda data: finished.append(data))
                 worker.run()
 
             self.assertTrue(finished)
@@ -3087,7 +3084,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(len(provider.requests), 2)
@@ -3188,7 +3185,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-1",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(manager.call_count, 3)
@@ -3269,7 +3266,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-1",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(provider.call_count, 3)
@@ -3354,7 +3351,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-1",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                first_worker.finished_signal.connect(first_finished.append)
+                first_worker.finished_signal.subscribe(first_finished.append)
                 first_worker.run()
 
             self.assertEqual(manager.call_count, 1)
@@ -3387,7 +3384,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     request_id="run-2",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                second_worker.finished_signal.connect(second_finished.append)
+                second_worker.finished_signal.subscribe(second_finished.append)
                 second_worker.run()
 
             self.assertEqual(manager.call_count, 1)
@@ -3474,7 +3471,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     "result_obj": {"status": "ok", "content": "recovered result"},
                     "result_text": '{"status":"ok","content":"recovered result"}',
                 })
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(manager.call_count, 0)
@@ -3548,7 +3545,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 session_id="repeated-finish", turn_id="turn-1", request_id="run-1",
                 run_context={"mode": RUN_MODE_EXECUTION},
             )
-            worker.finished_signal.connect(finished.append)
+            worker.finished_signal.subscribe(finished.append)
             worker.run()
 
             self.assertEqual(len(finished), 1)
@@ -3616,7 +3613,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertTrue(finished)
@@ -3702,12 +3699,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.assertTrue(blocking_stream.entered.wait(2))
                 worker.stop()
                 self.assertTrue(blocking_stream.closed.wait(1))
-                self.assertTrue(worker.wait(3000))
+                self.assertTrue(worker.join(3))
                 self.assertIsNone(worker._active_provider_stream)
         finally:
-            if worker is not None and worker.isRunning():
+            if worker is not None and worker.is_running():
                 worker.stop()
-                worker.wait(3000)
+                worker.join(3)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_parallel_workers_enter_provider_without_cross_session_lock(self):
@@ -3767,13 +3764,13 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     )
                     workers.append(worker)
                     worker.start()
-                self.assertTrue(all(worker.wait(5000) for worker in workers))
+                self.assertTrue(all(worker.join(5) for worker in workers))
                 self.assertEqual(entered_sessions, [True, True])
         finally:
             for worker in workers:
-                if worker.isRunning():
+                if worker.is_running():
                     worker.stop()
-                    worker.wait(3000)
+                    worker.join(3)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_deepseek_responses_worker_persists_and_replays_items_across_tool_turn(self):
@@ -3884,8 +3881,8 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(lambda data: finished.append(data))
-                worker.observability_signal.connect(lambda data: observability.append(data))
+                worker.finished_signal.subscribe(lambda data: finished.append(data))
+                worker.observability_signal.subscribe(lambda data: observability.append(data))
                 worker.run()
 
             self.assertEqual(len(provider.requests), 2)
@@ -4001,7 +3998,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(len(provider.requests), 2)
@@ -4088,7 +4085,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     session_id="image-session",
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertNotIn("error", finished[0])
@@ -4151,7 +4148,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
                 provider.worker = worker
-                worker.finished_signal.connect(finished.append)
+                worker.finished_signal.subscribe(finished.append)
                 worker.run()
 
             self.assertEqual(finished[0]["content"], "partial")
@@ -4209,7 +4206,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
-                first_worker.finished_signal.connect(first_finished.append)
+                first_worker.finished_signal.subscribe(first_finished.append)
                 first_worker.run()
 
                 restored_ledger = first_messages + first_finished[0]["generated_messages"]
@@ -4231,70 +4228,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-class TestSingleInstance(unittest.TestCase):
-    def test_build_ui_server_name_is_stable_and_scoped(self):
-        first = build_ui_server_name(os.path.join("C:\\Apps", "Cowork"))
-        second = build_ui_server_name(os.path.join("C:\\Apps", "Cowork"))
-        other = build_ui_server_name(os.path.join("C:\\Apps", "Cowork2"))
-
-        self.assertEqual(first, second)
-        self.assertNotEqual(first, other)
-        self.assertTrue(first.startswith("deepseek-cowork-ui-"))
-
-    def test_notify_existing_ui_triggers_activate(self):
-        from PySide6.QtCore import QCoreApplication
-
-        app = QCoreApplication.instance() or QCoreApplication([])
-        temp_dir = tempfile.mkdtemp()
-        server_name = build_ui_server_name(temp_dir)
-        activated = []
-        server = UiSingleInstanceServer(server_name, lambda: activated.append(True))
-        try:
-            self.assertTrue(server.start())
-            client_path = os.path.join(os.path.dirname(__file__), "single_instance_client.py")
-            proc = subprocess.Popen(
-                [sys.executable, client_path, server_name],
-                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            deadline = time.time() + 1
-            while time.time() < deadline and (not activated or proc.poll() is None):
-                app.processEvents()
-                time.sleep(0.01)
-            stdout, stderr = proc.communicate(timeout=1)
-            self.assertEqual(proc.returncode, 0, stdout + stderr)
-            self.assertEqual(activated, [True])
-        finally:
-            server.stop()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_notify_existing_ui_with_retries_waits_for_booting_server(self):
-        attempts = []
-
-        def fake_notify(*_args, **_kwargs):
-            attempts.append(time.time())
-            return len(attempts) >= 3
-
-        with patch("core.single_instance.notify_existing_ui", side_effect=fake_notify):
-            self.assertTrue(
-                notify_existing_ui_with_retries(
-                    "demo-server",
-                    total_timeout_ms=400,
-                    interval_ms=1,
-                    per_attempt_timeout_ms=1,
-                )
-            )
-
-        self.assertEqual(len(attempts), 3)
-
-
 class TestLLMWorkerGuidance(unittest.TestCase):
     def _worker(self, turn_id="turn-1"):
         worker = LLMWorker.__new__(LLMWorker)
-        QThread = __import__("PySide6.QtCore", fromlist=["QThread"]).QThread
-        QThread.__init__(worker)
+        TaskWorker.__init__(worker)
+        worker.step_signal = EventSource()
+        worker.observability_signal = EventSource()
         worker.turn_id = turn_id
         worker.session_id = "guidance-test"
         worker.is_subagent = False
@@ -4398,7 +4337,11 @@ class TestLLMWorkerGuidance(unittest.TestCase):
 class TestDaemonInteractionRoundtrip(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.state = DaemonState(_DaemonConfigStub(self.temp_dir))
+        storage = DesktopChatStorage(os.path.join(self.temp_dir, "chat_history.sqlite"))
+        self.ledger = RuntimeLedger(storage)
+        storage.runtime_ledger = self.ledger
+        self.state = DaemonState(_DaemonConfigStub(self.temp_dir), storage=storage, journal=LedgerJournal(self.ledger))
+        self.state.desktop_store = DesktopStore(storage)
         self.server = DaemonServer(("127.0.0.1", 0), DaemonRequestHandler, self.state)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -4410,6 +4353,8 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=1)
+        self.state.skill_catalog.stop_watching()
+        self.ledger.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_daemon_client_request_omits_inactive_ppt_agent_details(self):
@@ -4502,7 +4447,8 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                     "content": message.get("content"),
                 }
 
-        self.state.set_active_worker("session-7", _Worker(), turn_id="turn-7")
+        self.state.ensure_runtime_run("session-7", "turn-7", "turn-7", "daemon:test", [])
+        self.state.set_active_worker("session-7", _Worker(), turn_id="turn-7", run_id="turn-7")
         accepted = self.client.steer_message(
             "session-7", "turn-7", {"role": "user", "content": "focus tests"}
         )
@@ -4515,7 +4461,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(rejected["accepted"])
         self.assertEqual(rejected["error"], "turn_mismatch")
 
-    def test_reconnect_completes_old_daemon_finalizing_result(self):
+    def test_reconnect_marks_unfinished_old_run_interrupted_and_preserves_result(self):
         session_id = "old-finalizing-session"
         run_id = "old-finalizing-run"
         self.state.runtime_journal.begin_run(
@@ -4557,16 +4503,15 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         attached = self.client.attach_run(session_id, run_id, starting_after=0)
 
         self.assertEqual(attached["status"], "ok")
-        self.assertEqual(attached["run"]["status"], "completed")
-        self.assertEqual(
-            attached["run"]["recovered_by_daemon_instance_id"],
-            self.state.daemon_instance_id,
-        )
+        self.assertEqual(attached["run"]["status"], "interrupted")
+        self.assertEqual(attached["run"]["final_result"]["content"], "durable answer")
+        interrupted = [event for event in attached["events"] if event["type"] == "run_interrupted"]
+        self.assertEqual(len(interrupted), 1)
+        self.assertEqual(interrupted[0]["payload"]["current_daemon_instance_id"], self.state.daemon_instance_id)
 
-    def test_attach_interrupts_running_record_when_registered_worker_has_finished(self):
-        from PySide6.QtCore import QThread
+    def test_attach_does_not_rewrite_current_instance_while_owner_finalizes(self):
 
-        class _FinishedWorker(QThread):
+        class _FinishedWorker(TaskWorker):
             request_id = "finished-worker-run"
 
             def run(self):
@@ -4592,15 +4537,19 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             run_id=worker.request_id,
         )
         worker.start()
-        self.assertTrue(worker.wait(1000))
+        self.assertTrue(worker.join(1))
 
         attached = self.client.attach_run(session_id, worker.request_id)
 
         self.assertFalse(attached["worker_active"])
-        self.assertEqual(attached["run"]["status"], "interrupted")
+        self.assertEqual(attached["run"]["status"], "running")
+        self.assertNotIn(session_id, self.state.active_workers)
+        self.state.finalize(session_id, worker.request_id, "finished-worker-turn", [], {"content": "finished"})
+        attached = self.client.attach_run(session_id, worker.request_id)
+        self.assertEqual(attached["run"]["status"], "completed")
         self.assertNotIn(session_id, self.state.active_workers)
 
-    def test_stop_session_atomically_interrupts_runtime_before_worker_stop(self):
+    def test_stop_session_fences_registration_until_finalization(self):
         class _Worker:
             request_id = "stop-runtime-run"
 
@@ -4635,8 +4584,11 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertTrue(stopped)
         self.assertTrue(worker.stopped)
         run = self.state.runtime_journal.get_run(session_id, worker.request_id)
-        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["status"], "stopping")
         self.assertTrue(run["stop_requested"])
+        self.state.finalize(session_id, worker.request_id, run["turn_id"], [], {"content": ""})
+        self.assertEqual(self.state.runtime_journal.get_run(session_id, worker.request_id)["status"], "interrupted")
+
 
     def test_stop_session_can_confirm_worker_resource_release(self):
         class _Worker:
@@ -4649,8 +4601,8 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             def stop(self):
                 self.stopped = True
 
-            def wait(self, timeout_ms):
-                self.wait_timeout = timeout_ms
+            def join(self, timeout):
+                self.wait_timeout = timeout
                 return self.stopped
 
         session_id = "release-session"
@@ -4671,7 +4623,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertTrue(result["stopped"])
         self.assertTrue(result["released"])
         self.assertGreater(worker.wait_timeout, 0)
-        self.assertLessEqual(worker.wait_timeout, 750)
+        self.assertLessEqual(worker.wait_timeout, 0.75)
 
     def test_stop_session_run_id_does_not_cancel_newer_active_run(self):
         class _Worker:
@@ -4743,8 +4695,11 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(activated)
         self.assertFalse(worker.started)
         run = self.state.runtime_journal.get_run(session_id, worker.request_id)
-        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["status"], "stopping")
         self.assertTrue(run["stop_requested"])
+        self.state.finalize(session_id, worker.request_id, run["turn_id"], [], {"content": ""})
+        self.assertEqual(self.state.runtime_journal.get_run(session_id, worker.request_id)["status"], "interrupted")
+
 
     def test_old_worker_finish_cannot_clear_newer_active_worker(self):
         class _Worker:
@@ -4755,6 +4710,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         old_worker = _Worker("old-run")
         new_worker = _Worker("new-run")
         self.state.set_active_worker(session_id, old_worker, run_id=old_worker.request_id)
+        self.assertTrue(self.state.clear_active_worker(session_id, expected_worker=old_worker, expected_run_id=old_worker.request_id))
         self.state.set_active_worker(session_id, new_worker, run_id=new_worker.request_id)
 
         cleared = self.state.clear_active_worker(
@@ -4802,21 +4758,20 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertEqual(rejected["error"], "turn_mismatch")
 
     def test_stream_message_waits_for_worker_without_model_response_timeout(self):
-        from PySide6.QtCore import QThread, Signal
 
-        class _SlowStreamWorker(QThread):
+        class _SlowStreamWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
                 self.stopped = False
 
@@ -4828,7 +4783,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                 self.content_signal.emit("delayed")
                 self.finished_signal.emit({"content": "done"})
 
-        with patch("core.daemon.LLMWorker", _SlowStreamWorker), patch(
+        with patch("core.runtime_coordinator.LLMWorker", _SlowStreamWorker), patch(
             "core.daemon.DAEMON_STREAM_RESPONSE_TIMEOUT_SEC",
             0.01,
             create=True,
@@ -4858,22 +4813,21 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(any(chunk.get("type") == "error" for chunk in chunks))
 
     def test_ui_owned_daemon_stream_leaves_history_commit_to_ui(self):
-        from PySide6.QtCore import QThread, Signal
         from core.execution_authorization import ExecutionAuthorization
 
-        class _UiOwnedWorker(QThread):
+        class _UiOwnedWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(
                     args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
@@ -4892,7 +4846,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                 )
 
         session_id = "ui-owned-daemon-session"
-        with patch("core.daemon.LLMWorker", _UiOwnedWorker):
+        with patch("core.runtime_coordinator.LLMWorker", _UiOwnedWorker):
             chunks = []
             for chunk in self.client.send_message_stream(
                     session_id,
@@ -4918,20 +4872,19 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertEqual(run.get("status"), "completed")
 
     def test_update_shutdown_saves_unopened_stream_partial_and_rejects_new_work(self):
-        from PySide6.QtCore import QThread, Signal
         received = threading.Event()
-        class _UpdateWorker(QThread):
+        class _UpdateWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
                 self.stopped = threading.Event()
             def stop(self):
@@ -4946,7 +4899,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                 chunks.append(chunk)
                 if chunk.get("type") == "content":
                     received.set()
-        with patch("core.daemon.LLMWorker", _UpdateWorker):
+        with patch("core.runtime_coordinator.LLMWorker", _UpdateWorker):
             reader = threading.Thread(target=consume)
             reader.start()
             self.assertTrue(received.wait(5))
@@ -4967,22 +4920,21 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(self.state.update_requests)
         self.assertEqual(self.client._request({"action": "cancel_update"})["status"], "ok")
 
-    def test_terminal_journal_failure_keeps_provider_success_and_clears_worker(self):
-        from PySide6.QtCore import QThread, Signal
+    def test_terminal_journal_failure_preserves_output_and_reports_save_failure(self):
 
-        class _SuccessfulWorker(QThread):
+        class _SuccessfulWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
             def run(self):
@@ -4997,7 +4949,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             return real_update_run(target_session_id, run_id, patch)
 
         with (
-            patch("core.daemon.LLMWorker", _SuccessfulWorker),
+            patch("core.runtime_coordinator.LLMWorker", _SuccessfulWorker),
             patch.object(
                 self.state.runtime_journal,
                 "update_run",
@@ -5018,38 +4970,43 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             chunk["result"] for chunk in chunks if chunk.get("type") == "final"
         )
         self.assertEqual(final_result.get("content"), "durable visible answer")
-        self.assertNotIn("error", final_result)
-        self.assertEqual(final_result.get("_runtime_terminal"), "completed")
+        self.assertIn("保存失败", final_result["error"])
+        self.assertEqual(self.state.runtime_journal.get_run(session_id, chunks[0]["run_id"])["status"], "failed")
         self.assertIn("_runtime_journal_warning", final_result)
         self.assertNotIn(session_id, self.state.active_workers)
 
-    def test_daemon_commit_failure_preserves_answer_and_reports_typed_save_error(self):
-        from PySide6.QtCore import QThread, Signal
+    def test_daemon_commit_failure_preserves_answer_and_reports_save_error(self):
 
-        class _SuccessfulWorker(QThread):
+        class _SuccessfulWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
 
             def run(self):
                 self.finished_signal.emit({"content": "visible answer"})
 
+        original_save = self.state.chat_storage.save_conversation_safely
+        def fail_answer_save(session_id, messages, **kwargs):
+            if any(message.get("role") == "assistant" for message in messages):
+                raise PermissionError(13, "denied")
+            return original_save(session_id, messages, **kwargs)
+
         with (
-            patch("core.daemon.LLMWorker", _SuccessfulWorker),
+            patch("core.runtime_coordinator.LLMWorker", _SuccessfulWorker),
             patch.object(
                 self.state.chat_storage,
                 "save_conversation_safely",
-                side_effect=PermissionError(13, "denied"),
+                side_effect=fail_answer_save,
             ),
         ):
             chunks = list(
@@ -5066,29 +5023,33 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             chunk["result"] for chunk in chunks if chunk.get("type") == "final"
         )
         self.assertEqual(final_result.get("content"), "visible answer")
-        self.assertNotIn("error", final_result)
-        self.assertEqual(final_result.get("_history_commit_error_category"), "permission")
-        self.assertIn("denied", final_result.get("_history_commit_error", ""))
+        self.assertIn("保存失败", final_result["error"])
+        self.assertIn("denied", final_result.get("_runtime_journal_warning", ""))
+        saved = self.state.chat_storage.get_messages("daemon-commit-failure-session")
+        self.assertEqual([message["content"] for message in saved], ["hello"])
+        replay = self.client.attach_run("daemon-commit-failure-session", chunks[0]["run_id"])
+        self.assertEqual(replay["run"]["status"], "failed")
+        self.assertEqual(next(event["payload"]["result"]["content"] for event in replay["events"]
+                              if event["type"] == "final"), "visible answer")
 
     def test_socket_disconnect_does_not_stop_daemon_worker(self):
-        from PySide6.QtCore import QThread, Signal
 
         finished = threading.Event()
         workers = []
 
-        class _DisconnectWorker(QThread):
+        class _DisconnectWorker(TaskWorker):
             agent_manager = None
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
 
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.execution_authorization = ExecutionAuthorization.start(args[1], kwargs["session_id"], kwargs["request_id"], args[2])
                 self.stopped = False
                 workers.append(self)
@@ -5111,7 +5072,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             "request_id": "run-disconnect",
             "user_message_id": "user-disconnect",
         }
-        with patch("core.daemon.LLMWorker", _DisconnectWorker):
+        with patch("core.runtime_coordinator.LLMWorker", _DisconnectWorker):
             sock = socket.create_connection((host, port), timeout=1)
             sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             sock.recv(4096)
@@ -5126,9 +5087,9 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             self.assertEqual(attached_while_running["run"]["status"], "running")
             self.assertTrue(finished.wait(2))
             deadline = time.time() + 2
-            while time.time() < deadline and not self.state.chat_storage.has_conversation(
-                "disconnect-session"
-            ):
+            while time.time() < deadline and self.state.runtime_journal.get_run(
+                "disconnect-session", "run-disconnect"
+            )["status"] != "completed":
                 time.sleep(0.01)
 
         self.assertTrue(workers)

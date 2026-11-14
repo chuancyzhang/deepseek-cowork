@@ -7,9 +7,6 @@ import gc
 import threading
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtWidgets import QApplication
 
 from core.chat_save_queue import (
     ChatSaveRequest,
@@ -44,7 +41,7 @@ class TestChatSaveQueue(unittest.TestCase):
                     self.assertTrue(entered.wait(2))
                     worker.enqueue(ChatSaveRequest("s", messages + [{"id": "a1", "role": "assistant", "content": "latest"}], "t", "draft", {}, 0, 2))
                     self.assertFalse(worker.stop_worker(timeout_ms=10))
-                    self.assertTrue(worker.isRunning())
+                    self.assertTrue(worker.is_running())
                     self.assertFalse(worker._stop_requested)
                     release.set()
                     self.assertTrue(worker.wait_for_revision("s", 2, 2000))
@@ -84,12 +81,12 @@ class TestChatSaveQueue(unittest.TestCase):
         )
 
     def test_worker_coalesces_same_session(self):
-        app = QApplication.instance() or QApplication([])
+
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
             worker = ChatSaveWorker(storage.db_path, debounce_ms=20)
             completed = []
-            worker.save_completed.connect(
+            worker.save_completed.subscribe(
                 lambda session_id, revision: completed.append((session_id, revision))
             )
             worker.start()
@@ -117,7 +114,7 @@ class TestChatSaveQueue(unittest.TestCase):
                     )
                 )
                 self.assertTrue(worker.flush(session_id="session-1", timeout_ms=2000))
-                app.processEvents()
+
                 record = storage.get_conversation_record("session-1") or {}
                 messages = storage.get_messages("session-1")
             finally:
@@ -125,7 +122,7 @@ class TestChatSaveQueue(unittest.TestCase):
                 del worker
                 del storage
                 gc.collect()
-                app.processEvents()
+
 
         self.assertEqual(record.get("title"), "Second")
         self.assertEqual(record.get("status"), "running")
@@ -234,7 +231,7 @@ class TestChatSaveQueue(unittest.TestCase):
             self.assertFalse(worker.enqueue(second))
 
     def test_worker_ignores_stale_revision_after_newer_snapshot_is_accepted(self):
-        app = QApplication.instance() or QApplication([])
+
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "chat_history.sqlite")
             storage = ChatStorage(db_path)
@@ -266,12 +263,12 @@ class TestChatSaveQueue(unittest.TestCase):
                 del worker
                 del storage
                 gc.collect()
-                app.processEvents()
+
 
         self.assertEqual([message["content"] for message in messages], ["new"])
 
     def test_history_divergence_stops_retry_and_reports_blocked_save(self):
-        app = QApplication.instance() or QApplication([])
+
         with tempfile.TemporaryDirectory() as temp_dir:
             worker = ChatSaveWorker(
                 os.path.join(temp_dir, "chat_history.sqlite"),
@@ -279,12 +276,12 @@ class TestChatSaveQueue(unittest.TestCase):
             )
             blocked = []
             retryable = []
-            worker.save_blocked.connect(
+            worker.save_blocked.subscribe(
                 lambda session_id, revision, error: blocked.append(
                     (session_id, revision, error)
                 )
             )
-            worker.save_failed.connect(
+            worker.save_failed.subscribe(
                 lambda session_id, revision, category, error: retryable.append(
                     (session_id, revision, category, error)
                 )
@@ -313,12 +310,12 @@ class TestChatSaveQueue(unittest.TestCase):
                             timeout_ms=2000,
                         )
                     )
-                    app.processEvents()
+
                 finally:
                     self.assertTrue(worker.stop_worker(timeout_ms=2000))
                     del worker
                     gc.collect()
-                    app.processEvents()
+
 
         self.assertEqual(len(blocked), 1)
         self.assertEqual(blocked[0][:2], ("session-diverged", 2))

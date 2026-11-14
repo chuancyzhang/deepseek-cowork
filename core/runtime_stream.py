@@ -6,6 +6,97 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from contextlib import ExitStack
+
+
+class _StreamDispatcher:
+    """Fair batching for every stream owned by one journal."""
+    _creation = threading.Lock()
+
+    @classmethod
+    def attach(cls, stream):
+        with cls._creation:
+            dispatcher = getattr(stream.journal, "_stream_dispatcher", None)
+            if dispatcher is None or dispatcher.finished:
+                dispatcher = cls(stream.journal)
+                stream.journal._stream_dispatcher = dispatcher
+            with dispatcher.condition:
+                dispatcher.streams.append(stream)
+                dispatcher.condition.notify_all()
+            return dispatcher
+
+    def __init__(self, journal):
+        self.journal = journal
+        self.condition = threading.Condition()
+        self.streams = deque()
+        self.finished = False
+        self.thread = threading.Thread(target=self.run, name="runtime-streams", daemon=True)
+        self.thread.start()
+
+    def wake(self):
+        with self.condition:
+            self.condition.notify_all()
+
+    def run(self):
+        while True:
+            with self.condition:
+                self.condition.wait(.016)
+                streams = list(self.streams)
+                self.streams.rotate(-1)
+            selected = []
+            remaining = RuntimeStream.BATCH_EVENTS
+            remaining_bytes = RuntimeStream.BATCH_BYTES
+            for stream in streams:
+                with stream._condition:
+                    if stream.error or (stream._closing and not stream._pending):
+                        stream._writer_done = True
+                        stream._condition.notify_all()
+                        with self.condition:
+                            if stream in self.streams:
+                                self.streams.remove(stream)
+                        continue
+                    if not stream._pending or remaining <= 0 or remaining_bytes <= 0:
+                        continue
+                    batch, size = [], 0
+                    while stream._pending and len(batch) < remaining:
+                        entry = stream._pending[0]
+                        if (batch or selected) and size + entry.size > remaining_bytes:
+                            break
+                        batch.append(stream._pending.popleft())
+                        size += entry.size
+                        if entry.urgent:
+                            break
+                    if not batch:
+                        continue
+                    stream._pending_bytes -= size
+                    stream._condition.notify_all()
+                    selected.append((stream, batch, size))
+                    remaining -= len(batch)
+                    remaining_bytes -= size
+            if selected:
+                started = time.monotonic()
+                try:
+                    committed = []
+                    with ExitStack() as locks:
+                        # The ledger groups these changes into one durable record.
+                        # Legacy journals keep their distributed on-disk format.
+                        if hasattr(self.journal, "ledger"):
+                            locks.enter_context(self.journal.session_locks(sorted({stream.session_id for stream, _, _ in selected})))
+                        for stream, batch, size in selected:
+                            events = self.journal.append_events(stream.session_id, stream.run_id, [
+                                {"type": entry.payload.get("type") or "stream_event", "payload": entry.payload,
+                                 "created_at": entry.created_at} for entry in batch])
+                            committed.append((stream, batch, size, events))
+                    for stream, batch, size, events in committed:
+                        stream._persisted(batch, size, events, started)
+                except Exception as error:
+                    for stream, batch, _ in selected:
+                        stream._persistence_failed(error, batch)
+            with self._creation:
+                with self.condition:
+                    if not self.streams:
+                        self.finished = True
+                        return
 
 
 @dataclass
@@ -54,9 +145,8 @@ class RuntimeStream:
         self.last_sequence = 0
         self._metrics = {}
         self._last_report = time.monotonic()
-        self._writer = threading.Thread(target=self._persist, name=f"journal-{run_id}", daemon=True)
         self._sender = threading.Thread(target=self._send, name=f"stream-{run_id}", daemon=True)
-        self._writer.start()
+        self._dispatcher = _StreamDispatcher.attach(self)
         self._sender.start()
 
     @staticmethod
@@ -67,6 +157,7 @@ class RuntimeStream:
     def enqueue(self, payload, *, terminal=False):
         created_at, queued_at = time.time(), time.monotonic()
         payload = copy.deepcopy(payload)
+        payload.setdefault("created_at", created_at)
         size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         urgent = payload.get("type") in self.BOUNDARIES
         with self._condition:
@@ -85,6 +176,7 @@ class RuntimeStream:
             if urgent:
                 self._flush_ticket = ticket
             self._condition.notify_all()
+        self._dispatcher.wake()
         if urgent:
             self.flush(ticket)
         return True
@@ -94,6 +186,7 @@ class RuntimeStream:
             self._stopped = True
             self._flush_ticket = self._accepted
             self._condition.notify_all()
+        self._dispatcher.wake()
 
     @property
     def active(self):
@@ -106,6 +199,7 @@ class RuntimeStream:
             return self.error is not None or self._accepted == self._committed
 
     def flush(self, ticket=None):
+        self._dispatcher.wake()
         with self._condition:
             ticket = self._accepted if ticket is None else ticket
             self._flush_ticket = max(self._flush_ticket, ticket)
@@ -141,71 +235,33 @@ class RuntimeStream:
                            sending_events=len(self._sending), last_sequence=self.last_sequence)
         self._report(**metrics)
 
-    def _persist(self):
-        try:
-            while True:
-                with self._condition:
-                    while not self._pending:
-                        if self._closing:
-                            return
-                        self._condition.wait()
-                    deadline = self._pending[0].queued_at + self.INTERVAL
-                    while (not self._closing and self._flush_ticket <= self._committed
-                           and len(self._pending) < self.BATCH_EVENTS
-                           and self._pending_bytes < self.BATCH_BYTES):
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        self._condition.wait(remaining)
-                    batch = []
-                    size = 0
-                    while self._pending and len(batch) < self.BATCH_EVENTS:
-                        entry = self._pending[0]
-                        if batch and size + entry.size > self.BATCH_BYTES:
-                            break
-                        batch.append(self._pending.popleft())
-                        size += entry.size
-                        if entry.urgent:
-                            break
-                    self._pending_bytes -= size
-                    self._condition.notify_all()
-                started = time.monotonic()
-                events = self.journal.append_events(self.session_id, self.run_id, [
-                    {"type": entry.payload.get("type") or "stream_event",
-                     "payload": entry.payload, "created_at": entry.created_at}
-                    for entry in batch
-                ])
-                overflow = False
-                with self._condition:
-                    self.last_sequence = int(events[-1]["sequence"])
-                    self._committed = batch[-1].ticket
-                    if not self._subscriber_closed:
-                        for entry, event in zip(batch, events):
-                            if self._full(self._sending, self._sending_bytes, entry.size):
-                                overflow = True
-                                break
-                            self._sending.append((entry.payload, event["sequence"], entry.size))
-                            self._sending_bytes += entry.size
-                    self._condition.notify_all()
-                if overflow:
-                    self.disconnect("subscriber_backlog_exceeded")
-                self._record(batches=1, batch_bytes=size,
-                             queue_wait_ms=(started - batch[0].queued_at) * 1000,
-                             **self.journal.append_metrics())
-        except Exception as exc:
-            with self._condition:
-                self.error = exc
-                self._stopped = True
-                # Keep the uncommitted data for diagnosis; never replay an
-                # uncertain partial write automatically.
-                self._failed_batch = locals().get("batch", [])
-                self._condition.notify_all()
-            self._record(force=True, failures=1)
-            self._failed(exc)
-        finally:
-            with self._condition:
-                self._writer_done = True
-                self._condition.notify_all()
+    def _persisted(self, batch, size, events, started):
+        overflow = False
+        with self._condition:
+            self.last_sequence = int(events[-1]["sequence"])
+            self._committed = batch[-1].ticket
+            if not self._subscriber_closed:
+                for entry, event in zip(batch, events):
+                    if self._full(self._sending, self._sending_bytes, entry.size):
+                        overflow = True
+                        break
+                    self._sending.append((entry.payload, event["sequence"], entry.size))
+                    self._sending_bytes += entry.size
+            self._condition.notify_all()
+        if overflow:
+            self.disconnect("subscriber_backlog_exceeded")
+        self._record(batches=1, batch_bytes=size, queue_wait_ms=(started-batch[0].queued_at)*1000,
+                     **self.journal.append_metrics())
+
+    def _persistence_failed(self, error, batch):
+        with self._condition:
+            self.error = error
+            self._stopped = True
+            self._failed_batch = batch
+            self._writer_done = True
+            self._condition.notify_all()
+        self._record(force=True, failures=1)
+        self._failed(error)
 
     def _send(self):
         try:
@@ -231,7 +287,10 @@ class RuntimeStream:
                 return
             self._closing = True
             self._condition.notify_all()
-        self._writer.join()
+        self._dispatcher.wake()
+        with self._condition:
+            while not self._writer_done:
+                self._condition.wait()
         self._sender.join(5)
         if self._sender.is_alive():
             self.disconnect("subscriber_close_timeout")

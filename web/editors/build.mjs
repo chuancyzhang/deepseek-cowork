@@ -38,6 +38,7 @@ const buildResult = await build({
 });
 
 for (const name of [
+  "desktop-bridge.js",
   "browser-automation.js",
   "terminal.html",
   "docx.html",

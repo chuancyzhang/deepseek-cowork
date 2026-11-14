@@ -264,7 +264,7 @@ def parse_mcp_servers_json(value):
 
 
 class ConfigManager:
-    def __init__(self):
+    def __init__(self, *, migrate_legacy=True):
         self.config_file = "config.json"
         
         # Use centralized data directory logic
@@ -281,7 +281,7 @@ class ConfigManager:
         
         # If old config exists and new config doesn't, migrate it.
         # Check inequality to avoid copy error if paths are same (e.g. portable mode setup)
-        if os.path.abspath(old_config_path) != os.path.abspath(self.config_path):
+        if migrate_legacy and os.path.abspath(old_config_path) != os.path.abspath(self.config_path):
              if os.path.exists(old_config_path) and not os.path.exists(self.config_path):
                 print(f"[Config] Migrating config from {old_config_path} to {self.config_path}")
                 try:
@@ -302,7 +302,7 @@ class ConfigManager:
             "deepseek_v4_context_window_tokens": 1000000,
             "context_budget_ratio": 0.8,
             "experimental_long_context": {"enabled": False, "target_tokens": 300000},
-            "experimental_browser_automation": {"enabled": True},
+            "experimental_browser_automation": {"enabled": False},
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],
@@ -1691,6 +1691,9 @@ class ConfigManager:
         return self._set_config_value(key, value)
 
     def is_skill_enabled(self, skill_name, default_enabled=True):
+        from .platform_capabilities import skill_unavailable_reason
+        if skill_unavailable_reason(skill_name):
+            return False
         if skill_name == "browser-automation":
             from .browser_backend import BrowserBackendCoordinator, EXTERNAL
             return BrowserBackendCoordinator(self).snapshot()["backend"] == EXTERNAL
@@ -1709,6 +1712,10 @@ class ConfigManager:
         self.set("data_security", validate_config(value))
 
     def set_skill_enabled(self, skill_name, enabled, *, persist_strict=False):
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if enabled and issue:
+            raise ValueError(issue)
         if skill_name == "browser-automation":
             # Browser selection has one saved switch; legacy enable calls cannot
             # overwrite it or create a second, contradictory preference.

@@ -1,4 +1,3 @@
-import hashlib
 import os
 import tempfile
 import unittest
@@ -117,40 +116,6 @@ class TestInlineVisualization(unittest.TestCase):
                 origins=["https://cdn.example.com"],
             )
 
-    def test_webengine_remote_access_matches_verified_origins(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        import main
-
-        applied = []
-
-        class FakeSettings:
-            def setAttribute(self, attribute, enabled):
-                applied.append((attribute, enabled))
-
-        class FakeView:
-            def settings(self):
-                return FakeSettings()
-
-        attributes = type(
-            "WebAttribute",
-            (),
-            {
-                "JavascriptEnabled": "javascript",
-                "JavascriptCanOpenWindows": "windows",
-                "JavascriptCanAccessClipboard": "clipboard",
-                "LocalContentCanAccessFileUrls": "files",
-                "LocalContentCanAccessRemoteUrls": "remote",
-                "FullScreenSupportEnabled": "fullscreen",
-            },
-        )
-        module = type(
-            "FakeWebEngineCore",
-            (),
-            {"QWebEngineSettings": type("QWebEngineSettings", (), {"WebAttribute": attributes})},
-        )
-        with patch("main.importlib.import_module", return_value=module):
-            main.InlineVisualizationCard._configure_view(None, FakeView(), allow_remote=True)
-        self.assertIn(("remote", True), applied)
 
     def test_publish_register_and_restore_state(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -214,116 +179,9 @@ class TestInlineVisualization(unittest.TestCase):
             record = storage.register_inline_visualization(conversation_id, artifact)
             self.assertEqual(record["origins"], ["https://cdn.jsdelivr.net"])
 
-    def test_disabled_plugin_keeps_normal_bubble_path_and_history_is_read_only(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide6.QtWidgets import QApplication
-        import main
 
-        app = QApplication.instance() or QApplication([])
-        normal = main.ChatBubble(
-            "Agent",
-            "普通回复",
-            session_id="session-normal",
-            chat_storage=None,
-            visualize_enabled=False,
-        )
-        self.assertIsNone(main.WEBENGINE_AVAILABLE)
-        self.assertIsNone(normal.inline_visualization_container)
 
-        with tempfile.TemporaryDirectory() as root:
-            path = os.path.join(root, "visual.html")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write("<div id='visual'>ok</div>")
-            storage = ChatStorage(os.path.join(root, "history", "chat.sqlite"))
-            storage.upsert_conversation("session-history")
-            with open(path, "rb") as handle:
-                digest = hashlib.sha256(handle.read()).hexdigest()
-            artifact = {
-                "file": "visual-12345678.html",
-                "path": path,
-                "sha256": digest,
-                "title": "历史视图",
-                "origins": [],
-            }
-            storage.register_inline_visualization("session-history", artifact)
-            with patch("main.QTimer.singleShot"):
-                history = main.ChatBubble(
-                    "Agent",
-                    '说明\n\n::cowork-inline-vis{file="visual-12345678.html"}',
-                    session_id="session-history",
-                    chat_storage=storage,
-                    visualize_enabled=False,
-                )
-            history.show()
-            app.processEvents()
-            self.assertEqual(len(history.inline_visualization_cards), 1)
-            self.assertTrue(history.inline_visualization_cards[0].read_only)
-            self.assertNotIn("cowork-inline-vis", history.content_edit.toPlainText())
 
-    def test_valid_directive_without_conversation_context_surfaces_error(self):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide6.QtWidgets import QApplication
-        import main
-
-        app = QApplication.instance() or QApplication([])
-        directive = '::cowork-inline-vis{file="visual-12345678.html"}'
-        with patch("main.log_sub_agent_runtime") as log_mock:
-            bubble = main.ChatBubble("Agent", directive)
-            bubble.show()
-            app.processEvents()
-        self.assertNotIn("cowork-inline-vis", bubble.content_edit.toPlainText())
-        self.assertIn("缺少会话上下文", bubble.content_edit.toPlainText())
-        log_mock.assert_any_call(
-            "inline_visualization_context_missing",
-            missing=["chat_storage", "session_id"],
-            file_count=1,
-        )
-
-    def test_resource_error_uses_specific_card_state_and_diagnostic_event(self):
-        import main
-
-        shown = []
-        fake = type(
-            "FakeCard",
-            (),
-            {
-                "artifact": {"file": "chart-12345678.html"},
-                "conversation_id": "conversation-resource-error",
-                "_show_error": lambda self, message: shown.append(message),
-            },
-        )()
-        with patch("main.log_sub_agent_runtime") as log_mock:
-            main.InlineVisualizationCard._handle_runtime_error(
-                fake,
-                "外部资源加载失败：https://cdn.jsdelivr.net/npm/d3@7",
-            )
-        self.assertIn("交互可视化资源加载失败", shown[0])
-        log_mock.assert_called_once_with(
-            "inline_visualization_resource_error",
-            conversation_id="conversation-resource-error",
-            file="chart-12345678.html",
-            error="外部资源加载失败：https://cdn.jsdelivr.net/npm/d3@7",
-        )
-
-    def test_load_finished_does_not_hide_an_earlier_resource_error(self):
-        import main
-
-        visibility = []
-        label = type("FakeLabel", (), {"setVisible": lambda self, value: visibility.append(value)})()
-        fake = type(
-            "FakeCard",
-            (),
-            {
-                "artifact": {"file": "chart-12345678.html"},
-                "conversation_id": "conversation-resource-error",
-                "status_label": label,
-                "_visualization_error": "交互可视化资源加载失败",
-                "_show_error": lambda self, message: None,
-            },
-        )()
-        with patch("main.log_sub_agent_runtime"):
-            main.InlineVisualizationCard._handle_load_finished(fake, True)
-        self.assertEqual(visibility, [])
 
 
 if __name__ == "__main__":

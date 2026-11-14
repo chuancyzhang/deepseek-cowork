@@ -92,6 +92,29 @@ class DocumentationTests(unittest.TestCase):
         with patch.object(check_docs, "APP_VERSION", "0.0.0"):
             self.assertTrue(any("newer than app" in error for error in check_docs.validate_current_versions()))
 
+    def test_references_reject_local_only_notes_and_missing_source_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "guide.md"
+            (root / "private.md").write_text("# Local only", encoding="utf-8")
+            (root / "test").mkdir()
+            (root / "test/current.py").write_text("", encoding="utf-8")
+            source.write_text("[Local](private.md) `test/removed.py` `test/current.py`", encoding="utf-8")
+            with patch.object(check_docs, "ROOT", root):
+                errors = check_docs.validate_repository_references([source], {"guide.md", "test/current.py"})
+                self.assertEqual(len(errors), 2)
+                self.assertTrue(any("untracked file" in error for error in errors))
+                self.assertTrue(any("test/removed.py" in error for error in errors))
+
+    def test_historical_release_source_mentions_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "docs/releases/1.0.0.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("旧入口 `scripts/retired.py`", encoding="utf-8")
+            with patch.object(check_docs, "ROOT", root):
+                self.assertEqual(check_docs.validate_repository_references([source], set()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,12 +7,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
-from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
-from core.chat_storage import ChatStorage
+from core.desktop_store import DesktopChatStorage
+from core.runtime_ledger import RuntimeLedger, LedgerJournal
+from core.runtime_coordinator import RuntimeCoordinator
 from core.execution_authorization import ExecutionAuthorization
 from core.runtime_journal import RuntimeJournal
 from core.tool_registry import ToolRegistry
@@ -77,8 +75,6 @@ class TestLongContextAgent(unittest.TestCase):
     def run_agent(self, enabled, rounds=0, provider=None, tool_result=None,
                   known_capacity=True, target_tokens=300000, attachments=None, attachment_message_id="u1",
                   profile_overrides=None):
-        from main import MainWindow
-        self.app = QApplication.instance() or QApplication([])
         profile = {"id": "test", "model_name": "test-model", "base_url": "https://example.test/v1",
                    "provider": "openai", "api_protocol": "chat_completions",
                    "context_window_tokens": 32000, "max_output_tokens": 4096}
@@ -95,28 +91,24 @@ class TestLongContextAgent(unittest.TestCase):
         provider, skills = provider or ContextProvider(rounds), ContextSkills(tool_result)
         events, results = [], []
         with tempfile.TemporaryDirectory() as directory:
-            storage = ChatStorage(os.path.join(directory, "chat_history.sqlite"))
+            storage = DesktopChatStorage(os.path.join(directory, "chat_history.sqlite"))
             storage.save_conversation_safely("s", initial)
-            journal = RuntimeJournal(directory)
-            journal.begin_run("s", "run", writer_owner="ui:test", base_messages=initial,
+            ledger = RuntimeLedger(storage)
+            storage.runtime_ledger = ledger
+            journal = storage.runtime_journal = LedgerJournal(ledger)
+            journal.begin_run("s", "run", writer_owner="desktop:test", base_messages=initial,
                               extra={"user_message_id": "u1"})
-            queue = ChatSaveWorker(storage.db_path, debounce_ms=5000)
-            queue.start()
-            state = SimpleNamespace(session_id="s", active_turn_request_id="run", messages=copy.deepcopy(initial))
-            ui = SimpleNamespace(chat_save_worker=queue,
-                _history_writer_owner_for_session=lambda sid: "ui:test",
-                _prepare_generated_messages_for_turn=lambda state, messages: (copy.deepcopy(messages), 0),
-                _merge_generated_messages=lambda old, new: MainWindow._merge_generated_messages(None, old, new))
-            revision = [0]
-            def save(sid):
-                revision[0] += 1
-                return queue.enqueue(ChatSaveRequest(sid, copy.deepcopy(state.messages), "", "running", {}, 0, revision[0]))
-            ui.save_chat_history = save
+            coordinator = object.__new__(RuntimeCoordinator)
+            coordinator.chat_storage, coordinator.runtime_journal = storage, journal
+            coordinator.lock, coordinator.cancelled_runs = threading.RLock(), set()
+            coordinator.sessions = {"s": copy.deepcopy(initial)}
+            config = ConfigStub(directory, profile)
+            config.runtime_storage, config.runtime_journal = storage, journal
             worker = None
             def event(value):
                 events.append(value)
                 if value.get("type") == "context_storage_request":
-                    MainWindow._handle_context_storage_request(ui, state, value)
+                    coordinator.context_storage("s", value)
                 if value.get("phase") == "failed":
                     worker.is_stopped = True  # A failed test must never wait for manual input.
             try:
@@ -126,24 +118,24 @@ class TestLongContextAgent(unittest.TestCase):
                      patch.object(LLMWorker, "_build_stable_system_prompt", return_value="Stable prompt"), \
                      patch.object(LLMWorker, "_build_runtime_context_prompt", return_value="Current runtime"), \
                      patch("core.agent.get_runtime_snapshot", return_value={}):
-                    worker = LLMWorker(initial, ConfigStub(directory, profile), directory,
+                    worker = LLMWorker(initial, config, directory,
                         session_id="s", turn_id="1", request_id="run",
                         run_context={"selected_model_profile": profile,
                                      "desktop_long_context": {"enabled": enabled, "target_tokens": target_tokens}},
                         execution_authorization=ExecutionAuthorization("s", "run", True, ""))
-                    worker.observability_signal.connect(event)
-                    worker.finished_signal.connect(results.append)
+                    worker.observability_signal.subscribe(event)
+                    worker.finished_signal.subscribe(results.append)
                     worker.run()
                 self.assertEqual(len(results), 1)
                 self.assertNotIn("error", results[0], str([e for e in events if e.get("phase") == "failed"]))
-                self.assertTrue(queue.flush("s", 2000))
+                ledger.barrier()
                 active = storage.get_context_window("s")
                 if attachments:
                     saved = next(m for m in storage.get_messages("s") if m["id"] == attachment_message_id)
                     self.assertEqual(saved["content_parts"], attachments)
                 return provider, skills, events, results[0], active
             finally:
-                queue.stop_worker(2000)
+                ledger.close()
 
     def test_default_off_has_no_checkpoint_requests_or_tools(self):
         provider, skills, events, result, active = self.run_agent(False)

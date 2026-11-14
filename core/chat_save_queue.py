@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 
-from PySide6.QtCore import QThread, Signal
+from core.runtime_tasks import EventSource, TaskWorker
 
 from .chat_storage import ChatStorage, ConversationWriteConflict
 
@@ -84,13 +84,13 @@ class ContextSaveRequest:
     expires_at: float
 
 
-class ChatSaveWorker(QThread):
-    save_failed = Signal(str, int, str, str)
-    save_blocked = Signal(str, int, str)
-    save_completed = Signal(str, int)
+class ChatSaveWorker(TaskWorker):
 
     def __init__(self, db_path, debounce_ms=500, parent=None):
-        super().__init__(parent)
+        super().__init__()
+        self.save_failed = EventSource()
+        self.save_blocked = EventSource()
+        self.save_completed = EventSource()
         self.db_path = db_path
         self.debounce_seconds = max(0, int(debounce_ms or 0)) / 1000.0
         self._condition = threading.Condition()
@@ -246,7 +246,7 @@ class ChatSaveWorker(QThread):
         if not self.flush(timeout_ms=timeout_ms):
             return False
         self.request_stop()
-        return self.wait(max(0, int(timeout_ms or 0)))
+        return self.join(max(0, int(timeout_ms or 0)) / 1000.0)
 
     def _next_request_locked(self):
         if self._context_pending:

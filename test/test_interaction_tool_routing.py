@@ -1,12 +1,8 @@
-import os
+from core.runtime_tasks import EventSource, TaskWorker
 import threading
 import unittest
 from unittest.mock import patch
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtWidgets import QApplication
 
 from core.execution_authorization import ExecutionAuthorization
 from core.interaction import InteractionService, interaction_service
@@ -15,26 +11,23 @@ import test_core
 
 
 class BackgroundInteractionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
 
     setUp = test_core.TestDaemonInteractionRoundtrip.setUp
     tearDown = test_core.TestDaemonInteractionRoundtrip.tearDown
 
     def test_background_question_streams_to_owner_and_accepts_answer(self):
-        class Worker(QThread):
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
+        class Worker(TaskWorker):
 
             def __init__(self, messages, config, workspace_dir, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.agent_manager = None
                 self.request_id = kwargs["request_id"]
                 self.execution_authorization = ExecutionAuthorization.start(
@@ -62,7 +55,7 @@ class BackgroundInteractionTests(unittest.TestCase):
                     self.tool_tasks.close()
 
         chunks = []
-        with patch("core.daemon.LLMWorker", Worker):
+        with patch("core.runtime_coordinator.LLMWorker", Worker):
             for chunk in self.client.send_message_stream("daemon-session-test", "向我提问",
                     workspace_dir=self.temp_dir, run_context={"mode": "execution"}, writer_owner="ui:4242"):
                 chunks.append(chunk)
@@ -84,18 +77,18 @@ class BackgroundInteractionTests(unittest.TestCase):
         self.assertEqual(final["answer"]["status"], "completed")
 
     def test_legacy_timeout_is_durable_and_replayed_without_tool_response_payload(self):
-        class Worker(QThread):
-            thinking_signal = Signal(str)
-            content_signal = Signal(str)
-            tool_call_signal = Signal(dict)
-            tool_result_signal = Signal(dict)
-            observability_signal = Signal(dict)
-            agent_state_signal = Signal(dict)
-            output_signal = Signal(str)
-            finished_signal = Signal(object)
+        class Worker(TaskWorker):
 
             def __init__(self, messages, config, workspace_dir, **kwargs):
                 super().__init__()
+                self.thinking_signal = EventSource()
+                self.content_signal = EventSource()
+                self.tool_call_signal = EventSource()
+                self.tool_result_signal = EventSource()
+                self.observability_signal = EventSource()
+                self.agent_state_signal = EventSource()
+                self.output_signal = EventSource()
+                self.finished_signal = EventSource()
                 self.agent_manager = None
                 self.request_id = kwargs["request_id"]
                 self.execution_authorization = ExecutionAuthorization.start(
@@ -112,7 +105,7 @@ class BackgroundInteractionTests(unittest.TestCase):
                 finally:
                     self.tool_tasks.close()
 
-        with patch("core.daemon.LLMWorker", Worker):
+        with patch("core.runtime_coordinator.LLMWorker", Worker):
             chunks = list(self.client.send_message_stream("daemon-session-test", "test timeout",
                 workspace_dir=self.temp_dir, run_context={"mode": "execution"}, writer_owner="ui:4242"))
         self.assertFalse(any(chunk.get("type") == "tool_result" for chunk in chunks))
@@ -164,7 +157,7 @@ class BackgroundInteractionTests(unittest.TestCase):
         service = InteractionService()
         owner = ToolTaskManager("one", "run-one")
         tasks, requests = [], []
-        service.interaction_requested.connect(requests.append, Qt.DirectConnection)
+        service.interaction_requested.subscribe(requests.append)
         try:
             for i in range(2):
                 task, _ = owner.submit(f"ask-{i}", "read", {"i": i}, f"call-{i}",
@@ -193,7 +186,7 @@ class BackgroundInteractionTests(unittest.TestCase):
             from types import SimpleNamespace
             tool_tasks = SimpleNamespace(tasks={"slow": SimpleNamespace(done=done)})
             def stop(self): pass
-            def wait(self, timeout): return True
+            def join(self, timeout): return True
         self.state.set_active_worker("cleanup-session", Worker(), run_id="cleanup-run")
         result = self.state.stop_session("cleanup-session", expected_run_id="cleanup-run",
             wait_for_release=True, release_timeout_ms=30)

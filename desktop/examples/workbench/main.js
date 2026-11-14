@@ -1,0 +1,20 @@
+import {createCowork} from './client.js';
+const host=createCowork(),element=id=>document.getElementById(id),draft=element('draft');let current,change=Promise.resolve();
+const report=error=>{element('status').textContent=error.message;};
+host.subscribe(state=>{
+  current=state;document.body.classList.toggle('dark',state.theme==='dark');
+  element('title').textContent=state.conversation?.title||'开始一段对话';
+  const choices=[new Option('选择对话',''),...(state.conversations||[]).map(item=>new Option(item.title,item.id))];element('chats').replaceChildren(...choices);element('chats').value=state.conversationId||'';
+  if(draft.value!==(state.draft?.text||''))draft.value=state.draft?.text||'';
+  const messages=(state.conversation?.render_messages||state.conversation?.messages||[]).map(message=>{const article=document.createElement('article');article.className=message.role;article.textContent=typeof message.content==='string'?message.content:JSON.stringify(message.content||'');return article;});
+  const live=(state.events||[]).filter(event=>event.type==='content'&&event.run_id===state.conversation?.run?.id).map(event=>event.delta||'').join('');
+  if(live&&!messages.some(item=>item.textContent===live)){const article=document.createElement('article');article.textContent=live;messages.push(article);}element('messages').replaceChildren(...messages);
+  const active=['queued','running','stopping'].includes(state.conversation?.run?.status);element('stop').disabled=!active;element('status').textContent=active?'正在处理…':state.preview?'这是独立预览':'输入和任务由宿主保留';
+});
+draft.oninput=()=>{const value={text:draft.value,attachments:current?.draft?.attachments||[]},id=current?.conversationId;change=change.then(()=>host.drafts.change(value,id)).catch(report);};
+element('send').onclick=async()=>{try{await change;await host.runs.send(current?.conversationId);}catch(error){report(error);}};
+element('stop').onclick=()=>host.runs.stop(current.conversationId,current.conversation?.run?.id).catch(report);
+element('new').onclick=()=>host.conversations.create().catch(report);
+element('chats').onchange=event=>{if(event.target.value)host.conversations.select(event.target.value).catch(report);};
+element('theme').onclick=()=>host.theme.set(current?.theme==='dark'?'light':'dark').catch(report);
+await host.ready();

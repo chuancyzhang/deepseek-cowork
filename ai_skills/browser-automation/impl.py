@@ -20,7 +20,6 @@ from core.browser_backend import browser_operation, BrowserBackendError, EXTERNA
 _ALLOWED_COMMANDS = {
     "browsers",
     "click",
-    "cooperate",
     "doctor",
     "evaluate",
     "fill",
@@ -176,24 +175,12 @@ def _attach_screenshot(result, output_path, context, abort_state):
 
 
 def _run_owned_command(normalized, context, timeout_seconds, abort_state):
-    if normalized[:2] == ["session", "start"] and not any(arg in {"--help", "-h"} for arg in normalized):
-        from core.file_write_locks import file_write_lock
-        from core.browser_skill_component import browser_skill_root
-        # A new session cannot race the idle check and executable replacement.
-        with file_write_lock(browser_skill_root() + ".maintenance"):
-            return _run_owned_command_locked(normalized, context, timeout_seconds, abort_state)
-    return _run_owned_command_locked(normalized, context, timeout_seconds, abort_state)
-
-
-def _run_owned_command_locked(normalized, context, timeout_seconds, abort_state):
     from core.browser_skill_component import _session_id_from_args
     with browser_operation(context, EXTERNAL) as (coordinator, auth):
         normalized = list(normalized)
         help_only = "--help" in normalized or "-h" in normalized
         if any(item.startswith("--session=") or item.startswith("--request-id") for item in normalized) or normalized.count("--session") > 1:
             raise BrowserBackendError("invalid_session", "请只使用一次 --session 参数；会话创建标识由应用管理。")
-        if normalized[0] == "cooperate" and not help_only and (len(normalized) < 2 or normalized[1] not in {"sync", "wait", "status"}):
-            raise BrowserBackendError("invalid_session", "只能同步或等待当前任务的浏览器控制权。")
         if normalized[0] == "session" and not help_only and (len(normalized) < 2 or normalized[1] not in {"start", "stop"} or any(item.startswith("--all") for item in normalized)):
             raise BrowserBackendError("invalid_session", "只允许创建或结束当前任务自己的会话，不能管理其他应用的会话。")
         if normalized[:2] == ["session", "stop"] and not help_only and (len(normalized) < 3 or normalized[2].startswith("-") or "--session" in normalized):
@@ -212,10 +199,6 @@ def _run_owned_command_locked(normalized, context, timeout_seconds, abort_state)
             normalized.extend(["--request-id", request_token])
         result = run_browser_skill_cli(normalized, timeout_seconds=timeout_seconds,
                                        abort_check=lambda: bool(abort_state["aborted"]))
-        if request_token and result.get("not_executed"):
-            # Readiness failed before request preparation. Nothing was sent to
-            # the daemon, so retaining this token would create a phantom lease.
-            coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token, stopped=True)
         payload = result.get("result") or {}
         if request_token and result.get("status") == "completed" and isinstance(payload, dict) and payload.get("session_id"):
             coordinator.track_session(auth.session_id, auth.run_id, str(payload["session_id"]))
@@ -286,9 +269,6 @@ def browser_skill_cli(
         return result
     except Exception as exc:
         log_browser_skill_event("error", operation="tool", error=str(exc))
-        if isinstance(exc, BrowserBackendError) and exc.code in {"browser_switch_pending", "browser_backend_changed"}:
-            from core.browser_skill_component import browser_unavailable
-            return browser_unavailable(str(exc), code=exc.code, not_executed=True)
         return {
             "status": "incomplete",
             "error": {

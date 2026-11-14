@@ -10,6 +10,9 @@ BUILTIN_PLUGINS = (DeepSeekFlashMinimalBootstrap,)
 
 def resolve(provider, model) -> AgentBootstrapPlugin | None:
     """Resolve an enabled plugin without changing the normal agent registry."""
+    from core.platform_capabilities import is_windows
+    if not is_windows():
+        return None
     selected = str(provider.get("bootstrap_plugin", get_default_bootstrap_plugin(
         provider.get("provider_type") or provider.get("provider") or "openai",
         provider.get("base_url"), model,

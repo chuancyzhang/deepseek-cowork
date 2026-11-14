@@ -20,6 +20,21 @@ CURRENT_DOCS = tuple(ROOT / name for name in (
     "docs/technical-design.md", "web/platform/README.md",
 ))
 
+MAINTENANCE_DOCS = (
+    "AGENTS.md", "desktop/sdk/README.md",
+    "local_development_notes/CONVERSATION_FIRST_PRINCIPLES.md",
+    "local_development_notes/REPOSITORY_HYGIENE.md",
+    "local_development_notes/UI_PERFORMANCE_PRINCIPLES.md",
+    "local_development_notes/UI_UX_SPECIFICATION.md",
+)
+
+# Only concrete repository file paths are checked. Shell examples, globs,
+# generated outputs and historical release descriptions have different meanings.
+SOURCE_PATH_RE = re.compile(
+    r"`((?:core|scripts|test|desktop|web|bootstrap_plugins|bundled_plugins|"
+    r"skills|ai_skills)/[\w./-]+\.(?:py|md|tsx?|m?[cj]s|json|css|html))`"
+)
+
 REMOVED_LEGACY_DOCS = {
     "USER_GUIDE.md",
     "PRODUCT_DOC.md",
@@ -179,7 +194,32 @@ def validate_protected_diff() -> list[str]:
 def markdown_files() -> list[Path]:
     files = [path for path in CURRENT_DOCS if path.is_file() and path.parent != ROOT / "docs"]
     files.extend(sorted((ROOT / "docs").rglob("*.md")))
+    files.extend(ROOT / name for name in MAINTENANCE_DOCS)
     return files
+
+
+def validate_repository_references(files: list[Path], tracked: set[str]) -> list[str]:
+    errors = []
+    for source in files:
+        if not source.is_file():
+            errors.append(f"missing maintained documentation: {source.relative_to(ROOT)}")
+            continue
+        text = _read(source)
+        for target in LINK_RE.findall(text):
+            target = unquote(target.strip().strip("<>").partition("#")[0])
+            if not target or target.startswith(("http://", "https://", "mailto:", "cowork-file:")):
+                continue
+            resolved = (source.parent / target).resolve()
+            if not resolved.is_relative_to(ROOT):
+                errors.append(f"{source.relative_to(ROOT)}: link leaves repository: {target}")
+            elif resolved.is_file() and resolved.relative_to(ROOT).as_posix() not in tracked:
+                errors.append(f"{source.relative_to(ROOT)}: link depends on untracked file: {target}")
+        if source.parent == ROOT / "docs/releases" and source.name != "unreleased.md":
+            continue
+        for target in SOURCE_PATH_RE.findall(text):
+            if not (ROOT / target).is_file() or target not in tracked:
+                errors.append(f"{source.relative_to(ROOT)}: missing tracked source path: {target}")
+    return errors
 
 
 def run_checks(include_protected_diff: bool = True) -> list[str]:
@@ -189,6 +229,13 @@ def run_checks(include_protected_diff: bool = True) -> list[str]:
     errors.extend(validate_current_versions())
     errors.extend(validate_legacy_paths_removed())
     errors.extend(validate_document_assets())
+    # Validate new documents before staging too, but never accept ignored local notes.
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, check=True,
+    )
+    tracked = set(result.stdout.decode("utf-8").split("\0"))
+    errors.extend(validate_repository_references(files, tracked))
     if include_protected_diff:
         errors.extend(validate_protected_diff())
     return errors

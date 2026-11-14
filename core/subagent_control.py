@@ -72,7 +72,7 @@ class SubagentControl:
 
     def _saved_history(self, row, data, reason):
         page = self.storage.agent_history_page(row["id"], data.get("before"), data.get("limit", 50))
-        journal = RuntimeJournal(os.path.dirname(self.storage.db_path))
+        journal = getattr(self.storage, "runtime_journal", None) or RuntimeJournal(os.path.dirname(self.storage.db_path))
         namespace = "subagent:" + row["conversation_id"] + ":" + row["id"]
         activity = []
         for message in page["messages"]:

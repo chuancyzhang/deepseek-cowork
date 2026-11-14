@@ -14,7 +14,7 @@ class Signal:
     def __init__(self):
         self.callbacks = []
 
-    def connect(self, callback, *_):
+    def subscribe(self, callback):
         self.callbacks.append(callback)
 
     def emit(self, *args):
@@ -36,7 +36,7 @@ class Worker:
     def stop(self):
         self.stopped = True
 
-    def isRunning(self):
+    def is_running(self):
         return self.running
 
     def deleteLater(self):
@@ -278,6 +278,8 @@ class ReliableSubagentTests(unittest.TestCase):
         aid = manager.spawn_agent("daemon task")["agent_id"]
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), DaemonRequestHandler)
         server.state = types.SimpleNamespace(chat_storage=self.storage, config_manager=self.config, lock=threading.RLock())
+        from core.runtime_coordinator import RuntimeCoordinator
+        server.state.request = types.MethodType(RuntimeCoordinator.request, server.state)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

@@ -47,53 +47,36 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         for import_path in ("openpyxl", "xlrd", "docx", "pptx", "PIL", "pypdf", "reportlab"):
             self.assertIn(f"_internal/python_env/Lib/site-packages/{import_path}/__init__.py", release_text)
 
-    def test_webengine_is_a_required_packaging_dependency(self):
-        with open(os.path.join(ROOT, "requirements.txt"), "r", encoding="utf-8") as handle:
-            requirements = handle.read()
-        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
-            spec_text = handle.read()
+    def test_native_service_and_electron_replace_qt_dependencies(self):
+        from pathlib import Path
+        import json
+        spec = ast.parse(Path(ROOT, "deepseek-cowork.spec").read_text(encoding="utf-8"))
+        analysis = next(node.value for node in spec.body if isinstance(node, ast.Assign)
+                        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "Analysis")
+        excludes = ast.literal_eval(next(item.value for item in analysis.keywords if item.arg == "excludes"))
+        self.assertEqual(ast.literal_eval(analysis.args[0]), ["scripts/desktop_service_entry.py"])
+        requirements = Path(ROOT, "requirements.txt").read_text(encoding="utf-8")
+        for name in ("PySide6", "PyQt5", "PyQt6", "shiboken6", "ui"):
+            self.assertIn(name, excludes)
+            self.assertNotIn(name + ">=", requirements)
+        package = json.loads(Path(ROOT, "desktop/package.json").read_text(encoding="utf-8"))
+        self.assertTrue(package["devDependencies"]["electron"])
 
-        self.assertIn("PySide6>=6.2.0", requirements)
-        self.assertIn("PySide6-Addons>=6.2.0", requirements)
-        required_modules = [
-            "PySide6.QtPositioning",
-            "PySide6.QtPdf",
-            "PySide6.QtPdfWidgets",
-            "PySide6.QtOpenGL",
-            "PySide6.QtQml",
-            "PySide6.QtQuick",
-            "PySide6.QtQuickWidgets",
-            "PySide6.QtSvg",
-            "PySide6.QtWebChannel",
-            "PySide6.QtWebEngineCore",
-            "PySide6.QtWebEngineWidgets",
-        ]
-        excludes = spec_text.split("excludes=[", 1)[1].split("],", 1)[0]
-        hidden_imports = spec_text.split("pyside6_hidden = [", 1)[1].split("]", 1)[0]
-        for module_name in required_modules:
-            self.assertIn(f'"{module_name}"', hidden_imports)
-            self.assertNotIn(f"'{module_name}'", excludes)
+    def test_packaging_filters_retired_gui_and_python_development_files(self):
+        normalize = self._load_spec_function("_normalized_bundle_path")
+        native = self._load_spec_function("_allow_native_bundle_entry")
+        python = self._load_spec_function("_allow_python_env_entry")
+        for function in (native, python):
+            function.__globals__["_normalized_bundle_path"] = normalize
+        for path in ("PySide6/QtCore.pyd", "PyQt6/Qt6/bin/Qt6Core.dll", "shiboken6/module.pyd"):
+            self.assertFalse(native((path, "source", "BINARY")))
+        self.assertTrue(native(("winpty/conpty.dll", "source", "BINARY")))
+        for path in ("python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
+                     "python_env/Lib/site-packages/docx/tests/test.py", "python_env/Lib/a.pyc"):
+            self.assertFalse(python((path, "source", "DATA")))
+        self.assertTrue(python(("python_env/Lib/site-packages/docx/__init__.py", "source", "DATA")))
 
-    def test_packaging_filters_debug_qt_resources_locales_and_python_development_files(self):
-        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
-            spec_text = handle.read()
-
-        self.assertIn("QT_TRANSLATION_ALLOWLIST", spec_text)
-        self.assertIn("QTWEBENGINE_LOCALE_ALLOWLIST", spec_text)
-        self.assertIn('lowered.startswith("pyside6/qml/")', spec_text)
-        self.assertIn('".debug." in basename', spec_text)
-        self.assertIn('relative.startswith("pythonwin/")', spec_text)
-        self.assertIn('for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editors", "dist"))', spec_text)
-        self.assertIn("datas=application_datas + qt_minimal_datas", spec_text)
-        self.assertIn("a.datas = _filter_entries", spec_text)
-        self.assertIn("a.binaries = _filter_entries", spec_text)
-
-    def test_office_preview_does_not_require_qtaxcontainer(self):
-        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
-            spec_text = handle.read()
-
-        hidden_imports = spec_text.split("pyside6_hidden = [", 1)[1].split("]", 1)[0]
-        self.assertNotIn('"PySide6.QtAxContainer"', hidden_imports)
 
     def test_dynamic_skill_core_modules_are_packaged(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:

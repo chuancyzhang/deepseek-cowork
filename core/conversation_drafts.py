@@ -30,11 +30,11 @@ def conversation_has_content(meta, *, has_messages=False, title="", status=""):
         return True
     if any(meta.get(key) for key in (
         "selected_skill_names", "conversation_agent", "knowledge_refs",
-        "composer_conversation_refs", "pending_clarify_questions", "manual_title",
+        "composer_conversation_refs", "conversation_refs", "pending_clarify_questions", "manual_title",
         "pinned", "has_file_changes", "ui_timeline_v1", "team_space_required", "workspace_pages",
     )):
         return True
-    if meta.get("grill_mode_state") in {"armed", "active"}:
+    if meta.get("grill_mode_state") in {"armed", "active"} or meta.get("mode") == "grilling":
         return True
     if str(status or meta.get("session_status") or "").lower() in {
         "running", "stopping", "waiting", "interrupted", "stopped", "completed", "failed", "error",
@@ -68,12 +68,12 @@ def history_record_title(record):
     if meta.get("workspace_pages"):
         page = meta["workspace_pages"][0]
         return "页面 · " + str(page.get("title") or "无标题页")[:24]
-    if meta.get("composer_conversation_refs") or meta.get("knowledge_refs"):
+    if meta.get("composer_conversation_refs") or meta.get("conversation_refs") or meta.get("knowledge_refs"):
         return "草稿 · 已添加引用"
     if meta.get("selected_skill_names"):
         return f"草稿 · 已选 {len(meta['selected_skill_names'])} 个技能"
     if meta.get("conversation_agent"):
         return "草稿 · 已选择专家"
-    if meta.get("grill_mode_state") == "armed":
+    if meta.get("grill_mode_state") == "armed" or meta.get("mode") == "grilling":
         return "草稿 · 拷问模式"
     return title or "新任务"

@@ -625,10 +625,9 @@ def inspect_image_bytes(data: bytes, *, filename: str = "") -> dict:
         raise ValueError("主题图片为空。")
     if len(data) > THEME_MAX_ASSET_BYTES:
         raise ValueError(f"主题图片不能超过 {THEME_MAX_ASSET_BYTES // (1024 * 1024)} MiB。")
-    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
-    from PySide6.QtGui import QImageReader
+    from io import BytesIO
+    from PIL import Image
 
-    payload = QByteArray(bytes(data))
     raw = bytes(data)
     if raw.startswith((b"GIF87a", b"GIF89a")):
         image_format = "gif"
@@ -656,54 +655,31 @@ def inspect_image_bytes(data: bytes, *, filename: str = "") -> dict:
         raise ValueError(f"主题 WebP 动画结构损坏：{filename or '<memory>'}")
     if image_format == "png" and _png_contains_animation(raw):
         raise ValueError(f"主题图片不支持 APNG 动画：{filename or '<memory>'}")
-    buffer = QBuffer()
-    buffer.setData(payload)
-    if not buffer.open(QIODevice.ReadOnly):
-        raise ValueError(f"主题图片无法读取：{filename or '<memory>'}")
-    reader = QImageReader(buffer)
-    reader.setDecideFormatFromContent(True)
-    declared_frames = int(reader.imageCount())
-    if declared_frames > THEME_MAX_ANIMATION_FRAMES:
-        raise ValueError(
-            f"主题动画不能超过 {THEME_MAX_ANIMATION_FRAMES} 帧：{filename or '<memory>'}"
-        )
-    frames = 0
-    decoded_pixels = 0
+    frames = decoded_pixels = width = height = 0
     delays = []
-    width = 0
-    height = 0
-    while reader.canRead():
-        image = reader.read()
-        if image.isNull():
-            raise ValueError(
-                f"主题图片无法解码：{filename or '<memory>'}；{reader.errorString()}"
-            )
-        frames += 1
-        if frames > THEME_MAX_ANIMATION_FRAMES:
-            raise ValueError(
-                f"主题动画不能超过 {THEME_MAX_ANIMATION_FRAMES} 帧：{filename or '<memory>'}"
-            )
-        frame_width, frame_height = image.width(), image.height()
-        if not width:
-            width, height = frame_width, frame_height
-        if (
-            frame_width > THEME_MAX_IMAGE_EDGE
-            or frame_height > THEME_MAX_IMAGE_EDGE
-            or frame_width * frame_height > THEME_MAX_IMAGE_PIXELS
-        ):
-            raise ValueError(f"主题图片尺寸超限：{filename or '<memory>'}")
-        decoded_pixels += frame_width * frame_height
-        if decoded_pixels > THEME_MAX_ANIMATION_DECODED_PIXELS:
-            raise ValueError(
-                "主题动画累计解码像素不能超过 "
-                f"{THEME_MAX_ANIMATION_DECODED_PIXELS}：{filename or '<memory>'}"
-            )
-        delays.append(int(reader.nextImageDelay()))
-    if frames < 1:
-        raise ValueError(
-            f"主题图片无法解码：{filename or '<memory>'}；{reader.errorString()}"
-        )
-    if declared_frames > 0 and declared_frames != frames:
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            declared_frames = int(getattr(image, "n_frames", 1))
+            if declared_frames > THEME_MAX_ANIMATION_FRAMES:
+                raise ValueError(f"主题动画不能超过 {THEME_MAX_ANIMATION_FRAMES} 帧：{filename or '<memory>'}")
+            for frame in range(declared_frames):
+                image.seek(frame)
+                frame_width, frame_height = image.size
+                if not width:
+                    width, height = frame_width, frame_height
+                if (frame_width <= 0 or frame_height <= 0
+                    or frame_width > THEME_MAX_IMAGE_EDGE or frame_height > THEME_MAX_IMAGE_EDGE
+                    or frame_width * frame_height > THEME_MAX_IMAGE_PIXELS):
+                    raise ValueError(f"主题图片尺寸超限：{filename or '<memory>'}")
+                decoded_pixels += frame_width * frame_height
+                if decoded_pixels > THEME_MAX_ANIMATION_DECODED_PIXELS:
+                    raise ValueError(f"主题动画累计解码像素不能超过 {THEME_MAX_ANIMATION_DECODED_PIXELS}：{filename or '<memory>'}")
+                image.load()
+                delays.append(int(image.info.get("duration", 0)))
+                frames += 1
+    except (OSError, EOFError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"主题图片无法解码：{filename or '<memory>'}；{exc}") from exc
+    if frames < 1 or frames != declared_frames:
         raise ValueError(f"主题动画帧数据不完整：{filename or '<memory>'}")
     animation = None
     if frames > 1:

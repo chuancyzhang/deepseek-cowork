@@ -3,9 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: qrc:; script-src 'self' qrc:; worker-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; worker-src 'self' data: blob:; style-src 'self' 'unsafe-inline' cowork-local: https:; img-src 'self' data: blob: cowork-local: https:; font-src 'self' data: cowork-local: https:; frame-src 'self' about:">
     <title>HTML 可视化编辑器</title>
     <link rel="stylesheet" href="editor.css">
+    <style>.editor-toolbar{flex-wrap:wrap;overflow-x:visible}.html-workspace{padding:0}#html-frame{border:0;border-radius:0}</style>
   </head>
   <body>
     <main class="editor-shell">
@@ -17,9 +18,9 @@
           <option value="h3">标题 3</option>
           <option value="blockquote">引用</option>
         </select>
-        <button type="button" data-html-command="bold"><strong>B</strong></button>
-        <button type="button" data-html-command="italic"><em>I</em></button>
-        <button type="button" data-html-command="underline"><u>U</u></button>
+        <button type="button" data-html-command="bold" title="加粗"><strong>B</strong></button>
+        <button type="button" data-html-command="italic" title="斜体"><em>I</em></button>
+        <button type="button" data-html-command="underline" title="下划线"><u>U</u></button>
         <span class="toolbar-separator"></span>
         <button type="button" data-html-command="insertUnorderedList">• 列表</button>
         <button type="button" data-html-command="insertOrderedList">1. 列表</button>
@@ -34,7 +35,7 @@
         <iframe id="html-frame" sandbox="allow-same-origin" title="HTML 可视化编辑区域"></iframe>
       </section>
     </main>
-    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="desktop-bridge.js"></script>
     <script src="html-editor.js"></script>
   </body>
 </html>

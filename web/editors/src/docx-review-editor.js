@@ -224,7 +224,7 @@ window.coworkEditor = {
     try {
       if (!chunks.length || chunks.includes(undefined)) throw new Error("Word 编辑内容传输不完整，请重新打开。");
       snapshot = JSON.parse(chunks.join("")); chunks = [];
-      state = { version: 1, regions: clone(snapshot.regions), revisions: {} };
+      state = snapshot.coworkDraft ? clone(snapshot.coworkDraft) : { version: 1, regions: clone(snapshot.regions), revisions: {} };
       cleanState = serialized(); savedPayload = ""; history = [clone(state)]; historyIndex = 0;
       lastEdit = { region: "", time: 0 };
       const sections = document.getElementById("sections"); sections.replaceChildren();
@@ -251,7 +251,7 @@ window.coworkEditor = {
   setTheme(theme) { for (const [key, value] of Object.entries(theme || {})) document.documentElement.style.setProperty(`--cowork-${key}`, value); },
   dispose() { snapshot = state = null; chunks = []; history = []; documentView.replaceChildren(); revisionView.replaceChildren(); }
 };
-new QWebChannel(qt.webChannelTransport, channel => {
-  bridge = channel.objects.deliverableEditorBridge;
+window.connectDesktopBridge("deliverableEditorBridge", nativeBridge => {
+  bridge = nativeBridge;
   bridge.ready("docx_review");
 });

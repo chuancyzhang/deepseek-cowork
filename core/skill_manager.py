@@ -14,6 +14,8 @@ import copy
 import threading
 import hashlib
 
+RETIRED_SKILLS = {"speech-to-text": "语音转文字已下线，已有音频与转写记录保留。"}
+
 from .env_utils import get_app_data_dir
 from .mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
@@ -480,6 +482,11 @@ class SkillManager:
         }
 
     def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        if skill_name in RETIRED_SKILLS:
+            return False
+        from .platform_capabilities import skill_unavailable_reason
+        if skill_unavailable_reason(skill_name):
+            return False
         if skill_name in {"browser-automation", "workbench"} and self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_OPTIONAL:
             # Both are registered; per-run routing prevents hot-unloading active tools.
             return True
@@ -1028,6 +1035,9 @@ class SkillManager:
         return deduped
 
     def _register_tool(self, skill_name, tool_name, func, description=None, tool_kind="legacy_function"):
+        from .platform_capabilities import tool_unavailable_reason
+        if tool_unavailable_reason(tool_name):
+            return
         if tool_name in self.tools:
             print(
                 f"[SkillManager] Duplicate tool '{tool_name}' from skill '{skill_name}' skipped; already provided by '{self.tool_to_skill_map.get(tool_name)}'."
@@ -1106,6 +1116,9 @@ class SkillManager:
         if not isinstance(export, dict):
             return
         tool_name = str(export.get("name") or "").strip()
+        from .platform_capabilities import tool_unavailable_reason
+        if tool_unavailable_reason(tool_name):
+            return
         func = export.get("handler")
         if not tool_name or not callable(func):
             return
@@ -1570,7 +1583,8 @@ class SkillManager:
     def get_skill_config_fields(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
-        return json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+        fields = json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+        return fields
 
     def get_skill_mcp_server_presets(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
@@ -1651,6 +1665,10 @@ class SkillManager:
             elif field.get("required"):
                 missing.append(name)
         config_errors = self._skill_config_requirement_errors(skill_name, values=values)
+        from .platform_capabilities import skill_unavailable_reason
+        platform_issue = skill_unavailable_reason(skill_name)
+        if platform_issue:
+            config_errors.append(platform_issue)
         if issue:
             config_errors.append(issue)
         return {
@@ -2118,6 +2136,12 @@ class SkillManager:
         meta, body = self._parse_skill_md_content(md_path) if os.path.exists(md_path) else ({}, "")
         spec = self._load_skill_json(skill_path)
         tool_refs = self._parse_tool_refs(meta, spec)
+        from .platform_capabilities import is_windows, tool_unavailable_reason
+        if not is_windows():
+            tool_refs = [name for name in tool_refs if not tool_unavailable_reason(name)]
+            if skill_name == "history-query":
+                meta["allowed-tools"] = ", ".join(tool_refs)
+                body = "Use query_history to search local chat history by keywords and date ranges. Vector indexing and vector search are unavailable on this platform."
         kind = self._normalize_skill_kind(meta, spec)
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
@@ -2200,6 +2224,10 @@ class SkillManager:
             return None
 
     def _prepare_skill_dependencies(self, skill_name, skill_path):
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if issue:
+            return {"ok": False, "message": issue, "unsupported_platform": True}
         spec = self._load_skill_json(skill_path)
         if not isinstance(spec, dict):
             return {"ok": True, "message": "No dependency metadata."}
@@ -2236,6 +2264,10 @@ class SkillManager:
 
     def ensure_skill_dependencies_ready(self, skill_name, progress=None, observability=None, retry=False):
         """Prepare one loaded Skill's declared dependencies through the process coordinator."""
+        from .platform_capabilities import skill_unavailable_reason
+        issue = skill_unavailable_reason(skill_name)
+        if issue:
+            return {"ok": False, "message": issue, "unsupported_platform": True}
         normalized_name = str(skill_name or "").strip()
         record = self.skill_records.get(normalized_name)
         if not record:
@@ -2326,7 +2358,7 @@ class SkillManager:
 
     def _find_skill_path(self, skill_name):
         normalized_name = str(skill_name or "").strip()
-        if not normalized_name:
+        if not normalized_name or normalized_name in RETIRED_SKILLS:
             return None
         loaded_path = getattr(self, "loaded_skill_sources", {}).get(normalized_name)
         if loaded_path and os.path.isdir(loaded_path):
@@ -2385,7 +2417,7 @@ class SkillManager:
 
     def _find_user_skill_path(self, skill_name):
         normalized_name = str(skill_name or "").strip()
-        if not normalized_name:
+        if not normalized_name or normalized_name in RETIRED_SKILLS:
             return None
         for skills_dir in self._skill_roots_in_load_order():
             root = os.path.abspath(skills_dir)
@@ -2597,6 +2629,8 @@ class SkillManager:
                                  on_commit=None):
         from .skillhub import ORIGIN_FILE, file_hashes, read_origin
         skill_name = self._read_skill_name_from_path(source_path)
+        if skill_name in RETIRED_SKILLS:
+            raise ValueError(RETIRED_SKILLS[skill_name])
         from core.skill_from_conversation import is_valid_skill_name
         if not is_valid_skill_name(skill_name):
             raise ValueError("Invalid skill name")
@@ -2929,7 +2963,7 @@ class SkillManager:
                 continue
             is_ai_dir = os.path.basename(skills_dir) == "ai_skills"
             for skill_name in sorted(os.listdir(skills_dir)):
-                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
+                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen or skill_name in RETIRED_SKILLS:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not self._is_skill_directory(skill_path):
@@ -2964,6 +2998,11 @@ class SkillManager:
                 info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
                 if info.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
                     info["type"] = self.BUNDLED_PLUGIN_SOURCE_TYPE
+                from .platform_capabilities import skill_unavailable_reason
+                issue = skill_unavailable_reason(skill_name)
+                if issue:
+                    info.update(enabled=False, platform_unavailable=issue)
+                info["config_fields"] = self.get_skill_config_fields(skill_name)
                 all_skills.append(info)
                 seen.add(skill_name)
         for skill_name, record in self.skill_records.items():
@@ -3238,7 +3277,7 @@ class SkillManager:
             if not os.path.exists(skills_dir):
                 continue
             for skill_name in sorted(os.listdir(skills_dir)):
-                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
+                if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen or skill_name in RETIRED_SKILLS:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not self._is_skill_directory(skill_path):
@@ -3666,6 +3705,11 @@ class SkillManager:
         from .execution_authorization import invoke, current_authorization
         record = self.tool_registry.get(name)
         resolved_name = record.name if record else str(name or "").strip()
+        from .platform_capabilities import skill_unavailable_reason, tool_unavailable_reason
+        platform_issue = tool_unavailable_reason(resolved_name) or skill_unavailable_reason(
+            (args or {}).get("skill_name") if resolved_name == "run_skill_script" else self.tool_to_skill_map.get(resolved_name))
+        if platform_issue:
+            return {"ok": False, "status": "unsupported_platform", "executed": False, "error": platform_issue}
         if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
         from .connection_retirement import skill_issue

@@ -8,7 +8,7 @@ import threading
 import hashlib
 import inspect
 from datetime import datetime
-from PySide6.QtCore import QThread, Signal, Slot
+from core.runtime_tasks import EventSource, TaskWorker
 from core.skill_manager import SkillManager
 from core.env_utils import get_python_executable, get_runtime_snapshot
 from core.im_gateway_registry import (
@@ -643,20 +643,8 @@ def sanitize_llm_messages(
         }
     return cleaned
 
-class LLMWorker(QThread):
+class LLMWorker(TaskWorker):
     """后台调用 LLM API 的线程，支持 Tool Calls 和多轮思考"""
-    finished_signal = Signal(dict)
-    step_signal = Signal(str) # 用于输出中间步骤日志
-    thinking_signal = Signal(str) # 用于实时输出思考过程
-    skill_used_signal = Signal(str) # Signal to report active skill usage
-    tool_call_signal = Signal(dict)
-    tool_result_signal = Signal(dict)
-    content_signal = Signal(str)
-    content_snapshot_signal = Signal(str)
-    output_signal = Signal(str) # For generic output/errors
-    agent_state_signal = Signal(dict) # Signal to report sub-agent status
-    observability_signal = Signal(dict)
-    abort_signal = Signal() # Signal emitted when the worker is stopped
 
     def __init__(
         self,
@@ -677,6 +665,18 @@ class LLMWorker(QThread):
         data_security_policy=None,
     ):
         super().__init__()
+        self.finished_signal = EventSource()
+        self.step_signal = EventSource()
+        self.thinking_signal = EventSource()
+        self.skill_used_signal = EventSource()
+        self.tool_call_signal = EventSource()
+        self.tool_result_signal = EventSource()
+        self.content_signal = EventSource()
+        self.content_snapshot_signal = EventSource()
+        self.output_signal = EventSource()
+        self.agent_state_signal = EventSource()
+        self.observability_signal = EventSource()
+        self.abort_signal = EventSource()
         self.messages, self.excluded_provider_message_ids = project_provider_messages(messages)
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
@@ -719,9 +719,6 @@ class LLMWorker(QThread):
         )
         from core.browser_backend import bind_run
         self.run_context["browser_backend"] = bind_run(config_manager, self.execution_authorization, worker=True)
-        browser_coordinator = self.execution_authorization._browser_state["coordinator"]
-        if browser_coordinator.snapshot()["recoverable"]:
-            browser_coordinator.request_recovery()
         self.bootstrap = BootstrapSession()
         self._authorization_events = {}
         
@@ -758,7 +755,7 @@ class LLMWorker(QThread):
                 change_publisher=self._publish_skill_change,
             )
             skill_catalog_service.subscribe(self._on_skill_catalog_changed)
-            self.finished.connect(self._detach_skill_catalog)
+            self.finished.subscribe(self._detach_skill_catalog)
         else:
             # Compatibility path for direct unit construction; production request paths pass a catalog.
             self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
@@ -777,8 +774,8 @@ class LLMWorker(QThread):
         try:
             history_dir = self.config_manager.get_chat_history_dir()
             db_path = os.path.join(history_dir, "chat_history.sqlite")
-            self.chat_storage = ChatStorage(db_path)
-            self.runtime_journal = RuntimeJournal(history_dir)
+            self.chat_storage = getattr(config_manager, "runtime_storage", None) or ChatStorage(db_path)
+            self.runtime_journal = getattr(config_manager, "runtime_journal", None) or RuntimeJournal(history_dir)
             self.runtime_run_managed = bool(
                 self.session_id
                 and self.request_id
@@ -1162,14 +1159,12 @@ class LLMWorker(QThread):
             data_security_policy=self.data_security_run.policy,
         )
 
-    @Slot(str)
     def relay_agent_step(self, text):
         try:
             self.step_signal.emit(str(text))
         except Exception:
             pass
 
-    @Slot(dict)
     def relay_agent_state(self, payload):
         try:
             if isinstance(payload, dict):
@@ -2959,8 +2954,6 @@ class LLMWorker(QThread):
                                       f"工具 {name} 的执行结果未知；禁止自动重复执行。请先只读核实。")}
             if context["abort_check"]():
                 return result
-            if name == "browser_skill_cli" and isinstance(result, dict) and (result.get("recovery") or {}).get("kind") == "browser":
-                return result
             failure = self._tool_result_failure_kind(result)
             if (failure == "failed" and policy.get("safe_retry") and attempt < max_attempts
                     and not (isinstance(result, dict) and result.get("authorization_status"))
@@ -2980,9 +2973,6 @@ class LLMWorker(QThread):
             return result
 
     def _run_managed_tool(self, name, args, context, execution_id, policy, predecessor):
-        if getattr(self, "_browser_failure", None):
-            return {"status": "denied", "not_executed": True,
-                    "error": "浏览器暂时不可用，本轮后续操作未执行。"}, predecessor
         manager = self._ensure_tool_tasks()
         if name == "wait_tool":
             if (not isinstance(args, dict) or set(args) - {"task_id", "terminate"}
@@ -3042,10 +3032,6 @@ class LLMWorker(QThread):
     def _apply_tool_result_effects(self, name, args, result, task=None):
         if is_pending_tool_result(result) or (task is not None and task.effects_applied):
             return result
-        if name == "browser_skill_cli" and isinstance(result, dict) and (result.get("recovery") or {}).get("kind") == "browser":
-            self._browser_failure = result.get("error") or {}
-            self.observability_signal.emit({"type": "browser_task_blocked", "run_id": self.request_id,
-                                           "error": self._browser_failure, "timestamp": time.time()})
         if name == "request_user_input" and self._is_grilling_mode():
             if self._is_grill_checkpoint_args(args):
                 result = self._apply_grill_checkpoint_result(args, result)
@@ -3092,18 +3078,6 @@ class LLMWorker(QThread):
                     "result_text": ToolTaskManager.result_text(result), "tool_effects_applied": True,
                 })
         return result
-
-    def _finish_browser_failure(self, generated_messages):
-        if self.is_stopped or not getattr(self, "_browser_failure", None):
-            return False
-        self._checkpoint_generated_ledger(generated_messages, boundary="browser_unavailable")
-        self._commit_tool_deliveries()
-        self.finished_signal.emit({
-            "error": "浏览器暂时无法继续操作，已保留本次进度。",
-            "error_type": "BrowserUnavailable", "error_detail": self._browser_failure,
-            "generated_messages": generated_messages, "turn_id": self.turn_id, "request_id": self.request_id,
-        })
-        return True
 
     def _emit_tool_task_result(self, task, result, *, waiting=False):
         payload = {
@@ -3330,7 +3304,7 @@ class LLMWorker(QThread):
             self._close_data_security()
             try:
                 from core.browser_backend import finish_run
-                finish_run(self.execution_authorization, background=True)
+                finish_run(self.execution_authorization)
             except Exception as exc:
                 self.observability_signal.emit({"type": "browser_cleanup_error", "error": str(exc),
                                                "run_id": self.execution_authorization.run_id})
@@ -3376,7 +3350,7 @@ class LLMWorker(QThread):
         generated_messages = []
 
         # Invalid/missing scope is a visible failure before any bootstrap or
-        # context append. A QThread exception alone would leave the UI running.
+        # context append. An unhandled worker exception alone would leave the UI running.
         try:
             from core.team_spaces import resolve_run_binding
             space_binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
@@ -3418,7 +3392,7 @@ class LLMWorker(QThread):
             # Check Control Flags
             while self.is_paused:
                 if self.is_stopped: break
-                self.msleep(100)
+                time.sleep(0.1)
             if self.is_stopped: 
                 final_content = "⚠️ Operation stopped by user."
                 break
@@ -3434,9 +3408,6 @@ class LLMWorker(QThread):
                 })
                 return
             self._append_pending_guidance(current_messages, generated_messages)
-
-            if self._finish_browser_failure(generated_messages):
-                return
 
             if getattr(self, "_grill_prompt_reset", False):
                 grill_checkpoint_prompt_attempts = 0
@@ -3715,7 +3686,7 @@ class LLMWorker(QThread):
                             # Check Pause/Stop during stream
                             while self.is_paused:
                                  if self.is_stopped: break
-                                 self.msleep(100)
+                                 time.sleep(0.1)
                             if self.is_stopped: break
 
                             type_ = chunk.get("type")
@@ -4476,7 +4447,7 @@ class LLMWorker(QThread):
                             # Check Control Flags inside tool loop
                             while self.is_paused:
                                 if self.is_stopped: break
-                                self.msleep(100)
+                                time.sleep(0.1)
                             if self.is_stopped: break
                             
                             name = str(tool.function.name or "").strip()
@@ -4938,8 +4909,6 @@ class LLMWorker(QThread):
                                 "turn_id": self.turn_id,
                                 "request_id": self.request_id,
                             })
-                            return
-                        if self._finish_browser_failure(generated_messages):
                             return
                         if self.bootstrap.active and not self.is_stopped and not self._ensure_tool_tasks().outstanding():
                             self._finish_bootstrap(

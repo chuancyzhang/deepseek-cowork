@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 
-from core.theme import default_design_tokens, resolve_theme, theme_token_schema
+from core.theme_tokens import default_design_tokens, theme_token_schema
+from core.system_fonts import installed_font_families
 from core.theme_package import DEFAULT_WORKSPACE_SCENE
 from core.theme_service import (
     DEFAULT_THEME_ID,
     ThemeRepository,
+    resolve_theme,
     append_theme_log,
     theme_contrast_warnings,
     theme_manifest_schema,
@@ -113,9 +115,7 @@ def inspect_ui_theme(theme_id="", include_schema=True, _context=None):
         }
         result["manifest_schema"] = theme_manifest_schema()
         try:
-            from PySide6.QtGui import QFontDatabase
-
-            result["installed_font_families"] = list(QFontDatabase.families())
+            result["installed_font_families"] = installed_font_families()
         except Exception as exc:
             result["font_inventory_error"] = str(exc)
     return result
@@ -131,9 +131,7 @@ def _validate_ui_theme(
         if normalized.get(field)
     }
     if requested_fonts:
-        from PySide6.QtGui import QFontDatabase
-
-        installed = {family.casefold() for family in QFontDatabase.families()}
+        installed = {family.casefold() for family in installed_font_families()}
         missing = sorted(
             family for family in requested_fonts if family.casefold() not in installed
         )

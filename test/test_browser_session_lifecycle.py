@@ -103,19 +103,6 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         self.service.assert_called_once()
         self.assertTrue(self.coordinator.owns_session("chat", "run", "request:" + self.token))
 
-    def test_readiness_failure_does_not_leave_an_unsent_request_to_block_switching(self):
-        with patch.object(component, "browser_skill_status", return_value={"ready": False, "health_error": "incompatible"}):
-            result = self.start()
-        self.assertTrue(result["not_executed"])
-        self.assertEqual(result["recovery"]["kind"], "browser")
-        self.assertEqual(self.calls, [])
-        with self.coordinator._transaction() as db:
-            row = db.execute("SELECT sessions FROM leases").fetchone()
-            self.assertEqual(json.loads(row[0]), [])
-        finish_run(self.auth, background=True)
-        self.assertFalse(self.coordinator.run_active("chat", "run"))
-        self.assertFalse(self.coordinator.save(True)["pending"])
-
     def test_claim_failure_retains_session_and_request(self):
         self.claim_state = "closed"
         result = self.start()
@@ -124,35 +111,11 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         self.assertTrue(self.coordinator.owns_session("chat", "run", "request:" + self.token))
         self.assertTrue(self.coordinator.owns_session("chat", "run", "abcd"))
 
-    def test_service_loss_before_prepare_is_recoverable_without_phantom_request(self):
-        self.service.return_value = {"ready": False, "code": "service_unavailable", "detail": "IPC lost"}
-        result = self.start()
-        self.assertTrue(result["not_executed"])
-        self.assertEqual(result["recovery"]["kind"], "browser")
-        self.assertEqual(self.calls, [])
-        finish_run(self.auth, background=True)
-        self.assertFalse(self.coordinator.run_active("chat", "run"))
-
     def test_help_does_not_start_service_or_prepare(self):
         result = self.browser.browser_skill_cli(["session", "start", "--help"], _context=self.context)
         self.assertEqual(result["status"], "completed")
         self.service.assert_not_called()
         self.assertEqual(self.calls, [["session", "start", "--help"]])
-
-    def test_interrupted_call_preserves_ownership_for_background_cleanup(self):
-        self.assertEqual(self.start()["status"], "completed")
-        with patch.object(component, "_wait_process_while_monitoring", return_value={"aborted": True, "timed_out": False}), \
-                patch.object(component, "_stop_session_after_interruption", return_value={"stopped": True}) as cleanup, \
-                patch.object(component, "prepare_browser_recovery"):
-            result = self.browser.browser_skill_cli(["tab", "list", "--session", "abcd"], _context=self.context)
-            self.assertEqual(result["error"]["code"], "aborted")
-            self.assertTrue(result["session_cleanup"]["pending"])
-            cleanup.assert_not_called()
-            self.assertTrue(self.coordinator.owns_session("chat", "run", "abcd"))
-            finish_run(self.auth, background=True)
-            self.coordinator.request_recovery().join(5)
-            self.assertFalse(self.coordinator.run_active("chat", "run"))
-            cleanup.assert_called_once()
 
     def test_cancel_acknowledgement_is_not_cleanup_confirmation(self):
         self.start_error = True

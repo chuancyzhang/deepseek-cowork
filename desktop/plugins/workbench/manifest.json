@@ -1,0 +1,26 @@
+{
+  "id": "cowork.workbench",
+  "name": "Cowork 工作台",
+  "version": "2.0.0",
+  "description": "内置对话、管理页面和工作区。宿主持有输入、编辑和后台任务。",
+  "hostApi": 2,
+  "stateVersion": 1,
+  "entry": "index.html",
+  "capabilities": ["conversations.read", "conversations.write", "runs.control", "drafts.read", "drafts.write", "files.read", "files.write", "document.read", "document.edit", "management.read", "management.write", "navigation", "theme", "dialogs", "desktop"],
+  "contributes": [
+    {"id":"main", "kind":"workbench", "target":"main"},
+    {"id":"chat", "kind":"page", "target":"chat"},
+    {"id":"settings", "kind":"page", "target":"settings"},
+    {"id":"capabilities", "kind":"page", "target":"capabilities"},
+    {"id":"library", "kind":"page", "target":"library"},
+    {"id":"favorites", "kind":"page", "target":"favorites"},
+    {"id":"team", "kind":"page", "target":"team"},
+    {"id":"plugins", "kind":"page", "target":"plugins"},
+    {"id":"workspace", "kind":"panel", "target":"workspace"},
+    {"id":"files", "kind":"panel", "target":"files"},
+    {"id":"tasks", "kind":"panel", "target":"tasks"},
+    {"id":"browser", "kind":"panel", "target":"browser"},
+    {"id":"terminal", "kind":"panel", "target":"terminal"},
+    {"id":"office", "kind":"editor", "target":"*"}
+  ]
+}

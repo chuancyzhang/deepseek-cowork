@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from core.data_security import begin_run, normalize_config
-from core.llm.providers import OpenAIProvider, AnthropicProvider
+from core.llm.providers import AnthropicProvider
 from core.conversation_render import project_visible_messages
 
 
@@ -22,6 +22,36 @@ class DataSecurityIntegrationTests(unittest.TestCase):
         patcher = patch("bundled_plugins.data_security.events.append")
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_restored_reply_save_queue_and_unacknowledged_restart_recovery(self):
+        from core.chat_storage import ChatStorage
+        from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
+        from core.chat_recovery_journal import ChatRecoveryJournal
+        from core.conversation_render import project_visible_messages
+        token = "[[CW:111111111111:email:1111111111111111]]"
+        path = str(Path(self.temp.name) / "queue-history.sqlite")
+        messages = [{"id": "u-queue", "role": "user", "content": "alice@example.org"},
+                    {"id": "a-queue", "role": "assistant", "content": token,
+                     "meta": {"security_display_content": "alice@example.org", "data_security_tokens": True}}]
+        request = ChatSaveRequest("queue-session", messages, "test", "completed", {}, 0, revision=1)
+        journal = ChatRecoveryJournal(self.temp.name)
+        journal.record(request)
+        worker = ChatSaveWorker(path, debounce_ms=0)
+        worker.start()
+        try:
+            self.assertTrue(worker.enqueue(request))
+            self.assertTrue(worker.wait_for_revision("queue-session", 1, timeout_ms=3000))
+        finally:
+            self.assertTrue(worker.stop_worker())
+        storage = ChatStorage(path)
+        # Simulate restart before the UI received the successful write ack.
+        _, errors = ChatRecoveryJournal(self.temp.name).recover_into(storage)
+        self.assertFalse(errors)
+        reopened = storage.get_messages("queue-session")
+        self.assertEqual(len(reopened), 2)
+        self.assertEqual(reopened[-1]["content"], token)
+        self.assertEqual(project_visible_messages(reopened)[-1]["content"], "alice@example.org")
+
 
     def test_chat_and_responses_hook_after_attachment_expansion(self):
         from test_deepseek_provider import TestOpenAIProviderDeepSeek

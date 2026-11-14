@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -257,7 +260,11 @@ def _finish_office_helper(process, paths):
                 log.exception("office_preview.cleanup_error helper_pid=%s", process.pid)
 
 
-def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False):
+def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto"):
+    if renderer not in {"auto", "libreoffice"}:
+        raise ValueError("不支持的文档渲染器。")
+    if renderer == "libreoffice" or os.name != "nt":
+        return _render_libreoffice_pdf(path, cancel=cancel, timeout=timeout, root=root, force=force)
     source = Path(path).resolve()
     family = OFFICE_FAMILIES.get(source.suffix.lower())
     if family is None:
@@ -269,8 +276,6 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
     target = root / ("office-v1-" + fingerprint + ".pdf")
     if target.is_file() and not force:
         return str(target), fingerprint
-    if os.name != "nt":
-        raise WorkbenchError("renderer_unavailable", "本机 Office 版式预览需要 Windows。")
     cancel = cancel or threading.Event()
     if cancel.is_set():
         raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
@@ -396,3 +401,95 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False)
             partial.unlink(missing_ok=True)
             snapshot.unlink(missing_ok=True)
             cancel_path.unlink(missing_ok=True)
+
+
+def _libreoffice_executable():
+    from .libreoffice_component import managed_executable
+    candidates = [os.environ.get("COWORK_LIBREOFFICE_EXE"), managed_executable(), shutil.which("soffice"),
+                  shutil.which("libreoffice"), "/Applications/LibreOffice.app/Contents/MacOS/soffice"]
+    if os.name == "nt":
+        candidates.extend(str(Path(folder) / "LibreOffice/program/soffice.com")
+                          for folder in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")) if folder)
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return str(Path(candidate).resolve())
+    raise WorkbenchError("renderer_unavailable", "需要安装 LibreOffice 才能预览页面版式。也可以用本机应用打开原文件。")
+
+
+@contextmanager
+def _libreoffice_staging(root):
+    from .platform_runtime import platform_runtime
+    root = Path(root).resolve()
+    staging = Path(tempfile.mkdtemp(prefix="libreoffice-", dir=root)).resolve()
+    if not staging.is_relative_to(root):
+        raise ValueError("文档预览临时目录无效。")
+    try:
+        yield staging
+    finally:
+        # Keep normal paths for soffice/file URIs, extended paths only for I/O:
+        # LibreOffice creates deeply nested extension caches on Windows.
+        shutil.rmtree(platform_runtime.filesystem_path(staging))
+
+
+def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=False):
+    from .process_utils import popen_external_program, terminate_process_tree
+    source = Path(path).resolve()
+    if source.suffix.lower() not in OFFICE_FAMILIES:
+        raise WorkbenchError("unsupported", "此格式没有 Office 版式预览。")
+    cancel = cancel or threading.Event()
+    if cancel.is_set():
+        raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
+    executable = _libreoffice_executable()
+    data = source_bytes(source)
+    fingerprint = hashlib.sha256(data).hexdigest()
+    binary = os.stat(executable)
+    renderer_key = hashlib.sha256(f"{executable}|{binary.st_size}|{binary.st_mtime_ns}".encode()).hexdigest()[:16]
+    root = Path(root or cache_root())
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f"libreoffice-v1-{renderer_key}-{fingerprint}.pdf"
+    if target.is_file() and not force:
+        return str(target), fingerprint
+    log.info("office_preview.start renderer=libreoffice source_version=%s", fingerprint[:12])
+    process = None
+    try:
+        with _libreoffice_staging(root) as staging:
+            snapshot = staging / ("source" + source.suffix)
+            snapshot.write_bytes(data)
+            profile = staging / "profile"
+            output = staging / "source.pdf"
+            with (staging / "conversion.log").open("wb") as trace:
+                process = popen_external_program(
+                    [executable, "-env:UserInstallation=" + profile.as_uri(), "--headless", "--nologo",
+                     "--nodefault", "--norestore", "--convert-to", "pdf", "--outdir", str(staging), str(snapshot)],
+                    stdin=subprocess.DEVNULL, stdout=trace, stderr=subprocess.STDOUT,
+                    start_new_session=os.name != "nt", **subprocess_kwargs_no_window(),
+                )
+                deadline = time.monotonic() + timeout
+                try:
+                    while process.poll() is None:
+                        if cancel.wait(.05):
+                            raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
+                        if time.monotonic() >= deadline:
+                            raise WorkbenchError("renderer_timeout", "LibreOffice 版式预览超时，请检查文件后重试，或用系统应用打开。")
+                finally:
+                    if process.poll() is None:
+                        terminate_process_tree(process)
+                if process.returncode != 0 or not output.is_file():
+                    raise WorkbenchError("renderer_failed", "LibreOffice 未能转换此文档。源文件未修改，请重试或用本机应用打开。")
+            from pypdf import PdfReader
+            try:
+                if not PdfReader(str(output)).pages:
+                    raise ValueError("empty PDF")
+            except Exception as exc:
+                raise WorkbenchError("invalid_pdf", "LibreOffice 没有返回有效的 PDF，请重试或用系统应用打开。") from exc
+            if cancel.is_set():
+                raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
+            if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
+                raise WorkbenchError("source_changed", "文件在转换时发生修改，请重新预览最新版本。")
+            os.replace(output, target)
+        log.info("office_preview.finish renderer=libreoffice source_version=%s", fingerprint[:12])
+        return str(target), fingerprint
+    except Exception as exc:
+        log.warning("office_preview.failed renderer=libreoffice source_version=%s reason=%s exit=%s",
+                    fingerprint[:12], getattr(exc, "code", type(exc).__name__), getattr(process, "returncode", None))
+        raise

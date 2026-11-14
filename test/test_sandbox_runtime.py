@@ -212,6 +212,31 @@ class TestSandboxRuntime(unittest.TestCase):
         self.assertTrue(calls[1][0].endswith(os.path.join("skills", "first", "python", "site-packages")))
         self.assertTrue(calls[2][0].endswith(os.path.join("skills", "second", "python", "site-packages")))
 
+    def test_skill_dll_paths_follow_the_current_data_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = {"root": os.path.join(temp_dir, "sandbox"),
+                       "python": os.path.join(temp_dir, "python", "python.exe")}
+            profiles = [os.path.join(temp_dir, name) for name in ("first", "second")]
+            native_dirs = []
+            for profile in profiles:
+                native_dir = os.path.join(profile, "runtime_sandbox", "v1", "skills",
+                                          "shared-skill", "python", "site-packages", "native")
+                os.makedirs(native_dir)
+                with open(os.path.join(native_dir, "demo.dll"), "wb") as handle:
+                    handle.write(b"fixture")
+                native_dirs.append(native_dir)
+
+            with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
+                 patch.object(sandbox_runtime, "_toolkit_python_paths", return_value=[]):
+                for index in (0, 1, 0):
+                    with self.subTest(profile=index), \
+                         patch.object(sandbox_runtime, "get_app_data_dir", return_value=profiles[index]):
+                        env = sandbox_runtime.build_sandbox_env(skill_id="shared-skill")
+                        for key in ("PATH", "COWORK_PYTHON_DLL_DIRS"):
+                            paths = env[key].split(os.pathsep)
+                            self.assertIn(native_dirs[index], paths)
+                            self.assertNotIn(native_dirs[1 - index], paths)
+
     def test_install_skill_dependencies_clears_skill_dll_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_root = os.path.join(temp_dir, "sandbox")
@@ -401,8 +426,8 @@ class TestSandboxRuntime(unittest.TestCase):
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
                  patch("core.sandbox_runtime.subprocess.check_output", return_value="installed") as check_output:
                 result = sandbox_runtime.install_skill_dependencies(
-                    "speech-to-text",
-                    node_dependencies=["sherpa-onnx-node@1.12.33"],
+                    "fixture-node-skill",
+                    node_dependencies=["fixture-package@1.0.0"],
                     node_registry_url="https://registry.npmmirror.com/",
                     force=True,
                 )

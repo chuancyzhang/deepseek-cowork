@@ -1,4 +1,4 @@
-"""DPAPI-encrypted per-conversation mappings; short cross-process transactions."""
+"""Native-protected per-conversation mappings; short cross-process transactions."""
 from __future__ import annotations
 
 import json
@@ -19,8 +19,8 @@ class TokenVault:
 
     def crypt(self):
         if self.protector is None:
-            from core.variable_store import WindowsDpapiProtector
-            self.protector = WindowsDpapiProtector()
+            from core.credential_protection import create_credential_protector
+            self.protector = create_credential_protector(os.path.dirname(os.path.dirname(self.path)))
         return self.protector
 
     def _decode(self, row):

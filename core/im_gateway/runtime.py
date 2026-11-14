@@ -2162,8 +2162,10 @@ def build_context():
     session_mapper = SessionMapper(chat_storage)
 
     daemon_host = config_manager.get("daemon_host", DEFAULT_HOST)
-    daemon_port = config_manager.get("daemon_port", DEFAULT_PORT)
-    daemon_client = DaemonClient(daemon_host, daemon_port)
+    desktop_port = os.environ.pop("COWORK_GATEWAY_PORT", "")
+    desktop_token = os.environ.pop("COWORK_GATEWAY_TOKEN", "")
+    daemon_port = int(desktop_port) if desktop_port else config_manager.get("daemon_port", DEFAULT_PORT)
+    daemon_client = DaemonClient("127.0.0.1" if desktop_port else daemon_host, daemon_port, desktop_token=desktop_token)
 
     providers = []
     for provider_name in _enabled_provider_names(config_manager):

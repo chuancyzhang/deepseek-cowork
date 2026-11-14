@@ -167,8 +167,6 @@ def capability_summary(model):
     labels = []
     if model.get("supports_vision"):
         labels.append("图片理解")
-    if model.get("supports_image_generation"):
-        labels.append("图片生成")
     if model.get("reasoning_efforts"):
         labels.append("推理 " + str(model.get("reasoning_effort") or "/".join(model["reasoning_efforts"])))
     if evidence:

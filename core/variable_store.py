@@ -10,6 +10,9 @@ import threading
 import time
 import uuid
 from ctypes import wintypes
+from .credential_protection import (
+    KEYRING_PREFIX, CredentialProtectionError, create_credential_protector,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +28,7 @@ MAX_NAME_LENGTH = 64
 MAX_VALUE_LENGTH = 8192
 
 
-class VariableStoreError(RuntimeError):
+class VariableStoreError(CredentialProtectionError):
     pass
 
 
@@ -34,6 +37,7 @@ class _DataBlob(ctypes.Structure):
 
 
 class WindowsDpapiProtector:
+    prefix = DPAPI_PREFIX
     _UI_FORBIDDEN = 0x1
 
     def __init__(self):
@@ -131,7 +135,7 @@ def _normalize_value(value):
 
 
 class VariableStore:
-    """Single-writer global variable store. Secret values are DPAPI protected."""
+    """Single-writer global variable store with native credential protection."""
 
     def __init__(self, data_dir, protector=None):
         self.data_dir = os.path.abspath(os.fspath(data_dir))
@@ -144,7 +148,7 @@ class VariableStore:
 
     def _get_protector(self):
         if self._protector is None:
-            self._protector = WindowsDpapiProtector()
+            self._protector = create_credential_protector(self.data_dir)
         return self._protector
 
     def _file_signature(self):
@@ -184,8 +188,8 @@ class VariableStore:
                 if not isinstance(item.get("value"), str):
                     raise VariableStoreError(f"普通变量“{name}”缺少有效值。")
             else:
-                if not str(item.get("protected_value") or "").startswith(DPAPI_PREFIX):
-                    raise VariableStoreError(f"敏感凭据“{name}”不是有效的 DPAPI 数据。")
+                if not str(item.get("protected_value") or "").startswith((DPAPI_PREFIX, KEYRING_PREFIX)):
+                    raise VariableStoreError(f"敏感凭据“{name}”不是有效的加密数据。")
                 if "allow_ai_read" in item and not isinstance(item.get("allow_ai_read"), bool):
                     raise VariableStoreError(f"敏感凭据“{name}”的 AI 读取权限格式无效。")
             ids.add(identifier)
@@ -285,16 +289,22 @@ class VariableStore:
             return len(snapshot["entries"])
 
     def _protect(self, value):
-        raw = self._get_protector().protect(value.encode("utf-8"))
-        return DPAPI_PREFIX + base64.b64encode(raw).decode("ascii")
+        protector = self._get_protector()
+        try:
+            raw = protector.protect(value.encode("utf-8"))
+        except CredentialProtectionError as exc:
+            raise VariableStoreError(str(exc)) from exc
+        return getattr(protector, "prefix", DPAPI_PREFIX) + base64.b64encode(raw).decode("ascii")
 
     def _unprotect(self, payload):
         encoded = str(payload or "")
-        if not encoded.startswith(DPAPI_PREFIX):
-            raise VariableStoreError("敏感凭据不是有效的 DPAPI 数据。")
+        protector = self._get_protector()
+        prefix = getattr(protector, "prefix", DPAPI_PREFIX)
+        if not encoded.startswith(prefix):
+            raise VariableStoreError("凭据不属于当前平台，请重新录入。")
         try:
-            protected = base64.b64decode(encoded[len(DPAPI_PREFIX):], validate=True)
-            return self._get_protector().unprotect(protected).decode("utf-8")
+            protected = base64.b64decode(encoded[len(prefix):], validate=True)
+            return protector.unprotect(protected).decode("utf-8")
         except VariableStoreError:
             raise
         except Exception as exc:

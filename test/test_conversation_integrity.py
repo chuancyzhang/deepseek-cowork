@@ -1,4 +1,9 @@
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+from core.chat_storage import ChatStorage
+from core.conversation_actions import clone_branch, retain_branch_text_history
 
 from core.conversation_integrity import (
     LedgerMessageConflictError,
@@ -317,6 +322,60 @@ class TestConversationIntegrity(unittest.TestCase):
             [{"id": "m1", "role": "user", "content": "同一事件"}],
         )
         self.assertEqual(len(merged), 1)
+
+
+class BranchStorageTests(unittest.TestCase):
+    def test_branch_boundary_independence_files_and_atomic_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source"
+            source.mkdir()
+            attachment = source / "result.txt"
+            attachment.write_text("成果", encoding="utf-8")
+            db = ChatStorage(str(Path(root) / "history.sqlite"))
+            messages = [
+                {"id": "u", "role": "user", "content": "处理附件", "content_parts": [{"type": "text", "text": "处理附件"}, {"type": "input_file", "path": str(attachment)}], "meta": {"user_added_files": [str(attachment), str(source / "missing.md")], "conversation_refs": [{"session_id": "ref", "title": "参考", "snapshot_path": str(source / "missing-snapshot.txt")}]}},
+                {"id": "call", "role": "assistant", "content": "", "tool_calls": [{"id": "tool", "type": "function", "function": {"name": "text_file_read", "arguments": "{}"}}]},
+                {"id": "result", "role": "tool", "tool_call_id": "tool", "content": "成果"},
+                {"id": "answer", "role": "assistant", "content": f"[成果]({attachment})", "meta": {"ui_source_message_id": "answer", "ui_turn_group_id": "group"}},
+                {"id": "later", "role": "user", "content": "后续不继承"},
+            ]
+            db.save_conversation("source", messages, title="原会话", meta={"workspace_dir": str(source)})
+            original = db.get_messages("source")
+            branch, meta = clone_branch(original, {"selected_model_id": "model", "token_usage_summary": {"total": 99}}, "fork", "source", "原会话", "answer")
+            self.assertEqual(len(branch), 4)
+            self.assertFalse({m["id"] for m in branch} & {m["id"] for m in original})
+            self.assertEqual(branch[-1]["meta"]["ui_source_message_id"], branch[-1]["id"])
+            self.assertNotIn("token_usage_summary", meta)
+            self.assertTrue(meta["manual_title"])
+            target = Path(root) / "fork"
+            meta.update(workspace_dir=str(target), workspace_source="chat")
+            retain_branch_text_history(branch)
+            db.create_branch_conversation("fork", branch, title="原会话 · 分支", meta=meta)
+            self.assertFalse(target.exists())
+            fork = db.get_messages("fork")
+            self.assertEqual(fork[-1]["content"], original[3]["content"])
+            self.assertNotIn("user_added_files", fork[0]["meta"])
+            self.assertEqual(fork[0]["meta"]["branch_historical_files"], ["result.txt", "missing.md"])
+            self.assertEqual(fork[0]["content_parts"], [{"type": "text", "text": "处理附件"}])
+            self.assertTrue(fork[0]["meta"]["conversation_refs"][0]["history_only"])
+            self.assertNotIn("snapshot_path", fork[0]["meta"]["conversation_refs"][0])
+            self.assertEqual(db.get_messages("source"), original)
+            self.assertEqual(attachment.read_text(encoding="utf-8"), "成果")
+            db.delete_conversation("source")
+            attachment.unlink()
+            self.assertEqual(db.get_messages("fork"), fork)
+
+            # A database failure rolls back the conversation without creating files.
+            failure_target = Path(root) / "failed"
+            next_messages, next_meta = clone_branch(fork, {}, "failed", "fork", "分支", fork[-1]["id"])
+            next_meta.update(workspace_dir=str(failure_target), workspace_source="chat")
+            retain_branch_text_history(next_messages)
+            with patch.object(db, "_replace_messages_in_connection", side_effect=OSError("database write failed")):
+                with self.assertRaisesRegex(OSError, "database write failed"):
+                    db.create_branch_conversation("failed", next_messages, title="失败分支", meta=next_meta)
+            self.assertFalse(db.has_conversation("failed"))
+            self.assertFalse(failure_target.exists())
+            self.assertEqual(db.get_messages("fork"), fork)
 
 
 if __name__ == "__main__":

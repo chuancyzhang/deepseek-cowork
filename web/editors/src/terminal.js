@@ -30,12 +30,13 @@ function copySelection() {
 }
 terminal.attachCustomKeyEventHandler(event => {
   if (event.type !== "keydown") return true;
-  const copy = event.ctrlKey && !event.altKey && !event.metaKey &&
+  const macCommand = /Mac/.test(navigator.platform) && event.metaKey && !event.ctrlKey && !event.altKey;
+  const copy = (macCommand && event.code === "KeyC") || (event.ctrlKey && !event.altKey && !event.metaKey &&
     ((event.code === "KeyC" && (event.shiftKey || terminal.hasSelection())) ||
-     (event.code === "Insert" && !event.shiftKey));
-  const paste = !event.altKey && !event.metaKey &&
+     (event.code === "Insert" && !event.shiftKey)));
+  const paste = (macCommand && event.code === "KeyV") || (!event.altKey && !event.metaKey &&
     ((event.ctrlKey && event.code === "KeyV") ||
-     (event.shiftKey && !event.ctrlKey && event.code === "Insert"));
+     (event.shiftKey && !event.ctrlKey && event.code === "Insert")));
   if (copy || paste) {
     // Returning false only stops xterm; also cancel Chromium's native clipboard
     // action so it cannot overwrite the selection or paste the same text twice.
@@ -65,7 +66,7 @@ window.coworkTerminal = {
   fit: resize,
   focus() { terminal.focus(); }
 };
-new QWebChannel(qt.webChannelTransport, channel => {
-  bridge = channel.objects.terminalBridge;
+window.connectDesktopBridge("terminalBridge", nativeBridge => {
+  bridge = nativeBridge;
   bridge.ready(); resize();
 });

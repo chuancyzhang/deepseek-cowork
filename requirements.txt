@@ -1,6 +1,5 @@
-PySide6>=6.2.0
-PySide6-Addons>=6.2.0
 pywinpty==3.0.5; sys_platform == "win32"
+keyring>=25.0,<26; sys_platform != "win32"
 openai>=2.15.0
 pyinstaller>=6.0.0
 python-docx
@@ -19,7 +18,6 @@ requests
 websocket-client
 markdown
 anthropic>=0.3.0
-qtawesome
 fastapi>=0.95.0
 uvicorn>=0.23.0
 pycryptodome>=3.19.0

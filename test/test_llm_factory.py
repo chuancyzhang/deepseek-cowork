@@ -3,7 +3,7 @@ import os
 import unittest
 import httpx
 from unittest.mock import MagicMock
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -108,7 +108,7 @@ class TestLLMFactory(unittest.TestCase):
         self.assertEqual(provider.provider_name, "OpenAI Responses")
         self.assertFalse(provider.supports_vision)
 
-    def test_create_provider_exposes_image_generation_capability(self):
+    def test_offline_image_generation_ignores_legacy_profile_and_preserves_chat_tools(self):
         provider = LLMFactory.create_provider_from_profile({
             "provider_type": "openai",
             "api_key": "profile_key",
@@ -116,10 +116,29 @@ class TestLLMFactory(unittest.TestCase):
             "model_name": "profile-model",
             "api_protocol": "responses",
             "supports_image_generation": True,
+            "supports_vision": True,
         })
 
-        self.assertTrue(provider.supports_image_generation)
+        self.assertFalse(provider.supports_image_generation)
+        self.assertTrue(provider.supports_vision)
         self.assertEqual(provider.api_protocol, "responses")
+        client = self.openai_module.OpenAI.return_value
+        client.responses.create.return_value = [SimpleNamespace(type="response.completed", response=SimpleNamespace(
+            id="hello", usage=None, output=[{"id": "m", "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "你好"}]}]))]
+        chunks = list(provider.chat_stream([{"role": "user", "content": "你好"}], tools=[
+            {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]))
+        client.responses.create.assert_called_once()
+        sent = client.responses.create.call_args.kwargs["tools"]
+        self.assertEqual([tool["type"] for tool in sent], ["function"])
+        self.assertEqual(sent[0]["name"], "read_file")
+        self.assertEqual(next(chunk for chunk in chunks if chunk["type"] == "provider_terminal")["status"], "completed")
+
+    def test_offline_image_generation_ignores_legacy_global_config_without_rewriting_it(self):
+        self.config_data["supports_image_generation"] = True
+        provider = LLMFactory.create_provider(self.mock_config)
+        self.assertFalse(provider.supports_image_generation)
+        self.assertTrue(self.config_data["supports_image_generation"])
 
     def test_create_provider_accepts_runtime_reasoning_override(self):
         self.mock_config.get_model_profile.return_value = {

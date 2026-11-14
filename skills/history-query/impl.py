@@ -45,6 +45,8 @@ def _normalize_keywords(keywords):
 
 
 def _load_sqlite_vec(conn):
+    from core.platform_capabilities import require_windows_capability
+    require_windows_capability("历史向量检索")
     conn.enable_load_extension(True)
     ensure_package_installed("sqlite-vec", "sqlite_vec", skill_id="history-query")
     import sqlite_vec

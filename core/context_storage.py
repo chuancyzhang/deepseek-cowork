@@ -104,38 +104,44 @@ class ContextStorage:
         """Compare-and-swap a projection, after its source is durably saved."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute("SELECT conversation_id, status FROM context_windows WHERE id = ?",
-                                    (payload["id"],)).fetchone()
-            if existing:
-                if existing[0] != conversation_id or existing[1] == "invalid":
-                    raise ValueError("上下文提交身份已失效。")
-                return {"window_id": payload["id"], "outcome": "unchanged"}
-            if time.time() > float(payload["expires_at"]):
-                raise ValueError("上下文提交已过期，请重新整理。")
-            self._check_context_source(conn, conversation_id, payload["source_fingerprints"],
-                                       payload["history_revision"])
-            active = conn.execute(
-                "SELECT id FROM context_windows WHERE conversation_id = ? AND status = 'active'",
-                (conversation_id,),
-            ).fetchone()
-            if (active[0] if active else "") != payload.get("previous_id", ""):
-                raise ValueError("活动上下文已改变，未重复切换。")
-            ordinal = conn.execute(
-                "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM context_windows WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()[0]
-            conn.execute("UPDATE context_windows SET status = 'closed' WHERE conversation_id = ? AND status = 'active'",
-                         (conversation_id,))
-            dump = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            conn.execute(
-                "INSERT INTO context_windows VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-                (payload["id"], conversation_id, ordinal, payload.get("previous_id", ""),
-                 payload["run_id"], payload["history_revision"], dump(payload["covered_ids"]),
-                 dump(payload["source_fingerprints"]), time.time()),
-            )
-            conn.execute("INSERT INTO context_checkpoints VALUES (?, 1, ?, ?, ?)",
-                         (payload["id"], dump(payload["content"]), dump(payload["runtime_state"]),
-                          dump(payload["seed_messages"])))
+            return self._commit_context_window(conn, conversation_id, payload)
+
+    def _commit_context_window(self, conn, conversation_id, payload, *, now=None, apply=True):
+        now = time.time() if now is None else now
+        existing = conn.execute("SELECT conversation_id, status FROM context_windows WHERE id = ?",
+                                (payload["id"],)).fetchone()
+        if existing:
+            if existing[0] != conversation_id or existing[1] == "invalid":
+                raise ValueError("上下文提交身份已失效。")
+            return {"window_id": payload["id"], "outcome": "unchanged"}
+        if now > float(payload["expires_at"]):
+            raise ValueError("上下文提交已过期，请重新整理。")
+        self._check_context_source(conn, conversation_id, payload["source_fingerprints"],
+                                   payload["history_revision"])
+        active = conn.execute(
+            "SELECT id FROM context_windows WHERE conversation_id = ? AND status = 'active'",
+            (conversation_id,),
+        ).fetchone()
+        if (active[0] if active else "") != payload.get("previous_id", ""):
+            raise ValueError("活动上下文已改变，未重复切换。")
+        ordinal = conn.execute(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM context_windows WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()[0]
+        if not apply:
+            return {"window_id": payload["id"], "outcome": "committed", "ordinal": ordinal}
+        conn.execute("UPDATE context_windows SET status = 'closed' WHERE conversation_id = ? AND status = 'active'",
+                     (conversation_id,))
+        dump = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        conn.execute(
+            "INSERT INTO context_windows VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+            (payload["id"], conversation_id, ordinal, payload.get("previous_id", ""),
+             payload["run_id"], payload["history_revision"], dump(payload["covered_ids"]),
+             dump(payload["source_fingerprints"]), now),
+        )
+        conn.execute("INSERT INTO context_checkpoints VALUES (?, 1, ?, ?, ?)",
+                     (payload["id"], dump(payload["content"]), dump(payload["runtime_state"]),
+                      dump(payload["seed_messages"])))
         return {"window_id": payload["id"], "outcome": "committed", "ordinal": ordinal}
 
     def _invalidate_context_for_rewrite(self, conn, conversation_id, messages):

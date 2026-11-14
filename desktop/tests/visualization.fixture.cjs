@@ -1,0 +1,37 @@
+const {app, BrowserWindow, protocol} = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+protocol.registerSchemesAsPrivileged([{scheme:'cowork-plugin',privileges:{standard:true,secure:true}}]);
+app.setPath('userData',path.join(process.env.COWORK_VIS_TEST_DATA,'profile'));
+let window;
+const deadline=setTimeout(() => {console.error('visualization fixture timeout');app.exit(1);},15000);
+app.whenReady().then(async () => {
+  const documents=JSON.parse(fs.readFileSync(path.join(process.env.COWORK_VIS_TEST_DATA,'documents.json'),'utf8'));
+  protocol.handle('cowork-plugin', request => new Response(documents[new URL(request.url).host]?.html || '',{headers:{'Content-Type':'text/html; charset=utf-8'}}));
+  window=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  // A strict parent must not prevent the independently constrained child from running.
+  await window.loadURL('data:text/html,'+encodeURIComponent('<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; frame-src cowork-plugin:"><iframe sandbox="allow-scripts" src="cowork-plugin://active/"></iframe>'));
+  await window.webContents.executeJavaScript('window.events=[];addEventListener("message",event=>window.events.push(event.data));');
+  let child=window.webContents.mainFrame.frames[0];
+  const state=await child.executeJavaScript('window.cowork.loadState()');
+  assert.deepEqual(state,{selected:3});
+  await child.executeJavaScript('window.cowork.saveState({selected:4});');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  let events=await window.webContents.executeJavaScript('window.events');
+  assert.ok(events.some(event=>event.token===documents.active.token && event.type==='state' && event.state.selected===4));
+  assert.equal(await child.executeJavaScript('typeof require'), 'undefined');
+  await child.executeJavaScript('setTimeout(()=>{throw Error("fixture resource failure")},0);');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  events=await window.webContents.executeJavaScript('window.events');
+  assert.ok(events.some(event=>event.type==='error' && event.message.includes('fixture resource failure')));
+  await window.webContents.executeJavaScript('document.querySelector("iframe").src="cowork-plugin://readonly/";');
+  await new Promise(resolve=>window.webContents.once('did-frame-finish-load',resolve));
+  child=window.webContents.mainFrame.frames[0];
+  await window.webContents.executeJavaScript('window.events=[]');
+  await child.executeJavaScript('window.cowork.saveState({selected:99});');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  events=await window.webContents.executeJavaScript('window.events');
+  assert.equal(events.filter(event=>event.type==='state').length,0);
+  console.log('VISUALIZATION_FIXTURE_OK');
+}).then(()=>{clearTimeout(deadline);window?.destroy();app.exit(0);}).catch(error=>{console.error(error);clearTimeout(deadline);window?.destroy();app.exit(1);});

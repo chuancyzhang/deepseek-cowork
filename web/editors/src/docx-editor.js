@@ -304,7 +304,7 @@ for (const eventName of ["beforeinput", "keydown", "paste", "cut", "drop", "cont
   document.addEventListener(eventName, armDirtyTracking, true);
 }
 
-new QWebChannel(qt.webChannelTransport, (channel) => {
-  bridge = channel.objects.deliverableEditorBridge;
+window.connectDesktopBridge("deliverableEditorBridge", nativeBridge => {
+  bridge = nativeBridge;
   bridge.ready("docx");
 });

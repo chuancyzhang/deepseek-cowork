@@ -7,7 +7,6 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 from core import browser_skill_component
@@ -41,50 +40,6 @@ class BrowserSkillComponentTests(unittest.TestCase):
         service.start()
         self.addCleanup(service.stop)
 
-    def test_ready_cache_expires_and_cannot_cross_cli_versions(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, "diagnostics.json")
-            with patch.object(browser_skill_component, "_diagnostics_path", return_value=path):
-                for age, version, valid in [(0, browser_skill_component.BROWSER_SKILL_VERSION, True),
-                                            (3600, browser_skill_component.BROWSER_SKILL_VERSION, False),
-                                            (0, "0.3.3", False)]:
-                    with self.subTest(age=age, version=version):
-                        with open(path, "w", encoding="utf-8") as stream:
-                            json.dump({"state": "ready", "ready": True, "cli_version": version,
-                                       "checked_at": (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()}, stream)
-                        self.assertEqual(bool(browser_skill_component._read_diagnostics_cache()), valid)
-
-    def test_session_start_rechecks_ready_cache_without_creating_probe_windows(self):
-        ready = {"installed": True, "ready": True, "version": browser_skill_component.BROWSER_SKILL_VERSION}
-        unavailable = {**ready, "ready": False, "state": "extension_incompatible"}
-        with patch.object(browser_skill_component, "browser_skill_status", side_effect=[ready, unavailable]) as status, \
-                patch.object(browser_skill_component, "popen_external_program") as launch:
-            result = browser_skill_component.run_browser_skill_cli(["session", "start"])
-        self.assertTrue(result["not_executed"])
-        self.assertEqual(result["recovery"]["kind"], "browser")
-        self.assertEqual(status.call_args.kwargs["verify_execution"], False)
-        self.assertEqual(status.call_args.kwargs["start_service"], True)
-        launch.assert_not_called()
-
-    def test_fresh_checks_reject_old_daemon_or_control_protocol_even_if_connected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = self._installed_component(directory)
-            for service, expected in [
-                ({"ready": True, "daemon_version": "0.3.3"}, "service_unavailable"),
-                ({"ready": True, "daemon_version": browser_skill_component.BROWSER_SKILL_VERSION,
-                  "browsers": [{"extension_protocol_version": "1.3"}]}, "extension_incompatible"),
-            ]:
-                with self.subTest(expected=expected), \
-                        patch.object(browser_skill_component, "browser_skill_root", return_value=root), \
-                        patch.object(browser_skill_component, "_run_bsk", return_value={"returncode": 0, "stdout": "bsk " + browser_skill_component.BROWSER_SKILL_VERSION, "stderr": ""}) as run, \
-                        patch.object(browser_skill_component, "_ensure_browser_skill_service", return_value=service), \
-                        patch.object(browser_skill_component, "browser_skill_execution_probe") as probe:
-                    result = browser_skill_component.browser_skill_status(run_diagnostics=True)
-                    self.assertEqual(result["state"], expected)
-                    self.assertFalse(result["ready"])
-                    run.assert_called_once_with(["--version"], timeout=8)
-                    probe.assert_not_called()
-
     def test_bundled_upgrade_waits_for_active_sessions_and_never_downgrades(self):
         status = {"version": "0.1.8", "needs_update": True, "ready": False}
         with tempfile.TemporaryDirectory() as root, patch.object(browser_skill_component, "browser_skill_root", return_value=os.path.join(root, "component")), \
@@ -116,7 +71,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             install.assert_called_once()
             self.assertTrue(install.call_args.kwargs["require_idle"])
             extension.assert_called_once()
-            check.assert_called_with(run_diagnostics=True, verify_execution=False)
+            check.assert_called_with(run_diagnostics=True)
 
     def test_upgrade_cancellation_and_concurrent_upgrade_do_not_use_stale_ready_state(self):
         status = {"version": browser_skill_component.BROWSER_SKILL_VERSION, "ready": True,
@@ -554,7 +509,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
         self.assertEqual(result["result"], json.loads(payload))
         self.assertEqual(len(result["stderr"]), 100000)
 
-    def test_outer_timeout_returns_without_waiting_for_owned_session_cleanup(self):
+    def test_outer_timeout_reports_successful_session_cleanup(self):
         class BlockingProcess:
             pid = 42
             returncode = None
@@ -589,7 +544,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
                 "exit_code": 0,
                 "error": "",
             },
-        ) as cleanup, patch.object(
+        ), patch.object(
             browser_skill_component,
             "log_browser_skill_event",
         ):
@@ -598,10 +553,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
                 timeout_seconds=1,
             )
         self.assertEqual(result["error"]["code"], "timeout")
-        self.assertFalse(result["session_cleanup"]["stopped"])
-        self.assertTrue(result["session_cleanup"]["pending"])
-        self.assertNotIn("Cowork 已结束", result["error"]["message"])
-        cleanup.assert_not_called()
+        self.assertTrue(result["session_cleanup"]["stopped"])
+        self.assertIn("Cowork 已结束", result["error"]["message"])
 
     def test_browser_skill_timeout_exit_does_not_force_session_cleanup(self):
         process = type(

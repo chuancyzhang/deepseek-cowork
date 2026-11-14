@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from core.file_write_locks import file_write_lock
 
 
 MEMORY_LAYOUT_VERSION = 2
@@ -42,12 +43,17 @@ class MemoryStore:
         self._ensure_initialized()
 
     def _ensure_initialized(self):
+        # Lock the stable directory: Windows realpath probes on a file being
+        # replaced can themselves deny its rename while another caller waits.
+        with file_write_lock(self.root):
+            self._initialize_locked()
+
+    def _initialize_locked(self):
         os.makedirs(self.root, exist_ok=True)
         self._remove_obsolete_module_data()
-        _atomic_write(
-            self.layout_path,
-            json.dumps({"schema_version": MEMORY_LAYOUT_VERSION}, ensure_ascii=False, indent=2) + "\n",
-        )
+        layout = json.dumps({"schema_version": MEMORY_LAYOUT_VERSION}, ensure_ascii=False, indent=2) + "\n"
+        if self._read(self.layout_path) != layout:
+            _atomic_write(self.layout_path, layout)
         legacy = os.path.join(self.history_dir, "memories.md")
         summary = self.summary_path()
         if os.path.exists(legacy) and not os.path.exists(summary):

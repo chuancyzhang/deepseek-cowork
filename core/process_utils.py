@@ -57,7 +57,7 @@ def reveal_path_in_file_manager(path, system_name=None, shell_execute=None, pope
         else:
             target = normalized if os.path.isdir(normalized) else os.path.dirname(normalized)
             command = ["open", target] if system == "Darwin" else ["xdg-open", target]
-            launcher = popen or subprocess.Popen
+            launcher = popen or popen_external_program
             launcher(command)
         return FileManagerOpenResult(True, normalized, action)
     except Exception as exc:
@@ -169,14 +169,14 @@ def _path_is_within(path, root):
         return False
 
 
-def _sanitized_external_environment(environment, bundle_dir):
+def _sanitized_external_environment(environment, bundle_dir, *, preserve_path=False):
     sanitized = dict(os.environ if environment is None else environment)
     path_key = next(
         (key for key in sanitized if str(key).upper() == "PATH"),
         None,
     )
     path_value = sanitized.get(path_key) if path_key is not None else None
-    if path_value:
+    if path_value and not preserve_path:
         sanitized[path_key] = os.pathsep.join(
             entry
             for entry in path_value.split(os.pathsep)
@@ -186,8 +186,24 @@ def _sanitized_external_environment(environment, bundle_dir):
     return sanitized
 
 
-def popen_external_program(args, **kwargs):
+def posix_external_environment(environment=None, *, preserve_path=False):
+    env = dict(os.environ if environment is None else environment)
+    if os.name == "nt" or not getattr(sys, "frozen", False):
+        return env
+    env = _sanitized_external_environment(env, getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)), preserve_path=preserve_path)
+    for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        if name + "_ORIG" in env:
+            env[name] = env[name + "_ORIG"]
+        else:
+            env.pop(name, None)
+    return env
+
+
+def popen_external_program(args, *, preserve_path=False, **kwargs):
     """Start a non-bundled program without PyInstaller's DLL search override."""
+    if os.name != "nt" and getattr(sys, "frozen", False):
+        kwargs = dict(kwargs)
+        kwargs["env"] = posix_external_environment(kwargs.get("env"), preserve_path=preserve_path)
     bundle_dir = _frozen_windows_bundle_dir()
     if not bundle_dir:
         return subprocess.Popen(args, **kwargs)

@@ -55,6 +55,47 @@ class TestUpdater(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
+    def test_desktop_update_rejects_legacy_layout_and_keeps_user_data(self):
+        from pathlib import Path
+        from core.updater import find_staged_app_dir
+        root = Path(self.temp_dir)
+        legacy = root / "legacy"
+        legacy.mkdir()
+        (legacy / APP_EXE_NAME).write_bytes(b"legacy")
+        (legacy / INTERNAL_DIR_NAME).mkdir()
+        with self.assertRaises(UpdaterError):
+            find_staged_app_dir(str(legacy), layout="electron")
+        staged = root / "staged"
+        for name in ("deepseek-cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"):
+            file = staged / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b"new")
+        install = root / "install"
+        (install / "user_data").mkdir(parents=True)
+        (install / "user_data/config.json").write_bytes(b"user preferences")
+        (install / "Cowork.exe").write_bytes(b"old")
+        plan = build_update_plan(str(install), str(staged), layout="electron")
+        changed_paths = {item["path"] for kind in ("added", "modified", "deleted") for item in plan[kind]}
+        self.assertIn("Cowork.exe", changed_paths)
+        self.assertIn("deepseek-cowork.exe", changed_paths)
+        from core.updater import desktop_executable
+        self.assertEqual(desktop_executable(staged), "deepseek-cowork.exe")
+        self.assertEqual(desktop_executable(install), "Cowork.exe")
+        self.assertFalse(any(name.startswith("user_data/") for name in changed_paths))
+        self.assertEqual((install / "user_data/config.json").read_bytes(), b"user preferences")
+        self.assertEqual(find_staged_app_dir(str(staged), layout="electron"), str(staged))
+        with self.assertRaises(UpdaterError):
+            find_staged_app_dir(str(staged), layout="qt")
+
+    def test_desktop_release_manifest_is_platform_and_layout_specific(self):
+        from core.desktop_updates import validate_release
+        release = {"schema_version": 1, "app_layout": "electron", "target_os": "windows", "arch": "x64",
+                   "version": APP_VERSION, "filename": f"cowork-desktop-v{APP_VERSION}-windows-x64.zip", "size": 1234, "sha256": "a" * 64}
+        self.assertEqual(validate_release(release), release)
+        for key, value in (("app_layout", "qt"), ("arch", "arm64"), ("filename", "../wrong.zip"), ("sha256", ""), ("size", True)):
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                validate_release({**release, key: value})
+
     def test_select_release_asset_prefers_app_zip(self):
         release = {
             "assets": [

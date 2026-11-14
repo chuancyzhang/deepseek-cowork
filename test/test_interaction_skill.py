@@ -12,6 +12,19 @@ from core.interaction import interaction_service
 
 
 class TestInteractionSkill(unittest.TestCase):
+    def test_finished_event_carries_the_accepted_answer_for_history_replay(self):
+        from core.interaction import InteractionService
+        service = InteractionService()
+        finished = []
+        service.interaction_requested.subscribe(lambda request: service.respond_request(request['request_id'], '手动处理'))
+        service.interaction_finished.subscribe(finished.append)
+        response = service.create_request('conversation', 'text', '选择处理方式', metadata={'run_id': 'run'}, timeout_seconds=1)
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0]['answered'])
+        self.assertEqual(finished[0]['response'], response)
+        self.assertEqual(response['text'], '手动处理')
+        self.assertEqual(finished[0]['run_id'], 'run')
+
     def test_request_user_approval_returns_structured_payload(self):
         with patch.object(
             interaction_impl.interaction_service,

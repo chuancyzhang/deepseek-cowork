@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped } from '../src/runtime.ts';
+import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
+
+test('tool error display accepts structured JSON without changing the retained error', () => {
+  const error = {code:'bsk_command_failed',message:'no browser is currently connected',exit_code:1};
+  const before = JSON.stringify(error);
+  assert.equal(toolErrorText(error), error.message);
+  assert.equal(JSON.stringify(error), before);
+  assert.equal(toolErrorText('连接失败'), '连接失败');
+  for (const value of [null, undefined]) assert.equal(toolErrorText(value), '');
+  for (const value of [{code:'failed',exit_code:1}, {message:{reason:'offline'}}, [{code:'failed'}]]) {
+    assert.deepEqual(JSON.parse(toolErrorText(value)), value);
+  }
+  assert.equal(toolErrorText(1), '1');
+});
 
 test('only explicit user cancellation suppresses the error notice', () => {
   for (const error of ['interrupted by user', 'Run interrupted by user.']) assert.equal(isUserStopped({status:'interrupted',error}),true);

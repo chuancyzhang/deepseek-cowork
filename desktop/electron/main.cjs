@@ -65,6 +65,13 @@ async function createWindow() {
     backgroundColor: '#fafafa', title: '', show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('console-message', details => {
+    if (!details.message?.startsWith('workbench_render_failed ')) return;
+    // Persist the boundary diagnostic only, never general page console output.
+    void fs.mkdir(path.join(dataDir, 'logs'), {recursive:true})
+      .then(() => fs.appendFile(path.join(dataDir, 'logs', 'desktop-renderer.log'), `${new Date().toISOString()} ${details.message}\n`))
+      .catch(error => console.error('renderer_diagnostic_write_failed', error.message));
+  });
   window.on('page-title-updated', event => event.preventDefault());
   window.webContents.on('context-menu', (_event, params) => {
     if (!params.isEditable && !params.selectionText) return;

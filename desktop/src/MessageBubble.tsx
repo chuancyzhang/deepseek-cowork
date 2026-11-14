@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, GitBranch, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
 import type { FileReference, Message } from './types';
-import { messageText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
+import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
 import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
@@ -116,7 +116,7 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     let args = tool.function?.arguments ?? tool.arguments ?? tool.args ?? {};
     if (typeof args === 'string') {try {args = JSON.parse(args);} catch {args = {};}}
     const paths = ['path','file_path','filename','file'].flatMap(key => typeof args?.[key] === 'string' ? [args[key]] : []);
-    return <div className="process-step tool-step" key={tool.id}><Wrench className="timeline-node" size={14}/><button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><span>{tool.function?.name || tool.name || result?.meta?.tool_name || '工具调用'}</span><small>{state}</small><ChevronRight size={13}/></button>{paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}{failed && <p className="error-text">{String(resultObject.error || '工具执行失败')}</p>}{questions.filter(question => question.callId === tool.id).map(questionRow)}</div>;
+    return <div className="process-step tool-step" key={tool.id}><Wrench className="timeline-node" size={14}/><button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><span>{tool.function?.name || tool.name || result?.meta?.tool_name || '工具调用'}</span><small>{state}</small><ChevronRight size={13}/></button>{paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}{failed && <p className="error-text">{toolErrorText(resultObject.error) || '工具执行失败'}</p>}{questions.filter(question => question.callId === tool.id).map(questionRow)}</div>;
   }
   return <section className="assistant-turn">
     {expert && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}

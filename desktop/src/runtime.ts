@@ -1,5 +1,18 @@
 import type { Message, Run, RuntimeEvent } from './types';
 
+// Tool errors are JSON values, including structured errors from external tools.
+// Convert only for display; the original result stays available for inspection.
+export function toolErrorText(error: unknown): string {
+  if (error == null) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object') {
+    const message = (error as {message?: unknown}).message;
+    if (typeof message === 'string' && message.trim()) return message;
+    return JSON.stringify(error, null, 2);
+  }
+  return String(error);
+}
+
 export function messageText(content: any): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.filter(p => p?.type === 'text' || p?.type === 'output_text').map(p => p.text || '').join('\n');

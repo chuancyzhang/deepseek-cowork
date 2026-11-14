@@ -146,6 +146,8 @@ def _forbidden_reason(relative: Path) -> str:
         return "local identity, credentials or user data"
     if "node_modules" in {part.lower() for part in relative.parts}:
         return "Node development dependency"
+    if lowered.startswith("resources/service/_internal/ai_skills/frontend-slides/"):
+        return "Frontend Slides is no longer bundled; rebuild the desktop distribution"
     if "/web/editors/dist/" in "/" + lowered and lowered.endswith(".map"):
         return "editor source map"
     if "/__pycache__/" in f"/{lowered}/" or lowered.endswith((".pyc", ".pyo")):

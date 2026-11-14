@@ -16,8 +16,7 @@ log = logging.getLogger("desktop.conversations")
 PREFERENCE_KEYS = frozenset({"selected_model_id", "selected_skill_names", "conversation_agent", "knowledge_refs",
     "conversation_refs", "mode", "reasoning_effort", "keep_audio_local",
     "clarify_mode_state", "pending_clarify_questions", "grill_round_count", "grill_cycle_count", "grill_execution_confirmed",
-    "workflow_mode", "office_output_profile", "office_conversion_target", "office_source_files", "office_template_file",
-    "ppt_agent_mode", "ppt_agent_strategy", "ppt_agent_selected_strategy", "ppt_agent_preference", "ppt_agent_template_file", "ppt_agent_output_format"})
+    "workflow_mode", "office_output_profile", "office_conversion_target", "office_source_files", "office_template_file"})
 
 
 class ConversationActions:

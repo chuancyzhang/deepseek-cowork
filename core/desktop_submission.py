@@ -3,6 +3,7 @@
 System prompts, tool schemas, and provider history projection are unchanged.
 Only the newly accepted message and its existing run-context fields are built.
 """
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ from core.audio_attachments import is_audio_attachment
 from core.clarify_mode import normalize_run_context, normalize_selected_skill_names
 from core.conversation_actions import append_reference_context
 from core.conversation_agents import agent_role_context, builtin_agent_profiles
+
+log = logging.getLogger("desktop.submission")
 
 
 def is_image(path):
@@ -107,8 +110,10 @@ def run_context(service, cid, payload, profile):
         **({"team_space": binding} if binding else {})}
     for key in ("clarify_mode_state", "pending_clarify_questions", "grill_round_count", "grill_cycle_count",
                 "grill_execution_confirmed", "workflow_mode", "office_output_profile", "office_conversion_target",
-                "office_source_files", "office_template_file", "ppt_agent_mode", "ppt_agent_strategy",
-                "ppt_agent_selected_strategy", "ppt_agent_preference", "ppt_agent_template_file", "ppt_agent_output_format"):
+                "office_source_files", "office_template_file"):
         if key in preferences:
             context[key] = preferences[key]
+    if meta.get("ppt_agent_mode") or preferences.get("ppt_agent_mode"):
+        context["ppt_agent_mode"] = True
+        log.info("ppt_assistant_retired session=%s next_turn=ordinary_chat", cid)
     return normalize_run_context(context)

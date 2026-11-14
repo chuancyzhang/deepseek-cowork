@@ -69,7 +69,7 @@ def test_local_rejects_downgrade_and_mismatched_sidecar(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows path boundary")
 def test_extract_and_plan_support_paths_beyond_max_path(tmp_path):
-    member = "resources/service/_internal/ai_skills/frontend-slides/plugins/frontend-slides/skills/frontend-slides/bold-template-pack/selection-index.json"
+    member = "resources/service/_internal/" + "nested-resource/" * 7 + "selection-index.json"
     package = tmp_path / "package.zip"
     desktop_zip(package, extra={member: b"kept"})
     root = tmp_path / ("long-directory-" * 6)

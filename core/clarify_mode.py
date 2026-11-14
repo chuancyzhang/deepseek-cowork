@@ -153,7 +153,10 @@ def normalize_office_output_profile(value):
 
 def normalize_run_context(run_context):
     ctx = dict(run_context or {})
-    ppt_agent_mode = bool(ctx.get("ppt_agent_mode"))
+    # Old conversations keep their original metadata, but new turns no longer
+    # activate the retired PPT assistant or its HTML-first workflow.
+    if ctx.get("ppt_agent_mode"):
+        ctx["workflow_mode"] = ""
     selected_model_profile = json_copy(ctx.get("selected_model_profile"), {})
     if not isinstance(selected_model_profile, dict):
         selected_model_profile = {}
@@ -201,31 +204,7 @@ def normalize_run_context(run_context):
             if str(path or "").strip()
         ],
         "office_template_file": str(ctx.get("office_template_file") or "").strip(),
-        "ppt_agent_mode": ppt_agent_mode,
     }
-    if ppt_agent_mode:
-        normalized.update(
-            {
-                "ppt_agent_strategy": str(ctx.get("ppt_agent_strategy") or "").strip(),
-                "ppt_agent_selected_strategy": str(ctx.get("ppt_agent_selected_strategy") or "").strip(),
-                "ppt_agent_preference": str(ctx.get("ppt_agent_preference") or "").strip(),
-                "ppt_agent_template_file": str(ctx.get("ppt_agent_template_file") or "").strip(),
-                "ppt_agent_output_format": str(ctx.get("ppt_agent_output_format") or "").strip().lower(),
-                "ppt_agent_template_hash": str(ctx.get("ppt_agent_template_hash") or "").strip(),
-                "ppt_agent_renderer": str(ctx.get("ppt_agent_renderer") or "").strip().lower(),
-                "ppt_agent_renderer_prog_id": str(ctx.get("ppt_agent_renderer_prog_id") or "").strip(),
-                "ppt_agent_visual_status": str(ctx.get("ppt_agent_visual_status") or "").strip().lower(),
-                "ppt_agent_run_id": str(ctx.get("ppt_agent_run_id") or "").strip(),
-                "ppt_agent_task_id": str(ctx.get("ppt_agent_task_id") or "").strip(),
-                "ppt_agent_internal_stage": str(ctx.get("ppt_agent_internal_stage") or "").strip().lower(),
-                "ppt_agent_verification_level": str(ctx.get("ppt_agent_verification_level") or "").strip().lower(),
-                "ppt_agent_template_screenshots": [
-                    str(path or "").strip()
-                    for path in (ctx.get("ppt_agent_template_screenshots") or [])
-                    if str(path or "").strip()
-                ],
-            }
-        )
     if isinstance(ctx.get("knowledge_context"), dict):
         normalized["knowledge_context"] = json.loads(json.dumps(ctx["knowledge_context"]))
     if "team_space" in ctx:

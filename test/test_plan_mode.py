@@ -18,12 +18,6 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
-from core.ppt_agent import (
-    PPT_AGENT_PREFERENCE_BUSINESS,
-    PPT_AGENT_STRATEGY_HUASHU,
-    build_ppt_agent_prompt,
-    choose_ppt_agent_strategy,
-)
 from core.message_persistence import fold_skill_state_events
 
 
@@ -113,50 +107,30 @@ class TestClarifyModeHelpers(unittest.TestCase):
             }
         )
 
-        self.assertIs(ctx["ppt_agent_mode"], False)
         self.assertEqual(
             [key for key in ctx if key.startswith("ppt_agent_")],
-            ["ppt_agent_mode"],
+            [],
         )
         self.assertEqual(normalize_run_context(ctx), ctx)
 
-    def test_normalize_run_context_preserves_active_ppt_agent_details(self):
-        ctx = normalize_run_context(
-            {
-                "mode": RUN_MODE_EXECUTION,
-                "ppt_agent_mode": True,
-                "ppt_agent_strategy": " huashu ",
-                "ppt_agent_selected_strategy": " guizang ",
-                "ppt_agent_preference": " business ",
-                "ppt_agent_template_file": " template.pptx ",
-                "ppt_agent_output_format": " PPTX ",
-                "ppt_agent_template_hash": " hash ",
-                "ppt_agent_renderer": " PowerPoint ",
-                "ppt_agent_renderer_prog_id": " PowerPoint.Application ",
-                "ppt_agent_visual_status": " VERIFIED ",
-                "ppt_agent_run_id": " run-1 ",
-                "ppt_agent_task_id": " task-1 ",
-                "ppt_agent_internal_stage": " VISUAL_VALIDATION ",
-                "ppt_agent_verification_level": " FULL ",
-                "ppt_agent_template_screenshots": [" slide-1.png ", ""],
-            }
-        )
-
-        self.assertIs(ctx["ppt_agent_mode"], True)
-        self.assertEqual(ctx["ppt_agent_strategy"], "huashu")
-        self.assertEqual(ctx["ppt_agent_selected_strategy"], "guizang")
-        self.assertEqual(ctx["ppt_agent_preference"], "business")
-        self.assertEqual(ctx["ppt_agent_template_file"], "template.pptx")
-        self.assertEqual(ctx["ppt_agent_output_format"], "pptx")
-        self.assertEqual(ctx["ppt_agent_template_hash"], "hash")
-        self.assertEqual(ctx["ppt_agent_renderer"], "powerpoint")
-        self.assertEqual(ctx["ppt_agent_renderer_prog_id"], "PowerPoint.Application")
-        self.assertEqual(ctx["ppt_agent_visual_status"], "verified")
-        self.assertEqual(ctx["ppt_agent_run_id"], "run-1")
-        self.assertEqual(ctx["ppt_agent_task_id"], "task-1")
-        self.assertEqual(ctx["ppt_agent_internal_stage"], "visual_validation")
-        self.assertEqual(ctx["ppt_agent_verification_level"], "full")
-        self.assertEqual(ctx["ppt_agent_template_screenshots"], ["slide-1.png"])
+    def test_normalize_run_context_retires_ppt_workflow_without_mutating_source(self):
+        source = {
+            "mode": RUN_MODE_EXECUTION,
+            "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+            "ppt_agent_mode": True,
+            "ppt_agent_strategy": "frontend_slides",
+            "ppt_agent_template_file": "original-template.pptx",
+            "ppt_agent_output_format": "pptx",
+            "ppt_agent_template_screenshots": ["slide-1.png"],
+            "selected_skill_names": ["document-reader"],
+        }
+        before = json.loads(json.dumps(source))
+        ctx = normalize_run_context(source)
+        self.assertEqual(source, before)
+        self.assertFalse(any(key.startswith("ppt_agent_") for key in ctx))
+        self.assertEqual(ctx["workflow_mode"], "")
+        self.assertEqual(ctx["selected_skill_names"], ["document-reader"])
         self.assertEqual(normalize_run_context(ctx), ctx)
 
 
@@ -253,17 +227,6 @@ class TestAppendOnlySkillStateLedger(unittest.TestCase):
             self.assertEqual(fold_skill_state_events(restored), folded)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_ppt_agent_strategy_rules_select_huashu_for_business_visuals(self):
-        self.assertEqual(
-            choose_ppt_agent_strategy("生成一份高级感路演 BP", preference=PPT_AGENT_PREFERENCE_BUSINESS),
-            PPT_AGENT_STRATEGY_HUASHU,
-        )
-        prompt = build_ppt_agent_prompt("生成一份高级感路演 BP")
-        self.assertIn("PPT Agent", prompt["prompt"])
-        self.assertIn("Huashu Design", prompt["prompt"])
-        self.assertIn("HTML deliverable", prompt["prompt"])
-
 
 class TestClarifyModeLLMWorker(unittest.TestCase):
     def test_llm_worker_emits_necessary_clarification_policy(self):
@@ -468,7 +431,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_includes_ppt_agent_strategy_prompt(self):
+    def test_legacy_ppt_context_uses_ordinary_prompt_and_tools(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -518,24 +481,34 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                         "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
                         "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
                         "ppt_agent_mode": True,
-                        "ppt_agent_strategy": PPT_AGENT_STRATEGY_HUASHU,
-                        "ppt_agent_selected_strategy": PPT_AGENT_STRATEGY_HUASHU,
-                        "ppt_agent_preference": PPT_AGENT_PREFERENCE_BUSINESS,
+                        "ppt_agent_strategy": "huashu",
+                        "ppt_agent_selected_strategy": "huashu",
+                        "ppt_agent_preference": "business",
                     },
+                    turn_id="ppt-retirement-check",
                 )
+                ordinary = LLMWorker(
+                    [{"role": "user", "content": "make slides"}],
+                    _ConfigStub(temp_dir), workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                    turn_id="ppt-retirement-check",
+                    execution_authorization=worker.execution_authorization,
+                )
+                self.assertEqual(worker._build_stable_system_prompt(), ordinary._build_stable_system_prompt())
+                self.assertEqual(worker._build_runtime_context_prompt({}), ordinary._build_runtime_context_prompt({}))
+                self.assertEqual(worker._available_tool_names(), ordinary._available_tool_names())
                 worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             prompt_event = next(event for event in events if event.get("type") == "system_prompt")
             runtime_prompt = prompt_event.get("runtime_context", "")
-            self.assertIn("策略 [PPT Agent]", runtime_prompt)
-            self.assertIn("Huashu Design", runtime_prompt)
-            self.assertIn("HTML deliverable preview", runtime_prompt)
-            self.assertIn("HTML→PPTX/DOCX/PDF", runtime_prompt)
+            self.assertNotIn("PPT Agent", runtime_prompt)
+            self.assertNotIn("Huashu Design", runtime_prompt)
+            self.assertNotIn("办公稿生成", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_injects_selected_skill_prompt_for_ppt_agent(self):
+    def test_llm_worker_injects_selected_presentation_skill_in_ordinary_chat(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -587,11 +560,6 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={
                         "mode": RUN_MODE_EXECUTION,
-                        "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
-                        "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
-                        "ppt_agent_mode": True,
-                        "ppt_agent_strategy": PPT_AGENT_STRATEGY_HUASHU,
-                        "ppt_agent_selected_strategy": PPT_AGENT_STRATEGY_HUASHU,
                         "selected_skill_names": ["huashu-design"],
                     },
                 )

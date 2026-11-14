@@ -236,6 +236,41 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.client.call("conversation.send", **params)
         return params
 
+    def test_retired_ppt_chat_preserves_history_and_sends_without_special_workflow(self):
+        from core.chat_storage import ChatStorage
+        from core.desktop_store import DesktopStore
+
+        conversation = self.client.call("conversation.create")
+        cid = conversation["id"]
+        data = Path(self.client.call("settings.get")["data_dir"])
+        storage = ChatStorage(str(data / "chat_history" / "chat_history.sqlite"))
+        template = Path(conversation["meta"]["workspace_dir"]) / "original.pptx"
+        template.write_bytes(b"original-file-kept")
+        legacy = {"ppt_agent_mode": True, "ppt_agent_strategy": "frontend_slides",
+                  "ppt_agent_template_file": str(template), "ppt_agent_output_format": "pptx",
+                  "workflow_mode": "office_html_first", "office_output_profile": "ppt"}
+        storage.update_conversation_meta(cid, legacy)
+        storage.replace_messages(cid, [
+            {"id": "old-user", "role": "user", "content": "原演示需求"},
+            {"id": "old-answer", "role": "assistant", "content": "已有演示成果"},
+        ])
+        before = storage.get_messages(cid)
+        loaded = self.client.call("conversation.get", conversation_id=cid)
+        self.assertTrue(loaded["meta"]["ppt_agent_mode"])
+        self.assertEqual(loaded["messages"], before)
+
+        params = self.submit(cid, text="继续整理我的演示资料")
+        finished = self.client.wait_run(cid)
+        self.assertEqual(finished["run"]["status"], "completed")
+        payload = json.loads(DesktopStore(storage).get_run(params["request_id"])["payload"])
+        context = payload["runtime_context"]
+        self.assertFalse(any(key.startswith("ppt_agent_") for key in context))
+        self.assertEqual(context["workflow_mode"], "")
+        self.assertEqual(storage.get_messages(cid)[:len(before)], before)
+        self.assertEqual(template.read_bytes(), b"original-file-kept")
+        for key, value in legacy.items():
+            self.assertEqual(storage.get_conversation_meta(cid)[key], value)
+
     def test_message_context_snapshot_is_stable_and_absent_from_provider_projection(self):
         from core.agent import _clean_reasoning_content_by_turn
         cid = self.client.call("conversation.create")["id"]

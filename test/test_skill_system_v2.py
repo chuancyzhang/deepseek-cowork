@@ -1305,13 +1305,13 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(record["tool_refs"], ["browser_skill_cli"])
         self.assertEqual(record["spec"].get("python_dependencies"), [])
 
-    def test_builtin_ppt_agent_ai_skills_load_with_resources(self):
-        for skill_name in ("guizang-ppt-skill", "frontend-slides", "huashu-design"):
+    def test_builtin_presentation_skills_load_with_resources(self):
+        for skill_name in ("guizang-ppt-skill", "huashu-design"):
             self._copy_repo_ai_skill(skill_name)
 
         sm = self._build_manager()
 
-        for skill_name in ("guizang-ppt-skill", "frontend-slides", "huashu-design"):
+        for skill_name in ("guizang-ppt-skill", "huashu-design"):
             self.assertIn(skill_name, sm.skill_records)
             record = sm.skill_records[skill_name]
             self.assertTrue(record["spec"].get("default_enabled"))
@@ -1321,7 +1321,6 @@ class TestSkillSystemV2(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(record["path"], "SOURCE.md")))
 
         self.assertIn("huashu-design", sm.select_relevant_skills("PPT Agent Huashu Design 高级感路演", limit=5))
-        self.assertIn("frontend-slides", sm.select_relevant_skills("PPT Agent Frontend Slides 技术分享", limit=5))
         self.assertIn("guizang-ppt-skill", sm.select_relevant_skills("PPT Agent 横向翻页 瑞士风", limit=5))
 
     def test_huashu_builtin_skill_omits_large_media_assets(self):

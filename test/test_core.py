@@ -44,7 +44,6 @@ from core.message_persistence import filter_persistable_messages
 from core.runtime_ledger import RuntimeLedger, LedgerJournal
 from core.desktop_store import DesktopChatStorage, DesktopStore
 from core.runtime_journal import RuntimeJournal
-from core.ppt_agent import validate_pptx_structure
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
 from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_MODEL,
@@ -2044,13 +2043,17 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_direct_pptx_runtime_context_ignores_visual_process_state(self):
+    def test_retired_ppt_flags_do_not_change_runtime_or_stable_prompt(self):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = self._build_prompt_worker(temp_dir)
             worker.run_context.update({
                 "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
                 "office_output_profile": "ppt",
+            })
+            original_runtime = worker._build_runtime_context_prompt({})
+            original_stable = worker._build_stable_system_prompt()
+            worker.run_context.update({
                 "ppt_agent_mode": True,
                 "ppt_agent_output_format": "pptx",
                 "ppt_agent_template_file": os.path.join(temp_dir, "template.pptx"),
@@ -2066,11 +2069,14 @@ class TestAgentSystemPrompt(unittest.TestCase):
             ]
             second = worker._build_runtime_context_prompt({})
 
+            self.assertEqual(first, original_runtime)
             self.assertEqual(first, second)
+            self.assertEqual(worker._build_stable_system_prompt(), original_stable)
             self.assertNotIn("模板截图数量", first)
             self.assertNotIn("视觉校验状态", first)
-            self.assertIn("template.pptx", first)
-            self.assertIn("PowerPoint.Application", first)
+            self.assertNotIn("template.pptx", first)
+            self.assertNotIn("PowerPoint.Application", first)
+            self.assertNotIn("PPT Agent", first)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -4371,13 +4377,12 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             )
 
         payload = request.call_args.args[0]
-        self.assertIs(payload["run_context"]["ppt_agent_mode"], False)
         self.assertEqual(
             [key for key in payload["run_context"] if key.startswith("ppt_agent_")],
-            ["ppt_agent_mode"],
+            [],
         )
 
-    def test_daemon_stream_request_preserves_active_ppt_agent_details(self):
+    def test_daemon_stream_request_discards_retired_ppt_agent_details(self):
         fake_socket = MagicMock()
         fake_reader = MagicMock()
         fake_reader.__iter__.return_value = iter([])
@@ -4390,6 +4395,7 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
                     "hello",
                     run_context={
                         "mode": RUN_MODE_EXECUTION,
+                        "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
                         "ppt_agent_mode": True,
                         "ppt_agent_strategy": " huashu ",
                         "ppt_agent_template_file": " template.pptx ",
@@ -4398,12 +4404,8 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
             )
 
         wire_payload = json.loads(fake_socket.sendall.call_args.args[0].decode("utf-8"))
-        self.assertIs(wire_payload["run_context"]["ppt_agent_mode"], True)
-        self.assertEqual(wire_payload["run_context"]["ppt_agent_strategy"], "huashu")
-        self.assertEqual(
-            wire_payload["run_context"]["ppt_agent_template_file"],
-            "template.pptx",
-        )
+        self.assertFalse(any(key.startswith("ppt_agent_") for key in wire_payload["run_context"]))
+        self.assertEqual(wire_payload["run_context"]["workflow_mode"], "")
 
     def test_get_pending_interaction_and_respond_roundtrip(self):
         result_holder = {}
@@ -5163,25 +5165,6 @@ class TestImDailySummaryStorage(unittest.TestCase):
         row2 = self.storage.get_im_daily_summary("feishu", "user-a", "chat-a", "2026-03-06")
         self.assertEqual(row2["summary_text"], "summary-b")
         self.assertEqual(row2["source_message_upto_pos"], 20)
-
-class TestPptxStructureValidation(unittest.TestCase):
-    def test_python_pptx_structure_validation_reopens_and_counts_slides(self):
-        from pptx import Presentation
-        from pptx.util import Inches
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = os.path.join(temp_dir, "generated.pptx")
-            presentation = Presentation()
-            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-            slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = "标题"
-            presentation.save(path)
-
-            result = validate_pptx_structure(path)
-
-            self.assertEqual(result["page_count"], 1)
-            self.assertGreaterEqual(result["text_shape_count"], 1)
-            self.assertEqual(result["verification_level"], "structure_only")
-
 
 if __name__ == "__main__":
     unittest.main()

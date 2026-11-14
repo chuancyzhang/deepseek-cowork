@@ -196,7 +196,7 @@ class PackageReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(package_release.PackageAuditError, "SHA256"):
                     package_release.audit_distribution(dist)
 
-    def test_audit_rejects_retired_qt_and_development_resources(self):
+    def test_audit_rejects_retired_and_development_resources(self):
         cases = (
             "resources/service/_internal/PySide6/resources/qtwebengine_resources.debug.pak",
             "resources/service/_internal/PySide6/translations/qtbase_fr.qm",
@@ -204,6 +204,7 @@ class PackageReleaseTests(unittest.TestCase):
             "resources/service/_internal/PySide6/qml/QtQuick/qmldir",
             "resources/service/_internal/Qt6Core.dll",
             "resources/service/_internal/python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
+            "resources/service/_internal/ai_skills/frontend-slides/SKILL.md",
         )
         for relative in cases:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp_dir:

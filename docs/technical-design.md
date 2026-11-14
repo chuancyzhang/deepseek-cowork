@@ -149,9 +149,12 @@ Office 编辑器复用内置 Web 编辑器，改用限定命令的父页面桥�
 ```powershell
 npm --prefix desktop ci
 npm --prefix web/editors ci
+node desktop/node_modules/electron/install.js
 .\.venv\Scripts\python.exe scripts/run_desktop.py
 # 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
 ```
+
+当前 Electron 45 的 npm 包与可执行运行时分开安装。`npm ci` 完成后仍需执行上述 `install.js`；安装器按包内摘要校验下载或缓存的压缩包。下载失败时保留错误并修复网络或提供同版本已校验缓存，不能把 npm 依赖安装成功当作桌面运行环境就绪。
 
 Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
 

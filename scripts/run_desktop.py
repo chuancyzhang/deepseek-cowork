@@ -34,7 +34,7 @@ def main():
             subprocess.run([node, str(desktop / "node_modules" / script), *extra], cwd=desktop, env=env, check=True, **subprocess_kwargs_no_window())
     electron = desktop / "node_modules/electron/dist" / ("electron.exe" if os.name == "nt" else "Electron.app/Contents/MacOS/Electron" if sys.platform == "darwin" else "electron")
     if not electron.is_file():
-        raise SystemExit("Electron 运行时不完整，请在 desktop 目录运行 npm rebuild electron。")
+        raise SystemExit("Electron 运行时不完整，请在仓库根目录运行 node desktop/node_modules/electron/install.js。")
     # Electron is a GUI process: SW_HIDE also suppresses its first application
     # window. CREATE_NO_WINDOW suppresses consoles without hiding the workbench.
     return subprocess.call([str(electron), str(desktop)], cwd=ROOT, env=env,

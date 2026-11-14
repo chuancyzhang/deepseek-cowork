@@ -43,6 +43,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 npm --prefix desktop ci
 npm --prefix web/editors ci
+node desktop/node_modules/electron/install.js
 .\.venv\Scripts\python.exe main.py
 ```
 

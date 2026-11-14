@@ -564,11 +564,14 @@ def _python_dll_dirs(runtime, skill_id=None):
     dll_dirs = list(_BASE_NATIVE_LIBRARY_DIRS_CACHE[base_cache_key])
     if skill_id:
         skill_key = str(skill_id or "")
-        if skill_key not in _SKILL_NATIVE_LIBRARY_DIRS_CACHE:
-            _SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key] = _collect_native_library_dirs(
-                _skill_python_path(skill_key)
-            )
-        dll_dirs.extend(_SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key])
+        skill_path = _skill_python_path(skill_key)
+        path_key = os.path.normcase(os.path.abspath(skill_path))
+        cached = _SKILL_NATIVE_LIBRARY_DIRS_CACHE.get(skill_key)
+        if cached is None or cached[0] != path_key:
+            # A skill name may be reused in a different application data directory.
+            cached = (path_key, _collect_native_library_dirs(skill_path))
+            _SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key] = cached
+        dll_dirs.extend(cached[1])
     return _dedupe_paths(dll_dirs)
 
 

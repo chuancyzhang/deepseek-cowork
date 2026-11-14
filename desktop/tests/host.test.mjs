@@ -108,3 +108,37 @@ test('plugin theme changes preserve complete host settings for the restored buil
   assert.equal(store.get('settings').models.find(model=>model.id===store.get('settings').selected_model_id).id,'existing');
   assert.equal(store.get('settings').projects,settings.projects);
 });
+
+
+test('legacy IM navigation drafts are offered without marking a fresh visit dirty',async()=>{
+  const {prepareFormDraft,restoreFormRecovery,sameFormValue}=await import('../src/host/forms.ts');
+  const initial={enabled_provider:'wechat','feishu:app_id':'','dingtalk:client_id':'','dingtalk:client_secret':'','wecom:secret':''};
+  const legacy={enabled_provider:'','feishu:app_id':'','dingtalk:client_id':''};
+  const form=prepareFormDraft(initial,legacy,true);
+  assert.ok(sameFormValue(form.value,form.saved));assert.equal(form.value.enabled_provider,'wechat');
+  assert.equal(form.recovery.value.enabled_provider,'');
+  const restored=restoreFormRecovery(form);assert.equal(restored.value.enabled_provider,'');
+  assert.ok(!sameFormValue(restored.value,restored.saved));assert.equal(restored.recovery,undefined);
+  assert.ok(prepareFormDraft(initial,JSON.parse(JSON.stringify(form)),true).recovery);
+});
+
+test('form baselines preserve real edits without restoring stale unchanged fields',async()=>{
+  const {prepareFormDraft,sameFormValue,publicFormDraft}=await import('../src/host/forms.ts');
+  const saved={enabled_provider:'wechat',label:'old',token:''},value={...saved,label:'edited',token:'private-fixture'};
+  const cached=publicFormDraft({version:1,value,saved,recovery:{value,saved}},['token']);
+  assert.ok(!JSON.stringify(cached).includes('private-fixture'));assert.ok(!Object.hasOwn(cached.saved,'token'));
+  const next=prepareFormDraft({...saved,enabled_provider:'feishu',newField:'current'},cached,true);
+  assert.equal(next.value.enabled_provider,'feishu');assert.equal(next.value.newField,'current');assert.equal(next.value.label,'edited');assert.equal(next.value.token,'');
+  const applied=prepareFormDraft({...saved,label:'edited'}, {...cached,recovery:undefined},true);
+  assert.ok(sameFormValue(applied.value,applied.saved));
+  assert.ok(sameFormValue({a:1,b:{x:2,y:3}},{b:{y:3,x:2},a:1}));
+});
+
+test('legacy host snapshots recover only actual edits, while clean snapshots follow current settings',async()=>{
+  const {prepareFormDraft,sameFormValue}=await import('../src/host/forms.ts');
+  const saved={enabled_provider:'feishu',label:'old'},initial={enabled_provider:'wechat',label:'current'};
+  const clean=prepareFormDraft(initial,{value:saved,saved},true);
+  assert.ok(sameFormValue(clean.value,initial));assert.equal(clean.recovery,undefined);
+  const dirty=prepareFormDraft(initial,{value:{...saved,label:'unfinished'},saved},true);
+  assert.ok(sameFormValue(dirty.value,initial));assert.equal(dirty.recovery.value.label,'unfinished');assert.equal(dirty.recovery.value.enabled_provider,'wechat');
+});

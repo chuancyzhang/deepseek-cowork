@@ -3,6 +3,7 @@ import { ArrowLeft, BookOpen, Boxes, CircleUserRound, Clock3, KeyRound, LoaderCi
 import { rpc } from './managementApi';
 import type { Settings } from './types';
 import {useHostField} from './host/context';
+import {prepareFormDraft, publicFormDraft, restoreFormRecovery, sameFormValue, type FormDraft} from './host/forms';
 const Capabilities = lazy(() => import('./management/Capabilities'));
 const Preferences = lazy(() => import('./management/Preferences'));
 const Library = lazy(() => import('./management/Library'));
@@ -65,34 +66,41 @@ export function JobProgress({ job }: { job: any }) {
   return job && !['completed', 'failed', 'cancelled'].includes(job.status) ? <div className="job-progress" role="status"><LoaderCircle size={16} className="spin"/><span>{job.message || '正在处理…'}</span>{job.url && <button className="secondary" onClick={() => void rpc('external.open', { url: job.url })}>打开登录页</button>}<button className="icon-button" title="取消操作" onClick={() => void rpc('jobs.cancel', { id: job.id })}><X size={15}/></button>{job.qr_data && <img className="connection-qr" src={job.qr_data} alt="连接二维码"/>}{job.verification_required && <div className="input-action"><input aria-label="手机配对码" value={code} onChange={e => setCode(e.target.value)}/><button type="button" onClick={async () => {try {await rpc('im.verify', {code}); setCode(''); setFailure('');} catch (error) {setFailure((error as Error).message);}}}>确认配对码</button></div>}{failure && <span className="error-text">{failure}</span>}</div> : null;
 }
 
-export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean) => void, secrets: string[] = []) {
-  const [entry,setEntry] = useHostField<any>('form:' + key, () => {
+export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean) => void, secrets: string[] = [], offerLegacy = false) {
+  const [stored,setEntry] = useHostField<FormDraft>('form:' + key, () => {
     const cached=localStorage.getItem('form:' + key);
-    return {value:cached ? {...initial,...JSON.parse(cached)} : initial, saved:initial};
+    return prepareFormDraft(initial, cached ? JSON.parse(cached) : null, offerLegacy);
   });
+  const entry = stored.version === 1 ? stored : prepareFormDraft(initial, stored, offerLegacy);
   const {value,saved}=entry;
-  const dirty = JSON.stringify(value) !== JSON.stringify(saved);
+  const dirty = !sameFormValue(value,saved);
   const initialKey = key + ':' + JSON.stringify(initial), seenInitial = useRef('');
+  function persist(next: FormDraft) {
+    if (!next.recovery && sameFormValue(next.value,next.saved)) localStorage.removeItem('form:' + key);
+    else localStorage.setItem('form:' + key, JSON.stringify(publicFormDraft(next,secrets)));
+  }
   useEffect(()=>{
     if(seenInitial.current===initialKey)return;
     seenInitial.current=initialKey;
-    if(!dirty&&JSON.stringify(initial)!==JSON.stringify(saved))setEntry({value:initial,saved:initial});
-  },[initialKey,dirty,saved,initial]);
+    const next=prepareFormDraft(initial,entry,offerLegacy);
+    if(!sameFormValue(stored,next))setEntry(next);
+    persist(next);
+    if(next.recovery)console.info('form_draft_recovery_available', {form:key});
+  },[initialKey]);
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
-  function change(next: any) {
-    setEntry({...entry,value:next});
-    const publicDraft = { ...next }; for (const key of secrets) delete publicDraft[key];
-    localStorage.setItem('form:' + key, JSON.stringify(publicDraft));
-  }
+  function update(next: FormDraft) {setEntry(next);persist(next);}
+  function change(next: any) { update({...entry,value:next}); }
   function done(next = value) {
     let remaining = false;
-    setEntry((previous:any)=>{
-      const current=JSON.stringify(previous.value)===JSON.stringify(value)?next:previous.value;
-      remaining=JSON.stringify(current)!==JSON.stringify(next);
-      if(remaining){const cached={...current};for(const name of secrets)delete cached[name];localStorage.setItem('form:'+key,JSON.stringify(cached));}
-      else localStorage.removeItem('form:'+key);
-      return {value:current,saved:next};
+    setEntry(previous=>{
+      const current=sameFormValue(previous.value,value)?next:previous.value;
+      remaining=!sameFormValue(current,next);
+      const result={...previous,version:1 as const,value:current,saved:next};
+      persist(result);return result;
     });onDirty(remaining);
   }
-  return { value, change, done, dirty, reset: () => {setEntry({value:saved,saved});localStorage.removeItem('form:'+key);onDirty(false);} };
+  return { value, change, done, dirty, recovery:entry.recovery,
+    restore: () => {update(restoreFormRecovery(entry));console.info('form_draft_restored', {form:key});},
+    discardRecovery: () => {const {recovery,...next}=entry;update(next);console.info('form_draft_discarded', {form:key});},
+    reset: () => {update({...entry,value:saved});onDirty(false);} };
 }

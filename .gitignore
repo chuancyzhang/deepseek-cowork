@@ -159,6 +159,7 @@ git_bash_env/
 ripgrep_env/
 .runtime_downloads/
 /resources/browser_skill/artifacts/*.zip
+conversation_workspaces/
 
 # Offline editor development dependencies; only web/editors/dist is shipped.
 /web/editors/node_modules/

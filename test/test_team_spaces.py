@@ -288,7 +288,7 @@ class TeamSpaceTests(unittest.TestCase):
 
     def test_migration_and_capability_advertisement(self):
         with self.db.transaction() as db:
-            self.assertEqual(db.get(Platform, 1).schema_version, 2)
+            self.assertEqual(db.get(Platform, 1).schema_version, 3)
             db.get(Platform, 1).schema_version = 1
         self.db.migrate(self.settings)
         self.assertEqual(self.get()["name"], "方案")

@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 
 log = logging.getLogger("desktop.jobs")
 LOG_LIMIT = 300
@@ -68,6 +69,13 @@ class DesktopJobs:
             self.service.publish({"event": "job", "data": copy.deepcopy(job)})
 
     def submit(self, title, operation):
+        state = getattr(self.service, "state", None)
+        with state.lock if state is not None else nullcontext():
+            if state is not None and (state.update_preparing or state.shutdown_requested):
+                raise RuntimeError("应用正在准备退出或安装更新，请稍后重试。")
+            return self._submit(title, operation)
+
+    def _submit(self, title, operation):
         identity = f"{time.time_ns()}-{uuid.uuid4().hex[:10]}"
         cancelled = threading.Event()
         job = {"id": identity, "title": title, "status": "queued", "message": "等待处理", "error": "", "result": None, "created_at": time.time()}

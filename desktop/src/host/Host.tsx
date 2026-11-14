@@ -5,6 +5,7 @@ import {useWorkbenchController,type WorkbenchController} from './workbench';
 import {PluginRegistry} from '../plugins/registry';
 import {SaveCoordinator} from './saveCoordinator';
 import {HostSDK} from './sdk';
+import {receiveUpdate, type UpdateState} from './updates';
 
 type HostController=WorkbenchController & {registry:PluginRegistry;sdk:HostSDK};
 const ControllerContext=createContext<HostController|null>(null);
@@ -53,6 +54,13 @@ function Runtime({children}:{children:ReactNode}) {
     return()=>{alive=false;unsubscribe();};
   },[]);
   useEffect(()=>window.cowork.onEvents(events=>{if(events.some(event=>event.event==='plugins_recover_requested'))host.set('host:recoveryOpen',true);}),[host]);
+  useEffect(()=>{
+    let alive=true;
+    const refresh=()=>void window.cowork.call<UpdateState>('updates.get').then(value=>{if(alive)receiveUpdate(host,value);}).catch(error=>{if(alive)controller.error('更新状态读取失败：'+error.message);});
+    const unsubscribe=window.cowork.onEvents(events=>{for(const event of events){if(event.event==='update_state')receiveUpdate(host,event.data);if(event.event==='service_reconnected')refresh();}});
+    refresh();
+    return()=>{alive=false;unsubscribe();};
+  },[host]);
   if(!started)return <main className="loading host-startup" aria-busy={retrying||!failure}>
     <h1>DeepSeek Cowork</h1>
     <p role="status">{exiting?'正在停止后台并退出…':failure?'暂时无法打开工作台':startupMessage}</p>

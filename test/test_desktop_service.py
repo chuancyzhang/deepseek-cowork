@@ -140,7 +140,7 @@ class DesktopShutdownTests(unittest.TestCase):
         service.streams = {}
         service.store = SimpleNamespace(active_runs=lambda: [])
         service.state = SimpleNamespace(update_preparing=False, prepare_update_shutdown=lambda: {"saved": True})
-        for name in ("scheduler", "messaging", "workbench", "jobs", "models", "ledger"):
+        for name in ("updates", "scheduler", "messaging", "workbench", "jobs", "models", "ledger"):
             setattr(service, name, Mock())
         entered, release = threading.Event(), threading.Event()
         def fail_save():

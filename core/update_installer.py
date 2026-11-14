@@ -24,6 +24,24 @@ def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_nam
 
 INSTALLER_SCRIPT = r'''param([switch]$Headless, [switch]$Recover, [string]$PreviewImage, [double]$PreviewScale=1)
 $ErrorActionPreference = 'Stop'
+# Process-local .NET handling plus extended paths: no system registry change is required.
+[AppContext]::SetSwitch('Switch.System.IO.UseLegacyPathHandling', $false)
+[AppContext]::SetSwitch('Switch.System.IO.BlockLongPaths', $false)
+function Native-Path($path) {
+ if($path.StartsWith('\\?\')) { return $path }
+ $full=[IO.Path]::GetFullPath($path)
+ if($full.StartsWith('\\')) { return '\\?\UNC\'+$full.Substring(2) }
+ return '\\?\'+$full
+}
+function File-Exists($path) { return [IO.File]::Exists((Native-Path $path)) }
+function Path-Exists($path) { return (File-Exists $path) -or [IO.Directory]::Exists((Native-Path $path)) }
+function Remove-File($path) {
+ $native=Native-Path $path
+ if([IO.File]::Exists($native)) {
+  [IO.File]::SetAttributes($native, ([IO.File]::GetAttributes($native) -band (-bnot [IO.FileAttributes]::ReadOnly)))
+  [IO.File]::Delete($native)
+ }
+}
 $root = $PSScriptRoot
 $script:diagnosticId = Split-Path -Leaf $root
 $script:diagnosticStage = 'bootstrap'
@@ -201,12 +219,14 @@ function Safe-Path($directory, $relative) {
  return $path
 }
 function Copy-File($from, $to) {
- if(Test-Path -LiteralPath $to -PathType Container) { throw ('安装目标变成了目录：'+$to) }
- [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($to)) | Out-Null
- Copy-Item -LiteralPath $from -Destination $to -Force
+ $nativeTo=Native-Path $to
+ if([IO.Directory]::Exists($nativeTo)) { throw ('安装目标变成了目录：'+$to) }
+ [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($nativeTo)) | Out-Null
+ if([IO.File]::Exists($nativeTo)) { [IO.File]::SetAttributes($nativeTo, ([IO.File]::GetAttributes($nativeTo) -band (-bnot [IO.FileAttributes]::ReadOnly))) }
+ [IO.File]::Copy((Native-Path $from), $nativeTo, $true)
 }
 function File-Hash($path) {
- $stream=[IO.File]::OpenRead($path); $hash=[Security.Cryptography.SHA256]::Create()
+ $stream=[IO.File]::OpenRead((Native-Path $path)); $hash=[Security.Cryptography.SHA256]::Create()
  try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
  finally { $stream.Dispose(); $hash.Dispose() }
 }
@@ -263,8 +283,13 @@ function Release-Files($paths) {
   Stop-Process -Id $p.Id -Force -ErrorAction Stop
  }
  $deadline=[DateTime]::UtcNow.AddSeconds(10)
+ # Restart Manager rejects long paths (ERROR_WRITE_FAULT), including extended spelling.
+ # Its supported paths retain owner diagnostics; long paths require an exclusive read probe.
+ $rmPaths=@($paths | Where-Object { $_.Length -lt 260 })
+ $longPaths=@($paths | Where-Object { $_.Length -ge 260 })
+ if($longPaths.Count) { Write-Diagnostic 'long_path_lock_probe' @{count=$longPaths.Count} }
  do {
-  $blockers=@([CoworkLocks]::Find([string[]]$paths))
+  $blockers=@([CoworkLocks]::Find([string[]]$rmPaths))
   $unknown=@()
   foreach($b in $blockers) {
    $id=[int]$b.process.pid
@@ -281,7 +306,13 @@ function Release-Files($paths) {
    } else { $unknown += ($b.name+' (PID '+$id+')') }
   }
   if($unknown.Count) { throw ('请关闭占用安装文件的程序后重试：'+($unknown -join '、')) }
-  if($blockers.Count -eq 0 -and @(Live-Owned).Count -eq 0) { return }
+  if($blockers.Count -eq 0 -and @(Live-Owned).Count -eq 0) {
+   foreach($path in $longPaths) {
+    try { $probe=[IO.File]::Open((Native-Path $path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None); $probe.Dispose() }
+    catch { throw ('安装文件暂不可用，请关闭占用程序后重试：'+$path+'。'+$_.Exception.Message) }
+   }
+   return
+  }
   Start-Sleep -Milliseconds 250
  } while([DateTime]::UtcNow -lt $deadline)
  throw '应用文件仍被占用，尚未替换文件。请关闭相关程序后重试。'
@@ -361,8 +392,8 @@ function Rollback($plan) {
  foreach($relative in @($script:written.ToArray())) {
   $dest=Safe-Path $install $relative
   $old=Safe-Path $backup $relative
-  if(Test-Path -LiteralPath $old -PathType Leaf) { Copy-File $old $dest }
-  elseif(@($plan.added | Where-Object { $_.path -eq $relative }).Count) { if(Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force } }
+  if(File-Exists $old) { Copy-File $old $dest }
+  elseif(@($plan.added | Where-Object { $_.path -eq $relative }).Count) { if(Path-Exists $dest) { Remove-File $dest } }
  }
  foreach($relative in @($script:removed.ToArray())) { Copy-File (Safe-Path $backup $relative) (Safe-Path $install $relative) }
  foreach($item in @($plan.modified)+@($plan.deleted)) {
@@ -413,7 +444,7 @@ function Apply-Update {
   $paths=@()
   foreach($item in @($files)+@($plan.deleted)) {
    $dest=Safe-Path $install ([string]$item.path)
-   if(Test-Path -LiteralPath $dest -PathType Leaf) { $paths += $dest }
+   if(File-Exists $dest) { $paths += $dest }
   }
   foreach($item in $files) {
    $from=Safe-Path $source ([string]$item.path)
@@ -423,14 +454,14 @@ function Apply-Update {
   foreach($item in @($files)+@($plan.deleted)) {
    $dest=Safe-Path $install $item.path
    if($item.before_sha256) {
-    if(-not (Test-Path -LiteralPath $dest -PathType Leaf) -or (File-Hash $dest) -ne $item.before_sha256) { throw '安装目录在准备期间发生了变化，请重新打开应用后重试更新。' }
-   } elseif(Test-Path -LiteralPath $dest) { throw '安装目录在准备期间出现了新文件，请重新检查更新。' }
+    if(-not (File-Exists $dest) -or (File-Hash $dest) -ne $item.before_sha256) { throw '安装目录在准备期间发生了变化，请重新打开应用后重试更新。' }
+   } elseif(Path-Exists $dest) { throw '安装目录在准备期间出现了新文件，请重新检查更新。' }
   }
    $script:diagnosticStage='backup'
    Status '正在备份原版本…' 10
   foreach($item in @($plan.modified)+@($plan.deleted)) {
    $from=Safe-Path $install $item.path
-   if(Test-Path -LiteralPath $from -PathType Leaf) { Copy-File $from (Safe-Path $backup $item.path) }
+   if(File-Exists $from) { Copy-File $from (Safe-Path $backup $item.path) }
   }
   Record-Transaction 'backed_up'
    $script:diagnosticStage='write_files'
@@ -443,9 +474,9 @@ function Apply-Update {
   }
   foreach($item in @($plan.deleted)) {
    $dest=Safe-Path $install $item.path
-   if(Test-Path -LiteralPath $dest -PathType Leaf) {
+   if(File-Exists $dest) {
     $script:removed.Add([string]$item.path); Record-Transaction 'writing'; $script:mutated=$true
-    Remove-Item -LiteralPath $dest -Force
+    Remove-File $dest
    }
    $index++; Status '正在安装更新…' (15+[int](65*$index/$total))
   }

@@ -163,7 +163,7 @@ class RuntimeCoordinator:
 
     @_session_command
     def _accept(self, cid, rid, payload):
-        with self.runtime_journal.session_lock(cid):
+        with self.runtime_journal.session_lock(cid), self.lock:
             if self.update_preparing or self.shutdown_requested:
                 raise RuntimeError("后台正在结束，输入内容已保留。")
             run, created = self.desktop_store.accept(payload)

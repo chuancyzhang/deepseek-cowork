@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import zipfile
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from cryptography.fernet import Fernet
@@ -505,6 +506,105 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(rows["total"], 40)
         self.assertEqual(len({q["id"] for q in rows["items"]}), 40)
         print(f"\nEnterprise simulated streams: peak={counts['peak']}, requests=40, seconds={time.monotonic()-started:.2f}")
+
+    def desktop_package(self, version="99.0.0"):
+        from web.platform.server.releases import DESKTOP_REQUIRED_FILES, DESKTOP_ROOT
+        package = io.BytesIO()
+        with zipfile.ZipFile(package, "w") as archive:
+            for name in DESKTOP_REQUIRED_FILES - {"desktop-release.json"}:
+                archive.writestr(DESKTOP_ROOT + "/" + name, b"fixture")
+            archive.writestr(DESKTOP_ROOT + "/desktop-release.json", json.dumps({
+                "schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": version}))
+            archive.writestr(DESKTOP_ROOT + "/resources/service/_internal/enterprise_capabilities.json", json.dumps({
+                "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}))
+        data = package.getvalue()
+        return data, {"schema_version": 1, "version": version, "app_layout": "electron", "target_os": "windows", "arch": "x64",
+            "filename": f"cowork-desktop-v{version}-windows-x64.zip", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "notes": "测试更新"}
+
+    def test_desktop_release_import_is_pinned_and_recommendations_are_isolated(self):
+        from unittest.mock import patch
+        from web.platform.server import releases as module
+        self.web_login()
+        data, manifest = self.desktop_package()
+        seen = []
+        def download(request):
+            seen.append(request.url.path)
+            if request.url.path.endswith("/latest/download/latest-desktop-windows-x64.json"):
+                return httpx.Response(200, json=manifest)
+            if request.url.path.endswith("/download/v99.0.0/" + manifest["filename"]):
+                return httpx.Response(200, content=data)
+            return httpx.Response(404)
+        original = httpx.AsyncClient
+        actor = self.client.get("/api/v1/me").json()["member"]["id"]
+        async def run():
+            item, selected = await self.app.state.releases.github_candidate(actor)
+            await self.app.state.releases.import_github(item["id"], selected, actor, item["generation"])
+            return item
+        with patch.object(module.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(download), **kw)):
+            item = asyncio.run(run())
+        path = "/api/v1/admin/client-releases/" + item["id"]
+        ready = self.client.get(path).json()
+        self.assertEqual(ready["state"], "ready", ready)
+        self.assertFalse(ready["recommended"])
+        preview = self.client.get(path + "/download")
+        self.assertEqual(hashlib.sha256(preview.content).hexdigest(), ready["sha256"])
+        self.assertNotEqual(ready["sha256"], manifest["sha256"])
+        with self.db.transaction() as db:
+            qt = ClientRelease(app_version="1.0.0", app_layout="qt", state="published", recommended=True, created_by=actor)
+            db.add(qt); db.flush(); qt_id = qt.id
+        published = self.client.post(path + "/publish", headers=self.headers(), json={
+            "operation_id": "publish-desktop-import", "catalog_revision": 0, "recommended": True})
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"]["id"], item["id"])
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], qt_id)
+        withdrawn = self.client.post(path + "/withdraw", headers=self.headers(), json={
+            "operation_id": "withdraw-desktop-import", "catalog_revision": 1, "replacement_id": "", "reason": "撤回测试"})
+        self.assertEqual(withdrawn.status_code, 200, withdrawn.text)
+        self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
+        self.assertEqual(self.client.get("/api/v1/client-releases/" + item["id"] + "/download").status_code, 404)
+        self.assertEqual(len(seen), 2)
+
+    def test_v2_migration_keeps_existing_release_in_qt_channel(self):
+        from sqlalchemy import text
+        from web.platform.server.database import Platform
+        self.web_login()
+        actor = self.client.get("/api/v1/me").json()["member"]["id"]
+        release = self.app.state.releases.create({"app_version": "1.2.3"}, actor)
+        with self.db.transaction() as db:
+            record = db.get(ClientRelease, release["id"])
+            record.state, record.recommended = "published", True
+            db.get(Platform, 1).schema_version = 2
+        with self.db.engine.begin() as db:
+            db.execute(text("ALTER TABLE client_releases DROP COLUMN app_layout"))
+        self.db.migrate(self.settings)
+        self.db.migrate(self.settings)
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], release["id"])
+        self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
+        with self.db.transaction() as db:
+            self.assertEqual(db.get(Platform, 1).schema_version, 3)
+
+    def test_cancelled_github_import_cannot_overwrite_a_new_upload(self):
+        from unittest.mock import patch
+        from web.platform.server import releases as module
+        self.web_login()
+        _, manifest = self.desktop_package()
+        actor = self.client.get("/api/v1/me").json()["member"]["id"]
+        original = httpx.AsyncClient
+        async def run():
+            with patch.object(module.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=manifest)), **kw)):
+                item, selected = await self.app.state.releases.github_candidate(actor)
+            self.app.state.releases.cancel(item["id"], actor)
+            with self.db.transaction() as db:
+                record = db.get(ClientRelease, item["id"])
+                record.stage, record.error = "received", "new upload"
+            with patch.object(module.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(
+                    lambda request: httpx.Response(503)), **kw)):
+                await self.app.state.releases.import_github(item["id"], selected, actor, item["generation"])
+            return item
+        item = asyncio.run(run())
+        current = self.client.get("/api/v1/admin/client-releases/" + item["id"]).json()
+        self.assertEqual((current["state"], current["stage"], current["error"]), ("draft", "received", "new upload"))
 
     def test_release_validation_publish_withdraw_and_immutable_config(self):
         import zipfile

@@ -144,20 +144,22 @@ python -m server serve --host 127.0.0.1 --port 8080
 
 ## 客户端分发
 
-Windows 标准客户端按[构建说明](../../docs/technical-design.md#构建与发布)生成 ZIP 和审计报告。平台管理员执行：
+Windows 标准客户端按[构建说明](../../docs/technical-design.md#构建与发布)生成 ZIP 和 `latest-desktop-windows-x64.json` 更新清单（也可使用显式生成的审计报告）。平台管理员执行：
 
-1. 在“设置 → 客户端分发”新建发布，上传 ZIP 和对应报告。
+1. 在“设置 → 客户端分发”新建发布，选择“新版工作台（Electron）”，上传 ZIP 和对应更新清单。旧 Qt 包选择“旧版客户端（Qt）”并提供原审计报告。
 2. 点击“校验并生成企业包”，等待可下载状态。
 3. 下载核对后发布，并设置为推荐版本。
 4. 员工下载并完整解压，启动后登录企业账号。
 
-企业包在 EXE 同目录增加公开的 `enterprise_connection.json`。客户端从中心读取推荐版本并下载更新；发布列表提供撤下、删除和恢复记录操作。
+也可点击“从 GitHub 导入最新版”：中心读取正式 Release 的新版工作台清单，从固定版本标签下载标准 ZIP，验证并生成企业包。导入过程可取消，失败保留原因；完成后停在待发布状态，仍需管理员下载核验并发布推荐。
+
+企业包在 EXE 同目录增加公开的 `enterprise_connection.json`，封装后重新计算大小和 SHA-256。推荐版本按客户端结构、系统和架构隔离；下载页默认提供新版工作台，旧客户端仍查询 Qt 推荐。在线客户端安装前会重新确认推荐记录有效；发布列表提供撤下、删除和恢复操作。
 
 ## 团队空间与数据库
 
 团队空间提供计划、成员、资料、成果和动态，员工在桌面执行任务并选择发布内容，网页用于管理和阅读共享对象。操作见[用户手册](../../docs/user-guide.md#企业账号与团队空间)。
 
-数据库结构由 `server/database.py` 和 `server/team_space_tables.py` 定义，`platform.schema_version` 记录已完成版本。结构版本 2 通过单个事务增加空间相关表，再更新版本；执行入口为：
+数据库结构由 `server/database.py` 和 `server/team_space_tables.py` 定义，`platform.schema_version` 记录已完成版本。结构版本 2 增加空间相关表；版本 3 为发布记录增加 `app_layout`，原记录默认 Qt，保留原发布状态和推荐。执行入口为：
 
 ```bash
 docker compose run --rm platform python -m server migrate

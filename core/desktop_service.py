@@ -264,6 +264,7 @@ class DesktopService:
                 settled = self.state.prepare_update_shutdown()
                 if not settled.get("saved"):
                     raise RuntimeError(settled.get("error") or "后台任务尚未完成保存，请稍后再退出。")
+                self.updates.close()
                 self.scheduler.close()
                 self.messaging.close()
                 self.workbench.close()
@@ -276,6 +277,7 @@ class DesktopService:
             except Exception:
                 self.closing = False
                 self.state.update_preparing = False
+                self.updates.resume_automatic()
                 log.exception("service_shutdown_failed retry_available=true")
                 raise
 

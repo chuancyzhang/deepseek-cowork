@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, BookOpen, Users, Sparkles, Star, ChevronDown, ChevronRight, Folder, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeftClose, Pin, Plus, Search, Settings, Undo2, Trash2, Pencil, X } from 'lucide-react';
 import type { Conversation } from './types';
+import {UpdateNotice} from './management/Updates';
 
 type Props = {
   conversations: Conversation[]; projects: any[]; selected: string; route: string; running: Set<string>;
@@ -110,7 +111,7 @@ export default function Sidebar(props: Props) {
       {!visible.length && !searching && (query || !shownProjects.length) && <p className="sidebar-empty">{query ? '没有匹配的聊天' : archive ? '还没有归档的项目或聊天' : '从一个新想法开始'}</p>}
       {(visible.length > limit || props.hasMore) && <button className="sidebar-more" onClick={() => { setLimit(limit + 40); if (visible.length <= limit && props.hasMore) void props.onMore(); }}><ChevronDown size={13}/>更早的聊天</button>}
     </nav>
-    <div className="sidebar-bottom"><div className="sidebar-destinations">{[['capabilities','能力',Sparkles],['library','资料库',BookOpen],['favorites','常用任务',Star],['team','团队空间',Users]].map(([route,label,Icon]: any) => <button key={route} className={(props.route === route || route === 'capabilities' && props.route === 'plugins') ? 'selected' : ''} onClick={() => props.onRoute(route)}><Icon size={17}/><span>{label}</span></button>)}</div><div className="sidebar-utilities"><button className={props.route === 'settings' ? 'selected' : ''} aria-current={props.route === 'settings' ? 'page' : undefined} onClick={() => props.onRoute('settings')}><Settings size={17}/><span>设置</span><ChevronRight size={15} className="sidebar-settings-arrow" aria-hidden="true"/></button></div></div>
+    <div className="sidebar-bottom"><div className="sidebar-destinations">{[['capabilities','能力',Sparkles],['library','资料库',BookOpen],['favorites','常用任务',Star],['team','团队空间',Users]].map(([route,label,Icon]: any) => <button key={route} className={(props.route === route || route === 'capabilities' && props.route === 'plugins') ? 'selected' : ''} onClick={() => props.onRoute(route)}><Icon size={17}/><span>{label}</span></button>)}</div><UpdateNotice/><div className="sidebar-utilities"><button className={props.route === 'settings' ? 'selected' : ''} aria-current={props.route === 'settings' ? 'page' : undefined} onClick={() => props.onRoute('settings')}><Settings size={17}/><span>设置</span><ChevronRight size={15} className="sidebar-settings-arrow" aria-hidden="true"/></button></div></div>
     {menu && <div ref={menuElement} className="context-menu" role="menu" style={{ left: menu.x, top: menu.y }}>
       {menu.project && <button role="menuitem" onClick={()=>{props.onProjectAction(menu.project.archived || menu.project.hidden ? 'restore' : 'archive',menu.project);setMenu(null);}}>{menu.project.archived || menu.project.hidden ? <Undo2 size={15}/> : <Archive size={15}/>} {menu.project.archived || menu.project.hidden ? '恢复项目' : '归档项目'}</button>}
       {menu.item && ([['rename', '重命名', Pencil], ['pin', menu.item.meta.pinned ? '取消置顶' : '置顶', Pin],

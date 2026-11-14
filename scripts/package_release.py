@@ -397,6 +397,7 @@ def audit_distribution(dist_dir: Path) -> dict:
     ]
     return {
         "app_version": APP_VERSION,
+        "app_layout": "electron",
         "supported_connection_schemas": [1],
         "supported_platform_api_versions": [1],
         "dist_dir": str(dist_dir),

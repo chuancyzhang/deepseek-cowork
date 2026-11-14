@@ -9,6 +9,7 @@ const Preferences = lazy(() => import('./management/Preferences'));
 const Library = lazy(() => import('./management/Library'));
 const SystemSettings = lazy(() => import('./management/SystemSettings'));
 const Enterprise = lazy(() => import('./management/Enterprise'));
+const Updates = lazy(() => import('./management/Updates'));
 const PluginManager = lazy(() => import('./plugins/PluginManager'));
 
 export const managementNames: Record<string, string> = { capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间', settings: '设置' };
@@ -40,7 +41,8 @@ export default function Management({ route, settings, updateSettings, openConver
         : tab === 'plugins' ? <PluginManager/>
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
-        : ['preferences','im','security','storage','memory','experiments','components','logs','update'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
+        : tab === 'update' ? <Updates/>
+        : ['preferences','im','security','storage','memory','experiments','components','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
         : <Preferences key={tab} kind={tab} settings={settings} updateSettings={updateSettings} {...common}/>}
     </Suspense></div>
   </div>;

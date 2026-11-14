@@ -1,5 +1,6 @@
 // Explicit renderer RPC capabilities. Keep in sync with the desktop adapters.
 module.exports = [
+  "updates.get", "updates.check", "updates.local", "updates.cancel", "updates.dismiss",
   "settings.page",
   "settings.page_save",
   "settings.action",

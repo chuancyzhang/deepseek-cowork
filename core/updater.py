@@ -9,6 +9,7 @@ import sys
 import time
 import zipfile
 import uuid
+import stat
 from dataclasses import dataclass
 from contextlib import contextmanager
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ from core.process_utils import subprocess_kwargs_no_window, popen_external_progr
 from core.env_utils import get_app_data_dir
 from core.update_manifest import validate_manifest
 from core.platform_capabilities import desktop_target, is_windows
+from core.platform_runtime import platform_runtime
 
 PUBLIC_UPDATE_BASE_URL = ""
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/chuancyzhang/deepseek-cowork/releases/latest"
@@ -163,7 +165,7 @@ def _fetch_github_api_release(timeout):
     return {**data, "source_name": "github"}
 
 
-def fetch_latest_release(timeout=12, *, source=None, source_config=None):
+def fetch_latest_release(timeout=12, *, source=None, source_config=None, layout="qt"):
     config = source_config if source_config is not None else community_source_config()
     source = source or ("public" if config["public_base_url"] else "github")
     if source not in {"public", "github"}:
@@ -171,15 +173,22 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
     target = "windows-x64" if is_windows() else desktop_target()
     base = config["public_base_url"] + (PUBLIC_UPDATE_PATH if is_windows() else "/updates/" + target)
     github_manifest = GITHUB_MANIFEST_URL if is_windows() else GITHUB_RELEASES_URL + f"/latest/download/latest-{target}.json"
+    if layout == "electron":
+        if not is_windows():
+            raise UpdaterError("此平台尚未发布新版工作台安装包。")
+        base = config["public_base_url"] + "/updates/desktop-windows-x64"
+        github_manifest = config["github_releases_url"] + "/latest/download/latest-desktop-windows-x64.json"
     url = base + "/latest.json" if source == "public" else github_manifest
     try:
         with requests.get(url, headers={"User-Agent": "deepseek-cowork-updater", "Cache-Control": "no-cache"}, timeout=timeout) as response:
             # Compatibility is limited to a genuinely missing attachment.
             if source == "github" and response.status_code == 404:
+                if layout == "electron":
+                    return None
                 return _fetch_github_api_release(timeout)
             response.raise_for_status()
             try:
-                manifest = validate_manifest(response.json(), target)
+                manifest = validate_manifest(response.json(), target, layout=layout)
             except (ValueError, TypeError) as exc:
                 raise UpdaterError(str(exc) if isinstance(exc, ValueError) else "更新清单格式无效。") from exc
     except UpdaterError:
@@ -189,7 +198,7 @@ def fetch_latest_release(timeout=12, *, source=None, source_config=None):
             raise _public_source_error(exc, "公共更新源暂时不可用") from exc
         raise _network_error(exc, "无法读取 GitHub 更新清单") from exc
     version, filename = manifest["version"], manifest["filename"]
-    asset = ReleaseAsset(filename, base + "/" + filename if source == "public" else github_asset_url(version, filename),
+    asset = ReleaseAsset(filename, base + "/" + filename if source == "public" else config["github_releases_url"] + f"/download/v{version}/{filename}",
                          manifest["size"], version, "sha256:" + manifest["sha256"])
     return {"tag_name": version, "body": manifest["notes"], "html_url": GITHUB_RELEASES_URL + "/tag/v" + version,
             "assets": [asset.as_dict()], "source_name": source}
@@ -242,7 +251,7 @@ def _update_response(url, *, connection=None, **kwargs):
             yield response
 
 
-def fetch_enterprise_release(connection, timeout=12):
+def fetch_enterprise_release(connection, timeout=12, *, layout="qt"):
     base = connection["platform_url"]
     def read(path):
         try:
@@ -261,7 +270,7 @@ def fetch_enterprise_release(connection, timeout=12):
         raise UpdaterError("企业更新服务的平台标识与当前连接不一致。")
     if not isinstance(info.get("supported_api_versions"), list) or 1 not in info["supported_api_versions"]:
         raise UpdaterError("企业更新服务协议不兼容，请联系管理员。")
-    response = read("/api/v1/client-releases/recommended?target_os=windows&arch=x64")
+    response = read("/api/v1/client-releases/recommended?target_os=windows&arch=x64" + ("&app_layout=electron" if layout == "electron" else ""))
     if "release" not in response:
         raise UpdaterError("企业更新服务缺少推荐版本信息。")
     release = response["release"]
@@ -269,20 +278,30 @@ def fetch_enterprise_release(connection, timeout=12):
         return None
     if (not isinstance(release, dict) or release.get("state") != "published"
             or release.get("recommended") is not True or release.get("target_os") != "windows"
+            or release.get("app_layout", "qt") != layout
             or release.get("arch") != "x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(release.get("app_version", "")))
             or not isinstance(release.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", release["id"])
             or not re.fullmatch(r"[a-fA-F0-9]{64}", str(release.get("sha256", "")))
             or type(release.get("bytes")) is not int or release["bytes"] <= 0):
         raise UpdaterError("企业推荐版本的发布状态或安装包信息无效。")
     version = release["app_version"]
-    asset = ReleaseAsset(f"deepseek-cowork-v{version}.zip",
+    from core.update_manifest import release_filename
+    asset = ReleaseAsset(release_filename(version, layout=layout),
                          base + f"/api/v1/client-releases/{release['id']}/download",
                          release["bytes"], release["id"], "sha256:" + release["sha256"].lower())
     return {"tag_name": version, "body": release.get("notes") or "", "html_url": base + "/downloads",
             "assets": [asset.as_dict()]}
 
 
-def select_release_asset(release):
+def select_release_asset(release, *, layout="qt"):
+    if layout == "electron":
+        from core.update_manifest import release_filename
+        expected = release_filename(str(release.get("tag_name", "")).lstrip("vV"), layout=layout)
+        matches = [item for item in release.get("assets", []) if item.get("name") == expected]
+        if len(matches) != 1:
+            raise UpdaterError("发布记录缺少唯一的新版工作台安装包。")
+        item = matches[0]
+        return ReleaseAsset(item["name"], item["browser_download_url"], item["size"], item.get("id", ""), item.get("digest", ""))
     if not is_windows():
         from core.update_manifest import release_filename
         version = str(release.get("tag_name") or "").lstrip("vV")
@@ -352,7 +371,7 @@ def _is_update_excluded(relative_path):
 
 def _hash_file(path):
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with open(platform_runtime.filesystem_path(path), "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -361,13 +380,14 @@ def _hash_file(path):
 def _collect_app_files(root_dir):
     root_dir = os.path.abspath(root_dir)
     files = {}
-    for current_root, dirs, names in os.walk(root_dir):
-        relative_root = os.path.relpath(current_root, root_dir)
+    native_root = platform_runtime.filesystem_path(root_dir)
+    for current_root, dirs, names in os.walk(native_root):
+        relative_root = os.path.relpath(current_root, native_root)
         if relative_root == ".":
             dirs[:] = [name for name in dirs if not _is_update_excluded(name)]
         for name in names:
             full_path = os.path.join(current_root, name)
-            relative_path = os.path.relpath(full_path, root_dir).replace("\\", "/")
+            relative_path = os.path.relpath(full_path, native_root).replace("\\", "/")
             if _is_update_excluded(relative_path):
                 continue
             normalized = _normalized_relative_path(relative_path)
@@ -450,10 +470,10 @@ def write_update_plan(plan, target_dir=None):
     if not isinstance(plan, dict) or plan.get("format_version") != UPDATE_PLAN_FORMAT:
         raise UpdaterError("更新操作清单格式无效。")
     target_dir = target_dir or updates_dir()
-    os.makedirs(target_dir, exist_ok=True)
+    os.makedirs(platform_runtime.filesystem_path(target_dir), exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     plan_path = os.path.join(target_dir, f"apply-update-{stamp}.json")
-    with open(plan_path, "w", encoding="utf-8", newline="\n") as handle:
+    with open(platform_runtime.filesystem_path(plan_path), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(plan, handle, ensure_ascii=False, indent=2)
     return plan_path
 
@@ -478,6 +498,7 @@ def same_release_asset(left, right):
 
 
 def is_cached_asset_valid(asset, zip_path):
+    zip_path = platform_runtime.filesystem_path(zip_path)
     if not os.path.isfile(zip_path):
         return False
     expected_size = int((asset.get("size") if isinstance(asset, dict) else getattr(asset, "size", 0)) or 0)
@@ -497,25 +518,25 @@ def is_cached_asset_valid(asset, zip_path):
 
 def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback=None):
     target_dir = target_dir or updates_dir()
-    os.makedirs(target_dir, exist_ok=True)
+    os.makedirs(platform_runtime.filesystem_path(target_dir), exist_ok=True)
     keep = {os.path.abspath(path) for path in (keep_paths or []) if path}
     removed = 0
     patterns = (
         re.compile(r"^deepseek-cowork.*\.zip$", re.IGNORECASE),
         re.compile(r"^deepseek-cowork.*\.zip\.download$", re.IGNORECASE),
     )
-    for name in os.listdir(target_dir):
+    for name in os.listdir(platform_runtime.filesystem_path(target_dir)):
         path = os.path.join(target_dir, name)
         abs_path = os.path.abspath(path)
         if abs_path in keep:
             continue
-        if not any(pattern.match(name) for pattern in patterns) or not os.path.isfile(path):
+        if not any(pattern.match(name) for pattern in patterns) or not os.path.isfile(platform_runtime.filesystem_path(path)):
             continue
         try:
             if os.path.isdir(path):
                 shutil.rmtree(path)
             else:
-                os.remove(path)
+                os.remove(platform_runtime.filesystem_path(path))
             removed += 1
         except FileNotFoundError:
             continue
@@ -537,14 +558,14 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
     if not asset.download_url:
         raise UpdaterError("Release 资源缺少下载地址。")
     target_dir = target_dir or updates_dir()
-    os.makedirs(target_dir, exist_ok=True)
+    os.makedirs(platform_runtime.filesystem_path(target_dir), exist_ok=True)
     zip_path = expected_asset_path(asset, target_dir=target_dir)
     check_cancel(cancel_event)
     if is_cached_asset_valid(asset, zip_path):
         _emit(progress_callback, f"已找到本地安装包，跳过下载：{zip_path}", 100)
         return zip_path
-    if os.path.isfile(zip_path):
-        os.remove(zip_path)
+    if os.path.isfile(platform_runtime.filesystem_path(zip_path)):
+        os.remove(platform_runtime.filesystem_path(zip_path))
     temp_path = zip_path + ".download"
     _emit(progress_callback, f"正在下载 {asset.name}", 0)
     try:
@@ -552,7 +573,7 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
             response.raise_for_status()
             expected = asset.size or int(response.headers.get("content-length") or 0)
             downloaded = 0
-            with open(temp_path, "wb") as handle:
+            with open(platform_runtime.filesystem_path(temp_path), "wb") as handle:
                 for chunk in response.iter_content(chunk_size=1024 * 512):
                     check_cancel(cancel_event)
                     if not chunk:
@@ -562,17 +583,17 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
                     if expected:
                         percent = min(99, int(downloaded * 100 / expected))
                         _emit(progress_callback, f"正在下载 {asset.name}", percent)
-        actual_size = os.path.getsize(temp_path)
+        actual_size = os.path.getsize(platform_runtime.filesystem_path(temp_path))
         if asset.size and actual_size != asset.size:
             raise UpdaterError(f"下载大小校验失败：期望 {asset.size} 字节，实际 {actual_size} 字节。")
         check_cancel(cancel_event)
         if not is_cached_asset_valid(asset, temp_path):
             raise UpdaterError("安装包校验失败，请重新下载。")
-        os.replace(temp_path, zip_path)
+        os.replace(platform_runtime.filesystem_path(temp_path), platform_runtime.filesystem_path(zip_path))
     except Exception as exc:
         try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            if os.path.exists(platform_runtime.filesystem_path(temp_path)):
+                os.remove(platform_runtime.filesystem_path(temp_path))
         except Exception:
             pass
         if isinstance(exc, UpdaterError):
@@ -587,7 +608,9 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
 def find_staged_app_dir(root_dir, *, layout="qt"):
     if _is_valid_app_dir(root_dir, layout=layout):
         return root_dir
-    for current_root, dirs, _files in os.walk(root_dir):
+    native_root = platform_runtime.filesystem_path(root_dir)
+    for native_dir, dirs, _files in os.walk(native_root):
+        current_root = os.path.join(root_dir, os.path.relpath(native_dir, native_root))
         if _is_valid_app_dir(current_root, layout=layout):
             return current_root
         dirs[:] = [name for name in dirs if name not in {"__MACOSX", ".git"}]
@@ -596,7 +619,7 @@ def find_staged_app_dir(root_dir, *, layout="qt"):
 
 def _is_valid_app_dir(path, *, layout="qt"):
     if layout == "electron":
-        return bool(desktop_executable(path)) and all(os.path.isfile(os.path.join(path, name)) for name in (
+        return bool(desktop_executable(path)) and all(os.path.isfile(platform_runtime.filesystem_path(os.path.join(path, name))) for name in (
             "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"))
     if layout != "qt":
         raise UpdaterError("未知的应用安装结构。")
@@ -608,29 +631,60 @@ def _is_valid_app_dir(path, *, layout="qt"):
 
 def desktop_executable(path):
     """Resolve the branded entry while allowing updates from earlier builds."""
-    return next((name for name in DESKTOP_EXE_NAMES if os.path.isfile(os.path.join(path, name))), None)
+    return next((name for name in DESKTOP_EXE_NAMES if os.path.isfile(platform_runtime.filesystem_path(os.path.join(path, name)))), None)
 
 
-def _safe_extractall(archive, target_dir):
+def _safe_extractall(archive, target_dir, cancel_event=None, progress_callback=None):
     target_root = os.path.abspath(target_dir)
+    seen = set()
     for member in archive.infolist():
-        member_path = os.path.abspath(os.path.join(target_root, member.filename))
+        name = member.filename.replace("\\", "/").rstrip("/")
+        parts = name.split("/")
+        kind = stat.S_IFMT(member.external_attr >> 16)
+        if (not name or member.filename.startswith(("/", "\\")) or ":" in name
+                or any(part in {"", ".", ".."} or part.endswith((".", " ")) for part in parts)
+                or kind not in {0, stat.S_IFDIR, stat.S_IFREG} or member.flag_bits & 1
+                or name.casefold() in seen):
+            raise UpdaterError("更新包包含不安全、重复或不支持的路径。")
+        seen.add(name.casefold())
+        member_path = os.path.abspath(os.path.join(target_root, *parts))
         if os.path.commonpath([target_root, member_path]) != target_root:
             raise UpdaterError("更新包包含不安全的路径。")
-    archive.extractall(target_root)
+    # All I/O uses native long paths; manifests and user-visible paths stay ordinary.
+    total = max(1, sum(item.file_size for item in archive.infolist()))
+    copied, last_percent = 0, -1
+    for member in archive.infolist():
+        check_cancel(cancel_event)
+        destination = platform_runtime.filesystem_path(os.path.join(target_root, *member.filename.replace("\\", "/").split("/")))
+        if member.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, destination.open("wb") as output:
+            while chunk := source.read(1024 * 1024):
+                check_cancel(cancel_event)
+                output.write(chunk)
+                copied += len(chunk)
+        percent = int(copied * 100 / total)
+        if percent != last_percent:
+            _emit(progress_callback, "正在解压并校验更新包", percent)
+            last_percent = percent
 
 
-def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, layout="qt"):
-    if not os.path.isfile(zip_path):
+def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, layout="qt", cancel_event=None):
+    if not os.path.isfile(platform_runtime.filesystem_path(zip_path)):
         raise UpdaterError("更新包不存在。")
     target_dir = target_dir or updates_dir()
     stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     extract_dir = os.path.join(target_dir, f"staged-{stamp}")
-    os.makedirs(extract_dir, exist_ok=True)
+    os.makedirs(platform_runtime.filesystem_path(extract_dir), exist_ok=True)
     _emit(progress_callback, "正在解压更新包", None)
     try:
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            _safe_extractall(archive, extract_dir)
+        with zipfile.ZipFile(platform_runtime.filesystem_path(zip_path), "r") as archive:
+            _safe_extractall(archive, extract_dir, cancel_event, progress_callback)
+    except UpdateCancelled:
+        shutil.rmtree(platform_runtime.filesystem_path(extract_dir))
+        raise
     except zipfile.BadZipFile as exc:
         raise UpdaterError("更新包不是有效的 zip 文件。") from exc
     except Exception as exc:
@@ -638,6 +692,87 @@ def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, lay
     app_dir = find_staged_app_dir(extract_dir, layout=layout)
     _emit(progress_callback, "更新包校验完成", None)
     return app_dir
+
+
+def desktop_package_metadata(zip_path):
+    """Read identity from the archive, never infer an install version from its name."""
+    with zipfile.ZipFile(platform_runtime.filesystem_path(zip_path)) as archive:
+        entries = [item for item in archive.infolist()
+                   if item.filename.rstrip("/").split("/")[-1] == "desktop-release.json"]
+        if len(entries) != 1 or entries[0].file_size > 16384:
+            raise UpdaterError("安装包缺少唯一的新版工作台版本信息。")
+        value = json.loads(archive.read(entries[0]))
+    return validate_desktop_identity(value)
+
+
+def validate_desktop_identity(value):
+    if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1 or value.get("app_layout") != "electron"
+            or value.get("target") != "windows-x64"
+            or not isinstance(value.get("version"), str)
+            or not re.fullmatch(r"\d+\.\d+\.\d+", value["version"])):
+        raise UpdaterError("安装包的版本或平台无效，请选择完整的 Windows x64 新版工作台 ZIP。")
+    return value
+
+
+def validate_desktop_staged(staged, version, connection):
+    if not _is_valid_app_dir(staged, layout="electron"):
+        raise UpdaterError("更新包缺少新版工作台的必要文件。")
+    with open(platform_runtime.filesystem_path(os.path.join(staged, "desktop-release.json")), encoding="utf-8") as handle:
+        identity = validate_desktop_identity(json.load(handle))
+    if identity["version"] != version:
+        raise UpdaterError("安装包版本与更新清单不一致。")
+    validate_online_package(staged, connection)
+
+
+def prepare_desktop_local(path, root, current_version, connection, cancel, progress):
+    from core.update_coordinator import persist_prepared
+    from core.update_manifest import release_filename
+    identity = desktop_package_metadata(path)
+    version = identity["version"]
+    if compare_versions(version, current_version) < 0:
+        raise UpdaterError("安装包版本低于当前版本，不能降级安装。")
+    check_cancel(cancel)
+    native = platform_runtime.filesystem_path(path)
+    size, digest = os.path.getsize(native), _hash_file(native)
+    sidecar = native.parent / "latest-desktop-windows-x64.json"
+    notes, verified = "", False
+    if sidecar.is_file():
+        with sidecar.open(encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        # A directory can also contain an unrelated release's manifest.
+        if isinstance(manifest, dict) and manifest.get("filename") in {os.path.basename(path), release_filename(version, layout="electron")}:
+            manifest = validate_manifest(manifest, layout="electron")
+            if manifest["version"] != version or manifest["size"] != size or manifest["sha256"] != digest:
+                raise UpdaterError("本地 ZIP 与配套更新清单不一致，请重新获取完整安装包。")
+            notes, verified = manifest["notes"], True
+    downloads = os.path.join(root, "downloads")
+    os.makedirs(platform_runtime.filesystem_path(downloads), exist_ok=True)
+    asset = ReleaseAsset(f"local-{digest}.zip", "", size, digest, "sha256:" + digest)
+    owned = expected_asset_path(asset, downloads)
+    if not is_cached_asset_valid(asset, owned):
+        temporary = owned + ".download"
+        try:
+            with native.open("rb") as source, open(platform_runtime.filesystem_path(temporary), "wb") as target:
+                while chunk := source.read(1024 * 1024):
+                    check_cancel(cancel)
+                    target.write(chunk)
+            if _hash_file(temporary) != digest:
+                raise UpdaterError("本地安装包在准备期间发生变化，请重新选择。")
+            os.replace(platform_runtime.filesystem_path(temporary), platform_runtime.filesystem_path(owned))
+        finally:
+            if os.path.exists(platform_runtime.filesystem_path(temporary)):
+                os.remove(platform_runtime.filesystem_path(temporary))
+    staged = extract_update_zip(owned, root, progress, layout="electron", cancel_event=cancel)
+    validate_desktop_staged(staged, version, connection)
+    check_cancel(cancel)
+    result = {"app_layout": "electron", "update_source": "local", "source_name": "local",
+              "update_available": True, "install_enabled": True, "connection": connection,
+              "release": {"tag_name": version, "body": notes}, "asset": asset.as_dict(),
+              "zip_path": owned, "sha256": digest, "staged_app_dir": staged, "updates_dir": root,
+              "manifest_verified": verified, "current_version": current_version}
+    persist_prepared(root, result)
+    return result
 
 
 def prepare_update(current_version=APP_VERSION, download=False, progress_callback=None, install_dir=None):
@@ -764,7 +899,7 @@ def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, 
     staged_app_dir = os.path.abspath(staged_app_dir)
     if not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
-    with open(change_plan_path, encoding="utf-8") as handle:
+    with open(platform_runtime.filesystem_path(change_plan_path), encoding="utf-8") as handle:
         plan = json.load(handle)
     if plan.get("format_version") != UPDATE_PLAN_FORMAT:
         raise UpdaterError("更新操作清单格式无效。")

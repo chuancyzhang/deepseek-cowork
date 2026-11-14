@@ -92,8 +92,8 @@ def create_app(settings=None, *, transport=None):
         with database.transaction() as db:
             db.execute(update(ClientRelease).where(ClientRelease.state == "processing")
                        .values(state="failed", error="服务中断，处理未完成；可重新处理完整源文件。"))
-            db.execute(update(ClientRelease).where(ClientRelease.state == "draft", ClientRelease.stage == "receive")
-                       .values(state="failed", error="上传中断，请重新上传。"))
+            db.execute(update(ClientRelease).where(ClientRelease.state == "draft", ClientRelease.stage.in_(["receive", "import_pending"]))
+                       .values(state="failed", error="上传或导入中断，请重新上传或导入。"))
         cleanup()
         async with httpx.AsyncClient(transport=transport, follow_redirects=False,
                 timeout=httpx.Timeout(connect=15, read=settings.model_read_timeout, write=60, pool=15),
@@ -595,6 +595,15 @@ def create_app(settings=None, *, transport=None):
         actor = principal(request, admin=True)
         return releases.create(await read_json(request, 32768), actor["id"])
 
+    @app.post("/api/v1/admin/client-releases/import-github", status_code=202)
+    async def release_import_github(request: Request):
+        actor = principal(request, admin=True)
+        item, manifest = await releases.github_candidate(actor["id"])
+        task = asyncio.create_task(releases.import_github(item["id"], manifest, actor["id"], item["generation"]))
+        jobs.add(task)
+        task.add_done_callback(jobs.discard)
+        return {"id": item["id"], "state": "draft", "stage": "import_pending"}
+
     @app.get("/api/v1/admin/client-releases/{release_id}")
     def release_details(release_id: str, request: Request):
         principal(request, admin=True)
@@ -621,7 +630,7 @@ def create_app(settings=None, *, transport=None):
         report = await read_json(request, 1024 * 1024)
         with database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
-            if not item or item.state not in {"draft", "failed"} or (item.stage == "receive" and item.state != "failed"):
+            if not item or item.state not in {"draft", "failed"} or (item.stage in {"receive", "import_pending"} and item.state != "failed"):
                 raise PlatformError("release_busy", "此发布记录当前不能更换报告。", 409)
             item.report = report
         return {"saved": True}
@@ -653,7 +662,8 @@ def create_app(settings=None, *, transport=None):
             path = releases.download_path(item)
             if not path.is_file() or path.stat().st_size != item.output_bytes:
                 raise PlatformError("release_file_missing", "发布文件不完整，请联系管理员。", 503)
-            return FileResponse(path, media_type="application/zip", filename=f"deepseek-cowork-v{item.app_version}.zip",
+            filename = f"cowork-desktop-v{item.app_version}-windows-x64.zip" if item.app_layout == "electron" else f"deepseek-cowork-v{item.app_version}.zip"
+            return FileResponse(path, media_type="application/zip", filename=filename,
                                 headers={"X-Content-SHA256": item.output_sha256})
 
     @app.get("/api/v1/admin/client-releases/{release_id}/download")
@@ -662,10 +672,11 @@ def create_app(settings=None, *, transport=None):
         return download(release_id, preview=True)
 
     @app.get("/api/v1/client-releases/recommended")
-    def recommended(target_os: str = "windows", arch: str = "x64"):
+    def recommended(target_os: str = "windows", arch: str = "x64", app_layout: str = "qt"):
         with database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.state == "published", ClientRelease.recommended,
-                                                        ClientRelease.target_os == target_os, ClientRelease.arch == arch))
+                                                        ClientRelease.target_os == target_os, ClientRelease.arch == arch,
+                                                        ClientRelease.app_layout == app_layout))
             return {"release": public_release(item) if item else None}
 
     @app.get("/api/v1/client-releases/{release_id}/download")

@@ -228,6 +228,37 @@ $context=New-Object Windows.Forms.ApplicationContext
         transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
         self.assertEqual(transaction["phase"], "installed_not_opened")
 
+    def test_long_path_copy_delete_backup_and_rollback(self):
+        from core.platform_runtime import platform_runtime
+        import shutil
+        relative = "_internal/" + "nested/" * 40
+        def native(folder, name):
+            path = platform_runtime.filesystem_path(folder / relative / name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        try:
+            native(self.install, "changed.txt").write_text("old")
+            native(self.source, "changed.txt").write_text("new")
+            native(self.install, "removed.txt").write_text("restore me")
+            native(self.source, "added.txt").write_text("addition")
+            script = self.prepare()
+            self.execute(script)
+            details = (script.parent / "result.json").read_text(encoding="utf-8-sig") if (script.parent / "result.json").exists() else "no result"
+            self.assertEqual(native(self.install, "changed.txt").read_text(), "new", details)
+            self.assertFalse(native(self.install, "removed.txt").exists())
+            self.assertEqual(native(self.install, "added.txt").read_text(), "addition")
+            state = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
+            state["phase"] = "writing"  # Simulate interruption after the writes, using its durable journal.
+            (script.parent / "transaction.json").write_text(json.dumps(state))
+            self.execute(script, recover=True)
+            self.assertEqual(native(self.install, "changed.txt").read_text(), "old")
+            self.assertEqual(native(self.install, "removed.txt").read_text(), "restore me")
+            self.assertFalse(native(self.install, "added.txt").exists())
+            self.assertEqual((self.install / "user_data/private.txt").read_text(), "keep")
+        finally:
+            # Only this test's freshly-created temporary installation is removed.
+            shutil.rmtree(platform_runtime.filesystem_path(self.root))
+
     def compile_relaunch_fixture(self, exit_code=0, receipt_version=None):
         csc = Path(os.environ["SystemRoot"], "Microsoft.NET/Framework64/v4.0.30319/csc.exe")
         if not csc.exists():

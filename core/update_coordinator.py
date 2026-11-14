@@ -3,6 +3,8 @@ import copy
 import hashlib
 import json
 import os
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -31,6 +33,7 @@ def release_notes_text(source):
 
 
 def atomic_json(path, payload):
+    path = str(backend.platform_runtime.filesystem_path(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -56,20 +59,56 @@ def update_log(root, phase, **fields):
                "phase": phase, **fields}, ensure_ascii=False), update_log_directory(root))
 
 
-def load_prepared(root, current_version, connection=None, source_config=None):
+def persist_prepared(root, result):
+    """Publish the new cache first; only then retire owned, obsolete artifacts."""
+    atomic_json(os.path.join(root, "prepared.json"), result)
+    if result.get("app_layout") != "electron":
+        return
+    native_root = backend.platform_runtime.filesystem_path(os.path.abspath(root))
+    keep_zip = backend.platform_runtime.filesystem_path(result["zip_path"])
+    staged = backend.platform_runtime.filesystem_path(result["staged_app_dir"])
+    keep_stage = staged.relative_to(native_root).parts[0]
+    for item in native_root.iterdir():
+        # Generated staging is always an immediate child; never follow links,
+        # enter transactions, or touch the user's selected local ZIP.
+        if (item.name != keep_stage and re.fullmatch(r"staged-\d{8}-\d{6}-[a-f0-9]{8}", item.name)
+                and item.is_dir() and not item.is_symlink() and not os.path.isjunction(item)):
+            try:
+                shutil.rmtree(item)
+            except OSError as exc:
+                update_log(root, "cache_cleanup_failed", artifact=item.name, error=str(exc))
+    downloads = native_root / "downloads"
+    for item in downloads.iterdir():
+        if (item != keep_zip and item.is_file() and not item.is_symlink()
+                and re.fullmatch(r"(?:local-[a-f0-9]{64}|cowork-desktop-v\d+\.\d+\.\d+-windows-x64)\.zip(?:\.download)?", item.name)):
+            try:
+                item.unlink()
+            except OSError as exc:
+                update_log(root, "cache_cleanup_failed", artifact=item.name, error=str(exc))
+
+
+def load_prepared(root, current_version, connection=None, source_config=None, *, layout="qt", cancel=None):
     manifest = os.path.join(root, "prepared.json")
-    if not os.path.isfile(manifest):
+    if not os.path.isfile(backend.platform_runtime.filesystem_path(manifest)):
         return None
-    with open(manifest, encoding="utf-8") as handle:
+    with open(backend.platform_runtime.filesystem_path(manifest), encoding="utf-8") as handle:
         result = json.load(handle)
     if not isinstance(result, dict):
         raise backend.UpdaterError("更新缓存清单格式无效。")
+    if result.get("app_layout", "qt") != layout:
+        return None
     if result.get("connection") != connection:
         return None
-    if connection is None and result.get("source_config") != (source_config if source_config is not None else backend.community_source_config()):
+    local = result.get("update_source") == "local"
+    if not local and connection is None and result.get("source_config") != (source_config if source_config is not None else backend.community_source_config()):
         return None
-    if not is_newer_version(result["release"]["tag_name"], current_version):
+    comparison = backend.compare_versions(result["release"]["tag_name"], current_version)
+    if comparison < 0 or (comparison == 0 and not local):
         return None
+    if connection and not local:
+        current = backend.fetch_enterprise_release(connection, **({"layout": layout} if layout != "qt" else {}))
+        if not current or not backend.same_release_asset(result.get("asset", {}), backend.select_release_asset(current, **({"layout": layout} if layout != "qt" else {})).as_dict()):
+            raise backend.UpdaterError("企业推荐版本已变更或撤回，请重新检查更新。")
     zip_path = result.get("zip_path", "")
     # The manifest is a cache, never authority to read/delete arbitrary paths.
     expected = backend.expected_asset_path(result["asset"], os.path.join(root, "downloads"))
@@ -81,32 +120,36 @@ def load_prepared(root, current_version, connection=None, source_config=None):
         return None
     # The ZIP is verified; staging may have been modified since the previous run.
     if backend.is_windows():
-        result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root)
+        result["staged_app_dir"] = backend.extract_update_zip(zip_path, target_dir=root, **({"layout": layout, "cancel_event": cancel} if layout != "qt" else {}))
         backend.validate_online_package(result["staged_app_dir"], connection)
+        if layout == "electron":
+            backend.validate_desktop_staged(result["staged_app_dir"], result["release"]["tag_name"], connection)
+            persist_prepared(root, result)
     else:
         result["manual_install"] = True
     result["cache_reused"] = True
     return result
 
 
-def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id="", connection=None, source_config=None):
+def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id="", connection=None, source_config=None, *, layout="qt"):
     """One retry budget across check and download; successful checks do not reset it."""
     result = None
     config = None if connection else (source_config if source_config is not None else backend.community_source_config())
     source = "enterprise" if connection else "public" if config["public_base_url"] else "github"
     fallback_reason = ""
     downloads = os.path.join(root, "downloads")
+    layout_options = {"layout": layout} if layout != "qt" else {}
     for attempt in range(1, len(retry_delays) + 2):
         backend.check_cancel(cancel)
         try:
             if result is None:
                 emit("checking", message="正在检查更新…", attempt=attempt, source_name=source, fallback_reason=fallback_reason)
-                release = backend.fetch_enterprise_release(connection) if connection else backend.fetch_latest_release(source=source, source_config=config)
+                release = backend.fetch_enterprise_release(connection, **layout_options) if connection else backend.fetch_latest_release(source=source, source_config=config, **layout_options)
                 backend.check_cancel(cancel)
                 if release is None:
                     return {"release": {}, "current_version": current_version, "update_available": False,
                             "update_source": "online", "connection": connection, "install_enabled": install_enabled,
-                            "updates_dir": root, "source_name": source, "message": "企业平台暂无推荐版本，请联系管理员发布并推荐客户端。"}
+                            "updates_dir": root, "source_name": source, "message": "企业平台暂无推荐版本，请联系管理员发布并推荐客户端。" if connection else "更新源尚未发布新版工作台安装包，当前版本可以继续使用。"}
                 version = str(release.get("tag_name") or release.get("name") or "")
                 result = {"release": {"tag_name": version, "body": release.get("body") or "", "html_url": release.get("html_url") or backend.GITHUB_RELEASES_URL},
                           "current_version": current_version, "update_available": is_newer_version(version, current_version),
@@ -114,7 +157,9 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                           "source_config": config, "source_name": source, "fallback_reason": fallback_reason}
                 if not result["update_available"]:
                     return result
-                result["asset"] = backend.select_release_asset(release).as_dict()
+                result["asset"] = backend.select_release_asset(release, **layout_options).as_dict()
+                if layout != "qt":
+                    result["app_layout"] = layout
                 emit("available", message="发现新版本", result=result)
             if not install_enabled and backend.is_windows():
                 return result
@@ -146,11 +191,14 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                 result.update(zip_path=zip_path, sha256=backend._hash_file(zip_path), manual_install=True)
                 atomic_json(os.path.join(root, "prepared.json"), result)
                 return result
-            staged = backend.extract_update_zip(zip_path, target_dir=root)
+            staged = backend.extract_update_zip(zip_path, target_dir=root, **({"layout": layout, "cancel_event": cancel,
+                "progress_callback": lambda message, percent: emit("validating", message=message, percent=percent)} if layout != "qt" else {}))
             backend.validate_online_package(staged, connection)
+            if layout == "electron":
+                backend.validate_desktop_staged(staged, result["release"]["tag_name"], connection)
             backend.check_cancel(cancel)
             result.update(zip_path=zip_path, staged_app_dir=staged, sha256=backend._hash_file(zip_path))
-            atomic_json(os.path.join(root, "prepared.json"), result)
+            persist_prepared(root, result)
             return result
         except backend.UpdateNetworkError as exc:
             update_log(root, "network_error", update_id=update_id, attempt=attempt, source=source, error=str(exc))
@@ -161,7 +209,7 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                 fallback_reason = str(exc)
                 if result:
                     # Keep the already selected version, size and digest. Only transport changes.
-                    result["asset"]["browser_download_url"] = backend.github_asset_url(result["release"]["tag_name"], result["asset"]["name"])
+                    result["asset"]["browser_download_url"] = config["github_releases_url"] + f"/download/v{result['release']['tag_name'].lstrip('vV')}/{result['asset']['name']}"
                     result.update(source_name=source, fallback_reason=fallback_reason)
                 update_log(root, "source_switched", update_id=update_id, source=source, reason=fallback_reason)
                 emit("switching", message="公共更新源暂时不可用，正在改用 GitHub…", source_name=source,
@@ -176,7 +224,7 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
 
 
 class UpdateWorker(TaskWorker):
-    def __init__(self, operation, root, install_dir, current_version, install_enabled, payload=None, parent=None, connection=None, source_config=None):
+    def __init__(self, operation, root, install_dir, current_version, install_enabled, payload=None, parent=None, connection=None, source_config=None, *, layout="qt"):
         super().__init__()
         self.event = EventSource()
         self.operation, self.root, self.install_dir = operation, root, install_dir
@@ -189,6 +237,7 @@ class UpdateWorker(TaskWorker):
         self.error = None
         self.update_id = uuid.uuid4().hex
         self._last_phase = ""
+        self.layout = layout
 
     def emit_state(self, phase, **fields):
         if phase != self._last_phase:
@@ -201,56 +250,79 @@ class UpdateWorker(TaskWorker):
             update_log(self.root, "start", update_id=self.update_id, operation=self.operation,
                        channel="enterprise" if self.connection else "community",
                        platform_id=(self.connection or {}).get("platform_id"))
-            if self.operation == "online":
+            if self.operation == "restore":
+                cached = load_prepared(self.root, self.current_version, self.connection, self.source_config, layout=self.layout, cancel=self.cancel)
+                self.result = cached or {"release": {}, "update_available": False, "message": "检查是否有可用更新"}
+            elif self.operation == "online":
                 try:
                     # Enterprise caches are reused only after checking the current recommendation.
-                    cached = None if self.connection else load_prepared(self.root, self.current_version, source_config=self.source_config)
+                    cached = None if self.connection else load_prepared(self.root, self.current_version, source_config=self.source_config,
+                        **({"layout": self.layout, "cancel": self.cancel} if self.layout != "qt" else {}))
                     if cached and not cached.get("manual_install"):
                         self.emit_state("ready", message="更新已准备好", result=cached)
                 except (ValueError, KeyError, OSError, backend.UpdaterError) as exc:
                     update_log(self.root, "cache_invalid", error=str(exc))
                 self.result = prepare_online(self.root, self.current_version, self.install_enabled, self.cancel, self.emit_state,
-                                             update_id=self.update_id, connection=self.connection, source_config=self.source_config)
+                                             update_id=self.update_id, connection=self.connection, source_config=self.source_config,
+                                             **({"layout": self.layout} if self.layout != "qt" else {}))
             elif self.operation == "local":
-                path = self.payload
-                version = backend.local_update_package_version(path)
-                if backend.compare_versions(version, self.current_version) < 0:
-                    raise backend.UpdaterError("安装包版本低于当前版本，不能降级安装。")
-                self.emit_state("validating", message="正在验证本地安装包…", percent=-1)
-                staged = backend.extract_update_zip(path, target_dir=self.root)
-                backend.check_cancel(self.cancel)
-                self.result = {"update_source": "local", "update_available": True, "install_enabled": True,
-                               "release": {"tag_name": version, "body": ""}, "zip_path": path,
-                               "staged_app_dir": staged, "updates_dir": self.root}
+                if self.layout == "electron":
+                    self.result = backend.prepare_desktop_local(self.payload, self.root, self.current_version, self.connection, self.cancel,
+                        lambda message, percent: self.emit_state("validating", message=message, percent=percent))
+                else:
+                    self.result = self._prepare_legacy_local()
             elif self.operation == "plan":
-                self.emit_state("planning", message="正在准备安装…", percent=-1)
-                self.result = copy.deepcopy(self.payload)
-                backend.check_cancel(self.cancel)
-                if (self.result.get("update_source") == "online"
-                        and self.result.get("connection") != backend.update_connection(self.install_dir)):
-                    raise backend.UpdaterError("更新来源已改变，请重新检查更新。")
-                if self.result.get("update_source") == "online":
-                    if not self.connection and self.result.get("source_config") != backend.community_source_config():
-                        raise backend.UpdaterError("更新来源已改变，请重新检查更新。")
-                    backend.validate_online_package(self.result["staged_app_dir"], self.result.get("connection"))
-                plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"])
-                backend.check_cancel(self.cancel)
-                target_version = self.result["release"]["tag_name"]
-                update_log(self.root, "plan_compared", update_id=self.update_id, current_version=self.current_version,
-                           target_version=target_version, summary=plan["summary"])
-                if (is_newer_version(target_version, self.current_version)
-                        and not any(plan[group] for group in ("added", "modified", "deleted"))):
-                    raise backend.UpdaterError(
-                        f"安装包标为 {target_version}，但文件与当前版本完全相同，无法升级。"
-                        "应用保持运行，请获取重新构建的完整安装包后再试。")
-                self.result.update(change_plan=plan, change_summary=plan["summary"], change_plan_path=backend.write_update_plan(plan, self.root))
-                self.result["updates_dir"] = self.root
+                self._prepare_plan()
             self.result["update_id"] = self.update_id
             update_log(self.root, "prepared", update_id=self.update_id, operation=self.operation,
                        source=self.result.get("source_name"), version=self.result.get("release", {}).get("tag_name"))
         except Exception as exc:
             self.error = exc
             update_log(self.root, "cancelled" if isinstance(exc, backend.UpdateCancelled) else "error", update_id=self.update_id, operation=self.operation, error=str(exc))
+
+    def _prepare_legacy_local(self):
+        path = self.payload
+        version = backend.local_update_package_version(path)
+        if backend.compare_versions(version, self.current_version) < 0:
+            raise backend.UpdaterError("安装包版本低于当前版本，不能降级安装。")
+        self.emit_state("validating", message="正在验证本地安装包…", percent=-1)
+        staged = backend.extract_update_zip(path, target_dir=self.root)
+        backend.check_cancel(self.cancel)
+        return {"update_source": "local", "update_available": True, "install_enabled": True,
+                       "release": {"tag_name": version, "body": ""}, "zip_path": path,
+                       "staged_app_dir": staged, "updates_dir": self.root}
+    def _prepare_plan(self):
+        self.emit_state("planning", message="正在准备安装…", percent=-1)
+        self.result = copy.deepcopy(self.payload)
+        backend.check_cancel(self.cancel)
+        if (self.result.get("update_source") == "online"
+                and self.result.get("connection") != backend.update_connection(self.install_dir)):
+            raise backend.UpdaterError("更新来源已改变，请重新检查更新。")
+        if self.result.get("update_source") == "online":
+            if not self.connection and self.result.get("source_config") != backend.community_source_config():
+                raise backend.UpdaterError("更新来源已改变，请重新检查更新。")
+            backend.validate_online_package(self.result["staged_app_dir"], self.result.get("connection"))
+        if self.layout == "electron":
+            current = backend.update_connection(self.install_dir)
+            if current != self.result.get("connection"):
+                raise backend.UpdaterError("安装包所属的企业或更新来源已改变，请重新选择安装包。")
+            # Re-extract the verified owned ZIP: staged files may have changed since preparation.
+            self.result = load_prepared(self.result["updates_dir"], self.current_version, current, self.source_config,
+                                        layout=self.layout, cancel=self.cancel)
+            if not self.result:
+                raise backend.UpdaterError("更新缓存已失效，请重新准备安装包。")
+        plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"], **({"layout": self.layout} if self.layout != "qt" else {}))
+        backend.check_cancel(self.cancel)
+        target_version = self.result["release"]["tag_name"]
+        update_log(self.root, "plan_compared", update_id=self.update_id, current_version=self.current_version,
+                   target_version=target_version, summary=plan["summary"])
+        if (is_newer_version(target_version, self.current_version)
+                and not any(plan[group] for group in ("added", "modified", "deleted"))):
+            raise backend.UpdaterError(
+                f"安装包标为 {target_version}，但文件与当前版本完全相同，无法升级。"
+                "应用保持运行，请获取重新构建的完整安装包后再试。")
+        self.result.update(change_plan=plan, change_summary=plan["summary"], change_plan_path=backend.write_update_plan(plan, self.root))
+        self.result["updates_dir"] = self.root
 
 
 def _serialized(method):
@@ -263,13 +335,14 @@ def _serialized(method):
 
 class UpdateCoordinator:
 
-    def __init__(self, install_dir, install_enabled, current_version=APP_VERSION, root=None, parent=None):
+    def __init__(self, install_dir, install_enabled, current_version=APP_VERSION, root=None, parent=None, *, layout="qt"):
         self._lock = threading.RLock()
         self.changed = EventSource()
         self.installation_ready = EventSource()
         self.installation_cancel_requested = EventSource()
         self.install_dir, self.install_enabled = install_dir, install_enabled
         self.current_version = current_version
+        self.layout = layout
         self.root = root or backend.updates_dir()
         self.cache_root = self.root
         self.connection = None
@@ -301,12 +374,34 @@ class UpdateCoordinator:
             return
         self.automatic_started = True
         if self.worker is None:
-            self.check()
+            if self.layout == "electron":
+                self._select_channel()
+                self._start("restore")
+            else:
+                self.check()
+
+    def _select_channel(self):
+        connection = backend.update_connection(self.install_dir)
+        source_config = None if connection else backend.community_source_config()
+        if connection != self.connection or source_config != self.source_config:
+            self.prepared = None
+            self.state["result"] = {}
+        self.connection, self.source_config = connection, source_config
+        key = hashlib.sha256(json.dumps({"connection": connection, "source": source_config, "layout": self.layout}, sort_keys=True).encode()).hexdigest()
+        self.cache_root = os.path.join(self.root, "channels", key)
 
     @_serialized
     def check(self):
         self.automatic_started = True
         if self.worker is None:
+            if self.layout == "electron":
+                try:
+                    self._select_channel()
+                except backend.UpdaterError as exc:
+                    self.publish(phase="error", message=str(exc), error=str(exc), result={})
+                    return
+                self._start("online")
+                return
             try:
                 connection = backend.update_connection(self.install_dir)
                 source_config = None if connection else backend.community_source_config()
@@ -330,12 +425,16 @@ class UpdateCoordinator:
 
     @_serialized
     def _start(self, operation, payload=None):
-        work_root = self.cache_root if operation == "online" else self.root
+        work_root = self.cache_root if operation in {"online", "restore"} or self.layout == "electron" else self.root
         self.worker = UpdateWorker(operation, work_root, self.install_dir, self.current_version, self.install_enabled, payload, self,
-                                   connection=self.connection, source_config=self.source_config)
+                                   connection=self.connection, source_config=self.source_config,
+                                   **({"layout": self.layout} if self.layout != "qt" else {}))
         self.worker.event.subscribe(self._event)
         self.worker.finished.subscribe(self._finished)
         fields = {"error": "", "source": "local" if operation == "local" else "online" if operation == "online" else self.state.get("source", "online")}
+        if self.layout == "electron":
+            fields.update(phase="planning" if operation == "plan" else "checking" if operation == "online" else "validating",
+                          message="正在准备安装…" if operation == "plan" else "正在检查更新…" if operation == "online" else "正在校验安装包…", percent=-1)
         if operation in {"online", "local"}:
             fields["fallback_reason"] = ""
         self.publish(**fields)
@@ -372,11 +471,13 @@ class UpdateCoordinator:
 
     @_serialized
     def select_local(self, path):
-        if not self.install_enabled or self.state["phase"] == "installing":
+        if not self.install_enabled or self.state["phase"] in {"planning", "installing"}:
             return
         self.automatic_started = True
         self.install_requested = False
         self.prepared = None
+        if self.layout == "electron":
+            self._select_channel()
         self.publish(result={}, error="")
         if self.worker:
             self.pending = ("local", os.path.abspath(path))
@@ -414,11 +515,14 @@ class UpdateCoordinator:
                 self.publish(phase="ready" if self.prepared else "idle", message="更新已准备好" if self.prepared else "已取消本次更新", percent=-1)
                 return
             self.install_requested = False
-            message = "暂时无法下载更新，可重试或选择本地安装包" if isinstance(worker.error, backend.UpdateNetworkError) else str(worker.error)
+            message = ("暂时无法下载更新，可重试或选择本地安装包" if isinstance(worker.error, backend.UpdateNetworkError)
+                       else str(worker.error) if isinstance(worker.error, backend.UpdaterError)
+                       else "更新准备未完成，当前版本继续可用。")
             if getattr(worker.error, "retry_after", 0):
                 message = "更新服务请求过于频繁，请稍后重试或选择本地安装包。"
-            cached_available = (self.prepared and worker.operation == "online" and not self.connection
-                                and isinstance(worker.error, backend.UpdateNetworkError))
+            cached_available = (self.prepared and worker.operation == "online" and
+                                (self.prepared.get("update_source") == "local" or
+                                 not self.connection and isinstance(worker.error, backend.UpdateNetworkError)))
             if cached_available:
                 message = "更新已准备好，可直接安装；暂时无法检查其他更新"
             else:
@@ -441,10 +545,15 @@ class UpdateCoordinator:
             elif self.install_requested:
                 self._start("plan", result)
         else:
+            if worker.operation == "online" and self.prepared and self.prepared.get("update_source") == "local":
+                self.publish(phase="ready", message="本地安装包已准备好。" + result.get("message", ""), percent=100)
+                return
             self.prepared = None
             self.install_requested = False
             self.publish(phase="available" if result["update_available"] else "current",
                          message=result.get("message") or ("发现新版本" if result["update_available"] else "当前已是最新版本"), result=result, percent=-1)
+            if worker.operation == "restore":
+                self.check()
 
     @_serialized
     def install_aborted(self, message="更新已准备好，尚未安装"):

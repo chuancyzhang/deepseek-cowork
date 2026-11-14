@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import time
 import uuid
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, select, event, inspect, update
+from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, select, event, inspect, update, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -164,6 +164,7 @@ class ClientRelease(Base):
     app_version: Mapped[str] = mapped_column(String(32))
     target_os: Mapped[str] = mapped_column(String(16), default="windows")
     arch: Mapped[str] = mapped_column(String(16), default="x64")
+    app_layout: Mapped[str] = mapped_column(String(16), default="qt", server_default="qt")
     notes: Mapped[str] = mapped_column(Text, default="")
     source_sha256: Mapped[str] = mapped_column(String(64), default="")
     source_bytes: Mapped[int] = mapped_column(Integer, default=0)
@@ -221,15 +222,15 @@ class Database:
 
     def migrate(self, settings):
         from .team_space_tables import SPACE_TABLES
-        # Validate before DDL. V2 adds independent tables; no existing columns,
-        # grants, questions or release records are rewritten by this migration.
+        # Validate ownership before DDL. V2 adds spaces; V3 labels legacy
+        # releases as Qt while preserving their identities and recommendations.
         with self.engine.begin() as connection:
             platform = None
             if inspect(connection).has_table("platform"):
                 platform = connection.execute(select(Platform.__table__).where(Platform.id == 1)).mappings().first()
             if platform and platform["platform_id"] != settings.platform_id:
                 raise ValueError("数据库属于其他 platform_id；不得复用为新企业实例。")
-            if platform and platform["schema_version"] not in {1, 2}:
+            if platform and platform["schema_version"] not in {1, 2, 3}:
                 raise ValueError("数据库结构版本不兼容，需执行对应版本迁移。")
             Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t not in SPACE_TABLES])
             if platform is None:
@@ -238,6 +239,10 @@ class Database:
             if platform is None or platform["schema_version"] == 1:
                 Base.metadata.create_all(connection, tables=SPACE_TABLES)
                 connection.execute(update(Platform).where(Platform.id == 1).values(schema_version=2))
+            # Existing releases are Qt packages; never expose them to Electron clients.
+            if "app_layout" not in {column["name"] for column in inspect(connection).get_columns("client_releases")}:
+                connection.execute(text("ALTER TABLE client_releases ADD COLUMN app_layout VARCHAR(16) NOT NULL DEFAULT 'qt'"))
+            connection.execute(update(Platform).where(Platform.id == 1).values(schema_version=3))
             if platform and (platform["name"], platform["public_url"]) != (settings.platform_name, settings.public_url):
                 connection.execute(update(Platform).where(Platform.id == 1).values(name=settings.platform_name,
                     public_url=settings.public_url, config_version=platform["config_version"] + 1))

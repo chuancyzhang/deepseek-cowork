@@ -142,3 +142,15 @@ test('legacy host snapshots recover only actual edits, while clean snapshots fol
   const dirty=prepareFormDraft(initial,{value:{...saved,label:'unfinished'},saved},true);
   assert.ok(sameFormValue(dirty.value,initial));assert.equal(dirty.recovery.value.label,'unfinished');assert.equal(dirty.recovery.value.enabled_provider,'wechat');
 });
+
+// A get response may arrive after a dismiss or a newly prepared package event.
+test('update snapshots cannot revive a dismissed notice or replace a newer package',async()=>{
+  const {receiveUpdate}=await import('../src/host/updates.ts');
+  const store=new HostStore();
+  receiveUpdate(store,{revision:'100000000000000001',notice:true,version:'5.4.1'});
+  receiveUpdate(store,{revision:'100000000000000002',notice:false,version:'5.4.1'});
+  receiveUpdate(store,{revision:'100000000000000001',notice:true,version:'5.4.1'});
+  assert.equal(store.get('updates').notice,false);
+  receiveUpdate(store,{revision:'100000000000000003',notice:true,version:'5.4.2'});
+  assert.equal(store.get('updates').version,'5.4.2');
+});

@@ -9,6 +9,7 @@ import re
 import stat
 import time
 import zipfile
+import httpx
 
 from sqlalchemy import select, update
 
@@ -21,11 +22,36 @@ log = logging.getLogger(__name__)
 ROOT = "deepseek-cowork"
 REQUIRED_FILES = {"deepseek-cowork.exe", "_internal/python_env/python.exe",
                   "_internal/PySide6/Qt6Core.dll", "_internal/web/editors/dist/terminal.html"}
+DESKTOP_ROOT = "DeepSeek Cowork-win32-x64"
+DESKTOP_REQUIRED_FILES = {"deepseek-cowork.exe", "desktop-release.json", "resources/app.asar",
+                          "resources/service/cowork-service.exe", "resources/service/_internal/python_env/python.exe",
+                          "resources/web/editors/dist/terminal.html"}
 FORBIDDEN_ROOTS = {"user_data", "chat_history", "conversation_workspaces", ".git", ".env", "updates"}
 FORBIDDEN_FILES = {"config.json", "connections.sqlite3", "connection_templates.local.json", "variables.sqlite3",
                    "enterprise.sqlite3", "enterprise.sqlite3-wal", "enterprise.sqlite3-shm",
                    "enterprise_session.json", "enterprise_sessions.sqlite3", "enterprise_binding.json"}
 DEVICE_NAMES = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.I)
+GITHUB_RELEASES = "https://github.com/chuancyzhang/deepseek-cowork/releases"
+
+
+def normalize_report(report):
+    """Accept the build's public manifest as well as its detailed audit report."""
+    if not isinstance(report, dict):
+        raise PlatformError("incompatible_report", "请选择更新清单或打包检查报告。")
+    if "schema_version" not in report:
+        return report
+    version = report.get("version", "")
+    if (type(report.get("schema_version")) is not int or report["schema_version"] != 1
+            or report.get("app_layout") != "electron" or report.get("target_os") != "windows" or report.get("arch") != "x64"
+            or not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version)
+            or report.get("filename") != f"cowork-desktop-v{version}-windows-x64.zip"
+            or type(report.get("size")) is not int or report["size"] <= 0
+            or not re.fullmatch(r"[a-fA-F0-9]{64}", str(report.get("sha256", "")))
+            or not isinstance(report.get("notes", ""), str)):
+        raise PlatformError("incompatible_report", "新版工作台更新清单的版本、平台或摘要无效。")
+    return {"app_version": version, "app_layout": "electron", "zip_bytes": report["size"],
+            "zip_sha256": report["sha256"].lower(), "supported_connection_schemas": [1],
+            "supported_platform_api_versions": [1]}
 
 
 def sha256(path):
@@ -36,7 +62,12 @@ def sha256(path):
     return result.hexdigest()
 
 
-def inspect_archive(archive, settings, *, enterprise=False):
+def inspect_archive(archive, settings, *, enterprise=False, layout="qt", version=None):
+    if layout not in {"qt", "electron"}:
+        raise PlatformError("invalid_layout", "不支持此客户端结构。")
+    root = DESKTOP_ROOT if layout == "electron" else ROOT
+    internal = "resources/service/_internal" if layout == "electron" else "_internal"
+    default_config = internal + "/config.json"
     files, total, seen = {}, 0, set()
     infos = archive.infolist()
     if not infos or len(infos) > 50000:
@@ -45,7 +76,7 @@ def inspect_archive(archive, settings, *, enterprise=False):
         name = info.filename
         parts = name.rstrip("/").split("/")
         kind = stat.S_IFMT(info.external_attr >> 16)
-        if ("\\" in name or name.startswith("/") or len(parts) < 1 or parts[0] != ROOT
+        if ("\\" in name or name.startswith("/") or len(parts) < 1 or parts[0] != root
                 or any(not p or p in {".", ".."} or ":" in p or p.endswith((".", " "))
                        or DEVICE_NAMES.fullmatch(p) or any(ord(c) < 32 for c in p) for p in parts)
                 or kind not in {0, stat.S_IFDIR, stat.S_IFREG} or info.flag_bits & 1):
@@ -55,7 +86,7 @@ def inspect_archive(archive, settings, *, enterprise=False):
         if canonical in seen:
             raise PlatformError("unsafe_archive", "安装包包含重复或大小写冲突的路径。")
         seen.add(canonical)
-        if relative == DEFAULT_CONFIG_PATH and not info.is_dir():
+        if relative == default_config and not info.is_dir():
             try:
                 if info.file_size > MAX_DEFAULT_CONFIG_BYTES:
                     raise ValueError()
@@ -71,9 +102,21 @@ def inspect_archive(archive, settings, *, enterprise=False):
             raise PlatformError("archive_too_large", "安装包展开体积或压缩比超过限制。")
         if not info.is_dir():
             files[relative] = info
-    if not REQUIRED_FILES <= set(files):
+    if not (DESKTOP_REQUIRED_FILES if layout == "electron" else REQUIRED_FILES) <= set(files):
         raise PlatformError("missing_runtime", "安装包缺少 EXE 或必要运行资源。")
-    capability = files.get("_internal/enterprise_capabilities.json")
+    if layout == "electron":
+        metadata = files["desktop-release.json"]
+        try:
+            if metadata.file_size > 16384:
+                raise ValueError()
+            identity = json.loads(archive.read(metadata))
+            if (identity.get("schema_version") != 1 or identity.get("app_layout") != layout
+                    or identity.get("target") != "windows-x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(identity.get("version", "")))
+                    or version is not None and identity["version"] != version):
+                raise ValueError()
+        except (ValueError, AttributeError, KeyError):
+            raise PlatformError("version_mismatch", "包内版本、平台或客户端结构与发布记录不一致。") from None
+    capability = files.get(internal + "/enterprise_capabilities.json")
     if not capability or capability.file_size > 8192:
         raise PlatformError("incompatible_archive", "标准包尚未包含企业接入能力声明，请使用新版构建。")
     try:
@@ -91,6 +134,7 @@ def public_release(item, *, admin=False):
     value = {"id": item.id, "state": item.state, "app_version": item.app_version, "target_os": item.target_os,
              "arch": item.arch, "notes": item.notes, "recommended": item.recommended, "sha256": item.output_sha256,
              "bytes": item.output_bytes, "published_at": item.published_at, "revision": item.revision}
+    value["app_layout"] = item.app_layout
     if admin:
         value.update(stage=item.stage, error=item.error, created_at=item.created_at,
                      source_sha256=item.source_sha256, source_bytes=item.source_bytes, connection=item.snapshot)
@@ -110,22 +154,81 @@ class Releases:
         directory.mkdir(exist_ok=True)
         return directory
 
+    async def github_candidate(self, actor):
+        """Discovery is bounded; the ZIP URL is pinned to the discovered release tag."""
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                async with client.stream("GET", GITHUB_RELEASES + "/latest/download/latest-desktop-windows-x64.json",
+                                         headers={"Cache-Control": "no-cache", "User-Agent": "cowork-enterprise-importer"}) as response:
+                    response.raise_for_status()
+                    content = bytearray()
+                    async for block in response.aiter_bytes():
+                        content.extend(block)
+                        if len(content) > 1024 * 1024:
+                            raise PlatformError("invalid_manifest", "GitHub 更新清单过大。")
+                manifest = json.loads(content)
+            if not isinstance(manifest, dict) or "schema_version" not in manifest:
+                raise PlatformError("invalid_manifest", "GitHub 缺少有效的新版工作台更新清单。")
+            report = normalize_report(manifest)
+            if report["zip_bytes"] > self.settings.max_archive_bytes:
+                raise PlatformError("archive_too_large", "GitHub 安装包超过中心允许的大小。")
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("github_manifest_failed error=%s", type(exc).__name__)
+            raise PlatformError("github_unavailable", "无法读取 GitHub 新版工作台清单，请重试或上传本地 ZIP 和清单。", 502) from None
+        item = self.create({"app_version": report["app_version"], "app_layout": "electron", "notes": manifest.get("notes", "")}, actor)
+        with self.database.transaction() as db:
+            record = db.get(ClientRelease, item["id"])
+            record.report, record.stage = report, "import_pending"
+            record.generation = uid()
+            item["generation"] = record.generation
+        return item, manifest
+
+    async def import_github(self, release_id, manifest, actor, generation):
+        url = GITHUB_RELEASES + f"/download/v{manifest['version']}/{manifest['filename']}"
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                async with client.stream("GET", url, headers={"User-Agent": "cowork-enterprise-importer"}) as response:
+                    response.raise_for_status()
+                    async def blocks():
+                        async for block in response.aiter_bytes(1024 * 1024):
+                            with self.database.transaction() as db:
+                                record = db.get(ClientRelease, release_id)
+                                if not record or record.stage != "receive" or record.generation != generation:
+                                    raise PlatformError("cancelled", "GitHub 导入已取消。", 409)
+                            yield block
+                    await self.upload(release_id, blocks(), manifest, actor, expected_stage="import_pending", expected_generation=generation)
+            generation = self.prepare(release_id, actor, expected_generation=generation)
+            import asyncio
+            await asyncio.to_thread(self.process, release_id, generation)
+            log.info("github_import_finished release=%s version=%s", release_id, manifest["version"])
+        except Exception as exc:
+            log.exception("github_import_failed release=%s", release_id)
+            with self.database.transaction() as db:
+                record = db.get(ClientRelease, release_id)
+                if record and record.generation == generation and record.stage != "cancelled":
+                    record.state = "failed"
+                    record.stage = "import_failed"
+                    record.error = exc.message if isinstance(exc, PlatformError) else "从 GitHub 导入失败，请重试导入或上传本地安装包。"
+                    self.database.audit(db, "release.import_failed", member_id=actor, target=release_id, outcome="failed")
+
     def create(self, payload, actor):
         version = payload.get("app_version", "")
-        if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version) or payload.get("arch", "x64") != "x64":
+        if (not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version) or payload.get("arch", "x64") != "x64"
+                or payload.get("app_layout", "qt") not in {"qt", "electron"}):
             raise PlatformError("invalid_release", "请填写三段版本号；当前客户端发行包支持 Windows x64。")
         notes = str(payload.get("notes", ""))
         if len(notes) > 20000:
             raise PlatformError("invalid_release", "更新说明过长。")
         with self.database.transaction() as db:
-            item = ClientRelease(app_version=version, arch=payload.get("arch", "x64"), notes=notes, created_by=actor)
+            item = ClientRelease(app_version=version, arch=payload.get("arch", "x64"), app_layout=payload.get("app_layout", "qt"), notes=notes, created_by=actor)
             db.add(item)
             db.flush()
             self.database.audit(db, "release.created", member_id=actor, target=item.id)
             result = public_release(item, admin=True)
         return result
 
-    async def upload(self, release_id, stream, report, actor):
+    async def upload(self, release_id, stream, report, actor, *, expected_stage=None, expected_generation=None):
+        report = normalize_report(report)
         required = {"app_version", "zip_sha256", "zip_bytes", "supported_connection_schemas", "supported_platform_api_versions"}
         if not isinstance(report, dict) or not required <= set(report):
             raise PlatformError("incompatible_report", "检查报告缺少版本、摘要、大小或兼容性字段。")
@@ -133,15 +236,19 @@ class Releases:
             if not isinstance(report[key], list) or not report[key] or any(type(v) is not int for v in report[key]) or 1 not in report[key]:
                 raise PlatformError("incompatible_report", "需要支持企业连接 v1 与中心 API v1 的标准包。")
         directory = self.directory(release_id)
-        generation = uid()
+        generation = expected_generation or uid()
         with self.database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
+            if (expected_stage and item.stage != expected_stage) or (expected_generation and item.generation != expected_generation):
+                raise PlatformError("cancelled", "导入已取消或发布记录已变化。", 409)
             if item.state not in {"draft", "failed"} or (item.stage == "receive" and item.state != "failed"):
                 raise PlatformError("release_busy", "当前记录不可上传，请等待处理完成或新建记录。", 409)
             if report["app_version"] != item.app_version:
                 raise PlatformError("version_mismatch", "报告版本与发布记录不一致。")
+            if report.get("app_layout", "qt") != item.app_layout:
+                raise PlatformError("layout_mismatch", "安装包清单与发布记录的客户端结构不一致。")
             item.stage, item.generation, item.error = "receive", generation, ""
             item.revision += 1
         temporary = directory / (generation + ".upload")
@@ -176,9 +283,11 @@ class Releases:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def prepare(self, release_id, actor):
+    def prepare(self, release_id, actor, *, expected_generation=None):
         with self.database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
+            if expected_generation and (not item or item.generation != expected_generation or item.stage != "received"):
+                raise PlatformError("cancelled", "导入已取消或发布记录已变化。", 409)
             if not item or item.state not in {"draft", "failed"} or not item.source_sha256 or item.stage == "receive":
                 raise PlatformError("release_not_ready", "请先完整上传标准包和报告。", 409)
             source_path = self.directory(release_id) / (item.source_sha256 + ".source.zip")
@@ -211,12 +320,13 @@ class Releases:
             with self.database.transaction() as db:
                 item = db.get(ClientRelease, release_id)
                 snapshot, expected_sha, expected_bytes = item.snapshot, item.source_sha256, item.source_bytes
+                layout, version = item.app_layout, item.app_version
             source_path = directory / (expected_sha + ".source.zip")
             if source_path.stat().st_size != expected_bytes or sha256(source_path) != expected_sha:
                 raise PlatformError("checksum_mismatch", "完整源文件摘要复核失败，请重新上传。")
             source_hashes = {}
             with zipfile.ZipFile(source_path) as source:
-                files = inspect_archive(source, self.settings)
+                files = inspect_archive(source, self.settings, layout=layout, version=version)
                 self.stage(release_id, generation, "package")
                 with zipfile.ZipFile(candidate, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
                     for index, (name, info) in enumerate(files.items()):
@@ -228,10 +338,10 @@ class Releases:
                                 hasher.update(block)
                                 writer.write(block)
                         source_hashes[name] = hasher.hexdigest()
-                    output.writestr(ROOT + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
+                    output.writestr((DESKTOP_ROOT if layout == "electron" else ROOT) + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
             self.stage(release_id, generation, "recheck")
             with zipfile.ZipFile(candidate) as output:
-                files = inspect_archive(output, self.settings, enterprise=True)
+                files = inspect_archive(output, self.settings, enterprise=True, layout=layout, version=version)
                 if set(files) != set(source_hashes) | {CONNECTION_FILE}:
                     raise PlatformError("output_changed", "封装结果的文件集合不一致。")
                 for name, expected in source_hashes.items():
@@ -266,6 +376,12 @@ class Releases:
 
     def cancel(self, release_id, actor):
         with self.database.transaction() as db:
+            receiving = db.get(ClientRelease, release_id)
+            if receiving and receiving.stage in {"receive", "import_pending"}:
+                receiving.generation = uid()
+                receiving.stage, receiving.state, receiving.error = "cancelled", "draft", "上次导入已取消。"
+                self.database.audit(db, "release.cancelled", member_id=actor, target=release_id)
+                return {"state": "draft"}
             changed = db.execute(update(ClientRelease).where(ClientRelease.id == release_id,
                 ClientRelease.state == "processing").values(state="draft", stage="cancelled", error="上次处理已取消。")).rowcount
             if not changed:
@@ -290,14 +406,14 @@ class Releases:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
-            target = (ClientRelease.target_os == item.target_os, ClientRelease.arch == item.arch)
+            target = (ClientRelease.target_os == item.target_os, ClientRelease.arch == item.arch, ClientRelease.app_layout == item.app_layout)
             if action in {"delete", "restore"}:
                 if payload.get("revision") != item.revision:
                     raise PlatformError("release_changed", "发布记录已变化，请刷新后核对。", 409)
                 if action == "delete":
                     if item.state == "published" or item.recommended:
                         raise PlatformError("release_published", "请先撤下已发布版本，再删除记录。", 409)
-                    if item.state == "processing" or (item.stage == "receive" and item.state != "failed"):
+                    if item.state == "processing" or (item.stage in {"receive", "import_pending"} and item.state != "failed"):
                         raise PlatformError("release_busy", "正在上传或生成安装包，请先取消或等待完成。", 409)
                     if item.state not in {"draft", "failed", "ready", "withdrawn"}:
                         raise PlatformError("release_deleted", "此记录已删除，请刷新列表。", 409)
@@ -333,7 +449,7 @@ class Releases:
                     if replacement_id:
                         replacement = db.get(ClientRelease, replacement_id)
                         if (not replacement or replacement.id == item.id or replacement.state != "published"
-                                or (replacement.target_os, replacement.arch) != (item.target_os, item.arch)):
+                                or (replacement.target_os, replacement.arch, replacement.app_layout) != (item.target_os, item.arch, item.app_layout)):
                             raise PlatformError("invalid_replacement", "替代版本必须是同系统架构的另一已发布版本。")
                         replacement.recommended = True
                 item.state, item.recommended, item.error = "withdrawn", False, reason

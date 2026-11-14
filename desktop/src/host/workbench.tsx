@@ -382,7 +382,9 @@ export function useWorkbenchController() {
       if (installUpdate) {
         if (state.active_runs.length) {error('请等后台任务结束后再更新；草稿和编辑已保留。'); return;}
         if (!await leaveManagement.current()) return;
-        if (await confirm('重启并更新 DeepSeek Cowork？', '草稿和未保存编辑已保留。应用将关闭，安装完成后自动重新打开。', ['继续工作', '重启并更新']) !== 1) return;
+        const update = await call('updates.get');
+        const label = update.reinstall ? '重启并重新安装' : '重启并更新';
+        if (await confirm(label + ' DeepSeek Cowork？', `目标版本 ${update.version}。草稿和未保存编辑已保留。应用将关闭，安装完成后自动重新打开。`, ['继续工作', label]) !== 1) return;
         await call('app.install_update'); return;
       }
       if (unsaved || state.active_runs.length) {

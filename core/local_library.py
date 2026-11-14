@@ -18,14 +18,21 @@ class LocalLibrary:
 
     def projects(self):
         projects = {}
+        excluded = set()
         for item in self.s.config.get_projects():
             root = Path(item["path"]).expanduser().resolve()
-            projects[str(root)] = {"name": item.get("name") or root.name, "path": str(root)}
+            key = os.path.normcase(str(root))
+            if item.get("archived") or item.get("hidden"):
+                excluded.add(key)
+                continue
+            projects[key] = {"name": item.get("name") or root.name, "path": str(root)}
         for entries in self.s.storage.list_conversations_by_workspace().values():
             root = Path(entries[0]["workspace_dir"]).resolve()
-            projects.setdefault(str(root), {"name": root.name, "path": str(root)})
+            key = os.path.normcase(str(root))
+            if key not in excluded:
+                projects.setdefault(key, {"name": root.name, "path": str(root)})
         return [{**item, "id": hashlib.sha256(os.path.normcase(path).encode()).hexdigest()[:24],
-                 "available": Path(path).is_dir()} for path, item in projects.items()]
+                 "available": Path(item["path"]).is_dir()} for path, item in projects.items()]
 
     def checked(self, collection, item=""):
         project = next((p for p in self.projects() if p["id"] == collection), None)

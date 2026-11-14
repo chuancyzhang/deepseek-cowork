@@ -323,3 +323,96 @@ def test_local_library_aggregates_projects_and_keeps_file_scope(tmp_path):
     with pytest.raises(JobCancelled):
         library.files({},cancelled,progress)
     assert (second/'notes.md').read_text()=='# second'
+
+    # A project derived from chat history must not reappear after archival,
+    # even when its directory is unavailable. Restoring it reuses its identity.
+    service.config.get_projects = lambda: [{'path':str(first),'name':'项目一','archived':True}]
+    service.storage.list_conversations_by_workspace = lambda: {str(first):[{'workspace_dir':str(first)}]}
+    assert library.projects() == []
+    with pytest.raises(ValueError, match='不在资料库'):
+        library.checked(pid)
+    service.config.get_projects = lambda: [{'path':str(first),'name':'项目一','archived':False}]
+    assert library.projects()[0]['id'] == pid
+
+
+def test_background_jobs_keep_searchable_logs_and_recover_interrupted_work(tmp_path):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from core.desktop_store import DesktopStore, DesktopChatStorage
+    from core.desktop_jobs import DesktopJobs, JobCancelled, LOG_LIMIT
+    storage = DesktopChatStorage(str(tmp_path / "jobs.sqlite"))
+    service = SimpleNamespace(storage=storage, store=DesktopStore(storage), publish=Mock())
+    jobs = DesktopJobs(service)
+    # A cancel click racing the completion event must not resurrect a finished job.
+    service.publish.side_effect = lambda event: jobs.cancel(event["data"]["id"]) if event["data"]["status"] == "completed" else None
+    release = threading.Event()
+    def wait(identity):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = jobs.get(identity)
+            if result["status"] in {"completed", "failed", "cancelled"}:
+                return result
+            time.sleep(.01)
+        raise AssertionError("job did not finish")
+    try:
+        def complete(cancelled, progress):
+            progress("读取说明文件", qr_data="private-qr")
+            progress("读取说明文件", qr_data="another-qr")
+            return {"private_result": "should-not-be-logged"}
+        identity = jobs.submit("文档预览", complete)["job_id"]
+        result = wait(identity)
+        assert result["status"] == "completed"
+        assert [entry["message"] for entry in result["logs"]] == ["等待处理", "正在处理…", "读取说明文件", "已完成"]
+        assert "private" not in json.dumps(result["logs"])
+        assert jobs.list(query="说明文件")[0]["id"] == identity
+        assert jobs.list(status="failed") == []
+        entered = threading.Event()
+        def cancellable(cancelled, progress):
+            progress("等待取消")
+            entered.set(); release.wait(5)
+            if cancelled.is_set():
+                progress("正在结束处理")
+                assert jobs.get(cancel_id)["status"] == "stopping"
+                raise JobCancelled("已取消，原文件保留。")
+        cancel_id = jobs.submit("取消示例", cancellable)["job_id"]
+        assert entered.wait(2)
+        jobs.cancel(cancel_id); release.set()
+        result = wait(cancel_id)
+        assert result["status"] == "cancelled"
+        assert "stopping" in [entry["status"] for entry in result["logs"]]
+        def fail(cancelled, progress):
+            progress("正在转换")
+            raise ValueError("无法读取模板")
+        failed_id = jobs.submit("转换失败", fail)["job_id"]
+        assert wait(failed_id)["logs"][-1]["message"] == "无法读取模板"
+        assert jobs.list(query="模板", status="failed")[0]["id"] == failed_id
+        for index in range(110):
+            service.store.put_state("job:old-%03d" % index, {"id":"old-%03d" % index,"title":"历史记录" if index else "100% 特殊记录","status":"completed","created_at":1})
+        assert jobs.list(query="100%")[0]["id"] == "old-000"
+        first = jobs.list(limit=50)
+        second = jobs.list(before=first[-1]["id"],limit=50)
+        assert len(first) == len(second) == 50
+        assert not {item["id"] for item in first} & {item["id"] for item in second}
+        service.store.put_state("job:unfinished", {"id":"unfinished","title":"未完成操作","status":"running","created_at":1,"logs":[{"at":1,"status":"running","message":"已经完成的步骤"}]})
+        for index in range(105):
+            identity = "0-unfinished-%03d" % index
+            service.store.put_state("job:" + identity, {"id":identity,"title":"较早未完成操作","status":"queued","created_at":1})
+        service.store.put_state("job:bounded", {"id":"bounded","status":"running","logs":[{"at":i,"status":"running","message":str(i)} for i in range(LOG_LIMIT)]})
+        jobs.save({"id":"bounded","status":"completed","message":"已完成"})
+        assert jobs.get("bounded")["logs_omitted"] == 1
+        assert len(jobs.get("bounded")["logs"]) == LOG_LIMIT
+    finally:
+        release.set();jobs.close()
+    recovered = DesktopJobs(service)
+    try:
+        result = recovered.get("unfinished")
+        assert result["status"] == "interrupted"
+        assert result["logs"][0]["message"] == "已经完成的步骤"
+        assert result["logs"][-1]["status"] == "interrupted"
+        assert recovered.list(status="active") == []
+        assert recovered.get("0-unfinished-000")["status"] == "interrupted"
+        assert "logs" not in recovered.get("old-000")
+    finally:
+        recovered.close()

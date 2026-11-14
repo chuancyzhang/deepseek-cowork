@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, Boxes, CircleUserRound, Clock3, KeyRound, LoaderCircle, Palette, Plug, Puzzle, Settings2, SlidersHorizontal, Sparkles, Star, Users, X, Check, MessageSquare, ShieldCheck, Folder, Wrench, Search } from 'lucide-react';
 import { rpc } from './managementApi';
 import type { Settings } from './types';
@@ -37,7 +37,7 @@ export default function Management({ route, settings, updateSettings, openConver
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'plugins' ? <PluginManager/>
-        : tab === 'library' ? <Library {...common} onReference={onReference}/>
+        : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : ['preferences','im','security','storage','memory','experiments','components','logs','update'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
         : <Preferences key={tab} kind={tab} settings={settings} updateSettings={updateSettings} {...common}/>}
@@ -72,7 +72,12 @@ export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean
   });
   const {value,saved}=entry;
   const dirty = JSON.stringify(value) !== JSON.stringify(saved);
-  useEffect(()=>{if(!dirty&&JSON.stringify(initial)!==JSON.stringify(saved))setEntry({value:initial,saved:initial});},[initial,dirty,saved]);
+  const initialKey = key + ':' + JSON.stringify(initial), seenInitial = useRef('');
+  useEffect(()=>{
+    if(seenInitial.current===initialKey)return;
+    seenInitial.current=initialKey;
+    if(!dirty&&JSON.stringify(initial)!==JSON.stringify(saved))setEntry({value:initial,saved:initial});
+  },[initialKey,dirty,saved,initial]);
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
   function change(next: any) {
     setEntry({...entry,value:next});

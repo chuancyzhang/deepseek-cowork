@@ -181,7 +181,9 @@ class ConversationActions:
         if method in {"project.archive", "project.restore"}:
             with self.service.lock:
                 action = self.config.archive_project if method.endswith("archive") else self.config.restore_project
-                return {"saved": action(p["path"])}
+                saved = action(p["path"])
+                log.info("project_visibility_changed action=%s path=%s saved=%s", method, p["path"], saved)
+                return {"saved": saved}
         if method == "conversation.search":
             query = str(p.get("query") or "")
             identities = self.storage.search_conversations(query, limit=min(200, int(p.get("limit", 50))))

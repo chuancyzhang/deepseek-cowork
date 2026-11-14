@@ -10,12 +10,12 @@ const sources = [['local','本地资料库'], ['weknora','WeKnora'], ['tencent-d
 function list(value: any): any[] { if (Array.isArray(value)) return value; if (!value || typeof value !== 'object') return []; for (const key of ['data','items','knowledge','files','results','documents','list']) if (value[key]) { const items = list(value[key]); if (items.length) return items; } return []; }
 function title(item: any) {return item?.title || item?.name || item?.file_name || '未命名资料';}
 function date(value: any) {if (!value) return '—'; const d = new Date(typeof value === 'number' && value < 1e12 ? value*1000 : value); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('zh-CN');}
-type Props = { onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
+type Props = { projectsKey: string; projectsChanged: () => Promise<void>; onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
 export default function Library(props: Props) {
   const [source, setSource] = useHostField('library:source', 'local');
   return <LibrarySource key={source} {...props} source={source} setSource={setSource}/>;
 }
-function LibrarySource({source, setSource, onError, onReference, confirm}: Props & {source: string; setSource: (source: string) => void}) {
+function LibrarySource({source, setSource, onError, onReference, confirm, projectsKey, projectsChanged}: Props & {source: string; setSource: (source: string) => void}) {
   const local = source === 'local', sourceName = sources.find(item => item[0] === source)?.[1] || '';
   const [status, setStatus] = useState<any>(null);
   const [view, setView] = useHostField<any>('library:view:' + source, {catalog:null, collection:null, parents:[], rows:[], page:1, more:false, query:'', searching:false, loaded:false, scroll:0, unavailable:[]});
@@ -50,7 +50,16 @@ function LibrarySource({source, setSource, onError, onReference, confirm}: Props
     update({collection:target,parents:trail,page:nextPage,rows:nextPage===1?items:[...rows,...items],more:local?value.has_more:search?false:source==='weknora'?list(value.files).length>=30:Boolean(value[1]),loaded:true,searching:Boolean(search),unavailable:value.unavailable || [],total:value.total,scroll:nextPage===1?0:view.scroll});
     if(nextPage===1&&scroller.current)scroller.current.scrollTop=0;
   }
-  useEffect(()=>{if(connected) void (async()=>{await catalogLoad(); if(local&&!view.loaded) await children();})();},[connected]);
+  useEffect(()=>{if(connected) void (async()=>{
+    const result=await catalogLoad();
+    if(!result)return;
+    if(local && (!view.loaded || view.projectsKey !== projectsKey)) {
+      const retained=collection && result.mine?.some((item:any)=>item.id === collection.id);
+      setPreview(null);
+      update({projectsKey, ...(retained ? {} : {collection:null,parents:[]})});
+      await children(retained ? collection : null,retained ? parents : [],1,searching ? query : '');
+    }
+  })();},[connected,projectsKey]);
   useEffect(()=>{if(scroller.current)scroller.current.scrollTop=view.scroll || 0;},[]);
   async function selectCollection(item: any) {setPreview(null);update({query:''});await children(item,[]);}
   async function reference(item: any, entire=false) {
@@ -73,7 +82,7 @@ function LibrarySource({source, setSource, onError, onReference, confirm}: Props
     <section className="library-main" aria-label={sourceName}>
       {connected&&<header className="library-heading"><div><h2>{preview?title(preview):parents.length?title(parents.at(-1)):collection?title(collection):local?'全部项目资料':connected?'全部资料空间':sourceName}</h2></div><div className="button-row">
         {!preview&&<button className="icon-button" aria-label="刷新资料" title="刷新资料" disabled={busy} onClick={()=>void (async()=>{await catalogLoad();if(local||collection)await children(collection,parents,1,searching?query:'');})()}><RefreshCw size={17}/></button>}
-        {!preview&&local&&<button className="secondary" onClick={async()=>{try{const path=await rpc('dialog.workspace');if(path){await rpc('project.save',{path});await catalogLoad();await children(null,[]);}}catch(error){setFailure((error as Error).message);}}}><FolderPlus size={16}/>添加项目</button>}
+        {!preview&&local&&<button className="secondary" onClick={async()=>{try{const path=await rpc('dialog.workspace');if(path){await rpc('project.save',{path});await projectsChanged();}}catch(error){setFailure((error as Error).message);}}}><FolderPlus size={16}/>添加项目</button>}
         {!preview&&!local&&connected&&<button className="icon-button" title="断开连接" aria-label="断开连接" disabled={busy} onClick={async()=>{if(await confirm('断开'+sourceName+'？','已选资料仍保留，重新连接后可继续使用。',['取消','断开'])===1){await execute('library.logout');await loadStatus();update({catalog:null,collection:null,rows:[],loaded:false});}}}><LogOut size={17}/></button>}
       </div></header>}
       <JobProgress job={job}/>{failure&&<ErrorState message={failure}/>} {notice&&<p className="library-notice" role="status">{notice}</p>}

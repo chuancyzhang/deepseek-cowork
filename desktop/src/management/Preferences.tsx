@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Check, Download, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, ChevronRight, Copy, Download, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Empty, ErrorState, Field, JobProgress, PageHead, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import GatewaySetup from './GatewaySetup';
 import { ThemeSample } from '../ThemePreview';
 import type { Settings } from '../types';
+import { useHostField } from '../host/context';
 
 type Props = { kind: string; settings: Settings | null; updateSettings: (settings: Settings) => void; onError: (message: string) => void; onDirty: (value: boolean) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number> };
@@ -104,10 +105,60 @@ function VariableForm({ item, back, onDirty }: Props & { item: any; back: () => 
   const [failure, setFailure] = useState(''), [busy, setBusy] = useState(false);
   return <><PageHead title="编辑变量" back={back}/><form className="detail-form" onSubmit={async e => { e.preventDefault(); setBusy(true); try { await rpc('variables.save', { value: { name: v.name, kind: v.kind, value: v.kind === 'secret' && !v.value && item.id ? null : v.value, description: v.description, allow_ai_read: v.allow_ai_read, variable_id: item.id || '' } }); form.done(); back(); } catch (error) { setFailure((error as Error).message); } finally { setBusy(false); } }}><div className="form-grid"><Field label="名称"><input required value={v.name} onChange={e => set('name', e.target.value)}/></Field><Field label="类型"><select value={v.kind} onChange={e => set('kind', e.target.value)}><option value="text">普通文本</option><option value="secret">敏感凭据</option></select></Field><Field label="内容" wide><input type={v.kind === 'secret' ? 'password' : 'text'} autoComplete="off" placeholder={v.kind === 'secret' && item.id ? '留空保留现有凭据' : ''} value={v.value || ''} onChange={e => set('value', e.target.value)}/></Field><Field label="用途" wide><input value={v.description} onChange={e => set('description', e.target.value)}/></Field><label className="check-line wide"><input type="checkbox" checked={v.allow_ai_read} onChange={e => set('allow_ai_read', e.target.checked)}/>允许 AI 读取内容</label></div>{failure && <ErrorState message={failure}/>}<button className="primary" disabled={busy}>保存</button></form></>;
 }
+const jobStatuses: Record<string,string> = {queued:'等待处理',running:'进行中',stopping:'正在取消',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'};
 function Jobs({ onError }: Props) {
-  const [jobs, setJobs] = useState<any[]>([]), [failure, setFailure] = useState('');
-  useEffect(() => { void rpc('jobs.list').then(setJobs).catch(error => setFailure(error.message)); return window.cowork.onEvents(events => { for (const event of events) if (event.event === 'job') setJobs(previous => [event.data, ...previous.filter(item => item.id !== event.data.id)].slice(0,100)); }); }, []);
-  return <><PageHead compact title="后台操作" detail="界面关闭后，运行记录仍然保留。"/>{failure && <ErrorState message={failure}/>} {!jobs.length && <Empty title="还没有后台操作" detail="导入、连接测试和资料处理的进度会显示在这里。"/>}{jobs.map(job => <div className="model-row" key={job.id}><div><strong>{job.title}</strong><small>{job.message} · {new Date(job.created_at*1000).toLocaleString()}</small>{job.error && <p className="error-text">{job.error}</p>}</div>{['running','queued','stopping'].includes(job.status) ? <button className="secondary" onClick={() => void rpc('jobs.cancel', { id: job.id }).catch(error => onError(error.message))}>取消</button> : <span className="subtle-badge">{({ completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' } as any)[job.status]}</span>}</div>)}</>;
+  const [jobs, setJobs] = useState<any[]>([]), [failure, setFailure] = useState(''), [busy, setBusy] = useState(false), [more, setMore] = useState(false), [copied, setCopied] = useState('');
+  const [query, setQuery] = useHostField('jobs:query', ''), [status, setStatus] = useHostField('jobs:status', ''), [opened, setOpened] = useHostField('jobs:opened', '');
+  const sequence = useRef(0), cursor = useRef(''), updates = useRef(new Map<string,any>());
+  const matches = useCallback((job:any) => (!status || (status === 'active' ? ['queued','running','stopping'].includes(job.status) : job.status === status)) && [job.title, job.message, job.error, JSON.stringify(job.logs || [])].join(' ').toLowerCase().includes(query.trim().toLowerCase()), [query,status]);
+  const load = useCallback(async (before = '') => {
+    const current = ++sequence.current;
+    updates.current.clear();
+    setBusy(true);setFailure('');
+    try {
+      const items = await rpc<any[]>('jobs.list', {query:query.trim(),status,before,limit:50});
+      if(current !== sequence.current)return;
+      setJobs(previous => {
+        const values = new Map<string,any>((before ? previous : []).map(job => [job.id,job]));
+        for(const item of items)if(!values.has(item.id) || values.get(item.id).updated_at <= item.updated_at)values.set(item.id,item);
+        for(const item of updates.current.values())if(!values.has(item.id) || values.get(item.id).updated_at <= item.updated_at)values.set(item.id,item);
+        return [...values.values()].filter(matches).sort((a,b)=>b.id.localeCompare(a.id));
+      });cursor.current=items.at(-1)?.id || '';setMore(items.length === 50);
+    } catch(error) {if(current === sequence.current)setFailure((error as Error).message);}
+    finally {if(current === sequence.current)setBusy(false);}
+  },[query,status,matches]);
+  useEffect(() => {
+    setJobs([]);setMore(false);setBusy(true);
+    const timer = setTimeout(()=>void load(),200);
+    const unsubscribe = window.cowork.onEvents(events => {
+      for(const event of events)if(event.event === 'job') {
+        const last=updates.current.get(event.data.id);
+        if(last && last.updated_at > event.data.updated_at)continue;
+        updates.current.set(event.data.id,event.data);
+        setJobs(previous => {
+        const item = event.data, existing = previous.find(job => job.id === item.id);
+        if(existing && existing.updated_at > item.updated_at)return previous;
+        return [...previous.filter(job => job.id !== item.id), ...(matches(item) ? [item] : [])].sort((a,b)=>b.id.localeCompare(a.id));
+      });}
+    });
+    return ()=>{clearTimeout(timer);sequence.current++;unsubscribe();};
+  },[load,matches]);
+  async function copy(job:any) {
+    const text = [job.title, '状态：' + (jobStatuses[job.status] || job.status), '开始：' + new Date(job.created_at*1000).toLocaleString(),
+      ...(job.logs_omitted ? ['较早的 '+job.logs_omitted+' 条日志已省略。'] : []),
+      ...(job.logs?.length ? job.logs.map((item:any)=>new Date(item.at*1000).toLocaleString()+'  '+item.message) : ['这条旧记录未保存过程日志。',job.message,job.error].filter(Boolean))].join('\n');
+    try {await rpc('clipboard.write',{text});setCopied(job.id);}catch(error){onError((error as Error).message);}
+  }
+  return <><header className="management-toolbar jobs-toolbar"><h2 className="sr-only">后台操作</h2><div className="page-search"><Search size={17}/><input aria-label="搜索后台操作" placeholder="搜索操作、日志或错误" value={query} onChange={event=>setQuery(event.target.value)}/></div><select aria-label="筛选操作状态" value={status} onChange={event=>setStatus(event.target.value)}>{[['','全部状态'],['active','进行中'],['failed','失败'],['completed','已完成'],['cancelled','已取消'],['interrupted','已中断']].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><button className="icon-button" title="刷新后台操作" aria-label="刷新后台操作" disabled={busy} onClick={()=>void load()}><RefreshCw size={17}/></button></header>
+    {failure && <ErrorState message={failure} retry={()=>void load()}/>}
+    {!busy && !failure && !jobs.length && <Empty title={query || status ? '没有匹配的操作' : '还没有后台操作'} detail={query || status ? '换一个关键词或状态。' : '导入、连接测试和资料处理的进度会显示在这里。'}/>}
+    <div className="job-history">{jobs.map(job => <details key={job.id} open={opened === job.id} onToggle={event=>{if(event.currentTarget.open)setOpened(job.id);else if(opened === job.id)setOpened('');}}>
+      <summary><ChevronRight size={16}/><div><strong>{job.title}</strong><time>{new Date(job.created_at*1000).toLocaleString()}</time>{job.error && opened !== job.id && <p className="error-text">{job.error}</p>}</div><span className={job.status === 'failed' ? 'error-text' : 'muted'}>{jobStatuses[job.status] || job.status}</span>{['running','queued','stopping'].includes(job.status) && <button type="button" className="secondary" disabled={job.status === 'stopping'} onClick={event=>{event.preventDefault();event.stopPropagation();void rpc('jobs.cancel',{id:job.id}).catch(error=>onError(error.message));}}>取消</button>}</summary>
+      <div className="job-log"><div className="job-log-tools">{job.logs_omitted > 0 && <small>仅保留最近 {job.logs.length} 条，较早的 {job.logs_omitted} 条已省略。</small>}<button type="button" className="secondary" onClick={()=>void copy(job)}>{copied === job.id ? <Check size={14}/> : <Copy size={14}/>}复制日志</button></div>
+        {job.logs?.length ? <ol>{job.logs.map((entry:any,index:number)=><li key={index}><time title={new Date(entry.at*1000).toLocaleString()}>{new Date(entry.at*1000).toLocaleTimeString()}</time><span className={entry.status === 'failed' ? 'error-text' : ''}>{entry.message}</span></li>)}</ol> : <><p className="muted">这条旧记录未保存过程日志。</p>{job.message && <p>{job.message}</p>}{job.error && job.error !== job.message && <p className="error-text">{job.error}</p>}</>}
+      </div>
+    </details>)}</div>{busy && <p className="loading" role="status"><LoaderCircle size={17} className="spin"/>正在读取…</p>}{more && <button className="secondary" disabled={busy} onClick={()=>void load(cursor.current)}>加载更早记录</button>}
+  </>;
 }
 function General({ settings, onError, onDirty }: Props) {
   const [value, setValue] = useState<any>(null), [failure, setFailure] = useState('');

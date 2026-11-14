@@ -65,7 +65,7 @@ class Management:
     def _dispatch(self, method, p):
         action = method.split(".")[1]
         if method.startswith("jobs."):
-            return self.s.jobs.list() if action == "list" else getattr(self.s.jobs, action)(str(p["id"]))
+            return self.s.jobs.list(query=p.get("query", ""), status=p.get("status", ""), before=p.get("before", ""), limit=p.get("limit", 100)) if action == "list" else getattr(self.s.jobs, action)(str(p["id"]))
         if method.startswith("skills."):
             catalog = self.s.state.skill_catalog
             snapshot = catalog.snapshot()

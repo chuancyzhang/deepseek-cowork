@@ -62,9 +62,10 @@ async function requestExit() {
 }
 async function createWindow() {
   window = new BrowserWindow({ width: 1400, height: 930, minWidth: 850, minHeight: 620,
-    backgroundColor: '#fafafa', title: 'DeepSeek Cowork', show: false,
+    backgroundColor: '#fafafa', title: '', show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.on('page-title-updated', event => event.preventDefault());
   window.webContents.on('context-menu', (_event, params) => {
     if (!params.isEditable && !params.selectionText) return;
     const flags = params.editFlags;
@@ -113,7 +114,7 @@ else {
       return new Response(asset?.body || 'Plugin resource not available', {status:asset ? 200:404,
         headers:{'Content-Type':asset?.type || 'text/plain','Access-Control-Allow-Origin':'*','X-Content-Type-Options':'nosniff'}});
     });
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'DeepSeek Cowork', submenu: [
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '应用', submenu: [
       { label: '重新载入界面', accelerator: 'CmdOrCtrl+R', click: () => publish({ event: 'reload_requested' }) },
       { label: '恢复内置界面', click: () => publish({event:'plugins_recover_requested'}) },
       { label: '打开诊断日志', click: () => shell.openPath(path.join(dataDir, 'logs')) },

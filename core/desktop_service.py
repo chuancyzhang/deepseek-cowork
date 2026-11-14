@@ -238,7 +238,7 @@ class DesktopService:
                     "home_draft": self.store.versioned_state("draft:", {"text": "", "attachments": []})}
         if method == "skills.list":
             snapshot = self.state.skill_catalog.snapshot()
-            return [{key: skill.get(key) for key in ("name", "display_name", "description", "enabled")} for skill in snapshot.display_skills()]
+            return [{key: skill.get(key) for key in ("name", "display_name", "description", "enabled", "source_kind")} for skill in snapshot.display_skills()]
         if method == "workbench.result":
             return self.request_agent({**p, "action": "workbench_result"})
         if method == "app.shutdown":

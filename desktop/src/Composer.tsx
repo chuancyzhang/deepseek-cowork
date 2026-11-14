@@ -102,7 +102,7 @@ export default function Composer(props: Props) {
   }
   const list = section === 'conversations' ? conversations.filter(item => item.id !== conversation?.id && !item.meta.archived && item.has_messages)
     : section === 'experts' ? [{id: '', name: '默认助手', description: ''}, ...items.filter(item => item.enabled !== false)]
-    : section === 'variables' ? items.filter(item => item.kind === 'text') : items.filter(item => item.enabled !== false && item.name.startsWith('mcp-server-') === (section === 'connectors'));
+    : section === 'variables' ? items.filter(item => item.kind === 'text') : items.filter(item => item.enabled !== false && item.source_kind !== 'core_builtin' && item.name.startsWith('mcp-server-') === (section === 'connectors'));
   function selected(item: any) { return section === 'conversations' ? (pending?.references || refs.map(ref => ref.session_id)).includes(item.id) : section === 'experts' ? (pending?.expert || prefs.conversation_agent)?.id === item.id : (pending?.skills || skills).includes(item.name); }
   return <div ref={root} className={'composer-shell ' + (dragging ? 'dragging' : '')} onDragOver={event => {event.preventDefault(); setDragging(true);}} onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}} onDrop={event => {event.preventDefault(); setDragging(false); void importFiles([...event.dataTransfer.files]).catch(failure => error(failure.message));}} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); section && menu === 'add' ? setSection('') : close(); } }}>
     <div className="composer">

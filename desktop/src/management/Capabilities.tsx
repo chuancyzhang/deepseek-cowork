@@ -26,6 +26,16 @@ export default function Capabilities(props: Props) {
     try { const result = await operation(method, params, setJob); await reload(); return result; }
     catch (error) { onError((error as Error).message); } finally { setBusy(false); setJob(null); }
   }
+  if (selected?.builtin && kind === 'experts') return <>
+    <header className="item-editor-heading"><button className="icon-button" title="返回专家" onClick={() => setSelected(null)}><ArrowLeft size={18}/></button><h2>{selected.name}</h2></header>
+    <div className="detail-form"><p>{selected.description}</p><p className="muted">内置专家可直接在对话中选择。需要调整工作指引时，先复制为自建专家。</p>
+      <div className="form-grid"><Field label="工作指引" wide><textarea rows={14} readOnly value={selected.system_prompt}/></Field></div>
+      <div className="form-actions"><button className="secondary" onClick={() => setSelected(null)}>返回</button><button className="primary" onClick={() => setSelected({
+        id: crypto.randomUUID(), name: selected.name + '（副本）', description: selected.description,
+        system_prompt: selected.system_prompt, skill_names: [...selected.skill_names], enabled: true,
+      })}>复制为自建专家</button></div>
+    </div>
+  </>;
   if (selected) return kind === 'skills' ? <SkillEditor key={selected.name} {...props} item={selected} back={() => setSelected(null)} saved={reload}/>
     : <ItemEditor key={selected.id || 'new'} {...props} item={selected} back={() => { setSelected(null); void reload(); }}/ >;
   if (kind === 'skills' && mode === 'hub') return <SkillHub back={() => setMode('library')} mine={() => {setMode('mine'); void reload();}} onError={onError}/>;
@@ -44,6 +54,7 @@ export default function Capabilities(props: Props) {
       <div className="resource-symbol">{kind === 'skills' ? <Sparkles size={20}/> : kind === 'favorites' ? <Star size={20}/> : <FileCode2 size={20}/>}</div>
       <div className="resource-body"><button className="resource-title" onClick={() => { if (kind === 'schedule_history') { if (item.session_id) openConversation(item.session_id); } else setSelected(item); }}>{item.presentation?.short_name || item.display_name || item.name || item.favorite_name}</button>
         <p>{item.presentation?.summary || item.user_description || item.description || (kind === 'mcp' ? item.url || item.command : '') || item.summary || item.error}</p>
+        {kind === 'experts' && item.builtin && <small>内置专家</small>}
         {kind === 'skills' && item.config_status?.has_config && !item.config_status?.complete && <button className="text-link" onClick={() => setSelected(item)}>完成连接配置</button>}
         {item.schedule && <small>{item.schedule.enabled ? item.schedule.schedule_summary : '计划已暂停'}</small>}
         {kind === 'schedule_history' && <small>{({ running: '正在运行', completed: '已完成', error: '失败', missed: '已错过', interrupted: '已停止' } as any)[item.status]} · {new Date((item.started_at || item.created_at) * 1000).toLocaleString()}{item.delivery_error && <span className="error-text">{item.delivery_error}</span>}</small>}
@@ -51,8 +62,8 @@ export default function Capabilities(props: Props) {
         {kind === 'skills' ? <button className={`toggle ${item.enabled ? 'on' : ''}`} role="switch" aria-checked={Boolean(item.enabled)} aria-label={(item.enabled ? '停用' : '启用') + (item.display_name || item.name)} disabled={busy} onClick={() => void act('skills.enable', { name: item.name, enabled: !item.enabled })}><span/></button> :
           kind === 'favorites' ? <button className="icon-button" title="立即运行" disabled={busy} onClick={async () => { const result = await act('favorites.run', { id: item.id }); if (result?.conversation_id) openConversation(result.conversation_id); }}><Play size={17}/></button> :
           kind === 'mcp' ? <button className="secondary" disabled={busy} onClick={() => void act('mcp.test', { id: item.id })}>测试连接</button> : null}
-        {kind !== 'schedule_history' && <button className="icon-button" title="编辑" onClick={() => setSelected(item)}><Pencil size={16}/></button>}
-        {kind !== 'schedule_history' && (kind !== 'skills' || item.editable) && <button className="icon-button" title="删除" disabled={busy} onClick={async () => {
+        {kind !== 'schedule_history' && (kind === 'experts' && item.builtin ? <button className="secondary" onClick={() => setSelected(item)}>查看</button> : <button className="icon-button" title="编辑" onClick={() => setSelected(item)}><Pencil size={16}/></button>)}
+        {kind !== 'schedule_history' && !(kind === 'experts' && item.builtin) && (kind !== 'skills' || item.editable) && <button className="icon-button" title="删除" disabled={busy} onClick={async () => {
           if (await confirm('删除' + (item.display_name || item.name) + '？', kind === 'skills' ? '将删除此技能的本地文件。可以先打开详情导出备份。' : '已存在的对话和运行结果会保留。', ['取消', '删除']) === 1) await act(kind + '.delete', { id: item.id, name: item.name });
         }}><Trash2 size={16}/></button>}
       </div></article>)}</div>}

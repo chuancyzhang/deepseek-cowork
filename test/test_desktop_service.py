@@ -236,6 +236,38 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.client.call("conversation.send", **params)
         return params
 
+    def test_builtin_html_expert_selection_reaches_run_and_stays_in_its_conversation(self):
+        from core.chat_storage import ChatStorage
+        from core.desktop_store import DesktopStore
+
+        c = self.client
+        expert = next(item for item in c.call("experts.list") if item["id"] == "builtin-html-creator")
+        selection = {"id": expert["id"], "name": expert["name"]}
+        cid = c.call("conversation.create")["id"]
+        other = c.call("conversation.create")["id"]
+        c.call("conversation.preferences", conversation_id=cid, value={"conversation_agent": selection})
+        self.assertEqual(c.call("conversation.get", conversation_id=cid)["meta"]["conversation_agent"], selection)
+        self.assertFalse(c.call("conversation.get", conversation_id=other)["meta"].get("conversation_agent"))
+        params = self.submit(cid, text="核对 HTML 专家角色")
+        finished = c.wait_run(cid)
+        self.assertEqual(finished["run"]["status"], "completed")
+        data = Path(c.call("settings.get")["data_dir"])
+        storage = ChatStorage(str(data / "chat_history" / "chat_history.sqlite"))
+        context = json.loads(DesktopStore(storage).get_run(params["request_id"])["payload"])["runtime_context"]
+        self.assertEqual(context["agent_profile_id"], expert["id"])
+        self.assertIn(expert["system_prompt"], context["agent_system_prompt"])
+        request = next(value for value in reversed(Provider.requests)
+                       if any("核对 HTML 专家角色" in str(message.get("content")) for message in value["messages"]))
+        self.assertIn("你是 HTML 创作专家", json.dumps(request["messages"], ensure_ascii=False))
+        before = storage.get_messages(cid)
+        c.call("conversation.preferences", conversation_id=cid, value={"conversation_agent": {}})
+        self.assertEqual(storage.get_messages(cid), before)
+        ordinary = self.submit(cid, text="已切回普通助手")
+        self.assertEqual(c.wait_run(cid)["run"]["status"], "completed")
+        ordinary_context = json.loads(DesktopStore(storage).get_run(ordinary["request_id"])["payload"])["runtime_context"]
+        self.assertNotEqual(ordinary_context.get("agent_profile_id"), expert["id"])
+        self.assertIn("普通助手", ordinary_context["agent_system_prompt"])
+
     def test_retired_ppt_chat_preserves_history_and_sends_without_special_workflow(self):
         from core.chat_storage import ChatStorage
         from core.desktop_store import DesktopStore

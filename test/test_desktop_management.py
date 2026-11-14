@@ -115,6 +115,33 @@ class ManagementTests(unittest.TestCase):
         self.assertFalse(server["enabled"])
         c.call("mcp.delete", id=server["id"])
 
+    def test_builtin_html_expert_is_listed_without_persisting_or_overwriting_it(self):
+        c = self.client
+        config_file = self.data / "config.json"
+        stored = json.loads(config_file.read_text(encoding="utf-8"))["agent_profiles"]
+        builtin = next(item for item in c.call("experts.list") if item["id"] == "builtin-html-creator")
+        self.assertTrue(builtin["builtin"])
+        self.assertTrue(builtin["enabled"])
+        self.assertEqual(json.loads(config_file.read_text(encoding="utf-8"))["agent_profiles"], stored)
+        with self.assertRaisesRegex(RuntimeError, "内置专家不能修改或删除"):
+            c.call("experts.save", value={**builtin, "system_prompt": "changed"})
+        with self.assertRaisesRegex(RuntimeError, "内置专家不能修改或删除"):
+            c.call("experts.delete", id=builtin["id"])
+        copy_id = uuid.uuid4().hex
+        try:
+            c.call("experts.save", value={**builtin, "id": copy_id, "name": "HTML创作"})
+            profiles = c.call("experts.list")
+            original = next(item for item in profiles if item["id"] == builtin["id"])
+            copied = next(item for item in profiles if item["id"] == copy_id)
+            self.assertEqual(original["name"], "HTML创作（内置）")
+            self.assertEqual(original["system_prompt"], builtin["system_prompt"])
+            self.assertFalse(copied.get("builtin"))
+            persisted = json.loads(config_file.read_text(encoding="utf-8"))["agent_profiles"]
+            self.assertNotIn(builtin["id"], [item["id"] for item in persisted])
+        finally:
+            c.call("experts.delete", id=copy_id)
+        self.assertEqual(c.call("experts.list")[-1], builtin)
+
     def test_mcp_json_parse_normalizes_imports_without_saving_or_connecting(self):
         c = self.client
         before = c.call("mcp.list")

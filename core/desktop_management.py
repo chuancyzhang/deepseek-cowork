@@ -11,6 +11,7 @@ import uuid
 from core.theme_service import ThemeRepository, resolve_theme
 from core.theme_tokens import default_design_tokens
 from core.theme_presets import BUILTIN_THEMES, builtin_theme
+from core.conversation_agents import builtin_agent_profiles
 
 log = logging.getLogger("desktop.management")
 
@@ -173,8 +174,13 @@ class Management:
             return {"saved": True}
         if method.startswith("experts."):
             items = self.config.get_agent_profiles()
+            builtins = builtin_agent_profiles(items)
             if action == "list":
-                return items
+                log.debug("experts_list custom=%d builtin=%d", len(items), len(builtins))
+                return items + builtins
+            identity = (p.get("value") or {}).get("id") if action == "save" else p.get("id")
+            if any(item["id"] == identity for item in builtins):
+                raise ValueError("内置专家不能修改或删除，请复制为自建专家后编辑。")
             if action == "save":
                 value = p["value"]
                 if not str(value.get("name") or "").strip() or not str(value.get("system_prompt") or "").strip():
@@ -184,6 +190,7 @@ class Management:
             else:
                 items = [item for item in items if item["id"] != p["id"]]
             self.config.set_agent_profiles(items)
+            log.info("expert_changed action=%s expert=%s", action, value["id"] if action == "save" else identity)
             return {"saved": True}
         if method.startswith("favorites."):
             if action == "list":

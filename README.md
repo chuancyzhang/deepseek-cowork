@@ -6,18 +6,19 @@ DeepSeek Cowork is a local Windows desktop agent workspace that brings conversat
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
-Documented version: **5.4.0** · [Version notes](docs/releases/5.4.0.md) · [Release history](docs/releases/index.md)
+Documented version: **5.4.1** · [Version notes](docs/releases/5.4.1.md) · [Release history](docs/releases/index.md)
 
 ## What you can do
 
 - **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
 - **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Office/PDF output.
+- **Analysis and media**: bundled Python libraries for data analysis, Mermaid diagrams, interactive visualizations, and an optional multimedia plugin with separately configured services.
 - **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
 - **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 
-Version 5.4.0 introduces the Electron workspace, a shared task runtime and durable event pipeline, replaceable UI plugins, and updated library, editing, and management workflows. These notes describe source changes; a new package must still be built and validated before publication.
+Version 5.4.1 bundles data-analysis dependencies and commonly used Skills, adds Office and Skill draft review with generation task cards, and improves diagrams, image interactions, browser automation, and update recovery. The version and documentation are ready; the 5.4.1 package still requires a build and release validation before publication.
 
 ## Get started
 

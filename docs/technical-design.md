@@ -1,8 +1,10 @@
 # DeepSeek Cowork 技术文档
 
-文档适用版本：**5.4.0**
+文档适用版本：**5.4.1**
 
 本文集中维护运行模型、能力开发、构建发布和测试入口。桌面操作见[用户手册](user-guide.md)，企业中心部署见[平台说明](../web/platform/README.md)。
+
+本版变更摘要见 [5.4.1 版本说明](releases/5.4.1.md)。版本与文档已同步；Windows 成品仍待构建与验收，构建入口和验收范围见下文。
 
 ## 目录
 
@@ -238,7 +240,7 @@ assistant(tool_calls) → tool(A) → tool(B) → assistant(next response)
 
 Responses 的原生 Items 保存在 assistant 消息协议元数据中，下一轮按协议回放。官方 DeepSeek Responses 由服务地址与协议共同识别，处理 reasoning、message、function call 和服务端搜索；标准 OpenAI Responses 保持自己的请求配置。
 
-模型原生图片生成暂时下线。`LLMFactory` 创建模型实例时统一停用此能力，旧配置、运行快照和企业模型不再自动附加 Responses `image_generation` 工具；保存的旧配置不被改写。图片输入、普通函数工具及历史图片引用与协议回放保留。受影响模型的工具前缀会变化，后续请求重新建立对应缓存。
+模型原生图片生成暂时下线。`LLMFactory` 创建模型实例时统一停用此能力，旧配置、运行快照和企业模型不再自动附加 Responses `image_generation` 工具；保存的旧配置不被改写。图片输入、普通函数工具及历史图片引用与协议回放保留。受影响模型的工具前缀会变化，后续请求重新建立对应缓存。独立的[多媒体实验插件](#多媒体实验插件)通过普通工具调用配置的生成服务，不重新启用模型原生图片生成路径。
 
 `core/llm/chat_completions_stream.py` 负责解析流分片，Provider 管理连接和请求，Agent 负责工具调度。这三个层次分别维护协议转换、传输和任务状态。
 
@@ -437,7 +439,9 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 开发态读取仓库资源，PyInstaller onedir 冻结态从 `sys._MEIPASS` 读取随包资源。运行时准备脚本获取固定版本的 Git、ripgrep 与组件；spec 扫描动态 Skill 的 `core.*` 导入并加入 hidden imports。编辑器分发资源位于 `web/editors/dist/`。
 
-`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，生成完整目录、ZIP 与 `latest-desktop-windows-x64.json`。随后调用 `scripts/package_release.py` 审计 Electron 宿主、冻结服务、运行时、许可证、空白默认配置及两份离线编辑器的一致性；通过后生成确定性 ZIP 和带 `app_layout: electron` 的更新清单。审计报告仅在显式传入 `--report` 时生成。语音转文字技能、组件与打包脚本已下线；技能发现拒绝旧版残留的同名技能，历史音频文件和转写结果不删除。Word/PPT 预览由可选 LibreOffice 组件生成 PDF，通过会话绑定的异步任务发布。Windows x64 组件使用固定版本、大小与 SHA-256 校验，MSI 管理提取到应用数据目录，验证启动后原子发布，不设置系统关联。预览使用独立源文件副本与用户配置目录，缓存按源指纹及渲染程序版本隔离；取消、转换失败或源版本变化均显式报错，不转用文本预览。
+`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，组装完整目录，再调用 `scripts/package_release.py` 审计 Electron 宿主、冻结服务、运行时、许可证、空白默认配置及两份离线编辑器的一致性；通过后生成确定性 ZIP 和带 `app_layout: electron` 的 `latest-desktop-windows-x64.json`。脚本要求 ZIP 文件名与 `APP_VERSION` 一致，且 `docs/releases/版本号.md` 已存在；该文件全文写入清单的 `notes`。审计报告仅在显式传入 `--report` 时生成。
+
+旧版语音转文字技能、组件与打包脚本已下线；技能发现拒绝旧版残留的同名技能，历史音频文件和转写结果不删除。新音频转写由可选多媒体插件按显式配置执行。Word/PPT 预览由可选 LibreOffice 组件生成 PDF，通过会话绑定的异步任务发布。Windows x64 组件使用固定版本、大小与 SHA-256 校验，MSI 管理提取到应用数据目录，验证启动后原子发布，不设置系统关联。预览使用独立源文件副本与用户配置目录，缓存按源指纹及渲染程序版本隔离；取消、转换失败或源版本变化均显式报错，不转用文本预览。
 
 ### 更新清单
 
@@ -453,7 +457,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 ```text
 updates/desktop-windows-x64/latest.json
-updates/desktop-windows-x64/cowork-desktop-v5.4.0-windows-x64.zip
+updates/desktop-windows-x64/cowork-desktop-v5.4.1-windows-x64.zip
 ```
 
 清单字段如下：
@@ -466,7 +470,7 @@ updates/desktop-windows-x64/cowork-desktop-v5.4.0-windows-x64.zip
 | `target_os` / `arch` | `windows` / `x64` |
 | `filename` | `cowork-desktop-v版本号-windows-x64.zip` |
 | `size` / `sha256` | ZIP 实际字节数和 SHA-256 |
-| `notes` | 构建脚本中的发行摘要；公开发布前同步正式版本说明 |
+| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.1.md` |
 
 发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
 
@@ -519,7 +523,8 @@ $env:COWORK_QA_ROOT = $taskRoot
 | 文档结构、链接、图片与版本 | `scripts/check_docs.py`、`test/test_documentation.py` |
 | 消息与运行 | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_runtime_ledger.py`、`test/test_subagent_reliable_runtime.py` |
 | 历史、项目与界面 | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs`、`desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs`、`desktop/tests/plugin-page.test.mjs` |
-| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/editor-bridge.test.mjs` |
+| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/editor-bridge.test.mjs`、`desktop/tests/browser.test.mjs` |
+| 图片、流程图与多媒体 | `desktop/tests/attachments.test.mjs`、`desktop/tests/mermaid.test.mjs`、`desktop/tests/media-preview.test.mjs`、`test/test_multimedia.py` |
 | 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_system_v2.py` |
 | 打包与更新 | `test/test_package_release.py`、`test/test_package_default_config.py`、`test/test_packaging_runtime.py`、`test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
 | 企业中心 | `test/test_enterprise_platform.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
@@ -534,7 +539,9 @@ git diff --check
 
 Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。Python 测试使用原生线程和事件接口，界面行为通过现行 Electron 测试验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
 
-当前回归范围不再包含退役 Qt smoke 入口与 WebEngine 性能选项。默认配置审计使用 Electron 的 `resources/service/_internal/config.json`，继续拒绝私有配置、旧路径和大小写变体；验证禁止打包 Qt 的负向测试仍保留。Anthropic 真实 SDK 的请求快照／团队模型集成用例，以及真实 Electron 浏览器交互夹具已暂时移除，留待后续专项处理。已知 SDK 初始化兼容问题和浏览器点击后页面结果未变化的问题尚未修复，剩余测试通过不代表这两项能力通过验收。
+当前回归范围不再包含退役 Qt smoke 入口与 WebEngine 性能选项。默认配置审计使用 Electron 的 `resources/service/_internal/config.json`，继续拒绝私有配置、旧路径和大小写变体；验证禁止打包 Qt 的负向测试仍保留。
+
+内置浏览器后台截图与点击问题已在源码修复，`desktop/tests/browser.test.mjs` 和 `desktop/tests/browser.fixture.cjs` 恢复真实 Electron 交互覆盖，包括不同缩放、隐藏／最小化窗口、单次提交、页面版本和会话隔离。夹具使用本地页面，不代表任意外部网站或外部 BrowserSkill 已完成验收。Anthropic 真实 SDK 的请求快照／团队模型集成用例仍暂缓，SDK 初始化兼容问题仍待专项处理；其他测试通过不能替代该项验证。
 
 `PYTHONUTF8=1` 同时传给子进程；仅给父解释器加 `-X utf8` 不会自动改变子进程编码。前端开发需要带 npm 的 Node.js；若依赖已经安装，也可用随包 Node 直接执行 `node --test tests/*.test.mjs`，不要把精简运行时误认为完整 npm 开发环境。版本号与文档编辑完成后再运行一致性检查，避免测试进程读到混合的新旧版本。
 

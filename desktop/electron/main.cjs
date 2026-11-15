@@ -11,6 +11,12 @@ const { resolveDataDirectory } = require('./data-path.cjs');
 const {prepareInstall,commitInstall,startupRequest,UpdateStartup} = require('./updates.cjs');
 protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const visualizationPages = new Map();
+const {SnippetHost} = require('./snippets.cjs');
+const snippetHost = new SnippetHost({diagnostic:(event,details)=>{
+  void fs.mkdir(path.join(dataDir,'logs'),{recursive:true})
+    .then(()=>fs.appendFile(path.join(dataDir,'logs','desktop-preview.log'),`${new Date().toISOString()} ${event} ${JSON.stringify(details)}\n`))
+    .catch(error=>console.error('preview_diagnostic_write_failed',error.message));
+}});
 function servePlugin(plugin) {
   return { ...plugin, html: undefined, url: `cowork-plugin://${plugin.hash}/${plugin.entry}` };
 }
@@ -77,6 +83,7 @@ async function createWindow() {
     backgroundColor: '#fafafa', title: '', show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  snippetHost.attach(window.webContents);
   window.webContents.on('console-message', details => {
     if (!details.message?.startsWith('workbench_render_failed ')) return;
     // Persist the boundary diagnostic only, never general page console output.
@@ -134,6 +141,7 @@ else {
     });
     protocol.handle('cowork-plugin', request => {
       const url = new URL(request.url);
+      if (url.hostname.startsWith('snippet-')) return snippetHost.response(url);
       if (url.host === 'visualization') {
         const html = visualizationPages.get(url.pathname.slice(1));
         return new Response(html || 'Not found', {status:html ? 200:404,headers:{'Content-Type':'text/html; charset=utf-8'}});
@@ -191,6 +199,10 @@ else {
         return {...value, html: undefined, url: `cowork-plugin://visualization/${value.token}`};
       }
       if (method === 'visualization.release') { visualizationPages.delete(params.token); return {released:true}; }
+      if (method === 'snippet.create') return snippetHost.create(event.sender,params);
+      if (method === 'snippet.start') return snippetHost.start(event.sender,params.token);
+      if (method === 'snippet.event') return snippetHost.event(event.sender,params);
+      if (method === 'snippet.release') return snippetHost.release(event.sender,params.token);
       if (allowed.has(method)) return backend.call(method, params);
       if (['browser.open', 'browser.navigate', 'browser.close', 'browser.command'].includes(method)) return backend.call(method, params);
       if (method === 'browser.surface') return browserHost.show(params);

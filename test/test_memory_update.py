@@ -7,6 +7,7 @@ import unittest
 from core.chat_storage import ChatStorage
 from core.memory_update import (
     batch_transcripts,
+    build_memory_update_messages,
     collect_llm_content,
     estimate_tokens,
     filter_transcripts_for_memory_update,
@@ -206,3 +207,21 @@ class TestMemoryUpdate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_history_generation_distinguishes_global_and_project_lessons():
+    for scope, expected in [("global", "跨项目成立"), ("workspace", "仅保留适用于当前项目")]:
+        messages = build_memory_update_messages("已有记忆", "会话", scope=scope)
+        assert expected in messages[0]["content"]
+        assert "可复用经验" in messages[0]["content"]
+        assert "根因猜测" in messages[0]["content"]
+
+
+def test_project_history_excludes_chat_and_creation_workspaces():
+    records = [
+        {"id": "project", "meta": {"workspace_dir": "C:/Project", "workspace_source": "project"}},
+        {"id": "chat", "meta": {"workspace_dir": "C:/Project", "workspace_source": "chat"}},
+        {"id": "creation", "meta": {"workspace_dir": "C:/Project", "creation_session": True}},
+        {"id": "other", "meta": {"workspace_dir": "C:/Other"}},
+    ]
+    assert [item["id"] for item in filter_transcripts_for_workspace(records, "C:/Project")] == ["project"]

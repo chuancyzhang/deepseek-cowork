@@ -1,7 +1,7 @@
 ---
 name: skill-builder
 description: Build-focused skill for creating, updating, and installing standard Agent Skills, including remote HTTPS skill.md installation through a constrained specialist agent.
-allowed-tools: [create_new_skill, update_skill, install_agent_skill, remote_skill_installer_agent]
+allowed-tools: [create_new_skill, update_skill, install_agent_skill, remote_skill_installer_agent, review_draft]
 ---
 
 # Skill Builder
@@ -27,6 +27,9 @@ Use this Skill only when the user explicitly asks to create, modify, import, or 
 - **Keep Packages Portable**: keep reusable references, scripts, and assets inside the skill directory so Skill Center ZIP export can move the complete package.
 
 ## Tools
+
+### review_draft
+When the user starts “沉淀为 Skill”, prepare the draft and submit it through `review_draft` using the current review task. The review panel owns user edits and saving or updating the accepted Skill. Do not bypass it by directly installing or rewriting the target Skill. Autonomous lessons use `update_experience` in memory instead.
 
 ### create_new_skill
 Creates or updates an AI-generated skill in `ai_skills`.

@@ -24,7 +24,7 @@ def install_package(package_name, import_name=None):
 class SecurityError(Exception):
     pass
 
-def validate_code_safety(code, allowed_dir, god_mode=False):
+def _validate_code_safety(code, allowed_dir, god_mode=False):
     """AST static analysis for code safety"""
     if god_mode:
         return True
@@ -120,7 +120,7 @@ def run_python_code(workspace_dir, code, _context=None):
             visualization_dir = visualization_staging_dir(conversation_id, create=True)
 
     try:
-        validate_code_safety(code, workspace_dir, god_mode=god_mode)
+        _validate_code_safety(code, workspace_dir, god_mode=god_mode)
     except SecurityError as e:
         return f"Error: {str(e)}"
 

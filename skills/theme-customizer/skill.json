@@ -32,10 +32,11 @@
     "include_experience_entries": false
   },
   "workflow": [
+    "In creation sessions, generate a session-owned candidate and let the user apply it in the creation panel; do not call save, activate or delete tools.",
     "Inspect the active theme and token schema.",
     "Validate a minimal override set.",
     "Preview changes before persistence.",
-    "Save or activate only after explicit user acceptance.",
+    "In ordinary conversations, save or activate only after explicit user acceptance.",
     "Recommend restarting Cowork after a theme is saved and activated."
   ]
 }

@@ -806,16 +806,15 @@ class TestSkillSystemV2(unittest.TestCase):
             content = f.read()
         self.assertIn("Always capture stderr before retrying.", content)
 
-    def test_record_experience_without_skill_uses_general_experience(self):
+    def test_record_experience_requires_a_named_reviewed_skill(self):
         sm = self._build_manager()
-        success, message = sm.record_experience("Retry once after transient network failures.")
-        self.assertTrue(success, message)
-        self.assertIn("general-experience", sm.skill_records)
-        entries = sm.get_experience_entries("general-experience")
-        self.assertEqual(len(entries), 1)
-        self.assertIn("transient network failures", entries[0]["experience_text"])
+        success, message = sm.record_experience("A verified lesson")
+        self.assertFalse(success)
+        self.assertIn("skill_name is required", message)
+        self.assertNotIn("general-experience", sm.skill_records)
+        self.assertFalse(os.path.exists(os.path.join(self.skills_dir, "general-experience")))
 
-    def test_general_experience_registers_dedicated_tool(self):
+    def test_user_installed_legacy_experience_skill_remains_loadable(self):
         general_dir = os.path.join(self.skills_dir, "general-experience")
         os.makedirs(general_dir, exist_ok=True)
         with open(os.path.join(general_dir, "SKILL.md"), "w", encoding="utf-8") as f:
@@ -1319,34 +1318,21 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(record["tool_refs"], ["browser_skill_cli"])
         self.assertEqual(record["spec"].get("python_dependencies"), [])
 
-    def test_builtin_presentation_skills_load_with_resources(self):
-        for skill_name in ("guizang-ppt-skill", "huashu-design"):
-            self._copy_repo_ai_skill(skill_name)
+    def test_removed_packages_are_absent_from_builtin_roots(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        for relative in ("ai_skills/huashu-design", "ai_skills/guizang-ppt-skill",
+                         "skills/general-experience", "skills/skill-importer"):
+            self.assertFalse(os.path.exists(os.path.join(root, relative)))
 
+    def test_builtin_tool_loading_keeps_execution_and_keyword_search_only(self):
+        for name in ("python-runner", "history-query", "meta-tools", "memory-manager"):
+            self._copy_repo_skill(name)
         sm = self._build_manager()
-
-        for skill_name in ("guizang-ppt-skill", "huashu-design"):
-            self.assertIn(skill_name, sm.skill_records)
-            record = sm.skill_records[skill_name]
-            self.assertTrue(record["spec"].get("default_enabled"))
-            self.assertEqual(record["spec"].get("source_type"), "builtin_ai_skill")
-            self.assertIn("PPT Agent", record["search_text"])
-            self.assertTrue(record["spec"].get("references") or record["spec"].get("asset_refs"))
-            self.assertTrue(os.path.isfile(os.path.join(record["path"], "SOURCE.md")))
-
-        self.assertIn("huashu-design", sm.select_relevant_skills("PPT Agent Huashu Design 高级感路演", limit=5))
-        self.assertIn("guizang-ppt-skill", sm.select_relevant_skills("PPT Agent 横向翻页 瑞士风", limit=5))
-
-    def test_huashu_builtin_skill_omits_large_media_assets(self):
-        skill_dir = self._copy_repo_ai_skill("huashu-design")
-
-        media_files = []
-        for root, _dirs, filenames in os.walk(skill_dir):
-            for filename in filenames:
-                if os.path.splitext(filename)[1].lower() in {".mp3", ".wav", ".mp4"}:
-                    media_files.append(os.path.join(root, filename))
-
-        self.assertEqual(media_files, [])
+        tools = set(sm.tools)
+        self.assertTrue({"run_python_code", "query_history", "update_experience", "read_memories"} <= tools)
+        self.assertFalse({"validate_code_safety", "query_history_vector", "upsert_message_embedding",
+                          "record_general_experience", "generate_skill_from_folder", "analyze_skill_source_folder"} & tools)
+        self.assertFalse(sm.is_tool_allowed("update_experience", "grilling"))
 
     def test_run_skill_script_uses_skill_dependency_flow_and_sandbox_runner(self):
         skill_dir = os.path.join(self.skills_dir, "scripted-skill")

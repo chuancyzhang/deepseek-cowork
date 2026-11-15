@@ -26,12 +26,8 @@ Use this when you need to calculate data, process text, or perform tasks where n
 - **Tool Choice**: Prefer `run_python_code` for data processing, calculations, structured text transforms, and lightweight file analysis; use `bash` only when the real shell or an existing CLI is needed.
 - **Parallelism**: Python execution and package installation are not read-only batch operations and must not be called through `parallel_tools`.
 
-## God Mode (System Operations)
-When God Mode is enabled:
-- **Full Access**: Path traversal checks are disabled (access C:/, D:/, etc.).
-- **Dangerous Modules**: `subprocess`, `winreg`, `ctypes` are allowed.
-- **Use Cases**: Registry editing, Process management (kill/list), System service management.
-- **Caution**: Always explain the intent clearly to the user before running dangerous code.
+## Execution Authorization
+God Mode skips per-execution approval. With God Mode off, the host requests approval for the entire execution, including child processes. Once approved, normal operating-system user permissions apply. Internal AST checks do not create an OS sandbox and are not a separate callable tool.
 
 ## Commands
 

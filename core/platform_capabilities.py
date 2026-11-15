@@ -5,11 +5,7 @@ import sys
 _WINDOWS_ONLY_SKILLS = {
     "browser-automation": "此平台首版仅支持应用内浏览器，暂不接管外部浏览器。",
     "wecom-unified": "此平台首版暂不提供企业微信办公套件；机器人消息渠道独立配置。",
-    "huashu-design": "此平台首版暂不提供高级演示与视频工具；可使用基础文档生成和编辑。",
-    "frontend-slides": "此平台首版暂不提供高级演示导出；可使用基础文档生成和编辑。",
-    "guizang-ppt-skill": "此平台首版暂不提供高级演示工具；可使用基础文档生成和编辑。",
 }
-_WINDOWS_ONLY_TOOLS = {"query_history_vector", "upsert_message_embedding"}
 
 
 def is_windows():
@@ -30,12 +26,6 @@ def desktop_target(system=None, machine=None):
 
 def skill_unavailable_reason(name):
     return "" if is_windows() else _WINDOWS_ONLY_SKILLS.get(str(name or ""), "")
-
-
-def tool_unavailable_reason(name):
-    if not is_windows() and name in _WINDOWS_ONLY_TOOLS:
-        return "此平台首版暂不提供历史向量检索，请使用关键词历史搜索。"
-    return ""
 
 
 def require_windows_capability(label):

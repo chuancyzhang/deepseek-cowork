@@ -17,13 +17,14 @@ This skill manages the layered memory store saved alongside chat history.
 ## Tools
 
 ### read_memories
-Read the applicable global and workspace summaries.
+Read the applicable global and registered-project summaries, labeled by scope. Chat and creation directories are not projects.
 
 ### write_memories
 Append or replace the global summary with versioned storage.
 
 ## Current Runtime Notes
-- The always-on layer contains the soul prompt plus global/current-workspace summaries.
+- The always-on layer contains the soul prompt plus global/current-project summaries, captured for the current run; changes take effect next run.
 - The UI Memory Center owns generation review, summary editing, backups, and scoped `memories_update_state.json` tracking; use direct writes only when the user explicitly asks the model to remember something.
+- For autonomous verified lessons, use `update_experience` after reading these summaries. It updates only the experience section, without modifying Skills.
 - Do not store secrets, temporary debugging noise, or one-off implementation details.
 - Memory writes are not read-only and must not be run through `parallel_tools`.

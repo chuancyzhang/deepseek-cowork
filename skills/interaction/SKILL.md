@@ -27,6 +27,7 @@ Ask the user for text, a single choice, or multiple choices.
 - **message** (string, required): The message to display to the user.
 - **title** (string, optional): dialog title.
 - **input_mode** (string, optional): `text`, `choice`, or `multi_choice`.
+- **questions** (array, optional): questionnaire items with `id`, `header`, `question`, and `options`; each option provides `label`, optional `value`, and `description`. Use this for task clarification.
 - **purpose** (string, optional): runtime intent marker; `grill_checkpoint` is reserved for the grilling summary decision.
 - **options** (array, optional): list of selectable options.
 - **allow_free_text** (boolean, optional): allow arbitrary free-text input.

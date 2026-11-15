@@ -142,12 +142,22 @@ def build_transcript_batches(transcripts, max_tokens=DEFAULT_MEMORY_BATCH_TOKEN_
     return batches
 
 
-def build_memory_update_messages(current_memory, batch_text=None, batch_index=1, batch_count=1, batch_summaries=None):
+def _memory_scope_guidance(scope):
+    target = ("当前项目记忆：仅保留适用于当前项目的内容。" if scope == "workspace"
+              else "当前用户的全局记忆：仅保留跨项目成立的内容，不要混入单个项目的配置与业务规则。")
+    return (target + "经验只保留已验证的方法、修复或可复现限制，注明适用条件、做法和必要依据；"
+            "不要记录例行成功、临时报错或根因猜测。去重并合并相近经验，保留仍有效的事实和偏好。"
+            "经验统一放在唯一的‘## 可复用经验’小节中，每条使用一行 Markdown 无序列表。"
+            "不要因为没有项目就把项目内容写入全局；没有新信息时保留原文。")
+
+
+def build_memory_update_messages(current_memory, batch_text=None, batch_index=1, batch_count=1, batch_summaries=None, scope="global"):
     system_prompt = (
         "你是长期记忆整理助手。只保留长期稳定、有复用价值的信息：用户偏好、项目背景、"
         "持续约定、重要环境事实、反复出现的工作方式。不要写入一次性任务细节、敏感信息、"
         "临时状态、完整聊天记录或冗余内容。输出 Markdown。"
     )
+    system_prompt += _memory_scope_guidance(scope)
     if batch_summaries is not None:
         user_prompt = (
             "请将当前长期记忆与下面的分批摘要合并为最终 memories.md。要求：\n"
@@ -177,6 +187,7 @@ def build_incremental_memory_update_messages(current_memory, batch_text, batch_i
         "用户偏好、项目背景、持续约定、重要环境事实、反复出现的工作方式。不要写入一次性任务细节、"
         "敏感信息、临时状态、完整聊天记录或冗余内容。输出完整 Markdown 文件内容。"
     )
+    system_prompt += _memory_scope_guidance("global")
     user_prompt = (
         f"下面是第 {batch_index}/{batch_count} 批历史会话。请将这一批值得长期保存的信息合并进当前 memories.md，"
         "并输出合并后的完整 memories.md。要求：\n"
@@ -237,7 +248,7 @@ def _collect_llm_content_once(provider, messages):
     return content
 
 
-def generate_memory_update(provider, current_memory, transcripts, max_batch_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT, progress_callback=None):
+def generate_memory_update(provider, current_memory, transcripts, max_batch_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT, progress_callback=None, scope="global"):
     transcript_count = len(transcripts or [])
     batches = batch_transcripts(transcripts, max_batch_tokens)
     if not batches:
@@ -259,6 +270,7 @@ def generate_memory_update(provider, current_memory, transcripts, max_batch_toke
             batch_text=batch,
             batch_index=index,
             batch_count=len(batches),
+            scope=scope,
         )
         summaries.append(collect_llm_content(provider, messages, progress_callback=progress_callback))
 
@@ -267,6 +279,7 @@ def generate_memory_update(provider, current_memory, transcripts, max_batch_toke
     final_messages = build_memory_update_messages(
         current_memory=current_memory,
         batch_summaries=summaries,
+        scope=scope,
     )
     final_content = collect_llm_content(provider, final_messages, progress_callback=progress_callback)
     return {
@@ -424,6 +437,8 @@ def filter_transcripts_for_workspace(transcripts, workspace_dir):
     result = []
     for transcript in transcripts or []:
         meta = transcript.get("meta") if isinstance(transcript.get("meta"), dict) else {}
+        if meta.get("workspace_source") == "chat" or meta.get("creation_session"):
+            continue
         candidate = normalize_workspace_dir(meta.get("workspace_dir"))
         if candidate and candidate == target:
             result.append(transcript)

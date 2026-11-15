@@ -26,12 +26,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _READERS = {
     "file-system": {"workspace_list_files", "text_file_read", "glob", "grep"},
     "command-tools": {"glob", "grep"},
-    "history-query": {"query_history", "query_history_vector"},
+    "history-query": {"query_history"},
     "memory-manager": {"read_memories"},
 }
 _CONTROL = {
     "interaction": {"request_user_input", "request_user_approval"},
-    "meta-tools": {"parallel_tools"},
+    "meta-tools": {"parallel_tools", "update_experience"},
     "agent-manager": {"spawn_agent", "send_input", "wait_agent", "close_agent", "list_agents"},
     # This exact app-owned handler only retains a review draft. Publication is
     # unavailable to the model and requires the trusted renderer's save action.

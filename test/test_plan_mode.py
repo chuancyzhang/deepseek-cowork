@@ -259,7 +259,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 return ""
 
             def get_brief_skill_prompt(self, skill_name):
-                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+                return "Fixture Design brief" if skill_name == "fixture-design" else ""
 
         class _ProviderStub:
             provider_name = "stub"
@@ -461,7 +461,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 return ""
 
             def get_brief_skill_prompt(self, skill_name):
-                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+                return "Fixture Design brief" if skill_name == "fixture-design" else ""
 
         class _ProviderStub:
             provider_name = "stub"
@@ -518,7 +518,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             prompt_event = next(event for event in events if event.get("type") == "system_prompt")
             runtime_prompt = prompt_event.get("runtime_context", "")
             self.assertNotIn("PPT Agent", runtime_prompt)
-            self.assertNotIn("Huashu Design", runtime_prompt)
+            self.assertNotIn("Fixture Design", runtime_prompt)
             self.assertNotIn("办公稿生成", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -538,13 +538,13 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 return ""
 
             def get_brief_skill_prompt(self, skill_name):
-                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+                return "Fixture Design brief" if skill_name == "fixture-design" else ""
 
             def get_skill_display_name(self, skill_name):
-                return "Huashu Design" if skill_name == "huashu-design" else skill_name
+                return "Fixture Design" if skill_name == "fixture-design" else skill_name
 
             def get_full_skill_prompt(self, skill_name):
-                return "# Huashu Design Full Skill\nUse HTML as design medium." if skill_name == "huashu-design" else ""
+                return "# Fixture Design Full Skill\nUse HTML as design medium." if skill_name == "fixture-design" else ""
 
         class _ProviderStub:
             provider_name = "stub"
@@ -575,17 +575,17 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={
                         "mode": RUN_MODE_EXECUTION,
-                        "selected_skill_names": ["huashu-design"],
+                        "selected_skill_names": ["fixture-design"],
                     },
                 )
                 worker.observability_signal.subscribe(lambda data: events.append(data))
                 worker.run()
 
             request_system_text = "\n".join(provider_events[0][1])
-            self.assertIn("Huashu Design Full Skill", request_system_text)
+            self.assertIn("Fixture Design Full Skill", request_system_text)
             append_events = [event for event in events if event.get("type") == "system_prompt_append"]
             self.assertEqual(append_events[0]["source"], "selected_skill_prompt")
-            self.assertEqual(append_events[0]["skill_names"], ["huashu-design"])
+            self.assertEqual(append_events[0]["skill_names"], ["fixture-design"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

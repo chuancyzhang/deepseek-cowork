@@ -15,13 +15,13 @@ allowed-tools: [document_read]
 
 # Document Reader
 
-This bundled capability is enabled by default and reads structured document formats that plain text file tools intentionally refuse.
+This core built-in capability is always available and reads structured document formats that plain text file tools intentionally refuse.
 
 ## Tool
 
 ### document_read
 
-Reads DOCX, PPTX, XLSX, XLS, or PDF files from the current workspace and returns a unified structured payload with extracted text.
+Reads DOCX, PPTX, XLSX, XLS, or PDF files from paths permitted by the current execution authorization and returns a unified structured payload with extracted text.
 
 - The first call returns a bounded batch. `max_chars` limits the entire JSON result (including `sections` and metadata), defaults to 12000, and accepts 2000–60000.
 - Check `has_more` and `range`. Continue only as needed by passing `next_cursor` as `cursor` with the same `path`; omit selectors or keep them identical. A changed file requires a fresh read.
@@ -32,6 +32,6 @@ Reads DOCX, PPTX, XLSX, XLS, or PDF files from the current workspace and returns
 ## Boundaries
 
 - Use `text_file_read` only for plain text files.
-- Use `document_read` for Office/PDF reads. If the user explicitly disabled this capability, ask them to enable it in the capability store.
+- Use `document_read` for Office/PDF reads. It is a core built-in tool and does not require enabling in the capability store.
 - There is no Office/PDF write tool. When the user asks to create or modify Office/PDF files, use `run_python_code` with an appropriate library and normal workspace write safety rules.
 - This plugin does not use Pandoc.

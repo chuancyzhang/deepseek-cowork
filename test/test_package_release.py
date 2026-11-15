@@ -209,6 +209,10 @@ class PackageReleaseTests(unittest.TestCase):
             "resources/service/_internal/Qt6Core.dll",
             "resources/service/_internal/python_env/Lib/site-packages/pythonwin/Pythonwin.exe",
             "resources/service/_internal/ai_skills/frontend-slides/SKILL.md",
+            "resources/service/_internal/ai_skills/huashu-design/SKILL.md",
+            "resources/service/_internal/ai_skills/guizang-ppt-skill/SKILL.md",
+            "resources/service/_internal/skills/general-experience/impl.py",
+            "resources/service/_internal/skills/skill-importer/impl.py",
         )
         for relative in cases:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp_dir:

@@ -52,11 +52,9 @@ READ_ONLY_TOOL_NAMES = {
     "search_files",
     "search_codebase",
     "query_history",
-    "query_history_vector",
     "read_memories",
     "search_web",
     "read_web_article",
-    "analyze_skill_source_folder",
     "list_agents",
 }
 
@@ -95,7 +93,6 @@ EXECUTION_ONLY_TOOL_NAMES = {
     "create_new_skill",
     "update_skill",
     "install_agent_skill",
-    "generate_skill_from_folder",
     "install_package",
     "spawn_agent",
     "send_input",

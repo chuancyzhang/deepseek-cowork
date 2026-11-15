@@ -116,7 +116,8 @@ class DesktopSettings:
         if name == "preferences":
             self.memory().save_soul(str(v["soul"]))
         elif name == "memory":
-            self.memory().save_summary(str(v["summary"]), "workspace" if context else "global", context)
+            self.memory().save_summary(str(v["summary"]), "workspace" if context else "global", context,
+                                       expected_content=current["values"]["summary"])
         elif name == "security":
             from core.data_security import CATEGORIES, FEATURES
             self.config.set_data_security({**{key: v[key] for key in ("enabled", *FEATURES)}, "categories": {key: v["category:" + key] for key in CATEGORIES}})
@@ -211,7 +212,7 @@ class DesktopSettings:
             if not transcripts:
                 return {"message": "没有新的历史记录，现有记忆保持不变。"}
             provider = LLMFactory.create_provider_from_profile(profile)
-            result = update.generate_memory_update(provider, original, transcripts, progress_callback=report)
+            result = update.generate_memory_update(provider, original, transcripts, progress_callback=report, scope="workspace" if context else "global")
             report("整理完成，请核对后保存。")
             content = result["content"] if isinstance(result, dict) else result
             return {"draft_values": {"summary": content}, "message": "记忆草稿已生成，核对后点击保存。"}

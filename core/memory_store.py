@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -9,6 +10,54 @@ from core.file_write_locks import file_write_lock
 
 
 MEMORY_LAYOUT_VERSION = 2
+EXPERIENCE_HEADING = "## 可复用经验"
+
+
+def resolve_memory_project(config, workspace_dir, *, storage=None, conversation_id="", run_context=None):
+    """Resolve only the run's registered project, never a chat artifact directory."""
+    if (run_context or {}).get("creation_session"):
+        return ""
+    workspace = normalize_workspace_dir(workspace_dir)
+    if not workspace or config is None:
+        return ""
+    if storage is not None and conversation_id:
+        meta = storage.get_conversation_meta(conversation_id) or {}
+        if meta.get("workspace_source") == "chat" or meta.get("creation_session"):
+            return ""
+        bound = meta.get("workspace_dir") or meta.get("workspace_path")
+        if bound and normalize_workspace_dir(bound) != workspace:
+            return ""
+    projects = config.get_projects() if hasattr(config, "get_projects") else []
+    return next((normalize_workspace_dir(item["path"]) for item in projects
+                 if isinstance(item, dict) and normalize_workspace_dir(item.get("path")) == workspace), "")
+
+
+def memory_project_from_context(context):
+    if (context.get("run_context") or {}).get("creation_session"):
+        return ""
+    # This key is supplied by the worker, not by model tool arguments.
+    if "memory_project_dir" in context:
+        return context["memory_project_dir"] or ""
+    return resolve_memory_project(context.get("config_manager"), context.get("workspace_dir"),
+                                  storage=context.get("chat_storage"),
+                                  conversation_id=context.get("conversation_id") or context.get("session_id", ""),
+                                  run_context=context.get("run_context"))
+
+
+def _unfenced_line_indexes(lines):
+    """Do not mistake a Markdown example for a writable memory section."""
+    fence = ""
+    for index, line in enumerate(lines):
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = ""
+        elif marker:
+            fence = marker[1]
+        else:
+            yield index
+    if fence:
+        raise ValueError("记忆中有未闭合的代码块，请先在记忆页整理后重试。")
 
 
 def _atomic_write(path, content):
@@ -86,6 +135,8 @@ class MemoryStore:
     def _scope_dir(self, scope="global", workspace_dir=""):
         if scope == "global":
             return os.path.join(self.root, "global")
+        if scope != "workspace":
+            raise ValueError("不支持的记忆范围。")
         key = workspace_key(workspace_dir)
         if not key:
             raise ValueError("工作区摘要必须指定工作区路径。")
@@ -104,10 +155,12 @@ class MemoryStore:
             return handle.read()
 
     def read_soul(self):
-        return self._read(self.soul_path())
+        with file_write_lock(self.root):
+            return self._read(self.soul_path())
 
     def read_summary(self, scope="global", workspace_dir=""):
-        return self._read(self.summary_path(scope, workspace_dir))
+        with file_write_lock(self.root):
+            return self._read(self.summary_path(scope, workspace_dir))
 
     def _save_versioned(self, path, content, create_backup=True):
         backup_path = ""
@@ -124,7 +177,69 @@ class MemoryStore:
         return backup_path
 
     def save_soul(self, content):
-        return self._save_versioned(self.soul_path(), content)
+        with file_write_lock(self.root):
+            return self._save_versioned(self.soul_path(), content)
 
-    def save_summary(self, content, scope="global", workspace_dir="", create_backup=True):
-        return self._save_versioned(self.summary_path(scope, workspace_dir), content, create_backup)
+    def save_summary(self, content, scope="global", workspace_dir="", create_backup=True, *, expected_content=None):
+        with file_write_lock(self.root):
+            path = self.summary_path(scope, workspace_dir)
+            if expected_content is not None and self._read(path) != expected_content:
+                raise ValueError("记忆已被其他操作修改。编辑已保留，请刷新后合并。")
+            return self._save_versioned(path, content, create_backup)
+
+    def append_summary(self, content):
+        with file_write_lock(self.root):
+            current = self.read_summary()
+            return self.save_summary((current.rstrip() + "\n" + (content or "")).strip())
+
+    def update_experience(self, experience, scope="global", workspace_dir="", previous_experience=None):
+        """Edit one plain Markdown bullet; all unrelated summary text is preserved."""
+        if not isinstance(experience, str) or not experience.strip() or "\n" in experience.strip() or "\r" in experience.strip():
+            raise ValueError("经验必须是一条非空的单段文本，不含换行。")
+        entry = "- " + experience.strip()
+        if previous_experience is not None and (not isinstance(previous_experience, str) or not previous_experience.strip()):
+            raise ValueError("待替换经验不能为空，请先读取当前记忆。")
+        previous = "- " + previous_experience.strip() if previous_experience is not None else None
+        with file_write_lock(self.root):
+            content = self.read_summary(scope, workspace_dir)
+            summary_lines = content.splitlines(keepends=True)
+            visible = list(_unfenced_line_indexes(summary_lines))
+            headings = [index for index in visible if summary_lines[index].rstrip() == EXPERIENCE_HEADING]
+            if len(headings) > 1:
+                raise ValueError("存在多个可复用经验小节，请先在记忆页合并。")
+            if headings:
+                start = sum(map(len, summary_lines[:headings[0] + 1]))
+                following = next((index for index in visible if index > headings[0] and re.match(r"^#{1,2} ", summary_lines[index])), len(summary_lines))
+                end = sum(map(len, summary_lines[:following]))
+                body = content[start:end]
+            else:
+                start = end = len(content)
+                body = ""
+            lines = body.splitlines(keepends=True)
+            entries = {index: lines[index].rstrip("\r\n") for index in _unfenced_line_indexes(lines)}
+            matches = [index for index, line in entries.items() if previous is not None and line == previous]
+            if previous is not None and len(matches) != 1:
+                # A repeated successful replacement is harmless; a stale edit is not an append.
+                if not matches and entry in entries.values():
+                    return "unchanged"
+                raise ValueError("待替换经验不存在、已变化或不唯一，请重新读取后合并。")
+            if previous == entry or (previous is None and entry in entries.values()):
+                return "unchanged"
+            if previous is not None:
+                index = matches[0]
+                if entry in entries.values():
+                    lines.pop(index)
+                else:
+                    ending = "\r\n" if lines[index].endswith("\r\n") else "\n" if lines[index].endswith("\n") else ""
+                    lines[index] = entry + ending
+                updated_body = "".join(lines)
+                updated = content[:start] + updated_body + content[end:]
+                action = "updated"
+            elif headings:
+                updated = content[:start] + body.rstrip() + "\n" + entry + "\n\n" + content[end:]
+                action = "added"
+            else:
+                updated = content.rstrip() + ("\n\n" if content.strip() else "") + EXPERIENCE_HEADING + "\n\n" + entry + "\n"
+                action = "added"
+            self.save_summary(updated, scope, workspace_dir)
+            return action

@@ -29,19 +29,15 @@ Executes multiple independent read-only tool calls concurrently and returns orde
 - A denied or failed subcall returns a structured partial error; unsafe write tools are not executed.
 
 ### update_experience
-Records a verified, reusable lesson or updates a Skill description/instructions when the user explicitly requests that maintenance.
+Autonomously record a verified, reusable, non-sensitive lesson in project or global memory during execution. No per-lesson user approval is needed. This tool never changes a Skill.
 
-**When to use:**
-- A failure was reproduced, its root cause was confirmed, the fix was verified, and the lesson applies across tasks.
-- A stable, non-sensitive configuration rule was validated and will materially prevent future errors.
-- The user explicitly asks to correct a Skill description or usage instructions.
-
-**Do not use:**
-- Routine task success, unverified guesses, temporary project state, full conversation content, secrets, or personal data.
-- To modify Skill guidance without an explicit user request.
-
-### update_experience Parameters:
-- `skill_name`: The name of the skill to update.
-- `experience`: (Optional) A concise, actionable sentence describing the lesson learned (appended to existing).
-- `description`: (Optional) A new summary of what the skill does (replaces existing).
-- `instructions`: (Optional) The full markdown body explaining how to use the skill (replaces existing).
+- Record confirmed fixes, reproducible limitations with clear conditions, explicit lasting user corrections, or a validated method that reduces future trial and error.
+- A failure alone is not a lesson. Separate verified observations from an unknown root cause. Never store routine success, temporary outages, project progress, guesses, secrets, logs or whole conversations.
+- First call `read_memories`. Merge related lessons instead of appending near-duplicates; current user instructions and new evidence override old memory.
+- `scope`: required `project` or `global`. Project-specific rules belong to the current registered project; cross-project methods and stable environment constraints belong to global memory. The host chooses the actual project. No project is not a reason to write global memory.
+- `experience`: required concise single paragraph without line breaks; state applicability, action and necessary verification evidence.
+- `previous_experience`: optional exact old lesson text without its Markdown bullet, read from the same scope, to replace. Omit to add. A stale or ambiguous match fails; reread before merging.
+- Grilling remains read-only. Reconsider recording after entering execution; do not queue automatic writes.
+- Creation sessions are independent chats, not projects, and do not inherit their source project's write target. Only verified cross-project lessons may go to global memory.
+- Writes affect the next run's prompt. Unchanged lessons are not written again. On failure keep the original memory and report the reason; never claim success or bypass through file or shell tools.
+- User-requested reusable workflows still use the reviewed “沉淀为 Skill” flow. Explicit Skill edits belong to `skill_builder`; explicit general memory changes use `write_memories`.

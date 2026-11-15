@@ -7,7 +7,7 @@ metadata:
   author: deepseek-cowork team
   version: "1.0"
 security_level: low
-allowed-tools: query_history, upsert_message_embedding, query_history_vector
+allowed-tools: query_history
 ---
 
 # History Query Skill
@@ -19,13 +19,7 @@ This skill searches the local chat history stored in SQLite.
 ### query_history
 Query chat history with optional keywords and date range.
 
-### upsert_message_embedding
-Upsert a vector embedding for a message.
-
-### query_history_vector
-Vector search over message embeddings.
-
 ## Current Runtime Notes
 - Use history search when the user asks to recall prior discussions, previous decisions, or past task outcomes.
-- Keyword queries and vector queries are read-only and can be combined with other independent read-only lookups through `parallel_tools` when the current mode exposes them.
+- Keyword/date queries are read-only and can be combined with other independent read-only lookups through `parallel_tools` when the current mode exposes them.
 - History records may include session metadata such as pending clarification questions, selected skills, favorite launch context, and IM provider bindings.

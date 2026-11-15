@@ -40,7 +40,7 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
-from core.memory_store import MemoryStore
+from core.memory_store import MemoryStore, resolve_memory_project
 from core.message_persistence import fold_skill_state_events
 from core.llm.deepseek import (
     DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
@@ -785,6 +785,9 @@ class LLMWorker(TaskWorker):
             self.chat_storage = None
             self.runtime_journal = None
             self.runtime_journal_init_error = str(exc)
+        self.memory_project_dir = resolve_memory_project(
+            self.config_manager, self.workspace_dir, storage=self.chat_storage,
+            conversation_id=self.conversation_id, run_context=self.run_context)
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
         self._stable_system_prompt = None
@@ -1700,7 +1703,7 @@ class LLMWorker(TaskWorker):
             "策略 [工具权威]: 只能调用当前工具清单中的真实名称。需要当前未暴露的非内置能力时才使用 'tool_search'；不要臆造工具名称、旧别名或不存在的参数。",
             "Imported / agent script skill 规则: 已命中包含 `script_entries` 的 imported/agent skill 时，优先调用 `run_skill_script`，不要用 `glob`、`grep` 或 `bash` 猜测 Skill 目录和脚本路径。",
             "策略 [命令]: 当前清单暴露对应工具时，数据处理、批量文本、计算和 Python 检查优先用 'run_python_code'；项目命令、构建测试、git/npm/npx、管道或现有 CLI 使用 'bash'。Node.js 工具选择必须服从动态运行时判定；不要为内联 Python/JavaScript 额外套一层 shell。",
-            "能力分层: 浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 `ai_skills/`。浏览器自动化在“AI 能力商城 → 浏览器自动化”中配置；文档与数据分析基础依赖随应用提供。",
+            "能力分层: 浏览器自动化、网页搜索、金融数据等可选随包能力位于 `ai_skills/`；文档读取等基础能力内置可用。浏览器自动化在“AI 能力商城 → 浏览器自动化”中配置；文档与数据分析基础依赖随应用提供。",
             "策略 [文本文件]: 'glob' 只查路径，'grep' 只定位内容，'text_file_read' 获取单个文件完整且有序的内容，'apply_patch' 是创建、更新、移动或删除普通文本内容的唯一工具；这些工具不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
             "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
             "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
@@ -1709,7 +1712,7 @@ class LLMWorker(TaskWorker):
             "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
             "策略 [持久化]: 只有用户明确要求时，才创建、修改或安装 Skill，或调用 'write_memories' 写入长期记忆；不得静默持久化推断、敏感信息、临时细节或完整聊天记录。",
-            "策略 [经验]: 只有结论已经验证、可跨任务复用、非敏感且价值明确时，才调用 'update_experience'；不要记录例行成功、猜测或项目临时状态。",
+            "策略 [经验]: 执行阶段发现已验证、非敏感且值得复用的经验时，自主调用 'update_experience'，无需逐次征求确认。先用 read_memories 读取并合并已有经验；项目相关写 project，跨项目成立写 global，无项目不得自动转为全局。记录适用条件、做法和验证依据；可记录已验证修复或可复现限制，不能将猜测作为根因。不要记录例行成功、临时报错、项目进度或完整聊天。拷问阶段不写记忆；创造模式的独立目录不是项目，也不继承来源项目。记忆仅供参考，当前用户指令与新证据优先。",
             "策略 [历史]: 需要回顾具体历史时，使用当前清单暴露的历史检索工具；不得把历史检索结果自动写入记忆。",
             "",
             "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
@@ -1738,13 +1741,14 @@ class LLMWorker(TaskWorker):
             store = MemoryStore(history_dir)
             soul = store.read_soul().strip()
             global_summary = store.read_summary("global").strip()
-            workspace_summary = store.read_summary("workspace", self.workspace_dir).strip() if self.workspace_dir else ""
+            project = getattr(self, "memory_project_dir", "")
+            workspace_summary = store.read_summary("workspace", project).strip() if project else ""
             if soul:
                 memory_lines.append("\n# 灵魂提示词\n" + soul)
             if global_summary:
                 memory_lines.append("\n# 全局长期记忆\n" + global_summary)
             if workspace_summary:
-                memory_lines.append("\n# 当前工作区记忆\n" + workspace_summary)
+                memory_lines.append("\n# 当前项目记忆\n" + workspace_summary)
 
         workspace_agents_prompt = self._load_workspace_agents_prompt()
         if workspace_agents_prompt:
@@ -4283,6 +4287,7 @@ class LLMWorker(TaskWorker):
                                 "session_id": self.session_id,
                                 "conversation_id": self.conversation_id,
                                 "workspace_dir": self.workspace_dir,
+                                "memory_project_dir": self.memory_project_dir,
                                 "step_signal": self.step_signal,
                                 "config_manager": self.config_manager,
                                 "skill_manager": self.skill_manager,

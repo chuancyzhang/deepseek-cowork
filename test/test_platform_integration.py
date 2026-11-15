@@ -8,20 +8,15 @@ from unittest.mock import patch
 
 
 class PlatformIntegrationTests(unittest.TestCase):
-    def test_disabled_skill_and_vector_tool_cannot_be_discovered_or_executed(self):
+    def test_disabled_skill_cannot_be_enabled_or_executed(self):
         from core.skill_manager import SkillManager
         with tempfile.TemporaryDirectory() as root, patch("core.platform_capabilities.is_windows", return_value=False):
             manager = SkillManager(workspace_dir=root, auto_load=False, load_mcp_tools=False)
             self.assertFalse(manager._is_skill_enabled_for_path("wecom-unified", root))
             manager._register_tool("history-query", "query_history", lambda: "keyword")
-            manager._register_tool("history-query", "query_history_vector", lambda: self.fail("must not execute"))
             names = {item["function"]["name"] for item in manager.get_tool_definitions()}
             self.assertIn("query_history", names)
-            self.assertNotIn("query_history_vector", names)
-            denied = manager.call_tool("query_history_vector", {})
-            self.assertEqual(denied["status"], "unsupported_platform")
-            self.assertFalse(denied["executed"])
-            denied = manager.call_tool("run_skill_script", {"skill_name": "huashu-design"})
+            denied = manager.call_tool("run_skill_script", {"skill_name": "wecom-unified"})
             self.assertEqual(denied["status"], "unsupported_platform")
             self.assertFalse(manager.ensure_skill_dependencies_ready("wecom-unified")["ok"])
 

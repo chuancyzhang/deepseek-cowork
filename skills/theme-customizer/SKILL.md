@@ -10,6 +10,8 @@ Each saved user theme is one validated `.cowork-theme` package. Its manifest has
 
 ## Workflow
 
+In a creation session, generate and revise the session-owned candidate only. The user applies it in the creation panel. Do not call `save_ui_theme_preview`, `activate_ui_theme` or `delete_ui_theme` there, even after a chat confirmation. Steps 7–9 below apply only to ordinary conversations; candidate revisions and isolation still apply in both contexts.
+
 1. Call `inspect_ui_theme` before proposing changes. Reuse the returned token names and current values.
 2. Translate the user's visual intent into the smallest meaningful token and manifest override set. Put every workspace image, grid, stripe, dot, or noise layer in the single `workspace_scene`; use surface materials only for transparent, tinted, or opaque functional regions.
 3. When an existing local PNG, JPEG, GIF, or WebP is needed, create a preview first and call `import_ui_theme_asset`. Static PNG/JPEG/WebP assets may be referenced by `workspace_scene` or an icon; GIF and animated WebP assets may only be referenced by the single `workspace_scene` image layer. Cowork does not generate raster images in this workflow.

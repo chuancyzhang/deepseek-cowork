@@ -2238,6 +2238,29 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_experience_is_loaded_next_run_with_the_bound_project_only(self):
+        from core.memory_store import MemoryStore
+        with tempfile.TemporaryDirectory() as directory:
+            store = MemoryStore(directory)
+            project_a = os.path.join(directory, "project-a")
+            project_b = os.path.join(directory, "project-b")
+            store.update_experience("全局已验证方法")
+            store.update_experience("项目 A 方法", "workspace", project_a)
+            store.update_experience("项目 B 方法", "workspace", project_b)
+            worker = self._build_prompt_worker(directory)
+            worker.memory_project_dir = project_a
+            before = worker._get_stable_system_prompt()
+            self.assertIn("项目 A 方法", before)
+            self.assertNotIn("项目 B 方法", before)
+            store.update_experience("本轮新经验", "workspace", project_a)
+            self.assertEqual(worker._get_stable_system_prompt(), before)
+            next_worker = self._build_prompt_worker(directory)
+            next_worker.memory_project_dir = project_a
+            self.assertIn("本轮新经验", next_worker._get_stable_system_prompt())
+            chat_worker = self._build_prompt_worker(directory)
+            self.assertIn("全局已验证方法", chat_worker._get_stable_system_prompt())
+            self.assertNotIn("项目 A 方法", chat_worker._get_stable_system_prompt())
+
     def test_workspace_agents_md_is_appended_to_stable_system_prompt(self):
         temp_dir = tempfile.mkdtemp()
         try:

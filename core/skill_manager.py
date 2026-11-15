@@ -82,7 +82,6 @@ def _humanize_skill_name(skill_name):
         "agent-manager": "协作代理",
         "document-reader": "文档读取",
         "file-system": "文件整理与读写",
-        "general-experience": "通用经验增强",
         "history-query": "历史记录查询",
         "interaction": "用户确认与交付",
         "memory-manager": "长期记忆",
@@ -90,7 +89,6 @@ def _humanize_skill_name(skill_name):
         "command-tools": "命令与搜索工具",
         "financial-data-akshare": "AKShare 金融数据",
         "python-runner": "Python 执行",
-        "skill-importer": "能力导入",
         "skill_builder": "能力创建",
         "browser-automation": "浏览器自动化",
         "web-search": "网页搜索",
@@ -175,13 +173,11 @@ class SkillManager:
         "history-query": "memory-meta",
         "memory-manager": "memory-meta",
         "meta-tools": "memory-meta",
-        "general-experience": "memory-meta",
         "agent-manager": "memory-meta",
         "skill_builder": "system-skill",
-        "skill-importer": "system-skill",
     }
 
-    SYSTEM_SKILLS = {"skill_builder", "skill-importer"}
+    SYSTEM_SKILLS = {"skill_builder"}
     BUNDLED_PLUGIN_SOURCE_TYPE = "bundled_plugin"
     SKILL_ENTRY_FILES = ("SKILL.md", "skill.json", "impl.py")
 
@@ -1035,9 +1031,6 @@ class SkillManager:
         return deduped
 
     def _register_tool(self, skill_name, tool_name, func, description=None, tool_kind="legacy_function"):
-        from .platform_capabilities import tool_unavailable_reason
-        if tool_unavailable_reason(tool_name):
-            return
         if tool_name in self.tools:
             print(
                 f"[SkillManager] Duplicate tool '{tool_name}' from skill '{skill_name}' skipped; already provided by '{self.tool_to_skill_map.get(tool_name)}'."
@@ -1116,9 +1109,6 @@ class SkillManager:
         if not isinstance(export, dict):
             return
         tool_name = str(export.get("name") or "").strip()
-        from .platform_capabilities import tool_unavailable_reason
-        if tool_unavailable_reason(tool_name):
-            return
         func = export.get("handler")
         if not tool_name or not callable(func):
             return
@@ -2136,12 +2126,6 @@ class SkillManager:
         meta, body = self._parse_skill_md_content(md_path) if os.path.exists(md_path) else ({}, "")
         spec = self._load_skill_json(skill_path)
         tool_refs = self._parse_tool_refs(meta, spec)
-        from .platform_capabilities import is_windows, tool_unavailable_reason
-        if not is_windows():
-            tool_refs = [name for name in tool_refs if not tool_unavailable_reason(name)]
-            if skill_name == "history-query":
-                meta["allowed-tools"] = ", ".join(tool_refs)
-                body = "Use query_history to search local chat history by keywords and date ranges. Vector indexing and vector search are unavailable on this platform."
         kind = self._normalize_skill_kind(meta, spec)
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
@@ -2896,64 +2880,6 @@ class SkillManager:
         meta["experience"] = current
         self._write_skill_md(md_path, meta, body)
 
-    def _ensure_general_experience_skill(self):
-        for root in self.skills_dirs:
-            candidate = os.path.join(root, "general-experience")
-            if os.path.isdir(candidate):
-                return candidate
-        target_dir = os.path.join(self._default_writable_skill_root(), "general-experience")
-        os.makedirs(target_dir, exist_ok=True)
-        md_path = os.path.join(target_dir, "SKILL.md")
-        skill_json_path = os.path.join(target_dir, "skill.json")
-        if not os.path.exists(md_path):
-            meta = {
-                "name": "general-experience",
-                "description": "General runtime experience package for cross-task lessons learned.",
-                "license": "Apache-2.0",
-                "type": "ai_generated",
-                "created_by": "system",
-                "kind": "knowledge",
-                "capability_group": "memory-meta",
-                "experience": [],
-            }
-            body = (
-                "# Skill Purpose\nCapture cross-task runtime lessons that do not naturally belong to a narrower skill.\n\n"
-                "## When to Use\nUse this experience package for execution patterns, environment caveats, recovery strategies, and collaboration rules.\n\n"
-                "## When Not to Use\nDo not store highly specific tool guidance here when it clearly belongs to another skill.\n\n"
-                "## Common Pitfalls\nAvoid turning one-off debugging notes into generic rules without evidence.\n\n"
-                "## Experience / Lessons Learned\nAdd high-value cross-task lessons here.\n"
-            )
-            self._write_skill_md(md_path, meta, body)
-        if not os.path.exists(skill_json_path):
-            payload = {
-                "version": 2,
-                "name": "general-experience",
-                "kind": "knowledge",
-                "capability_group": "memory-meta",
-                "description": "General runtime experience package for cross-task lessons learned.",
-                "tags": ["experience", "runtime", "lessons"],
-                "triggers": ["lesson learned", "execution pattern", "runtime issue"],
-                "anti_triggers": [],
-                "tool_refs": [],
-                "references": [],
-                "experience_policy": {
-                    "entry_storage": "experience/entries.jsonl",
-                    "summary_sync": "frontmatter_experience",
-                },
-                "disclosure_level_defaults": {
-                    "default_prompt_level": "brief",
-                    "include_references": False,
-                    "include_experience_entries": False,
-                },
-                "workflow": [
-                    "Capture cross-task execution lessons as structured entries.",
-                    "Promote high-value patterns into the summary when they recur.",
-                ],
-            }
-            with open(skill_json_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        return target_dir
-
     def get_all_skills(self):
         self._scan_dist_dirs()
         all_skills = []
@@ -3181,17 +3107,10 @@ class SkillManager:
         if not experience_text:
             return False, "experience_text is required."
 
+        if not skill_name:
+            return False, "skill_name is required for reviewed Skill experience; use update_experience for memory."
         target_skill = skill_name
-        general_path = ""
-        if not target_skill:
-            general_path = self._ensure_general_experience_skill()
-            target_skill = os.path.basename(general_path)
-
         skill_record = self.skill_records.get(target_skill)
-        if not skill_record and general_path:
-            spec = self._load_skill_json(general_path)
-            skill_record = {"path": general_path, "spec": spec, "experience_entries": []}
-            self.skill_records[target_skill] = skill_record
         if not skill_record:
             return False, f"Skill '{target_skill}' not found."
 
@@ -3705,8 +3624,8 @@ class SkillManager:
         from .execution_authorization import invoke, current_authorization
         record = self.tool_registry.get(name)
         resolved_name = record.name if record else str(name or "").strip()
-        from .platform_capabilities import skill_unavailable_reason, tool_unavailable_reason
-        platform_issue = tool_unavailable_reason(resolved_name) or skill_unavailable_reason(
+        from .platform_capabilities import skill_unavailable_reason
+        platform_issue = skill_unavailable_reason(
             (args or {}).get("skill_name") if resolved_name == "run_skill_script" else self.tool_to_skill_map.get(resolved_name))
         if platform_issue:
             return {"ok": False, "status": "unsupported_platform", "executed": False, "error": platform_issue}

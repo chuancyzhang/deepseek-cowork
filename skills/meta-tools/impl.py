@@ -224,70 +224,35 @@ def parallel_tools(calls, max_concurrency=4, _context=None):
     return payload
 
 
-def update_experience(skill_name=None, experience=None, description=None, instructions=None, tool_name=None, task_type=None, error_pattern=None, tags=None, _context=None):
-    """
-    Update the experience/lessons learned, description, or instructions for a specific skill.
-
-    Args:
-        skill_name (str, optional): Name of the skill to update. If omitted, record into general-experience.
-        experience (str, optional): New lesson learned (appended to existing).
-        description (str, optional): New skill description (replaces existing).
-        instructions (str, optional): New usage instructions/body (replaces existing).
-    """
-    if not _context:
-        return "Error: Context not available."
-
-    skill_manager = _context.get("skill_manager")
-    if not skill_manager:
-        return "Error: SkillManager not found in context."
-
-    updates = []
-
-    if description or instructions:
-        target_skill = skill_name or "general-experience"
-        success, message = skill_manager.update_skill(
-            target_skill,
-            description=description,
-            instructions=instructions,
-        )
-        if not success:
-            return f"Failed to update '{target_skill}': {message}"
-        if description:
-            updates.append("description")
-        if instructions:
-            updates.append("instructions")
-
-    if experience:
-        success, message = skill_manager.record_experience(
-            experience_text=experience,
-            skill_name=skill_name,
-            tool_name=tool_name,
-            task_type=task_type,
-            error_pattern=error_pattern,
-            tags=tags if isinstance(tags, list) else None,
-            source="meta_tool",
-        )
-        if not success:
-            target_skill = skill_name or "general-experience"
-            return f"Failed to update '{target_skill}': {message}"
-        updates.append("experience")
-
-    if not updates:
-        return "No changes requested."
-
-    target_name = skill_name or "general-experience"
-    publisher = _context.get("skill_change_publisher")
-    if not callable(publisher):
-        return "Error: Skill update was written but the runtime change publisher is unavailable."
-    publisher(
-        {
-            "action": "updated" if skill_name else "created",
-            "skill_names": [target_name],
-            "source": "ai",
-            "session_id": _context.get("session_id") or "",
-        }
-    )
-    return f"Successfully updated '{target_name}': {', '.join(updates)}"
+def update_experience(scope, experience, previous_experience=None, _context=None):
+    """Persist one verified lesson in the current user's applicable memory."""
+    import logging
+    from core.memory_store import MemoryStore, memory_project_from_context
+    from core.clarify_mode import normalize_run_mode
+    context = _context or {}
+    log = logging.getLogger("memory.experience")
+    session = context.get("session_id") or ""
+    log.info("experience_started session=%s scope=%s", session, scope)
+    try:
+        if normalize_run_mode((context.get("run_context") or {}).get("mode")) != "execution":
+            raise ValueError("拷问阶段仅可读取记忆，请进入执行阶段后再判断是否记录。")
+        if scope not in {"project", "global"}:
+            raise ValueError("scope 必须是 project 或 global。")
+        config = context.get("config_manager")
+        if config is None:
+            raise ValueError("无法确定当前用户的记忆存储。")
+        project = memory_project_from_context(context) if scope == "project" else ""
+        if scope == "project" and not project:
+            raise ValueError("当前任务未绑定项目，未写入记忆；不要自动改写全局记忆。")
+        action = MemoryStore(config.get_chat_history_dir()).update_experience(
+            experience, "workspace" if project else "global", project, previous_experience)
+        log.info("experience_finished session=%s scope=%s action=%s", session, scope, action)
+        return {"status": "ok", "scope": scope, "action": action,
+                "content": "经验未变化。" if action == "unchanged" else "经验已保存，从下一轮任务生效。"}
+    except Exception as exc:
+        log.warning("experience_failed session=%s scope=%s reason=%s", session, scope, type(exc).__name__)
+        return {"status": "error", "scope": scope, "error": str(exc),
+                "content": "经验未保存，原有记忆保留。请核对原因后重试，不要通过文件或命令工具绕过。"}
 
 
 TOOL_EXPORTS = [
@@ -329,22 +294,20 @@ TOOL_EXPORTS = [
     {
         "name": "update_experience",
         "handler": update_experience,
-        "description": "Record lessons learned or update a skill's guidance based on execution feedback.",
+        "description": "Autonomously save a verified, reusable lesson to project or global memory during execution. Read memory first and merge existing lessons. Never edits Skills.",
         "parameters": {
             "type": "object",
             "properties": {
-                "skill_name": {"type": "string", "description": "Name of the skill to update."},
-                "experience": {"type": "string", "description": "Concise lesson learned to append."},
-                "description": {"type": "string", "description": "Replacement description for the target skill."},
-                "instructions": {"type": "string", "description": "Replacement markdown instructions for the target skill."},
-                "tool_name": {"type": "string", "description": "Tool associated with the lesson."},
-                "task_type": {"type": "string", "description": "Task category for the lesson."},
-                "error_pattern": {"type": "string", "description": "Error signature associated with the lesson."},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for the lesson."},
+                "scope": {"type": "string", "enum": ["project", "global"], "description": "Project-specific or reusable across projects; the host resolves the current project."},
+                "experience": {"type": "string", "description": "One concise paragraph without line breaks: applicability, action and verified evidence."},
+                "previous_experience": {"type": "string", "description": "Exact old experience text (without the Markdown bullet) to replace after reading memory. Omit to add."},
             },
-            "required": [],
+            "required": ["scope", "experience"],
+            "additionalProperties": False,
         },
         "kind": "meta_learning",
-        "search_hint": "experience lessons learned improve skill guidance",
+        "read_only": False,
+        "allowed_modes": ["execution"],
+        "search_hint": "experience lessons learned project global memory",
     },
 ]

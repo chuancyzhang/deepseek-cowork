@@ -11,6 +11,14 @@ const install=()=>rpc('settings.action',{page:'update',action:'update.install'})
 export function UpdateNotice() {
   const host=useHost(),[state]=useHostField<UpdateState|null>('updates',null);
   const [failure,setFailure]=useState(''),[busy,setBusy]=useState(false);
+  const preparing=state?.install&&['preparing','ready','cancelling','committing','cleanup_failed'].includes(state.install.phase);
+  if(state&&preparing)return <section className="update-notice" aria-label="更新安装进度">
+    <p role="status">{state.install?.error||(state.install?.phase==='committing'?'正在保存并退出应用…':'正在准备安装更新…')}</p>
+    {(state.can_cancel_install||state.install?.phase==='cleanup_failed')&&<button className="secondary" disabled={busy} onClick={async()=>{
+      setBusy(true);setFailure('');try{receiveUpdate(host,await rpc<UpdateState>('updates.cancel'));}catch(error){setFailure((error as Error).message);}finally{setBusy(false);}
+    }}>取消准备</button>}
+    {failure&&<p role="alert">{failure}</p>}
+  </section>;
   if(!state?.notice)return null;
   return <section className="update-notice" aria-label="可安装的更新">
     <div className="update-notice-heading"><span role="status">{state.version} 已准备好</span>
@@ -31,18 +39,20 @@ export default function Updates() {
   }
   if(!state)return <div className="loading"><LoaderCircle className="spin"/>正在读取更新状态…<button onClick={()=>void action('updates.get')}>重试</button>{failure&&<p role="alert">{failure}</p>}</div>;
   const installing=['planning','installing'].includes(state.phase);
+  const preparing=!!state.install&&['preparing','ready','cancelling','cleanup_failed'].includes(state.install.phase);
   return <div className="update-settings">
     <section className="settings-section"><h3>DeepSeek Cowork</h3><p className="muted">当前版本 {state.current_version}</p>
       <div className="button-row"><button className={state.ready?'secondary':'primary'} disabled={requesting||state.busy||installing} onClick={()=>void action('updates.check')}>检查更新</button>
         <button className="secondary" disabled={requesting||installing||!state.packaged} onClick={async()=>{try{const path=await rpc('dialog.choose',{kind:'update'});if(path)await action('updates.local',{path});}catch(error){setFailure((error as Error).message);}}}>选择本地安装包</button>
-        {state.busy&&!installing&&<button className="secondary" disabled={requesting} onClick={()=>void action('updates.cancel')}>取消准备</button>}</div>
+        {(state.can_cancel_install||state.busy&&!installing||state.install?.phase==='cleanup_failed')&&<button className="secondary" disabled={requesting} onClick={()=>void action('updates.cancel')}>取消准备</button>}</div>
       {!state.packaged&&<p className="muted">开发运行可以检查版本，请在完整 Windows 安装包中进行更新。</p>}
     </section>
     <section className="settings-section" aria-live="polite">
       {state.version&&<h3>{state.version}{state.reinstall?' · 重新安装当前版本':''}</h3>}
       {state.source&&<p className="muted">来源：{sources[state.source]||state.source}</p>}
-      <p role="status">{state.message}</p>
-      {state.busy&&<progress aria-label="更新准备进度" max={100} value={state.percent>=0?state.percent:undefined}/>}
+      <p role="status">{preparing?(state.install?.error||'正在准备安装，可取消并继续使用当前版本。'):state.message}</p>
+      {(state.busy||preparing)&&<progress aria-label="更新准备进度" max={100} value={state.percent>=0?state.percent:undefined}/>}
+      {state.last_install_result?.error&&<div className="inline-error" role="alert"><p>{state.last_install_result.error}</p></div>}
       {state.notes&&<div className="update-notes">{state.notes}</div>}
       {state.ready&&<><button className="primary" disabled={!state.can_install||requesting} onClick={async()=>{setRequesting(true);setFailure('');try{await install();}catch(error){setFailure((error as Error).message);}finally{setRequesting(false);}}}>{installLabel(state)}</button>
         {state.source==='local'&&<p className="muted">{state.local_manifest_verified?'已核对配套清单、包结构及完整性。':'已检查包结构及完整性；此包未附配套清单，未验证发布者身份。'}</p>}</>}

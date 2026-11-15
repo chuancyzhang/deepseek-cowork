@@ -8,6 +8,7 @@ const { BrowserHost } = require('./browser.cjs');
 const { FileHost } = require('./files.cjs');
 const fileHost = new FileHost();
 const { resolveDataDirectory } = require('./data-path.cjs');
+const {prepareInstall,commitInstall,startupRequest,UpdateStartup} = require('./updates.cjs');
 protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const visualizationPages = new Map();
 function servePlugin(plugin) {
@@ -30,6 +31,7 @@ for (const method of ['project.list', 'project.save', 'project.archive', 'projec
   'agent.list', 'agent.get', 'agent.send', 'agent.stop', 'agent.resume', 'conversation.receipt', 'conversation.workspace']) allowed.add(method);
 for (const method of require('./management-methods.cjs')) allowed.add(method);
 allowed.add('task.inspect');
+allowed.add('updates.abort_install');
 allowed.add('task.context');
 for (const method of ['file.render', 'file.render_result', 'file.install_renderer']) allowed.add(method);
 for (const method of ['reviews.create', 'reviews.list', 'reviews.get', 'reviews.update', 'reviews.generate', 'reviews.open', 'reviews.save', 'reviews.rebase']) allowed.add(method);
@@ -38,6 +40,15 @@ allowed.add('visualization.get'); allowed.add('visualization.state');
 for (const method of ['workbench.list', 'workbench.profiles', 'workbench.open', 'workbench.close', 'workbench.control', 'workbench.read', 'workbench.input', 'workbench.reply', 'workbench.resize', 'workbench.activate', 'file.save_copy']) allowed.add(method);
 let window, backend, plugins, tray, browserHost, quitting = false, quitPending = false, uiReady = false;
 let eventQueue = [], batch;
+const startup = new UpdateStartup({installDir: app.isPackaged ? path.dirname(app.getPath('exe')) : root,
+  version:app.getVersion(), call:(...args)=>backend.call(...args), diagnostic:(event,details)=>{
+    void fs.mkdir(path.join(dataDir,'logs'),{recursive:true})
+      .then(()=>fs.appendFile(path.join(dataDir,'logs','update.log'),`${new Date().toISOString()} ${event} ${JSON.stringify(details)}\n`))
+      .catch(error=>console.error('update_diagnostic_write_failed',error.message));
+  }});
+const initialStartupRequest = startupRequest(process.env, startup.installDir);
+startup.accept(initialStartupRequest);
+let installPending = false;
 function publish(event) {
   if (event.event === 'browser_host') { void browserHost?.handle(event.data); return; }
   eventQueue.push(event);
@@ -89,7 +100,7 @@ async function createWindow() {
     ] : [{label:'复制', role:'copy', enabled:flags.canCopy}];
     Menu.buildFromTemplate(actions).popup({window, frame:params.frame || undefined});
   });
-  window.webContents.on('did-start-loading', () => { uiReady = false; });
+  window.webContents.on('did-start-loading', () => { uiReady = false; startup.ready = false; });
   window.webContents.on('will-navigate', (event, url) => { if (url !== entry) event.preventDefault(); });
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.once('ready-to-show', () => window.show());
@@ -101,9 +112,13 @@ async function createWindow() {
   });
   await window.loadURL(entry);
 }
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!app.requestSingleInstanceLock({update:initialStartupRequest})) app.quit();
 else {
-  app.on('second-instance', () => { if (window) { window.restore(); window.show(); window.focus(); } });
+  app.on('second-instance', (_event,_argv,_cwd,data) => {
+    if (window) { window.restore(); window.show(); window.focus(); }
+    startup.accept(data?.update);
+    void startup.flush().catch(error=>publish({event:'service_error',error:error.message}));
+  });
   app.whenReady().then(async () => {
     protocol.handle('cowork-local', request => fileHost.response(request, net.fetch));
     protocol.handle('cowork-editor', request => {
@@ -222,20 +237,20 @@ else {
       if (method === 'app.ui_ready') { uiReady = true; return {ready:true}; }
       if (method === 'app.startup_status') return backend.startupState;
       if (method === 'app.reload') { window.webContents.reload(); return { accepted: true }; }
-      if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; publish({ event: 'service_reconnected' }); return { connected: true }; }
-      if (method === 'app.ready') return backend.call('updates.acknowledge');
-      if (method === 'app.install_update') {
-        let transaction;
-        try {
-          transaction = await backend.call('updates.prepare_install', { host_pid: process.pid });
-          await backend.call('updates.commit_install', transaction);
-          await quit({serviceStopped:true});
-          return { accepted: true };
-        } catch (error) {
-          if (transaction) await backend.call('updates.abort_install', transaction).catch(() => {});
-          throw error;
-        }
+      if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; await startup.flush(); publish({ event: 'service_reconnected' }); return { connected: true }; }
+      if (method === 'app.ready') {
+        startup.ready=true;
+        const result=await startup.flush();
+        if (!result.acknowledged) return backend.call('updates.acknowledge',{host_version:app.getVersion()});
+        return result;
       }
+      if (method === 'app.install_update') {
+        if (installPending) throw new Error('正在准备安装，请稍候。');
+        installPending=true;
+        try { return await prepareInstall(backend,process.pid); }
+        finally { installPending=false; }
+      }
+      if (method === 'app.commit_update') return commitInstall(backend,params,dataDir,quit);
       if (method === 'app.logs') return shell.openPath(path.join(dataDir, 'logs'));
       if (method === 'system.open_path') {
         const base = await fs.realpath(dataDir), target = await fs.realpath(String(params.path || ''));

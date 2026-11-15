@@ -36,7 +36,7 @@ def acknowledge_update_request(request, root, install_dir, version):
         state = json.loads((transaction / "transaction.json").read_text(encoding="utf-8-sig"))
         if (any(item.get("id") != identity for item in (config, commit, state))
                 or not _same_path(config.get("install_dir"), install_dir)
-                or state.get("phase") not in ("installed", "installed_not_opened")
+                or state.get("phase") not in ("installed", "installed_not_opened", "rolled_back", "failed")
                 or (transaction / "abort.json").exists()):
             raise ValueError("更新事务尚未安装完成或不属于当前应用。")
         # Report the actual running version; only the installer decides whether

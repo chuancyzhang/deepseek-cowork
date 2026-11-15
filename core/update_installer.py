@@ -4,12 +4,12 @@ import os
 import uuid
 
 
-def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_name, theme=None, version=""):
-    transaction = os.path.join(root, "transactions", uuid.uuid4().hex)
-    os.makedirs(transaction)
+def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_name, theme=None, version="", *, transaction_id=None, previous_version=""):
+    transaction = os.path.join(root, "transactions", transaction_id or uuid.uuid4().hex)
+    os.makedirs(transaction, exist_ok=bool(transaction_id))
     config = {"install_dir": install_dir, "source_dir": staged_dir, "plan_path": plan_path,
               "wait_pids": wait_pids, "exe_name": exe_name, "version": version,
-              "theme": theme or {}, "id": os.path.basename(transaction)}
+              "theme": theme or {}, "id": os.path.basename(transaction), "previous_version": previous_version}
     with open(os.path.join(transaction, "config.json"), "w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False)
     script = os.path.join(transaction, "install.ps1")
@@ -50,6 +50,7 @@ $script:mutexCreated = $null
 $script:mutexAcquired = $false
 $script:mutexName = ''
 $updatesRoot = Split-Path -Parent (Split-Path -Parent $root)
+if((Split-Path -Leaf $updatesRoot) -eq 'desktop' -and (Split-Path -Leaf (Split-Path -Parent $updatesRoot)) -eq 'updates') { $updatesRoot=Split-Path -Parent $updatesRoot }
 $script:logDataRoot = if((Split-Path -Leaf $updatesRoot) -eq 'updates') { Split-Path -Parent $updatesRoot } else { $updatesRoot }
 function Write-Diagnostic($phase, $fields=@{}) {
  try {
@@ -142,6 +143,7 @@ $createdNew=$false; $abandoned=$false
 $mutexWatch=[Diagnostics.Stopwatch]::StartNew()
 Write-Diagnostic 'mutex_acquire_start' @{mutex_name=$script:mutexName; timeout_ms=0}
 $mutex=New-Object Threading.Mutex($false, $script:mutexName, [ref]$createdNew)
+try {
 $script:mutexCreated=$createdNew
 $script:diagnosticStage='mutex_wait'
 try { $acquired=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true; $abandoned=$true }
@@ -200,6 +202,7 @@ function Log($message) {
 function Status($message, $percent=-1) {
  Log $message
  if(-not $Headless) {
+  if($finish) { $finish.Enabled=-not $script:busy }
   $status.Text = $message
   if($percent -lt 0) { $progress.Style='Marquee' } else { $progress.Style='Continuous'; $progress.Value=[Math]::Max(0,[Math]::Min(100,$percent)) }
   [Windows.Forms.Application]::DoEvents()
@@ -338,7 +341,7 @@ function Open-App {
  Write-Diagnostic 'relaunch_started' @{app_pid=$p.Id}
  return $p
 }
-function Wait-AppStartup($opened) {
+function Wait-AppStartup($opened, $expectedVersion=$cfg.version) {
  $deadline=[DateTime]::UtcNow.AddSeconds(30)
  $exitObserved=$false
  while(-not (Test-Path -LiteralPath (Join-Path $root 'opened.json'))) {
@@ -356,7 +359,7 @@ function Wait-AppStartup($opened) {
  }
  $receipt=Get-Content -LiteralPath (Join-Path $root 'opened.json') -Raw -Encoding UTF8 | ConvertFrom-Json
  if($receipt.id -ne $cfg.id) { throw '应用启动确认不属于本次更新。' }
- if($receipt.version -ne $cfg.version.TrimStart('v','V')) { throw ('应用实际启动版本为 '+$receipt.version+'，与安装包标注的 '+$cfg.version+' 不一致，请获取正确构建的安装包。') }
+ if($receipt.version -ne $expectedVersion.TrimStart('v','V')) { throw ('应用实际启动版本为 '+$receipt.version+'，与预期版本 '+$expectedVersion+' 不一致，请获取正确构建的安装包。') }
  Write-Diagnostic 'startup_confirmed' @{app_pid=$receipt.pid; app_version=$receipt.version; launched_pid=$opened.Id}
 }
 function Reopen-InstalledApp {
@@ -367,6 +370,7 @@ function Reopen-InstalledApp {
   $opened=Open-App
   Wait-AppStartup $opened
   Record-Transaction 'complete'; $script:outcome='complete'; Status '更新完成' 100
+  Save-Json 'result.json' @{id=$cfg.id; phase='complete'}
   Write-Diagnostic 'install_complete'
   $script:busy=$false
   if(-not $Headless) { $form.Close() }
@@ -379,7 +383,22 @@ function Reopen-InstalledApp {
   Save-Json 'result.json' $details
   Status ('应用启动未确认：'+$details.error)
   if(-not $Headless) { $subtitle.Text='安装文件已保留，可重新打开应用或查看详情。'; $retry.Text='重新打开应用'; $retry.Visible=$true }
- } finally { $script:busy=$false }
+ } finally { $script:busy=$false; if($finish){$finish.Enabled=$true} }
+}
+function Reopen-PreviousApp {
+ $script:busy=$true
+ try {
+  Status '正在重新打开原版本…'
+  $opened=Open-App
+  Wait-AppStartup $opened $cfg.previous_version
+  Write-Diagnostic 'previous_version_opened' @{version=$cfg.previous_version; outcome=$script:outcome}
+  $script:busy=$false
+  if(-not $Headless) { $form.Close() }
+ } catch {
+  Write-Diagnostic 'previous_version_open_failed' (Error-Details $_)
+  Status ('原版本未能确认打开：'+$_.Exception.Message)
+  if(-not $Headless) { $retry.Text='打开原版本'; $retry.Visible=$true }
+ } finally { $script:busy=$false; if($finish){$finish.Enabled=$true} }
 }
 function Rollback($plan) {
  Status '正在恢复原版本…'
@@ -418,14 +437,15 @@ function Recover-Update {
   foreach($relative in $record.removed) { $script:removed.Add([string]$relative) }
   Rollback $plan
   $script:outcome='rolled_back'; Status '已恢复原版本，可以重新打开应用。' 100
+  Save-Json 'result.json' @{id=$cfg.id; phase='rolled_back'; error='更新未完成，已恢复原版本。'}
   Write-Diagnostic 'recovery_complete'
-  if(-not $Headless) { $retry.Text='打开原版本'; $retry.Visible=$true }
+  if(-not $Headless) { Reopen-PreviousApp }
  } catch {
   Write-Diagnostic 'recovery_failed' (Error-Details $_)
   $script:outcome='rollback_failed'
   Status ('恢复未完成：'+$_.Exception.Message+' 备份已保留在：'+$backup)
   if(-not $Headless) { $retry.Text='重试恢复'; $retry.Visible=$true }
- } finally { $script:busy=$false }
+ } finally { $script:busy=$false; if($finish){$finish.Enabled=$true} }
 }
 function Apply-Update {
  $script:diagnosticStage='validate_install'
@@ -492,16 +512,19 @@ function Apply-Update {
   $reason=$_.Exception.Message; Log $reason
   $script:outcome='failed'
   if($script:mutated -and $plan) {
-   try { Rollback $plan; $script:outcome='rolled_back'; $reason='更新未完成，已恢复原版本。'+$reason; try { $null=Open-App } catch { Log ('原版本未能自动打开：'+$_.Exception.Message) } }
+   try { Rollback $plan; $script:outcome='rolled_back'; $reason='更新未完成，已恢复原版本。'+$reason }
    catch { $script:outcome='rollback_failed'; Record-Transaction 'rollback_failed'; $reason='更新未完成，原版本尚未恢复。请关闭占用程序后重试恢复；备份保留在：'+$backup+'。'+$_.Exception.Message }
   }
   Save-Json 'result.json' @{id=$cfg.id; phase=$script:outcome; error=$reason}
+  Record-Transaction $script:outcome
   Status $reason
   if(-not $Headless) {
    $retry.Visible=$true
-   $retry.Text=if($script:outcome -eq 'rolled_back') {'打开原版本'} elseif($script:outcome -eq 'rollback_failed') {'重试恢复'} else {'重试'}
+   $subtitle.Text='更新未完成。可以处理后重试，或结束更新并保留诊断记录。'
+   $retry.Text=if($script:outcome -in @('rolled_back','failed')) {'打开原版本'} else {'重试恢复'}
+   if($script:outcome -in @('rolled_back','failed')) { Reopen-PreviousApp }
   }
- } finally { $script:busy=$false }
+ } finally { $script:busy=$false; if($finish){$finish.Enabled=$true} }
 }
 
 $script:diagnosticStage='form_initialize'
@@ -527,10 +550,12 @@ if(-not $Headless) {
  $buttons=New-Object Windows.Forms.FlowLayoutPanel; $buttons.AutoSize=$true; $buttons.Dock='Fill'
  $details=New-Object Windows.Forms.Button; $details.Text='查看详情'; $details.AutoSize=$true; $details.FlatStyle='Flat'; $details.FlatAppearance.BorderSize=0
  $retry=New-Object Windows.Forms.Button; $retry.Text='重试'; $retry.AutoSize=$true; $retry.Visible=$false
- $buttons.Controls.Add($details); $buttons.Controls.Add($retry)
+ $finish=New-Object Windows.Forms.Button; $finish.Text='结束更新'; $finish.AutoSize=$true
+ $finish.Add_Click({if(-not $script:busy){$form.Close()}})
+ $buttons.Controls.Add($details); $buttons.Controls.Add($retry); $buttons.Controls.Add($finish)
  $script:logBox=New-Object Windows.Forms.TextBox; $script:logBox.Multiline=$true; $script:logBox.ReadOnly=$true; $script:logBox.ScrollBars='Vertical'; $script:logBox.Dock='Fill'; $script:logBox.Visible=$false; $script:logBox.Height=180
  $script:logBox.BackColor=$form.BackColor; $script:logBox.ForeColor=$form.ForeColor
- foreach($button in @($details,$retry)) { $button.BackColor=$form.BackColor; $button.ForeColor=$form.ForeColor; $button.FlatStyle='Flat' }
+ foreach($button in @($details,$retry,$finish)) { $button.BackColor=$form.BackColor; $button.ForeColor=$form.ForeColor; $button.FlatStyle='Flat' }
  $layout.Controls.Add($title); $layout.Controls.Add($subtitle); $layout.Controls.Add($status); $layout.Controls.Add($progress); $layout.Controls.Add($buttons); $layout.Controls.Add($script:logBox)
  foreach($label in @($title,$subtitle,$status)) { $label.Margin=New-Object Windows.Forms.Padding(0,0,0,10) }
  $form.Add_Resize({ foreach($label in @($subtitle,$status)) { $label.MaximumSize=New-Object Drawing.Size([Math]::Max(200,$form.ClientSize.Width-2*$spacing),0) } })
@@ -538,7 +563,7 @@ if(-not $Headless) {
  $retry.Add_Click({
   $retry.Visible=$false
   if($script:outcome -eq 'installed_not_opened') { Reopen-InstalledApp }
-  elseif($script:outcome -eq 'rolled_back') { try { $null=Open-App; $form.Close() } catch { Status $_.Exception.Message; $retry.Visible=$true } }
+  elseif($script:outcome -in @('rolled_back','failed')) { Reopen-PreviousApp }
   elseif($script:outcome -eq 'rollback_failed') { Recover-Update }
   else { Apply-Update }
  })
@@ -581,26 +606,45 @@ if($Headless) {
 }
 $context=New-Object Windows.Forms.ApplicationContext
 $form.Add_FormClosed({$context.ExitThread()})
+$waitStarted=[Diagnostics.Stopwatch]::StartNew()
+$script:commitObservedAt=$null
 $timer=New-Object Windows.Forms.Timer; $timer.Interval=250
 $timer.Add_Tick({
  if($Recover) { $timer.Stop(); $script:committed=$true; $form.Show(); Recover-Update; return }
- if(Test-Path -LiteralPath (Join-Path $root 'abort.json')) { Write-Diagnostic 'installer_cancelled'; $timer.Stop(); $context.ExitThread(); return }
+ if(-not $script:committed -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { $script:outcome='cancelled'; Write-Diagnostic 'installer_cancelled'; $timer.Stop(); $context.ExitThread(); return }
  $parent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
  $parentAlive=$parent -and (Identity $parent) -eq $launchParentIdentity
  if(Test-Path -LiteralPath (Join-Path $root 'commit.json')) {
-  if(-not $script:committed) { $script:diagnosticStage='wait_parent_exit'; Write-Diagnostic 'commit_observed' @{parent_pid=[int]$cfg.wait_pids[0]; parent_alive=[bool]$parentAlive} }
+  if(-not $script:committed) { $script:commitObservedAt=$waitStarted.Elapsed.TotalSeconds; $script:diagnosticStage='wait_parent_exit'; Write-Diagnostic 'commit_observed' @{parent_pid=[int]$cfg.wait_pids[0]; parent_alive=[bool]$parentAlive} }
   $script:committed=$true
-  if($parentAlive) { return }
+  if($parentAlive) {
+   if($waitStarted.Elapsed.TotalSeconds-$script:commitObservedAt -ge 45) {
+    $timer.Stop(); $script:outcome='parent_exit_failed'
+    $reason='应用尚未退出，未替换文件。请结束更新，正常退出应用后重新尝试。'
+    Save-Json 'result.json' @{id=$cfg.id; phase=$script:outcome; error=$reason}
+    Record-Transaction $script:outcome; Status $reason; $form.Show()
+   }
+   return
+  }
   $timer.Stop(); $form.Show(); Log 'installer_window_shown'; Apply-Update; return
  }
- if(-not $parentAlive) {
-  Write-Diagnostic 'parent_exited_without_commit'
-  $timer.Stop(); Status '应用未完成安装准备，尚未替换任何文件。请重新打开应用后重试。'; $form.Show()
+ if(-not $parentAlive -or $waitStarted.Elapsed.TotalSeconds -ge 60) {
+  $script:outcome='cancelled'; Write-Diagnostic 'install_commit_wait_cancelled' @{parent_alive=[bool]$parentAlive}
+  Save-Json 'abort.json' @{id=$cfg.id}
+  Save-Json 'result.json' @{id=$cfg.id; phase='cancelled'; error='安装准备未提交，未替换文件。'}
+  $timer.Stop(); $context.ExitThread()
  }
 })
 # Pump the handshake without showing an installer window over a still-running app.
 $timer.Start()
 [Windows.Forms.Application]::Run($context)
 Write-Diagnostic 'installer_exit' @{outcome=$script:outcome; committed=$script:committed}
-$timer.Dispose(); $form.Dispose(); $context.Dispose()
+} finally {
+ if($timer){$timer.Stop();$timer.Dispose()}
+ if($form){$form.Dispose()}
+ if($context){$context.Dispose()}
+ if($acquired){$mutex.ReleaseMutex();Write-Diagnostic 'mutex_released'}
+ $mutex.Dispose()
+}
+exit $(if($script:outcome -in @('complete','cancelled')){0}else{1})
 '''

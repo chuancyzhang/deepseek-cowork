@@ -30,6 +30,10 @@ class WindowsInstallerTests(unittest.TestCase):
         (self.install / "user_data" / "private.txt").write_text("keep")
         self.ps = str(Path(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
         self.children = []
+        from unittest.mock import patch
+        self.environment = patch.dict(os.environ, {"COWORK_APP_DATA_DIR": str(self.root / "app-data")})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
 
     def tearDown(self):
         for child in self.children:
@@ -155,7 +159,7 @@ class WindowsInstallerTests(unittest.TestCase):
             "$form.MaximizeBox=$false; $form.MinimizeBox=$true; $form.Opacity=0; $form.ShowInTaskbar=$false")
         source = source.replace("$context=New-Object Windows.Forms.ApplicationContext", """
 $qaCloseTimer=New-Object Windows.Forms.Timer; $qaCloseTimer.Interval=100
-$qaCloseTimer.Add_Tick({ if(Test-Path -LiteralPath (Join-Path $root 'qa-close')) { $qaCloseTimer.Stop(); $form.Close() } })
+$qaCloseTimer.Add_Tick({ if($form.Visible -and -not $script:busy -and (Test-Path -LiteralPath (Join-Path $root 'qa-close'))) { $qaCloseTimer.Stop(); $form.Close() } })
 $qaCloseTimer.Start()
 $context=New-Object Windows.Forms.ApplicationContext
 """)
@@ -182,7 +186,8 @@ $context=New-Object Windows.Forms.ApplicationContext
             if transaction["phase"] == "installed_not_opened":
                 break
             time.sleep(.05)
-        self.assertEqual(transaction["phase"], "installed_not_opened")
+        self.assertEqual(transaction["phase"], "installed_not_opened",
+                         (script.parent / "result.json").read_text(encoding="utf-8-sig") if (script.parent / "result.json").exists() else "no failure result")
         self.assertIn("installer_window_shown", json.dumps(self.diagnostic_events(script.parent.name)))
         self.assertEqual((self.install / "_internal/data.txt").read_text(), "new")
         # A failed window retains ownership while its recovery actions remain usable.
@@ -195,7 +200,7 @@ $context=New-Object Windows.Forms.ApplicationContext
         self.assertFalse(failure["mutex_acquired"])
         # Closing that window must release ownership so a fresh install can start.
         (script.parent / "qa-close").touch()
-        self.assertEqual(child.wait(timeout=5), 0)
+        self.assertEqual(child.wait(timeout=5), 1)  # Closing a failed install must not report success.
         third = self.prepare()
         restarted = launch_windows_update_script(str(third))
         self.children.append(restarted)
@@ -218,6 +223,62 @@ $context=New-Object Windows.Forms.ApplicationContext
         (script.parent / "abort.json").write_text(json.dumps({"id": script.parent.name}))
         self.assertEqual(child.wait(timeout=5), 0)
         self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+
+    def test_hidden_wait_without_commit_times_out_and_releases_mutex(self):
+        script = self.prepare()
+        source = script.read_text(encoding="utf-8-sig").replace("$waitStarted.Elapsed.TotalSeconds -ge 60", "$waitStarted.Elapsed.TotalSeconds -ge 0.5")
+        script.write_text(source, encoding="utf-8-sig")
+        child = launch_windows_update_script(str(script))
+        self.children.append(child)
+        self.assertEqual(child.wait(timeout=20), 0)
+        self.assertTrue((script.parent / "abort.json").exists())
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertIn("mutex_released", [e["phase"] for e in self.diagnostic_events(script.parent.name)])
+
+    def test_committed_live_parent_times_out_without_killing_or_writing(self):
+        script = self.prepare()
+        source = script.read_text(encoding="utf-8-sig").replace("$script:commitObservedAt -ge 45", "$script:commitObservedAt -ge 0.5")
+        source = source.replace("$form.MaximizeBox=$false; $form.MinimizeBox=$true",
+            "$form.MaximizeBox=$false; $form.MinimizeBox=$true; $form.Opacity=0; $form.ShowInTaskbar=$false")
+        source = source.replace("$context=New-Object Windows.Forms.ApplicationContext", """
+$qaCloseTimer=New-Object Windows.Forms.Timer; $qaCloseTimer.Interval=100
+$qaCloseTimer.Add_Tick({if($form.Visible -and -not $script:busy -and (Test-Path -LiteralPath (Join-Path $root 'result.json'))) {$qaCloseTimer.Stop();$form.Close()}})
+$qaCloseTimer.Start()
+$context=New-Object Windows.Forms.ApplicationContext
+""")
+        script.write_text(source, encoding="utf-8-sig")
+        (script.parent / "commit.json").write_text(json.dumps({"id": script.parent.name}))
+        child = launch_windows_update_script(str(script))
+        self.children.append(child)
+        self.assertEqual(child.wait(timeout=20), 1)
+        result = json.loads((script.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["phase"], "parent_exit_failed")
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertFalse((script.parent / "abort.json").exists())
+
+    def test_gui_rollback_reopens_previous_version_and_exits_with_failure_result(self):
+        from core.app_version import APP_VERSION
+        self.compile_relaunch_fixture(receipt_version=APP_VERSION)
+        (self.install / "deepseek-cowork.exe").write_bytes((self.source / "deepseek-cowork.exe").read_bytes())
+        script = self.prepare()
+        source = script.read_text(encoding="utf-8-sig")
+        source = source.replace("$form.MaximizeBox=$false; $form.MinimizeBox=$true",
+            "$form.MaximizeBox=$false; $form.MinimizeBox=$true; $form.Opacity=0; $form.ShowInTaskbar=$false")
+        operation = "   Copy-File (Safe-Path $source $item.path) (Safe-Path $install $item.path)"
+        source = source.replace(operation, "   if($item.path -eq '_internal/data.txt'){throw 'Injected write failure'}\n" + operation)
+        script.write_text(source, encoding="utf-8-sig")
+        config = json.loads((script.parent / "config.json").read_text())
+        config["wait_pids"] = [2147483647]
+        (script.parent / "config.json").write_text(json.dumps(config))
+        (script.parent / "commit.json").write_text(json.dumps({"id": script.parent.name}))
+        child = launch_windows_update_script(str(script))
+        self.children.append(child)
+        self.assertEqual(child.wait(timeout=25), 1)
+        result = json.loads((script.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(result["phase"], "rolled_back")
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertFalse((self.install / "_internal/added.txt").exists())
+        self.assertIn("previous_version_opened", [e["phase"] for e in self.diagnostic_events(script.parent.name)])
 
     def test_actual_copy_preserves_data_and_reports_relaunch_failure(self):
         script = self.prepare()

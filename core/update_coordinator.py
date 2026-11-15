@@ -51,6 +51,8 @@ def update_log_directory(root):
     # stay at the stable application root, including after an app restart.
     if os.path.basename(os.path.dirname(root)) == "channels" and len(os.path.basename(root)) == 64:
         root = os.path.dirname(os.path.dirname(root))
+    if os.path.basename(root) == "desktop" and os.path.basename(os.path.dirname(root)) == "updates":
+        root = os.path.dirname(root)
     return os.path.dirname(root) if os.path.basename(root) == "updates" else root
 
 
@@ -116,7 +118,7 @@ def load_prepared(root, current_version, connection=None, source_config=None, *,
         raise backend.UpdaterError("更新缓存路径无效。")
     if not backend.is_cached_asset_valid(result["asset"], zip_path):
         return None
-    if result.get("sha256") != backend._hash_file(zip_path):
+    if result.get("sha256") != (backend._hash_file(zip_path, cancel) if cancel is not None else backend._hash_file(zip_path)):
         return None
     # The ZIP is verified; staging may have been modified since the previous run.
     if backend.is_windows():
@@ -311,7 +313,7 @@ class UpdateWorker(TaskWorker):
                                         layout=self.layout, cancel=self.cancel)
             if not self.result:
                 raise backend.UpdaterError("更新缓存已失效，请重新准备安装包。")
-        plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"], **({"layout": self.layout} if self.layout != "qt" else {}))
+        plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"], **({"layout": self.layout, "cancel_event": self.cancel} if self.layout != "qt" else {}))
         backend.check_cancel(self.cancel)
         target_version = self.result["release"]["tag_name"]
         update_log(self.root, "plan_compared", update_id=self.update_id, current_version=self.current_version,

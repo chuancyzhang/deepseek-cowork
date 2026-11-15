@@ -206,8 +206,176 @@ def test_prepared_notice_dismissal_restart_and_install_failure_keeps_input_gate_
     wait(recovered.coordinator)
     assert recovered.snapshot()["ready"] and recovered.snapshot()["source"] == "local"
     monkeypatch.setattr(updater, "create_windows_update_script", lambda *a, **kw: (_ for _ in ()).throw(OSError("cannot create installer")))
-    with pytest.raises(OSError, match="cannot create"):
-        recovered.dispatch("updates.prepare_install", {"host_pid": os.getpid()})
+    transaction = recovered.dispatch("updates.prepare_install", {"host_pid": os.getpid(), "id": "a" * 32})
+    recovered.install_thread.join(10)
+    failure = recovered.dispatch("updates.install_status", transaction)
+    assert failure["phase"] == "failed" and "cannot create" in failure["error"]
     assert not state.update_preparing
     assert recovered.snapshot()["can_install"]
     updates.close(); recovered.close()
+
+
+@pytest.fixture
+def install_service(tmp_path, monkeypatch):
+    install = tmp_path / "install"
+    install.mkdir()
+    for name in ("deepseek-cowork.exe", "resources/app.asar", "resources/service/cowork-service.exe", "desktop-release.json"):
+        target = install / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"old")
+    monkeypatch.setenv("COWORK_DESKTOP_INSTALL_DIR", str(install))
+    monkeypatch.setattr(updater, "update_connection", lambda path: None)
+    state = SimpleNamespace(lock=threading.RLock(), update_preparing=False, update_requests={})
+    service = SimpleNamespace(config=SimpleNamespace(data_dir=str(tmp_path)), state=state,
+        store=SimpleNamespace(active_runs=lambda: []), jobs=SimpleNamespace(active={}), publish=lambda event: None,
+        closing=False, dispatch=lambda *a: {"stopped": True})
+    updates = DesktopUpdates(service)
+    package = tmp_path / "update.zip"
+    desktop_zip(package)
+    updates.dispatch("updates.local", {"path": str(package)})
+    wait(updates.coordinator)
+    launches = []
+    class Installer:
+        pid = 12345
+        def __init__(self, script):
+            self.root = Path(script).parent
+            self.code = None
+            (self.root / "ready.json").write_text(json.dumps({"id": self.root.name}))
+        def poll(self):
+            if (self.root / "abort.json").exists():
+                self.code = 0
+            return self.code
+        def wait(self, timeout=None):
+            assert self.poll() is not None
+            return self.code
+    def launch(script):
+        process = Installer(script)
+        launches.append(process)
+        return process
+    monkeypatch.setattr(updater, "launch_windows_update_script", launch)
+    yield updates, service, launches
+    if updates.attempt and updates.attempt["phase"] not in {"committed", "failed", "cancelled"}:
+        updates.dispatch("updates.abort_install", {"id": updates.attempt["id"]})
+    if updates.install_thread:
+        updates.install_thread.join(10)
+        assert not updates.install_thread.is_alive()
+    updates.close()
+
+
+def install_wait(updates, phase):
+    import time
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        state = updates.dispatch("updates.install_status", {"id": updates.attempt["id"]})
+        if state["phase"] == phase:
+            return state
+        time.sleep(.01)
+    pytest.fail(f"install never reached {phase}: {state}")
+
+
+def test_cancel_before_prepare_is_idempotent_and_never_freezes(install_service):
+    updates, service, launches = install_service
+    request = {"id": "1" * 32, "host_pid": os.getpid()}
+    assert updates.dispatch("updates.abort_install", request)["phase"] == "cancelled"
+    assert updates.dispatch("updates.prepare_install", request)["phase"] == "cancelled"
+    assert not launches and not service.state.update_preparing
+
+
+def test_cancel_during_slow_plan_blocks_late_installer_and_restores_input(install_service, monkeypatch):
+    updates, service, launches = install_service
+    started, release = threading.Event(), threading.Event()
+    original = updater.build_update_plan
+    def slow(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(updater, "build_update_plan", slow)
+    request = {"id": "2" * 32, "host_pid": os.getpid()}
+    assert updates.dispatch("updates.prepare_install", request)["phase"] == "preparing"
+    assert started.wait(5)
+    assert updates.dispatch("updates.prepare_install", request)["id"] == request["id"]
+    updates.dispatch("updates.abort_install", request)
+    assert service.state.update_preparing
+    release.set()
+    install_wait(updates, "cancelled")
+    assert not launches and not service.state.update_preparing
+    assert updates.snapshot()["can_install"]
+
+
+def test_lost_owner_cancels_ready_installer_without_commit(install_service, monkeypatch):
+    import core.desktop_updates as module
+    updates, service, launches = install_service
+    monkeypatch.setattr(module, "OWNER_TIMEOUT", .15)
+    request = {"id": "3" * 32, "host_pid": os.getpid()}
+    updates.dispatch("updates.prepare_install", request)
+    install_wait(updates, "ready")
+    updates.install_thread.join(5)  # No more status requests: the owner is gone.
+    assert updates.attempt["phase"] == "failed"
+    assert launches[0].poll() == 0 and not service.state.update_preparing
+    assert not (updates.transaction / "commit.json").exists()
+
+
+def test_commit_and_abort_cannot_both_win(install_service):
+    updates, service, launches = install_service
+    request = {"id": "4" * 32, "host_pid": os.getpid()}
+    updates.dispatch("updates.prepare_install", request)
+    install_wait(updates, "ready")
+    entered, release = threading.Event(), threading.Event()
+    def shutdown(*args):
+        entered.set()
+        assert release.wait(5)
+    service.dispatch = shutdown
+    result = []
+    thread = threading.Thread(target=lambda: result.append(updates.dispatch("updates.commit_install", request)))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        assert updates.dispatch("updates.install_status", request)["phase"] == "committing"
+        assert updates.dispatch("updates.abort_install", request)["phase"] == "committing"
+        assert not (updates.transaction / "abort.json").exists()
+    finally:
+        release.set(); thread.join(5)
+    assert result[0]["phase"] == "committed"
+    assert updates.dispatch("updates.commit_install", request)["phase"] == "committed"
+    assert (updates.transaction / "commit.json").exists() and len(launches) == 1
+
+
+def test_failed_shutdown_cancels_installer_and_unfreezes(install_service):
+    updates, service, launches = install_service
+    request = {"id": "5" * 32, "host_pid": os.getpid()}
+    updates.dispatch("updates.prepare_install", request)
+    install_wait(updates, "ready")
+    def fail(*args):
+        raise RuntimeError("save failed")
+    service.dispatch = fail
+    with pytest.raises(RuntimeError, match="save failed"):
+        updates.dispatch("updates.commit_install", request)
+    install_wait(updates, "cancelled")
+    assert launches[0].poll() == 0 and not service.state.update_preparing
+
+
+def test_restart_cancels_uncommitted_transaction_and_preserves_result(install_service):
+    updates, service, _ = install_service
+    directory = updates.root / "transactions" / ("6" * 32)
+    directory.mkdir(parents=True)
+    (directory / "config.json").write_text(json.dumps({"id": directory.name, "install_dir": str(updates.install_dir)}))
+    (directory / "transaction.json").write_text(json.dumps({"id": directory.name, "phase": "ready"}))
+    recovered = DesktopUpdates(service)
+    assert (directory / "abort.json").exists()
+    assert recovered.dispatch("updates.install_status", {"id": directory.name})["phase"] == "cancelled"
+    recovered.close()
+
+
+def test_desktop_installer_and_channel_logs_are_in_the_application_inventory(tmp_path):
+    from core.update_diagnostics import log_installer_event
+    from core.update_coordinator import update_log
+    from core.runtime_logs import collect_files
+    transaction = tmp_path / "updates/desktop/transactions" / ("7" * 32)
+    transaction.mkdir(parents=True)
+    (transaction / "update-launch.log").write_text("raw startup failure")
+    log_installer_event(transaction, "installer_launch_requested")
+    update_log(str(tmp_path / "updates/desktop/channels" / ("8" * 64)), "planning")
+    files, issues = collect_files(tmp_path)
+    assert not issues
+    assert {file.source for file in files} >= {"app_update", "update-launch"}
+    assert not (tmp_path / "updates/desktop/logs").exists()

@@ -371,19 +371,21 @@ def _is_update_excluded(relative_path):
     return bool(normalized and normalized.split("/", 1)[0].lower() in UPDATE_EXCLUDED_ROOTS)
 
 
-def _hash_file(path):
+def _hash_file(path, cancel_event=None):
     digest = hashlib.sha256()
     with open(platform_runtime.filesystem_path(path), "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            check_cancel(cancel_event)
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _collect_app_files(root_dir):
+def _collect_app_files(root_dir, cancel_event=None):
     root_dir = os.path.abspath(root_dir)
     files = {}
     native_root = platform_runtime.filesystem_path(root_dir)
     for current_root, dirs, names in os.walk(native_root):
+        check_cancel(cancel_event)
         relative_root = os.path.relpath(current_root, native_root)
         if relative_root == ".":
             dirs[:] = [name for name in dirs if not _is_update_excluded(name)]
@@ -401,7 +403,7 @@ def _collect_app_files(root_dir):
     return files
 
 
-def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, layout="qt"):
+def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, layout="qt", cancel_event=None):
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
     if not _is_valid_app_dir(staged_app_dir, layout=layout):
@@ -417,14 +419,16 @@ def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, la
         raise UpdaterError(str(exc)) from None
 
     _emit(progress_callback, "正在比较当前版本与新版本文件", None)
-    current_files = _collect_app_files(install_dir)
-    staged_files = _collect_app_files(staged_app_dir)
+    current_files = _collect_app_files(install_dir, cancel_event)
+    staged_files = _collect_app_files(staged_app_dir, cancel_event)
+    digest = lambda filename: _hash_file(filename, cancel_event) if cancel_event is not None else _hash_file(filename)
     added = []
     modified = []
     unchanged = 0
 
     for relative_path, staged_info in sorted(staged_files.items()):
-        staged_hash = _hash_file(staged_info["full_path"])
+        check_cancel(cancel_event)
+        staged_hash = digest(staged_info["full_path"])
         operation = {
             "path": relative_path,
             "size": staged_info["size"],
@@ -435,14 +439,14 @@ def build_update_plan(install_dir, staged_app_dir, progress_callback=None, *, la
             operation["before_sha256"] = None
             added.append(operation)
             continue
-        if current_info["size"] == staged_info["size"] and _hash_file(current_info["full_path"]) == staged_hash:
+        if current_info["size"] == staged_info["size"] and digest(current_info["full_path"]) == staged_hash:
             unchanged += 1
             continue
-        operation["before_sha256"] = _hash_file(current_info["full_path"])
+        operation["before_sha256"] = digest(current_info["full_path"])
         modified.append(operation)
 
     deleted = [
-        {"path": relative_path, "before_sha256": _hash_file(current_files[relative_path]["full_path"])}
+        {"path": relative_path, "before_sha256": digest(current_files[relative_path]["full_path"])}
         for relative_path in sorted(set(current_files) - set(staged_files))
     ]
     write_bytes = sum(item["size"] for item in added + modified)
@@ -893,7 +897,7 @@ def prepare_local_update(
 
 
 
-def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt"):
+def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt", transaction_id=None):
     from core.update_installer import write_installer
     if sys.platform != "win32":
         raise UpdaterError("自动安装更新仅支持 Windows。")
@@ -913,7 +917,10 @@ def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, 
             if _is_update_excluded(relative):
                 raise UpdaterError("更新操作不能修改用户数据。")
     pids = list(dict.fromkeys(int(pid) for pid in [current_pid or os.getpid(), *(extra_wait_pids or [])] if int(pid) > 0))
-    return write_installer(install_dir, staged_app_dir, os.path.abspath(change_plan_path), target_dir or updates_dir(), pids, exe_name, theme, version)
+    if transaction_id is not None and not re.fullmatch(r"[0-9a-f]{32}", transaction_id):
+        raise UpdaterError("更新事务编号无效。")
+    return write_installer(install_dir, staged_app_dir, os.path.abspath(change_plan_path), target_dir or updates_dir(), pids, exe_name, theme, version,
+                           transaction_id=transaction_id, previous_version=APP_VERSION)
 
 
 def launch_windows_update_script(script_path):

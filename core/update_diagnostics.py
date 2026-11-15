@@ -23,6 +23,8 @@ def installer_data_dir(transaction):
     if transaction.parent.name != "transactions":
         return transaction
     root = transaction.parent.parent
+    if root.name == "desktop" and root.parent.name == "updates":
+        return root.parent.parent
     return root.parent if root.name == "updates" else root
 
 

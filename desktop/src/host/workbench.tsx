@@ -389,6 +389,7 @@ export function useWorkbenchController() {
   async function closeApp(installUpdate = false) {
     if (closePending.current) return;
     closePending.current = true;
+    let transaction:{id:string}|undefined;
     try {
       await saves.preserve(installUpdate ? 'update' : 'quit');
       const unsaved = editorsRef.current.some(e => e.text !== e.saved);
@@ -399,7 +400,12 @@ export function useWorkbenchController() {
         const update = await call('updates.get');
         const label = update.reinstall ? '重启并重新安装' : '重启并更新';
         if (await confirm(label + ' DeepSeek Cowork？', `目标版本 ${update.version}。草稿和未保存编辑已保留。应用将关闭，安装完成后自动重新打开。`, ['继续工作', label]) !== 1) return;
-        await call('app.install_update'); return;
+        const preparation=await call('app.install_update');
+        if(preparation.cancelled)return;
+        transaction=preparation;
+        try { await saves.preserve('update'); }
+        catch(failure) {await call('updates.abort_install',transaction);throw failure;}
+        await call('app.commit_update',transaction); return;
       }
       if (unsaved || state.active_runs.length) {
         const choice = await confirm('退出 DeepSeek Cowork？', `${state.active_runs.length ? '进行中的任务将停止，已完成的内容会保留。' : ''}${unsaved ? '未保存的编辑已作为草稿保留，下次打开可以继续。' : ''}`, ['继续工作', '退出应用']);

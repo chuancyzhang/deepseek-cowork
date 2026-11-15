@@ -212,9 +212,10 @@ def collect_files(data_dir=None):
             if match:
                 add(path, match["source"], day=day)
     add(root / "updates" / "app_update.log", "app_update")
-    for transaction in children(root / "updates" / "transactions"):
-        for source in ("update", "update-launch"):
-            add(transaction / f"{source}.log", source)
+    for transactions in (root / "updates" / "transactions", root / "updates" / "desktop" / "transactions"):
+        for transaction in children(transactions):
+            for source in ("update", "update-launch"):
+                add(transaction / f"{source}.log", source)
     browser_root = _legacy_browser_root(root)
     if browser_root is not None and _safe_path(browser_root, browser_root):
         try:

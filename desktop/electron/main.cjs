@@ -132,7 +132,11 @@ else {
     try { backend = new Backend({ root, dataDir, resources: app.isPackaged ? process.resourcesPath : null, publish }); }
     catch (error) { await dialog.showMessageBox({ type: 'error', message: error.message }); quitting = true; app.quit(); return; }
     backend.ready.catch(error => publish({ event: 'service_error', error: error.message }));
-    browserHost = new BrowserHost({ root, backend, getWindow: () => window });
+    browserHost = new BrowserHost({ root, backend, getWindow: () => window, diagnostic: (event, details) => {
+      void fs.mkdir(path.join(dataDir, 'logs'), {recursive:true})
+        .then(() => fs.appendFile(path.join(dataDir, 'logs', 'desktop-browser.log'), `${new Date().toISOString()} ${event} ${JSON.stringify(details)}\n`))
+        .catch(error => console.error('browser_diagnostic_write_failed', error.message));
+    } });
     tray = new Tray(path.join(root, app.isPackaged ? 'logo.ico' : 'images/logo.ico'));
     tray.setToolTip('DeepSeek Cowork');
     const showWindow = () => { window?.restore(); window?.show(); window?.focus(); };

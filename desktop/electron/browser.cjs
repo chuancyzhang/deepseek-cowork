@@ -1,15 +1,16 @@
-const { BaseWindow, WebContentsView, net } = require('electron');
+const { BaseWindow, WebContentsView, nativeImage, net } = require('electron');
 const { readFileSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 
 class BrowserHost {
-  constructor({ root, backend, getWindow }) {
+  constructor({ root, backend, getWindow, diagnostic = () => {} }) {
     this.backend = backend; this.getWindow = getWindow; this.views = new Map(); this.visible = null;
+    this.diagnostic = diagnostic;
     this.surfaceRevision = 0;
     this.inputShield = null;
-    this.backgroundWindow = null;
+    this.backgroundWindows = new Map();
     this.localSessions = new Set();
     this.automation = readFileSync(path.join(root, 'web/editors/dist/browser-automation.js'), 'utf8');
   }
@@ -39,10 +40,9 @@ class BrowserHost {
       });
     }
     view.setBounds({ x: 0, y: 0, width: 1000, height: 750 });
-    wc.setBackgroundThrottling(false);
-    // Background automation needs a compositor surface. Parking views in a
-    // hidden host keeps them live without covering another workspace/page.
+    // Background automation needs a live compositor, even when no tab is shown.
     this.park(view);
+    wc.setBackgroundThrottling(false);
     this.views.set(tab.id, item);
     wc.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
     wc.session.setPermissionCheckHandler(() => false);
@@ -68,8 +68,24 @@ class BrowserHost {
   async js(item, code) {
     return item.view.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: this.automation + '\n' + code }]);
   }
+  async capture(wc) {
+    if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
+    let timer;
+    try {
+      // CDP waits for a compositor frame; capturePage can fail immediately just
+      // after navigation or while another background view covers this one.
+      const { data } = await Promise.race([
+        wc.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('等待网页画面超时')), 8000); }),
+      ]);
+      return nativeImage.createFromBuffer(Buffer.from(data, 'base64'));
+    } finally { clearTimeout(timer); }
+  }
   async handle(request) {
     let result;
+    const started = Date.now();
+    const context = { request_id: request.id, conversation_id: request.conversation_id, tab_id: request.tab.id, action: request.action };
+    this.diagnostic('browser_request_started', context);
     try {
       await this.checked(request);
       let item = this.views.get(request.tab.id);
@@ -82,7 +98,14 @@ class BrowserHost {
         if (!item || item.cid !== request.conversation_id) throw new Error('网页已关闭，请重新打开。');
         const wc = item.view.webContents, args = request.arguments;
         item.owner = request.tab.owner;
-        if (request.action === 'close') { if (this.visible === item) this.hide(); this.backgroundWindow?.contentView.removeChildView(item.view); wc.close(); this.views.delete(item.id); result = { ok: true }; }
+        if (request.action === 'close') {
+          if (this.visible === item) this.hide();
+          const background = this.backgroundWindows.get(item.view);
+          background?.contentView.removeChildView(item.view);
+          wc.close(); background?.destroy();
+          this.backgroundWindows.delete(item.view); this.views.delete(item.id);
+          result = { ok: true };
+        }
         else if (request.action === 'navigate') { void wc.loadURL(args.url).catch(() => {}); result = { ok: true, status: 'loading' }; }
         else if (request.action === 'command') {
           const navigation = wc.navigationHistory;
@@ -103,14 +126,19 @@ class BrowserHost {
             if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
             result = { ...value, ok: true, tab_id: item.id, page_version: revision + ':' + value.dom_version };
             try {
-              const screenshot = await wc.capturePage({ stayHidden: true, stayAwake: true });
+              const screenshot = await this.capture(wc);
               if (screenshot.isEmpty()) throw new Error('截图为空');
-              result.screenshot = { type: 'image_url', image_url: { url: screenshot.toDataURL() } };
+              // Native pixels include Windows DPI and page zoom. Tool coordinates
+              // use CSS pixels, so the image must match the observed viewport.
+              result.screenshot = { type: 'image_url', image_url: { url: screenshot.resize(value.viewport).toDataURL() } };
               result.image_status = 'ready';
             } catch (error) {
               result.image_status = 'failed';
               result.screenshot_note = '截图未完成：' + error.message + '。文字和元素结果已保留；坐标操作前请重新观察并取得截图。';
+              this.diagnostic('browser_capture_failed', { ...context, error: error.message });
             }
+            await this.checked(request);
+            if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
             delete result.dom_version;
           } else if (request.action === 'browser_action') {
             const prefix = revision + ':';
@@ -136,8 +164,9 @@ class BrowserHost {
                   await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: args.key, windowsVirtualKeyCode: keys[args.key] });
                 } else {
                   const coords = args.action === 'click' ? result : args;
-                  const x = Math.round(coords.x), y = Math.round(coords.y), bounds = item.view.getBounds();
-                  if (!(x >= 0 && y >= 0 && x < bounds.width && y < bounds.height)) throw new Error('坐标超出网页，请重新观察。');
+                  // coworkAct has checked these CSS coordinates against the DOM
+                  // viewport. Native view bounds use DIPs and differ under zoom.
+                  const x = Math.round(coords.x), y = Math.round(coords.y);
                   await wc.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
                   await wc.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
                 }
@@ -153,7 +182,8 @@ class BrowserHost {
         }
       }
     } catch (error) { result = { ok: false, status: 'failed', error: error.message, verification: '请检查实际页面后继续，操作不会自动重复。' }; }
-    await this.backend.call('browser.host_result', { id: request.id, result }).catch(() => {});
+    this.diagnostic('browser_request_finished', { ...context, elapsed_ms: Date.now() - started, ok: result.ok, status: result.status, image_status: result.image_status, error: result.error });
+    await this.backend.call('browser.host_result', { id: request.id, result }).catch(error => this.diagnostic('browser_result_rejected', { ...context, error: error.message }));
   }
   hide() {
     this.surfaceRevision++;
@@ -161,10 +191,22 @@ class BrowserHost {
     if (this.visible) { this.park(this.visible.view); this.visible = null; }
   }
   park(view) {
-    if (!this.backgroundWindow) this.backgroundWindow = new BaseWindow({ show: false, skipTaskbar: true, width: 1600, height: 1200 });
+    let background = this.backgroundWindows.get(view);
+    if (!background) {
+      // A never-shown native window has no reliable capture/input surface on
+      // Windows. Keep it composited, but invisible and unable to take input.
+      // Each tab gets its own compositor: overlapping sibling views can stop
+      // painting independently, even with background throttling disabled.
+      background = new BaseWindow({ show: false, opacity: 0, focusable: false, frame: false, skipTaskbar: true });
+      background.setIgnoreMouseEvents(true);
+      this.backgroundWindows.set(view, background);
+    }
     this.getWindow()?.contentView.removeChildView(view);
-    this.backgroundWindow.contentView.addChildView(view);
-    view.setBounds({ ...view.getBounds(), x: 0, y: 0 });
+    background.contentView.addChildView(view);
+    const { width, height } = view.getBounds();
+    background.setContentSize(width, height);
+    view.setBounds({ x: 0, y: 0, width, height });
+    background.showInactive();
   }
   shield(window, item) {
     if (item.owner === 'human') return;
@@ -195,7 +237,7 @@ class BrowserHost {
     const x = Math.max(0, Math.round(rect.x || 0)), y = Math.max(0, Math.round(rect.y || 0));
     item.view.setBounds({ x, y, width: Math.max(1, Math.min(bounds.width - x, Math.round(rect.width || 1))), height: Math.max(1, Math.min(bounds.height - y, Math.round(rect.height || 1))) });
     // The transparent input surface leaves the live page visible after handoff.
-    this.backgroundWindow?.contentView.removeChildView(item.view);
+    this.backgroundWindows.get(item.view)?.contentView.removeChildView(item.view);
     window.contentView.addChildView(item.view); this.visible = item;
     item.view.setVisible(true);
     this.shield(window, item);

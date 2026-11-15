@@ -161,6 +161,7 @@ ripgrep_env/
 /resources/browser_skill/artifacts/*.zip
 conversation_workspaces/
 /attachments/
+/conversation-references/
 
 # Offline editor development dependencies; only web/editors/dist is shipped.
 /web/editors/node_modules/

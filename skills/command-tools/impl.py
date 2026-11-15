@@ -8,10 +8,10 @@ import tempfile
 import time
 
 
+from core.interaction import ask_user
+from core.runtime_components import install_node_runtime
 from core.filesystem_ops import glob_paths, grep_contents
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
-from core.interaction import ask_user
-from core.runtime_components import install_node_runtime, load_saved_download_sources, selected_source
 
 def _decode_bytes(raw):
     if raw is None:
@@ -91,7 +91,7 @@ def run_node_code(workspace_dir, code, _context=None):
     node_exe = get_runtime_executable("node")
     if not node_exe:
         approved = ask_user(
-            "此操作需要可选的 Node.js 运行环境。是否现在从设置中选择的下载源安装？",
+            "此操作需要可选的 Node.js 运行环境。是否现在从官方来源下载并安装？",
             _context=_context,
             title="安装 Node.js",
             timeout_seconds=180,
@@ -99,8 +99,7 @@ def run_node_code(workspace_dir, code, _context=None):
         if not approved:
             return "Error: Node.js runtime is not installed and the user declined installation."
         try:
-            source = selected_source("node", load_saved_download_sources())
-            install_node_runtime(source)
+            install_node_runtime()
             node_exe = get_runtime_executable("node")
         except Exception as exc:
             return f"Error installing Node.js runtime: {exc}"

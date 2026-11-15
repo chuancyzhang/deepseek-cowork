@@ -25,6 +25,7 @@ from web.platform.server.package_policy import (  # noqa: E402
 )
 from scripts.bundled_runtime_checks import (  # noqa: E402
     GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
+    validate_python_bundle,
 )
 
 
@@ -67,6 +68,13 @@ REQUIRED_PATHS = (
     "LICENSES.chromium.html",
     "resources/service/_internal/enterprise_capabilities.json",
     "resources/service/_internal/python_env/python.exe",
+    "resources/service/_internal/python_env/requirements-data-analysis.txt",
+    "resources/service/_internal/python_env/Lib/site-packages/numpy/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/pandas/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/scipy/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/matplotlib/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/seaborn/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/sklearn/__init__.py",
     "resources/service/_internal/python_env/Lib/site-packages/openpyxl/__init__.py",
     "resources/service/_internal/python_env/Lib/site-packages/xlrd/__init__.py",
     "resources/service/_internal/python_env/Lib/site-packages/docx/__init__.py",
@@ -374,6 +382,9 @@ def audit_distribution(dist_dir: Path) -> dict:
     try:
         git_runtime = validate_git_bundle(dist_dir / "resources/service/_internal/git_bash_env")
         ripgrep_runtime = validate_ripgrep_bundle(dist_dir / "resources/service/_internal/ripgrep_env")
+        print("[Packaging] Checking bundled Python documents and data analysis…", flush=True)
+        python_runtime = validate_python_bundle(dist_dir / "resources/service/_internal/python_env")
+        print("[Packaging] Bundled Python checks passed.", flush=True)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise PackageAuditError(str(exc)) from exc
     components: dict[str, dict[str, int]] = {}
@@ -414,6 +425,7 @@ def audit_distribution(dist_dir: Path) -> dict:
         "wecom_cli_assets": wecom_cli_assets,
         "git_runtime": git_runtime,
         "ripgrep_runtime": ripgrep_runtime,
+        "python_runtime": python_runtime,
     }
 
 

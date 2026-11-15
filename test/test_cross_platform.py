@@ -144,6 +144,11 @@ class PlatformContractTests(unittest.TestCase):
                 safe_extract_runtime_tar(archive, Path(root) / "invalid")
             self.assertFalse((Path(root) / "escape").exists())
 
+    def test_optional_node_source_keeps_pinned_archive_and_hash(self):
+        from core import runtime_components
+        self.assertEqual(runtime_components.NODE_ARCHIVE, "node-v24.14.1-win-x64.zip")
+        self.assertEqual(len(runtime_components.NODE_SHA256), 64)
+
 
 @unittest.skipIf(os.name == "nt", "requires a real POSIX kernel")
 class NativePosixTests(unittest.TestCase):

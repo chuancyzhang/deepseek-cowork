@@ -225,12 +225,16 @@ class ManagementTests(unittest.TestCase):
         self.assertNotIn("context_target", page["values"])
         c.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "context_target": 0})
         self.assertEqual(c.call("settings.get")["context_policy"]["target_tokens"], 1000000)
-        components = c.call("settings.page", page="components")
-        self.assertNotIn("node_source", components["values"])
-        items = [item["id"] for section in components["sections"] for item in section.get("items", [])]
-        self.assertEqual(items, ["documents", "data-analysis"])
-        for action in ("source.node", "node.install", "component.install:speech", "component.install:finance"):
-            with self.assertRaisesRegex(RuntimeError, "不可用"):
+        with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
+            c.call("settings.page", page="components")
+        with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
+            c.call("settings.page_save", page="components", value={"python_source": "pypi"})
+        for key in ("download_sources", "skill_dependency_install_timeout_seconds"):
+            self.assertNotIn(key, c.call("settings.general"))
+            with self.assertRaisesRegex(RuntimeError, "不支持的设置项"):
+                c.call("settings.general", value={key: 300})
+        for action in ("source.python", "source.node", "node.install", "component.install:data-analysis", "component.remove:data-analysis", "component.install:speech", "component.install:finance"):
+            with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
                 c.call("settings.action", page="components", action=action)
         self.assertNotIn("speech-to-text", [item["name"] for item in c.call("skills.inventory")])
         with self.assertRaisesRegex(RuntimeError, "已下线"):

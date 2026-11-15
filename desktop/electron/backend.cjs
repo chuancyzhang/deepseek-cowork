@@ -40,6 +40,7 @@ class Backend {
     // processes already survive their parent with independent log handles.
     const child = spawn(executable, args, { cwd: this.root, ...platform.childOptions, stdio: ['ignore', log, log],
       env: { ...process.env, PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1', COWORK_APP_DATA_DIR: this.dataDir,
+        ...(process.versions.electron ? { COWORK_ELECTRON_EXE: process.execPath } : {}),
         ...(this.resources ? { COWORK_DESKTOP_INSTALL_DIR: path.dirname(this.resources) } : {}) } });
     closeSync(log);
     this.child = child;

@@ -104,7 +104,7 @@ CONTENT_DEFAULTS = {
     "home.card.browser.title": "浏览器自动化",
     "home.card.browser.description": "读取网页、提取数据和填写表单",
     "home.reminder.title": "工具包",
-    "home.reminder.description": "文档工具包已随应用安装；数据分析工具包可在设置中按需安装。",
+    "home.reminder.description": "文档与数据分析工具包已随应用提供，可直接使用。",
     "home.theme_reminder.title": "工作台主题",
     "home.theme_reminder.description": "用自然语言调整外观，预览后保存。",
     "composer.placeholder": "描述任务，输入 @ 引用会话或选择专家",

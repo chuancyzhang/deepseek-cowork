@@ -1,11 +1,117 @@
-"""Shared, read-only checks for the CLI runtimes shipped in Windows builds."""
+"""Checks for the runtimes shipped in Windows builds; probes use isolated scratch space."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
+
+
+DATA_ANALYSIS_DISTS = ("numpy", "pandas", "scipy", "matplotlib", "seaborn", "scikit-learn")
+
+
+def data_analysis_versions(lock_path):
+    versions = {}
+    for line in Path(lock_path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, version = line.split("==")
+        if not name or not version or name in versions:
+            raise ValueError(f"Invalid data analysis dependency lock: {line}")
+        versions[name] = version
+    if not set(DATA_ANALYSIS_DISTS).issubset(versions):
+        raise ValueError("Data analysis dependency lock is incomplete.")
+    return versions
+
+
+# Executed by the shipped interpreter, never the build interpreter. -I excludes
+# the host's PYTHONPATH/user site; origins also have to belong to this bundle.
+PYTHON_BUNDLE_PROBE = r'''
+import importlib, importlib.metadata as metadata, io, json, pathlib, socket, sys
+root = pathlib.Path(sys.executable).resolve().parent
+def no_network(*args, **kwargs):
+    raise RuntimeError("Bundled Python validation must not access the network")
+socket.socket.connect = no_network
+expected = json.loads(sys.argv[1])
+for name, version in expected.items():
+    if metadata.version(name) != version:
+        raise RuntimeError(f"{name}: expected {version}, found {metadata.version(name)}")
+for name in ('numpy', 'pandas', 'scipy', 'matplotlib', 'seaborn', 'sklearn',
+             'openpyxl', 'xlrd', 'docx', 'pptx', 'PIL.Image', 'pypdf', 'reportlab'):
+    module = importlib.import_module(name)
+    if not pathlib.Path(module.__file__).resolve().is_relative_to(root):
+        raise RuntimeError(f"{name} loaded outside bundled Python: {module.__file__}")
+import numpy as np, pandas as pd
+from scipy.linalg import solve
+from sklearn.linear_model import LinearRegression
+from joblib import Parallel, delayed
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+np.testing.assert_allclose(solve([[3., 1.], [1., 2.]], [9., 8.]), [2., 3.])
+model = LinearRegression().fit(np.array([[0.], [1.], [2.]]), [1., 3., 5.])
+np.testing.assert_allclose(model.predict([[3.]]), [7.])
+if Parallel(n_jobs=2)(delayed(pow)(x, 2) for x in range(3)) != [0, 1, 4]:
+    raise RuntimeError('Joblib worker execution failed')
+frame = pd.DataFrame({'group': ['a', 'a', 'b'], 'value': [1, 2, 3]})
+if frame.groupby('group')['value'].sum().to_dict() != {'a': 3, 'b': 3}:
+    raise RuntimeError('pandas aggregation failed')
+frame.to_excel('data.xlsx', index=False)
+pd.testing.assert_frame_equal(pd.read_excel('data.xlsx'), frame)
+sns.barplot(data=frame, x='group', y='value', errorbar=None)
+plt.savefig('plot.png'); plt.close('all')
+from PIL import Image
+with Image.open('plot.png') as picture:
+    picture.verify()
+from docx import Document
+document = Document(); document.add_paragraph('Cowork'); document.save('test.docx')
+if Document('test.docx').paragraphs[0].text != 'Cowork':
+    raise RuntimeError('Word round-trip failed')
+from pptx import Presentation
+deck = Presentation(); deck.slides.add_slide(deck.slide_layouts[6]); deck.save('test.pptx')
+if len(Presentation('test.pptx').slides) != 1:
+    raise RuntimeError('PowerPoint round-trip failed')
+from reportlab.pdfgen.canvas import Canvas
+from pypdf import PdfReader
+canvas = Canvas('test.pdf'); canvas.drawString(72, 72, 'Cowork'); canvas.save()
+if 'Cowork' not in PdfReader('test.pdf').pages[0].extract_text():
+    raise RuntimeError('PDF round-trip failed')
+print(json.dumps({'versions': expected, 'checks': ['imports', 'linear-algebra', 'regression', 'joblib-workers', 'aggregation', 'xlsx', 'plot', 'docx', 'pptx', 'pdf']}))
+'''
+
+
+def validate_python_bundle(root: Path) -> dict:
+    root = Path(root).resolve()
+    versions = data_analysis_versions(root / "requirements-data-analysis.txt")
+    expected = data_analysis_versions(Path(__file__).resolve().parents[1] / "requirements-data-analysis.txt")
+    if versions != expected:
+        raise ValueError("Bundled data analysis versions do not match this release's dependency lock.")
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith(("PYTHON", "PIP_", "MPL", "QT_"))}
+    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    env["PATH"] = os.pathsep.join(map(str, [root, root / "DLLs", windows / "System32", windows]))
+    scratch = Path(__file__).resolve().parents[1] / ".tmp" / "python-bundle-check"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="probe-", dir=scratch) as directory:
+        env.update(TEMP=directory, TMP=directory, MPLCONFIGDIR=directory,
+                   APPDATA=directory, LOCALAPPDATA=directory, USERPROFILE=directory)
+        result = subprocess.run(
+            [str(root / "python.exe"), "-I", "-B", "-X", "utf8", "-c", PYTHON_BUNDLE_PROBE, json.dumps(versions)],
+            cwd=directory, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            raise ValueError(f"Bundled Python verification failed ({result.returncode}):\n{result.stderr or result.stdout}")
+        try:
+            return json.loads(result.stdout)
+        except ValueError as exc:
+            raise ValueError(f"Bundled Python returned an invalid verification result: {result.stdout}") from exc
 
 
 RIPGREP_VERSION = "15.1.0"

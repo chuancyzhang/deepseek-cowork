@@ -34,7 +34,7 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 ## 从源码运行
 
-使用 Python 3.10+ 和带 npm 的 Node.js 22.12+，在仓库根目录执行。应用随包的 `node_env` 是执行运行时，不能据此假定已经安装 npm：
+使用 Python 3.12+（当前 Windows 发行包使用 3.14）和带 npm 的 Node.js 22.12+，在仓库根目录执行。桌面的 JavaScript 工具可复用 Electron 自带的 Node.js；源码构建所需的 npm 仍需另行准备：
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, BookOpen, Boxes, CircleUserRound, Clock3, KeyRound, LoaderCircle, Palette, Plug, Puzzle, Settings2, SlidersHorizontal, Sparkles, Star, Users, X, Check, MessageSquare, ShieldCheck, Folder, Wrench, Search } from 'lucide-react';
+import { ArrowLeft, BookOpen, Boxes, CircleUserRound, Clock3, KeyRound, LoaderCircle, Palette, Plug, Puzzle, Settings2, SlidersHorizontal, Sparkles, Star, Users, X, Check, MessageSquare, ShieldCheck, Folder, Search } from 'lucide-react';
 import { rpc } from './managementApi';
 import type { Settings } from './types';
 import {useHostField} from './host/context';
@@ -20,7 +20,7 @@ const groups: Record<string, [string, string, any][]> = {
   settings: [['appearance', '外观与阅读', Palette], ['preferences', '回答偏好', MessageSquare], ['models', '模型与服务', Boxes],
     ['im', '消息连接', Plug], ['enterprise', '企业账号', Users], ['security', '数据安全', ShieldCheck], ['variables', '变量与凭据', KeyRound],
     ['storage', '文件与存储', Folder], ['memory', '长期记忆', BookOpen], ['experiments', '实验功能', SlidersHorizontal],
-    ['components', '组件与依赖', Wrench], ['logs', '运行日志', Clock3], ['update', '更新与关于', Settings2], ['jobs', '后台操作', Clock3]],
+    ['logs', '运行日志', Clock3], ['update', '更新与关于', Settings2], ['jobs', '后台操作', Clock3]],
   library: [['library', '资料库', BookOpen]], team: [['team', '团队空间', Users]],
 };
 
@@ -30,12 +30,13 @@ export default function Management({ route, settings, updateSettings, openConver
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
   const tabs = (groups[route] || groups.settings).flatMap(item => item[0] === 'experiments' && settings?.multimedia_enabled ? [item, ['multimedia', '多媒体', Sparkles] as [string,string,any]] : [item]);
-  const [tab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
+  const [selectedTab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
+  const tab = tabs.some(([id]) => id === selectedTab) ? selectedTab : tabs[0][0];
   const [dirty, setDirty] = useState(false), [query, setQuery] = useState('');
   useEffect(() => window.cowork.onEvents(events => {
     if (events.some(event => event.event === 'settings_changed')) void rpc('settings.get').then(updateSettings).catch(error => onError(error.message));
   }), [updateSettings, onError]);
-  useEffect(() => {if (tab === 'multimedia' && !settings?.multimedia_enabled) setTab('experiments');}, [tab, settings?.multimedia_enabled]);
+  useEffect(() => {if (selectedTab === 'multimedia' && !settings?.multimedia_enabled) setTab('experiments');}, [selectedTab, settings?.multimedia_enabled]);
   const leave = useCallback(async () => !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1, [dirty, confirm]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
@@ -48,7 +49,7 @@ export default function Management({ route, settings, updateSettings, openConver
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>
-        : ['preferences','im','security','storage','memory','experiments','components','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
+        : ['preferences','im','security','storage','memory','experiments','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
         : <Preferences key={tab} kind={tab} settings={settings} updateSettings={updateSettings} {...common}/>}
     </Suspense></div>
   </div>;

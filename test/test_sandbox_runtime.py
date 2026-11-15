@@ -10,6 +10,53 @@ from core import sandbox_runtime
 
 
 class TestSandboxRuntime(unittest.TestCase):
+    def test_electron_node_mode_is_scoped_to_the_target_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            electron = os.path.join(directory, "Cowork.exe")
+            with open(electron, "w") as handle:
+                handle.write("fixture")
+            with patch.dict(os.environ, {"COWORK_ELECTRON_EXE": electron, "COWORK_NODE_EXE": ""}):
+                self.assertEqual(sandbox_runtime._resolve_node(), electron)
+                env = {"PATH": directory, "ELECTRON_RUN_AS_NODE": "1", "ELECTRON_NO_ASAR": "1"}
+                self.assertEqual(sandbox_runtime._node_process_env(electron, env)["ELECTRON_RUN_AS_NODE"], "1")
+                self.assertNotIn("ELECTRON_RUN_AS_NODE", sandbox_runtime._node_process_env("python.exe", env))
+                self.assertNotIn("ELECTRON_RUN_AS_NODE", sandbox_runtime._node_process_env("bash.exe", env))
+                with patch.object(sandbox_runtime.subprocess, "check_output", return_value="v24.0.0") as run:
+                    self.assertEqual(sandbox_runtime._probe_executable(electron, ["--version"])[0], "v24.0.0")
+                self.assertEqual(run.call_args.kwargs["env"]["ELECTRON_RUN_AS_NODE"], "1")
+                self.assertEqual(env["ELECTRON_RUN_AS_NODE"], "1")
+
+    def test_damaged_builtin_library_does_not_trigger_pip_install(self):
+        from core import env_utils
+        with patch.object(env_utils.sys, "frozen", True, create=True), \
+             patch.object(env_utils, "get_python_executable", return_value="python.exe"), \
+             patch.object(env_utils, "_sandbox_can_import", return_value=False), \
+             patch.object(env_utils, "_sandbox_import_probe", return_value={"error": "missing DLL"}), \
+             patch.object(sandbox_runtime, "install_skill_dependencies") as install:
+            with self.assertRaisesRegex(RuntimeError, "(?s)重新安装完整.*missing DLL"):
+                env_utils.ensure_package_installed("numpy", "numpy")
+            install.assert_not_called()
+
+    def test_bundled_python_precedes_overlays_and_does_not_load_toolkits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = {"root": os.path.join(directory, "sandbox"), "python": os.path.join(directory, "python_env", "python.exe")}
+            shipped = os.path.join(directory, "python_env", "Lib", "site-packages")
+            legacy = os.path.join(directory, "runtime_sandbox", "v1", "toolkits", "data-analysis", "site-packages")
+            os.makedirs(shipped)
+            os.makedirs(legacy)
+            with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
+                 patch.object(sandbox_runtime, "get_app_data_dir", return_value=directory), \
+                 patch.object(sandbox_runtime, "_is_frozen", return_value=True), \
+                 patch.dict(os.environ, {"PYTHONPATH": legacy, "PYTHONHOME": directory}):
+                env = sandbox_runtime.build_sandbox_env(skill_id="python-runner")
+            entries = env["PYTHONPATH"].split(os.pathsep)
+            overlay = os.path.join(directory, "runtime_sandbox", "v1", "skills", "python-runner", "python", "site-packages")
+            self.assertLess(entries.index(shipped), entries.index(overlay))
+            self.assertNotIn(legacy, entries)
+            self.assertNotIn(legacy, env["COWORK_PYTHON_DLL_DIRS"])
+            self.assertNotIn("PYTHONHOME", env)
+            self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+
     def test_rg_resolution_supports_source_and_frozen_layout_and_beats_host_path(self):
         for frozen in (False, True):
             with self.subTest(frozen=frozen), tempfile.TemporaryDirectory() as temp_dir:
@@ -67,7 +114,6 @@ class TestSandboxRuntime(unittest.TestCase):
             os.makedirs(bundled)
             runtime = {"root": temp_dir, "rg": os.path.join(bundled, "rg.exe")}
             with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
-                 patch.object(sandbox_runtime, "_toolkit_python_paths", return_value=[]), \
                  patch.dict(os.environ, {"PATH": host}, clear=True):
                 env = sandbox_runtime.build_sandbox_env()
             self.assertLess(env["PATH"].split(os.pathsep).index(bundled), env["PATH"].split(os.pathsep).index(host))
@@ -200,7 +246,6 @@ class TestSandboxRuntime(unittest.TestCase):
 
             fake_runtime = {"python": os.path.join(python_root, "python.exe")}
             with patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
-                 patch("core.sandbox_runtime._toolkit_python_paths", return_value=[]), \
                  patch("core.sandbox_runtime._collect_native_library_dirs", side_effect=wrapped_collect):
                 first = sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="first")
                 second = sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="second")
@@ -227,7 +272,7 @@ class TestSandboxRuntime(unittest.TestCase):
                 native_dirs.append(native_dir)
 
             with patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
-                 patch.object(sandbox_runtime, "_toolkit_python_paths", return_value=[]):
+                 patch.dict(os.environ, {}, clear=True):
                 for index in (0, 1, 0):
                     with self.subTest(profile=index), \
                          patch.object(sandbox_runtime, "get_app_data_dir", return_value=profiles[index]):
@@ -292,6 +337,7 @@ class TestSandboxRuntime(unittest.TestCase):
 
             with patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
+                 patch.dict(os.environ, {"COWORK_NODE_EXE": "", "COWORK_ELECTRON_EXE": ""}), \
                  patch.object(sandbox_runtime.sys, "frozen", True, create=True):
                 resolved = sandbox_runtime._resolve_node()
 

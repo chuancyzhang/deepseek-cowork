@@ -250,7 +250,7 @@ class Management:
             self.s.publish({"event": "appearance_changed"})
             return self._dispatch("themes.list", {})
         if method == "settings.general":
-            permitted = {"chat_workspace_root", "download_sources", "experimental_browser_automation", "experimental_long_context", "context_budget_ratio", "deepseek_v4_context_window_tokens", "skill_dependency_install_timeout_seconds"}
+            permitted = {"chat_workspace_root", "experimental_browser_automation", "experimental_long_context", "context_budget_ratio", "deepseek_v4_context_window_tokens"}
             if "value" in p:
                 unknown = set(p["value"]) - permitted
                 if unknown:
@@ -263,7 +263,7 @@ class Management:
                         else:
                             if key == "context_budget_ratio" and not .1 <= float(value) <= 1:
                                 raise ValueError("上下文使用比例应在 10% 到 100% 之间。")
-                            if key in {"deepseek_v4_context_window_tokens", "skill_dependency_install_timeout_seconds"} and int(value) <= 0:
+                            if key == "deepseek_v4_context_window_tokens" and int(value) <= 0:
                                 raise ValueError("请输入大于零的数值。")
                             self.config.set(key, value)
             return {key: self.config.get(key) for key in permitted}

@@ -83,26 +83,6 @@ class DesktopSettings:
                          help="关闭后使用工作区内置网页。正在运行的浏览任务结束后才能切换。")]},
                         {"title": "多媒体", "fields": [field("multimedia", "启用多媒体", "toggle",
                          help="启用后出现独立管理页。停用保留配置、任务与成果，已有任务继续收尾。")]}]
-        elif name == "components":
-            from core import runtime_components as runtime
-            title = "组件与依赖"
-            sources = runtime.normalize_download_sources(self.config.get("download_sources"))
-            values = {"python_source": sources["python"]["selected"]}
-            values["dependency_timeout"] = self.config.get("skill_dependency_install_timeout_seconds", 600)
-            sections = [{"title": "下载来源", "fields": [field("python_source", "Python 依赖", "select", options=[
-                         {"value": item["id"], "label": item["name"]} for item in runtime.source_options("python", sources)]),
-                         field("dependency_timeout", "技能依赖安装超时（秒）", "number", min=30, max=7200)],
-                         "actions": [action("source.python", "测试 Python 来源")]}]
-            items = []
-            for identity in ("documents", "data-analysis"):
-                spec = runtime.TOOLKITS[identity]
-                status = runtime.toolkit_status(identity)
-                items.append({"id": identity, "name": spec["name"], "description": spec["description"],
-                              "status": "已就绪" if status["healthy"] else "需要修复" if status["installed"] else "未安装",
-                              "error": status.get("health_error", ""), "actions": [] if spec.get("bundled") else [
-                              action("component.install:" + identity, "修复" if status["installed"] else "安装"),
-                              *([action("component.remove:" + identity, "卸载", title="卸载组件？", confirm="仅移除此工具包，不删除对话或工作文件。") ] if status["installed"] else [])]})
-            sections.append({"title": "运行组件", "items": items})
         elif name == "logs":
             title = "运行日志"
             values = {"days": 1, "keyword": ""}
@@ -128,7 +108,7 @@ class DesktopSettings:
             raise ValueError("设置已被其他操作修改。编辑已保留，请刷新后合并。")
         # Older local form drafts can still contain controls retired from these pages.
         # Do not let them overwrite runtime settings now managed elsewhere.
-        retired = {"experiments": {"context_target"}, "components": {"node_source"}}
+        retired = {"experiments": {"context_target"}}
         values = {key: value for key, value in (p.get("value") or {}).items() if key not in retired.get(name, set())}
         if set(values) - set(current["values"]):
             raise ValueError("不支持的设置项。")
@@ -154,18 +134,6 @@ class DesktopSettings:
                 self.config.set("experimental_multimedia", {**(self.config.get("experimental_multimedia") or {}), "enabled": bool(v["multimedia"])})
             self.s.media.reconcile()
             self.s.publish({"event": "settings_changed"})
-        elif name == "components":
-            from core import runtime_components as runtime
-            sources = runtime.normalize_download_sources(self.config.get("download_sources"))
-            if v["python_source"] not in {item["id"] for item in runtime.source_options("python", sources)}:
-                raise ValueError("下载来源不存在。")
-            sources["python"]["selected"] = v["python_source"]
-            timeout = int(v["dependency_timeout"])
-            if not 30 <= timeout <= 7200:
-                raise ValueError("安装超时应为 30 到 7200 秒。")
-            with self.config.batch_save():
-                self.config.set("download_sources", sources)
-                self.config.set("skill_dependency_install_timeout_seconds", timeout)
         elif name == "im":
             return self.s.messaging.save(v, p)
         else:
@@ -212,31 +180,6 @@ class DesktopSettings:
                 return {"detail": {"title": f"运行日志 · {len(result.records)}/{result.total} 条", "text": content or "此范围内没有日志。"},
                         "message": "；".join(result.issues) if result.issues else ""}
             return self.s.jobs.submit("读取运行日志", query)
-        if identity.startswith(("source.", "component.")):
-            from core import runtime_components as runtime
-            from core.desktop_jobs import JobCancelled
-            sources = runtime.normalize_download_sources(self.config.get("download_sources"))
-            def install(cancelled, progress):
-                def report(*args):
-                    if cancelled.is_set():
-                        raise JobCancelled("已取消组件操作，已有文件保留。")
-                    message = next((arg for arg in reversed(args) if isinstance(arg, str)), "正在处理组件…")
-                    progress(message)
-                report()
-                if identity.startswith("source."):
-                    kind = identity.split(".")[1]
-                    result = runtime.test_source(kind, runtime.selected_source(kind, sources))
-                    return {"detail": {"title": "下载来源测试", "text": str(result)}}
-                operation, component = identity.split(":")
-                if component not in {"documents", "data-analysis"}:
-                    raise ValueError("组件不存在。")
-                if operation == "component.remove":
-                    result = runtime.uninstall_toolkit(component)
-                else:
-                    result = runtime.install_toolkit(component, runtime.selected_source("python", sources), progress_callback=report, force=True)
-                log.info("component_completed action=%s", identity)
-                return {"refresh": True, "message": "组件操作已完成。"}
-            return self.s.jobs.submit("组件管理", install)
         if identity == "memory.generate":
             return self.generate_memory(p)
         if identity.startswith("im."):

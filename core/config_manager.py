@@ -41,7 +41,6 @@ from .mcp_client import (
     clear_mcp_auth_cache,
     normalize_mcp_transport,
 )
-from .runtime_components import default_download_sources, normalize_download_sources
 from .im_gateway_config import normalize_im_gateway_config
 from .variable_store import VariableStore
 
@@ -306,7 +305,6 @@ class ConfigManager:
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],
-            "skill_dependency_install_timeout_seconds": 300,
             "agent_profiles": self._default_agent_profiles(),
             "favorites": [],
             "favorite_run_history": [],
@@ -314,7 +312,6 @@ class ConfigManager:
             "skill_configs": {},
             "projects": [],
             "god_mode": False,
-            "download_sources": default_download_sources(),
             "default_workspace": "",
             "chat_workspace_root": os.path.join(self.data_dir, "conversation_workspaces"),
             "im_gateway": {
@@ -330,7 +327,6 @@ class ConfigManager:
         }
         self.load_config()
         self._apply_migrations()
-        self.config["download_sources"] = normalize_download_sources(self.config.get("download_sources"))
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)

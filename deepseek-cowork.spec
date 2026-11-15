@@ -18,6 +18,7 @@ SPEC_DIR = os.path.dirname(os.path.abspath(_spec_arg)) if _spec_arg else os.getc
 sys.path.insert(0, SPEC_DIR)
 from scripts.bundled_runtime_checks import (
     GIT_REQUIRED_FILES, RIPGREP_FILE_HASHES, validate_git_bundle, validate_ripgrep_bundle,
+    DATA_ANALYSIS_DISTS, data_analysis_versions,
 )
 ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
 BROWSER_SKILL_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "browser_skill")
@@ -435,7 +436,12 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 MCP_RUNTIME_DISTS = ["mcp"]
 SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]
-SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS
+SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS + list(DATA_ANALYSIS_DISTS)
+DATA_ANALYSIS_LOCK = os.path.join(SPEC_DIR, "requirements-data-analysis.txt")
+for name, expected_version in data_analysis_versions(DATA_ANALYSIS_LOCK).items():
+    actual_version = _require_distribution(name).version
+    if actual_version != expected_version:
+        raise RuntimeError(f"Data analysis dependency {name}: expected {expected_version}, found {actual_version}. Install requirements.txt before building.")
 MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
@@ -473,6 +479,7 @@ MCP_ANALYSIS_HIDDENIMPORTS = sorted(set(MCP_ANALYSIS_HIDDENIMPORTS))
 
 def _collect_minimal_python_env(prefix):
     datas = []
+    _add_data_file(datas, DATA_ANALYSIS_LOCK, "python_env/requirements-data-analysis.txt")
 
     root_candidates = [
         "python.exe",

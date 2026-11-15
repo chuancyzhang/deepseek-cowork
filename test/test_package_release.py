@@ -52,6 +52,9 @@ class PackageReleaseTests(unittest.TestCase):
             side_effect=lambda _root, key: ["manager"] if key == "credential.helper" else [],
         )
         self.git_config_patch.start()
+        python_patch = patch.object(package_release, "validate_python_bundle", return_value={"checks": ["fixture"]})
+        self.python_check = python_patch.start()
+        self.addCleanup(python_patch.stop)
 
     def tearDown(self):
         self.hash_patch.stop()
@@ -124,6 +127,7 @@ class PackageReleaseTests(unittest.TestCase):
             dist = self._create_minimal_dist(temp_dir)
 
             report = package_release.audit_distribution(dist)
+            self.python_check.assert_called_once_with(dist / "resources/service/_internal/python_env")
 
             self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS) + 1)
             self.assertTrue(any(item["name"] == "resources/service/_internal/python_env" for item in report["components"]))

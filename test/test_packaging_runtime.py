@@ -2,12 +2,41 @@ import ast
 import os
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from scripts import bundled_runtime_checks
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestPackagedRuntimeContract(unittest.TestCase):
+    def test_data_analysis_lock_and_bundle_validation(self):
+        lock = Path(ROOT, "requirements-data-analysis.txt")
+        versions = bundled_runtime_checks.data_analysis_versions(lock)
+        self.assertTrue(set(bundled_runtime_checks.DATA_ANALYSIS_DISTS).issubset(versions))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / lock.name).write_bytes(lock.read_bytes())
+            import subprocess
+            completed = subprocess.CompletedProcess([], 1, "", "ImportError: missing numpy DLL")
+            with patch.object(bundled_runtime_checks.subprocess, "run", return_value=completed) as run:
+                with self.assertRaisesRegex(ValueError, "missing numpy DLL"):
+                    bundled_runtime_checks.validate_python_bundle(root)
+            args, kwargs = run.call_args
+            self.assertIn("-I", args[0])
+            self.assertNotIn("PYTHONPATH", kwargs["env"])
+            self.assertNotIn("PYTHONHOME", kwargs["env"])
+            self.assertNotIn("site-packages", kwargs["env"]["PATH"])
+
+    def test_data_analysis_versions_reject_incomplete_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory, "requirements.txt")
+            lock.write_text("numpy==1.0\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                bundled_runtime_checks.data_analysis_versions(lock)
+
     @staticmethod
     def _load_spec_function(function_name):
         spec_path = os.path.join(ROOT, "deepseek-cowork.spec")

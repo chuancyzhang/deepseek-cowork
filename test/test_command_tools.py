@@ -28,6 +28,22 @@ class _FakeProcess:
 
 
 class TestCommandTools(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("COWORK_TEST_ELECTRON_EXE"), "requires explicit Electron runtime")
+    def test_run_node_code_reuses_real_electron_without_launching_desktop(self):
+        from core import sandbox_runtime
+        electron = os.environ["COWORK_TEST_ELECTRON_EXE"]
+        runtime = {"root": os.path.join(self.workspace_dir, "sandbox"), "node": electron}
+        with patch.dict(os.environ, {"COWORK_ELECTRON_EXE": electron}), \
+             patch.object(sandbox_runtime, "get_app_data_dir", return_value=self.workspace_dir), \
+             patch.object(sandbox_runtime, "ensure_sandbox_runtime", return_value=runtime), \
+             patch("core.execution_authorization.require_process_authorization"):
+            result = self.module.run_node_code(self.workspace_dir,
+                "const cp=require('node:child_process'); console.log('ELECTRON_NODE_OK',process.versions.node); "
+                "console.log(cp.execFileSync(process.execPath,['-e','console.log(6*7)'],{encoding:'utf8'}));")
+            self.assertIn("ELECTRON_NODE_OK", result)
+            self.assertIn("42", result)
+            self.assertTrue(sandbox_runtime.get_runtime_snapshot()["node"]["version"].startswith("v"))
+
     def setUp(self):
         self.workspace_dir = tempfile.mkdtemp()
         self.module = _load_command_tools_module()

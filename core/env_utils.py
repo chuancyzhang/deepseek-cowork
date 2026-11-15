@@ -224,6 +224,14 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
         _INSTALL_FAILED.pop(cache_key, None)
         return
 
+    from core.sandbox_runtime import BUNDLED_PYTHON_IMPORTS
+    if getattr(sys, "frozen", False) and import_name.split(".", 1)[0] in BUNDLED_PYTHON_IMPORTS:
+        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id)
+        raise RuntimeError(
+            f"随应用提供的 {import_name} 不可用，请重新安装完整的 Cowork 分发包。\n"
+            + _summarize_import_probe(probe)
+        )
+
     if cache_key in _INSTALL_FAILED:
         raise RuntimeError(_INSTALL_FAILED[cache_key])
 
@@ -253,9 +261,9 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
                     raise RuntimeError(msg)
                 _inject_skill_python_path(skill_id)
         else:
-            from core.runtime_components import selected_python_index_url
+            from core.sandbox_runtime import PYTHON_INDEX_URL
             subprocess.check_call(
-                [python_exe, "-m", "pip", "install", "--index-url", selected_python_index_url(), package_name],
+                [python_exe, "-m", "pip", "install", "--index-url", PYTHON_INDEX_URL, package_name],
                 env=build_sandbox_env(),
                 **subprocess_kwargs_no_window(),
             )

@@ -291,8 +291,7 @@ class DependencyCoordinator:
         self._flights = {}
 
     def _timeout(self):
-        value = self.config_manager.get("skill_dependency_install_timeout_seconds", 300) if self.config_manager else 300
-        return max(30, min(int(value or 300), 1800))
+        return 300
 
     def _log(self, message):
         if callable(self.logger):

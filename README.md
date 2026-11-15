@@ -34,7 +34,7 @@ The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels
 
 ## Run from source
 
-Use Python 3.10+ and Node.js 22.12+ with npm. The bundled `node_env` is an execution runtime and does not imply npm is installed. Run these commands from the repository root:
+Use Python 3.12+ (the current Windows release uses 3.14) and Node.js 22.12+ with npm. Desktop JavaScript tools can reuse Electron's Node.js runtime; npm for source builds must still be installed separately. Run these commands from the repository root:
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git

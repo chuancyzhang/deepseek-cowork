@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -11,6 +12,12 @@ from core.process_utils import subprocess_kwargs_no_window, terminate_process_tr
 
 
 SANDBOX_VERSION = "v1"
+# Extra Skill dependencies use a product default; built-in libraries ship with Python.
+PYTHON_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+BUNDLED_PYTHON_IMPORTS = frozenset({
+    "numpy", "pandas", "scipy", "matplotlib", "seaborn", "sklearn",
+    "openpyxl", "xlrd", "docx", "pptx", "PIL", "pypdf", "reportlab",
+})
 _RUNTIME_CACHE = None
 _BASE_NATIVE_LIBRARY_DIRS_CACHE = {}
 _SKILL_NATIVE_LIBRARY_DIRS_CACHE = {}
@@ -225,7 +232,7 @@ def _probe_executable(executable, args=None, extra_paths=None, timeout=8):
             errors="replace",
             stderr=subprocess.STDOUT,
             timeout=timeout,
-            env=_simple_exec_env(extra_paths=extra_paths),
+            env=_node_process_env(executable, _simple_exec_env(extra_paths=extra_paths)),
             **_no_window_kwargs(),
         )
         first_line = (out or "").strip().splitlines()[0] if out else ""
@@ -297,11 +304,26 @@ def _resolve_pip(python_exe):
 
 
 def _resolve_node():
-    candidates = [os.getenv("COWORK_NODE_EXE")]
+    candidates = [os.getenv("COWORK_NODE_EXE"), os.getenv("COWORK_ELECTRON_EXE")]
     candidates.extend(_runtime_file_candidates("node", ["node.exe", "node", os.path.join("bin", "node")]))
     if not _is_frozen():
         candidates.append(shutil.which("node"))
     return _candidate_existing_file(candidates)
+
+
+def _is_electron_node(executable):
+    host = os.getenv("COWORK_ELECTRON_EXE")
+    return bool(host and executable and os.path.normcase(_norm(host)) == os.path.normcase(_norm(executable)))
+
+
+def _node_process_env(executable, env):
+    # Enable Node mode only for this specific child, never the desktop or shell.
+    env = dict(env)
+    env.pop("ELECTRON_RUN_AS_NODE", None)
+    env.pop("ELECTRON_NO_ASAR", None)
+    if _is_electron_node(executable):
+        env.update(ELECTRON_RUN_AS_NODE="1", ELECTRON_NO_ASAR="1")
+    return env
 
 
 def _resolve_npm():
@@ -440,6 +462,8 @@ def ensure_sandbox_runtime():
         "rg": rg_exe,
         "rg_diagnostics": rg_diagnostics,
     }
+    logging.getLogger(__name__).info("sandbox_runtime_resolved python=%s node=%s node_source=%s",
+                                     python_exe, node_exe, "electron" if _is_electron_node(node_exe) else "standalone")
     return _RUNTIME_CACHE
 
 
@@ -485,14 +509,6 @@ def _skill_python_path(skill_id):
 
 def _skill_node_root(skill_id):
     return os.path.join(_skill_root(skill_id), "node")
-
-
-def _toolkit_python_paths():
-    try:
-        from core.runtime_components import installed_toolkit_paths
-        return installed_toolkit_paths()
-    except Exception:
-        return []
 
 
 def _sandbox_python_bootstrap_dir(root):
@@ -542,14 +558,12 @@ def _python_dll_dirs(runtime, skill_id=None):
     python_exe = runtime.get("python")
     runtime_root = _python_runtime_root(python_exe)
     runtime_site_packages = os.path.join(runtime_root, "Lib", "site-packages") if runtime_root else ""
-    toolkit_paths = tuple(_toolkit_python_paths())
     base_cache_key = tuple(
         os.path.normcase(os.path.abspath(path))
         for path in (
             runtime_root,
             os.path.join(runtime_root, "DLLs") if runtime_root else "",
             runtime_site_packages,
-            *toolkit_paths,
         )
         if path
     )
@@ -558,7 +572,6 @@ def _python_dll_dirs(runtime, skill_id=None):
             runtime_root,
             os.path.join(runtime_root, "DLLs") if runtime_root else "",
             runtime_site_packages,
-            *toolkit_paths,
         )
 
     dll_dirs = list(_BASE_NATIVE_LIBRARY_DIRS_CACHE[base_cache_key])
@@ -601,6 +614,15 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
     env["TEMP"] = temp_dir
 
     pythonpath_entries = [bootstrap_dir]
+    # The general Python tools use this release's libraries. Skill-specific
+    # extensions keep their own environment without changing the shipped files.
+    if skill_id in (None, "python-runner", "command-tools"):
+        runtime_site = os.path.join(_python_runtime_root(runtime.get("python")), "Lib", "site-packages")
+        if os.path.isdir(runtime_site):
+            pythonpath_entries.append(runtime_site)
+    if _is_frozen():
+        env["PYTHONNOUSERSITE"] = "1"
+        env.pop("PYTHONHOME", None)
     if skill_id:
         python_path = _skill_python_path(skill_id)
         node_root = _skill_node_root(skill_id)
@@ -611,10 +633,8 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
         env["NODE_PATH"] = node_modules
         env["npm_config_prefix"] = node_root
 
-    pythonpath_entries.extend(_toolkit_python_paths())
-
     existing_pythonpath = env.get("PYTHONPATH", "")
-    if existing_pythonpath:
+    if existing_pythonpath and not _is_frozen():
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join([item for item in pythonpath_entries if item])
 
@@ -661,7 +681,7 @@ def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=No
     return subprocess.Popen(
         args,
         cwd=cwd,
-        env=env,
+        env=_node_process_env(args[0] if isinstance(args, (list, tuple)) and args else None, env),
         stdin=stdin if stdin is not None else subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -801,7 +821,7 @@ def get_runtime_snapshot():
             "path": runtime.get("node", ""),
             "available": bool(runtime.get("node")),
             "version": _run_version(runtime.get("node"), ["--version"]),
-            "source": "sandbox" if _is_frozen() else "development",
+            "source": "electron" if _is_electron_node(runtime.get("node")) else "sandbox" if _is_frozen() else "development",
         },
         "bash": {
             "path": runtime.get("bash", ""),
@@ -889,8 +909,7 @@ def install_skill_dependencies(
                 raise RuntimeError("Sandbox Python runtime is missing.")
             target = _skill_python_path(skill_id)
             os.makedirs(target, exist_ok=True)
-            from core.runtime_components import selected_python_index_url
-            cmd = [python_exe, "-m", "pip", "install", "--index-url", selected_python_index_url(), "--upgrade", "--target", target] + python_dependencies
+            cmd = [python_exe, "-m", "pip", "install", "--index-url", PYTHON_INDEX_URL, "--upgrade", "--target", target] + python_dependencies
             out = subprocess.check_output(
                 cmd,
                 env=env,
@@ -917,7 +936,7 @@ def install_skill_dependencies(
             cmd.extend(node_dependencies)
             out = subprocess.check_output(
                 cmd,
-                env=env,
+                env=_node_process_env(cmd[0], env),
                 text=True,
                 encoding="utf-8",
                 errors="replace",

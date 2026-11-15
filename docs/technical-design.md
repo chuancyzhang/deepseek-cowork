@@ -158,6 +158,10 @@ node desktop/node_modules/electron/install.js
 
 Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
 
+文档和数据分析依赖统一放在随包 `python_env`。`requirements-data-analysis.txt` 锁定数据分析库及完整传递依赖，由 `requirements.txt` 引入；spec 核验构建环境版本并收集包文件、元数据、原生库与资源。生成 ZIP 前，`scripts/package_release.py` 使用随包 Python 在隔离目录验证导入、科学计算、机器学习、并行 worker、图表与 Office/PDF 文件读写；失败阻止出包。应用不再提供组件管理页、下载源或安装超时配置，也不加载旧工具包目录。通用 Python 工具优先使用随包库，第三方技能保留独立依赖环境与内部默认安装参数。
+
+Electron 启动服务时通过 `COWORK_ELECTRON_EXE` 传递自身可执行文件，通用 JavaScript 工具可复用宿主 Node.js。版本探测和实际执行仅对目标子进程设置 `ELECTRON_RUN_AS_NODE=1`，Python、Bash 与桌面宿主不继承该模式。`run_node_code` 保留原进程取消和输出路径；npm/npx 的交付范围不变。独立运行 Python 服务且没有 Electron 宿主时，仍可显式配置独立 Node.js。
+
 ```powershell
 $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win

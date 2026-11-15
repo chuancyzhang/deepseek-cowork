@@ -15,13 +15,30 @@
 
 ## Windows 本机 Docker 启动
 
-构建或导入 `cowork-enterprise:local` 镜像后，在此目录执行：
+企业中心只分发 Windows x64 Electron 客户端；不再提供 Qt 包、Qt 推荐渠道或跨架构升级。账号、模型授权和团队空间独立于客户端发行格式。
+
+源码部署先在此目录执行 `docker compose --env-file .env.local -f compose.local.yaml build platform`（首次尚无 `.env.local` 时使用 `docker build -t cowork-enterprise:local .`）。离线部署使用下节生成的完整交付包。随后执行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
 脚本首次生成 `.env.local`，以后复用原配置。打开 `http://localhost:8788/app`，按页面创建首位平台管理员。
+
+离线包启动前校验 `deployment.json` 中的文件摘要及导入镜像 ID，再固定使用该包的镜像；失败不会改用旧镜像。只有旧 `images.tar` 而没有部署清单的包会被拒绝。`-VerifyOnly` 只校验文件并导入、核验镜像，不启动服务或写入业务数据。
+
+### 构建离线部署包
+
+在仓库根目录执行，要求 Docker Desktop Linux 引擎已启动、Python 环境已准备，且本机已有 `postgres:17` 镜像（首次可执行 `docker pull postgres:17`）：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B scripts/package_enterprise.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dist\enterprise-docker\start-local.ps1 -VerifyOnly
+```
+
+产物为 `dist/enterprise-docker/` 与 `dist/cowork-enterprise-docker.zip`。打包从当前源码快照重新构建服务镜像，逐文件比对镜像中的源码，检查数据库版本及 Electron 分发能力，然后导出镜像、源码、启动脚本和校验清单。镜像标签包含应用版本及源码摘要；不复用可变的旧 `cowork-enterprise:local` 标签，不自动升级已有 PostgreSQL 镜像。
+
+打包只放行部署源码，排除 `.env.local`、密钥、业务数据和缓存；交付目录含本机配置或未知文件时拒绝覆盖。生产环境配置、数据库和文件卷不进入分发包。
 
 停止与再次启动：
 
@@ -37,6 +54,8 @@ docker compose --env-file .env.local -f compose.local.yaml build platform
 docker compose --env-file .env.local -f compose.local.yaml stop platform
 docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform
 ```
+
+离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。Compose 项目名和卷名保持一致，不新建账号库，不重置加密密钥。结构迁移到版本 4 后不能直接换回旧中心镜像；如需恢复，应配套恢复升级前数据库和文件卷。
 
 ## Linux 部署
 
@@ -146,20 +165,26 @@ python -m server serve --host 127.0.0.1 --port 8080
 
 Windows 标准客户端按[构建说明](../../docs/technical-design.md#构建与发布)生成 ZIP 和 `latest-desktop-windows-x64.json` 更新清单（也可使用显式生成的审计报告）。平台管理员执行：
 
-1. 在“设置 → 客户端分发”新建发布，选择“新版工作台（Electron）”，上传 ZIP 和对应更新清单。旧 Qt 包选择“旧版客户端（Qt）”并提供原审计报告。
+1. 在“设置 → 客户端分发”新建发布，填写程序版本，上传 Electron 标准 ZIP 和同次构建的更新清单。
 2. 点击“校验并生成企业包”，等待可下载状态。
 3. 下载核对后发布，并设置为推荐版本。
 4. 员工下载并完整解压，启动后登录企业账号。
 
 也可点击“从 GitHub 导入最新版”：中心读取正式 Release 的新版工作台清单，从固定版本标签下载标准 ZIP，验证并生成企业包。导入过程可取消，失败保留原因；完成后停在待发布状态，仍需管理员下载核验并发布推荐。
 
-企业包在 EXE 同目录增加公开的 `enterprise_connection.json`，封装后重新计算大小和 SHA-256。推荐版本按客户端结构、系统和架构隔离；下载页默认提供新版工作台，旧客户端仍查询 Qt 推荐。在线客户端安装前会重新确认推荐记录有效；发布列表提供撤下、删除和恢复操作。
+企业包在 EXE 同目录增加公开的 `enterprise_connection.json`，封装后重新计算大小和 SHA-256。管理员及员工下载页同时提供对应企业 ZIP 的“下载校验清单”；离线更新把两者放在同一目录，不能搭配标准 ZIP 的原清单。
+
+当前只有 Windows x64 Electron 一个推荐版本。客户端启动约 15 秒后检查，之后每 24 小时检查，自动下载高于当前版本的推荐包；员工确认“重启并更新”后才安装。安装前重新确认推荐记录有效，已有任务须先结束。企业源失败不切换公共源。撤下只阻止新的在线下载和安装，不卸载已安装版本；离线副本无法确认撤回状态。后台目前不提供强制升级、设备清单或全员安装回执。
+
+Qt 客户端已停止支持，旧安装不能沿用原更新入口。首次使用当前企业版须下载、完整解压并运行 Electron 企业包；本产品不维护 Qt 到 Electron 的自动迁移流程。
+
+![企业客户端分发与校验清单](../../docs/images/enterprise-distribution.png)
 
 ## 团队空间与数据库
 
 团队空间提供计划、成员、资料、成果和动态，员工在桌面执行任务并选择发布内容，网页用于管理和阅读共享对象。操作见[用户手册](../../docs/user-guide.md#企业账号与团队空间)。
 
-数据库结构由 `server/database.py` 和 `server/team_space_tables.py` 定义，`platform.schema_version` 记录已完成版本。结构版本 2 增加空间相关表；版本 3 为发布记录增加 `app_layout`，原记录默认 Qt，保留原发布状态和推荐。执行入口为：
+数据库结构由 `server/database.py` 和 `server/team_space_tables.py` 定义，`platform.schema_version` 记录已完成版本。结构版本 4 仅支持 Electron 分发：旧 Qt 记录保留在数据库，但撤下并清空推荐，不再提供上传、发布或下载；已有 Electron 推荐、成员、模型、团队空间和业务文件保留。执行入口为：
 
 ```bash
 docker compose run --rm platform python -m server migrate
@@ -177,7 +202,7 @@ docker compose logs --tail=100 platform
 docker compose stop
 ```
 
-健康检查为 `/healthz`，平台信息为 `/api/v1/platform-info`。管理页面显示客户端处理状态和提问清理状态。
+健康检查 `/healthz` 返回实际数据库结构版本；`/api/v1/platform-info` 提供客户端分发能力，以及通过交付脚本构建的镜像版本和源码摘要。管理页面显示客户端处理状态和提问清理状态。
 
 业务数据库备份使用排除提问正文的命令，并在停止写入期间备份业务文件卷，独立保管加密密钥：
 

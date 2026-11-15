@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import html
 import json
 import logging
+import os
 from pathlib import Path
 import time
 import uuid
@@ -23,7 +24,7 @@ from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
                        LocalAdministrator, LoginEntry, Member, Model, Platform, Question)
 from .management import Management, member_view, model_view
-from .releases import Releases, public_release
+from .releases import Releases, public_release, desktop_manifest, normalize_report
 from .security import PlatformError, Vault, digest
 from .team_spaces import TeamSpaces
 from .team_space_routes import team_space_router
@@ -170,8 +171,8 @@ def create_app(settings=None, *, transport=None):
     @app.get("/healthz")
     def health():
         with database.transaction() as db:
-            db.get(Platform, 1)
-        return {"status": "ok"}
+            platform = db.get(Platform, 1)
+            return {"status": "ok", "schema_version": platform.schema_version}
 
     @app.get("/api/v1/platform-info")
     def platform_info():
@@ -179,6 +180,9 @@ def create_app(settings=None, *, transport=None):
             platform = db.get(Platform, 1)
             return {"platform_id": platform.platform_id, "platform_name": platform.name,
                     "config_version": platform.config_version, "supported_api_versions": [1],
+                    "client_distribution": {"app_layouts": ["electron"], "target_os": ["windows"], "arch": ["x64"]},
+                    "build": {"version": os.environ.get("COWORK_BUILD_VERSION", "source"),
+                              "source_sha256": os.environ.get("COWORK_BUILD_SOURCE", "")},
                     "team_spaces": {"version": 1, "minimum_client_version": 1},
                     "question_retention_days": 30, "question_scope": "enterprise_models_only"}
 
@@ -586,7 +590,8 @@ def create_app(settings=None, *, transport=None):
     def release_list(request: Request, deleted: bool = False):
         principal(request, admin=True)
         with database.transaction() as db:
-            query = select(ClientRelease).where(ClientRelease.state == "deleted" if deleted else ClientRelease.state != "deleted")
+            query = select(ClientRelease).where(ClientRelease.app_layout == "electron",
+                ClientRelease.state == "deleted" if deleted else ClientRelease.state != "deleted")
             return {"items": [public_release(r, admin=True) for r in db.scalars(query.order_by(ClientRelease.created_at.desc()))],
                     "catalog_revision": db.get(Platform, 1).catalog_revision}
 
@@ -611,6 +616,8 @@ def create_app(settings=None, *, transport=None):
             item = db.get(ClientRelease, release_id)
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
+            if item.app_layout != "electron":
+                raise PlatformError("retired_release", "旧版客户端已停止分发。", 410)
             return public_release(item, admin=True)
 
     @app.put("/api/v1/admin/client-releases/{release_id}/source")
@@ -627,10 +634,10 @@ def create_app(settings=None, *, transport=None):
     @app.put("/api/v1/admin/client-releases/{release_id}/report")
     async def release_report(release_id: str, request: Request):
         principal(request, admin=True)
-        report = await read_json(request, 1024 * 1024)
+        report = normalize_report(await read_json(request, 1024 * 1024))
         with database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
-            if not item or item.state not in {"draft", "failed"} or (item.stage in {"receive", "import_pending"} and item.state != "failed"):
+            if not item or item.app_layout != "electron" or item.state not in {"draft", "failed"} or (item.stage in {"receive", "import_pending"} and item.state != "failed"):
                 raise PlatformError("release_busy", "此发布记录当前不能更换报告。", 409)
             item.report = report
         return {"saved": True}
@@ -654,15 +661,18 @@ def create_app(settings=None, *, transport=None):
         actor = principal(request, admin=True)
         return releases.mutate(release_id, action, await read_json(request, 16384), actor["id"])
 
-    def download(release_id, *, preview=False):
+    def download(release_id, *, preview=False, manifest=False):
         with database.transaction() as db:
             item = db.get(ClientRelease, release_id)
-            if not item or item.state not in ({"ready", "published"} if preview else {"published"}):
+            if not item or item.app_layout != "electron" or item.state not in ({"ready", "published"} if preview else {"published"}):
                 raise PlatformError("release_unavailable", "此版本尚未发布或已撤下。", 404)
             path = releases.download_path(item)
             if not path.is_file() or path.stat().st_size != item.output_bytes:
                 raise PlatformError("release_file_missing", "发布文件不完整，请联系管理员。", 503)
-            filename = f"cowork-desktop-v{item.app_version}-windows-x64.zip" if item.app_layout == "electron" else f"deepseek-cowork-v{item.app_version}.zip"
+            if manifest:
+                return JSONResponse(desktop_manifest(item), headers={
+                    "Content-Disposition": 'attachment; filename="latest-desktop-windows-x64.json"'})
+            filename = f"cowork-desktop-v{item.app_version}-windows-x64.zip"
             return FileResponse(path, media_type="application/zip", filename=filename,
                                 headers={"X-Content-SHA256": item.output_sha256})
 
@@ -671,8 +681,15 @@ def create_app(settings=None, *, transport=None):
         principal(request, admin=True)
         return download(release_id, preview=True)
 
+    @app.get("/api/v1/admin/client-releases/{release_id}/manifest")
+    def preview_manifest(release_id: str, request: Request):
+        principal(request, admin=True)
+        return download(release_id, preview=True, manifest=True)
+
     @app.get("/api/v1/client-releases/recommended")
-    def recommended(target_os: str = "windows", arch: str = "x64", app_layout: str = "qt"):
+    def recommended(target_os: str = "windows", arch: str = "x64", app_layout: str = "electron"):
+        if app_layout != "electron":
+            raise PlatformError("unsupported_client", "企业中心仅支持 Electron 工作台，请下载当前企业客户端。", 410)
         with database.transaction() as db:
             item = db.scalar(select(ClientRelease).where(ClientRelease.state == "published", ClientRelease.recommended,
                                                         ClientRelease.target_os == target_os, ClientRelease.arch == arch,
@@ -682,6 +699,10 @@ def create_app(settings=None, *, transport=None):
     @app.get("/api/v1/client-releases/{release_id}/download")
     def public_download(release_id: str):
         return download(release_id)
+
+    @app.get("/api/v1/client-releases/{release_id}/manifest")
+    def public_manifest(release_id: str):
+        return download(release_id, manifest=True)
 
     @app.get("/", response_class=HTMLResponse)
     @app.get("/app", response_class=HTMLResponse)

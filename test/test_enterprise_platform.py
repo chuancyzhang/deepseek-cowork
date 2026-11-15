@@ -20,7 +20,7 @@ from sqlalchemy import select
 from web.platform.server.app import create_app
 from web.platform.server.config import Settings
 from web.platform.server.database import AuthSource, ClientRelease, LoginTransaction, Member, Model, Question
-from web.platform.server.releases import REQUIRED_FILES
+from web.platform.server.releases import DESKTOP_ROOT
 from web.platform.server.security import challenge, digest
 
 
@@ -507,7 +507,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(len({q["id"] for q in rows["items"]}), 40)
         print(f"\nEnterprise simulated streams: peak={counts['peak']}, requests=40, seconds={time.monotonic()-started:.2f}")
 
-    def desktop_package(self, version="99.0.0"):
+    def desktop_package(self, version="99.0.0", extra=None):
         from web.platform.server.releases import DESKTOP_REQUIRED_FILES, DESKTOP_ROOT
         package = io.BytesIO()
         with zipfile.ZipFile(package, "w") as archive:
@@ -517,11 +517,13 @@ class PlatformTests(unittest.TestCase):
                 "schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": version}))
             archive.writestr(DESKTOP_ROOT + "/resources/service/_internal/enterprise_capabilities.json", json.dumps({
                 "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}))
+            for name, contents in (extra or {}).items():
+                archive.writestr(DESKTOP_ROOT + "/" + name, contents)
         data = package.getvalue()
         return data, {"schema_version": 1, "version": version, "app_layout": "electron", "target_os": "windows", "arch": "x64",
             "filename": f"cowork-desktop-v{version}-windows-x64.zip", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "notes": "测试更新"}
 
-    def test_desktop_release_import_is_pinned_and_recommendations_are_isolated(self):
+    def test_desktop_release_import_is_pinned_and_manifest_matches_enterprise_zip(self):
         from unittest.mock import patch
         from web.platform.server import releases as module
         self.web_login()
@@ -549,22 +551,38 @@ class PlatformTests(unittest.TestCase):
         preview = self.client.get(path + "/download")
         self.assertEqual(hashlib.sha256(preview.content).hexdigest(), ready["sha256"])
         self.assertNotEqual(ready["sha256"], manifest["sha256"])
-        with self.db.transaction() as db:
-            qt = ClientRelease(app_version="1.0.0", app_layout="qt", state="published", recommended=True, created_by=actor)
-            db.add(qt); db.flush(); qt_id = qt.id
+        offline = self.client.get(path + "/manifest")
+        self.assertIn('latest-desktop-windows-x64.json', offline.headers['content-disposition'])
+        self.assertEqual(offline.json()["sha256"], ready["sha256"])
+        self.assertEqual(offline.json()["size"], len(preview.content))
+        public_path = "/api/v1/client-releases/" + item["id"]
+        self.assertEqual(self.client.get(public_path + "/manifest").status_code, 404)
+        # Exercise the same local ZIP boundary used by an offline employee.
+        from core.updater import prepare_desktop_local
+        from threading import Event
+        root = Path(self.temp.name) / "offline"
+        root.mkdir()
+        package_path = root / offline.json()["filename"]
+        package_path.write_bytes(preview.content)
+        (root / "latest-desktop-windows-x64.json").write_text(json.dumps(offline.json()), encoding="utf-8")
+        prepared = prepare_desktop_local(str(package_path), str(root / "cache"), "1.0.0", ready["connection"], Event(), None)
+        self.assertTrue(prepared["manifest_verified"])
         published = self.client.post(path + "/publish", headers=self.headers(), json={
             "operation_id": "publish-desktop-import", "catalog_revision": 0, "recommended": True})
         self.assertEqual(published.status_code, 200, published.text)
         self.assertEqual(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"]["id"], item["id"])
-        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], qt_id)
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], item["id"])
+        self.assertEqual(self.client.get(public_path + "/manifest").json(), offline.json())
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended?app_layout=qt").status_code, 410)
         withdrawn = self.client.post(path + "/withdraw", headers=self.headers(), json={
             "operation_id": "withdraw-desktop-import", "catalog_revision": 1, "replacement_id": "", "reason": "撤回测试"})
         self.assertEqual(withdrawn.status_code, 200, withdrawn.text)
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
         self.assertEqual(self.client.get("/api/v1/client-releases/" + item["id"] + "/download").status_code, 404)
+        self.assertEqual(self.client.get(public_path + "/manifest").status_code, 404)
         self.assertEqual(len(seen), 2)
 
-    def test_v2_migration_keeps_existing_release_in_qt_channel(self):
+    def test_v2_migration_retires_legacy_release_and_preserves_members(self):
         from sqlalchemy import text
         from web.platform.server.database import Platform
         self.web_login()
@@ -578,10 +596,39 @@ class PlatformTests(unittest.TestCase):
             db.execute(text("ALTER TABLE client_releases DROP COLUMN app_layout"))
         self.db.migrate(self.settings)
         self.db.migrate(self.settings)
-        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], release["id"])
+        self.assertIsNone(self.client.get("/api/v1/client-releases/recommended").json()["release"])
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
         with self.db.transaction() as db:
-            self.assertEqual(db.get(Platform, 1).schema_version, 3)
+            self.assertEqual(db.get(Platform, 1).schema_version, 4)
+            self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
+            self.assertIsNotNone(db.get(Member, actor))
+            record = db.get(ClientRelease, release["id"])
+            self.assertEqual((record.state, record.recommended, record.stage), ("withdrawn", False, "retired"))
+        self.assertEqual(self.client.get("/api/v1/admin/client-releases").json()["items"], [])
+        self.assertEqual(self.client.post("/api/v1/admin/client-releases", headers=self.headers(), json={
+            "app_version": "1.2.4", "app_layout": "qt"}).status_code, 400)
+        self.assertEqual(self.client.post("/api/v1/admin/client-releases/" + release["id"] + "/publish", headers=self.headers(), json={
+            "operation_id": "republish-retired-qt", "catalog_revision": 1}).status_code, 410)
+
+    def test_v3_migration_preserves_electron_recommendation_and_business_data(self):
+        from web.platform.server.database import Platform
+        self.web_login()
+        actor = self.client.get("/api/v1/me").json()["member"]["id"]
+        model = self.model(actor)
+        with self.db.transaction() as db:
+            old = ClientRelease(app_version="1.0.0", app_layout="qt", state="published", recommended=True, created_by=actor)
+            current = ClientRelease(app_version="2.0.0", state="published", recommended=True, created_by=actor)
+            db.add_all([old, current]); db.flush()
+            current_id, old_id = current.id, old.id
+            db.get(Platform, 1).schema_version = 3
+        self.db.migrate(self.settings)
+        self.db.migrate(self.settings)
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended").json()["release"]["id"], current_id)
+        with self.db.transaction() as db:
+            self.assertIsNotNone(db.get(Model, model))
+            self.assertEqual(db.get(Member, actor).role, "admin")
+            self.assertFalse(db.get(ClientRelease, old_id).recommended)
+            self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
 
     def test_cancelled_github_import_cannot_overwrite_a_new_upload(self):
         from unittest.mock import patch
@@ -609,17 +656,8 @@ class PlatformTests(unittest.TestCase):
     def test_release_validation_publish_withdraw_and_immutable_config(self):
         import zipfile
         self.web_login()
-        package = io.BytesIO()
-        with zipfile.ZipFile(package, "w") as archive:
-            for name in REQUIRED_FILES:
-                archive.writestr("deepseek-cowork/"+name, b"test build fixture")
-            archive.writestr("deepseek-cowork/_internal/enterprise_capabilities.json", json.dumps({
-                "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}))
-            archive.writestr("deepseek-cowork/_internal/config.json", json.dumps({
-                "api_key": "", "base_url": "https://api.deepseek.com", "disabled_skills": []}))
-        data = package.getvalue()
-        report = {"app_version": "1.2.3", "zip_bytes": len(data), "zip_sha256": hashlib.sha256(data).hexdigest(),
-                  "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}
+        data, report = self.desktop_package("1.2.3", {"resources/service/_internal/config.json": json.dumps({
+            "api_key": "", "base_url": "https://api.deepseek.com", "disabled_skills": []})})
         release = self.client.post("/api/v1/admin/client-releases", json={"app_version": "1.2.3"}, headers=self.headers()).json()
         path = "/api/v1/admin/client-releases/"+release["id"]
         self.assertEqual(self.client.put(path+"/report", json=report, headers=self.headers()).status_code, 200)
@@ -632,11 +670,12 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/client-releases/"+release["id"]+"/download").status_code, 404)
         preview = self.client.get(path+"/download")
         with zipfile.ZipFile(io.BytesIO(preview.content)) as archive:
-            connection = json.loads(archive.read("deepseek-cowork/enterprise_connection.json"))
+            connection = json.loads(archive.read(DESKTOP_ROOT + "/enterprise_connection.json"))
             self.assertEqual(connection["platform_id"], "test-company")
             self.assertEqual(len(connection), 6)
-            for name in REQUIRED_FILES:
-                self.assertEqual(archive.read("deepseek-cowork/"+name), b"test build fixture")
+            with zipfile.ZipFile(io.BytesIO(data)) as source:
+                for name in source.namelist():
+                    self.assertEqual(archive.read(name), source.read(name))
         payload = {"operation_id": "publish-operation-unique", "catalog_revision": 0, "recommended": True}
         published = self.client.post(path+"/publish", headers=self.headers(), json=payload)
         self.assertEqual(published.status_code, 200, published.text)
@@ -695,14 +734,10 @@ class PlatformTests(unittest.TestCase):
         import zipfile
         from web.platform.server.releases import inspect_archive
         from web.platform.server.security import PlatformError
-        for malicious in ("deepseek-cowork/../escape", "deepseek-cowork/enterprise_connection.json", "deepseek-cowork/user_data/history.json"):
+        for malicious in ("../escape", "enterprise_connection.json", "user_data/history.json"):
             with self.subTest(malicious=malicious):
-                buffer = io.BytesIO()
-                with zipfile.ZipFile(buffer, "w") as archive:
-                    for name in REQUIRED_FILES:
-                        archive.writestr("deepseek-cowork/"+name, "fixture")
-                    archive.writestr(malicious, "bad")
-                with zipfile.ZipFile(io.BytesIO(buffer.getvalue())) as archive:
+                data, _ = self.desktop_package(extra={malicious: "bad"})
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
                     with self.assertRaises(PlatformError):
                         inspect_archive(archive, self.settings)
 

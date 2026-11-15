@@ -14,14 +14,11 @@ import httpx
 from sqlalchemy import select, update
 
 from .connection_contract import CONNECTION_FILE, validate_connection
-from .package_policy import DEFAULT_CONFIG_PATH, MAX_DEFAULT_CONFIG_BYTES, validate_default_config
+from .package_policy import MAX_DEFAULT_CONFIG_BYTES, validate_default_config
 from .database import ClientRelease, Operation, Platform, uid
 from .security import PlatformError, digest, encode
 
 log = logging.getLogger(__name__)
-ROOT = "deepseek-cowork"
-REQUIRED_FILES = {"deepseek-cowork.exe", "_internal/python_env/python.exe",
-                  "_internal/PySide6/Qt6Core.dll", "_internal/web/editors/dist/terminal.html"}
 DESKTOP_ROOT = "DeepSeek Cowork-win32-x64"
 DESKTOP_REQUIRED_FILES = {"deepseek-cowork.exe", "desktop-release.json", "resources/app.asar",
                           "resources/service/cowork-service.exe", "resources/service/_internal/python_env/python.exe",
@@ -39,6 +36,8 @@ def normalize_report(report):
     if not isinstance(report, dict):
         raise PlatformError("incompatible_report", "请选择更新清单或打包检查报告。")
     if "schema_version" not in report:
+        if report.get("app_layout") != "electron":
+            raise PlatformError("incompatible_report", "仅支持 Electron 工作台的更新清单或打包报告。")
         return report
     version = report.get("version", "")
     if (type(report.get("schema_version")) is not int or report["schema_version"] != 1
@@ -62,11 +61,11 @@ def sha256(path):
     return result.hexdigest()
 
 
-def inspect_archive(archive, settings, *, enterprise=False, layout="qt", version=None):
-    if layout not in {"qt", "electron"}:
-        raise PlatformError("invalid_layout", "不支持此客户端结构。")
-    root = DESKTOP_ROOT if layout == "electron" else ROOT
-    internal = "resources/service/_internal" if layout == "electron" else "_internal"
+def inspect_archive(archive, settings, *, enterprise=False, layout="electron", version=None):
+    if layout != "electron":
+        raise PlatformError("invalid_layout", "企业中心仅支持 Electron 工作台。")
+    root = DESKTOP_ROOT
+    internal = "resources/service/_internal"
     default_config = internal + "/config.json"
     files, total, seen = {}, 0, set()
     infos = archive.infolist()
@@ -102,20 +101,19 @@ def inspect_archive(archive, settings, *, enterprise=False, layout="qt", version
             raise PlatformError("archive_too_large", "安装包展开体积或压缩比超过限制。")
         if not info.is_dir():
             files[relative] = info
-    if not (DESKTOP_REQUIRED_FILES if layout == "electron" else REQUIRED_FILES) <= set(files):
+    if not DESKTOP_REQUIRED_FILES <= set(files):
         raise PlatformError("missing_runtime", "安装包缺少 EXE 或必要运行资源。")
-    if layout == "electron":
-        metadata = files["desktop-release.json"]
-        try:
-            if metadata.file_size > 16384:
-                raise ValueError()
-            identity = json.loads(archive.read(metadata))
-            if (identity.get("schema_version") != 1 or identity.get("app_layout") != layout
-                    or identity.get("target") != "windows-x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(identity.get("version", "")))
-                    or version is not None and identity["version"] != version):
-                raise ValueError()
-        except (ValueError, AttributeError, KeyError):
-            raise PlatformError("version_mismatch", "包内版本、平台或客户端结构与发布记录不一致。") from None
+    metadata = files["desktop-release.json"]
+    try:
+        if metadata.file_size > 16384:
+            raise ValueError()
+        identity = json.loads(archive.read(metadata))
+        if (identity.get("schema_version") != 1 or identity.get("app_layout") != layout
+                or identity.get("target") != "windows-x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(identity.get("version", "")))
+                or version is not None and identity["version"] != version):
+            raise ValueError()
+    except (ValueError, AttributeError, KeyError):
+        raise PlatformError("version_mismatch", "包内版本、平台或客户端结构与发布记录不一致。") from None
     capability = files.get(internal + "/enterprise_capabilities.json")
     if not capability or capability.file_size > 8192:
         raise PlatformError("incompatible_archive", "标准包尚未包含企业接入能力声明，请使用新版构建。")
@@ -128,6 +126,16 @@ def inspect_archive(archive, settings, *, enterprise=False, layout="qt", version
     if enterprise and CONNECTION_FILE not in files:
         raise PlatformError("missing_connection", "企业包缺少连接配置。")
     return files
+
+
+def desktop_manifest(item):
+    """Offline clients must verify the branded ZIP, never the standard source ZIP."""
+    if item.app_layout != "electron":
+        raise PlatformError("manifest_unavailable", "旧版客户端使用原打包报告，不提供新版工作台清单。", 404)
+    return {"schema_version": 1, "app_layout": "electron", "version": item.app_version,
+            "target_os": item.target_os, "arch": item.arch,
+            "filename": f"cowork-desktop-v{item.app_version}-windows-x64.zip",
+            "size": item.output_bytes, "sha256": item.output_sha256, "notes": item.notes}
 
 
 def public_release(item, *, admin=False):
@@ -214,13 +222,13 @@ class Releases:
     def create(self, payload, actor):
         version = payload.get("app_version", "")
         if (not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version) or payload.get("arch", "x64") != "x64"
-                or payload.get("app_layout", "qt") not in {"qt", "electron"}):
-            raise PlatformError("invalid_release", "请填写三段版本号；当前客户端发行包支持 Windows x64。")
+                or payload.get("target_os", "windows") != "windows" or payload.get("app_layout", "electron") != "electron"):
+            raise PlatformError("invalid_release", "请填写三段版本号；企业中心仅支持 Windows x64 Electron 工作台。")
         notes = str(payload.get("notes", ""))
         if len(notes) > 20000:
             raise PlatformError("invalid_release", "更新说明过长。")
         with self.database.transaction() as db:
-            item = ClientRelease(app_version=version, arch=payload.get("arch", "x64"), app_layout=payload.get("app_layout", "qt"), notes=notes, created_by=actor)
+            item = ClientRelease(app_version=version, notes=notes, created_by=actor)
             db.add(item)
             db.flush()
             self.database.audit(db, "release.created", member_id=actor, target=item.id)
@@ -241,13 +249,15 @@ class Releases:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
+            if item.app_layout != "electron":
+                raise PlatformError("retired_release", "旧版客户端已停止分发，请新建 Electron 发布。", 410)
             if (expected_stage and item.stage != expected_stage) or (expected_generation and item.generation != expected_generation):
                 raise PlatformError("cancelled", "导入已取消或发布记录已变化。", 409)
             if item.state not in {"draft", "failed"} or (item.stage == "receive" and item.state != "failed"):
                 raise PlatformError("release_busy", "当前记录不可上传，请等待处理完成或新建记录。", 409)
             if report["app_version"] != item.app_version:
                 raise PlatformError("version_mismatch", "报告版本与发布记录不一致。")
-            if report.get("app_layout", "qt") != item.app_layout:
+            if report.get("app_layout") != item.app_layout:
                 raise PlatformError("layout_mismatch", "安装包清单与发布记录的客户端结构不一致。")
             item.stage, item.generation, item.error = "receive", generation, ""
             item.revision += 1
@@ -290,6 +300,8 @@ class Releases:
                 raise PlatformError("cancelled", "导入已取消或发布记录已变化。", 409)
             if not item or item.state not in {"draft", "failed"} or not item.source_sha256 or item.stage == "receive":
                 raise PlatformError("release_not_ready", "请先完整上传标准包和报告。", 409)
+            if item.app_layout != "electron":
+                raise PlatformError("retired_release", "旧版客户端已停止分发。", 410)
             source_path = self.directory(release_id) / (item.source_sha256 + ".source.zip")
             if not source_path.is_file():
                 raise PlatformError("source_missing", "完整源文件不存在，请重新上传。", 409)
@@ -338,7 +350,7 @@ class Releases:
                                 hasher.update(block)
                                 writer.write(block)
                         source_hashes[name] = hasher.hexdigest()
-                    output.writestr((DESKTOP_ROOT if layout == "electron" else ROOT) + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
+                    output.writestr(DESKTOP_ROOT + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
             self.stage(release_id, generation, "recheck")
             with zipfile.ZipFile(candidate) as output:
                 files = inspect_archive(output, self.settings, enterprise=True, layout=layout, version=version)
@@ -406,6 +418,8 @@ class Releases:
             item = db.scalar(select(ClientRelease).where(ClientRelease.id == release_id).with_for_update())
             if not item:
                 raise PlatformError("not_found", "发布记录不存在。", 404)
+            if item.app_layout != "electron":
+                raise PlatformError("retired_release", "旧版客户端已停止分发。", 410)
             target = (ClientRelease.target_os == item.target_os, ClientRelease.arch == item.arch, ClientRelease.app_layout == item.app_layout)
             if action in {"delete", "restore"}:
                 if payload.get("revision") != item.revision:

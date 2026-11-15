@@ -37,10 +37,10 @@ class WindowsInstallerTests(unittest.TestCase):
                 child.kill(); child.wait(timeout=5)
         self.temp.cleanup()
 
-    def prepare(self):
-        plan = build_update_plan(str(self.install), str(self.source))
+    def prepare(self, layout="qt"):
+        plan = build_update_plan(str(self.install), str(self.source), layout=layout)
         path = write_update_plan(plan, str(self.root))
-        script = create_windows_update_script(str(self.install), str(self.source), path, current_pid=os.getpid(), target_dir=str(self.root / "updates"), version="9.0.0")
+        script = create_windows_update_script(str(self.install), str(self.source), path, current_pid=os.getpid(), target_dir=str(self.root / "updates"), version="9.0.0", layout=layout)
         return Path(script)
 
     def diagnostic_events(self, transaction):
@@ -303,6 +303,26 @@ $context=New-Object Windows.Forms.ApplicationContext
             self.assertTrue(any(event["phase"] == "relaunch_process_exited" and event["exit_code"] == 0 for event in events))
         finally:
             stop.set(); owner.join(timeout=2)
+
+    def test_electron_enterprise_install_preserves_binding_and_user_data(self):
+        connection = {"schema_version": 1, "config_version": 1, "platform_id": "installer-qa",
+            "platform_name": "安装验证", "platform_url": "https://installer.example.invalid", "distribution_channel": "enterprise"}
+        for directory in (self.install, self.source):
+            for name in ("resources/app.asar", "resources/service/cowork-service.exe"):
+                target = directory / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("old" if directory == self.install else "new")
+            (directory / "desktop-release.json").write_text(json.dumps({"schema_version": 1, "app_layout": "electron",
+                "target": "windows-x64", "version": "9.0.0"}), encoding="utf-8")
+            (directory / "enterprise_connection.json").write_text(json.dumps(connection), encoding="utf-8")
+        self.compile_relaunch_fixture(receipt_version="9.0.0")
+        script = self.prepare(layout="electron")
+        self.execute(script)
+        transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(transaction["phase"], "complete")
+        self.assertEqual((self.install / "resources/app.asar").read_text(), "new")
+        self.assertEqual(json.loads((self.install / "enterprise_connection.json").read_text()), connection)
+        self.assertEqual((self.install / "user_data/private.txt").read_text(), "keep")
 
     def test_nonzero_relaunch_exit_preserves_install_and_records_exit_code(self):
         self.compile_relaunch_fixture(exit_code=23)

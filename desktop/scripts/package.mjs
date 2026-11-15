@@ -9,6 +9,8 @@ const root = path.dirname(desktop);
 if (process.platform !== 'win32') throw new Error('Windows 包需要在 Windows 上构建。');
 const python = process.env.COWORK_PYTHON || path.join(root, '.venv/Scripts/python.exe');
 const qa = process.env.COWORK_QA_ROOT ? path.resolve(process.env.COWORK_QA_ROOT) : path.join(root, '.tmp/desktop-build');
+const outputDirectory = process.env.COWORK_PACKAGE_OUT_DIR ? path.resolve(process.env.COWORK_PACKAGE_OUT_DIR) : path.join(desktop, 'out');
+if (outputDirectory === desktop || desktop.startsWith(outputDirectory + path.sep)) throw new Error('发行目录不能覆盖源码目录。');
 await fs.mkdir(qa, {recursive: true});
 const env = {...process.env, COWORK_BUILD_DESKTOP_SERVICE:'1', TEMP:qa, TMP:qa,
   PYINSTALLER_CONFIG_DIR:path.join(qa,'pyinstaller-cache')};
@@ -30,7 +32,7 @@ const zipDir = path.join(root, '.tmp/desktop/download');
 let localZip = false;
 try { localZip = (await fs.stat(path.join(zipDir, `electron-v${pkg.devDependencies.electron}-win32-x64.zip`))).isFile(); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
-const outputs = await packager({dir:desktop, out:path.join(desktop,'out'), name:pkg.productName, executableName:'deepseek-cowork', platform:'win32', arch:'x64',
+const outputs = await packager({dir:desktop, out:outputDirectory, name:pkg.productName, executableName:'deepseek-cowork', platform:'win32', arch:'x64',
   electronVersion:pkg.devDependencies.electron, ...(localZip ? {electronZipDir: zipDir} : {}),
   appVersion:version, overwrite:true, asar:true, prune:true, icon:path.join(root,'images/logo.ico'),
   ignore:[/^\/(src|tests|scripts|out)(\/|$)/, /^\/node_modules(\/|$)/, /^\/(tsconfig|vite\.config)/],

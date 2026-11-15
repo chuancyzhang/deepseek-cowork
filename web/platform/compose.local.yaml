@@ -1,7 +1,7 @@
 name: cowork-enterprise-local
 services:
   database:
-    image: postgres:17
+    image: ${COWORK_DATABASE_IMAGE:-postgres:17}
     environment:
       POSTGRES_DB: cowork
       POSTGRES_USER: cowork
@@ -15,7 +15,7 @@ services:
       retries: 12
     restart: unless-stopped
   platform:
-    image: cowork-enterprise:local
+    image: ${COWORK_PLATFORM_IMAGE:-cowork-enterprise:local}
     build:
       context: .
       dockerfile: Dockerfile

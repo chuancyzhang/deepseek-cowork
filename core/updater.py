@@ -251,7 +251,9 @@ def _update_response(url, *, connection=None, **kwargs):
             yield response
 
 
-def fetch_enterprise_release(connection, timeout=12, *, layout="qt"):
+def fetch_enterprise_release(connection, timeout=12, *, layout="electron"):
+    if layout != "electron":
+        raise UpdaterError("企业中心仅支持 Electron 工作台，请下载当前企业客户端。")
     base = connection["platform_url"]
     def read(path):
         try:
@@ -270,7 +272,7 @@ def fetch_enterprise_release(connection, timeout=12, *, layout="qt"):
         raise UpdaterError("企业更新服务的平台标识与当前连接不一致。")
     if not isinstance(info.get("supported_api_versions"), list) or 1 not in info["supported_api_versions"]:
         raise UpdaterError("企业更新服务协议不兼容，请联系管理员。")
-    response = read("/api/v1/client-releases/recommended?target_os=windows&arch=x64" + ("&app_layout=electron" if layout == "electron" else ""))
+    response = read("/api/v1/client-releases/recommended?target_os=windows&arch=x64&app_layout=electron")
     if "release" not in response:
         raise UpdaterError("企业更新服务缺少推荐版本信息。")
     release = response["release"]
@@ -278,7 +280,7 @@ def fetch_enterprise_release(connection, timeout=12, *, layout="qt"):
         return None
     if (not isinstance(release, dict) or release.get("state") != "published"
             or release.get("recommended") is not True or release.get("target_os") != "windows"
-            or release.get("app_layout", "qt") != layout
+            or release.get("app_layout") != "electron"
             or release.get("arch") != "x64" or not re.fullmatch(r"\d+\.\d+\.\d+", str(release.get("app_version", "")))
             or not isinstance(release.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", release["id"])
             or not re.fullmatch(r"[a-fA-F0-9]{64}", str(release.get("sha256", "")))

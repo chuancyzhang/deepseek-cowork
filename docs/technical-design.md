@@ -163,6 +163,8 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
+如果默认输出目录中的程序正在使用，先设置 `$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')` 再构建，避免覆盖运行中的安装目录。该目录同时接收完整程序、ZIP 和清单；不要直接覆盖员工正在使用的安装目录。
+
 输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。打包检查排除用户数据与 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
 
 ```powershell
@@ -439,7 +441,9 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 普通版读取公共更新地址；地址为空时使用 GitHub。公共源网络、服务或资源缺失时可切换 GitHub，仍共用最多 5 次尝试；清单、身份或摘要错误直接停止。GitHub 的 `latest` 仅用于发现清单，ZIP 固定到 `/download/v版本号/文件名`，换源保持已选版本、大小和 SHA-256。
 
-企业发行身份来自当前安装目录，登录状态不改变渠道。企业端按 `app_layout + target_os + arch` 隔离推荐版本，Electron 请求显式带 `app_layout=electron`，旧客户端默认 Qt。安装在线缓存前重新读取推荐记录，已撤回或更换的推荐包不能继续安装；企业源失败不切到公共源。
+企业发行身份来自当前安装目录，登录状态不改变渠道。企业中心只支持 Windows x64 Electron 发行物；推荐接口默认 Electron，显式 Qt 请求返回停止支持。数据库结构版本 4 撤下旧 Qt 记录并保留业务数据，旧记录不能重新发布。安装在线缓存前重新读取推荐记录，已撤回或更换的推荐包不能继续安装；企业源失败不切到公共源。企业 ZIP 与其专用清单通过同一发布状态和文件存在性检查，清单记录封装后的大小和摘要，供本地更新复用。
+
+`scripts/package_enterprise.py` 从允许分发的源码快照构建 Linux amd64 中心镜像，核对镜像内文件与源码摘要后导出离线部署包。`deployment.json` 绑定应用版本、源码摘要、镜像 ID 和文件摘要；启动脚本先核验再导入并选择固定镜像，缺失或损坏时明确失败，不使用旧镜像冒充当前构建。交付流程不携带 `.env.local` 或业务卷，实际部署与备份步骤见[企业平台说明](../web/platform/README.md)。
 
 静态公共服务器的目录为：
 

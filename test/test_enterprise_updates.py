@@ -22,22 +22,28 @@ CONNECTION = {"schema_version": 1, "config_version": 1, "platform_id": "company"
               "distribution_channel": "enterprise"}
 
 
+def package_files(connection=None):
+    files = {"deepseek-cowork.exe": "new exe", "resources/app.asar": "interface",
+             "resources/service/cowork-service.exe": "service", "resources/service/_internal/data.txt": "data",
+             "desktop-release.json": json.dumps({"schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": "9.0.0"})}
+    if connection:
+        files["enterprise_connection.json"] = json.dumps(connection)
+    return files
+
+
 def package(connection=None):
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as archive:
-        archive.writestr("deepseek-cowork/deepseek-cowork.exe", "new exe")
-        archive.writestr("deepseek-cowork/_internal/data.txt", "data")
-        if connection:
-            archive.writestr("deepseek-cowork/enterprise_connection.json", json.dumps(connection))
+        for name, contents in package_files(connection).items():
+            archive.writestr("DeepSeek Cowork-win32-x64/" + name, contents)
     return data.getvalue()
 
 
 def installed(path, connection=None):
-    path.mkdir(exist_ok=True)
-    (path / "_internal").mkdir(exist_ok=True)
-    (path / "deepseek-cowork.exe").write_text("old exe")
-    if connection:
-        (path / "enterprise_connection.json").write_text(json.dumps(connection))
+    for name, contents in {**package_files(connection), "deepseek-cowork.exe": "old exe"}.items():
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents, encoding="utf-8")
     return str(path)
 
 
@@ -66,7 +72,7 @@ def platform():
     connection = {**CONNECTION, "platform_url": f"http://127.0.0.1:{server.server_port}/cowork"}
     state["zip"] = package(connection)
     state["release"] = {"id": "release-9", "state": "published", "recommended": True,
-                        "app_version": "9.0.0", "target_os": "windows", "arch": "x64",
+                        "app_version": "9.0.0", "app_layout": "electron", "target_os": "windows", "arch": "x64",
                         "notes": "企业发布说明", "bytes": len(state["zip"]),
                         "sha256": hashlib.sha256(state["zip"]).hexdigest()}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -81,7 +87,7 @@ def platform():
 
 def prepare(root, connection):
     return prepare_online(str(root), "5.3.0", True, threading.Event(), lambda *a, **k: None,
-                          connection=connection, retry_delays=())
+                          connection=connection, retry_delays=(), layout="electron")
 
 
 def test_http_enterprise_download_and_install_plan_bypass_loopback_proxy(tmp_path, monkeypatch):
@@ -96,16 +102,16 @@ def test_http_enterprise_download_and_install_plan_bypass_loopback_proxy(tmp_pat
         assert result["release"]["body"] == "企业发布说明"
         assert result["connection"] == connection
         assert state["requests"] == ["/cowork/api/v1/platform-info",
-                                     "/cowork/api/v1/client-releases/recommended?target_os=windows&arch=x64",
+                                     "/cowork/api/v1/client-releases/recommended?target_os=windows&arch=x64&app_layout=electron",
                                      "/cowork/api/v1/client-releases/release-9/download"]
-        worker = UpdateWorker("plan", str(tmp_path / "updates"), install, "5.3.0", True, result, connection=connection)
+        worker = UpdateWorker("plan", str(tmp_path / "updates"), install, "5.3.0", True, result, connection=connection, layout="electron")
         worker.run()
         assert worker.error is None
         assert worker.result["change_summary"]["modified"] == 1
         assert Path(worker.result["change_plan_path"]).is_file()
-        assert load_prepared(str(tmp_path / "updates"), "5.3.0") is None
-        assert load_prepared(str(tmp_path / "updates"), "5.3.0", {**connection, "platform_id": "other"}) is None
-        assert load_prepared(str(tmp_path / "updates"), "5.3.0", connection)
+        assert load_prepared(str(tmp_path / "updates"), "5.3.0", layout="electron") is None
+        assert load_prepared(str(tmp_path / "updates"), "5.3.0", {**connection, "platform_id": "other"}, layout="electron") is None
+        assert load_prepared(str(tmp_path / "updates"), "5.3.0", connection, layout="electron")
         # Recheck recommendation on restart, but reuse the verified matching ZIP.
         state["requests"].clear()
         prepare(tmp_path / "updates", connection)
@@ -113,6 +119,7 @@ def test_http_enterprise_download_and_install_plan_bypass_loopback_proxy(tmp_pat
 
 
 @pytest.mark.parametrize("field,value", [("state", "withdrawn"), ("recommended", False), ("arch", "arm64"),
+                                       ("app_layout", "qt"), ("app_layout", None),
                                        ("sha256", "bad"), ("bytes", 0), ("id", "../other"), ("app_version", "next")])
 def test_invalid_recommendation_never_downloads(tmp_path, field, value):
     with platform() as (connection, state):
@@ -164,18 +171,18 @@ def test_community_distribution_ignores_previous_enterprise_login(tmp_path):
     install = installed(tmp_path / "install")
     staged = installed(tmp_path / "staged")
     with patch("core.enterprise_client.EnterpriseStore.read", side_effect=AssertionError("community must not read enterprise state")):
-        coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"))
+        coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"), layout="electron")
         with patch.object(coordinator, "_start") as start:
             coordinator.check()
         assert coordinator.connection is None
-        assert coordinator.cache_root == coordinator.root
+        assert coordinator.cache_root != coordinator.root
         start.assert_called_once_with("online")
-        updater.build_update_plan(install, staged)
+        updater.build_update_plan(install, staged, layout="electron")
 
 
 def test_enterprise_source_cache_isolation_and_confirmed_connection(tmp_path):
     install = installed(tmp_path / "install", CONNECTION)
-    coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"))
+    coordinator = UpdateCoordinator(install, True, root=str(tmp_path / "updates"), layout="electron")
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}), patch.object(coordinator, "_start"):
         coordinator.start_automatic()
         first_root = coordinator.cache_root
@@ -199,7 +206,7 @@ def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monk
     install = installed(tmp_path / "install", CONNECTION)
     root = str(tmp_path / "updates")
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
-        coordinator = UpdateCoordinator(install, True, root=root)
+        coordinator = UpdateCoordinator(install, True, root=root, layout="electron")
         with patch.object(coordinator, "_start"):
             coordinator.check()
         identity = "b" * 32
@@ -207,7 +214,7 @@ def test_enterprise_restart_acknowledges_installer_at_stable_root(tmp_path, monk
         # A package can raise config_version; restart must still acknowledge the
         # same transaction, independently of the new cache identity.
         installed(Path(install), {**CONNECTION, "config_version": 2})
-        restarted = UpdateCoordinator(install, True, root=root)
+        restarted = UpdateCoordinator(install, True, root=root, layout="electron")
         with patch.object(restarted, "_start"):
             restarted.check()
         assert restarted.cache_root != coordinator.cache_root
@@ -226,11 +233,11 @@ def test_account_change_before_install_requires_new_check(tmp_path):
     payload = {"update_source": "online", "connection": CONNECTION, "staged_app_dir": "unused"}
     other = {**CONNECTION, "platform_id": "other"}
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={"connection": other}), patch.object(updater, "build_update_plan") as plan:
-        worker = UpdateWorker("plan", str(tmp_path), install, "5.3.0", True, payload, connection=CONNECTION)
+        worker = UpdateWorker("plan", str(tmp_path), install, "5.3.0", True, payload, connection=CONNECTION, layout="electron")
         worker.run()
         assert "更新来源已改变" in str(worker.error)
         plan.assert_not_called()
-        coordinator = UpdateCoordinator(install, True, root=str(tmp_path))
+        coordinator = UpdateCoordinator(install, True, root=str(tmp_path), layout="electron")
         coordinator.connection = CONNECTION
         coordinator.prepared = payload
         coordinator.worker = SimpleNamespace(operation="plan", cancel=threading.Event(), error=worker.error, deleteLater=lambda: None)
@@ -242,13 +249,13 @@ def test_account_change_before_install_requires_new_check(tmp_path):
 
 def test_local_enterprise_zip_needs_no_network(tmp_path):
     install = installed(tmp_path / "install", CONNECTION)
-    path = tmp_path / "deepseek-cowork-v9.0.0.zip"
+    path = tmp_path / "cowork-desktop-v9.0.0-windows-x64.zip"
     path.write_bytes(package(CONNECTION))
     with patch.object(updater.requests, "get", side_effect=AssertionError("unexpected network")), patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
-        worker = UpdateWorker("local", str(tmp_path / "updates"), install, "5.3.0", True, str(path))
+        worker = UpdateWorker("local", str(tmp_path / "updates"), install, "5.3.0", True, str(path), connection=CONNECTION, layout="electron")
         worker.run()
         assert worker.error is None
-        plan = UpdateWorker("plan", str(tmp_path / "updates"), install, "5.3.0", True, worker.result)
+        plan = UpdateWorker("plan", str(tmp_path / "updates"), install, "5.3.0", True, worker.result, connection=CONNECTION, layout="electron")
         plan.run()
         assert plan.error is None
 
@@ -257,7 +264,7 @@ def test_enterprise_outage_has_bounded_retry_without_github_fallback(tmp_path):
     with patch.object(updater, "fetch_enterprise_release", side_effect=updater.UpdateNetworkError("offline")) as fetch, patch.object(updater, "fetch_latest_release") as github:
         with pytest.raises(updater.UpdateNetworkError):
             prepare_online(str(tmp_path), "5.3.0", True, threading.Event(), lambda *a, **k: None,
-                           connection=CONNECTION, retry_delays=(0, 0, 0, 0))
+                           connection=CONNECTION, retry_delays=(0, 0, 0, 0), layout="electron")
         assert fetch.call_count == 5
         github.assert_not_called()
 
@@ -275,4 +282,4 @@ def test_enterprise_local_package_still_enforces_connection(tmp_path, candidate)
     staged = installed(tmp_path / "staged", candidate)
     with patch("core.enterprise_client.EnterpriseStore.read", return_value={}):
         with pytest.raises(updater.UpdaterError):
-            updater.build_update_plan(install, staged)
+            updater.build_update_plan(install, staged, layout="electron")

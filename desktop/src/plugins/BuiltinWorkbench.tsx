@@ -7,7 +7,8 @@ import Usage from '../Usage';
 import { Drafts, type Draft } from '../drafts';
 import DraftRecovery from '../DraftRecovery';
 import Sidebar from '../Sidebar';
-import MessageBubble, {AssistantTurn} from '../MessageBubble';
+import MessageBubble, {AssistantTurn, GenerationTaskStatus} from '../MessageBubble';
+import {activeReview} from '../reviews';
 import HistoryEditor from '../HistoryEditor';
 import Dialog from '../Dialog';
 import OfficeEditor from '../OfficeEditor';
@@ -31,6 +32,7 @@ export default function BuiltinWorkbench() {
   const timings = useMemo(() => turnTimings(events), [events]);
   const groups = useMemo(() => messageGroups(messages, questions), [messages, questions]);
   const runLabel = current?.run?.status === 'stopping' ? '正在停止，保留已完成内容…' : interaction ? '等待你的回答' : '正在处理';
+  const reviewTask = activeReview(current?.reviews || [], current?.run, current?.id || '');
   const latestGroup = groups.at(-1);
   const activeGroup = active && latestGroup?.assistant && latestGroup.messages.some(message =>
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id) ? latestGroup.id : undefined;
@@ -87,8 +89,8 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       setHistoryUndo(null);
       if (selectedId.current === historyEdit.conversationId) { setCurrent(result.conversation); setEvents(unwrapEvents(result.conversation.events || [])); }
       setHistoryEdit(null); void refreshList();
-    }}/></div> : group.assistant ? <AssistantTurn stopped={group.id === stoppedGroup?.id} statusLabel={runLabel} key={group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)} activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions} interactionRun={active ? current?.run?.id : undefined} showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))} onInteractionDone={() => setInteraction(null)} messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
-            {active && !activeProcess && <div className="run-state"><LoaderCircle size={14} className="spin"/>{runLabel}</div>}
+    }}/></div> : group.assistant ? <AssistantTurn reviewTask={group.id === activeGroup ? reviewTask : undefined} stopped={group.id === stoppedGroup?.id} statusLabel={runLabel} key={group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)} activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions} interactionRun={active ? current?.run?.id : undefined} showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))} onInteractionDone={() => setInteraction(null)} messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
+            {active && !activeProcess && !(reviewTask && activeGroup) && (reviewTask ? <GenerationTaskStatus task={reviewTask} statusLabel={runLabel} waiting={current?.run?.status === 'queued'}/> : <div className="run-state"><LoaderCircle size={14} className="spin"/>{runLabel}</div>)}
             {userStopped && !stoppedGroup && <div className="run-state" role="status">已停止</div>}
             {!active && !userStopped && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
             </div>}

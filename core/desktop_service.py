@@ -162,6 +162,7 @@ class DesktopService:
         rendered = project_visible_messages(window["messages"], timeline_events=record["meta"].get("ui_timeline_v1", []))
         return {**record, **window, "render_messages": self.files.message_files(conversation_id, rendered),
                 "run": self.public_run(run), "events": events,
+                "reviews": [self.reviews.summary(value) for value in self.reviews.entries(conversation_id).values()],
                 "draft": draft["value"], "draft_revision": draft["revision"],
                 "view": view["value"], "view_revision": view["revision"]}
 

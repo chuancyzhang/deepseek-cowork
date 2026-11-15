@@ -274,6 +274,13 @@ def test_real_rpc_agent_submits_review_tool_and_preserves_composer(tmp_path):
         ready = client.call("reviews.get", conversation_id=cid, id=draft["id"])
         assert ready["status"] == "ready", ready
         assert ready["run_id"] == result["run"]["id"]
+        summary = next(item for item in result["reviews"] if item["id"] == draft["id"])
+        assert summary["run_id"] == ready["run_id"]
+        assert summary["status"] == "ready"
+        assert summary["kind"] == "skill"
+        assert "source" not in summary and "content" not in summary and "submission" not in summary
+        other = client.call("conversation.create")
+        assert client.call("conversation.get", conversation_id=other["id"])["reviews"] == []
         assert any(event.get("event") == "review_changed" and event.get("data", {}).get("open") for event in client.events)
         saved = client.call("reviews.save", conversation_id=cid, id=draft["id"], revision=ready["revision"])
         assert Path(saved["saved_path"], "SKILL.md").is_file()

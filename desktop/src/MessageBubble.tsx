@@ -8,6 +8,7 @@ import {useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
 import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
+import {reviewTitle, type ReviewSummary} from './reviews';
 
 function MediaResult({file,cid,onFile}:{file:FileReference;cid:string;onFile:(path:string)=>void}) {
   const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
@@ -94,8 +95,21 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
 });
 export default MessageBubble;
 
-export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}}: {
-  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: () => void;
+export function GenerationTaskStatus({task, statusLabel = '正在处理', duration, expanded, toggle, waiting = false}: {
+  task: ReviewSummary; statusLabel?: string; duration?: number; expanded?: boolean; toggle?: () => void; waiting?: boolean;
+}) {
+  const office = task.kind === 'office';
+  const target = office ? reviewTitle(task) : task.title;
+  const format = office ? ({docx:'Word 文档',pptx:'PPT 演示文稿',xlsx:'Excel 工作簿'}[task.format] || task.format.toUpperCase()) : '可复用技能';
+  const stage = statusLabel !== '正在处理' ? statusLabel : waiting ? '等待开始' : task.status !== 'generating' ? '草稿已提交，正在完成回复' : office ? '正在整理内容' : '正在提炼可复用方法';
+  return <div className="generation-task">
+    <div className="generation-task-heading"><span className="generation-task-icon" aria-hidden="true">{office ? <FileText size={22}/> : <Sparkles size={22}/>}</span><div className="generation-task-identity"><strong role="status">{office ? '正在生成办公稿' : '正在沉淀为 Skill'}</strong><div className="generation-task-target" title={target + ' · ' + format}>{target} · {format}</div></div></div>
+    <div className="generation-task-footer"><span className="generation-task-stage" role="status"><LoaderCircle className="spin" size={14}/>{stage}</span><div className="generation-task-process">{toggle && <button className="process-summary" aria-expanded={expanded} onClick={toggle}>{expanded ? '收起执行过程' : '查看执行过程'}<ChevronRight size={13} className={expanded ? 'rotated' : ''}/></button>}{duration != null && <small className="process-duration">已用时 {formatDuration(duration)}</small>}</div></div>
+  </div>;
+}
+
+export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask}: {
+  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: () => void; reviewTask?: ReviewSummary;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const hasProcess = messageProcess || questions.length > 0;
@@ -109,8 +123,14 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     return seconds == null ? null : <small className="process-duration">{formatDuration(seconds)}</small>;
   }
   const [expanded, setExpanded] = useHostField<boolean | null>('reply:' + cid + ':' + messages[0].id, null);
+  const task = activeRun && reviewTask?.run_id === activeRun ? reviewTask : undefined;
+  const previousTask = useRef(task);
+  useEffect(() => {
+    if (previousTask.current && !task) setExpanded(null);
+    previousTask.current = task;
+  }, [task, setExpanded]);
   const pending = questions.some(question => !question.outcome && question.runId === interactionRun);
-  const open = pending || (expanded ?? running);
+  const open = pending || (expanded ?? (running && !task));
   const expert = messages.find(message => message.meta?.conversation_agent?.name || message.meta?.ui_conversation_agent?.name);
   const callIds = new Set(messages.flatMap(message => message.tool_calls || []).map(tool => tool.id));
   function questionRow(question: QuestionRecord) {
@@ -128,14 +148,14 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
   }
   return <section className="assistant-turn">
     {expert && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}
-    {hasProcess && <div className="reply-process"><button className="process-summary" aria-expanded={open} disabled={pending} onClick={() => setExpanded(!open)}>{running ? <LoaderCircle className="spin" size={14}/> : <Sparkles size={14}/>}<span>{running ? statusLabel : stopped ? '已停止' : '执行过程'}</span>{duration != null && <small className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</small>}<ChevronRight size={13} className={open ? 'rotated' : ''}/></button>{open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
+    {(hasProcess || task) && <div className="reply-process">{task ? <GenerationTaskStatus task={task} statusLabel={statusLabel} duration={duration} expanded={open} toggle={hasProcess && !pending ? () => setExpanded(!open) : undefined}/> : <button className="process-summary" aria-expanded={open} disabled={pending} onClick={() => setExpanded(!open)}>{running ? <LoaderCircle className="spin" size={14}/> : <Sparkles size={14}/>}<span>{running ? statusLabel : stopped ? '已停止' : '执行过程'}</span>{duration != null && <small className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</small>}<ChevronRight size={13} className={open ? 'rotated' : ''}/></button>}{hasProcess && open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
       {!!message.reasoning_content && <div className="process-step"><Sparkles className="timeline-node" size={14}/><Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<>深度思考{thoughtDuration(message)}</>}><div className="markdown"><Markdown text={message.reasoning_content} onFile={onFile}/><button className="text-link" onClick={() => void window.cowork.call('clipboard.write', {text: message.reasoning_content})}>复制思考原文</button></div></Disclosure></div>}
       {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} onFile={onFile} files={message.file_references}/></div>}
       {message.tool_calls?.map(tool => toolRow(message, tool, results.get(tool.id)))}
       {message.role === 'tool' && !callIds.has(message.tool_call_id) && toolRow(message, {id: message.tool_call_id}, message)}
       {questions.filter(question => !question.callId && question.sourceId === (message.meta?.ui_source_message_id || message.id)).map(questionRow)}
     </div>)}{questions.filter(question => question.callId ? !callIds.has(question.callId) && !messages.some(message => message.tool_call_id === question.callId) : !messages.some(message => (message.meta?.ui_source_message_id || message.id) === question.sourceId)).map(questionRow)}</div>}</div>}
-    {!hasProcess && (stopped || duration != null) && <div className="process-duration">{stopped && '已停止'}{duration != null && <>{stopped && ' · '}{running ? '已用时' : '用时'} {formatDuration(duration)}</>}</div>}
+    {!hasProcess && !task && (stopped || duration != null) && <div className="process-duration">{stopped && '已停止'}{duration != null && <>{stopped && ' · '}{running ? '已用时' : '用时'} {formatDuration(duration)}</>}</div>}
     {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly/>}
   </section>;
 }

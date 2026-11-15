@@ -6,7 +6,7 @@ import {useHostField} from './host/context';
 import BrowserWorkspace from './BrowserWorkspace';
 import TerminalWorkspace from './TerminalWorkspace';
 import ReviewWorkspace from './ReviewWorkspace';
-import {reviewTitle, type ReviewEdit, type ReviewSummary} from './reviews';
+import {reviewTitle, type ReviewEdit} from './reviews';
 import TaskWorkspace, { type TaskView } from './TaskWorkspace';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
@@ -28,20 +28,20 @@ export default function Workspace(props: Props) {
   const { conversation, value, change, expanded, editors, error } = props;
   const cid = conversation.id;
   const [tabs, setTabs] = useState<WorkbenchTab[]>([]), [profiles, setProfiles] = useState<{id: string; name: string}[]>([]);
-  const [reviews, setReviews] = useState<ReviewSummary[]>([]);
+  const reviews = conversation.reviews || [];
   const [address, setAddress] = useHostField('workspace:'+cid+':address',''), [shell, setShell] = useHostField('workspace:'+cid+':shell',''), [busy, setBusy] = useState(false), [loadError, setLoadError] = useState('');
   const root = useRef<HTMLElement>(null), alive = useRef(true);
   const [tabsOpen, setTabsOpen] = useState(false), [tabQuery, setTabQuery] = useState('');
   const tabPicker = useRef<HTMLDivElement>(null), tabTrigger = useRef<HTMLButtonElement>(null);
   const current = useRef(props); current.current = props;
   const refresh = useCallback(async () => {
-    try { const [result, drafts] = await Promise.all([call('workbench.list', { conversation_id: cid }), call<ReviewSummary[]>('reviews.list', {conversation_id: cid})]); if (alive.current) { setTabs(result.tabs); setReviews(drafts); setLoadError(''); } }
+    try { const result = await call('workbench.list', { conversation_id: cid }); if (alive.current) { setTabs(result.tabs); setLoadError(''); } }
     catch (failure) { if (alive.current) setLoadError((failure as Error).message); }
   }, [cid]);
   useEffect(() => {
     alive.current = true; void refresh();
     void call('workbench.profiles', { conversation_id: cid }).then(value => { if (alive.current) setProfiles(value); }).catch(failure => { if (alive.current) setLoadError(failure.message); });
-    const unsubscribe = window.cowork.onEvents(events => { if (events.some(event => event.event === 'service_reconnected' || ['workbench_changed','review_changed'].includes(event.event) && event.conversation_id === cid)) void refresh(); });
+    const unsubscribe = window.cowork.onEvents(events => { if (events.some(event => event.event === 'service_reconnected' || event.event === 'workbench_changed' && event.conversation_id === cid)) void refresh(); });
     return () => { alive.current = false; unsubscribe(); };
   }, [cid, refresh]);
   useEffect(() => {

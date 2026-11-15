@@ -6,6 +6,33 @@ import {HostSDK} from '../src/host/sdk.ts';
 import {PluginRegistry} from '../src/plugins/registry.ts';
 import {SaveCoordinator} from '../src/host/saveCoordinator.ts';
 import {MessageProjection,mergeEvents} from '../src/runtime.ts';
+import {activeReview,reviewTitle} from '../src/reviews.ts';
+
+test('review status uses durable revisions and the active conversation/run even before a snapshot loads',()=>{
+  const store=new HostStore();
+  const draft={id:'office',kind:'office',title:'报告',format:'docx',status:'generating',revision:2,run_id:'run-a'};
+  const run={id:'run-a',conversation_id:'a',status:'running',created_at:1,updated_at:2};
+  receiveEvents(store,[{event:'review_changed',conversation_id:'a',data:{...draft,status:'ready',revision:3}}]);
+  receiveConversation(store,'a',{id:'a',meta:{},run,reviews:[draft]});
+  receiveConversation(store,'b',{id:'b',meta:{},run:{...run,id:'run-b',conversation_id:'b'},reviews:[]});
+  assert.equal(conversationAt(store,'a').reviews[0].status,'ready');
+  assert.equal(conversationAt(store,'b').reviews.length,0);
+  assert.equal(activeReview(conversationAt(store,'a').reviews,run,'a').id,'office');
+  assert.equal(reviewTitle(draft),'报告.docx');
+  assert.equal(reviewTitle({...draft,title:'报告.DOCX'}),'报告.DOCX');
+  for(const other of [{...run,id:'next-run'}, {...run,conversation_id:'b'}, {...run,status:'completed'}, {...run,status:'failed'}, {...run,status:'interrupted'}]) {
+    assert.equal(activeReview(conversationAt(store,'a').reviews,other,'a'),undefined);
+  }
+  assert.equal(activeReview([draft],{...run,status:'stopping'},'a').id,'office');
+  const before = conversationAt(store,'a').reviews;
+  receiveEvents(store,[{event:'review_changed',conversation_id:'a',data:{...draft,revision:1}}]);
+  receiveConversation(store,'a',{id:'a',meta:{},run,reviews:[]});
+  assert.equal(conversationAt(store,'a').reviews,before);
+  assert.equal(conversationAt(store,'a').reviews[0].status,'ready');
+  receiveEvents(store,[{event:'review_changed',conversation_id:'b',data:{...draft,kind:'skill',run_id:'run-b',revision:10}}]);
+  assert.equal(conversationAt(store,'a').reviews[0].kind,'office');
+  assert.equal(activeReview(conversationAt(store,'b').reviews,conversationAt(store,'b').run,'b').kind,'skill');
+});
 
 const plugin={id:'test.plugin',name:'test',hash:'b',hostApi:2,stateVersion:1,entry:'index.html',capabilities:['drafts.read','drafts.write','document.read','document.edit','files.read'],contributes:[{id:'main',kind:'workbench',target:'main'}],token:'preview'};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};

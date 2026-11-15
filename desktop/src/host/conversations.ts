@@ -1,6 +1,7 @@
 import type {Conversation,HostEvent,Run,RuntimeEvent} from '../types';
 import type {HostStore,Update} from './store';
 import {mergeEvents,isActive} from '../runtime.ts';
+import {mergeReviews,type ReviewSummary} from '../reviews.ts';
 
 /** Backend snapshots and durable increments enter the same host projection. */
 export function receiveRun(store:HostStore,run:Run|null,id:string) {
@@ -11,20 +12,23 @@ export function receiveRun(store:HostStore,run:Run|null,id:string) {
 }
 export function conversationAt(store:HostStore,id:string):Conversation|null {
   const value=store.get<Conversation|null>(store.sessionKey('current',id),null);
-  return value?{...value,run:store.get<Record<string,Run>>('runs',{})[id]||null}:null;
+  return value?{...value,run:store.get<Record<string,Run>>('runs',{})[id]||null,reviews:store.get<ReviewSummary[]>(store.sessionKey('reviews',id),[])}:null;
 }
 export function receiveConversation(store:HostStore,id:string,update:Update<Conversation|null>) {
   const previous=conversationAt(store,id),value=typeof update==='function'?update(previous):update;
   if(!value){store.set(store.sessionKey('current',id),null);return;}
   if(value.run===null&&!isActive(previous?.run?.status))store.set<Record<string,Run>>('runs',runs=>Object.fromEntries(Object.entries(runs).filter(([key])=>key!==id)));
   if('run' in value)receiveRun(store,value.run||null,id);
-  const {run,...body}=value;store.set(store.sessionKey('current',id),body);
+  const {run,reviews,...body}=value;
+  if(reviews)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],reviews));
+  store.set(store.sessionKey('current',id),body);
 }
 export function receiveEvents(store:HostStore,batch:HostEvent[]) {
   const grouped=new Map<string,RuntimeEvent[]>();
   for(const event of batch){
     const id=event.conversation_id;if(!id)continue;
     if(event.run)receiveRun(store,event.run,id);
+    if(event.event==='review_changed' && event.data?.id)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],[event.data]));
     if(event.event!=='runtime')continue;
     if(!grouped.has(id))grouped.set(id,[]);grouped.get(id)!.push(event.data);
     const key=store.sessionKey('interaction',id);

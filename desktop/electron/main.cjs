@@ -86,7 +86,7 @@ async function createWindow() {
   });
   window.on('page-title-updated', event => event.preventDefault());
   window.webContents.on('context-menu', (_event, params) => {
-    if (!params.isEditable && !params.selectionText) return;
+    if (!params.isEditable && !params.selectionText && params.mediaType !== 'image') return;
     const flags = params.editFlags;
     const actions = params.isEditable ? [
       {label:'撤销', role:'undo', enabled:flags.canUndo},
@@ -97,7 +97,12 @@ async function createWindow() {
       {label:'粘贴', role:'paste', enabled:flags.canPaste},
       {type:'separator'},
       {label:'全选', role:'selectAll', enabled:flags.canSelectAll},
-    ] : [{label:'复制', role:'copy', enabled:flags.canCopy}];
+    ] : params.selectionText ? [{label:'复制', role:'copy', enabled:flags.canCopy}] : [];
+    if (params.mediaType === 'image') {
+      if (actions.length) actions.push({type:'separator'});
+      actions.push({label:'复制图片', enabled:params.hasImageContents,
+        click:() => window.webContents.copyImageAt(params.x, params.y)});
+    }
     Menu.buildFromTemplate(actions).popup({window, frame:params.frame || undefined});
   });
   window.webContents.on('did-start-loading', () => { uiReady = false; startup.ready = false; });

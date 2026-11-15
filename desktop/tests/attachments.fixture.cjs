@@ -1,4 +1,4 @@
-const {app,BrowserWindow}=require('electron');
+const {app,BrowserWindow,Menu,clipboard,ClipboardItem,nativeImage}=require('electron');
 const http=require('node:http'),fs=require('node:fs/promises'),path=require('node:path'),assert=require('node:assert/strict');
 const requests=[];let imagePath='',window,server;
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -20,6 +20,34 @@ app.whenReady().then(async()=>{
   while(!window)await delay(30);
   const read=code=>window.webContents.executeJavaScript(code);
   const until=async(code)=>{for(let i=0;i<700;i++){try{if(await read(code))return;}catch{}await delay(40);}throw Error('Timed out: '+code+' '+await read("JSON.stringify({text:document.body.textContent,images:[...document.querySelectorAll('.image-attachment')].map(e=>e.outerHTML),messages:[...document.querySelectorAll('.message')].map(e=>({class:e.className,text:e.textContent}))})"));};
+  // Inspect the real native menu from actual right-clicks without leaving it open.
+  let contextMenu;
+  Menu.prototype.popup=function(){contextMenu=this;};
+  const copyImage=async(selector,pasteBack=false)=>{
+    await read(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'})`);
+    await until(`document.querySelector(${JSON.stringify(selector)})?.naturalWidth>0`);
+    await delay(100);
+    const point=await read(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+    const scale=window.webContents.getZoomFactor(),position={x:Math.round(point.x*scale),y:Math.round(point.y*scale),button:'right',clickCount:1};
+    contextMenu=null;window.webContents.sendInputEvent({type:'mouseDown',...position});window.webContents.sendInputEvent({type:'mouseUp',...position});
+    for(let i=0;i<100&&!contextMenu;i++)await delay(20);
+    const copy=contextMenu?.items.find(item=>item.label==='复制图片');assert.ok(copy?.enabled,'loaded image has a copy action');
+    const previous=await Promise.all((await clipboard.read()).map(async item=>new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type=>[type,await item.getType(type)]))))));
+    try {
+      clipboard.clear();copy.click();
+      for(let i=0;i<100&&!await clipboard.has('image/png');i++)await delay(20);
+      const item=(await clipboard.read()).find(item=>item.types.includes('image/png'));
+      assert.ok(item,'clipboard contains image data');
+      const image=nativeImage.createFromBuffer(Buffer.from(await (await item.getType('image/png')).arrayBuffer()));
+      assert.deepEqual(image.getSize(),{width:320,height:200},'copy retains original image dimensions');
+      if(pasteBack){
+        await read("document.querySelector('textarea[aria-label=\"消息输入\"]').focus()");window.webContents.paste();
+        await until("document.querySelectorAll('.composer .image-attachment').length===4");
+        await read("document.querySelectorAll('.composer .image-attachment-remove')[3].click()");
+        await until("document.querySelectorAll('.composer .image-attachment').length===3");
+      }
+    } finally {await clipboard.write(previous);}
+  };
   await until("!!window.cowork&&!!document.querySelector('textarea[aria-label=\"消息输入\"]')");
   const settings=await read(`window.cowork.call('settings.save_model',{name:'图片验收',model_name:'fixture',api_key:'local-only',base_url:'http://127.0.0.1:${server.address().port}/v1',supports_vision:true})`);
   await read("window.cowork.call('settings.permission',{enabled:true})");
@@ -28,6 +56,7 @@ app.whenReady().then(async()=>{
   await until("!!document.querySelector('textarea[aria-label=\"消息输入\"]')&&document.body.innerText.includes('图片验收')");
   const paste=()=>read(`(()=>{const canvas=document.createElement('canvas');canvas.width=320;canvas.height=200;const c=canvas.getContext('2d');c.fillStyle='#f5f5f5';c.fillRect(0,0,320,200);c.fillStyle='#404040';c.font='22px sans-serif';c.fillText('图片预览验收',40,65);c.fillRect(40,100,65,55);c.fillRect(125,120,65,35);c.fillRect(210,85,65,70);const bytes=Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),x=>x.charCodeAt(0));const transfer=new DataTransfer();transfer.items.add(new File([bytes],'粘贴图片.png',{type:'image/png'}));const input=document.querySelector('textarea[aria-label="消息输入"]');input.focus();input.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:transfer}));})()`);
   for(let count=1;count<=3;count++){await paste();await until(`document.querySelectorAll('.composer .image-attachment img').length===${count}`);}
+  await copyImage('.composer .image-attachment img',true);
   const cid=(await read("window.cowork.call('conversation.list')")).conversations?.[0]?.id;
   // Obtain the durable draft through the same API used when reopening history.
   const list=await read("window.cowork.call('conversation.list')");
@@ -36,6 +65,20 @@ app.whenReady().then(async()=>{
   let conversation;
   for(let i=0;i<80;i++){conversation=await read(`window.cowork.call('conversation.get',{conversation_id:${JSON.stringify(id)}})`);if(conversation.draft.attachments.length===3)break;await delay(50);}
   assert.equal(conversation.draft.attachments.length,3);imagePath=conversation.draft.attachments[0].path;
+  for(const name of ['image-review','summary-writing'])await read(`window.cowork.call('skills.enable',{name:${JSON.stringify(name)},enabled:true})`);
+  await read(`window.cowork.call('conversation.preferences',{conversation_id:${JSON.stringify(id)},value:{selected_skill_names:['image-review']}})`);
+  await until("!!document.querySelector('[aria-label=\"选择技能 image-review\"]')");
+  await read("document.querySelector('[aria-label=\"选择技能 image-review\"]').click()");
+  await until("document.querySelector('.composer-submenu strong')?.textContent==='技能'&&!!document.querySelector('.picker-row[aria-pressed=\"true\"]')");
+  assert.equal(await read("document.querySelector('.picker-row[aria-pressed=\"true\"]').textContent"),'Image Review');
+  await read("[...document.querySelectorAll('.composer-submenu .picker-row')].find(e=>e.textContent==='Summary Writing').click()");
+  await until("document.querySelectorAll('.composer .skill-chip').length===2");
+  if(process.env.COWORK_ATTACHMENT_SCREENSHOTS){await fs.mkdir(process.env.COWORK_ATTACHMENT_SCREENSHOTS,{recursive:true});await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'skills-picker.png'),(await window.webContents.capturePage()).toPNG());}
+  await read("[...document.querySelectorAll('.composer-submenu .picker-row')].find(e=>e.textContent==='Image Review').click()");
+  await until("document.querySelectorAll('.composer .skill-chip').length===1&&!!document.querySelector('[aria-label=\"选择技能 summary-writing\"]')");
+  await read("document.querySelector('[aria-label=\"移除能力 summary-writing\"]').click();document.querySelector('textarea[aria-label=\"消息输入\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+  await until("document.querySelectorAll('.composer .skill-chip').length===0");
+  assert.equal(await read("document.querySelectorAll('.composer .image-attachment').length"),3,'changing skills preserves attachments');
   await read("document.querySelector('textarea[aria-label=\"消息输入\"]').focus()");
   await window.webContents.insertText('请查看这些图片，并说明图表内容。');
   await read(`window.cowork.call('settings.select_model',{model_id:${JSON.stringify(settings.selected_model_id)}})`);
@@ -45,6 +88,7 @@ app.whenReady().then(async()=>{
   await delay(400);
   const positions=await read("[...document.querySelectorAll('.message.user .image-attachment')].map(e=>Math.round(e.getBoundingClientRect().top))");
   assert.equal(new Set(positions).size,1,'three attachments share a row');
+  await copyImage('.message.user .image-attachment img');
   assert.ok(requests.some(payload=>payload.messages.some(message=>Array.isArray(message.content)&&message.content.filter(part=>part.type==='image_url').length===3)),'real vision request contains all three images');
   await read("(()=>{const b=document.querySelector('.process-summary');if(b?.getAttribute('aria-expanded')!=='true')b?.click()})()");
   await until("!!document.querySelector('.viewed-images .process-tool')");
@@ -66,6 +110,7 @@ app.whenReady().then(async()=>{
   const wrapped=await read("[...document.querySelectorAll('.message.user .image-attachment')].map(e=>Math.round(e.getBoundingClientRect().top))");
   assert.ok(new Set(wrapped).size>1,'narrow layout wraps thumbnails');
   if(process.env.COWORK_ATTACHMENT_SCREENSHOTS)await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'conversation-images-dark.png'),(await window.webContents.capturePage()).toPNG());
+  await copyImage('.viewed-images img');
   await read("document.querySelector('.viewed-images .image-attachment-open').click()");
   await until("!!document.querySelector('.workspace img')");
   console.log('ATTACHMENTS_FIXTURE_OK',JSON.stringify({platform:process.platform,scale:require('electron').screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));

@@ -236,6 +236,38 @@ class ManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "已下线"):
             c.call("skills.enable", name="speech-to-text", enabled=True)
 
+    def test_external_browser_toggle_matches_saved_backend_after_restart(self):
+        import sqlite3
+        from contextlib import closing
+        from core.platform_capabilities import is_windows
+        if not is_windows():
+            self.skipTest("External BrowserSkill is available on Windows only")
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            c = ServiceClient(directory)
+            try:
+                data = Path(c.call("settings.get")["data_dir"])
+                page = c.call("settings.page", page="experiments")
+                policy = json.loads((data / "config.json").read_text(encoding="utf-8"))["experimental_browser_automation"]
+                self.assertEqual(page["values"]["external_browser"], not policy["enabled"])
+                for external in (False, True, False):
+                    saved = c.call("settings.page_save", page="experiments", revision=page["revision"],
+                                   value={"external_browser": external})
+                    self.assertEqual(saved["values"]["external_browser"], external)
+                    policy = json.loads((data / "config.json").read_text(encoding="utf-8"))["experimental_browser_automation"]
+                    self.assertEqual(policy["enabled"], not external)
+                    with closing(sqlite3.connect(data / "browser_backend.sqlite")) as db:
+                        self.assertEqual(db.execute("SELECT backend FROM state WHERE id=1").fetchone()[0],
+                                         "external" if external else "internal")
+                    page = c.call("settings.page", page="experiments")
+                    self.assertEqual(page["values"]["external_browser"], external)
+                c.close()
+                c = ServiceClient(directory)
+                self.assertFalse(c.call("settings.page", page="experiments")["values"]["external_browser"])
+                with closing(sqlite3.connect(data / "browser_backend.sqlite")) as db:
+                    self.assertEqual(db.execute("SELECT backend FROM state WHERE id=1").fetchone()[0], "internal")
+            finally:
+                c.close()
+
     def test_settings_reject_invalid_changes_without_partial_save(self):
         c = self.client
         before = c.call("settings.page", page="storage")

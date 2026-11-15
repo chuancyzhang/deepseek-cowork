@@ -11,6 +11,7 @@ const SystemSettings = lazy(() => import('./management/SystemSettings'));
 const Enterprise = lazy(() => import('./management/Enterprise'));
 const Updates = lazy(() => import('./management/Updates'));
 const PluginManager = lazy(() => import('./plugins/PluginManager'));
+const Multimedia = lazy(() => import('./plugins/multimedia/Multimedia'));
 
 export const managementNames: Record<string, string> = { capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间', settings: '设置' };
 const groups: Record<string, [string, string, any][]> = {
@@ -28,9 +29,13 @@ export default function Management({ route, settings, updateSettings, openConver
   onReference: (ref: any) => Promise<void>; onError: (message: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
-  const tabs = groups[route] || groups.settings;
+  const tabs = (groups[route] || groups.settings).flatMap(item => item[0] === 'experiments' && settings?.multimedia_enabled ? [item, ['multimedia', '多媒体', Sparkles] as [string,string,any]] : [item]);
   const [tab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
   const [dirty, setDirty] = useState(false), [query, setQuery] = useState('');
+  useEffect(() => window.cowork.onEvents(events => {
+    if (events.some(event => event.event === 'settings_changed')) void rpc('settings.get').then(updateSettings).catch(error => onError(error.message));
+  }), [updateSettings, onError]);
+  useEffect(() => {if (tab === 'multimedia' && !settings?.multimedia_enabled) setTab('experiments');}, [tab, settings?.multimedia_enabled]);
   const leave = useCallback(async () => !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1, [dirty, confirm]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
@@ -39,6 +44,7 @@ export default function Management({ route, settings, updateSettings, openConver
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'plugins' ? <PluginManager/>
+        : tab === 'multimedia' && settings?.multimedia_enabled ? <Multimedia {...common} openConversation={openConversation} manageServices={async () => {if (await leave()) {setDirty(false); setTab('models');}}}/>
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>

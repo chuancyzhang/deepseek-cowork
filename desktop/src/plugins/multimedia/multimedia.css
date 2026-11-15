@@ -1,0 +1,28 @@
+.multimedia-plugin { max-width: 880px; margin-inline: auto; }
+.multimedia-plugin .media-model-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.multimedia-plugin .media-model-table th { font-weight: 500; text-align: left; padding: 12px; }
+.multimedia-plugin .media-model-table th:first-child { width: 76px; }
+.multimedia-plugin .media-model-table td { padding: 8px; border-bottom: 1px solid var(--line); }
+.multimedia-plugin .media-model-choice { width: 100%; min-height: 60px; padding: 12px; text-align: left; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; border: 1px solid transparent; background: transparent; }
+.multimedia-plugin .media-model-choice span { max-width: 100%; overflow-wrap: anywhere; }
+.multimedia-plugin .media-model-choice:hover,.multimedia-plugin .media-model-choice.selected { background: var(--hover); border-color: var(--line); }
+.multimedia-plugin small { color: var(--muted); overflow-wrap: anywhere; }
+.multimedia-plugin .media-binding-editor { margin-top: 16px; }
+.multimedia-plugin .input-action select { min-width: 0; flex: 1; }
+.multimedia-plugin .form-actions { flex-wrap: wrap; }
+.multimedia-plugin .form-actions > span { flex: 1; min-width: 150px; }
+.multimedia-plugin .media-tasks { margin-top: 32px; }
+.multimedia-plugin .media-task { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.multimedia-plugin .media-task p { overflow-wrap: anywhere; margin: 8px 0; }
+.multimedia-plugin .media-task .button-row { flex-wrap: wrap; }
+.multimedia-plugin .media-task .button-row button { overflow-wrap: anywhere; max-width: 100%; }
+.multimedia-plugin .media-task details { margin-top: 12px; }
+.multimedia-plugin .media-result img,.multimedia-plugin .media-result video,.multimedia-plugin .media-result audio { max-width: 100%; display: block; margin: 16px auto; }
+.multimedia-plugin .media-result img,.multimedia-plugin .media-result video { max-height: 440px; }
+.multimedia-plugin .media-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 440px; overflow: auto; }
+@media (max-width: 760px) {
+  .multimedia-plugin .form-grid { grid-template-columns: minmax(0,1fr); }
+  .multimedia-plugin .media-model-table th:first-child { width: 50px; }
+  .multimedia-plugin .media-model-table th,.multimedia-plugin .media-model-table td { padding: 6px 2px; }
+  .multimedia-plugin .media-model-choice { padding: 8px; }
+}

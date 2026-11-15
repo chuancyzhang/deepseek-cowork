@@ -276,8 +276,8 @@ class Management:
             previous = next((item for item in channels if item["channel_id"] == identity), {})
             if not str(value.get("display_name") or "").strip() or not str(value.get("base_url") or "").startswith(("https://", "http://")):
                 raise ValueError("请填写服务名称和有效的 HTTP 或 HTTPS 地址。")
-            if not value.get("models") or any(not str(model.get("model_name") or "").strip() for model in value["models"]):
-                raise ValueError("请至少添加一个模型，并填写每个模型的标识。")
+            if not isinstance(value.get("models"), list) or any(not str(model.get("model_name") or "").strip() for model in value["models"]):
+                raise ValueError("请填写每个模型的标识。")
             value = {**previous, **value, "channel_id": identity, "api_key": value.get("api_key") or previous.get("api_key", "")}
             self.config.set_model_channels([item for item in channels if item["channel_id"] != identity] + [value], self.config.get_selected_model_id())
             return self.s.public_settings()

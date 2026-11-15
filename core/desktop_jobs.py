@@ -68,14 +68,14 @@ class DesktopJobs:
             self.service.store.put_state("job:" + job["id"], job)
             self.service.publish({"event": "job", "data": copy.deepcopy(job)})
 
-    def submit(self, title, operation):
+    def submit(self, title, operation, *, on_settled=None):
         state = getattr(self.service, "state", None)
         with state.lock if state is not None else nullcontext():
             if state is not None and (state.update_preparing or state.shutdown_requested):
                 raise RuntimeError("应用正在准备退出或安装更新，请稍后重试。")
-            return self._submit(title, operation)
+            return self._submit(title, operation, on_settled=on_settled)
 
-    def _submit(self, title, operation):
+    def _submit(self, title, operation, *, on_settled=None):
         identity = f"{time.time_ns()}-{uuid.uuid4().hex[:10]}"
         cancelled = threading.Event()
         job = {"id": identity, "title": title, "status": "queued", "message": "等待处理", "error": "", "result": None, "created_at": time.time()}
@@ -108,6 +108,11 @@ class DesktopJobs:
             finally:
                 with self.lock:
                     self.active.pop(identity, None)
+                if on_settled is not None:
+                    try:
+                        on_settled(job)
+                    except Exception:
+                        log.exception("job_cleanup_failed id=%s", identity)
         self.executor.submit(execute)
         return {"job_id": identity}
 

@@ -1,6 +1,6 @@
 export type Attachment = { name: string; path: string; size: number };
 export type Model = { id: string; label: string; configured: boolean; display_name: string; model_name: string; base_url: string; channel_id: string; channel_display_name: string; provider_type: string; reasoning_efforts?: string[] };
-export type Settings = { models: Model[]; selected_model_id: string; god_mode: boolean; theme: string; data_dir: string; projects: any[]; context_policy: {enabled: boolean; target_tokens: number} };
+export type Settings = { models: Model[]; selected_model_id: string; god_mode: boolean; theme: string; data_dir: string; projects: any[]; multimedia_enabled?: boolean; context_policy: {enabled: boolean; target_tokens: number} };
 export type FileReference = {path: string; url: string; name: string; kind: string; label: string; references: string[]};
 export type Message = { id: string; role: string; created_at?: number; content?: any; reasoning_content?: string; tool_calls?: any[]; tool_call_id?: string; result_obj?: any; meta?: Record<string, any>; file_references?: FileReference[]; live?: boolean };
 export type Run = { id: string; conversation_id: string; message_id: string; status: string; error: string; created_at?:number; updated_at?:number };

@@ -8,7 +8,7 @@ const { BrowserHost } = require('./browser.cjs');
 const { FileHost } = require('./files.cjs');
 const fileHost = new FileHost();
 const { resolveDataDirectory } = require('./data-path.cjs');
-protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const visualizationPages = new Map();
 function servePlugin(plugin) {
   return { ...plugin, html: undefined, url: `cowork-plugin://${plugin.hash}/${plugin.entry}` };

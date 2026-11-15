@@ -27,6 +27,7 @@ export default function FilePreview({file, text, change, toolbar, cid, register}
     {failure && <p role="alert" className="error-text">{failure}</p>}
     {kind === 'office' ? <OfficePreview file={file} cid={cid}/> : html && source ? <Suspense fallback={<p role="status">正在打开编辑器…</p>}><OfficeEditor file={file} text={text} onChange={change} error={setFailure} register={(path, callback) => {flush.current=callback; register(path, callback);}}/></Suspense>
       : kind === 'image' ? <div className="image-preview"><img src={file.payload.url} alt={file.name}/></div>
+      : kind === 'video' || kind === 'audio' ? <div className="file-media-preview">{kind === 'video' ? <video src={file.payload.url} controls preload="metadata" aria-label={file.name} onError={() => setFailure('无法在应用内播放此格式，可以用本机应用打开。')}/> : <audio src={file.payload.url} controls preload="metadata" aria-label={file.name} onError={() => setFailure('无法在应用内播放此格式，可以用本机应用打开。')}/>}</div>
       : kind && ['doc','ppt','xls'].includes(kind) ? <div className="empty-workspace">此格式需要使用本机应用打开，或转换为 DOCX、PPTX、XLSX。</div>
       : <iframe title={'预览 ' + file.name} sandbox={kind === 'pdf' ? undefined : 'allow-scripts'} src={kind === 'pdf' ? url + '#navpanes=0&view=FitH' : url}/>}
   </div>;

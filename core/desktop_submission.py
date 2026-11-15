@@ -44,7 +44,13 @@ def referenced_images(text, workspace, existing):
     return result
 
 
-def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_local=False,
+def media_image_inputs(config):
+    policy = config.get("experimental_multimedia") or {}
+    bindings = policy.get("bindings") or {}
+    return policy.get("enabled") is True and any(bindings.get(key) for key in ("image_generate", "image_understand"))
+
+
+def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_local=False, media_images=False,
                  references=(), branch_file_map=None):
     text = str(text or "").strip()
     paths = list(dict.fromkeys(os.path.normpath(str(path)) for path in paths))
@@ -53,7 +59,7 @@ def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_lo
     images_from_text = referenced_images(text, workspace, paths)
     paths.extend(images_from_text)
     images = [path for path in paths if is_image(path)]
-    if images and not supports_vision:
+    if images and not supports_vision and not media_images:
         raise ValueError("当前模型未配置图片理解。图片已保留，请切换到支持图片的模型后再发送。")
     if keep_audio_local and any(is_audio_attachment(path) for path in paths):
         raise ValueError("语音转文字已下线，该音频原先仅用于转写，尚未向模型发送。请移除音频后发送文字；输入与附件仍保留。")
@@ -68,13 +74,15 @@ def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_lo
         blocks.append(text)
     parts = [{"type": "text", "text": text}] if text else []
     for path in [path for path in visible if path in images] + [path for path in visible if path not in images]:
-        parts.append({"type": "input_image" if path in images else "input_file", "path": path,
+        parts.append({"type": "input_image" if path in images and supports_vision else "input_file", "path": path,
                       "name": os.path.basename(path) or path, "source": "user_added"})
     meta = {"display_content": text}
     if paths:
         meta["user_added_files"] = paths
     if images:
         meta.update(user_added_images=images, vision_requested=bool(supports_vision))
+        if not supports_vision and media_images:
+            meta["multimedia_images"] = True
     if images_from_text:
         meta["workspace_referenced_images"] = images_from_text
     return append_reference_context({"content": "\n\n".join(blocks).strip(), "display_content": text,

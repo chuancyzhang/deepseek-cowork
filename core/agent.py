@@ -753,6 +753,10 @@ class LLMWorker(TaskWorker):
             self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
         self.discovered_tool_names = set()
         self.skill_manager.browser_run_context = self.run_context
+        media_host = getattr(config_manager, "multimedia_host", None)
+        self.multimedia_lease = media_host.bind_run() if media_host is not None else None
+        if self.multimedia_lease is not None:
+            self.finished.subscribe(self.multimedia_lease.close)
         self.tools = []
         self.tool_tasks = None
         self._refresh_tool_definitions()
@@ -857,6 +861,8 @@ class LLMWorker(TaskWorker):
         if getattr(self, "long_context_policy", {}).get("enabled"):
             from core.long_context import register_history_tools
             register_history_tools(self.skill_manager)
+        if getattr(self, "multimedia_lease", None) is not None:
+            self.multimedia_lease.register(self.skill_manager)
         for tool_name in self._selected_skill_tool_names():
             self.discovered_tool_names.add(tool_name)
         try:

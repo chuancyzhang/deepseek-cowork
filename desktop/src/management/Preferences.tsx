@@ -51,7 +51,6 @@ function ModelForm({ item, back, onDirty, updateSettings, confirm }: Props & { i
   const changeModel = (index: number, values: any) => set('models', v.models.map((model: any, i: number) => i === index ? { ...model, ...values } : model));
   async function leave() { if (!form.dirty || await confirm('保留编辑草稿？', '普通字段会保留。API Key 不写入草稿，下次需要重新填写。', ['继续编辑', '返回']) === 1) back(); }
   return <><PageHead title={item.channel_id ? '编辑模型服务' : '添加模型服务'} back={() => void leave()}/><form className="detail-form" onSubmit={async e => { e.preventDefault(); setBusy(true); setFailure(''); try {
-    if (!v.models.length) throw new Error('请至少添加一个模型。');
     updateSettings(await rpc('settings.channel_save', { value: v })); form.done(); back();
   } catch (error) { setFailure((error as Error).message); } finally { setBusy(false); } }}><div className="form-grid">
     <Field label="服务名称"><input required value={v.display_name} onChange={e => set('display_name', e.target.value)}/></Field><Field label="服务类型"><select value={v.provider_type} onChange={e => set('provider_type', e.target.value)}><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></Field>

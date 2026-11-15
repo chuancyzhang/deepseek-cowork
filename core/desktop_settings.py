@@ -76,10 +76,13 @@ class DesktopSettings:
             from core.browser_backend import normalize_policy as browser_policy
             # The persisted legacy flag enables the INTERNAL browser. The UI
             # asks about the external browser, so both read and write invert it.
-            values = {"external_browser": not browser_policy(self.config.get("experimental_browser_automation"))["enabled"]}
+            values = {"external_browser": not browser_policy(self.config.get("experimental_browser_automation"))["enabled"],
+                      "multimedia": (self.config.get("experimental_multimedia") or {}).get("enabled") is True}
             title, description = "实验功能", "按需启用，设置从下一轮任务生效。"
             sections = [{"title": "浏览器", "fields": [field("external_browser", "使用外部 Chrome / Edge", "toggle",
-                         help="关闭后使用工作区内置网页。正在运行的浏览任务结束后才能切换。")]}]
+                         help="关闭后使用工作区内置网页。正在运行的浏览任务结束后才能切换。")]},
+                        {"title": "多媒体", "fields": [field("multimedia", "启用多媒体", "toggle",
+                         help="启用后出现独立管理页。停用保留配置、任务与成果，已有任务继续收尾。")]}]
         elif name == "components":
             from core import runtime_components as runtime
             title = "组件与依赖"
@@ -146,7 +149,11 @@ class DesktopSettings:
                     self.config.set(key, value)
         elif name == "experiments":
             # Keep the original backend coordinator and task-snapshot semantics.
-            self.config.set_experimental_browser_automation({"enabled": not bool(v["external_browser"])})
+            with self.config.batch_save():
+                self.config.set_experimental_browser_automation({"enabled": not bool(v["external_browser"])})
+                self.config.set("experimental_multimedia", {**(self.config.get("experimental_multimedia") or {}), "enabled": bool(v["multimedia"])})
+            self.s.media.reconcile()
+            self.s.publish({"event": "settings_changed"})
         elif name == "components":
             from core import runtime_components as runtime
             sources = runtime.normalize_download_sources(self.config.get("download_sources"))

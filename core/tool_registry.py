@@ -106,7 +106,7 @@ EXECUTION_ONLY_TOOL_NAMES = {
 
 
 def _tokenize(text):
-    return re.findall(r"[a-z0-9][a-z0-9_\-]*", str(text or "").casefold())
+    return re.findall(r"[a-z0-9][a-z0-9_\-]*|[\u3400-\u9fff]+", str(text or "").casefold())
 
 
 def _as_string_list(value):

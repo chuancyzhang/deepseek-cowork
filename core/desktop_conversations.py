@@ -262,7 +262,7 @@ class ConversationActions:
                 if not str(p.get("text") or "").strip() and not files:
                     raise ValueError("消息内容不能为空。")
                 old_meta = old.get("meta") or {}
-                replacement = user_payload(p.get("text"), files, workspace=self.service.workspace(cid), supports_vision=True,
+                replacement = user_payload(p.get("text"), files, workspace=self.service.workspace(cid), supports_vision=not old_meta.get("multimedia_images"), media_images=bool(old_meta.get("multimedia_images")),
                     references=old_meta.get("conversation_refs", []), branch_file_map=record["meta"].get("branch_file_map"),
                     keep_audio_local=bool(old_meta.get("local_only_audio_files") or old_meta.get("transcription_only_audio_files")))
                 from core.enterprise_client import submission
@@ -412,7 +412,9 @@ class ConversationRuntime:
             for item in attachments:
                 path = str(Path(item["path"]).resolve())
                 paths.append(path if path in prior_attachments else str(self.checked_file(cid, path)))
-            message = user_payload(text, paths, workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
+            from core.desktop_submission import media_image_inputs
+            media_images = media_image_inputs(self.config)
+            message = user_payload(text, paths, workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False), media_images=media_images,
                 keep_audio_local=protected_audio,
                 references=preferences.get("conversation_refs", []), branch_file_map=record["meta"].get("branch_file_map"))
             from core.enterprise_client import submission
@@ -427,7 +429,7 @@ class ConversationRuntime:
                        "workspace_dir": str(self.workspace(cid)), "model_id": profile["id"],
                        "skills": p.get("skills", preferences.get("selected_skill_names", [])), "attachments": attachments,
                        "preferences": preferences, "input_hash": input_hash, "draft_revision": p.get("draft_revision"),
-                       "content_parts": message.get("content_parts"), "message_meta": message_meta, "rewrite": p.get("rewrite")}
+                       "content_parts": message.get("content_parts"), "message_meta": message_meta, "rewrite": p.get("rewrite"), "multimedia_images": media_images}
             if payload["rewrite"]:
                 self.conversations.idle(cid)
             payload["runtime_context"] = run_context(self, cid, payload, profile)
@@ -477,6 +479,7 @@ class ConversationRuntime:
             attachments = p.get("attachments") or []
             built = user_payload(text, [str(self.checked_file(cid, item["path"])) for item in attachments],
                 workspace=self.workspace(cid), supports_vision=profile.get("supports_vision", False),
+                media_images=bool(accepted.get("multimedia_images")),
                 keep_audio_local=bool(preferences.get("keep_audio_local")))
             message.update(content=built["content"], content_parts=built["content_parts"])
             message["meta"] = {**(message.get("meta") or {}), **(built.get("meta") or {}), "desktop_attachments": attachments}

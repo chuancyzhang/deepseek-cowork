@@ -9,6 +9,12 @@ import InlineVisualization from './InlineVisualization';
 import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
 
+function MediaResult({file,cid,onFile}:{file:FileReference;cid:string;onFile:(path:string)=>void}) {
+  const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
+  useEffect(()=>{let live=true;setUrl('');setFailure('');void window.cowork.call('file.open',{conversation_id:cid,path:file.path}).then(result=>{if(live)setUrl(result.payload.url);}).catch(error=>{if(live)setFailure(error.message);});return()=>{live=false;};},[cid,file.path]);
+  return <figure>{url&&(file.kind==='video'?<video src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure&&<p role="alert" className="error-text">{failure}</p>}</figure>;
+}
+
 function CodeBlock({ children }: { children?: React.ReactNode }) {
   const source = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
@@ -60,10 +66,12 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   const references = message.role === 'user' ? message.meta?.conversation_refs || [] : [];
   const context = message.role === 'user' ? message.meta?.ui_context || {} : {};
   const referencedFiles = (message.file_references || []).filter(file => file.references.some(reference => text.includes(reference)));
-  const documents = referencedFiles.filter(file => file.kind !== 'image');
+  const documents = referencedFiles.filter(file => !['image','audio','video'].includes(file.kind));
+  const media = referencedFiles.filter(file => ['audio','video'].includes(file.kind));
   if (message.role === 'tool') return <button className="message-tool-link" onClick={() => onAction('tool', message)}><Wrench size={14}/><span>{message.meta?.tool_name || '工具结果'}</span><ChevronDown size={13}/></button>;
   return <article id={'message-' + message.id} className={`message ${message.role}`}>
     <div className="message-body">
+    {media.length > 0 && <div className="message-media">{media.map(file => <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
     {(references.length > 0 || context.skills?.length > 0 || context.knowledge?.length > 0) && <div className="message-contexts" aria-label="发送时选中的上下文">
       {references.map((ref: any) => <span className="context-chip conversation-chip" key={ref.id || ref.session_id} title={'对话快照：' + ref.title}><MessageSquare size={13}/><span>对话 {ref.title}</span></span>)}
       {context.skills?.map((name: string) => <span className="context-chip skill-chip" key={name} title={name}>{name.startsWith('mcp-server-') ? <Link size={13}/> : <Puzzle size={13}/>}<span>{name.startsWith('mcp-server-') ? '连接器' : '技能'} {name}</span></span>)}

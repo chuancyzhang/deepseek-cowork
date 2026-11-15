@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { ArrowLeft, ArrowUp, BookOpen, Check, ChevronDown, ChevronRight, FileText, Folder, Link, LoaderCircle, MessageCircleQuestion, MessageSquare, Paperclip, Play, Plus, Puzzle, Search, ShieldCheck, SlidersHorizontal, Square, UserRound, X } from 'lucide-react';
 import type { Attachment, Conversation, Settings } from './types';
 import { receiveAttachments } from './attachments';
+import ImageAttachment, {isImageAttachment} from './ImageAttachment';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Props = {
@@ -12,6 +13,7 @@ type Props = {
   send: () => Promise<void>; stop: () => Promise<void>; attach: () => Promise<void>; permission: (enabled: boolean) => Promise<void>;
   selectModel: (id: string) => Promise<void>; route: (name: string) => Promise<void>; error: (message: string) => void;
   browseLibrary: () => Promise<void>;
+  openFile?: (path: string) => void;
 };
 const categories = [['mode', '模式', SlidersHorizontal], ['experts', '专家', UserRound], ['skills', '技能', Puzzle], ['connectors', '连接器', Link], ['conversations', '对话', MessageSquare], ['variables', '插入变量', FileText]] as const;
 const modes = [['execution', '直接推进', '讨论、执行并完成任务'], ['grilling', '拷问模式', '先澄清问题，再确认执行']] as const;
@@ -109,11 +111,12 @@ export default function Composer(props: Props) {
   const matching = list.filter(item => [item.name,item.display_name,item.title,item.description].some(part => String(part || '').toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   return <div ref={root} className={'composer-shell ' + (dragging ? 'dragging' : '')} onDragOver={event => {event.preventDefault(); setDragging(true);}} onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}} onDrop={event => {event.preventDefault(); setDragging(false); void importFiles([...event.dataTransfer.files]).catch(failure => error(failure.message));}} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); section && menu === 'add' ? setSection('') : close(); } }}>
     <div className="composer">
-      {(skills.length > 0 || refs.length > 0 || knowledge.length > 0 || attachments.length > 0) && <div className="composer-contexts">
+      {attachments.some(isImageAttachment) && conversation && <div className="image-attachments">{attachments.filter(isImageAttachment).map(file => <ImageAttachment key={conversation.id + ':' + file.path} cid={conversation.id} file={file} onOpen={props.openFile} onRemove={() => setAttachments(attachments.filter(item => item.path !== file.path))}/>)}</div>}
+      {(skills.length > 0 || refs.length > 0 || knowledge.length > 0 || attachments.some(file => !isImageAttachment(file))) && <div className="composer-contexts">
         {refs.map(ref => <div className="context-chip conversation-chip" key={ref.id}><MessageSquare size={13}/><button title={'查看引用快照：' + ref.title} onClick={() => {open('add', 'conversations');}}><span>对话 {ref.title}</span></button><button aria-label={'移除引用 ' + ref.title} onClick={() => void applyPreference({conversation_refs: refs.filter(item => item.id !== ref.id)})}><X size={12}/></button></div>)}
         {skills.map(name => <div className="context-chip skill-chip" key={name}>{name.startsWith('mcp-server-') ? <Link size={13}/> : <Puzzle size={13}/>}<span title={name}>{name.startsWith('mcp-server-') ? '连接器' : '技能'} {name}</span><button disabled={busy} aria-label={'移除能力 ' + name} onClick={() => void applyPreference({selected_skill_names: skills.filter(item => item !== name)})}><X size={12}/></button></div>)}
         {knowledge.map((ref, index) => <div className="context-chip knowledge-chip" key={JSON.stringify(ref)}><BookOpen size={13}/><button title={ref.title || ref.name} onClick={() => void props.browseLibrary().catch(failure => error(failure.message))}><span>资料 {ref.title || ref.name}</span></button><button aria-label={'移除资料 ' + (ref.title || ref.name)} onClick={() => void applyPreference({knowledge_refs: knowledge.filter((_, i) => i !== index)})}><X size={12}/></button></div>)}
-        {attachments.map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} onClick={() => setAttachments(attachments.filter(item => item.path !== file.path))}><X size={12}/></button></div>)}
+        {attachments.filter(file => !isImageAttachment(file)).map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} onClick={() => setAttachments(attachments.filter(item => item.path !== file.path))}><X size={12}/></button></div>)}
       </div>}
       <textarea ref={textarea} aria-label="消息输入" placeholder={active ? '补充要求，或留下下一步想法…' : '描述任务，输入 @ 引用会话或选择专家'} value={text} onChange={event => {
         setText(event.target.value);

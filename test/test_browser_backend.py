@@ -136,8 +136,8 @@ class BrowserBackendTest(unittest.TestCase):
     def manager(self):
         manager = SkillManager(config_manager=self.config, auto_load=False, load_mcp_tools=False)
         for name in ("workbench", "browser-automation"):
-            manager.skill_source_kinds[name] = TOOL_SOURCE_OPTIONAL
-            manager._load_legacy_implementation(name, str(ROOT / "ai_skills" / name / "impl.py"))
+            manager.skill_source_kinds[name] = "core_builtin" if name == "workbench" else TOOL_SOURCE_OPTIONAL
+            manager._load_legacy_implementation(name, str(ROOT / ("skills" if name == "workbench" else "ai_skills") / name / "impl.py"))
         return manager
 
     def test_exposure_search_validation_and_prefix_pinning(self):

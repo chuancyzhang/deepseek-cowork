@@ -72,10 +72,6 @@ class ManagementTests(unittest.TestCase):
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         storage = ChatStorage(str(self.data / "chat_history" / "chat_history.sqlite"))
         storage.register_inline_visualization(cid, {"file":"chart.html", "path":str(source), "sha256":digest, "title":"图表", "origins":[]})
-        skill = self.data / "skills" / "visualize" / "SKILL.md"
-        skill.parent.mkdir(parents=True)
-        skill.write_text("---\nname: visualize\ndescription: Local visualization fixture\n---\nRender the published visualization.\n", encoding="utf-8")
-        c.call("skills.enable", name="visualize", enabled=True)
         loaded = c.call("visualization.get", conversation_id=cid, file="chart.html")
         from html import unescape
         self.assertIn("connect-src 'none'", unescape(loaded["html"]))
@@ -85,21 +81,50 @@ class ManagementTests(unittest.TestCase):
             c.call("visualization.get", file="chart.html")
         c.call("visualization.state", conversation_id=cid, file="chart.html", sha256=digest, state={"selected":3})
         self.assertEqual(storage.get_inline_visualization_state(cid, "chart.html", digest), {"selected":3})
+
         with self.assertRaisesRegex(RuntimeError, "不属于"):
             c.call("visualization.get", conversation_id=other, file="chart.html")
         with self.assertRaisesRegex(RuntimeError, "版本"):
             c.call("visualization.state", conversation_id=cid, file="chart.html", sha256="outdated", state={"selected":4})
-        c.call("skills.enable", name="visualize", enabled=False)
-        try:
-            self.assertTrue(c.call("visualization.get", conversation_id=cid, file="chart.html")["read_only"])
-            with self.assertRaisesRegex(RuntimeError, "只读"):
-                c.call("visualization.state", conversation_id=cid, file="chart.html", sha256=digest, state={"selected":4})
-        finally:
-            c.call("skills.enable", name="visualize", enabled=True)
+        with self.assertRaisesRegex(RuntimeError, "内置"):
+            c.call("skills.enable", name="visualize", enabled=False)
+        self.assertFalse(c.call("visualization.get", conversation_id=cid, file="chart.html")["read_only"])
         source.write_text('<div id="chart">外部修改</div>', encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "已变化"):
             c.call("visualization.get", conversation_id=cid, file="chart.html")
         self.assertEqual(storage.get_inline_visualization_state(cid, "chart.html", digest), {"selected":3})
+
+    def test_pasted_image_and_tool_snapshot_preview_keep_conversation_boundaries(self):
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        from core.tool_images import persist_tool_image
+        from core.desktop_submission import user_payload
+        cid = self.client.call("conversation.create")["id"]
+        other = self.client.call("conversation.create")["id"]
+        buffer = BytesIO()
+        Image.new("RGB", (24, 16), "blue").save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode()
+        attachment = self.client.call("workspace.attach_data", conversation_id=cid, name="粘贴图片.png", base64=encoded)
+        self.assertEqual(Path(attachment["path"]).read_bytes(), buffer.getvalue())
+        root = Path(attachment["path"]).parent.parent
+        payload = user_payload("看这张图", [attachment["path"]], workspace=root, supports_vision=True)
+        self.assertEqual(payload["content_parts"][1]["type"], "input_image")
+        with self.assertRaisesRegex(ValueError, "图片已保留"):
+            user_payload("看这张图", [attachment["path"]], workspace=root)
+        for name, data in (("../escape.png", encoded), ("broken.png", "not base64")):
+            with self.assertRaises(RuntimeError):
+                self.client.call("workspace.attach_data", conversation_id=cid, name=name, base64=data)
+        snapshot = persist_tool_image(attachment["path"], str(self.data / "chat_history"), cid)
+        Path(attachment["path"]).unlink()
+        preview = self.client.call("file.open", conversation_id=cid, path=snapshot["path"])
+        self.assertTrue(preview["payload"]["read_only"])
+        self.assertEqual(preview["payload"]["preview_kind"], "image")
+        with self.assertRaisesRegex(RuntimeError, "不属于"):
+            self.client.call("file.open", conversation_id=other, path=snapshot["path"])
+        Path(snapshot["path"]).write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError, "快照"):
+            self.client.call("file.open", conversation_id=cid, path=snapshot["path"])
 
     def test_skills_experts_and_mcp_inventory(self):
         c = self.client

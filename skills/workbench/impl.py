@@ -1,4 +1,4 @@
-"""Deferred tools for the current conversation's visible workbench."""
+"""Built-in tools for the current conversation's visible workbench."""
 from core.workbench import workbench_bridge
 
 
@@ -47,7 +47,7 @@ def _tool(name, description, properties, required=(), read_only=False):
     return {"name": name, "handler": globals()[name], "description": description,
             "parameters": {"type": "object", "properties": properties, "required": list(required)},
             "read_only": read_only, "destructive": not read_only,
-            "should_defer": True, "always_load": False,
+            "should_defer": False, "always_load": False,
             "search_hint": "右侧浏览器 人机协作 网页 终端 文件 browser workbench terminal " + name}
 
 

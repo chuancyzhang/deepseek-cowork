@@ -71,18 +71,18 @@ class WorkbenchStateTest(unittest.TestCase):
         self.assertTrue(data["output"].endswith("中文"))
         self.assertEqual(terminal.read(data["cursor"])["output"], "")
 
-    def test_tools_are_deferred_and_readers_have_trusted_provenance(self):
+    def test_builtin_tools_are_available_and_readers_have_trusted_provenance(self):
         from core.skill_manager import SkillManager
-        from core.tool_registry import TOOL_SOURCE_OPTIONAL
+        from core.tool_registry import TOOL_SOURCE_CORE_BUILTIN
         manager = SkillManager(auto_load=False, load_mcp_tools=False)
         before = [item["function"]["name"] for item in manager.tool_definitions]
-        manager.skill_source_kinds["workbench"] = TOOL_SOURCE_OPTIONAL
-        manager._load_legacy_implementation("workbench", str(ROOT / "ai_skills/workbench/impl.py"))
+        manager.skill_source_kinds["workbench"] = TOOL_SOURCE_CORE_BUILTIN
+        manager._load_legacy_implementation("workbench", str(ROOT / "skills/workbench/impl.py"))
         self.assertNotIn("workbench", manager.skill_load_errors)
         names = manager.skill_to_tools["workbench"]
         self.assertEqual(len(names), 10)
         for name in names:
-            self.assertTrue(manager.tool_records[name]["should_defer"])
+            self.assertFalse(manager.tool_records[name]["should_defer"])
             self.assertFalse(manager.tool_records[name]["always_load"])
         for name in ("browser_tabs", "browser_observe", "terminal_read"):
             self.assertEqual(trusted_kind(name, manager.tools[name]), "read")

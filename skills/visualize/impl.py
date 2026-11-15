@@ -1,11 +1,14 @@
 import json
 import os
+import logging
 
 from core.inline_visualization import (
     is_visualize_enabled_context,
     publish_visualization_fragment,
     visualization_staging_dir,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _conversation_id(context):
@@ -18,7 +21,7 @@ def _disabled_error():
     return {
         "ok": False,
         "status": "denied",
-        "content": "交互可视化插件未启用，未执行任何可视化代码。",
+        "content": "交互可视化技能未加载，未执行任何可视化代码。",
     }
 
 
@@ -26,6 +29,9 @@ def run_visualization_python(workspace_dir, code, _context=None):
     """Run Python with a conversation-scoped visualization output directory."""
     if not is_visualize_enabled_context(_context):
         return _disabled_error()
+    conversation_id = _conversation_id(_context)
+    if not conversation_id:
+        return {"ok": False, "status": "error", "content": "缺少当前会话 ID，未执行可视化代码。"}
     manager = (_context or {}).get("skill_manager")
     runner = getattr(manager, "tools", {}).get("run_python_code") if manager is not None else None
     if not callable(runner):
@@ -34,11 +40,18 @@ def run_visualization_python(workspace_dir, code, _context=None):
             "status": "error",
             "content": "Python Runner 未加载，无法生成交互可视化。",
         }
+    logger.info("visualization_python_start conversation_id=%s", conversation_id)
     result = runner(workspace_dir=workspace_dir, code=code, _context=_context)
+    if isinstance(result, dict):
+        logger.info("visualization_python_done conversation_id=%s status=%s", conversation_id, result.get("status"))
+        return result
+    ok = not str(result or "").startswith("Error")
+    logger.info("visualization_python_done conversation_id=%s ok=%s", conversation_id, ok)
     return {
-        "ok": not str(result or "").startswith("Error"),
+        "ok": ok,
+        "status": "completed" if ok else "error",
         "content": str(result or ""),
-        "visualization_dir": visualization_staging_dir(_conversation_id(_context), create=True),
+        "visualization_dir": visualization_staging_dir(conversation_id, create=True),
     }
 
 

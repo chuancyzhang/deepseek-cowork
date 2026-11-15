@@ -97,7 +97,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
         </div><div className="composer-container">
 <DraftRecovery conflict={draftConflict} pending={Boolean(drafts.get(selectedId.current).pending)} resolve={keep => void resolveDraft(keep)} recover={retry => void recoverSend(retry)}/>
           {current?.meta.ppt_agent_mode && <p className="muted" role="status">PPT 助手已下线，历史与文件保留。后续消息将通过普通对话处理。</p>}
-          <Composer conversation={current} conversations={conversations} settings={settings} text={draft} setText={setDraft} attachments={attachments} setAttachments={setAttachments} skills={selectedSkills} active={active} sending={sending} textarea={composer} ensureConversation={ensureConversation} preferences={preferences} send={send} stop={stop} attach={attach} browseLibrary={browseLibrary} route={next => {if (next === 'settings') setSettingsTab('models'); return goRoute(next);}} error={error}
+          <Composer conversation={current} conversations={conversations} settings={settings} text={draft} setText={setDraft} attachments={attachments} setAttachments={setAttachments} skills={selectedSkills} active={active} sending={sending} textarea={composer} ensureConversation={ensureConversation} preferences={preferences} send={send} stop={stop} attach={attach} browseLibrary={browseLibrary} openFile={path => void openFile(path).catch(error)} route={next => {if (next === 'settings') setSettingsTab('models'); return goRoute(next);}} error={error}
             selectModel={async id => {await preferences({selected_model_id: id}); setSettings(await call('settings.select_model', {model_id: id}));}}
             permission={async enabled => {setSettings(await call('settings.permission', {enabled}));}}/>
         </div>

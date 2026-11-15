@@ -148,9 +148,9 @@ def trusted_kind(name, handler):
     expected_name = {"tool_search": "_tool_search", "lookup_app_variable": "_lookup_app_variable"}.get(name, name)
     if getattr(handler, "__name__", "") != expected_name:
         return "opaque"
-    if name == "document_read" and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "ai_skills", "document-reader", "impl.py"))):
+    if name == "document_read" and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "document-reader", "impl.py"))):
         return "read"
-    if name in {"browser_tabs", "terminal_read", "browser_observe"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "ai_skills", "workbench", "impl.py"))):
+    if name in {"browser_tabs", "terminal_read", "browser_observe"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "workbench", "impl.py"))):
         return "read"
     for skill, names in _READERS.items():
         if name in names and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", skill, "impl.py"))):

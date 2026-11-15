@@ -91,6 +91,8 @@ class Management:
                 return {**record, "fields": fields, "values": public, "configured_fields": list(values),
                         "files": self.checked(manager.list_skill_files(name))}
             if action == "enable":
+                if not p["enabled"] and (manager.skill_records.get(name) or {}).get("source_kind") == "core_builtin":
+                    raise ValueError("内置技能默认启用，不能停用。")
                 self.config.set_skill_enabled(name, bool(p["enabled"]), persist_strict=True)
                 self.skill_change("enabled" if p["enabled"] else "disabled", [name])
                 return {"saved": True}

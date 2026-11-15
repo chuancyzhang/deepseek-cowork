@@ -1,5 +1,8 @@
 ---
 name: workbench
+type: builtin
+source_type: builtin
+default_enabled: true
 description: 在当前聊天右侧浏览器中打开文件、网页和交互终端，与用户接力浏览、填写网页或运行命令。
 license: Apache-2.0
 metadata:

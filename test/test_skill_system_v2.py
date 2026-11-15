@@ -76,27 +76,41 @@ class TestSkillSystemV2(unittest.TestCase):
         shutil.copytree(source_dir, target_dir)
         return target_dir
 
-    def test_visualize_plugin_is_disabled_by_default_and_registers_no_tools(self):
-        self._copy_repo_ai_skill("visualize")
-        manager = self._build_manager()
-
-        self.assertNotIn("visualize", manager.skill_records)
-        tool_names = {
-            (item.get("function") or {}).get("name")
-            for item in manager.get_tool_definitions()
-        }
-        self.assertNotIn("run_visualization_python", tool_names)
-        self.assertNotIn("finalize_inline_visualization", tool_names)
-
-    def test_visualize_plugin_registers_tools_only_when_enabled(self):
-        self._copy_repo_ai_skill("visualize")
-        manager = self._build_manager_with_enabled({"visualize"})
-
-        self.assertIn("visualize", manager.skill_records)
-        self.assertEqual(
-            set(manager.get_tools_for_skill("visualize")),
-            {"run_visualization_python", "finalize_inline_visualization"},
-        )
+    def test_promoted_builtin_skills_ignore_old_disable_flags_and_shadow_old_copies(self):
+        names = ("visualize", "document-reader", "view-image", "workbench")
+        class ConfigStub:
+            def is_skill_enabled(self, name, default_enabled=True):
+                return False
+            def get_mcp_servers(self):
+                return []
+            def get(self, key, default=None):
+                return default
+        manager = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub(), auto_load=False)
+        manager.skills_dirs = []
+        manager.skill_root_kinds = {}
+        manager._register_skill_root(self.ai_skills_dir, "optional")
+        manager._register_skill_root(self.skills_dir, "core_builtin")
+        for name in names:
+            target = self._copy_repo_skill(name)
+            shutil.copytree(target, os.path.join(self.ai_skills_dir, name))
+        manager.load_skills()
+        inventory = [item for item in manager.get_all_skills() if item["name"] in names]
+        self.assertEqual(len(inventory), len(names))
+        self.assertTrue(all(item["enabled"] and item["source_kind"] == "core_builtin" for item in inventory))
+        for name in names:
+            with self.subTest(skill=name):
+                self.assertEqual(manager.skill_records[name]["source_kind"], "core_builtin")
+                self.assertEqual(manager.loaded_skill_sources[name], os.path.join(self.skills_dir, name))
+                self.assertFalse(manager.is_skill_editable(name))
+        for name, tools in {
+            "visualize": {"run_visualization_python", "finalize_inline_visualization"},
+            "document-reader": {"document_read"}, "view-image": {"view_image"},
+            "workbench": {"browser_tabs", "browser_open", "browser_close", "terminal_read", "terminal_input", "terminal_resize", "terminal_interrupt", "browser_observe", "browser_navigate", "browser_action"},
+        }.items():
+            self.assertEqual(set(manager.get_tools_for_skill(name)), tools)
+        definitions = manager.get_tool_definitions()
+        tool_names = [item["function"]["name"] for item in definitions]
+        self.assertEqual(len(tool_names), len(set(tool_names)))
 
     def test_web_search_plugin_loads_provider_config_and_registration_metadata(self):
         self._copy_repo_ai_skill("web-search")

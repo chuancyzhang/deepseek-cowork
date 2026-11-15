@@ -24,7 +24,7 @@ const entry = pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename',
   'conversation.archive', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond',
   'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list',
-  'workspace.create', 'workspace.attach', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
+  'workspace.create', 'workspace.attach', 'workspace.attach_data', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
 for (const method of ['project.list', 'project.save', 'project.archive', 'project.restore', 'conversation.search',
   'conversation.pin', 'conversation.restore', 'conversation.delete', 'conversation.preferences', 'conversation.export',
   'conversation.reference', 'conversation.branch', 'history.prepare', 'history.edit', 'history.delete', 'history.undo',

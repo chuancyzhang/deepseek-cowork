@@ -2,9 +2,9 @@
 name: visualize
 description: Generate interactive charts, data explorers, diagrams, simulations, or UI previews as executable HTML fragments embedded directly in the conversation.
 description_cn: 生成可直接嵌入对话的交互图表、数据探索器、Diagram、模拟器或 UI Preview。
-type: bundled_plugin
-source_type: bundled_plugin
-default_enabled: false
+type: builtin
+source_type: builtin
+default_enabled: true
 metadata:
   author: deepseek-cowork team
   version: "1.0.0"
@@ -15,7 +15,7 @@ allowed-tools: [run_visualization_python, finalize_inline_visualization]
 
 # Visualize
 
-仅在交互视图能明显改善理解、比较或探索时使用本插件。静态结构能用普通 Markdown 或 Mermaid 说明时，不要生成内联可视化。
+仅在交互视图能明显改善理解、比较或探索时使用本内置技能。静态结构能用普通 Markdown 或 Mermaid 说明时，不要生成内联可视化。
 
 ## Workflow
 

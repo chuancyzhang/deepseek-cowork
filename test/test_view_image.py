@@ -18,7 +18,7 @@ class ViewImageChatTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / "example.png"
         Image.new("RGB", (16, 12), "red").save(self.source)
-        spec = importlib.util.spec_from_file_location("view_image_test_impl", Path(__file__).resolve().parents[1] / "ai_skills/view-image/impl.py")
+        spec = importlib.util.spec_from_file_location("view_image_test_impl", Path(__file__).resolve().parents[1] / "skills/view-image/impl.py")
         self.impl = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.impl)
         self.context = {"session_id": "chat-a", "tool_call_id": "image-call", "model_api_protocol": "chat_completions",

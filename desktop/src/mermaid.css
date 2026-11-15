@@ -1,0 +1,9 @@
+.mermaid-diagram{margin:16px 0;border:1px solid var(--line);border-radius:8px;min-width:0;max-width:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+.mermaid-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:6px 8px;border-bottom:1px solid var(--line)}
+.mermaid-toolbar button,.mermaid-diagram>p button{font:inherit;font-size:12px;min-height:30px;padding:4px 8px;border-radius:5px;color:var(--muted)}
+.mermaid-toolbar button:hover,.mermaid-toolbar button[aria-pressed=true]{background:var(--soft);color:var(--text)}
+.mermaid-diagram button:focus-visible,.mermaid-viewport:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.mermaid-viewport{overflow:auto;padding:16px;max-height:720px;text-align:center}
+.mermaid-viewport img{display:block;height:auto;margin:auto}
+.mermaid-diagram>p{padding:8px 12px;margin:0;font-size:13px}
+.mermaid-diagram pre{margin:0!important;max-height:480px;overflow:auto;text-align:left}

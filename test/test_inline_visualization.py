@@ -14,6 +14,33 @@ from core.inline_visualization import (
 
 
 class TestInlineVisualization(unittest.TestCase):
+    def test_python_failure_and_cancellation_are_not_reported_as_success(self):
+        import importlib.util
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        root = Path(__file__).resolve().parents[1]
+        def load(name, skill):
+            spec = importlib.util.spec_from_file_location(name, root / "skills" / skill / "impl.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        visualize = load("test_visualize_impl", "visualize")
+        runner = load("test_visualize_runner", "python-runner")
+        context = {"conversation_id": "viz-test", "skill_manager": SimpleNamespace(
+            skill_records={"visualize": {}}, tools={"run_python_code": runner.run_python_code})}
+        process = Mock(returncode=1)
+        process.communicate.return_value = (b"partial output", b"Traceback: failure")
+        with tempfile.TemporaryDirectory() as workspace, patch.object(runner, "get_runtime_executable", return_value="python"), patch.object(runner, "run_in_sandbox", return_value=process), patch.object(visualize, "visualization_staging_dir", return_value=workspace), patch("core.inline_visualization.visualization_staging_dir", return_value=workspace):
+            result = visualize.run_visualization_python(workspace, "print(1)", context)
+            self.assertFalse(result["ok"])
+            self.assertIn("exited with code 1", result["content"])
+            self.assertIn("partial output", result["content"])
+        cancelled = {"ok": False, "status": "cancelled", "error": "stopped"}
+        context["skill_manager"].tools["run_python_code"] = Mock(return_value=cancelled)
+        self.assertEqual(visualize.run_visualization_python("unused", "print(1)", context), cancelled)
+        self.assertFalse(visualize.run_visualization_python("unused", "print(1)", {"skill_manager": context["skill_manager"]})["ok"])
+
     def test_directive_parser_only_accepts_exact_standalone_directive(self):
         source = (
             "说明\n\n"

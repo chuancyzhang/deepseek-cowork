@@ -176,7 +176,7 @@ class DesktopWorkbench:
 
 
 class DesktopFiles:
-    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
+    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
                          'file.render', 'file.render_result', 'file.install_renderer', 'file.preview'])
 
     def __init__(self, storage, config, jobs=None):
@@ -240,6 +240,35 @@ class DesktopFiles:
                 if len(result) >= 500:
                     break
             return {"root": str(root), "folder": str(folder), "files": result}
+        if method == "workspace.attach_data":
+            root = self.checked_file(cid, "attachments")
+            name = str(p.get("name") or "粘贴图片.png")
+            if name in {".", ".."} or any(char in name for char in '/\\\x00:'):
+                raise ValueError("附件文件名无效，请重新粘贴或通过添加文件选择。")
+            encoded = p.get("base64")
+            maximum = 40 * 1024 * 1024
+            if not isinstance(encoded, str) or not encoded or len(encoded) > ((maximum + 2) // 3) * 4:
+                raise ValueError("粘贴附件为空或超过 40 MiB，请保存为文件后添加。")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error) as exc:
+                raise ValueError("粘贴附件内容无效，请重新复制后粘贴。") from exc
+            if not content or len(content) > maximum:
+                raise ValueError("粘贴附件为空或超过 40 MiB，请保存为文件后添加。")
+            root.mkdir(exist_ok=True)
+            target = root / (uuid.uuid4().hex + "-" + name)
+            log.info("attachment_save_start session=%s bytes=%s", cid, len(content))
+            try:
+                with target.open("xb") as dest:
+                    dest.write(content)
+                    dest.flush()
+                    os.fsync(dest.fileno())
+            except OSError:
+                target.unlink(missing_ok=True)
+                log.exception("attachment_save_failed session=%s", cid)
+                raise
+            log.info("attachment_save_completed session=%s bytes=%s", cid, len(content))
+            return {"name": name, "path": str(target), "size": len(content)}
         if method == "workspace.attach":
             root = self.workspace(cid) / "attachments"
             root.mkdir(exist_ok=True)
@@ -271,6 +300,17 @@ class DesktopFiles:
             return {"path": str(path), "fingerprint": sha256_file(path)}
         if method == "file.open":
             from core.deliverable_editing import create_edit_session, load_editor_payload
+            from core.generated_images import session_attachment_dir
+            from core.deliverable_editing import sha256_file
+            snapshot = Path(p["path"]).resolve()
+            history_dir = self.config.get_chat_history_dir() if self.config else None
+            snapshot_root = Path(session_attachment_dir(history_dir, cid)) / "tool-images" if history_dir else None
+            if snapshot_root and snapshot.parent == snapshot_root.resolve() and re.fullmatch(r"[a-f0-9]{64}\.(png|jpg|webp|gif)", snapshot.name):
+                self.workspace(cid)  # Verify that the owning conversation still exists.
+                if not snapshot.is_file() or sha256_file(snapshot) != snapshot.stem:
+                    raise ValueError("工具图片快照已丢失或发生变化，无法可靠展示；请恢复原快照。")
+                return {"id": uuid.uuid4().hex, "path": str(snapshot), "name": "已查看的图片" + snapshot.suffix,
+                        "fingerprint": snapshot.stem, "payload": {"kind": "preview", "preview_kind": "image", "read_only": True}}
             path = self.checked_file(cid, p["path"])
             from core.file_capabilities import file_capability
             capability = file_capability(str(path))

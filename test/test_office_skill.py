@@ -17,7 +17,7 @@ file_spec.loader.exec_module(file_impl)
 
 doc_spec = importlib.util.spec_from_file_location(
     "document_impl",
-    os.path.join(os.path.dirname(__file__), "../ai_skills/document-reader/impl.py"),
+    os.path.join(os.path.dirname(__file__), "../skills/document-reader/impl.py"),
 )
 document_impl = importlib.util.module_from_spec(doc_spec)
 doc_spec.loader.exec_module(document_impl)
@@ -69,7 +69,7 @@ class TestOfficeSkill(unittest.TestCase):
     def test_document_reader_is_default_on_without_runtime_dependency_install(self):
         manifest_path = os.path.join(
             os.path.dirname(__file__),
-            "../ai_skills/document-reader/skill.json",
+            "../skills/document-reader/skill.json",
         )
         with open(manifest_path, "r", encoding="utf-8") as handle:
             manifest = json.load(handle)
@@ -135,16 +135,6 @@ class TestOfficeSkill(unittest.TestCase):
         document.save(path)
         result = document_impl.document_read(self.workspace_dir, "long.docx", cursor=batch["next_cursor"])
         self.assertEqual(result["error"]["code"], "file_changed")
-
-    def test_explicit_disable_still_overrides_document_reader_default(self):
-        from core.config_manager import ConfigManager
-
-        config = object.__new__(ConfigManager)
-        config.config = {
-            "disabled_skills": ["document-reader"],
-            "enabled_skills": [],
-        }
-        self.assertFalse(config.is_skill_enabled("document-reader", default_enabled=True))
 
     def test_document_read_handles_pptx_and_pdf(self):
         from pptx import Presentation

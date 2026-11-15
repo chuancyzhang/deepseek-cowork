@@ -3,8 +3,8 @@ name: document-reader
 description: Bundled document reader for structured documents through one unified tool.
 description_cn: 随应用提供的文档读取能力：通过统一工具读取 DOCX、PPTX、XLSX、XLS 和 PDF 文档。
 license: Apache-2.0
-type: bundled_plugin
-source_type: bundled_plugin
+type: builtin
+source_type: builtin
 default_enabled: true
 metadata:
   author: deepseek-cowork team

@@ -163,6 +163,8 @@ def run_python_code(workspace_dir, code, _context=None):
         output = output or ""
         if error:
             output += f"\nStderr: {error}"
+        if process.returncode:
+            return f"Error: Python exited with code {process.returncode}.\n{output}"
         return output if output.strip() else "(No output)"
     except FileNotFoundError:
         return "Error: Executable not found. If you are trying to run a command (like 'ls', 'git'), ensure it is installed and in the system PATH."

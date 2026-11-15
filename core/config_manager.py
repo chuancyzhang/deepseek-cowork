@@ -1686,6 +1686,21 @@ class ConfigManager:
     def set(self, key, value):
         return self._set_config_value(key, value)
 
+    def set_mode_plugin_enabled(self, plugin_id, enabled):
+        key = "disabled_mode_plugins"
+        previous = self.config.get(key)
+        disabled = set(previous or [])
+        disabled.discard(plugin_id) if enabled else disabled.add(plugin_id)
+        self.config[key] = sorted(disabled)
+        try:
+            self._write_config_or_raise()
+        except Exception:
+            if previous is None:
+                self.config.pop(key, None)
+            else:
+                self.config[key] = previous
+            raise
+
     def is_skill_enabled(self, skill_name, default_enabled=True):
         from .platform_capabilities import skill_unavailable_reason
         if skill_unavailable_reason(skill_name):

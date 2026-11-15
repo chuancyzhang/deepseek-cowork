@@ -26,6 +26,9 @@ export function useWorkbenchController() {
   const [current, setCurrent] = useConversation();
   const [events, setEvents] = useSessionField<RuntimeEvent[]>('events', []);
   const [route, setRoute] = useHostField('navigation:route', 'chat');
+  const [creationOpen, setCreationOpen] = useSessionField('creationOpen', false);
+  const [creationTab, setCreationTab] = useSessionField('creationTab', 'design');
+  const [creationScope, setCreationScope] = useSessionField('creationScope', '整个界面');
   const [loading, setLoading] = useHostField('loading', true);
   const [serviceError, setServiceError] = useHostField('serviceError', '');
   const [notice, setNotice] = useState('');
@@ -51,7 +54,7 @@ export function useWorkbenchController() {
   const [historyEdit, setHistoryEdit] = useState<{ conversationId: string; prepared: any } | null>(null);
   const [historyUndo, setHistoryUndo] = useState<{ conversationId: string; token: string } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
-  const [pluginPreview, setPluginPreview] = useState<Plugin | null>(null);
+  const [pluginPreview, setPluginPreview] = useSessionField<Plugin | null>('pluginPreview',null);
   const [themeCandidate, setThemeCandidate] = useState<any>(null), [themePreview, setThemePreview] = useState<any>(null);
   const [previewText, setPreviewText] = useState('# 让想法成为成果\n\n这里是独立的预览内容。\n\n## 今天的工作\n\n- 整理资料\n- 写下结论\n\n**继续完善。**');
   const [showUsage, setShowUsage] = useState(false);
@@ -233,7 +236,7 @@ export function useWorkbenchController() {
     const snapshots = new Map<string, string>();
     if(id===selectedId.current)for (const [path, flush] of editorFlush.current) snapshots.set(path, await flush());
     const field=<T,>(name:string,initial:T)=>host.get<T>(host.sessionKey(name,id),initial);
-    const value = { workspaceOpen: field('workspaceOpen',false), workspace: field('workspaceView',emptyWorkspace()),
+    const value = { creationOpen:field('creationOpen',false), creationTab:field('creationTab','design'), creationScope:field('creationScope','整个界面'), workspaceOpen: field('workspaceOpen',false), workspace: field('workspaceView',emptyWorkspace()),
       activeFile: field('activeFile',''), scrollTop: id===selectedId.current ? scroll.current?.scrollTop ?? field('scrollTop',0) : field('scrollTop',0),
       editors: field<Editor[]>('editors',[]).map(editor => ({ path: editor.file.path, text: snapshots.get(editor.file.path) ?? editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) };
     if (value.workspace.reviewEdits) value.workspace = {...value.workspace, reviewEdits:Object.fromEntries(Object.entries(value.workspace.reviewEdits).map(([key,edit]) => [key, {...edit,...(edit.filePath && snapshots.has(edit.filePath) ? {officeText:snapshots.get(edit.filePath)} : {})}]))};
@@ -271,6 +274,8 @@ export function useWorkbenchController() {
       if (selectedId.current !== id || generation !== loadGeneration.current) return;
       applyDraft(drafts.get(id).value, false); setDraftConflict(drafts.get(id).conflict);
       viewRevisions.current.set(id, value.view_revision ?? -1);
+      setCreationOpen(value.view?.creationOpen ?? Boolean(value.meta.creation_session));
+      setCreationTab(value.view?.creationTab || 'design'); setCreationScope(value.view?.creationScope || '整个界面');
       setWorkspaceOpen(Boolean(value.view?.workspaceOpen)); setWorkspaceView({...emptyWorkspace(), ...value.view?.workspace}); setEditors([]); setActiveFile('');
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       const restored: Editor[] = [];
@@ -301,7 +306,7 @@ export function useWorkbenchController() {
     if (!await leaveManagement.current()) return;
     await saveDraft(); await saveView();
     const blank = stateRef.current.current;
-    if (blank && !workspace && !blank.has_messages && !blank.messages?.length && !drafts.get(blank.id).value.text.trim() && !drafts.get(blank.id).value.attachments.length && !blank.meta.manual_title && !blank.meta.has_file_changes && !blank.meta.conversation_agent && !blank.meta.selected_skill_names?.length && !blank.meta.knowledge_refs?.length && !blank.meta.conversation_refs?.length && blank.meta.mode !== 'grilling' && !editorsRef.current.length && !isActive(blank.run?.status)) {
+    if (blank && !blank.meta.creation_session && !workspace && !blank.has_messages && !blank.messages?.length && !drafts.get(blank.id).value.text.trim() && !drafts.get(blank.id).value.attachments.length && !blank.meta.manual_title && !blank.meta.has_file_changes && !blank.meta.conversation_agent && !blank.meta.selected_skill_names?.length && !blank.meta.knowledge_refs?.length && !blank.meta.conversation_refs?.length && blank.meta.mode !== 'grilling' && !editorsRef.current.length && !isActive(blank.run?.status)) {
       setRoute('chat'); composer.current?.focus(); return blank;
     }
     const value = await call<Conversation>('conversation.create', { workspace_dir: workspace });
@@ -362,7 +367,7 @@ export function useWorkbenchController() {
     if (loading || !current) return;
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
     return () => clearTimeout(timer);
-  }, [editors, activeFile, workspaceOpen, workspaceView, saveView, error, loading]);
+  }, [editors, activeFile, workspaceOpen, workspaceView, creationOpen, creationTab, creationScope, saveView, error, loading]);
   useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, interaction]);
 
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
@@ -442,6 +447,7 @@ export function useWorkbenchController() {
           attachments: value.attachments.filter(file => !submittedAttachments.some(sent => sent.path === file.path)) });
       } else {
         await drafts.submit(id, { text: submittedText, attachments: submittedAttachments,
+          ...(conversation?.meta.creation_session ? {creation_scope:host.get(host.sessionKey('creationScope',id),'整个界面'),display_text:submittedText} : {}),
           model_id: conversation?.meta?.selected_model_id || settings?.selected_model_id,
           skills: conversation?.meta.selected_skill_names ?? conversation?.view?.selectedSkills ?? [] });
       }
@@ -617,9 +623,32 @@ export function useWorkbenchController() {
       if (next === 'settings') setSettings(await call('settings.get'));
     } catch (failure) { error((failure as Error).message); }
   }
+  async function enterCreation(tab = 'design') {
+    if (host.get('creation:opening',false)) return;
+    host.set('creation:opening',true);
+    try {
+      if (!await leaveManagement.current()) return;
+      const source = await ensureConversation();
+      await saveDraft(source); await saveView(source);
+      const result = await call('creation.prepare',{conversation_id:source});
+      if (selectedId.current !== source) return;
+      await switchConversation(result.conversation_id);
+      if (selectedId.current !== result.conversation_id || conversationAt(host,result.conversation_id)?.id !== result.conversation_id) return;
+      setCreationOpen(true); setCreationTab(tab); setRoute('chat');
+      await saveView(result.conversation_id); await refreshList();
+    } finally {host.set('creation:opening',false);}
+  }
+  async function exitCreation() {
+    const id = selectedId.current, source = conversationAt(host,id)?.meta.creation_source_id;
+    await saveDraft(id); await saveView(id);
+    if (selectedId.current !== id) return;
+    if (source) await switchConversation(source);
+    else {setCreationOpen(false); await saveView(id);}
+  }
   async function applyPlugin() {
     if (!pluginPreview?.token) return;
-    try { const registry = host.get<import('../plugins/registry').PluginRegistry>('pluginRegistry'); await registry.apply(pluginPreview,saves); setPluginPreview(null); }
+    const cid=selectedId.current;
+    try { const registry = host.get<import('../plugins/registry').PluginRegistry>('pluginRegistry'); await registry.apply(pluginPreview,saves); host.set(host.sessionKey('pluginPreview',cid),null); }
     catch (failure) { error((failure as Error).message); }
   }
 
@@ -632,6 +661,6 @@ export function useWorkbenchController() {
     for(const id of drafts.entries.keys()) await saveDraft(id);
     for(const key of host.values.keys()) if(key.startsWith('session:')&&key.endsWith(':current')&&host.get(key)) await saveView(key.slice(8,-8));
   }), [saves]);
-  return {settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, draftConflict, setDraftConflict, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, resolveDraft, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
+  return {creationOpen,setCreationOpen,creationTab,setCreationTab,creationScope,setCreationScope,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, draftConflict, setDraftConflict, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, resolveDraft, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
 }
 export type WorkbenchController = ReturnType<typeof useWorkbenchController>;

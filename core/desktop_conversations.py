@@ -205,6 +205,14 @@ class ConversationActions:
                     patch = {"archived": True, "deleted_at": int(time.time())}
                 else:
                     patch = {key: copy.deepcopy(value) for key, value in p.get("value", {}).items() if key in PREFERENCE_KEYS}
+                    if "mode" in patch:
+                        from core.mode_plugins import require_mode
+                        from core.clarify_mode import normalize_run_mode
+                        if patch["mode"] not in {"execution", "grilling"}:
+                            raise ValueError("请选择有效的运行模式。")
+                        if self.record(cid)["meta"].get("creation_session") and patch["mode"] != "execution":
+                            raise ValueError("请退出创造模式后，在原对话中使用拷问模式。")
+                        require_mode(self.config, normalize_run_mode(patch["mode"]))
                 self.storage.update_conversation_meta(cid, patch)
                 if method == "conversation.preferences":
                     log.info("preferences_saved session=%s keys=%s", cid, sorted(patch))
@@ -387,6 +395,7 @@ class ConversationRuntime:
             if not profile or not profile.get("api_key"):
                 raise ValueError("请先在“模型与服务”中填写 API Key，或导入现有设置。输入内容已保留。")
             text = str(p.get("text") or "").strip()
+            display_text = str(p.get("display_text") or text)
             attachments = p.get("attachments") or []
             if not text and not attachments:
                 raise ValueError("请输入消息或添加附件。")
@@ -396,6 +405,14 @@ class ConversationRuntime:
                 raise ValueError("对话不存在。")
             from core.desktop_conversations import PREFERENCE_KEYS
             preferences = {key: value for key, value in {**record["meta"], **(p.get("preferences") or {})}.items() if key in PREFERENCE_KEYS}
+            from core.mode_plugins import require_mode
+            require_mode(self.config, preferences.get("mode", "execution"))
+            if record["meta"].get("creation_session"):
+                require_mode(self.config, "creation")
+                if preferences.get("mode", "execution") != "execution":
+                    raise ValueError("请退出创造模式后，在原对话中使用拷问模式。")
+                from core.desktop_creation import creation_request
+                text = creation_request(text, p.get("creation_scope") or "整个界面")
             workspace = self.workspace(cid)
             if not workspace.is_dir():
                 if record["meta"].get("workspace_source") == "chat" or not (record["meta"].get("workspace_dir") or record["meta"].get("workspace_path")):
@@ -422,7 +439,6 @@ class ConversationRuntime:
             message_meta = {**(message.get("meta") or {})}
             # Tool-review shortcuts keep generated instructions in the model
             # content while presenting a readable request in the conversation.
-            display_text = str(p.get("display_text") or text)
             message_meta["display_content"] = display_text
             if "conversation_agent" in preferences:
                 message_meta["conversation_agent"] = preferences["conversation_agent"]

@@ -15,7 +15,7 @@ const Multimedia = lazy(() => import('./plugins/multimedia/Multimedia'));
 
 export const managementNames: Record<string, string> = { capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间', settings: '设置' };
 const groups: Record<string, [string, string, any][]> = {
-  capabilities: [['skills', '技能', Sparkles], ['mcp', 'MCP 服务', Plug], ['experts', '专家', CircleUserRound], ['plugins', '界面插件', Puzzle]],
+  capabilities: [['skills', '技能', Sparkles], ['mcp', 'MCP 服务', Plug], ['experts', '专家', CircleUserRound], ['plugins', '插件', Puzzle]],
   favorites: [['favorites', '常用任务', Star], ['schedule_history', '运行记录', Clock3]],
   settings: [['appearance', '外观与阅读', Palette], ['preferences', '回答偏好', MessageSquare], ['models', '模型与服务', Boxes],
     ['im', '消息连接', Plug], ['enterprise', '企业账号', Users], ['security', '数据安全', ShieldCheck], ['variables', '变量与凭据', KeyRound],

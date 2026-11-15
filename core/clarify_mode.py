@@ -207,6 +207,8 @@ def normalize_run_context(run_context):
     }
     if isinstance(ctx.get("knowledge_context"), dict):
         normalized["knowledge_context"] = json.loads(json.dumps(ctx["knowledge_context"]))
+    if ctx.get("creation_session"):
+        normalized["creation_session"] = True
     if "team_space" in ctx:
         # Retain invalid values too: the runtime must reject damaged bindings,
         # never normalize them into an ordinary personal conversation.

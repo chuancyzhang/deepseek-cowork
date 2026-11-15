@@ -4,15 +4,15 @@ import {useWorkbench} from '../host/Host';
 import type {Plugin} from '../types';
 const call=<T=any,>(method:string,params?:unknown)=>window.cowork.call<T>(method,params);
 export default function PluginManager(){
-  const {registry,saves,setPluginPreview,setNotice,error}=useWorkbench();
+  const {registry,saves,host,selectedId,setNotice,error}=useWorkbench();
   useSyncExternalStore(registry.subscribe,registry.snapshot);
   useEffect(()=>{void registry.refresh().catch(reason=>error(reason.message));},[registry,error]);
   const catalog=registry.inventory.catalog||registry.inventory.plugins;
   const perform=(action:()=>Promise<unknown>)=>void action().catch(reason=>error(reason.message));
-  async function preview(method:string,id?:string){const value=await call<Plugin|null>(method,id?{id}:{});if(value)setPluginPreview(value);}
+  async function preview(method:string,id?:string){const cid=selectedId.current;const value=await call<Plugin|null>(method,id?{id}:{});if(value)host.set(host.sessionKey('pluginPreview',cid),value);}
   return <section aria-label="界面插件">
     <div className="management-toolbar"><button className="primary" disabled={registry.switching} onClick={()=>perform(()=>preview('plugins.preview'))}><Plus size={15}/>添加本地插件</button></div>
-    <div className="plugin-list">{catalog.map(plugin=><section className="plugin-card" key={plugin.id}>
+    <div className="plugin-list">{(registry.inventory.modes||[]).map(plugin=><section className="plugin-card" key={plugin.id}><div className="plugin-icon"><Code2 size={24}/></div><div><h3>{plugin.name}<small>模式插件 · {plugin.enabled?'已启用':'已停用'}</small></h3><p>{plugin.description}</p><div className="button-row"><button className="secondary" onClick={()=>perform(()=>registry.enableMode(plugin.id,!plugin.enabled))}>{plugin.enabled?'停用':'启用'}</button></div></div></section>)}{catalog.map(plugin=><section className="plugin-card" key={plugin.id}>
       <div className="plugin-icon"><FileText size={24}/></div><div><h3>{plugin.name}<small>v{plugin.version}{plugin.enabled===false?' · 已停用':''}</small></h3><p>{plugin.description}</p>
       <div className="button-row">
         {plugin.id!=='cowork.workbench'&&<button className="secondary" disabled={plugin.enabled===false} onClick={()=>perform(async()=>{const result=await call('plugins.export',{id:plugin.id});if(result)setNotice('插件源码已保存到：'+result.path);})}><Code2 size={14}/>导出可编辑源码</button>}

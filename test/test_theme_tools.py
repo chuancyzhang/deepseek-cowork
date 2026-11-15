@@ -49,6 +49,25 @@ class ThemeToolTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_creation_preview_is_session_owned_and_requires_manual_apply(self):
+        context = {**self.context, "run_context": {"mode": "execution", "creation_session": True}}
+        preview = self.manager.call_tool("preview_ui_theme", {"name": "设计候选", "overrides": {"tokens": {"primary": "#2255aa"}}}, context=context)
+        self.assertEqual(preview["status"], "ok")
+        repository = ThemeRepository(self.temp_dir, preview_session="session-1")
+        before = repository.load_preview()
+        self.assertIsNotNone(before)
+        self.assertIsNone(ThemeRepository(self.temp_dir).load_preview())
+        self.assertIsNone(ThemeRepository(self.temp_dir, preview_session="other").load_preview())
+        for name, params in [
+            ("save_ui_theme_preview", {"preview_id": before["preview_id"], "preview_revision": before["revision"]}),
+            ("activate_ui_theme", {"theme_id": "default"}),
+            ("delete_ui_theme", {"theme_id": "default"}),
+        ]:
+            with self.subTest(tool=name):
+                result = self.manager.call_tool(name, params, context=context)
+                self.assertIn("创造面板", str(result))
+                self.assertEqual(repository.load_preview(), before)
+
     def test_tool_search_discovers_theme_capability(self):
         discovered = set()
         result = self.manager.call_tool(

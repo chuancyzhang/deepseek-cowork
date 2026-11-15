@@ -42,6 +42,7 @@ allowed.add('task.context');
 for (const method of ['file.render', 'file.render_result', 'file.install_renderer']) allowed.add(method);
 for (const method of ['reviews.create', 'reviews.list', 'reviews.get', 'reviews.update', 'reviews.generate', 'reviews.open', 'reviews.save', 'reviews.rebase']) allowed.add(method);
 allowed.add('host.recovery.get'); allowed.add('host.recovery.save');
+for (const method of ['modes.list', 'modes.enable', 'creation.candidate']) allowed.add(method);
 allowed.add('visualization.get'); allowed.add('visualization.state');
 for (const method of ['workbench.list', 'workbench.profiles', 'workbench.open', 'workbench.close', 'workbench.control', 'workbench.read', 'workbench.input', 'workbench.reply', 'workbench.resize', 'workbench.activate', 'file.save_copy']) allowed.add(method);
 let window, backend, plugins, tray, browserHost, quitting = false, quitPending = false, uiReady = false;
@@ -232,7 +233,22 @@ else {
       }
       if (method.startsWith('plugins.')) await backend.ready;
       if (method === 'plugins.list') return plugins.list();
-      if (method === 'plugins.inventory') return plugins.inventory();
+      if (method === 'plugins.inventory') return {...await plugins.inventory(), modes:await backend.call('modes.list',{})};
+      if (method === 'creation.prepare') {
+        const session = await backend.call('creation.open', params);
+        const reference = path.join(session.workspace, 'reference');
+        await fs.mkdir(reference, {recursive:true});
+        // Seed SDK references without overwriting edited examples or candidates.
+        await fs.cp(path.join(__dirname,'../sdk'), path.join(reference,'sdk'), {recursive:true,force:false,errorOnExist:false});
+        await fs.cp(path.join(__dirname,'../examples/workbench'), path.join(reference,'workbench'), {recursive:true,force:false,errorOnExist:false});
+        console.info('creation_prepared', {conversation_id:session.conversation_id});
+        return session;
+      }
+      if (method === 'plugins.preview_generated') {
+        const candidate = await backend.call('creation.candidate',params);
+        if (!candidate.path) throw Error('尚未生成界面候选。请先完成设计任务。');
+        return servePlugin(await plugins.preview(candidate.path));
+      }
       if (method === 'plugins.load') return servePlugin(await plugins.load(params.id));
       if (method === 'plugins.preview') {
         const result = await dialog.showOpenDialog(window, { title: '选择插件源代码文件夹', properties: ['openDirectory'] });

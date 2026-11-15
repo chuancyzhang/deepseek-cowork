@@ -217,6 +217,11 @@ class Management:
                 return self.config.restore_previous_app_variables()
             return self.config.delete_app_variable(p["id"])
         if method.startswith("themes."):
+            themes = self.themes
+            if p.get("conversation_id"):
+                record = self.s.conversations.record(str(p["conversation_id"]))
+                if record["meta"].get("creation_session"):
+                    themes = ThemeRepository(self.config.data_dir, preview_session=str(p["conversation_id"]))
             if action == "fonts":
                 from core.system_fonts import installed_font_families
                 return installed_font_families()
@@ -225,7 +230,7 @@ class Management:
                 appearance = self.themes.load_appearance()
                 return {"active": snapshot.active_theme_id, "appearance": appearance,
                         "themes": [{"id": key, "name": value[0], "description": value[1], "builtin": True} for key, value in BUILTIN_THEMES.items()] + list(snapshot.themes),
-                        "preview": self.themes.load_preview()}
+                        "preview": themes.load_preview()}
             if action == "resolve":
                 appearance = self.themes.load_appearance()
                 return self.theme(p.get("id"), dark=bool(p.get("dark")), reading=appearance["reading"])
@@ -242,15 +247,15 @@ class Management:
             elif action == "export":
                 return self.themes.export_theme(p["id"], default_design_tokens(), target_path=p["path"])
             elif action == "preview":
-                preview = self.themes.load_preview()
+                preview = themes.load_preview()
                 return {"preview": preview, "resolved": resolve_theme(preview, default_design_tokens()) if preview else None}
             elif action == "discard_preview":
-                self.themes.clear_preview(p["id"], preview_revision=p["revision"])
+                themes.clear_preview(p["id"], preview_revision=p["revision"])
             elif action == "commit_preview":
-                self.themes.commit_preview(preview_id=p["id"], preview_revision=p["revision"], name=p["name"],
+                themes.commit_preview(preview_id=p["id"], preview_revision=p["revision"], name=p["name"],
                     activate=True, default_tokens=default_design_tokens())
             self.s.publish({"event": "appearance_changed"})
-            return self._dispatch("themes.list", {})
+            return self._dispatch("themes.list", {"conversation_id": p.get("conversation_id")})
         if method == "settings.general":
             permitted = {"chat_workspace_root", "experimental_browser_automation", "experimental_long_context", "context_budget_ratio", "deepseek_v4_context_window_tokens"}
             if "value" in p:

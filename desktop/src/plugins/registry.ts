@@ -1,7 +1,7 @@
-import type {Extension,Plugin} from '../types';
+import type {Extension,Plugin,ModePlugin} from '../types';
 import type {SaveCoordinator} from '../host/saveCoordinator';
 export type Contribution={plugin:Plugin;extension:Extension};
-export type Inventory={plugins:Plugin[];selected:Record<string,string[]>;catalog?:Plugin[]};
+export type Inventory={plugins:Plugin[];selected:Record<string,string[]>;catalog?:Plugin[];modes?:ModePlugin[]};
 type Candidate={plugin:Plugin;ready:Set<string>;expected:Set<string>;failure:string};
 const call=<T=any>(method:string,params?:unknown)=>window.cowork.call<T>(method,params);
 
@@ -18,6 +18,9 @@ export class PluginRegistry {
   subscribe=(listener:()=>void)=>{this.listeners.add(listener);return ()=>{this.listeners.delete(listener);};};
   snapshot=()=>this.version;
   async refresh(){this.inventory=await call<Inventory>('plugins.inventory');this.changed();}
+  async enableMode(id:string,enabled:boolean){
+    this.inventory={...this.inventory,modes:await call<ModePlugin[]>('modes.enable',{id,enabled})};this.changed();
+  }
   resolve(kind:Extension['kind'],target:string):Contribution[] {
     const refs=this.inventory.selected[`${kind}:${target}`]||this.inventory.selected[`${kind}:*`]||[];
     return refs.flatMap(ref=>this.inventory.plugins.flatMap(plugin=>plugin.contributes.filter(extension=>`${plugin.id}/${extension.id}`===ref).map(extension=>({plugin,extension}))));
@@ -59,7 +62,7 @@ export class PluginRegistry {
     this.switching=true;
     try{
       await Promise.all([...this.pending]);await saves.preserve('plugin');
-      this.inventory=await call<Inventory>(method,params);
+      this.inventory={...await call<Inventory>(method,params),modes:this.inventory.modes};
       if(method==='plugins.recover')this.recoveryEpoch++;
     }finally{this.switching=false;this.changed();}
   }

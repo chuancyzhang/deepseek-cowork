@@ -6,13 +6,14 @@ import GatewaySetup from './GatewaySetup';
 import { ThemeSample } from '../ThemePreview';
 import type { Settings } from '../types';
 import { useHostField } from '../host/context';
+import { useWorkbench } from '../host/Host';
 
 type Props = { kind: string; settings: Settings | null; updateSettings: (settings: Settings) => void; onError: (message: string) => void; onDirty: (value: boolean) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number> };
 
 export default function Preferences(props: Props) {
   const { kind } = props;
-  if (kind === 'appearance') return <Appearance {...props}/>;
+  if (kind === 'appearance') return <AppearanceEntry/>;
   if (kind === 'models') return <Models {...props}/>;
   if (kind === 'variables') return <Variables {...props}/>;
   if (kind === 'jobs') return <Jobs {...props}/>;
@@ -70,21 +71,24 @@ function ModelForm({ item, back, onDirty, updateSettings, confirm }: Props & { i
   {failure && <ErrorState message={failure}/>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button className="primary" disabled={busy}><Check size={16}/>保存服务</button></div></form></>;
 }
 
-function Appearance({ onError, settings, updateSettings, confirm }: Props) {
+function AppearanceEntry(){const c=useWorkbench();return <><PageHead compact title="外观与阅读" detail="在创造模式中统一设计主题、阅读样式和工作台。"/><button className="primary" onClick={()=>void c.enterCreation('themes').catch(reason=>c.error(reason.message))}>打开创造模式</button></>;}
+
+export function Appearance({ onError, settings, updateSettings, confirm, previewChanged, applied }: Props & {previewChanged?:(value:any)=>void;applied?:(previous:string)=>void}) {
   const [fonts, setFonts] = useState<string[]>([]);
   useEffect(() => {void rpc('themes.fonts').then(setFonts).catch(error => setFailure(error.message));}, []);
   const [value, setValue] = useState<any>(null), [preview, setPreview] = useState<any>(null), [selected, setSelected] = useState(''), [failure, setFailure] = useState('');
   const load = useCallback(async () => { try { const data = await rpc('themes.list'); setValue(data); setSelected(data.active); } catch (error) { setFailure((error as Error).message); } }, []);
   useEffect(() => { void load(); }, [load]);
   const dark = value?.appearance.mode === 'dark' || value?.appearance.mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches;
-  useEffect(() => { if (selected) void rpc('themes.resolve', { id: selected, dark }).then(setPreview).catch(error => setFailure(error.message)); }, [selected, dark, value?.appearance.reading]);
+  useEffect(() => { let alive=true;if (selected) void rpc('themes.resolve', { id: selected, dark }).then(result=>{if(alive)setPreview(result);}).catch(error => {if(alive)setFailure(error.message);});return()=>{alive=false;}; }, [selected, dark, value?.appearance.reading]);
+  useEffect(()=>{if(preview)previewChanged?.(preview);},[preview,previewChanged]);
   async function appearance(next: any) { try { setValue(await rpc('themes.appearance', { value: next })); if (settings) updateSettings({ ...settings, theme: next.mode }); } catch (error) { setFailure((error as Error).message); } }
-  return <><PageHead compact title="外观与阅读" detail="先在右侧预览，找到适合你的颜色与阅读节奏。"><button className="secondary" onClick={async () => { const path = await rpc('dialog.choose', { kind: 'theme' }); if (path) { try { await rpc('themes.import', { path }); await load(); } catch (error) { setFailure((error as Error).message); } } }}><Download size={15}/>导入主题</button></PageHead>
+  return <><PageHead compact title="外观与阅读" detail={previewChanged?"先在左侧预览，找到适合你的颜色与阅读节奏。":"先预览，找到适合你的颜色与阅读节奏。"}><button className="secondary" onClick={async () => { const path = await rpc('dialog.choose', { kind: 'theme' }); if (path) { try { await rpc('themes.import', { path }); await load(); } catch (error) { setFailure((error as Error).message); } } }}><Download size={15}/>导入主题</button></PageHead>
     {failure && <ErrorState message={failure} retry={() => void load()}/>}{value && <>
       <div className="segmented" aria-label="明暗模式">{[['system','跟随系统'],['light','浅色'],['dark','深色']].map(([mode,label]) => <button key={mode} className={value.appearance.mode === mode ? 'selected' : ''} onClick={() => void appearance({ ...value.appearance, mode })}>{label}</button>)}</div>
       <div className="appearance-layout"><div className="theme-inventory">{value.themes.map((theme: any) => <button className={`theme-tile ${selected === theme.id ? 'selected' : ''}`} key={theme.id} onClick={() => setSelected(theme.id)}><span className={'theme-swatch ' + theme.id}/><span><strong>{theme.name}</strong><small>{theme.description || '自定义主题'}</small></span>{value.active === theme.id && <Check size={16}/>}</button>)}</div>
-      <ThemeSample theme={preview}/></div>
-      <div className="form-actions"><button className="secondary" disabled={!selected || value.themes.find((item: any) => item.id === selected)?.builtin} onClick={async () => { const path = await rpc('dialog.save', { name: (preview?.name || '主题') + '.cowork-theme' }); if (path) { try { await rpc('themes.export', { id: selected, path }); onError('主题已导出。'); } catch (error) { setFailure((error as Error).message); } } }}>导出主题</button><button className="secondary" disabled={value.themes.find((item:any) => item.id === selected)?.builtin} onClick={async () => {if (await confirm("删除自定义主题？", "如果它正在使用，工作台会恢复内置主题。", ["取消","删除"]) === 1) {try {await rpc("themes.delete",{id:selected});await load();}catch(error){setFailure((error as Error).message);}}}}>删除主题</button><button className="primary" disabled={selected === value.active} onClick={async () => { try { setValue(await rpc('themes.activate', { id: selected })); } catch (error) { setFailure((error as Error).message); } }}><Check size={16}/>应用主题</button></div>
+      {!previewChanged&&<ThemeSample theme={preview}/>}</div>
+      <div className="form-actions"><button className="secondary" disabled={!selected || value.themes.find((item: any) => item.id === selected)?.builtin} onClick={async () => { const path = await rpc('dialog.save', { name: (preview?.name || '主题') + '.cowork-theme' }); if (path) { try { await rpc('themes.export', { id: selected, path }); onError('主题已导出。'); } catch (error) { setFailure((error as Error).message); } } }}>导出主题</button><button className="secondary" disabled={value.themes.find((item:any) => item.id === selected)?.builtin} onClick={async () => {if (await confirm("删除自定义主题？", "如果它正在使用，工作台会恢复内置主题。", ["取消","删除"]) === 1) {try {await rpc("themes.delete",{id:selected});await load();}catch(error){setFailure((error as Error).message);}}}}>删除主题</button><button className="primary" disabled={selected === value.active} onClick={async () => { try { setValue(await rpc('themes.activate', { id: selected })); applied?.(value.active); } catch (error) { setFailure((error as Error).message); } }}><Check size={16}/>应用主题</button></div>
       <section className="settings-section"><h3>阅读</h3><div className="form-grid">{[["font_family","界面字体"],["mono_font_family","代码字体"]].map(([key,label]) => <Field label={label} key={key}><select value={value.appearance.reading[key] || ""} onChange={event => void appearance({...value.appearance, reading:{...value.appearance.reading,[key]:event.target.value}})}><option value="">使用主题字体</option>{fonts.map(font => <option key={font} value={font}>{font}</option>)}</select></Field>)}</div><div className="form-grid"><Field label="字号"><select value={value.appearance.reading.font_scale || 1} onChange={e => void appearance({ ...value.appearance, reading: { ...value.appearance.reading, font_scale: +e.target.value } })}>{[.9,1,1.1,1.2,1.3,1.5].map(scale => <option key={scale} value={scale}>{Math.round(scale*100)}%</option>)}</select></Field><Field label="界面密度"><select value={value.appearance.reading.density || 'comfortable'} onChange={e => void appearance({ ...value.appearance, reading: { ...value.appearance.reading, density: e.target.value } })}><option value="comfortable">舒适</option><option value="standard">标准</option><option value="compact">紧凑</option></select></Field></div></section>
     </>}</>;
 }

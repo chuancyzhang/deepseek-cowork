@@ -21,6 +21,21 @@ from core.clarify_mode import (
 from core.message_persistence import fold_skill_state_events
 
 
+def test_bundled_grilling_plugin_preserves_existing_prompt_bytes():
+    import hashlib
+    from core.mode_plugins import GRILLING
+    # Captured from the original Agent branch before extracting the policy.
+    cases = [
+        ({}, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        ({"mode": "grilling"}, "24f843dc36a3524b2c77bf22c1ff749e49660711b9dc03ce478b26b9e805a73d"),
+        ({"mode": "grilling", "grill_round_count": 10, "grill_cycle_count": 2}, "5745fb03de6f217e3cb59b45c2b6274a85ce7103bd4887b24759ca03df6a70a7"),
+        ({"mode": "grilling", "grill_checkpoint_cancelled": True}, "dc2754e953711aabf83b7ab55dd0fb70f58472dbaaf2c20f40f1ec47f937d165"),
+        ({"mode": "execution", "grill_execution_confirmed": True}, "fd42af2213134683dafdf75bd7903131c0b3e8de8a71256702348776fe4ce89f"),
+    ]
+    for context, expected in cases:
+        assert hashlib.sha256("\n".join(GRILLING.policy.prompt_lines(context)).encode()).hexdigest() == expected
+
+
 class _ConfigStub:
     def __init__(self, history_dir):
         self._history_dir = history_dir

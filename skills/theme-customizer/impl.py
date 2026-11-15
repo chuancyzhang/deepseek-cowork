@@ -25,7 +25,16 @@ def _repository(_context):
         return repository
     config_manager = context.get("config_manager")
     data_dir = getattr(config_manager, "data_dir", None)
-    return ThemeRepository(data_dir)
+    creation = (context.get("run_context") or {}).get("creation_session")
+    session = context.get("session_id") if creation else ""
+    if creation and not session:
+        raise ValueError("创造模式缺少设计会话，无法保存主题候选。")
+    return ThemeRepository(data_dir, preview_session=str(session or ""))
+
+
+def _require_manual_apply(context):
+    if isinstance(context, dict) and (context.get("run_context") or {}).get("creation_session"):
+        raise ValueError("创造模式只生成候选；请让用户在创造面板中应用或管理已保存主题。")
 
 
 def _approval_response(message, *, title, details="", _context=None):
@@ -479,6 +488,7 @@ def save_ui_theme_preview(
     activate=True,
     _context=None,
 ):
+    _require_manual_apply(_context)
     repository = _repository(_context)
     preview = repository.load_preview()
     if not preview or preview.get("preview_id") != preview_id:
@@ -561,6 +571,7 @@ def save_ui_theme_preview(
 
 
 def activate_ui_theme(theme_id, _context=None):
+    _require_manual_apply(_context)
     repository = _repository(_context)
     theme = repository.get_theme(str(theme_id or ""))
     if not theme:
@@ -601,6 +612,7 @@ def activate_ui_theme(theme_id, _context=None):
 
 
 def delete_ui_theme(theme_id, _context=None):
+    _require_manual_apply(_context)
     repository = _repository(_context)
     theme = repository.get_theme(str(theme_id or ""))
     if not theme or theme.get("id") == DEFAULT_THEME_ID:

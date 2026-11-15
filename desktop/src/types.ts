@@ -1,5 +1,6 @@
 import type {ReviewSummary} from './reviews';
 export type Attachment = { name: string; path: string; size: number };
+export type ModePlugin = {id:string;mode:string;name:string;description:string;scope:'run'|'session';kind:'mode';version:string;builtin:boolean;enabled:boolean};
 export type Model = { id: string; label: string; configured: boolean; display_name: string; model_name: string; base_url: string; channel_id: string; channel_display_name: string; provider_type: string; reasoning_efforts?: string[] };
 export type Settings = { models: Model[]; selected_model_id: string; god_mode: boolean; theme: string; data_dir: string; projects: any[]; multimedia_enabled?: boolean; context_policy: {enabled: boolean; target_tokens: number} };
 export type FileReference = {path: string; url: string; name: string; kind: string; label: string; references: string[]};

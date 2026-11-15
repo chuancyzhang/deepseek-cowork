@@ -54,6 +54,7 @@ function Runtime({children}:{children:ReactNode}) {
     return()=>{alive=false;unsubscribe();};
   },[]);
   useEffect(()=>window.cowork.onEvents(events=>{if(events.some(event=>event.event==='plugins_recover_requested'))host.set('host:recoveryOpen',true);}),[host]);
+  useEffect(()=>window.cowork.onEvents(events=>{if(events.some(event=>event.event==='modes_changed'))void registry.refresh().catch(reason=>controller.error(reason.message));}),[registry]);
   useEffect(()=>{
     let alive=true;
     const refresh=()=>void window.cowork.call<UpdateState>('updates.get').then(value=>{if(alive)receiveUpdate(host,value);}).catch(error=>{if(alive)controller.error('更新状态读取失败：'+error.message);});

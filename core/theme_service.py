@@ -769,13 +769,19 @@ class ThemeStoreSnapshot:
 class ThemeRepository:
     """Atomic repository for v2 theme packages with explicit v1 compatibility."""
 
-    def __init__(self, data_dir: str | None = None):
+    def __init__(self, data_dir: str | None = None, *, preview_session: str = ""):
         self.data_dir = os.path.abspath(data_dir or get_app_data_dir())
         self.themes_dir = os.path.join(self.data_dir, THEME_DIRECTORY_NAME)
         self.store_path = os.path.join(self.themes_dir, THEME_STORE_FILENAME)
         self.preview_path = os.path.join(self.themes_dir, THEME_PREVIEW_FILENAME)
         self.legacy_preview_path = os.path.join(self.themes_dir, LEGACY_THEME_PREVIEW_FILENAME)
         self.appearance_path = os.path.join(self.themes_dir, "_appearance.json")
+        if preview_session:
+            # Session IDs are opaque. Hashing also prevents path traversal.
+            import hashlib
+            key = hashlib.sha256(preview_session.encode("utf-8")).hexdigest()
+            self.preview_path = os.path.join(self.themes_dir, f"_preview-{key}.cowork-theme")
+            self.legacy_preview_path = os.path.join(self.themes_dir, f"_preview-{key}.json")
 
     def load_appearance(self) -> dict[str, Any]:
         if not os.path.exists(self.appearance_path):

@@ -129,6 +129,20 @@ runpy.run_module('core.desktop_service', run_name='__main__')
 
 
 class DesktopShutdownTests(unittest.TestCase):
+    def test_mode_enablement_does_not_claim_success_after_save_failure(self):
+        from core.config_manager import ConfigManager
+        from unittest.mock import Mock
+        config = ConfigManager.__new__(ConfigManager)
+        config.config = {}
+        config._write_config_or_raise = Mock(side_effect=OSError("disk full"))
+        with self.assertRaisesRegex(OSError, "disk full"):
+            config.set_mode_plugin_enabled("cowork.creation", False)
+        self.assertNotIn("disabled_mode_plugins", config.config)
+        config.config["disabled_mode_plugins"] = ["cowork.creation"]
+        with self.assertRaisesRegex(OSError, "disk full"):
+            config.set_mode_plugin_enabled("cowork.creation", True)
+        self.assertEqual(config.config["disabled_mode_plugins"], ["cowork.creation"])
+
     def test_shutdown_completion_waits_for_saving_and_failure_keeps_retry_available(self):
         from core.desktop_service import DesktopService
         from types import SimpleNamespace
@@ -235,6 +249,74 @@ class DesktopIntegrationTests(unittest.TestCase):
         params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex, text=text, model_id=self.model_id)
         self.client.call("conversation.send", **params)
         return params
+
+    def test_creation_sessions_preserve_source_and_enforce_mode_lifecycle(self):
+        from core.chat_storage import ChatStorage
+        from core.desktop_store import DesktopStore
+        c = self.client
+        source = c.call("conversation.create")["id"]
+        c.call("draft.save", conversation_id=source, value={"text": "保留原任务", "attachments": []})
+        c.call("conversation.preferences", conversation_id=source, value={"mode": "grilling"})
+        design = c.call("creation.open", conversation_id=source)
+        cid = design["conversation_id"]
+        self.assertNotEqual(cid, source)
+        self.assertEqual(c.call("creation.open", conversation_id=source), design)
+        self.assertEqual(c.call("creation.open", conversation_id=cid), design)
+        self.assertEqual(c.call("conversation.get", conversation_id=cid)["meta"]["mode"], "execution")
+        original = c.call("conversation.get", conversation_id=source)
+        self.assertEqual(original["draft"]["text"], "保留原任务")
+        self.assertEqual(original["meta"]["mode"], "grilling")
+        with self.assertRaisesRegex(RuntimeError, "退出创造模式"):
+            c.call("conversation.preferences", conversation_id=cid, value={"mode": "grilling"})
+        params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                      text="创建一个阅读主题", model_id=self.model_id, creation_scope="主题")
+        c.call("conversation.send", **params)
+        c.call("modes.enable", id="cowork.creation", enabled=False)
+        finished = c.wait_run(cid)
+        self.assertEqual(finished["run"]["status"], "completed")
+        self.assertTrue(c.call("conversation.send", **params)["accepted"])
+        self.assertEqual(len([m for m in finished["messages"] if m["role"] == "user"]), 1)
+        self.assertEqual(finished["messages"][0]["meta"]["display_content"], params["text"])
+        with self.assertRaisesRegex(RuntimeError, "已停用"):
+            c.call("creation.open", conversation_id=source)
+        with self.assertRaisesRegex(RuntimeError, "已停用"):
+            self.submit(cid)
+        data = Path(c.call("settings.get")["data_dir"])
+        storage = ChatStorage(str(data / "chat_history" / "chat_history.sqlite"))
+        context = json.loads(DesktopStore(storage).get_run(params["request_id"])["payload"])["runtime_context"]
+        self.assertTrue(context["creation_session"])
+        self.assertEqual(context["mode"], "execution")
+        request = next(value for value in reversed(Provider.requests)
+                       if any(params["text"] in str(message.get("content")) for message in value["messages"]))
+        self.assertTrue(any("[创造模式" in str(m.get("content")) for m in request["messages"] if m["role"] == "user"))
+        self.assertFalse(any("[创造模式" in str(m.get("content")) for m in request["messages"] if m["role"] in {"system", "developer"}))
+        c.call("modes.enable", id="cowork.creation", enabled=True)
+        c.call("modes.enable", id="cowork.grilling", enabled=False)
+        with self.assertRaisesRegex(RuntimeError, "已停用"):
+            self.submit(source)
+        c.call("conversation.preferences", conversation_id=source, value={"mode": "execution"})
+        self.submit(source)
+        self.assertEqual(c.wait_run(source)["run"]["status"], "completed")
+
+    def test_creation_theme_candidates_are_isolated_and_survive_reopening(self):
+        from core.theme_service import ThemeRepository
+        from core.theme_tokens import default_design_tokens
+        c = self.client
+        ids = [c.call("creation.open", conversation_id=c.call("conversation.create")["id"])["conversation_id"] for _ in range(2)]
+        data = c.call("settings.get")["data_dir"]
+        previews = [ThemeRepository(data, preview_session=cid).write_preview(name="候选 " + str(i),
+                    overrides={"tokens": {"primary": "#2255aa"}}, default_tokens=default_design_tokens(), session_id=cid)
+                    for i, cid in enumerate(ids)]
+        self.assertIsNone(c.call("themes.preview")["preview"])
+        for cid, preview in zip(ids, previews):
+            self.assertEqual(c.call("themes.preview", conversation_id=cid)["preview"]["preview_id"], preview["preview_id"])
+            self.assertEqual(c.call("creation.open", conversation_id=cid)["conversation_id"], cid)
+        with self.assertRaisesRegex(RuntimeError, "主题预览不存在"):
+            c.call("themes.commit_preview", conversation_id=ids[1], id=previews[0]["preview_id"], revision=previews[0]["revision"], name="错误候选")
+        c.call("themes.commit_preview", conversation_id=ids[0], id=previews[0]["preview_id"], revision=previews[0]["revision"], name="已应用")
+        self.assertIsNone(c.call("themes.preview", conversation_id=ids[0])["preview"])
+        self.assertEqual(c.call("themes.preview", conversation_id=ids[1])["preview"]["preview_id"], previews[1]["preview_id"])
+        self.assertEqual(len([t for t in c.call("themes.list")["themes"] if not t.get("builtin")]), 1)
 
     def test_builtin_html_expert_selection_reaches_run_and_stays_in_its_conversation(self):
         from core.chat_storage import ChatStorage

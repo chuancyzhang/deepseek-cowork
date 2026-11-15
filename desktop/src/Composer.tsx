@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { ArrowLeft, ArrowUp, BookOpen, Check, ChevronDown, ChevronRight, FileText, Folder, Link, LoaderCircle, MessageCircleQuestion, MessageSquare, Paperclip, Play, Plus, Puzzle, Search, ShieldCheck, SlidersHorizontal, Square, UserRound, X } from 'lucide-react';
-import type { Attachment, Conversation, Settings } from './types';
+import type { Attachment, Conversation, Settings, ModePlugin } from './types';
 import { receiveAttachments } from './attachments';
 import ImageAttachment, {isImageAttachment} from './ImageAttachment';
 
@@ -14,9 +14,9 @@ type Props = {
   selectModel: (id: string) => Promise<void>; route: (name: string) => Promise<void>; error: (message: string) => void;
   browseLibrary: () => Promise<void>;
   openFile?: (path: string) => void;
+  modes?: ModePlugin[]; creation?: boolean; enterCreation?: () => Promise<void>; exitCreation?: () => Promise<void>;
 };
 const categories = [['mode', '模式', SlidersHorizontal], ['experts', '专家', UserRound], ['skills', '技能', Puzzle], ['connectors', '连接器', Link], ['conversations', '对话', MessageSquare], ['variables', '插入变量', FileText]] as const;
-const modes = [['execution', '直接推进', '讨论、执行并完成任务'], ['grilling', '拷问模式', '先澄清问题，再确认执行']] as const;
 
 export default function Composer(props: Props) {
   const { conversation, conversations, settings, text, setText, attachments, setAttachments, skills, active, sending, textarea, error } = props;
@@ -30,6 +30,7 @@ export default function Composer(props: Props) {
   const lists = useRef(new Map<string, Promise<any[]>>());
   const prefs = conversation?.meta || {}, refs: any[] = prefs.conversation_refs || [], knowledge: any[] = prefs.knowledge_refs || [];
   const model = settings?.models.find(model => model.id === (prefs.selected_model_id || settings.selected_model_id));
+  const modes = [{mode:'execution',name:'直接推进',description:'讨论、执行并完成任务',scope:'run'},...(props.modes || []).filter(item=>item.enabled)];
   function close() { clearTimeout(hover.current); lists.current.clear(); setMenu(''); setSection(''); setQuery(''); setPending(null); setExpanded([]); }
   function open(target: string, part = '') { clearTimeout(hover.current); lists.current.clear(); setMenu(target); setSection(part); setQuery(''); setFailure(''); }
   function enterSection(id: string) { clearTimeout(hover.current); if (id !== section) {setSection(id); setQuery('');} }
@@ -132,6 +133,7 @@ export default function Composer(props: Props) {
         <button className="text-tool" title={settings?.god_mode ? '完全访问' : '请求批准'} onClick={() => menu === 'permission' ? close() : open('permission')}><ShieldCheck size={14}/><span>{settings?.god_mode ? '完全访问' : '请求批准'}</span></button>
         <button className="text-tool" title="选择专家" onClick={() => open('add','experts')}><UserRound size={14}/><span>{prefs.conversation_agent?.name || '专家'}</span></button>
         {prefs.mode === 'grilling' && <div className="mode-chip">{!active && <button aria-label="取消拷问模式" onClick={() => void applyPreference({mode: 'execution', grill_execution_confirmed: false})}><X size={12}/></button>}<button onClick={() => open('add','mode')}>拷问模式</button></div>}
+        {props.creation && <div className="mode-chip"><button onClick={()=>open('add','mode')}>创造模式</button></div>}
       </div><div className="composer-right"><button className="model-trigger" aria-expanded={menu === 'model'} aria-haspopup="dialog" title={model?.label || '选择模型'} onClick={() => menu === 'model' ? close() : open('model')}><span>{model?.label || '选择模型'}{prefs.reasoning_effort ? ' · ' + prefs.reasoning_effort : ''}</span><ChevronDown size={12}/></button><button className="send-button" title={active && !text.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || conversation?.run?.status === 'stopping' || !active && !text.trim() && !attachments.length} onClick={() => void (active && !text.trim() && !attachments.length ? props.stop() : props.send()).catch(failure => error(failure.message))}>{sending ? <LoaderCircle className="spin" size={18}/> : active && !text.trim() && !attachments.length ? <Square size={15} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
     </div>
     <div className="composer-footer"><button title={prefs.workspace_dir || '聊天工作目录'} onClick={async () => {try {const path = await call<string | null>('dialog.workspace'); if (path) {const cid = await props.ensureConversation(); await call('conversation.workspace', {conversation_id: cid, path});}} catch (failure) {error((failure as Error).message);}}}><Folder size={13}/><span>工作目录 · {prefs.workspace_source === 'chat' || !prefs.workspace_dir ? '聊天工作目录' : prefs.workspace_dir.split(/[\\/]/).pop()}</span></button><span>Enter 发送 · Shift+Enter 换行</span></div>
@@ -139,7 +141,7 @@ export default function Composer(props: Props) {
       {['add','mention'].includes(menu) ? <>
         <nav className="composer-menu-nav">{categories.filter(([id]) => menu !== 'mention' || ['experts','skills','connectors','conversations'].includes(id)).map(([id,label,Icon]) => <button key={id} className={section === id ? 'selected' : ''} onMouseEnter={() => {clearTimeout(hover.current); if (menu === 'add' && section !== id) hover.current = setTimeout(() => enterSection(id), 100);}} onMouseLeave={() => clearTimeout(hover.current)} onClick={() => enterSection(id)} onKeyDown={event => {if (event.key === 'ArrowRight') {event.preventDefault(); enterSection(id);}}}><Icon size={15}/><span>{label}</span><ChevronRight size={13}/></button>)}{menu === 'add' && <><hr/><button onClick={() => {close(); void props.browseLibrary().catch(failure => error(failure.message));}}><BookOpen size={15}/>浏览资料库</button><button onClick={() => {close(); void props.attach();}}><Paperclip size={15}/>添加文件</button>{active && (text.trim() || attachments.length > 0) && <button disabled={conversation?.run?.status === 'stopping'} onClick={() => {close(); void props.stop().catch(failure => error(failure.message));}}><Square size={14}/>停止当前任务</button>}</>}</nav>
         {section && <section className="composer-submenu"><div className="submenu-heading"><button className="icon-button submenu-back" title="返回" onClick={() => setSection('')}><ArrowLeft size={14}/></button><strong>{categories.find(([id]) => id === section)?.[1]}</strong></div>
-          {section === 'mode' ? modes.map(([id, label, detail]) => <button className="picker-row" disabled={active || busy} key={id} onClick={() => void applyPreference({mode: id, grill_execution_confirmed: false}, true)}>{id === 'grilling' ? <MessageCircleQuestion size={16}/> : <Play size={16}/>}<span>{label}<small>{detail}</small></span>{(prefs.mode || 'execution') === id && <Check size={14}/>}</button>) : <>
+          {section === 'mode' ? <>{modes.map(item => <button className="picker-row" disabled={busy || item.scope==='run' && active && !props.creation || props.creation && item.mode==='grilling'} key={item.mode} onClick={async()=>{setBusy(true);try {if(item.mode==='creation'){await props.enterCreation?.();close();}else if(props.creation){await props.exitCreation?.();close();}else await applyPreference({mode:item.mode,grill_execution_confirmed:false},true);}catch(reason){setFailure((reason as Error).message);}finally{setBusy(false);}}}>{item.mode==='grilling'?<MessageCircleQuestion size={16}/>:item.mode==='creation'?<Puzzle size={16}/>:<Play size={16}/>}<span>{item.name}<small>{props.creation&&item.mode==='grilling'?'退出创造后可选择拷问模式':item.description}</small></span>{(props.creation?'creation':prefs.mode||'execution')===item.mode&&<Check size={14}/>}</button>)}<button className="picker-row" onClick={()=>{close();void props.route('plugins');}}>管理模式插件<ChevronRight size={14}/></button></> : <>
             <label className="picker-search"><Search size={14}/><input aria-label="搜索上下文" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)}/></label>
             {loading ? <div className="picker-empty"><LoaderCircle size={16} className="spin"/>正在读取…</div> : <div className="picker-list">{matching.map(item => {
               const key = section + ':' + (item.id || item.name), isExpanded = expanded.includes(key), selectable = section !== 'variables';

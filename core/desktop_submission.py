@@ -124,4 +124,6 @@ def run_context(service, cid, payload, profile):
     if meta.get("ppt_agent_mode") or preferences.get("ppt_agent_mode"):
         context["ppt_agent_mode"] = True
         log.info("ppt_assistant_retired session=%s next_turn=ordinary_chat", cid)
+    if meta.get("creation_session"):
+        context["creation_session"] = True
     return normalize_run_context(context)

@@ -27,7 +27,8 @@
     "create_new_skill",
     "update_skill",
     "install_agent_skill",
-    "remote_skill_installer_agent"
+    "remote_skill_installer_agent",
+    "review_draft"
   ],
   "workflow": [
     "Draft skill metadata first.",

@@ -138,6 +138,8 @@ class DesktopWorkbench:
             active = self.s.request_agent({**identity, "token": claim["token"], "action": "workbench_active"})
             if active.get("status") != "ok":
                 return {"ok": False, "status": "cancelled", "executed": False, "error": "请求已取消，本次操作未执行。"}
+            if action == "review_draft":
+                return self.s.reviews.submit_tool(cid, identity["run_id"], args)
             if action == "list":
                 snapshot = self.snapshot(cid)
                 if not internal:
@@ -396,6 +398,11 @@ class DesktopFiles:
         root = self.workspace(conversation_id)
         target = Path(path)
         target = (root / target).resolve() if not target.is_absolute() else target.resolve()
-        if not target.is_relative_to(root):
+        data_dir = getattr(self.config, "data_dir", "")
+        draft_base = (Path(data_dir) / "review-drafts").resolve() if data_dir else None
+        draft_root = (draft_base / conversation_id).resolve() if draft_base else None
+        if draft_root and draft_root.parent != draft_base:
+            draft_root = None
+        if not target.is_relative_to(root) and not (draft_root and target.is_relative_to(draft_root)):
             raise ValueError("文件不属于当前工作目录，请先切换工作目录。")
         return target

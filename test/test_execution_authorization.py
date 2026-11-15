@@ -76,6 +76,18 @@ class ExecutionAuthorizationTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         request.assert_not_called()
 
+    def test_only_builtin_review_handler_is_a_control_operation(self):
+        from core.execution_authorization import trusted_kind
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills", "skill_builder", "impl.py")
+        spec = importlib.util.spec_from_file_location("review_authorization", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(trusted_kind("review_draft", module.review_draft), "control")
+        def review_draft():
+            pass
+        self.assertEqual(trusted_kind("review_draft", review_draft), "opaque")
+        self.assertEqual(trusted_kind("create_new_skill", module.create_new_skill), "opaque")
+
     def test_artifact_add_is_free_but_project_add_requires_permission(self):
         manager = self.manager("apply_patch", self.files.apply_patch)
         artifact = os.path.join(self.auth.artifact_root, "report.txt")

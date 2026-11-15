@@ -33,6 +33,9 @@ _CONTROL = {
     "interaction": {"request_user_input", "request_user_approval"},
     "meta-tools": {"parallel_tools"},
     "agent-manager": {"spawn_agent", "send_input", "wait_agent", "close_agent", "list_agents"},
+    # This exact app-owned handler only retains a review draft. Publication is
+    # unavailable to the model and requires the trusted renderer's save action.
+    "skill_builder": {"review_draft"},
 }
 _FILES = {"apply_patch", "workspace_rename_path", "workspace_delete_path"}
 

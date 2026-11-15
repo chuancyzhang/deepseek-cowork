@@ -1111,7 +1111,7 @@ def _frontmatter_value(value):
         return "[" + ", ".join(json.dumps(item, ensure_ascii=False) for item in value) + "]"
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value)
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def build_skill_md(draft):

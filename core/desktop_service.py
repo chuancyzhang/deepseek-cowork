@@ -86,6 +86,8 @@ class DesktopService:
         from core.desktop_conversations import ConversationRuntime
         from core.desktop_settings import DesktopSettingsAPI
         self.files = DesktopFiles(self.storage, self.config, self.jobs)
+        from core.desktop_reviews import DesktopReviews
+        self.reviews = DesktopReviews(self)
         from core.desktop_media import DesktopMedia
         self.media = DesktopMedia(self)
         self.conversation_runtime = ConversationRuntime(config=self.config, storage=self.storage, store=self.store,
@@ -229,7 +231,7 @@ class DesktopService:
             raise ValueError("无效的操作参数。")
         for domain in (self.workbench, self.conversations, self.conversation_runtime, self.files,
                        self.management, self.settings_pages, self.settings_api, self.messaging,
-                       self.updates, self.models, self.skillhub, self.connections, self.media):
+                       self.updates, self.models, self.skillhub, self.connections, self.media, self.reviews):
             if method in domain.methods:
                 return domain.dispatch(method, p)
         cid = str(p.get("conversation_id") or "")

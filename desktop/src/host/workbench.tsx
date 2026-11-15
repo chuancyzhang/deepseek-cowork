@@ -2,6 +2,7 @@ import {useCallback,useEffect,useLayoutEffect,useRef,useState,useMemo} from 'rea
 import type {Attachment,Conversation,FileSession,HostEvent,Message,Plugin,Run,RuntimeEvent,Settings} from '../types';
 import {MessageProjection,isActive,mergeEvents,unwrapEvents,messageText,interactionRecords} from '../runtime';
 import {Drafts,type Draft} from '../drafts';
+import {reviewId} from '../reviews';
 import {emptyWorkspace,type WorkspaceView} from '../Workspace';
 import {themeStyle} from '../theme';
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
@@ -143,20 +144,27 @@ export function useWorkbenchController() {
       requestAnimationFrame(() => { if (element) element.scrollTop = oldTop + element.scrollHeight - oldHeight; });
     } catch (failure) { error((failure as Error).message); } finally { setOlderLoading(false); }
   }
+  function openReview(review: string, cid = selectedId.current) {
+    if (!cid) return;
+    host.set<WorkspaceView>(host.sessionKey('workspaceView', cid), previous => {
+      const view = previous || emptyWorkspace();
+      return {...view, selected:'review:' + review, reviewOpen:[...new Set([...(view.reviewOpen || []),review])], reviewClosed:(view.reviewClosed || []).filter(id=>id!==review)};
+    });
+    host.set(host.sessionKey('workspaceOpen', cid), true);
+  }
   const messageActionRef = useRef<(action: string, message: Message) => Promise<void>>(async () => {});
   const fileActionRef = useRef<(path: string) => Promise<void>>(async () => {});
   const onMessageAction = useCallback((action: string, message: Message) => { void messageActionRef.current(action, message); }, []);
   const onMessageFile = useCallback((path: string) => { void fileActionRef.current(path); }, []);
   messageActionRef.current = async (action, message) => {
     const id = selectedId.current;
+    if (action === 'tool' && reviewId(message.result_obj || message.content)) {openReview(reviewId(message.result_obj || message.content)!); return;}
     if (action === 'tool') { setWorkspaceOpen(true); changeWorkspace({selected: 'tasks', tasksPinned: true, tasksOpen: false, task: {...stateRef.current.workspaceView.task, section: 'calls', callId: message.tool_call_id, runId: message.meta?.turn_id || message.meta?.ui_turn_id, agentId: undefined}}); return; }
     try {
       if (action === 'office' || action === 'skill') {
-        const source = messageText(message.content);
-        const instruction = action === 'office' ? '请将下面这份回答整理为可编辑的办公文档，选择适合内容的格式，并保存到当前工作目录。保留事实、来源和已完成成果。' : '请将下面这轮任务中的可复用方法整理为 Skill 草稿，明确适用范围、操作步骤与验证方式，先展示草稿供我审阅。';
-        const existing = drafts.get(id).value.text;
-        setDraft([existing, instruction + '\n\n' + source].filter(Boolean).join('\n\n'));
-        composer.current?.focus();
+        await saveView(id);
+        const review = await call('reviews.create', {conversation_id:id, kind:action, message_id:message.id});
+        if (selectedId.current === id) openReview(review.id, id);
         return;
       }
       if (!['branch', 'edit', 'retry', 'delete'].includes(action)) return;
@@ -228,6 +236,7 @@ export function useWorkbenchController() {
     const value = { workspaceOpen: field('workspaceOpen',false), workspace: field('workspaceView',emptyWorkspace()),
       activeFile: field('activeFile',''), scrollTop: id===selectedId.current ? scroll.current?.scrollTop ?? field('scrollTop',0) : field('scrollTop',0),
       editors: field<Editor[]>('editors',[]).map(editor => ({ path: editor.file.path, text: snapshots.get(editor.file.path) ?? editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) };
+    if (value.workspace.reviewEdits) value.workspace = {...value.workspace, reviewEdits:Object.fromEntries(Object.entries(value.workspace.reviewEdits).map(([key,edit]) => [key, {...edit,...(edit.filePath && snapshots.has(edit.filePath) ? {officeText:snapshots.get(edit.filePath)} : {})}]))};
     host.set(host.sessionKey('scrollTop',id),value.scrollTop);
     viewQueue.current = viewQueue.current.catch(() => undefined).then(async () => {
       const receipt = await call('view.save', { conversation_id: id, value, revision: viewRevisions.current.get(id) ?? -1 });
@@ -359,6 +368,11 @@ export function useWorkbenchController() {
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
     receiveEvents(host,batch);
     for (const event of batch) {
+      if (event.event === 'review_changed' && event.conversation_id && event.data?.open) {
+        const cid = event.conversation_id, review = event.data.id;
+        host.set<WorkspaceView>(host.sessionKey('workspaceView', cid), previous => {const view = previous || emptyWorkspace(); return {...view,reviewOpen:[...new Set([...(view.reviewOpen || []),review])],reviewClosed:(view.reviewClosed || []).filter(id=>id!==review)};});
+        if (cid === selectedId.current && !host.get(host.sessionKey('workspaceOpen',cid),false)) setNotice('草稿已就绪，可打开工作区审阅。');
+      }
       if (event.event === 'query_sync') host.set('query:pending', Boolean((event as any).pending));
       if (event.event === 'service_error') setServiceError(event.error || '本地服务已断开。');
       if (event.event === 'service_reconnecting') setServiceError('连接暂时中断，正在重新连接后台…');
@@ -488,6 +502,25 @@ export function useWorkbenchController() {
     try { const id = await ensureConversation(); const added = await call<Attachment[]>('dialog.attach', {conversation_id: id}); if (selectedId.current === id) setAttachments(previous => [...previous, ...added.filter(item => !previous.some(old => old.path === item.path))]); }
     catch (failure) { error((failure as Error).message); }
   }
+  async function browseLibrary() {
+    await saveView();
+    const id = await ensureConversation();
+    if (selectedId.current !== id) return;
+    changeWorkspace({selected: 'library', libraryOpen: true}); setWorkspaceOpen(true);
+  }
+  async function addLibraryReference(ref: any, targetId?: string) {
+    const id = targetId || await ensureConversation();
+    if (ref.source === 'local') {
+      const added = await call<Attachment[]>('workspace.attach', {conversation_id: id, paths: [ref.path]});
+      const value = drafts.get(id).value;
+      drafts.change(id, {...value, attachments: [...value.attachments, ...added.filter(file => !value.attachments.some(old => old.path === file.path))]});
+      if (selectedId.current === id) applyDraft(drafts.get(id).value, false);
+      await drafts.save(id);
+      return;
+    }
+    const target = await call<Conversation>('conversation.get', {conversation_id: id});
+    await preferences({knowledge_refs: [...(target.meta.knowledge_refs || []).filter((item: any) => JSON.stringify(item) !== JSON.stringify(ref)), ref]}, id);
+  }
   async function activateFile(path: string) {
     try { await saveView(); setActiveFile(path); changeWorkspace({selected: 'file:' + path}); } catch (failure) { error((failure as Error).message); }
   }
@@ -593,6 +626,6 @@ export function useWorkbenchController() {
     for(const id of drafts.entries.keys()) await saveDraft(id);
     for(const key of host.values.keys()) if(key.startsWith('session:')&&key.endsWith(':current')&&host.get(key)) await saveView(key.slice(8,-8));
   }), [saves]);
-  return {settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, draftConflict, setDraftConflict, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, resolveDraft, recoverSend, creatingConversation, ensureConversation, preferences, attach, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
+  return {settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, draftConflict, setDraftConflict, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, resolveDraft, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
 }
 export type WorkbenchController = ReturnType<typeof useWorkbenchController>;

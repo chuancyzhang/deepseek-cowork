@@ -420,12 +420,16 @@ class ConversationRuntime:
             from core.enterprise_client import submission
             question = submission(profile, text)
             message_meta = {**(message.get("meta") or {})}
+            # Tool-review shortcuts keep generated instructions in the model
+            # content while presenting a readable request in the conversation.
+            display_text = str(p.get("display_text") or text)
+            message_meta["display_content"] = display_text
             if "conversation_agent" in preferences:
                 message_meta["conversation_agent"] = preferences["conversation_agent"]
             if question:
                 message_meta["enterprise_submission"] = question
             payload = {"conversation_id": cid, "request_id": str(p["request_id"]),
-                       "message_id": str(p["message_id"]), "content": message["content"], "display_text": text,
+                       "message_id": str(p["message_id"]), "content": message["content"], "display_text": display_text,
                        "workspace_dir": str(self.workspace(cid)), "model_id": profile["id"],
                        "skills": p.get("skills", preferences.get("selected_skill_names", [])), "attachments": attachments,
                        "preferences": preferences, "input_hash": input_hash, "draft_revision": p.get("draft_revision"),

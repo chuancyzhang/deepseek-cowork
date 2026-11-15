@@ -605,6 +605,15 @@ def remote_skill_installer_agent(
     )
 
 
+def review_draft(workspace_dir, kind, draft_id="", title="", file_path="", content=None, _context=None):
+    """Submit a persistent draft to the current conversation's review workspace."""
+    from core.workbench import workbench_bridge
+    return workbench_bridge().call("review_draft", {
+        "kind": kind, "draft_id": draft_id, "title": title,
+        "file_path": file_path, "content": content,
+    }, _context)
+
+
 TOOL_EXPORTS = [
     {
         "name": "remote_skill_installer_agent",
@@ -652,5 +661,35 @@ TOOL_EXPORTS = [
         "requires_user_interaction": True,
         "should_defer": True,
         "result_format": "json",
+    },
+    {
+        "name": "review_draft",
+        "handler": review_draft,
+        "description": "Submit an Office file or reusable Skill draft to this conversation's workspace for human review. Does not publish or install it. Returns immediately; the user can review, edit and save later. Preserve an existing draft_id from the user's request. Never overwrite a draft already under review; submit a new draft for revisions.",
+        "search_hint": "review draft office Word PowerPoint Excel skill 草稿 审阅 生成办公稿 沉淀技能",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["office", "skill"]},
+                "draft_id": {"type": "string", "description": "Existing review draft ID supplied by the user request. Omit to create a new draft."},
+                "title": {"type": "string", "description": "Human-readable result name."},
+                "file_path": {"type": "string", "description": "Office only: path to an existing, validated DOCX/PPTX/XLSX file in the current workspace. Generate the file with normal tools first, preferably under .cowork/drafts/."},
+                "content": {
+                    "type": "object", "description": "Skill only: reusable guidance and optional reviewed text resources. No executable tool bindings or dependency installation.",
+                    "properties": {
+                        "skill_name": {"type": "string"},
+                        "description": {"type": "string", "description": "When to use the skill."},
+                        "instructions_md": {"type": "string", "description": "Complete guidance: scope, steps, verification, boundaries and source limitations."},
+                        "resources": {"type": "array", "items": {"type": "object", "properties": {
+                            "path": {"type": "string", "description": "Relative path under references/ or scripts/."},
+                            "kind": {"type": "string", "enum": ["reference", "script"]},
+                            "content": {"type": "string"}, "description": {"type": "string"}
+                        }, "required": ["path", "kind", "content"]}}
+                    }, "required": ["skill_name", "description", "instructions_md"]
+                }
+            }, "required": ["kind"]
+        },
+        "read_only": False, "destructive": False,
+        "allowed_modes": ["execution"], "result_format": "json"
     },
 ]

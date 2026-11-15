@@ -10,15 +10,15 @@ const sources = [['local','本地资料库'], ['weknora','WeKnora'], ['tencent-d
 function list(value: any): any[] { if (Array.isArray(value)) return value; if (!value || typeof value !== 'object') return []; for (const key of ['data','items','knowledge','files','results','documents','list']) if (value[key]) { const items = list(value[key]); if (items.length) return items; } return []; }
 function title(item: any) {return item?.title || item?.name || item?.file_name || '未命名资料';}
 function date(value: any) {if (!value) return '—'; const d = new Date(typeof value === 'number' && value < 1e12 ? value*1000 : value); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('zh-CN');}
-type Props = { projectsKey: string; projectsChanged: () => Promise<void>; onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
+type Props = { scope?: string; projectsKey: string; projectsChanged: () => Promise<void>; onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
 export default function Library(props: Props) {
-  const [source, setSource] = useHostField('library:source', 'local');
+  const [source, setSource] = useHostField((props.scope || 'library') + ':source', 'local');
   return <LibrarySource key={source} {...props} source={source} setSource={setSource}/>;
 }
-function LibrarySource({source, setSource, onError, onReference, confirm, projectsKey, projectsChanged}: Props & {source: string; setSource: (source: string) => void}) {
+function LibrarySource({source, setSource, onError, onReference, confirm, projectsKey, projectsChanged, scope = 'library'}: Props & {source: string; setSource: (source: string) => void}) {
   const local = source === 'local', sourceName = sources.find(item => item[0] === source)?.[1] || '';
   const [status, setStatus] = useState<any>(null);
-  const [view, setView] = useHostField<any>('library:view:' + source, {catalog:null, collection:null, parents:[], rows:[], page:1, more:false, query:'', searching:false, loaded:false, scroll:0, unavailable:[]});
+  const [view, setView] = useHostField<any>(scope + ':view:' + source, {catalog:null, collection:null, parents:[], rows:[], page:1, more:false, query:'', searching:false, loaded:false, scroll:0, unavailable:[]});
   const {catalog, collection, parents, rows, page, more, query, searching} = view;
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState(''), [job, setJob] = useState<any>(null);
   const [form, setForm] = useState({url:'', email:'', password:'', company:'', token:''}), [authUrl, setAuthUrl] = useState('');

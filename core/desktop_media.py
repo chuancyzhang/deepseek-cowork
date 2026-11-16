@@ -10,7 +10,7 @@ log = logging.getLogger("desktop.media")
 
 
 class DesktopMedia:
-    methods = frozenset({"media.config", "media.save", "media.tasks", "media.resume", "media.stop"})
+    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.stop"})
 
     def __init__(self, service):
         self.s = service

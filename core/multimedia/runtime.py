@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from . import ADAPTERS, CAPABILITIES, KNOWN_MODELS, normalize, snapshot, validate_binding, quick_actions, binding_error
+from . import ADAPTERS, CAPABILITIES, KNOWN_MODELS, normalize, snapshot, validate_binding, quick_actions, binding_error, model_usage
 from .adapters import Adapter, MediaError, safe_message
 
 log = logging.getLogger("multimedia")
@@ -100,6 +100,23 @@ class MediaRuntime:
     def bind_run(self):
         return RunLease(self, snapshot(self.s.config))
 
+    def validate(self, p):
+        """Local draft checks only: never persist, submit, or probe a provider."""
+        channels = {item["channel_id"]: item for item in self.s.config.get_model_channels()}
+        for item in p.get("services", []):
+            if item.get("channel_id") not in channels:
+                channels[item.get("channel_id")] = item
+        result = {}
+        for kind, binding in p.get("bindings", {}).items():
+            if kind not in CAPABILITIES or not isinstance(binding, dict):
+                continue
+            channel = channels.get(binding.get("channel_id"), {})
+            reason = binding_error(kind, binding, channel)
+            usage = model_usage({**channel, "model_name": binding.get("model")}, {kind: binding})
+            suggested = usage.get("adapter") if kind in usage.get("capabilities", []) and binding.get("adapter") != usage.get("adapter") else None
+            result[kind] = {"valid": not reason, "message": reason, "suggested_adapter": suggested}
+        return result
+
     def config(self):
         from core.desktop_settings import DesktopSettings
         value = normalize(self.s.config.get("experimental_multimedia"))
@@ -108,10 +125,11 @@ class MediaRuntime:
                     | {"configured": bool(item["api_key"]), "models": [model["model_name"] for model in item["models"]]}
                     for item in source_channels]
         records = self.host.records()
+        checks = self.validate({"bindings": value["bindings"]})
         statuses = {}
         for kind, binding in value["bindings"].items():
             channel = next((item for item in channels if item["channel_id"] == binding.get("channel_id")), {})
-            reason = binding_error(kind, binding, next((item for item in source_channels if item["channel_id"] == binding.get("channel_id")), {}))
+            reason = checks[kind]["message"]
             if reason:
                 statuses[kind] = {"label": "配置需修正", "message": reason, "valid": False}
                 continue
@@ -168,6 +186,8 @@ class MediaRuntime:
     def dispatch(self, method, p):
         if method == "media.config":
             return self.config()
+        if method == "media.validate":
+            return self.validate(p)
         if method == "media.save":
             return self.save_config(p)
         if method == "media.tasks":

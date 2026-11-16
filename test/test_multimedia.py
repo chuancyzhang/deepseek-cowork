@@ -227,6 +227,28 @@ class MultimediaTests(unittest.TestCase):
         self.assertTrue(self.host.model_usage({**chat_profile, "model_name": "dual-model", "discovery": {"endpoints": ["/v1/chat/completions", "/v1/videos"]}})["chat_supported"])
         self.assertFalse(self.host.model_usage({**chat_profile, "discovery": {"endpoints": ["/v1/chat/completions"]}})["chat_supported"])
 
+    def test_draft_validation_uses_current_binding_without_saving_or_calling_provider(self):
+        self.config.channels[0]["base_url"] = "https://apihub.agnes-ai.com/v1"
+        runtime = self.host.acquire(existing=True)
+        try:
+            original = self.config.get("experimental_multimedia")
+            binding = {"adapter": "openai", "channel_id": "media", "model": "agnes-video-2.5-flash"}
+            invalid = runtime.dispatch("media.validate", {"bindings": {"video_generate": binding}})
+            self.assertFalse(invalid["video_generate"]["valid"])
+            self.assertEqual(invalid["video_generate"]["suggested_adapter"], "agnes")
+            corrected = runtime.dispatch("media.validate", {"bindings": {"video_generate": {**binding, "adapter": "agnes"}}})
+            self.assertTrue(corrected["video_generate"]["valid"])
+            self.assertEqual(corrected["video_generate"]["message"], "")
+            self.assertEqual(self.config.get("experimental_multimedia"), original)
+            self.assertEqual(self.calls, [])
+            self.assertEqual(self.host.records(), [])
+            usage = self.host.model_usage({"base_url": "https://apihub.agnes-ai.com/v1", "model_name": "agnes-image-2.5-flash"})
+            self.assertFalse(usage["chat_supported"])
+            self.config.set("experimental_multimedia", {"enabled": True, "bindings": {"video_generate": {}}})
+            self.assertFalse(runtime.config()["binding_status"]["video_generate"]["valid"])
+        finally:
+            self.host.release()
+
     def test_audio_and_understanding_save_text_and_media(self):
         source = self.root / "one" / "sample.wav"
         source.write_bytes(b"RIFFfixture")

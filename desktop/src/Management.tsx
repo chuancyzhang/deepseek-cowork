@@ -108,7 +108,7 @@ export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean
       persist(result);return result;
     });onDirty(remaining);
   }
-  return { value, change, done, dirty, recovery:entry.recovery,
+  return { value, saved, change, done, dirty, recovery:entry.recovery,
     restore: () => {update(restoreFormRecovery(entry));console.info('form_draft_restored', {form:key});},
     discardRecovery: () => {const {recovery,...next}=entry;update(next);console.info('form_draft_discarded', {form:key});},
     reset: () => {update({...entry,value:saved});onDirty(false);} };

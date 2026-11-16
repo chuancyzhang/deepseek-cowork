@@ -4,11 +4,11 @@ const {app}=electron,fs=require('node:fs/promises'),path=require('node:path'),as
 const originalLoad=Module._load;
 app.getVersion=()=>require('../package.json').version;
 class HiddenWindow extends electron.BrowserWindow {
-  constructor(options){super({...options,show:false,webPreferences:{...options.webPreferences,offscreen:true,backgroundThrottling:false}});}
-  show(){} showInactive(){}
+  constructor(options){super({...options,show:false,webPreferences:{...options.webPreferences,offscreen:process.env.COWORK_EDITOR_NATIVE!=='1',backgroundThrottling:false}});}
+  show(){if(process.env.COWORK_EDITOR_NATIVE==='1')super.show();} showInactive(){}
 }
 Module._load=function(name,...rest){return name==='electron'?{...electron,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
-app.commandLine.appendSwitch('disable-gpu');
+if(process.env.COWORK_EDITOR_NATIVE!=='1')app.commandLine.appendSwitch('disable-gpu');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms)),errors=[];let window;
 const deadline=setTimeout(()=>{console.error('EDITOR_TIMEOUT',errors);app.exit(1);},100000);
 const read=async code=>{try{return await window.webContents.executeJavaScript(code);}catch(error){throw Error(code+'\n'+error.message);}};
@@ -23,6 +23,7 @@ app.once('browser-window-created',(_event,win)=>{
   win.webContents.once('did-finish-load',()=>void run().catch(async error=>{console.error(error.stack,errors);await snapshot('failure');try{await rpc('app.quit');}catch{app.exit(1);}process.exitCode=1;}));
 });
 async function run(){
+  console.log('EDITOR_DISPLAY',JSON.stringify({native:process.env.COWORK_EDITOR_NATIVE==='1',scaleFactor:electron.screen.getDisplayMatching(window.getBounds()).scaleFactor,bounds:window.getBounds()}));
   await until('Boolean(document.querySelector("[aria-label=消息输入]"))');
   await input('保留这条原草稿');await click('工作区');
   await until('Boolean(document.querySelector(".workspace"))');
@@ -80,8 +81,47 @@ async function run(){
   assert.ok((await read('document.querySelector("[aria-label=消息输入]").value')).startsWith('保留这条原草稿'));
   assert.equal((await rpc('media.tasks',{conversation_id:cid})).length,0);
   await click('设置');await click('多媒体');await until('document.querySelector(".media-model-table")');
-  await read('document.querySelector("[aria-label=配置视频生成]").click()');await snapshot('multimedia-config');
-  await click('去聊天试用');await until('document.querySelector("[aria-label=消息输入]")');
+  await read('document.querySelector("[aria-label=配置视频生成]").click()');
+  await until('document.querySelector(".media-config-actions .primary")?.textContent.includes("去聊天使用")');
+  assert.ok(await read('document.querySelector("[aria-label=配置视频生成]").textContent.includes("已配置")'));
+  assert.equal(await read('document.querySelector(".media-model-table").textContent.includes("未验证")'),false);
+  await snapshot('multimedia-config');
+  const selectAdapter=async value=>read(`(()=>{const el=[...document.querySelectorAll('.media-binding-editor label')].find(el=>el.firstElementChild.textContent==='接入方式').querySelector('select');el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await selectAdapter('openai');await until('document.querySelector(".media-config-issue")?.textContent.includes("使用 Agnes")');
+  await click('保存配置');await until('document.querySelector(".media-config-form .inline-error")');
+  assert.equal((await rpc('media.config')).bindings.video_generate.adapter,'agnes');
+  await snapshot('multimedia-repair');
+  await click('使用 Agnes');await until('!document.querySelector(".media-config-issue") && document.querySelector(".media-config-actions .primary")?.textContent.includes("去聊天使用")');
+  assert.equal(await read('document.querySelector(".media-model-table").textContent.includes("待保存")'),false);
+  await read('document.querySelector("[aria-label=更多配置操作]").click()');await click('移除此项配置');
+  await until('document.querySelector("[aria-label=配置视频生成]").textContent.includes("待移除")');
+  assert.equal((await rpc('media.config')).bindings.video_generate.model,'agnes-video-2.5-flash');
+  await click('取消修改');await until('document.querySelector(".media-config-actions .primary")?.textContent.includes("去聊天使用")');
+  await rpc('themes.appearance',{value:{mode:'dark',reading:{}}});window.setSize(900,720);window.webContents.setZoomFactor(1.25);
+  await until('document.documentElement.dataset.theme==="dark"');await delay(250);
+  assert.ok(await read('document.documentElement.scrollWidth<=innerWidth+1'));
+  await read('document.querySelector(".media-binding-editor").scrollIntoView({block:"start"})');await snapshot('multimedia-dark-small');
+  assert.ok(await read('document.querySelector(".media-config-actions .primary").getBoundingClientRect().right<=innerWidth+1'));
+  window.setSize(1400,930);window.webContents.setZoomFactor(1);await rpc('themes.appearance',{value:{mode:'light',reading:{}}});
+
+  await click('去聊天使用');await until('document.querySelector("[aria-label=消息输入]")');
+  for(const model of ['agnes-video-2.5-flash','agnes-image-2.5-flash','my-video-chat-model'])await rpc('settings.save_model',{channel_id:'fixture',model_name:model,name:'验证服务',base_url:'https://apihub.agnes-ai.com/v1'});
+  const settings=await rpc('settings.get'),chat=settings.models.find(item=>item.model_name==='my-video-chat-model');
+  await rpc('settings.select_model',{model_id:chat.id});
+  await click('设置');await click('返回聊天');await until('document.querySelector("[aria-label=消息输入]")');
+  await read('document.querySelector(".model-trigger").click()');await until('document.querySelector(".model-menu")');
+  assert.ok(await read('document.querySelector(".model-menu .picker-list").textContent.includes("my-video-chat-model")'));
+  assert.equal(await read('document.querySelector(".model-menu .picker-list").textContent.includes("agnes-video-2.5-flash")'),false);
+  assert.equal(await read('document.querySelector(".model-menu .picker-list").textContent.includes("agnes-image-2.5-flash")'),false);
+  await snapshot('chat-model-picker');await click('图片、视频与音频');await until('document.querySelector(".media-config-form")');
+  assert.equal((await rpc('media.tasks',{conversation_id:cid})).length,0);
+  await click('返回聊天');await until('document.querySelector("[aria-label=消息输入]")');
+  await read('document.querySelector(".model-trigger").click()');await click('管理对话模型');
+  await until('document.querySelector(".management-nav [aria-current=page]")?.textContent.includes("模型与服务")');
+  await click('返回聊天');await until('document.querySelector("[aria-label=消息输入]")');
+  page=await rpc('settings.page',{page:'experiments'});await rpc('settings.page_save',{page:'experiments',revision:page.revision,value:{...page.values,multimedia:false}});
+  await read('document.querySelector(".model-trigger").click()');await until('document.querySelector(".model-menu")');
+  await until('document.querySelectorAll(".model-media-link").length===0');
   assert.equal(errors.filter(error=>/workbench_render_failed|Uncaught|Maximum update/.test(error)).length,0,errors.join('\n'));
   clearTimeout(deadline);console.log('CODE_EDITOR_MEDIA_OK');await rpc('app.quit');
 }

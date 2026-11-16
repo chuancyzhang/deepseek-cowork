@@ -19,9 +19,11 @@ ADAPTERS = {
 # Exact provider declarations, not substring guesses about user model names.
 KNOWN_MODELS = {
     # https://agnes-ai.com/zh-Hans/docs/agnes-image-20-flash
-    "agnes-image-2.0-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成"},
+    "agnes-image-2.0-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成", "adapter": "agnes"},
+    # https://agnes-ai.com/zh-Hans/docs/agnes-image-25-flash
+    "agnes-image-2.5-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成", "adapter": "agnes"},
     # https://agnes-ai.com/zh-Hans/docs/agnes-video-25-flash
-    "agnes-video-2.5-flash": {"capabilities": ["video_generate"], "chat_supported": False, "purpose_label": "视频生成"},
+    "agnes-video-2.5-flash": {"capabilities": ["video_generate"], "chat_supported": False, "purpose_label": "视频生成", "adapter": "agnes"},
 }
 EXAMPLES = {
     "image_generate": ("生成图片", "生成一张极简咖啡店海报，暖色调，突出手冲咖啡。"),

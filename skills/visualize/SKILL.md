@@ -1,60 +1,54 @@
 ---
 name: visualize
-description: Generate interactive charts, data explorers, diagrams, simulations, or UI previews as executable HTML fragments embedded directly in the conversation.
-description_cn: 生成可直接嵌入对话的交互图表、数据探索器、Diagram、模拟器或 UI Preview。
+description: Build in-conversation interactive charts, explorers, simulations or interface previews when interaction materially helps understanding. Use Markdown for ordinary tables, Mermaid for static relationships and project tools for standalone sites.
+description_cn: 在对话中生成有用的交互图表、探索器、模拟器和界面预览。
 type: builtin
 source_type: builtin
 default_enabled: true
 metadata:
   author: deepseek-cowork team
-  version: "1.0.0"
-  permissions: ["workspace_read", "code_execution"]
-security_level: medium
+  version: "2.0"
 allowed-tools: [run_visualization_python, finalize_inline_visualization]
 ---
 
-# Visualize
+# 交互可视化
 
-仅在交互视图能明显改善理解、比较或探索时使用本内置技能。静态结构能用普通 Markdown 或 Mermaid 说明时，不要生成内联可视化。
+选择最小且能解释问题的表达：普通对照用 Markdown 表格，静态节点关系用 Mermaid；参数变化、筛选、模拟和探索适合本技能。报告/PPT 静态图使用绘图库，网站、独立文件或项目修改按对应任务处理，不因有图表就生成内联内容。
 
-## Workflow
+## 内容与交互
 
-1. 使用 `run_visualization_python` 读取当前工作区数据、计算、聚合和抽样。
-2. Python 代码必须从环境变量 `COWORK_VISUALIZATION_DIR` 获取输出目录，并在其中写入一个 ASCII 小写连字符命名的 `.html` 文件。
-3. 文件只能是 HTML Fragment；不要包含 `doctype`、`html`、`head` 或 `body`。
-4. 调用 `finalize_inline_visualization` 校验并发布该文件。
-5. 把工具返回的 `directive` 原样单独放在最终回复中需要显示交互视图的位置。不要把它放进代码块或 Markdown 链接。
-6. 修改已有视图时重新生成文件并再次发布，不覆盖已发布版本。
+- 初始画面就有用，只提供对当前任务必要的控件，不机械加入搜索、重置、评分卡或装饰面板。
+- 数据分析先用 data-analysis 核验口径与结果，再传入绘图所需值。单位、时间范围、缺失和抽样如实呈现，不拿演示数据替代真实结果。
+- 每个控件真实更新图形和数值；筛选后的结论也要成立。空结果、零和缺失分别处理。
+- 图表、模拟或界面布局任务按需读取 [图表与交互指导](references/charts.md)，路径见 References。
 
-## Fragment contract
+## 生成与发布
 
-- 总大小必须小于 2 MB。大数据应先聚合、分箱、抽样、降低精度或删除未使用字段。
-- 根元素必须有唯一 `id`，脚本必须通过该 ID 获取根节点。
-- 使用字面 HTML 和真实换行；不要把 `\\"` 或 `\\n` 留在最终文件中。
-- 交互数据应内联。禁止 `fetch`、XHR、WebSocket、表单提交和运行时本地文件访问。
-- 优先使用原生 HTML、SVG、Canvas、CSS 和内联 JavaScript。标准 SVG/XML 命名空间 URI 不属于网络资源，可以正常使用。
-- 仅在确有必要时加载静态外部资源，并使用版本固定的 HTTPS URL。允许的 CDN 为 `cdnjs.cloudflare.com`、`esm.sh`、`cdn.jsdelivr.net`、`unpkg.com`、`fonts.googleapis.com`、`fonts.gstatic.com` 和 `fonts.bunny.net`；其他来源会在发布时被拒绝。
-- 禁止 `fetch`、XHR、WebSocket、表单提交和运行时本地文件访问；外部资源加载或 CSP 拦截失败会直接显示错误，不能把空白图表当作成功结果。
-- 使用 `--background`、`--foreground`、`--muted-foreground`、`--border`、`--accent`、`--primary` 和 `--viz-series-*` 主题变量；不要硬编码浅色或深色背景。
-- 填满可用对话宽度，默认按 736px 设计并支持 320px；避免固定外宽、横向滚动、`position: fixed` 和 viewport-height 布局。
-- 使用原生 `button`、`input`、`select`、`textarea`，提供标签、键盘操作和 SVG `<title>/<desc>`。
-- 每个选择、筛选或参数变化都必须真实更新视图。生成后检查所有查询元素存在且 JavaScript 无未定义变量。
+1. 通过 run_visualization_python 计算必要数据，并从环境变量 COWORK_VISUALIZATION_DIR 取得输出目录。
+2. 写入 ASCII 小写连字符命名的 .html 文件，只能是 HTML Fragment，不含 doctype、html、head、body。写真实换行和 HTML，安全序列化内联数据，不能留下字符串转义残片。
+3. 检查数据计算、DOM 引用、变量和主交互代码，再调用 finalize_inline_visualization。
+4. 将返回 directive 原样单独放在最终回复的显示位置，不包装成代码块或链接。
+5. 修改后重新生成并发布，不覆盖已发布版本。发布只验证文件契约和资源限制，不等于完成交互或视觉检查。实际检查以当前可用预览为准，未运行不能声称运行通过。
 
-## State
+## Fragment 契约
 
-需要在历史会话中恢复筛选或选择时：
+- UTF-8，最多 2 MiB，大数据先聚合、分箱、抽样或降低无用精度。
+- 根节点有唯一 id，用 document.getElementById 取得根节点；CSS、查询和事件限定在此根节点。检查重复 ID、缺失元素及未定义变量。
+- 数据内联，禁止 fetch、XHR、WebSocket、表单提交或运行时本地文件访问。
+- 优先原生 HTML、SVG、Canvas、CSS 和 JS。SVG/XML 命名空间 URI 不算网络资源。
+- 确有需要才用固定版本 HTTPS 静态资源，允许 CDN：cdnjs.cloudflare.com、esm.sh、cdn.jsdelivr.net、unpkg.com、fonts.googleapis.com、fonts.gstatic.com、fonts.bunny.net。其他来源被拒绝；资源或脚本失败需修正，不把空白图当成功。
+- 使用宿主实际提供的 --background、--foreground、--muted-foreground、--border、--muted、--accent、--accent-foreground、--primary、--primary-foreground、--destructive、--viz-series-1 至 6、--font-size-base，不假设上游组件样式、图标或 window.openai API 存在。
+- SVG/CSS 用主题变量，Canvas 或图表库先解析颜色；监听 window 的 cowork:themechange 事件重新绘制。类别颜色映射稳定，不假定某个系列永远是某种颜色。
+- 填满可用宽度，支持 320px；不能固定外宽、position:fixed 或 viewport-height 布局。窄窗口重排控件、减少刻度，不整体缩小文字。
+- 使用原生 button/input/select/textarea，提供可访问名称、键盘和焦点；图形有 title/desc 或可访问摘要，关键信息不只依赖颜色或悬停。
 
-```javascript
-const saved = await window.cowork.loadState();
-// apply saved values before the first render
-window.cowork.saveState({ selectedId, filters });
-```
+## 展示状态
 
-只保存展示状态。不要保存密码、文件内容、凭据或超过 64 KB 的数据。
+需要恢复筛选时先 await window.cowork.loadState()，校验并应用保存值，再首次绘制；有意义的交互后 window.cowork.saveState({selectedId, filters})。该方法不返回保存成功承诺，失败由宿主显示。
 
-## Output
+只保存展示状态，JSON 对象最多 64 KiB；不保存凭据、原始文件、图片或可重新计算的大量数据。状态不发起模型消息、不授权外部操作。默认值适用于缺失或不兼容的状态，不能跨会话共享。
 
-最终回复仅保留必要的简短说明和发布工具返回的指令，例如：
+最终回复仅保留必要结论与发布指令，例如：
 
 ```text
 ::cowork-inline-vis{file="customer-explorer-a1b2c3d4.html"}

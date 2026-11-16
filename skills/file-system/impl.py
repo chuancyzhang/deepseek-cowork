@@ -23,7 +23,7 @@ def _structured_document_error(action, path):
         "structured_document_not_supported",
         (
             "This tool only handles plain text files and workspace paths. "
-            "Use the bundled document-reader capability and document_read to read "
+            "Use the bundled documents capability and document_read to read "
             "DOCX, PPTX, XLSX, XLS, or PDF files. To create or modify those formats, "
             "use run_python_code with an appropriate document library."
         ),

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { visualizationThemeCss } from './theme';
 
 export default function InlineVisualization({ cid, file }: {cid: string; file: string}) {
   const root = useRef<HTMLElement>(null), frame = useRef<HTMLIFrameElement>(null);
@@ -15,13 +16,14 @@ export default function InlineVisualization({ cid, file }: {cid: string; file: s
     if (!visible) return;
     let alive = true, token = '';
     const release = () => {if (token) void window.cowork.call('visualization.release', {token});};
-    void window.cowork.call('visualization.get', {conversation_id: cid, file}).then(result => {token=result.token;if (alive) {setValue(result); setFailure('');} else release();}).catch(error => {if (alive) setFailure(error.message);});
+    const theme_css = visualizationThemeCss(getComputedStyle(document.documentElement), document.documentElement.dataset.theme === 'dark');
+    void window.cowork.call('visualization.get', {conversation_id: cid, file, theme_css}).then(result => {token=result.token;if (alive) {setValue(result); setFailure('');} else release();}).catch(error => {if (alive) setFailure(error.message);});
     return () => {alive = false;release();};
   }, [cid, file, visible, retry]);
   const theme = useCallback(() => {
     if (!value) return;
     const styles = getComputedStyle(document.documentElement);
-    const css = `:root{color-scheme:${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'};font-family:${styles.fontFamily};color:${styles.getPropertyValue('--text')};background:${styles.getPropertyValue('--bg')};}body{margin:12px;overflow-wrap:anywhere}button,input,select,textarea{font:inherit}*{box-sizing:border-box}`;
+    const css = visualizationThemeCss(styles, document.documentElement.dataset.theme === 'dark');
     frame.current?.contentWindow?.postMessage({token:value.token, type:'theme', css}, '*');
   }, [value]);
   useEffect(() => {

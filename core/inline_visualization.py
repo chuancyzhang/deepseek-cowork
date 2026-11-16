@@ -323,6 +323,7 @@ def build_visualization_document(fragment, initial_state=None, read_only=False, 
   addEventListener('message', event => {{
     if (event.source === parent && event.data?.token === token && event.data?.type === 'theme') {{
       document.getElementById('cowork-theme').textContent = String(event.data.css || '');
+      dispatchEvent(new Event('cowork:themechange'));
     }}
   }});
   const report = () => parent.postMessage({{

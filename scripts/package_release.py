@@ -81,6 +81,8 @@ REQUIRED_PATHS = (
     "resources/service/_internal/python_env/Lib/site-packages/pptx/__init__.py",
     "resources/service/_internal/python_env/Lib/site-packages/PIL/__init__.py",
     "resources/service/_internal/python_env/Lib/site-packages/pypdf/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/pypdfium2/__init__.py",
+    "resources/service/_internal/python_env/Lib/site-packages/pypdfium2_raw/pdfium.dll",
     "resources/service/_internal/python_env/Lib/site-packages/reportlab/__init__.py",
     *(f"resources/service/_internal/git_bash_env/{name}" for name in GIT_REQUIRED_FILES),
     *(f"resources/service/_internal/ripgrep_env/{name}" for name in RIPGREP_FILE_HASHES),
@@ -89,9 +91,14 @@ REQUIRED_PATHS = (
     "resources/service/_internal/pywinpty-3.0.5.dist-info/licenses/LICENSE.txt",
     "resources/service/_internal/skills/workbench/SKILL.md",
     "resources/service/_internal/skills/workbench/impl.py",
-    *(f"resources/service/_internal/skills/{skill}/{entry}" for skill in ("visualize", "document-reader", "view-image") for entry in ("skill.json", "impl.py")),
+    *(f"resources/service/_internal/skills/{skill}/{entry}" for skill in ("visualize", "documents", "view-image") for entry in ("skill.json", "impl.py")),
     "resources/service/_internal/skills/visualize/SKILL.md",
-    "resources/service/_internal/skills/document-reader/SKILL.md",
+    "resources/service/_internal/skills/documents/SKILL.md",
+    *(f"resources/service/_internal/skills/{skill}/{entry}" for skill in ("presentations", "data-analysis") for entry in ("skill.json", "SKILL.md")),
+    *(f"resources/service/_internal/skills/{entry}" for entry in (
+        "documents/references/word.md", "presentations/references/authoring.md",
+        "data-analysis/references/quality-and-diagnostics.md", "data-analysis/references/statistics.md",
+        "visualize/references/charts.md")),
     "resources/service/_internal/web/editors/dist/terminal.html",
     "resources/service/_internal/web/editors/dist/terminal.js",
     "resources/service/_internal/web/editors/dist/terminal.css",
@@ -158,7 +165,8 @@ def _forbidden_reason(relative: Path) -> str:
     if "node_modules" in {part.lower() for part in relative.parts}:
         return "Node development dependency"
     removed_packages = ("ai_skills/frontend-slides", "ai_skills/huashu-design",
-                        "ai_skills/guizang-ppt-skill", "skills/skill-importer", "skills/general-experience")
+                        "ai_skills/guizang-ppt-skill", "skills/skill-importer", "skills/general-experience",
+                        "skills/document-reader", "ai_skills/document-reader")
     if any(lowered.startswith("resources/service/_internal/" + package + "/") for package in removed_packages):
         return "Removed built-in Skill is still bundled; rebuild the desktop distribution"
     if "/web/editors/dist/" in "/" + lowered and lowered.endswith(".map"):

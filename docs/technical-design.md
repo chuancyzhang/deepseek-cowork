@@ -363,6 +363,10 @@ example-skill/
 
 `SkillCatalogService` 将目录编译为不可变快照，UI 与 daemon 各自使用快照。任务提交建立轻量运行视图，创建、更新或启停能力后通过 `SkillChangeEvent` 发布变更，Worker 在模型请求边界应用新目录。
 
+内置 `documents` 负责 Office/PDF 读取与 Word 创作，`presentations` 负责 PPTX，`data-analysis` 负责口径、质量、计算与结论，`visualize` 负责对话中的交互表达。创作与分析复用现有 Python 运行时；多个交付格式共用已核验的结果。`SKILL.md` 保留核心流程，`references` 按任务读取，加载后的指导提供实际文件路径，默认不把参考正文一并注入。
+
+`document-reader` 完整退役，目录、加载与发行入口统一为 `documents`，没有旧 ID 别名、转发或配置迁移；历史记录不改写。保留原 `document_read` 工具及分批读取协议，新增 `document_render`。上述技能摘要、指导与工具定义会改变模型请求前缀；详细参考按需读取，展示状态不进入模型上下文。
+
 ### 配置与依赖
 
 `config_fields` 支持 `text`、`secret`、`select`，以及必填、默认值、选项、条件规则、帮助信息和声明的环境变量。配置保存在 `skill_configs`，执行时注入对应字段。
@@ -405,6 +409,8 @@ AI 在执行阶段自主判断是否调用 `update_experience(scope, experience,
 
 终端使用 ConPTY／POSIX PTY 和离线 xterm.js，后台线程读取，UI 分批呈现；Windows Job 或 POSIX 会话管理所属进程。Office 预览通过后台 helper 或可选 LibreOffice 生成阅读副本，`core/preview_versions.py` 按内容版本组织缓存，界面通过显式刷新加载新内容。
 
+`document_render(path, pages?, source_version?)` 接受 DOCX/PPTX/PDF，复用 LibreOffice 转 PDF，再以随包 `pypdfium2==5.15.2` 生成最长边 2000 像素的 PNG，每批最多 4 页。返回 `page_count`、内容 SHA-256 `source_version`、`renderer`、页面路径与 `next_pages`，后续批次携带版本校验；Office 转换及 PDF 转图共用取消与超时边界。PDFium 每批在独立 Python 进程运行，不在多会话线程间共享原生对象。只写入工作目录下 `.cowork/document-previews/<会话摘要>/` 的独立预览批次，不修改源文件；失败清理本批缓存，清理失败同时报告。调用 `view_image` 检查页面后才能声称版式已核验。
+
 写作页在会话中维护标题、正文和恢复副本，首次保存创建 Markdown 文件。富编辑器使用隔离 iframe 与限定命令的父页面桥接，前端资源由 `web/editors/` 构建并随应用分发。
 
 ## 后台任务与企业协作
@@ -428,6 +434,8 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 ## 主题设置与数据处理
 
 主题包使用 Schema、资产清单及稳定 Surface/Component ID。`preview_id + revision` 标识用户预览的候选，确认后提交已保存主题；界面使用统一 token 和共享控件。
+
+内联可视化使用 `core.inline_visualization.build_visualization_document` 的生产包装，开发验收也复用它。`desktop/src/theme.ts` 将当前主题映射为片段实际使用的背景、文字、边界、控件和六个系列颜色变量，首次渲染前注入；后续只更新主题 CSS 并派发 `cowork:themechange`。Canvas/图表库监听事件解析颜色后重绘，不重载 iframe 或重置展示状态。片段仍受 2 MiB、状态 64 KiB、会话与内容哈希绑定、沙箱和静态资源白名单约束。
 
 设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。管理表单将浏览位置、保存基准和实际修改分开：切换消息渠道不会改变启停配置；新草稿只恢复相对基准的修改字段。缺少可信基准的旧消息连接草稿由用户主动恢复或丢弃，不自动覆盖已保存配置。密码不写入持久化恢复副本。
 

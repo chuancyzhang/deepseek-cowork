@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "name": "presentations",
+  "display_name": "演示文稿",
+  "kind": "knowledge",
+  "capability_group": "content-creation",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "制作可编辑 PPTX，套用模板并检查逐页内容与版式。",
+  "description_cn": "制作可编辑 PPTX，套用模板并检查逐页内容与版式。",
+  "presentation": {
+    "category": "content_creation",
+    "short_name": "演示文稿",
+    "summary": "制作可编辑 PPTX，套用模板并检查逐页内容与版式。",
+    "examples": [
+      "制作汇报 PPT",
+      "修改演示文稿",
+      "套用 PPT 模板"
+    ],
+    "access_note": "通过现有工具处理任务相关文件；创建与修改沿用当前执行授权。"
+  },
+  "tags": [
+    "pptx",
+    "PPT",
+    "PowerPoint",
+    "演示文稿",
+    "幻灯片"
+  ],
+  "triggers": [
+    "pptx",
+    "PPT",
+    "PowerPoint",
+    "演示文稿",
+    "幻灯片"
+  ],
+  "anti_triggers": [],
+  "tool_refs": [
+    "document_read",
+    "document_render",
+    "run_python_code",
+    "view_image",
+    "review_draft"
+  ],
+  "references": [
+    "references/authoring.md"
+  ],
+  "python_dependencies": [],
+  "node_dependencies": []
+}

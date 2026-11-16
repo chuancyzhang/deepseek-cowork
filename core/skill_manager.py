@@ -14,7 +14,10 @@ import copy
 import threading
 import hashlib
 
-RETIRED_SKILLS = {"speech-to-text": "语音转文字已下线，已有音频与转写记录保留。"}
+RETIRED_SKILLS = {
+    "speech-to-text": "语音转文字已下线，已有音频与转写记录保留。",
+    "document-reader": "旧文档技能已移除，请选择 documents（文档处理）；旧配置不自动迁移。",
+}
 
 from .env_utils import get_app_data_dir
 from .mcp_client import (
@@ -80,7 +83,9 @@ def _humanize_skill_name(skill_name):
     text = (skill_name or "").replace("_", "-")
     mapping = {
         "agent-manager": "协作代理",
-        "document-reader": "文档读取",
+        "documents": "文档处理",
+        "presentations": "演示文稿",
+        "data-analysis": "数据分析",
         "file-system": "文件整理与读写",
         "history-query": "历史记录查询",
         "interaction": "用户确认与交付",
@@ -964,9 +969,11 @@ class SkillManager:
                 if ref_content:
                     sections.append(f"## Reference: {ref}\n{ref_content}")
         elif spec.get("references"):
+            reference_root = self.loaded_skill_sources.get(skill_name, "")
             sections.append(
                 "## References\n"
-                + "\n".join(f"- `{ref}`" for ref in spec.get("references") if isinstance(ref, str))
+                + "Use text_file_read only for the references needed by the task.\n"
+                + "\n".join(f"- `{os.path.join(reference_root, ref) if reference_root else ref}`" for ref in spec.get("references") if isinstance(ref, str))
             )
 
         return "\n\n".join([item for item in sections if item]).strip()

@@ -21,6 +21,8 @@ from .process_utils import subprocess_kwargs_no_window
 from .workbench import WorkbenchError
 
 log = logging.getLogger(__name__)
+DOCUMENT_RENDER_MAX_PAGES = 4
+DOCUMENT_RENDER_LONG_EDGE = 2000
 OFFICE_FAMILIES = {".doc": "word", ".docx": "word", ".ppt": "powerpoint",
                    ".pptx": "powerpoint", ".xls": "excel", ".xlsx": "excel"}
 MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
@@ -62,6 +64,135 @@ def cache_pdf(path, root=None):
         finally:
             temporary.unlink(missing_ok=True)
     return str(target)
+
+
+# PDFium is not thread-safe. A bounded, cancellable process per batch avoids
+# sharing native handles between concurrent conversations and the service.
+_PDF_RASTER_SCRIPT = r'''
+import json, math, pathlib, sys
+try:
+    import pypdfium2 as pdfium
+    source, destination, first, last, max_pages, long_edge = sys.argv[1:]
+    first, last, max_pages, long_edge = map(int, (first, last, max_pages, long_edge))
+    doc = pdfium.PdfDocument(source)
+    try:
+        total = len(doc)
+        last = min(max_pages, total) if last == 0 else last
+        if first < 1 or last < first or last > total or last - first + 1 > max_pages:
+            raise ValueError('页码超出文档范围；每批最多渲染 4 页。')
+        pages = []
+        for index in range(first - 1, last):
+            page = doc[index]
+            try:
+                width, height = page.get_size()
+                if not all(math.isfinite(v) and v > 0 for v in (width, height)):
+                    raise ValueError('PDF 页面尺寸无效。')
+                bitmap = page.render(scale=long_edge / max(width, height))
+                try:
+                    picture = bitmap.to_pil()
+                    try:
+                        filename = f'page-{index + 1}.png'
+                        picture.save(str(pathlib.Path(destination) / filename))
+                        pages.append(dict(page=index + 1, file=filename, width=picture.width, height=picture.height))
+                    finally:
+                        picture.close()
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+        print(json.dumps(dict(page_count=total, pages=pages, has_more=last < total,
+                             next_pages=f'{last + 1}-{min(last + max_pages, total)}' if last < total else None)))
+    finally:
+        doc.close()
+except Exception as exc:
+    print(json.dumps(dict(error=type(exc).__name__, message=str(exc)[:400]), ensure_ascii=True))
+    sys.exit(1)
+'''
+
+
+def render_document_pages(path, output_dir, *, pages=None, source_version=None, cancel=None, timeout=120):
+    """Render an immutable batch into a caller-owned directory; never edit source."""
+    from .process_utils import popen_external_program, terminate_process_tree
+    from .sandbox_runtime import get_runtime_executable
+    import re
+
+    cancel = cancel or threading.Event()
+    if cancel.is_set():
+        raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
+    first, last = 1, 0
+    if pages is not None:
+        match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", str(pages))
+        if not match:
+            raise ValueError("pages 应为 '1' 或 '2-4'，每批最多 4 页。")
+        first, last = int(match[1]), int(match[2] or match[1])
+        if last < first or last - first + 1 > DOCUMENT_RENDER_MAX_PAGES:
+            raise ValueError("每批最多渲染 4 页，请缩小页码范围。")
+    source = Path(path).resolve()
+    if source.suffix.lower() not in {".docx", ".pptx", ".pdf"}:
+        raise ValueError("页面渲染支持 DOCX、PPTX 和 PDF。")
+    fingerprint = hashlib.sha256(source_bytes(source)).hexdigest()
+    if source_version is not None and source_version != fingerprint:
+        raise WorkbenchError("source_changed", "文件版本已变化，请重新渲染，不能沿用旧页面检查结果。")
+    deadline = time.monotonic() + timeout
+    if source.suffix.lower() == ".pdf":
+        pdf = cache_pdf(source)
+        renderer = "PDFium"
+    else:
+        pdf, converted_version = render_office_pdf(source, cancel=cancel, timeout=timeout, renderer="libreoffice")
+        if converted_version != fingerprint:
+            raise WorkbenchError("source_changed", "文件在转换前发生变化，请重新渲染。")
+        renderer = "LibreOffice + PDFium"
+    if cancel.is_set():
+        raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
+    if time.monotonic() >= deadline:
+        raise WorkbenchError("renderer_timeout", "页面渲染超时，源文件未修改；请缩小页码范围后重试。")
+    executable = get_runtime_executable("python")
+    if not executable:
+        raise WorkbenchError("runtime_unavailable", "应用 Python 运行时不可用，尚未完成页面渲染。")
+    log.info("document_raster.start version=%s pages=%s renderer=%s", fingerprint[:12], pages or "first-batch", renderer)
+    process = None
+    try:
+        process = popen_external_program(
+            [executable, "-I", "-B", "-X", "utf8", "-c", _PDF_RASTER_SCRIPT,
+             str(pdf), str(output_dir), str(first), str(last), str(DOCUMENT_RENDER_MAX_PAGES), str(DOCUMENT_RENDER_LONG_EDGE)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            **subprocess_kwargs_no_window(),
+        )
+        while True:
+            if cancel.is_set():
+                raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
+            if time.monotonic() >= deadline:
+                raise WorkbenchError("renderer_timeout", "页面渲染超时，源文件未修改；请缩小页码范围后重试。")
+            try:
+                stdout, stderr = process.communicate(timeout=.1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            result = json.loads(stdout.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise WorkbenchError("renderer_failed", "页面渲染进程未返回有效结果，源文件未修改。") from exc
+        if process.returncode or "error" in result:
+            log.warning("document_raster.worker_failed exit=%s reason=%s", process.returncode, result.get("error"))
+            message = result.get("message", "页面渲染失败。")
+            if result.get("error") == "ModuleNotFoundError":
+                message = "随包页面渲染组件缺失，请重新安装完整 Cowork 包。"
+            raise WorkbenchError("renderer_failed", message)
+        if cancel.is_set():
+            raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
+        if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
+            raise WorkbenchError("source_changed", "文件在渲染时发生变化，请重新渲染最新版本。")
+        result.update(source_version=fingerprint, renderer=renderer)
+        log.info("document_raster.finish version=%s pages=%s", fingerprint[:12], len(result["pages"]))
+        return result
+    except Exception as exc:
+        log.warning("document_raster.failed version=%s reason=%s", fingerprint[:12], getattr(exc, "code", type(exc).__name__))
+        raise
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                terminate_process_tree(process)
+            process.communicate()
 
 
 _OFFICE_SCRIPT = r'''

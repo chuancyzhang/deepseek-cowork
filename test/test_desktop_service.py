@@ -392,14 +392,14 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.submit(source)
         self.client.wait_run(source)
         reference = self.client.call("conversation.reference", conversation_id=cid, source_id=source)
-        preferences = {"selected_skill_names": ["document-reader"], "conversation_refs": [reference],
+        preferences = {"selected_skill_names": ["documents"], "conversation_refs": [reference],
                        "knowledge_refs": [{"source": "weknora", "title": "发送时的资料"}]}
         params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
                       text="记录本轮选择", model_id=self.model_id, preferences=preferences)
         self.client.call("conversation.send", **params)
         self.client.wait_run(cid)
         original = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
-        self.assertEqual(original["meta"]["ui_context"], {"skills": ["document-reader"], "knowledge": [{"title": "发送时的资料"}]})
+        self.assertEqual(original["meta"]["ui_context"], {"skills": ["documents"], "knowledge": [{"title": "发送时的资料"}]})
         self.assertEqual(original["meta"]["conversation_refs"][0]["id"], reference["id"])
         self.client.call("conversation.preferences", conversation_id=cid, value={"selected_skill_names": [], "knowledge_refs": []})
         reopened = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
@@ -415,7 +415,7 @@ class DesktopIntegrationTests(unittest.TestCase):
     def test_edit_and_retry_keep_original_skills_after_composer_selection_changes(self):
         cid = self.client.call("conversation.create")["id"]
         first = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
-                     text="常用任务原请求", model_id=self.model_id, skills=["document-reader"])
+                     text="常用任务原请求", model_id=self.model_id, skills=["documents"])
         self.client.call("conversation.send", **first)
         self.client.wait_run(cid)
         self.client.call("conversation.preferences", conversation_id=cid, value={"selected_skill_names": []})
@@ -428,10 +428,10 @@ class DesktopIntegrationTests(unittest.TestCase):
                              rewrite={"hash": prepared["hash"], "revision": prepared["revision"], "message_id": current["id"]})
             self.client.wait_run(cid)
             rewritten = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
-            self.assertEqual(rewritten["meta"]["ui_context"]["skills"], ["document-reader"])
+            self.assertEqual(rewritten["meta"]["ui_context"]["skills"], ["documents"])
             inspection = self.client.call("task.inspect", conversation_id=cid, run_id=request_id)
             self.assertEqual(inspection["current_context"]["skills"], [])
-            self.assertEqual(inspection["submitted_context"]["skills"], ["document-reader"])
+            self.assertEqual(inspection["submitted_context"]["skills"], ["documents"])
 
     def test_durable_send_deduplication_and_isolation(self):
         first = self.client.call("conversation.create")

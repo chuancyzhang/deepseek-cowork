@@ -62,6 +62,7 @@ def finalize_inline_visualization(filename, title="", _context=None):
     conversation_id = _conversation_id(_context)
     if not conversation_id:
         return {"ok": False, "status": "error", "content": "缺少当前会话 ID。"}
+    logger.info("visualization_publish_start conversation_id=%s", conversation_id)
     try:
         artifact = publish_visualization_fragment(
             conversation_id,
@@ -72,6 +73,7 @@ def finalize_inline_visualization(filename, title="", _context=None):
         if storage is None:
             raise RuntimeError("聊天存储未初始化，无法登记内联可视化。")
         storage.register_inline_visualization(conversation_id, artifact)
+        logger.info("visualization_publish_done conversation_id=%s sha256=%s bytes=%s", conversation_id, artifact["sha256"], artifact["bytes"])
         return {
             "ok": True,
             "source_tool": "finalize_inline_visualization",
@@ -82,6 +84,7 @@ def finalize_inline_visualization(filename, title="", _context=None):
             "directive": artifact["directive"],
         }
     except Exception as exc:
+        logger.warning("visualization_publish_failed conversation_id=%s reason=%s", conversation_id, type(exc).__name__)
         return {
             "ok": False,
             "status": "error",

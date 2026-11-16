@@ -41,7 +41,7 @@ for name, version in expected.items():
     if metadata.version(name) != version:
         raise RuntimeError(f"{name}: expected {version}, found {metadata.version(name)}")
 for name in ('numpy', 'pandas', 'scipy', 'matplotlib', 'seaborn', 'sklearn',
-             'openpyxl', 'xlrd', 'docx', 'pptx', 'PIL.Image', 'pypdf', 'reportlab'):
+             'openpyxl', 'xlrd', 'docx', 'pptx', 'PIL.Image', 'pypdf', 'pypdfium2', 'pypdfium2_raw', 'reportlab'):
     module = importlib.import_module(name)
     if not pathlib.Path(module.__file__).resolve().is_relative_to(root):
         raise RuntimeError(f"{name} loaded outside bundled Python: {module.__file__}")
@@ -81,7 +81,18 @@ from pypdf import PdfReader
 canvas = Canvas('test.pdf'); canvas.drawString(72, 72, 'Cowork'); canvas.save()
 if 'Cowork' not in PdfReader('test.pdf').pages[0].extract_text():
     raise RuntimeError('PDF round-trip failed')
-print(json.dumps({'versions': expected, 'checks': ['imports', 'linear-algebra', 'regression', 'joblib-workers', 'aggregation', 'xlsx', 'plot', 'docx', 'pptx', 'pdf']}))
+if metadata.version('pypdfium2') != '5.15.2':
+    raise RuntimeError('PDFium binding version does not match the release')
+import pypdfium2 as pdfium
+pdf = pdfium.PdfDocument('test.pdf')
+page = pdf[0]
+bitmap = page.render(scale=1)
+picture = bitmap.to_pil()
+picture.save('page.png')
+picture.close(); bitmap.close(); page.close(); pdf.close()
+with Image.open('page.png') as picture:
+    picture.verify()
+print(json.dumps({'versions': expected, 'checks': ['imports', 'linear-algebra', 'regression', 'joblib-workers', 'aggregation', 'xlsx', 'plot', 'docx', 'pptx', 'pdf', 'pdf-raster']}))
 '''
 
 

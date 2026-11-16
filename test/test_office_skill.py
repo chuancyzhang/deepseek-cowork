@@ -17,7 +17,7 @@ file_spec.loader.exec_module(file_impl)
 
 doc_spec = importlib.util.spec_from_file_location(
     "document_impl",
-    os.path.join(os.path.dirname(__file__), "../skills/document-reader/impl.py"),
+    os.path.join(os.path.dirname(__file__), "../skills/documents/impl.py"),
 )
 document_impl = importlib.util.module_from_spec(doc_spec)
 doc_spec.loader.exec_module(document_impl)
@@ -25,7 +25,9 @@ doc_spec.loader.exec_module(document_impl)
 
 class TestOfficeSkill(unittest.TestCase):
     def setUp(self):
-        self.workspace_dir = tempfile.mkdtemp()
+        scratch = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.tmp/office-skill-tests"))
+        os.makedirs(scratch, exist_ok=True)
+        self.workspace_dir = tempfile.mkdtemp(dir=scratch)
 
     def tearDown(self):
         shutil.rmtree(self.workspace_dir, ignore_errors=True)
@@ -69,7 +71,7 @@ class TestOfficeSkill(unittest.TestCase):
     def test_document_reader_is_default_on_without_runtime_dependency_install(self):
         manifest_path = os.path.join(
             os.path.dirname(__file__),
-            "../skills/document-reader/skill.json",
+            "../skills/documents/skill.json",
         )
         with open(manifest_path, "r", encoding="utf-8") as handle:
             manifest = json.load(handle)
@@ -112,8 +114,8 @@ class TestOfficeSkill(unittest.TestCase):
         book.create_sheet("第二表").append(["最后一项"])
         book.save(os.path.join(self.workspace_dir, "large.xlsx"))
         book.close()
-        shutil.copyfile(os.path.join(os.path.dirname(__file__), "fixtures/document-reader-batches.xls"),
-                        os.path.join(self.workspace_dir, "large.xls"))
+        from document_fixtures import write_xls_batches
+        write_xls_batches(os.path.join(self.workspace_dir, "large.xls"), long_cell)
         for ext in ("xlsx", "xls"):
             with self.subTest(format=ext):
                 self.assertEqual(self._read_batches(f"large.{ext}"), expected)

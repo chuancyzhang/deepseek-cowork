@@ -89,7 +89,10 @@ class ManagementTests(unittest.TestCase):
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         storage = ChatStorage(str(self.data / "chat_history" / "chat_history.sqlite"))
         storage.register_inline_visualization(cid, {"file":"chart.html", "path":str(source), "sha256":digest, "title":"图表", "origins":[]})
-        loaded = c.call("visualization.get", conversation_id=cid, file="chart.html")
+        theme_css = ":root{--background:#202020;--foreground:#eeeeee}"
+        loaded = c.call("visualization.get", conversation_id=cid, file="chart.html", theme_css=theme_css)
+        self.assertIn(theme_css, loaded["html"])
+        self.assertLess(loaded["html"].index(theme_css), loaded["html"].index('<div id="chart">'))
         from html import unescape
         self.assertIn("connect-src 'none'", unescape(loaded["html"]))
         self.assertNotIn("QWebChannel", loaded["html"])

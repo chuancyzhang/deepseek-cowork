@@ -435,7 +435,9 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
-SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]
+SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "pypdfium2", "reportlab"]
+if _require_distribution("pypdfium2").version != "5.15.2":
+    raise RuntimeError("Install the pinned pypdfium2 from requirements.txt before building.")
 SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS + list(DATA_ANALYSIS_DISTS)
 DATA_ANALYSIS_LOCK = os.path.join(SPEC_DIR, "requirements-data-analysis.txt")
 for name, expected_version in data_analysis_versions(DATA_ANALYSIS_LOCK).items():

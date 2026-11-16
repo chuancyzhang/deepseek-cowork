@@ -1708,7 +1708,7 @@ class LLMWorker(TaskWorker):
             "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
             "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
             "策略 [补丁约束]: 先读后改并提供精确上下文；重复片段必须补足上下文直到唯一匹配，不得依赖空白或 Unicode 模糊匹配。删除会一次展示全部路径并要求确认。补丁失败后根据结构化错误重新读取或修正补丁，不得臆造其他文本写入工具。",
-            "Office/PDF 策略: 读取 DOCX/PPTX/XLSX/XLS/PDF 应使用随应用提供的 `document-reader` 能力及 'document_read'；写入这些格式应使用任务所需的实际生成工具或运行时库。",
+            "Office/PDF 策略: 通过 `documents` 的 'document_read' 按需读取文档；Word 制作遵循 documents，PPTX 制作遵循 presentations，分析数据遵循 data-analysis。使用现有 Python 库生成文件；版式检查用 'document_render' 分页生成图片，再用 'view_image' 实际检查。文件生成、结构检查和视觉检查是不同结果，不得混淆。",
             "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
             "策略 [持久化]: 只有用户明确要求时，才创建、修改或安装 Skill，或调用 'write_memories' 写入长期记忆；不得静默持久化推断、敏感信息、临时细节或完整聊天记录。",

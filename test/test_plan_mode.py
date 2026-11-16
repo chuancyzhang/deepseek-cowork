@@ -138,14 +138,14 @@ class TestClarifyModeHelpers(unittest.TestCase):
             "ppt_agent_template_file": "original-template.pptx",
             "ppt_agent_output_format": "pptx",
             "ppt_agent_template_screenshots": ["slide-1.png"],
-            "selected_skill_names": ["document-reader"],
+            "selected_skill_names": ["documents"],
         }
         before = json.loads(json.dumps(source))
         ctx = normalize_run_context(source)
         self.assertEqual(source, before)
         self.assertFalse(any(key.startswith("ppt_agent_") for key in ctx))
         self.assertEqual(ctx["workflow_mode"], "")
-        self.assertEqual(ctx["selected_skill_names"], ["document-reader"])
+        self.assertEqual(ctx["selected_skill_names"], ["documents"])
         self.assertEqual(normalize_run_context(ctx), ctx)
 
 

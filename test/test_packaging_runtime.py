@@ -61,7 +61,7 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             release_text = handle.read()
 
         self.assertIn(
-            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"]',
+            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "xlrd", "python-docx", "python-pptx", "Pillow", "pypdf", "pypdfium2", "reportlab"]',
             spec_text,
         )
         self.assertIn('SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS', spec_text)

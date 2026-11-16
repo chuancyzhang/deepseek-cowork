@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "name": "documents",
+  "display_name": "文档处理",
+  "kind": "knowledge",
+  "capability_group": "file-information-interaction",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "读取 Office/PDF，创建、编辑和检查 Word 文档。",
+  "description_cn": "读取 Office/PDF，创建、编辑和检查 Word 文档。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "文档处理",
+    "summary": "读取 Office/PDF，创建、编辑和检查 Word 文档。",
+    "examples": [
+      "创建 Word 报告",
+      "修改文档",
+      "总结 PDF"
+    ],
+    "access_note": "通过现有工具处理任务相关文件；创建与修改沿用当前执行授权。"
+  },
+  "tags": [
+    "docx",
+    "Word",
+    "文档",
+    "PDF",
+    "document_read",
+    "document_render"
+  ],
+  "triggers": [
+    "docx",
+    "Word",
+    "文档",
+    "PDF",
+    "document_read",
+    "document_render"
+  ],
+  "anti_triggers": [],
+  "tool_refs": [
+    "document_read",
+    "document_render",
+    "run_python_code",
+    "view_image",
+    "review_draft"
+  ],
+  "references": [
+    "references/word.md"
+  ],
+  "python_dependencies": [],
+  "node_dependencies": []
+}

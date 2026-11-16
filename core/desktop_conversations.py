@@ -168,7 +168,8 @@ class ConversationActions:
             state = self.storage.get_inline_visualization_state(cid, artifact["file"], artifact["sha256"])
             log.info("visualization_loaded conversation=%s file=%s read_only=%s", cid, artifact["file"], read_only)
             return {"title": artifact["title"], "sha256": artifact["sha256"], "read_only": read_only,
-                    **build_visualization_document(content["fragment"], state, read_only=read_only, origins=content["origins"], frame_only=True)}
+                    **build_visualization_document(content["fragment"], state, read_only=read_only, origins=content["origins"],
+                                                    theme_css=str(p.get("theme_css") or ""), frame_only=True)}
         if method == "project.list":
             return self.config.get_projects()
         if method == "project.save":

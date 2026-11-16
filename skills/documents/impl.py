@@ -3,6 +3,9 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import tempfile
+import threading
 from contextlib import closing, contextmanager
 
 from core.filesystem_ops import _build_error, _build_ok, record_full_read_state, resolve_path
@@ -293,6 +296,68 @@ def document_read(workspace_dir, path, sheet_name=None, pages=None, max_chars=12
         return _build_error(action, code, str(exc)[:500])
 
 
+class _TaskCancellation:
+    def __init__(self, context):
+        from core.execution_authorization import current_authorization
+        auth = current_authorization(context)
+        self.event = auth._cancelled if auth else threading.Event()
+        self.abort = context.get("abort_check")
+
+    def is_set(self):
+        return self.event.is_set() or bool(callable(self.abort) and self.abort())
+
+    def wait(self, timeout):
+        return self.event.wait(timeout) or self.is_set()
+
+
+def document_render(workspace_dir, path, pages=None, source_version=None, _context=None):
+    """Create bounded page images for view_image without changing the document."""
+    from core.document_preview import render_document_pages
+    context = _context or {}
+    session = str(context.get("session_id") or context.get("conversation_id") or "")
+    trace = f"session_id={session} tool_call_id={context.get('tool_call_id', '')}"
+    output = None
+    LOGGER.info("document_render stage=start %s pages=%s", trace, pages or "first-batch")
+    try:
+        if not session:
+            LOGGER.warning("document_render stage=failed %s reason=session_unavailable", trace)
+            return _build_error("document_render", "session_unavailable", "缺少当前会话，无法保存页面预览。")
+        source, display_path, error = resolve_path(workspace_dir, path, context=context, action="document_render", must_exist=True)
+        if error:
+            LOGGER.warning("document_render stage=failed %s reason=%s", trace, error.get("error"))
+            return error
+        session_key = hashlib.sha256(session.encode("utf-8")).hexdigest()[:24]
+        # No caller-supplied output path, and no junction/symlink traversal.
+        destination, _, error = resolve_path(workspace_dir, f".cowork/document-previews/{session_key}",
+                                              context={}, action="document_render", for_write=True)
+        if error:
+            LOGGER.warning("document_render stage=failed %s reason=%s", trace, error.get("error"))
+            return error
+        cancelled = _TaskCancellation(context)
+        if cancelled.is_set():
+            LOGGER.info("document_render stage=cancelled %s", trace)
+            return _build_error("document_render", "cancelled", "已停止页面渲染，源文件未修改。")
+        os.makedirs(destination, exist_ok=True)
+        output = tempfile.mkdtemp(prefix="pages-", dir=destination)
+        result = render_document_pages(source, output, pages=pages, source_version=source_version, cancel=cancelled)
+        for page in result["pages"]:
+            page["path"] = os.path.relpath(os.path.join(output, page.pop("file")), workspace_dir).replace("\\", "/")
+        LOGGER.info("document_render stage=completed %s version=%s pages=%s", trace, result["source_version"][:12], len(result["pages"]))
+        return _build_ok("document_render", {"path": display_path, **result,
+            "content": "页面图片已生成；请调用 view_image 检查所需页面。生成成功不代表已完成排版检查。"})
+    except Exception as exc:
+        cleanup_error = ""
+        if output:
+            try:
+                shutil.rmtree(output)
+            except OSError:
+                LOGGER.exception("document_render stage=cleanup_failed %s", trace)
+                cleanup_error = " 部分预览缓存未能清理，源文件未修改。"
+        code = getattr(exc, "code", "invalid_argument" if isinstance(exc, ValueError) else "render_failed")
+        LOGGER.warning("document_render stage=failed %s reason=%s", trace, code)
+        return _build_error("document_render", code, str(exc)[:500] + cleanup_error)
+
+
 TOOL_EXPORTS = [{
     "name": "document_read", "handler": document_read,
     "description": "Read DOCX, PPTX, XLSX, XLS or PDF in bounded batches. Read only needed ranges; pass next_cursor as cursor to continue. Use text_file_read for plain text.",
@@ -306,4 +371,14 @@ TOOL_EXPORTS = [{
                       "description": "Whole JSON result character budget including metadata and sections. Default 12000."},
     }, "required": ["path"]},
     "read_only": True, "search_hint": "read docx pptx xlsx xls pdf office document structured batch range",
+}, {
+    "name": "document_render", "handler": document_render,
+    "description": "Render DOCX/PPTX/PDF to at most four page images for view_image. Does not edit source. Office needs LibreOffice. Return source_version on later batches; inspect images before claiming layout verified.",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string", "description": "Document path; relative to current workspace or an authorized absolute path."},
+        "pages": {"type": "string", "description": "One-based page/range, e.g. '2-4'; at most 4 pages. Default first batch."},
+        "source_version": {"type": "string", "description": "Source hash returned by an earlier batch; rejects changed documents."},
+    }, "required": ["path"]},
+    "read_only": True, "destructive": False,
+    "search_hint": "render inspect docx pptx pdf page slide layout PNG 文档 页面 幻灯片 排版 检查",
 }]

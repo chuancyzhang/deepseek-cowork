@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "name": "data-analysis",
+  "display_name": "数据分析",
+  "kind": "knowledge",
+  "capability_group": "data-analysis",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "分析数据、比较指标、解释变化并核验结论。",
+  "description_cn": "分析数据、比较指标、解释变化并核验结论。",
+  "presentation": {
+    "category": "data_analysis",
+    "short_name": "数据分析",
+    "summary": "分析数据、比较指标、解释变化并核验结论。",
+    "examples": [
+      "分析销售下降原因",
+      "检查数据质量",
+      "比较各地区转化率"
+    ],
+    "access_note": "通过现有工具处理任务相关文件；创建与修改沿用当前执行授权。"
+  },
+  "tags": [
+    "数据分析",
+    "统计",
+    "同比",
+    "环比",
+    "指标变化",
+    "数据质量",
+    "data analysis"
+  ],
+  "triggers": [
+    "数据分析",
+    "统计",
+    "同比",
+    "环比",
+    "指标变化",
+    "数据质量",
+    "data analysis"
+  ],
+  "anti_triggers": [
+    "仅重命名文件",
+    "仅调整文件样式"
+  ],
+  "tool_refs": [
+    "document_read",
+    "run_python_code",
+    "view_image"
+  ],
+  "references": [
+    "references/quality-and-diagnostics.md",
+    "references/statistics.md"
+  ],
+  "python_dependencies": [],
+  "node_dependencies": []
+}

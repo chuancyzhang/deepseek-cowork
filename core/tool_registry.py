@@ -49,6 +49,7 @@ READ_ONLY_TOOL_NAMES = {
     "glob",
     "grep",
     "document_read",
+    "document_render",
     "search_files",
     "search_codebase",
     "query_history",

@@ -9,7 +9,7 @@ from core.team_spaces import TeamSpaceClient
 
 class Connections:
     methods = frozenset({"library.status", "library.select", "library.login", "library.authorize", "library.confirm",
-        "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.reference",
+        "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.read_result", "library.reference",
         "library.upload", "library.uploads", "library.check_upload", "library.tenant",
         "enterprise.status", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
         "team.list", "team.detail", "team.collection", "team.object", "team.execute", "team.upload", "team.download", "team.conversation"})
@@ -64,6 +64,15 @@ class Connections:
             scope = provider.snapshot()
             if not scope or scope.get("unavailable"):
                 raise ValueError("请先连接此资料来源。已选择的资料仍保留。")
+            if action == "read_result":
+                from core.knowledge_library import same_identity
+                job = self.s.jobs.get(str(p["job_id"]))
+                result = job.get("result") or {}
+                if (job["status"] != "completed" or result.get("kind") != "library_preview"
+                        or not same_identity(result.get("scope", {}), scope)
+                        or result.get("scope", {}).get("generation") != scope.get("generation")):
+                    raise ValueError("预览尚未完成或资料库账号已改变，请重新打开文件。")
+                return {key: result[key] for key in ("path", "name", "fingerprint", "payload")}
             if action == "reference":
                 ref = provider.reference(scope, p["collection"], p["title"], p.get("item", ""))
                 self.library.store.visit(ref)
@@ -80,9 +89,15 @@ class Connections:
                         return provider.tool(scope, "search", {"query": p["query"]}, cancelled=cancelled.is_set)
                     return provider.search(scope, p["query"], cancelled=cancelled.is_set)
                 if action == "read":
+                    from core.library_preview import weknora_preview, document_content, check_cancelled
                     if source == "weknora":
-                        return {"html": provider.preview_html(scope, p["item"])}
-                    return provider.read(scope, p["item"], p["collection"], cancelled=cancelled.is_set)
+                        return weknora_preview(provider, scope, p["item"], self.s.config.data_dir, cancelled, progress)
+                    value = provider.read(scope, p["item"], p.get("collection", ""), cancelled=cancelled.is_set)
+                    check_cancelled(cancelled)
+                    content = document_content(value)
+                    if not content:
+                        raise ValueError("平台尚未返回可显示的正文，请在原平台核对文件内容或解析状态。")
+                    return {"text": content, "format": "markdown", "url": value.get("url", "")}
                 if action == "upload":
                     return provider.upload(scope, p["path"], p["collection"], p.get("parent", ""))
                 if action == "check_upload":

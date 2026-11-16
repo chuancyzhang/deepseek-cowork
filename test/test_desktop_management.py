@@ -9,6 +9,23 @@ from test_desktop_service import ServiceClient, QA_ROOT
 
 
 class ManagementTests(unittest.TestCase):
+    def test_external_file_preview_preserves_creation_and_session_boundaries(self):
+        c = self.client
+        cid = c.call('conversation.create')['id']
+        other = c.call('conversation.create')['id']
+        path = self.data / ('outside-' + uuid.uuid4().hex + '.md')
+        path.write_text('工作目录外的正文', encoding='utf-8')
+        opened = c.call('file.open', conversation_id=cid, path=str(path))
+        self.assertEqual(opened['payload']['content'], '工作目录外的正文')
+        self.assertTrue(c.call('file.describe', conversation_id=cid, path=str(path))['fingerprint'])
+        with self.assertRaisesRegex(RuntimeError, '工作目录'):
+            c.call('workspace.create', conversation_id=cid, name=str(self.data / 'forbidden.md'))
+        with self.assertRaisesRegex(RuntimeError, '编辑会话'):
+            c.call('file.save', conversation_id=other, id=opened['id'], payload='wrong conversation')
+        path.unlink()
+        with self.assertRaisesRegex(RuntimeError, '不存在|移动'):
+            c.call('file.open', conversation_id=cid, path=str(path))
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(dir=QA_ROOT)
@@ -94,7 +111,7 @@ class ManagementTests(unittest.TestCase):
             c.call("visualization.get", conversation_id=cid, file="chart.html")
         self.assertEqual(storage.get_inline_visualization_state(cid, "chart.html", digest), {"selected":3})
 
-    def test_pasted_image_and_tool_snapshot_preview_keep_conversation_boundaries(self):
+    def test_pasted_image_and_tool_snapshot_preview_preserve_integrity(self):
         import base64
         from io import BytesIO
         from PIL import Image
@@ -120,11 +137,12 @@ class ManagementTests(unittest.TestCase):
         preview = self.client.call("file.open", conversation_id=cid, path=snapshot["path"])
         self.assertTrue(preview["payload"]["read_only"])
         self.assertEqual(preview["payload"]["preview_kind"], "image")
-        with self.assertRaisesRegex(RuntimeError, "不属于"):
-            self.client.call("file.open", conversation_id=other, path=snapshot["path"])
+        self.assertTrue(self.client.call("file.open", conversation_id=other, path=snapshot["path"])["payload"]["read_only"])
         Path(snapshot["path"]).write_bytes(b"changed")
         with self.assertRaisesRegex(RuntimeError, "快照"):
             self.client.call("file.open", conversation_id=cid, path=snapshot["path"])
+        with self.assertRaisesRegex(RuntimeError, "快照"):
+            self.client.call("file.open", conversation_id=other, path=snapshot["path"])
 
     def test_skills_experts_and_mcp_inventory(self):
         c = self.client
@@ -311,7 +329,7 @@ class ManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "不可用"):
             c.call("settings.action", page="preferences", action="component.remove:documents")
 
-    def test_preview_files_are_scoped_and_do_not_create_editable_sessions(self):
+    def test_preview_files_are_read_only_across_workspaces(self):
         from PIL import Image
         from pypdf import PdfWriter
         c = self.client
@@ -329,8 +347,7 @@ class ManagementTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "编辑会话已失效"):
                 c.call("file.save", conversation_id=conversation["id"], id=file["id"], payload="wrong")
         other = c.call("conversation.create")
-        with self.assertRaisesRegex(RuntimeError, "不属于"):
-            c.call("file.open", conversation_id=other["id"], path=str(image))
+        self.assertEqual(c.call("file.open", conversation_id=other["id"], path=str(image))["payload"]["preview_kind"], "image")
 
     def test_office_payload_roundtrip_and_external_conflict(self):
         from openpyxl import Workbook, load_workbook
@@ -504,3 +521,97 @@ def test_background_jobs_keep_searchable_logs_and_recover_interrupted_work(tmp_p
         assert "logs" not in recovered.get("old-000")
     finally:
         recovered.close()
+
+
+def test_library_preview_jobs_are_serializable_and_finish_on_bad_results(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from core.desktop_jobs import DesktopJobs
+    from core.desktop_store import DesktopStore, DesktopChatStorage
+    from core.desktop_connections import Connections
+    from core.knowledge_library import KnowledgeService, KnowledgeStore
+    from test_knowledge_library import TestProtector, WeKnoraFixture
+
+    storage = DesktopChatStorage(str(tmp_path / "jobs.sqlite"))
+    service = SimpleNamespace(storage=storage, store=DesktopStore(storage), publish=Mock(), config=SimpleNamespace(data_dir=tmp_path))
+    service.jobs = DesktopJobs(service)
+    wire = WeKnoraFixture()
+    provider = KnowledgeService(KnowledgeStore(str(tmp_path), TestProtector()), wire)
+    provider.login("http://fixture.test", "reader@example.test", "fixture")
+    adapter = Connections.__new__(Connections)
+    adapter.s = service
+    adapter.library = SimpleNamespace(source="weknora", provider=lambda source: provider)
+    wire.documents["doc-a"]["file_type"] = "html"
+    try:
+        good = adapter.dispatch("library.read", {"source":"weknora", "item":"doc-a"})
+        bad = service.jobs.submit("Invalid binary result", lambda cancel, progress: {"html": b"bad"})
+        service.jobs.executor.shutdown(wait=True)
+        assert service.jobs.get(good["job_id"])["status"] == "completed"
+        assert "Preview while indexing" in service.jobs.get(good["job_id"])["result"]["html"]
+        failure = service.jobs.get(bad["job_id"])
+        assert failure["status"] == "failed" and failure["result"] is None
+        assert service.jobs.active == {}
+        assert not any(call.args[0]["event"] == "service_error" for call in service.publish.call_args_list)
+    finally:
+        service.jobs.close()
+
+
+def test_library_binary_preview_identity_and_content_types(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from core.library_preview import weknora_preview, document_content
+    from core.desktop_connections import Connections
+    scope = {"source":"weknora", "connection_id":"a", "user_id":"u", "tenant_id":"t", "generation":1}
+    provider = Mock()
+    provider.snapshot.return_value = scope
+    provider.request.return_value = {"data":{"title":"培训办法.pdf", "file_type":"pdf"}}
+    provider.preview_html.return_value = b"%PDF-1.4\npreview"
+    result = weknora_preview(provider, scope, "doc", tmp_path, threading.Event(), Mock())
+    assert result["payload"]["preview_kind"] == "pdf"
+    assert Path(result["path"]).read_bytes().startswith(b"%PDF-")
+    json.dumps(result)
+    adapter = Connections.__new__(Connections)
+    adapter.library = SimpleNamespace(source="weknora", provider=lambda source: provider)
+    adapter.s = SimpleNamespace(jobs=SimpleNamespace(get=lambda _: {"status":"completed", "result":result}))
+    assert adapter.dispatch("library.read_result", {"source":"weknora","job_id":"job"})["path"] == result["path"]
+    provider.snapshot.return_value = {**scope,"user_id":"other"}
+    import pytest
+    with pytest.raises(ValueError, match="账号"):
+        adapter.dispatch("library.read_result", {"source":"weknora","job_id":"job"})
+    provider.snapshot.return_value = {**scope,"generation":2}
+    with pytest.raises(ValueError, match="账号"):
+        adapter.dispatch("library.read_result", {"source":"weknora","job_id":"job"})
+    provider.request.return_value = {"data":{"title":"培训办法.docx", "file_type":"docx"}}
+    provider.preview_html.return_value = b"PK-office"
+    with patch("core.document_preview.render_office_pdf", return_value=(result["path"], "fingerprint")) as render:
+        office = weknora_preview(provider, scope, "doc", tmp_path, threading.Event(), Mock())
+    assert office["payload"]["preview_kind"] == "pdf"
+    assert render.call_args.kwargs["renderer"] == "libreoffice"
+    assert document_content({"data":{"content":[{"type":"text", "text":"腾讯正文"}]}}) == "腾讯正文"
+    assert document_content({"parsed_content":{"markdown":"乐享正文"}}) == "乐享正文"
+    cancelled=threading.Event();cancelled.set()
+    from core.desktop_jobs import JobCancelled
+    with pytest.raises(JobCancelled):
+        weknora_preview(provider, scope, "doc", tmp_path, cancelled, Mock())
+
+
+def test_job_storage_failure_publishes_terminal_failure(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from core.desktop_jobs import DesktopJobs
+    from core.desktop_store import DesktopStore, DesktopChatStorage
+    storage=DesktopChatStorage(str(tmp_path / "jobs.sqlite"))
+    service=SimpleNamespace(storage=storage,store=DesktopStore(storage),publish=Mock())
+    jobs=DesktopJobs(service)
+    def operation(cancelled, progress):
+        service.store.put_state=Mock(side_effect=OSError("disk unavailable"))
+        return {"text":"result"}
+    try:
+        receipt=jobs.submit("storage failure",operation)
+        jobs.executor.shutdown(wait=True)
+        events=[call.args[0] for call in service.publish.call_args_list]
+        assert any(event["event"]=="job" and event["data"]["id"]==receipt["job_id"] and event["data"]["status"]=="failed" for event in events)
+        assert jobs.active == {}
+    finally:
+        jobs.close()

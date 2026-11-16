@@ -1,6 +1,7 @@
 """Observable, cancellable UI operations independent of renderer lifetime."""
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import json
 import logging
 import threading
 import time
@@ -96,14 +97,20 @@ class DesktopJobs:
                 progress("正在处理…", status="running")
                 log.info("job_started id=%s", identity)
                 result = operation(cancelled, progress)
+                # Validate before attaching a result to the durable job. A bad
+                # result must not poison the subsequent failure record.
+                json.dumps(result, ensure_ascii=False)
                 progress("已完成", status="completed", result=result)
                 log.info("job_completed id=%s", identity)
             except Exception as exc:
                 log.exception("job_failed id=%s", identity)
                 try:
-                    progress(str(exc), status="cancelled" if isinstance(exc, JobCancelled) else "failed", error=str(exc))
+                    progress(str(exc), status="cancelled" if isinstance(exc, JobCancelled) or getattr(exc, "code", None) == "cancelled" else "failed", error=str(exc), result=None)
                 except Exception:
                     log.exception("job_status_save_failed id=%s", identity)
+                    # Let current observers settle even if durable storage is
+                    # unavailable. This is explicitly a failure, never success.
+                    self.service.publish({"event": "job", "data": {"id": identity, "status": "failed", "error": "操作结果无法保存，请查看诊断日志。", "result": None}})
                     self.service.publish({"event": "service_error", "error": "操作结果无法保存，请查看诊断日志。", "job_id": identity})
             finally:
                 with self.lock:

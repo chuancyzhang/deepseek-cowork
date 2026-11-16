@@ -505,8 +505,10 @@ class DesktopIntegrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.client.call("file.save", conversation_id=cid, id=reopened["id"], payload="未保存编辑")
         self.assertEqual(Path(original["path"]).read_text(encoding="utf-8"), "外部修改")
-        with self.assertRaises(RuntimeError):
-            self.client.call("file.open", conversation_id=cid, path=str(ROOT / "README.md"))
+        external = self.client.call("file.open", conversation_id=cid, path=str(ROOT / "README.md"))
+        self.assertEqual(external["payload"]["kind"], "text")
+        with self.assertRaisesRegex(RuntimeError, "工作目录"):
+            self.client.call("workspace.create", conversation_id=cid, name=str(ROOT / "forbidden.md"))
 
     def test_history_edit_guard_undo_branch_and_reference(self):
         cid = self.client.call("conversation.create")["id"]

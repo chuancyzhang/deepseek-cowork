@@ -81,37 +81,42 @@ export class Drafts {
   save(id: string) { return this.serial(id, () => this.flush(id)); }
   async submit(id: string, params: any) {
     return this.serial(id, async () => {
-      const entry = this.get(id);
-      const signature = JSON.stringify(params);
-      let pending = entry.pending;
-      if (pending && pending.signature !== signature) {
-        throw new Error('上一条消息的接收结果尚未确认。请先核对发送状态；新输入已保留。');
-      }
-      if (!pending) {
-        await this.flush(id);
-        const submitted = params.consume_draft === false ? null : { text: params.text, attachments: params.attachments || [] };
-        pending = { signature, submitted, params: { ...params, conversation_id: id,
-          request_id: crypto.randomUUID(), message_id: crypto.randomUUID(),
-          ...(submitted && equal(entry.value, submitted) ? { draft_revision: entry.revision } : {}) } };
-        entry.pending = pending; this.persist(id);
-      }
-      let receipt;
-      try { receipt = await this.rpc('conversation.send', pending.params); }
-      catch (failure) {
-        // A validation rejection is definitive. Transport loss remains pending
-        // until a durable receipt proves what happened to this exact command.
-        const state = await this.rpc('conversation.receipt', { conversation_id: id, request_id: pending.params.request_id }).catch(() => null);
-        if (state?.accepted) receipt = state;
-        else {
-          if (state?.rejected) { entry.pending = undefined; this.persist(id); }
-          throw failure;
+      this.submitting.add(id);
+      try {
+        const entry = this.get(id);
+        const signature = JSON.stringify(params);
+        let pending = entry.pending;
+        if (pending && pending.signature !== signature) {
+          throw new Error('上一条消息的接收结果尚未确认。请先核对发送状态；新输入已保留。');
         }
-      }
-      if (!receipt.accepted) throw new Error('消息尚未被接收，输入内容已保留。');
-      this.acknowledge(id, receipt.draft, pending.submitted);
-      return receipt;
+        if (!pending) {
+          await this.flush(id);
+          const submitted = params.consume_draft === false ? null : { text: params.text, attachments: params.attachments || [] };
+          pending = { signature, submitted, params: { ...params, conversation_id: id,
+            request_id: crypto.randomUUID(), message_id: crypto.randomUUID(),
+            ...(submitted && equal(entry.value, submitted) ? { draft_revision: entry.revision } : {}) } };
+          entry.pending = pending; this.persist(id);
+        }
+        let receipt;
+        try { receipt = await this.rpc('conversation.send', pending.params); }
+        catch (failure) {
+          // A validation rejection is definitive. Transport loss remains pending
+          // until a durable receipt proves what happened to this exact command.
+          const state = await this.rpc('conversation.receipt', { conversation_id: id, request_id: pending.params.request_id }).catch(() => null);
+          if (state?.accepted) receipt = state;
+          else {
+            if (state?.rejected) { entry.pending = undefined; this.persist(id); }
+            throw failure;
+          }
+        }
+        if (!receipt.accepted) throw new Error('消息尚未被接收，输入内容已保留。');
+        this.acknowledge(id, receipt.draft, pending.submitted);
+        return receipt;
+      } finally {this.submitting.delete(id);this.persist(id);}
     });
   }
+  private submitting = new Set<string>();
+  needsRecovery(id: string) {return Boolean(this.get(id).pending) && !this.submitting.has(id);}
   acknowledge(id: string, remote: Remote, submitted: Draft | null) {
     const entry = this.get(id);
     const value = submitted ? { text: entry.value.text === submitted.text ? '' : entry.value.text,

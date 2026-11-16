@@ -193,7 +193,7 @@ class DesktopFiles:
         if method == "file.render":
             from core.document_preview import render_office_pdf
             from core.deliverable_editing import sha256_file
-            path = self.checked_file(cid, p["path"])
+            path = self.preview_file(cid, p["path"])
             expected = str(p.get("fingerprint") or "")
             if path.suffix.lower() not in {".doc", ".docx", ".ppt", ".pptx"}:
                 raise ValueError("此文件不使用文档版式预览。")
@@ -217,7 +217,7 @@ class DesktopFiles:
             result = job.get("result") or {}
             if job["status"] != "completed" or result.get("kind") != "office_preview" or result.get("conversation_id") != cid:
                 raise ValueError("文档预览尚未完成或不属于当前对话。")
-            path = self.checked_file(cid, result["path"])
+            path = self.preview_file(cid, result["path"])
             return {"id": job["id"], "path": str(path), "name": path.name, "fingerprint": result["fingerprint"],
                     "payload": {"kind": "preview", "preview_kind": "pdf", "read_only": True, "preview_path": result["preview_path"]}}
         if method == "workspace.list":
@@ -293,25 +293,25 @@ class DesktopFiles:
                 handle.flush()
                 os.fsync(handle.fileno())
             self.storage.update_conversation_meta(cid, {"has_file_changes": True})
+            log.info("workspace_file_created session=%s kind=%s bytes=%s", cid, path.suffix.lower(), path.stat().st_size)
             return self.dispatch("file.open", {"conversation_id": cid, "path": str(path)})
         if method == "file.describe":
             from core.deliverable_editing import sha256_file
-            path = self.checked_file(cid, p["path"])
+            path = self.preview_file(cid, p["path"])
             return {"path": str(path), "fingerprint": sha256_file(path)}
         if method == "file.open":
             from core.deliverable_editing import create_edit_session, load_editor_payload
-            from core.generated_images import session_attachment_dir
             from core.deliverable_editing import sha256_file
             snapshot = Path(p["path"]).resolve()
             history_dir = self.config.get_chat_history_dir() if self.config else None
-            snapshot_root = Path(session_attachment_dir(history_dir, cid)) / "tool-images" if history_dir else None
-            if snapshot_root and snapshot.parent == snapshot_root.resolve() and re.fullmatch(r"[a-f0-9]{64}\.(png|jpg|webp|gif)", snapshot.name):
+            snapshot_home = (Path(history_dir) / "attachments").resolve() if history_dir else None
+            if snapshot_home and snapshot.parent.name == "tool-images" and snapshot.parent.parent.parent == snapshot_home and re.fullmatch(r"[a-f0-9]{64}\.(png|jpg|webp|gif)", snapshot.name):
                 self.workspace(cid)  # Verify that the owning conversation still exists.
                 if not snapshot.is_file() or sha256_file(snapshot) != snapshot.stem:
                     raise ValueError("工具图片快照已丢失或发生变化，无法可靠展示；请恢复原快照。")
                 return {"id": uuid.uuid4().hex, "path": str(snapshot), "name": "已查看的图片" + snapshot.suffix,
                         "fingerprint": snapshot.stem, "payload": {"kind": "preview", "preview_kind": "image", "read_only": True}}
-            path = self.checked_file(cid, p["path"])
+            path = self.preview_file(cid, p["path"])
             from core.file_capabilities import file_capability
             capability = file_capability(str(path))
             if capability and capability.office_family in {"word", "powerpoint"}:
@@ -433,6 +433,15 @@ class DesktopFiles:
         log.debug("message_file_references session=%s messages=%s files=%s", conversation_id, len(projected),
                   sum(len(message["file_references"]) for message in projected))
         return projected
+
+    def preview_file(self, conversation_id, path):
+        root = self.workspace(conversation_id)
+        target = Path(path).expanduser()
+        target = (root / target).resolve() if not target.is_absolute() else target.resolve()
+        if not target.is_file():
+            raise ValueError("文件不存在或已被移动，请恢复原文件后重新打开。")
+        log.info("file_preview_open session=%s outside_workspace=%s", conversation_id, not target.is_relative_to(root))
+        return target
 
     def checked_file(self, conversation_id, path):
         root = self.workspace(conversation_id)

@@ -2,6 +2,12 @@ const {app,BrowserWindow,Menu,clipboard,ClipboardItem,nativeImage}=require('elec
 const http=require('node:http'),fs=require('node:fs/promises'),path=require('node:path'),assert=require('node:assert/strict');
 const requests=[];let imagePath='',window,server;
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const {Backend}=require('../electron/backend.cjs'),backendCall=Backend.prototype.call;
+let sendWaiting=false;
+Backend.prototype.call=async function(method,params){
+  if(method==='conversation.send'){sendWaiting=true;await delay(600);}
+  try{return await backendCall.call(this,method,params);}finally{if(method==='conversation.send')sendWaiting=false;}
+};
 const deadline=setTimeout(()=>{console.error('attachment fixture timeout');app.exit(1);},75000);
 // A fixture script is not launched from package.json; provide the real app version.
 app.getVersion=()=>require('../package.json').version;
@@ -83,6 +89,9 @@ app.whenReady().then(async()=>{
   await window.webContents.insertText('请查看这些图片，并说明图表内容。');
   await read(`window.cowork.call('settings.select_model',{model_id:${JSON.stringify(settings.selected_model_id)}})`);
   await read("document.querySelector('.send-button').click()");
+  for(let i=0;i<100&&!sendWaiting;i++)await delay(5);
+  assert.ok(sendWaiting,'the real submit is held to represent a slow machine');
+  assert.equal(await read('document.body.textContent.includes("上一条消息的接收结果待确认")'),false,'normal pending sends do not show recovery');
   await until("document.querySelectorAll('.message.user .image-attachment img').length===3&&document.body.textContent.includes('已查看图片，图表内容已保留')");
   await until(`window.cowork.call('conversation.get',{conversation_id:${JSON.stringify(id)}}).then(value=>value.run?.status==='completed')`);
   await delay(400);
@@ -114,4 +123,4 @@ app.whenReady().then(async()=>{
   await read("document.querySelector('.viewed-images .image-attachment-open').click()");
   await until("!!document.querySelector('.workspace img')");
   console.log('ATTACHMENTS_FIXTURE_OK',JSON.stringify({platform:process.platform,scale:require('electron').screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));
-}).then(async()=>{clearTimeout(deadline);server.close();await window.webContents.executeJavaScript("window.cowork.call('app.quit').catch(()=>{});null");}).catch(async error=>{console.error(error);clearTimeout(deadline);server?.close();process.exitCode=1;try{await window?.webContents.executeJavaScript("window.cowork.call('app.quit')");}catch{}app.exit(1);});
+}).then(async()=>{clearTimeout(deadline);server.close();await window.webContents.executeJavaScript("window.cowork.call('app.quit').catch(()=>{});null");}).catch(async error=>{console.error(error);if(process.env.COWORK_ATTACHMENT_SCREENSHOTS&&window){await fs.mkdir(process.env.COWORK_ATTACHMENT_SCREENSHOTS,{recursive:true});await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'failure.png'),(await window.webContents.capturePage()).toPNG());console.error(await window.webContents.executeJavaScript('JSON.stringify({hidden:document.hidden,images:[...document.querySelectorAll(".image-attachment img")].map(el=>({complete:el.complete,width:el.naturalWidth,rect:el.getBoundingClientRect()}))})'));}clearTimeout(deadline);server?.close();process.exitCode=1;try{await window?.webContents.executeJavaScript("window.cowork.call('app.quit')");}catch{}app.exit(1);});

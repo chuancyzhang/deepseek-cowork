@@ -37,6 +37,7 @@ module.exports = [
   "library.login",
   "library.logout",
   "library.read",
+  "library.read_result",
   "library.reference",
   "library.search",
   "library.select",

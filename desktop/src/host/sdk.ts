@@ -98,8 +98,7 @@ export class HostSDK {
       }
       case 'editors.save':{
         const editor=this.editor(lease,p);if(!editor||editor.file.payload.read_only)throw new Error('此文件不可保存。');
-        const value=editor.text,result=await call('file.save',{conversation_id:id,id:editor.file.id,payload:['text','html'].includes(editor.file.payload.kind)?value:JSON.parse(value)});
-        this.store.set<any[]>(this.store.sessionKey('editors',id),previous=>previous.map(item=>item.file.id===editor.file.id?{...item,saved:value,file:{...item.file,fingerprint:result.fingerprint}}:item));return result;
+        return c.saveEditor(editor.file.path,id);
       }
       case 'editors.saveCopy':{
         const editor=this.editor(lease,p);if(!editor)throw new Error('编辑会话已关闭。');

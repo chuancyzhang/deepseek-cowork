@@ -50,16 +50,16 @@ export default function BuiltinWorkbench() {
     if (width >= box.width - 80) {setWorkspaceExpanded(true); return;}
     setWorkspaceExpanded(false); changeWorkspace({width: Math.min(95, width / box.width * 100)});
   }
-const fileTools = editor && current && <><span title={editor.file.path}>{editor.file.name}</span>
-  {!editor.file.payload.read_only && editor.text !== editor.saved && <button className="primary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}
+const fileTools = editor && current && <>{editor.file.payload.untitled?<input className="draft-file-name" aria-label="文稿文件名" value={editor.file.name} onChange={event=>setEditors(previous=>previous.map(item=>item.file.path===editor.file.path?{...item,file:{...item.file,name:event.target.value}}:item))}/>:<span title={editor.file.path}>{editor.file.name}</span>}
+  {!editor.file.payload.read_only && editor.text !== editor.saved && (!editor.file.payload.untitled || editor.text.trim()) && <button className="primary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}
   {editor.file.payload.recovery_available && editor.text !== editor.saved && <button className="primary" onClick={() => void saveCopy()}>保存恢复副本</button>}
   {editor.file.payload.office_family && <button className="secondary" onClick={() => void call<string>('file.external', {conversation_id:current.id,path:editor.file.path}).then(message => {if(message)error(message);}).catch(failure => error(failure.message))}>打开应用编辑</button>}
-  <FileActions key={editor.file.id} actions={[
+  {!editor.file.payload.untitled&&<FileActions key={editor.file.id} actions={[
     ['在文件夹中显示', Folder, () => call('file.reveal', {conversation_id:current.id,path:editor.file.path})],
     ['复制路径', Copy, () => call('clipboard.write', {text:editor.file.path})],
     ...(!editor.file.payload.office_family ? [['用本机应用打开', ExternalLink, async () => {const message=await call<string>('file.external', {conversation_id:current.id,path:editor.file.path});if(message)throw Error(message);}]] as FileAction[] : []),
     ['重新载入文件', RefreshCw, reloadFile],
-  ]} error={error}/></>;
+  ]} error={error}/>}</>;
 
 return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
     {sidebar && <Sidebar conversations={conversations} projects={settings?.projects || []} selected={current?.id || ''} route={route} running={runningConversations}
@@ -75,7 +75,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
 
       <button className="icon-button" title={theme === 'dark' ? '切换浅色' : '切换深色'} onClick={async () => { const next = theme === 'dark' ? 'light' : 'dark'; await call('settings.theme', { theme: next }); setSettings(previous => previous ? { ...previous, theme: next } : null); }}>{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button></div></header>
       {route === 'chat' && settings && <div className="header-popovers">{showUsage && <Usage visible={showUsage} events={events} settings={settings} onClose={() => setShowUsage(false)} onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}/>} {headerPanel && <section className="history-popover"><div className="navigator-heading"><strong>{headerPanel === 'search' ? '搜索当前对话' : '历史提问'}</strong><button className="icon-button" title="关闭" onClick={() => setHeaderPanel('')}><X size={15}/></button></div>{headerPanel === 'search' && <input autoFocus aria-label="搜索当前对话" placeholder="输入关键词" value={messageQuery} onChange={event => setMessageQuery(event.target.value)}/>}<div>{messages.filter(message => headerPanel === 'history' ? message.role === 'user' : messageQuery.trim() && messageText(message.content).toLowerCase().includes(messageQuery.toLowerCase())).map(message => <button key={message.id} onClick={() => {document.getElementById('message-' + message.id)?.scrollIntoView({block: 'center'}); setHeaderPanel('');}}>{messageText(message.content).slice(0,160)}</button>)}</div>{current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}</section>}</div>}
-      {serviceError && <div className="service-error"><strong>本地服务连接中断</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
+      {serviceError && <div className="service-error"><strong>本地服务异常</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
       <PluginSlot kind="page" target={route}>
       {loading ? <div className="loading"><LoaderCircle size={23} className="spin"/><p>正在打开你的工作台…</p></div> : route === 'chat' ? <div ref={layout} className={`work-layout ${workspaceOpen ? 'with-workspace' : ''} ${workspaceExpanded ? 'expanded' : ''}`}>
         <section className={`conversation ${!messages.length ? 'home-conversation' : ''}`} style={workspaceExpanded && workspaceView.selected !== 'conversation' ? {display:'none'} : undefined}><div className="message-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 120; }}>
@@ -96,7 +96,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
             {!active && !userStopped && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
             </div>}
         </div><div className="composer-container">
-<DraftRecovery conflict={draftConflict} pending={Boolean(drafts.get(selectedId.current).pending)} resolve={keep => void resolveDraft(keep)} recover={retry => void recoverSend(retry)}/>
+<DraftRecovery conflict={draftConflict} pending={drafts.needsRecovery(selectedId.current)} busy={sending} resolve={keep => void resolveDraft(keep)} recover={retry => void recoverSend(retry)}/>
           {current?.meta.ppt_agent_mode && <p className="muted" role="status">PPT 助手已下线，历史与文件保留。后续消息将通过普通对话处理。</p>}
           <Composer modes={registry.inventory.modes} creation={creationOpen && Boolean(current?.meta.creation_session)} enterCreation={enterCreation} exitCreation={exitCreation} conversation={current} conversations={conversations} settings={settings} text={draft} setText={setDraft} attachments={attachments} setAttachments={setAttachments} skills={selectedSkills} active={active} sending={sending} textarea={composer} ensureConversation={ensureConversation} preferences={preferences} send={send} stop={stop} attach={attach} browseLibrary={browseLibrary} openFile={path => void openFile(path).catch(error)} route={next => {if (next === 'settings') setSettingsTab('models'); return goRoute(next);}} error={error}
             selectModel={async id => {await preferences({selected_model_id: id}); setSettings(await call('settings.select_model', {model_id: id}));}}

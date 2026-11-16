@@ -294,7 +294,7 @@ class KnowledgeService:
         self.store = store or KnowledgeStore()
         self.transport = transport or requests
 
-    def _http(self, base, method, path, *, token=None, tenant=None, cancelled=None, raw_preview=False, **kwargs):
+    def _http(self, base, method, path, *, token=None, tenant=None, cancelled=None, raw_preview=False, preview_limit=1500000, **kwargs):
         if not path.startswith("/api/v1/"):
             raise KnowledgeError("invalid_path", "资料库请求路径无效。")
         headers = {"Accept": "application/json"}
@@ -319,8 +319,8 @@ class KnowledgeService:
                 if 200 <= response.status_code < 300:
                     if raw_preview:
                         content = response.content
-                        if len(content) > 1500000:
-                            raise KnowledgeError("preview_too_large", "HTML 文件超过内置预览大小限制（1.5 MB）。")
+                        if len(content) > preview_limit:
+                            raise KnowledgeError("preview_too_large", "文件超过内置预览大小限制，请在原平台打开。")
                         log.info("knowledge_preview complete id=%s duration=%.3f", request_id, time.monotonic() - started)
                         return content
                     try:
@@ -440,9 +440,10 @@ class KnowledgeService:
         self._identity(scope, self.store.connection())
         return result
 
-    def preview_html(self, scope, knowledge_id):
+    def preview_html(self, scope, knowledge_id, cancelled=None, *, preview_limit=1500000):
         # Preview has its own server authorization; parsing/indexing readiness is unrelated.
-        return self.request(scope, "GET", f"/api/v1/knowledge/{segment(knowledge_id)}/preview", raw_preview=True)
+        return self.request(scope, "GET", f"/api/v1/knowledge/{segment(knowledge_id)}/preview", raw_preview=True,
+                            cancelled=cancelled, preview_limit=preview_limit)
 
     def switch_tenant(self, tenant_id):
         scope = self.snapshot()

@@ -132,3 +132,5 @@ body{font-family:var(--font-family);font-size:calc(14px * var(--font-scale))}
 @media(max-width:800px){.job-history>details>summary{gap:8px;flex-wrap:wrap}.job-log{padding-left:0}.job-log li{gap:10px}.jobs-toolbar>.page-search{flex-basis:100%}}
 
 .settings-draft-recovery{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding:14px 16px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font-size:13px;line-height:1.7}.settings-draft-recovery p{flex:1 1 260px;margin:0}.settings-draft-recovery .button-row{flex-shrink:0}
+
+.library-collection-group h3{font-size:11px;font-weight:500;color:var(--muted);padding:12px 12px 4px;margin:0}.library-collection-group small{display:block;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;margin-top:3px}.library-collection-group button{width:100%}

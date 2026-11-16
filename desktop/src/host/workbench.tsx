@@ -75,6 +75,7 @@ export function useWorkbenchController() {
   const draftRef = {get current() {return drafts.get(selectedId.current).value;}};
   const editorsRef = host.ref<Editor[]>(() => host.sessionKey('editors'), []);
   const editorFlush = useRef(new Map<string, () => Promise<string>>());
+  const editorSaves = useRef(new Map<string, Promise<any>>());
   const registerEditorFlush = useCallback((path: string, flush?: () => Promise<string>) => { if (flush) editorFlush.current.set(path, flush); else editorFlush.current.delete(path); }, []);
   const stateRef = {get current() {return {
     current:conversationAt(host,selectedId.current), settings:host.get<Settings|null>('settings',null),
@@ -95,7 +96,7 @@ export function useWorkbenchController() {
     let alive = true;
     const check = async () => {
       const item = editorsRef.current.find(item => item.file.path === activeFile);
-      if (!item || item.file.unavailable) return;
+      if (!item || item.file.unavailable || item.file.payload.untitled) return;
       try { const result = await call('file.describe', {conversation_id: current.id, path: activeFile}); if (alive) setFileChanged(result.fingerprint !== item.file.fingerprint); }
       catch { if (alive) setFileChanged(true); }
     };
@@ -238,7 +239,7 @@ export function useWorkbenchController() {
     const field=<T,>(name:string,initial:T)=>host.get<T>(host.sessionKey(name,id),initial);
     const value = { creationOpen:field('creationOpen',false), creationTab:field('creationTab','design'), creationScope:field('creationScope','整个界面'), workspaceOpen: field('workspaceOpen',false), workspace: field('workspaceView',emptyWorkspace()),
       activeFile: field('activeFile',''), scrollTop: id===selectedId.current ? scroll.current?.scrollTop ?? field('scrollTop',0) : field('scrollTop',0),
-      editors: field<Editor[]>('editors',[]).map(editor => ({ path: editor.file.path, text: snapshots.get(editor.file.path) ?? editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) };
+      editors: field<Editor[]>('editors',[]).map(editor => ({ path: editor.file.path, name:editor.file.name, untitled:Boolean(editor.file.payload.untitled), text: snapshots.get(editor.file.path) ?? editor.text, saved: editor.saved, fingerprint: editor.file.fingerprint })) };
     if (value.workspace.reviewEdits) value.workspace = {...value.workspace, reviewEdits:Object.fromEntries(Object.entries(value.workspace.reviewEdits).map(([key,edit]) => [key, {...edit,...(edit.filePath && snapshots.has(edit.filePath) ? {officeText:snapshots.get(edit.filePath)} : {})}]))};
     host.set(host.sessionKey('scrollTop',id),value.scrollTop);
     viewQueue.current = viewQueue.current.catch(() => undefined).then(async () => {
@@ -280,6 +281,7 @@ export function useWorkbenchController() {
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       const restored: Editor[] = [];
       for (const item of value.view?.editors || []) {
+        if (item.untitled) {restored.push({file:{id:item.path,path:item.path,name:item.name || '未命名.md',fingerprint:'',payload:{kind:'text',untitled:true}},text:item.text,saved:'',plugin});continue;}
         try { const file = await call<FileSession>('file.open', { conversation_id: id, path: item.path, expected_fingerprint: item.fingerprint, recover_draft: item.text !== item.saved }); restored.push({ file, text: item.text, saved: item.saved, plugin }); }
         catch (failure) {
           restored.push({ file: { id: '', path: item.path, name: item.path.split(/[\\/]/).pop(), fingerprint: item.fingerprint, payload: { kind: 'text' }, unavailable: true }, text: item.text, saved: item.saved, plugin });
@@ -428,12 +430,14 @@ export function useWorkbenchController() {
     const sendingKey = host.sessionKey('sending', requestedId);
     if (host.get(sendingKey, false) || (!input.text.trim() && !input.attachments.length)) return;
     host.set(sendingKey, true); setNotice('');
+    let targetSendingKey = sendingKey;
     const submittedText = input.text; const submittedAttachments = input.attachments;
     try {
       let conversation = conversationAt(host, requestedId);
       if (requestedId && !conversation) conversation = await call<Conversation>('conversation.get', {conversation_id: requestedId});
       if (!conversation) conversation = conversationAt(host, await ensureConversation());
       const id = conversation!.id;
+      targetSendingKey = host.sessionKey('sending', id);host.set(targetSendingKey, true);
       if (isActive(conversation?.run?.status)) {
         const signature = JSON.stringify([id, conversation!.run!.id, submittedText, submittedAttachments]);
         if (pendingSteering.current?.signature !== signature) pendingSteering.current = { id: crypto.randomUUID(), signature };
@@ -455,7 +459,7 @@ export function useWorkbenchController() {
       await saveDraft(id);
       if (!requestedId) { drafts.change('', { text: '', attachments: [] }); await saveDraft(''); }
       nearBottom.current = true; await loadConversation(id, true); await refreshList();
-    } catch (failure) { error((failure as Error).message); throw failure; } finally { host.set(sendingKey, false); if(selectedId.current===requestedId)composer.current?.focus(); }
+    } catch (failure) { error((failure as Error).message); throw failure; } finally { host.set(sendingKey, false);host.set(targetSendingKey, false); if(selectedId.current===requestedId)composer.current?.focus(); }
   }
   async function stop() {
     if (!current?.run) return;
@@ -475,6 +479,9 @@ export function useWorkbenchController() {
   }
   async function recoverSend(retry = false) {
     const id = selectedId.current;
+    const sendingKey=host.sessionKey('sending',id);
+    if(host.get(sendingKey,false))return;
+    host.set(sendingKey,true);
     try {
       const pending = drafts.get(id).pending;
       if (!pending) return;
@@ -484,6 +491,7 @@ export function useWorkbenchController() {
         await loadConversation(id, true); await saveDraft(id);
       } else error('尚未找到接收记录，可重试原消息。当前新输入会保留。');
     } catch (failure) { error((failure as Error).message); }
+    finally {host.set(sendingKey,false);}
   }
   const creatingConversation = useRef<Promise<string> | null>(null);
   async function ensureConversation(): Promise<string> {
@@ -554,20 +562,38 @@ export function useWorkbenchController() {
       setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true);
     } catch (failure) { if (selectedId.current === id) error((failure as Error).message); }
   }
-  async function saveEditor(path: string) {
-    const editor = editorsRef.current.find(e => e.file.path === path);
+  async function saveEditor(path: string, id = selectedId.current): Promise<any> {
+    const key = id + ':' + path;
+    if (editorSaves.current.has(key)) return editorSaves.current.get(key);
+    const task = persistEditor(path, id);
+    editorSaves.current.set(key, task);
+    try {return await task;} finally {editorSaves.current.delete(key);}
+  }
+  async function persistEditor(path: string, id: string) {
+    const editorKey = host.sessionKey('editors', id);
+    const editor = host.get<Editor[]>(editorKey, []).find(e => e.file.path === path);
     if (!editor) return;
     if (editor.file.payload.read_only) {
       if (editor.text !== editor.saved) throw new Error('请先保存恢复副本，再关闭文件。原草稿仍保留。');
       return;
     }
-    const text = editorFlush.current.has(path) ? await editorFlush.current.get(path)!() : editor.text;
+    const text = selectedId.current === id && editorFlush.current.has(path) ? await editorFlush.current.get(path)!() : editor.text;
     if (!text && !['text', 'html'].includes(editor.file.payload.kind)) return;
-    const id = selectedId.current;
+    if (editor.file.payload.untitled) {
+      if (!text.trim()) return {saved:false,empty:true};
+      const name = editor.file.name.trim();
+      if (!name || /[\\/:*?"<>|]/.test(name) || !/\.(md|txt)$/i.test(name)) throw new Error('请填写 Markdown 或文本文件名，例如「工作笔记.md」。');
+      const file = await call<FileSession>('workspace.create', {conversation_id:id,name,text});file.payload.start_edit=true;
+      host.set<Editor[]>(editorKey, previous => previous.map(e => e.file.path === path ? {...e,file,saved:text} : e));
+      const activeKey=host.sessionKey('activeFile',id),workspaceKey=host.sessionKey('workspaceView',id);
+      if(host.get(activeKey,'')===path)host.set(activeKey,file.path);
+      host.set<WorkspaceView>(workspaceKey, previous=>previous.selected==='file:'+path?{...previous,selected:'file:'+file.path}:previous);
+      await saveView(id);void refreshFiles(id);
+      return file;
+    }
     const result = await call('file.save', { conversation_id: id, id: editor.file.id, payload: ['text', 'html'].includes(editor.file.payload.kind) ? text : JSON.parse(text) });
-    if (selectedId.current !== id) return;
-    setEditors(previous => previous.map(e => e.file.path === path ? { ...e, saved: text, file: { ...e.file, fingerprint: result.fingerprint } } : e));
-    void refreshFiles();
+    host.set<Editor[]>(editorKey, previous => previous.map(e => e.file.path === path ? { ...e, saved: text, file: { ...e.file, fingerprint: result.fingerprint } } : e));
+    void refreshFiles(id);return {...result,path};
   }
   async function reloadFile() {
     const id = selectedId.current, item = editorsRef.current.find(item => item.file.path === activeFile);
@@ -596,23 +622,29 @@ export function useWorkbenchController() {
     setEditors(previous => previous.map(e => e.file.path === path ? { ...e, text } : e));
   }
   async function closeEditor(path: string) {
+    const id=selectedId.current;
     try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
     const editor = editors.find(e => e.file.path === path);
-    if (editor && editor.saved !== editor.text) {
+    if (editor && editor.saved !== editor.text && (!editor.file.payload.untitled || editor.text.trim())) {
       const choice = await confirm('保存修改？', editor.file.name + ' 中有尚未保存的内容。', ['取消', '不保存并关闭', '保存并关闭']);
       if (choice === 0) return;
-      if (choice === 2) { try { await saveEditor(path); } catch (failure) { error((failure as Error).message); return; } }
+      if (choice === 2) { try { const result=await saveEditor(path,id);path=result?.path || path; } catch (failure) { error((failure as Error).message); return; } }
     }
-    setEditors(previous => previous.filter(e => e.file.path !== path));
-    if (activeFile === path) { const next = editors.find(e => e.file.path !== path)?.file.path || ''; setActiveFile(next); changeWorkspace({selected: next ? 'file:' + next : 'new', newOpen: true}); }
+    const editorKey=host.sessionKey('editors',id),activeKey=host.sessionKey('activeFile',id);
+    const remaining=host.get<Editor[]>(editorKey,[]).filter(e=>e.file.path!==path);host.set(editorKey,remaining);
+    if(host.get(activeKey,'')===path){const next=remaining[0]?.file.path||'';host.set(activeKey,next);host.set<WorkspaceView>(host.sessionKey('workspaceView',id),previous=>({...previous,selected:next?'file:'+next:'new',newOpen:true}));}
+    await saveView(id);
   }
   async function createDocument() {
     try {
       const id = await ensureConversation();
       if (!id) return;
-      const name = '写作-' + new Date().toLocaleString('sv').replace(/[: ]/g, '-');
-      const file = await call<FileSession>('workspace.create', { conversation_id: id, name: name + '.md' });
-      await openFile(file.path); await refreshFiles(id);
+      const plugin = await call<Plugin>('plugins.load', {id:'cowork.writing'});
+      if(selectedId.current!==id)return;
+      const path='untitled:'+crypto.randomUUID();
+      const file:FileSession={id:path,path,name:'写作-'+new Date().toLocaleString('sv').replace(/[: ]/g,'-')+'.md',fingerprint:'',payload:{kind:'text',untitled:true}};
+      setEditors(previous=>[...previous,{file,text:'',saved:'',plugin}]);setActiveFile(path);setWorkspaceOpen(true);changeWorkspace({selected:'file:'+path,...(!workspaceView.filesPinned?{filesOpen:false}:{})});
+      await saveView(id);
     } catch (failure) { error((failure as Error).message); }
   }
   async function goRoute(next: string) {

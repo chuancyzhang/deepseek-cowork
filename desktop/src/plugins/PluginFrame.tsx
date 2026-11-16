@@ -24,7 +24,7 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
       if(!initialized)return;
       const value=sdk.snapshot(instance);
       if(plugin.hostApi===1){
-        const data={name:value.editor?.file.name||'文稿',text:value.editor?.text||'',theme:value.theme,saved:value.editor?.text===value.editor?.saved},signature=JSON.stringify(data);
+        const data={name:value.editor?.file.name||'文稿',text:value.editor?.text||'',theme:value.theme,saved:!value.editor?.file.payload.untitled&&value.editor?.text===value.editor?.saved,initialEditing:Boolean(value.editor?.file.payload.untitled||value.editor?.file.payload.start_edit)},signature=JSON.stringify(data);
         if(signature!==lastDocument){lastDocument=signature;post({channel:'cowork-host-v1',event:'document',data});}
       }
       else post({channel:'cowork-host-v2',event:'state',data:value});
@@ -60,7 +60,7 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
           }
           if(!mapped[method])throw new Error('原写作插件不支持此操作。');
           if(method==='document.change'){
-            const value=sdk.snapshot(instance);lastDocument=JSON.stringify({name:value.editor?.file.name||'文稿',text:params?.text,theme:value.theme,saved:params?.text===value.editor?.saved});
+            const value=sdk.snapshot(instance);lastDocument=JSON.stringify({name:value.editor?.file.name||'文稿',text:params?.text,theme:value.theme,saved:!value.editor?.file.payload.untitled&&params?.text===value.editor?.saved,initialEditing:Boolean(value.editor?.file.payload.untitled||value.editor?.file.payload.start_edit)});
           }
           const result=await sdk.invoke(instance,mapped[method],params);
           reply(method==='document.read'?{text:result?.text,name:result?.file?.name}:result);return;

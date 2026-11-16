@@ -36,6 +36,8 @@ test('a late send receipt keeps typing that started during the request', async (
   f.store.rpc = async (method, params) => { if (method === 'conversation.send') await wait; return f.rpc(method, params); };
   const sent = f.store.submit('a', { text: '第一条', attachments: [] });
   await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.store.get('a').pending);
+  assert.equal(f.store.needsRecovery('a'), false, 'a normal slow submission is not an unresolved send');
   f.store.change('a', { text: '继续输入', attachments: [] });
   const saved = f.store.save('a');
   release();
@@ -54,6 +56,7 @@ test('an uncertain accepted send recovers without a second submission after relo
   await assert.rejects(f.store.submit('a', { text: '已发送', attachments: [] }));
   const restored = new Drafts(f.rpc, f.storage);
   restored.restore('a', f.remote());
+  assert.equal(restored.needsRecovery('a'), true);
   await restored.recoverSubmission('a');
   assert.equal(restored.get('a').value.text, '');
   assert.equal(restored.get('a').pending, undefined);

@@ -180,7 +180,7 @@ else {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
       if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
-      if (method === 'library.read' && params.source === 'local') return fileHost.register(await backend.call(method, params));
+      if (method === 'library.read_result' || (method === 'library.read' && params.source === 'local')) return fileHost.register(await backend.call(method, params));
       if (method === 'library.external' && params.source === 'local') {
         const item = await backend.call('library.reference', params);
         const failure = await shell.openPath(item.path);

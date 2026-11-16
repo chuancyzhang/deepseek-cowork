@@ -339,6 +339,8 @@ class DesktopFiles:
             if not report.allowed:
                 raise ValueError(report.message)
             payload = load_editor_payload(session)
+            from core.file_capabilities import editor_presentation
+            payload.update(editor_presentation(str(path)))
             expected = str(p.get("expected_fingerprint") or "")
             # Preserve the original edit base across restart, so a recovered
             # draft cannot overwrite a file changed by another application.

@@ -24,8 +24,8 @@ const groups: Record<string, [string, string, any][]> = {
   library: [['library', '资料库', BookOpen]], team: [['team', '团队空间', Users]],
 };
 
-export default function Management({ route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
-  route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
+export default function Management({ useAction, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
+  useAction: (id:string)=>Promise<void>; route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
   onReference: (ref: any) => Promise<void>; onError: (message: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
@@ -45,7 +45,7 @@ export default function Management({ route, settings, updateSettings, openConver
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'plugins' ? <PluginManager/>
-        : tab === 'multimedia' && settings?.multimedia_enabled ? <Multimedia {...common} openConversation={openConversation} manageServices={async () => {if (await leave()) {setDirty(false); setTab('models');}}}/>
+        : tab === 'multimedia' && settings?.multimedia_enabled ? <Multimedia useAction={useAction} {...common} openConversation={openConversation} manageServices={async () => {if (await leave()) {setDirty(false); setTab('models');}}}/>
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>

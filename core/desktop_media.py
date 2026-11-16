@@ -2,6 +2,9 @@
 import json
 import logging
 import threading
+import copy
+import hashlib
+from pathlib import Path
 
 log = logging.getLogger("desktop.media")
 
@@ -79,3 +82,40 @@ class DesktopMedia:
             return runtime.dispatch(method, p)
         finally:
             self.release()
+
+    def model_usage(self, profile):
+        from core.llm.gateway_catalog import ENDPOINTS
+        identity = hashlib.sha256(json.dumps([profile.get(key) for key in ("channel_id", "base_url", "model_name")]).encode()).hexdigest()
+        with self.lock:
+            known = copy.deepcopy(self.s.config.get("model_usage", {}))
+            if self.enabled:
+                from core.multimedia import model_usage
+                fact = model_usage(profile, (self.s.config.get("experimental_multimedia") or {}).get("bindings") or {})
+                if fact and known.get(identity) != fact:
+                    known[identity] = fact
+                    self.s.config.set("model_usage", known)
+            if known.get(identity):
+                return copy.deepcopy(known[identity])
+        endpoints = (profile.get("discovery") or {}).get("endpoints") or []
+        if any(endpoint in ENDPOINTS for endpoint in endpoints):
+            return {"chat_supported": True, "purpose_label": "对话"}
+        if endpoints:
+            return {"chat_supported": False, "purpose_label": "专用接口", "reason": "此模型未声明支持对话接口，请在对应功能中使用。"}
+        return {"chat_supported": None, "purpose_label": "用途待验证"}
+
+    def actions(self):
+        if not self.enabled:
+            return []
+        from core.multimedia import quick_actions
+        return quick_actions((self.s.config.get("experimental_multimedia") or {}).get("bindings") or {}, self.s.config.get_model_channels())
+
+    @staticmethod
+    def public(record):
+        result = {key: copy.deepcopy(record[key]) for key in (
+            "id", "conversation_id", "run_id", "capability", "status", "message", "created_at", "updated_at", "model",
+            "service_name", "remote_id", "provider_task_id", "progress", "files", "text", "job_id") if key in record}
+        result["task_id"] = result["id"]
+        result["text"] = result.get("text", "")[:16000]
+        result["can_resume"] = record["status"] not in {"queued", "submitting", "running", "downloading", "completed", "failed", "cancelled"} and bool(record.get("remote_id") or record.get("sources") or record.get("receipt") or record.get("files") or (Path(record["destination"]) / "receipt.json").is_file())
+        result["can_attach_id"] = record["status"] == "unknown" and record["capability"] == "video_generate"
+        return result

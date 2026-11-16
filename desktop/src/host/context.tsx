@@ -1,6 +1,6 @@
 import {createContext,useContext,useCallback,useSyncExternalStore,useMemo} from 'react';
 import {HostStore,type Update} from './store';
-import type {Conversation,Run} from '../types';
+import type {Conversation,Run,MediaTask} from '../types';
 import type {ReviewSummary} from '../reviews';
 import {receiveConversation} from './conversations';
 export const StoreContext=createContext<HostStore|null>(null);
@@ -20,6 +20,7 @@ export function useSessionField<T>(field:string,initial:T|(()=>T)):[T,(value:Upd
 export function useConversation():[Conversation|null,(value:Update<Conversation|null>)=>void]{
   const host=useHost(),[value]=useSessionField<Conversation|null>('current',null),[runs]=useHostField<Record<string,Run>>('runs',{});
   const [reviews]=useSessionField<ReviewSummary[]>('reviews',[]);
-  const current=useMemo(()=>value?{...value,run:runs[value.id]||null,reviews}:null,[value,runs[value?.id||''],reviews]);
+  const [media_tasks]=useSessionField<MediaTask[]>('media_tasks',[]);
+  const current=useMemo(()=>value?{...value,run:runs[value.id]||null,reviews,media_tasks}:null,[value,runs[value?.id||''],reviews,media_tasks]);
   return [current,useCallback((next:Update<Conversation|null>)=>receiveConversation(host,host.get('navigation:selected',''),next),[host])];
 }

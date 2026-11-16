@@ -94,7 +94,7 @@ class DesktopService:
         self.media = DesktopMedia(self)
         self.conversation_runtime = ConversationRuntime(config=self.config, storage=self.storage, store=self.store,
             state=self.state, files=self.files, actions=self.conversations, publish=self.publish,
-            start=self.start_stream, view=self.conversation, request=self.request_agent)
+            start=self.start_stream, view=self.conversation, request=self.request_agent, model_usage=self.media.model_usage)
         self.settings_api = DesktopSettingsAPI(self.config, self.management.themes, self.publish, self.public_settings, self.store)
         token = uuid.uuid4().hex + uuid.uuid4().hex
         self.token = token
@@ -138,11 +138,12 @@ class DesktopService:
         models = []
         for profile in self.config.iter_model_profiles():
             models.append({key: profile.get(key) for key in ("id", "display_name", "model_name", "channel_id", "channel_display_name", "provider_type", "base_url", "reasoning_effort", "reasoning_efforts")}
-                          | {"configured": bool(profile.get("api_key")), "label": self.config.get_model_label(profile["id"])})
+                          | {"configured": bool(profile.get("api_key")), "label": self.config.get_model_label(profile["id"]), **self.media.model_usage(profile)})
         return {"models": models, "selected_model_id": self.config.get_selected_model_id(),
                 "god_mode": self.config.get_god_mode(), "theme": self.management.themes.load_appearance()["mode"],
                 "data_dir": self.config.data_dir, "projects": self.config.get_projects(),
                 "multimedia_enabled": self.media.enabled,
+                "plugin_actions": self.media.actions(),
                 "context_policy": desktop_policy(self.config)}
 
     def conversation(self, conversation_id, *, before=None, limit=80):
@@ -165,6 +166,7 @@ class DesktopService:
         return {**record, **window, "render_messages": self.files.message_files(conversation_id, rendered),
                 "run": self.public_run(run), "events": events,
                 "reviews": [self.reviews.summary(value) for value in self.reviews.entries(conversation_id).values()],
+                "media_tasks": [self.media.public(value) for value in self.media.records(conversation_id)],
                 "draft": draft["value"], "draft_revision": draft["revision"],
                 "view": view["value"], "view_revision": view["revision"]}
 

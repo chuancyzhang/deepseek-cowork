@@ -47,7 +47,7 @@ test('v2 packages hash local assets, compose panels, reject command collisions a
     await fs.writeFile(path.join(source,'manifest.json'),JSON.stringify(manifest));
     const conflict=await host.preview(source);await assert.rejects(host.install(conflict.token),/命令标识冲突/);
     assert.equal((await host.inventory()).plugins.filter(item=>item.enabled&&item.id==='example.other').length,0);
-    const recovered=await host.recover();assert.deepEqual(recovered.selected['editor:text'],['cowork.writing/writing']);
+    const recovered=await host.recover();assert.deepEqual(recovered.selected['editor:markdown'],['cowork.writing/writing']);
     assert.deepEqual(recovered.selected['workbench:main'],['cowork.workbench/main']);
   }finally{await fs.rm(root,{recursive:true,force:true});}
 });

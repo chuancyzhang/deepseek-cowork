@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Paperclip, Plus, X } from 'lucide-react';
+import { Paperclip, Plus, Puzzle, X } from 'lucide-react';
 import type { Attachment } from './types';
 import { receiveAttachments } from './attachments';
 
@@ -8,6 +8,7 @@ export default function HistoryEditor({ conversationId, prepared, onClose, onSav
   submit: (value: {text: string; attachments: Attachment[]}) => Promise<any>;
 }) {
   const key = `cowork-history-edit:${conversationId}:${prepared.message.id}`;
+  const skills: string[] = prepared.message.meta?.ui_context?.skills || [];
   const [draft, setDraft] = useState<{text: string; attachments: Attachment[]}>(() => {
     const fallback = {text: prepared.message.meta?.display_content ?? prepared.message.content ?? '', attachments: prepared.message.meta?.desktop_attachments || (prepared.message.meta?.user_added_files || []).map((path: string) => ({path, name: path.split(/[\\/]/).pop(), size: 0}))};
     const saved = localStorage.getItem(key); if (!saved) return fallback;
@@ -28,7 +29,7 @@ export default function HistoryEditor({ conversationId, prepared, onClose, onSav
     catch (failure) {setFailure((failure as Error).message);} finally {setBusy(false);}
   }
   return <section className="history-editor inline-history-editor" aria-label="编辑已发送消息" onDragOver={event => event.preventDefault()} onDrop={event => {event.preventDefault(); void receiveAttachments(conversationId, [...event.dataTransfer.files]).then(add).catch(failure => onError(failure.message));}}>
-    <div className="composer-contexts">{draft.attachments.map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} disabled={busy} onClick={() => setDraft({...draft, attachments: draft.attachments.filter(item => item.path !== file.path)})}><X size={12}/></button></div>)}</div>
+    <div className="composer-contexts">{skills.map(name => <span className="context-chip" key={'skill:' + name}><Puzzle size={13}/><span title={name}>{name}</span></span>)}{draft.attachments.map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} disabled={busy} onClick={() => setDraft({...draft, attachments: draft.attachments.filter(item => item.path !== file.path)})}><X size={12}/></button></div>)}</div>
     <textarea ref={textarea} aria-label="编辑消息内容" autoFocus rows={3} value={draft.text} onChange={event => setDraft({...draft, text: event.target.value})} disabled={busy} onKeyDown={event => {if (event.key === 'Escape' && !busy) onClose();}} onPaste={event => {
       const files = [...event.clipboardData.files], value = event.clipboardData.getData('text/plain');
       if (files.length) {event.preventDefault(); void receiveAttachments(conversationId, files).then(add).catch(failure => onError(failure.message));}

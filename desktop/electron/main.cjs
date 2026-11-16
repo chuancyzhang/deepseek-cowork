@@ -82,6 +82,7 @@ async function requestExit() {
 async function createWindow() {
   window = new BrowserWindow({ width: 1400, height: 930, minWidth: 850, minHeight: 620,
     backgroundColor: '#fafafa', title: '', show: false,
+    ...(process.platform === 'win32' ? {titleBarStyle:'hidden', titleBarOverlay:{color:'#fafafa',symbolColor:'#303030',height:32}} : {}),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   snippetHost.attach(window.webContents);
@@ -270,6 +271,10 @@ else {
       if (method === 'app.ui_ready') { uiReady = true; return {ready:true}; }
       if (method === 'app.startup_status') return backend.startupState;
       if (method === 'app.reload') { window.webContents.reload(); return { accepted: true }; }
+      if (method === 'app.titlebar') {
+        if (process.platform === 'win32' && /^#[0-9a-f]{6}$/i.test(params.background) && /^#[0-9a-f]{6}$/i.test(params.foreground)) window.setTitleBarOverlay({color:params.background,symbolColor:params.foreground,height:32});
+        return {accepted:true};
+      }
       if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; await startup.flush(); publish({ event: 'service_reconnected' }); return { connected: true }; }
       if (method === 'app.ready') {
         startup.ready=true;

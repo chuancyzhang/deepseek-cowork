@@ -37,7 +37,7 @@ class PluginHost {
     if (!Array.isArray(caps) || caps.some(cap=>!capabilities.has(cap))) throw new Error('插件请求了当前版本不支持的能力。');
     if (manifest.hostApi === 1) {
       if (manifest.id !== 'cowork.writing' || caps.some(cap=>!['document.read','document.edit'].includes(cap))) throw new Error('hostApi 1 仅适配原写作编辑器，请升级至 hostApi 2。');
-      manifest.contributes = [{id:'writing',kind:'editor',target:'text'}];
+      manifest.contributes = [{id:'writing',kind:'editor',target:'markdown'}];
     } else {
       if (!Number.isInteger(manifest.stateVersion) || manifest.stateVersion < 1 || !Array.isArray(manifest.contributes) || !manifest.contributes.length) throw new Error('hostApi 2 需要状态版本和扩展点声明。');
       const ids = new Set();
@@ -87,7 +87,10 @@ class PluginHost {
       const valid=references.filter(reference=>plugins.some(plugin=>plugin.enabled && plugin.contributes.some(extension=>`${plugin.id}/${extension.id}`===reference)));
       if (valid.length) selected[slot]=valid;
     }
-    if (!state.selected['editor:text']?.length && plugins.some(p=>p.id==='cowork.writing' && p.enabled)) selected['editor:text']=['cowork.writing/writing'];
+    // Keep explicit custom text selections for code unless the user has chosen
+    // a dedicated code editor. Only the bundled writing default is narrowed.
+    const legacy = state.selected['editor:text'];
+    if (!state.selected['editor:code']?.length && legacy?.some(ref => ref !== 'cowork.writing/writing' || plugins.some(plugin=>plugin.id==='cowork.writing'&&!plugin.builtin))) selected['editor:code'] = selected['editor:text'];
     this.checkCommands(plugins); return {plugins,selected,catalog:listed};
   }
   checkCommands(plugins) {

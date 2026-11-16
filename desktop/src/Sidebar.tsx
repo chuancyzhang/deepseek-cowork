@@ -94,7 +94,7 @@ export default function Sidebar(props: Props) {
           </section>;
   }
   return <aside className="sidebar">
-    <div className="brand"><span className="brand-symbol">✳</span><strong>DeepSeek Cowork</strong><button className="icon-button" title="收起侧栏" onClick={props.onCollapse}><PanelLeftClose size={17}/></button></div>
+    <div className="brand"><strong>DeepSeek Cowork</strong><button className="icon-button" title="收起侧栏" onClick={props.onCollapse}><PanelLeftClose size={17}/></button></div>
     <button className="new-chat" onClick={() => props.onNew()}><Plus size={18}/>新建聊天</button>
     <label className="search"><Search size={15}/><input aria-label="搜索项目和聊天内容" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)}/>{query && <button title="清除搜索" onClick={() => setQuery('')}><X size={13}/></button>}</label>
     <nav className="conversation-list" aria-label="项目与对话">

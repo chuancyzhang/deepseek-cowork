@@ -412,6 +412,27 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertNotIn("ui_context", json.dumps(request))
         self.assertTrue(all("meta" not in message for message in request["messages"]))
 
+    def test_edit_and_retry_keep_original_skills_after_composer_selection_changes(self):
+        cid = self.client.call("conversation.create")["id"]
+        first = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                     text="常用任务原请求", model_id=self.model_id, skills=["document-reader"])
+        self.client.call("conversation.send", **first)
+        self.client.wait_run(cid)
+        self.client.call("conversation.preferences", conversation_id=cid, value={"selected_skill_names": []})
+        for text in ("修改常用任务请求", "再次修改请求"):
+            current = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
+            prepared = self.client.call("history.prepare", conversation_id=cid, message_id=current["id"])
+            request_id = uuid.uuid4().hex
+            self.client.call("conversation.send", conversation_id=cid, request_id=request_id, message_id=uuid.uuid4().hex,
+                             text=text, model_id=self.model_id, consume_draft=False,
+                             rewrite={"hash": prepared["hash"], "revision": prepared["revision"], "message_id": current["id"]})
+            self.client.wait_run(cid)
+            rewritten = self.client.call("conversation.get", conversation_id=cid)["messages"][0]
+            self.assertEqual(rewritten["meta"]["ui_context"]["skills"], ["document-reader"])
+            inspection = self.client.call("task.inspect", conversation_id=cid, run_id=request_id)
+            self.assertEqual(inspection["current_context"]["skills"], [])
+            self.assertEqual(inspection["submitted_context"]["skills"], ["document-reader"])
+
     def test_durable_send_deduplication_and_isolation(self):
         first = self.client.call("conversation.create")
         second = self.client.call("conversation.create")

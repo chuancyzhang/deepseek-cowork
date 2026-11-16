@@ -326,11 +326,12 @@ class ConversationActions:
 class ConversationRuntime:
     methods = frozenset(['conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename', 'conversation.archive', 'conversation.receipt', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond'])
 
-    def __init__(self, *, config, storage, store, state, files, actions, publish, start, view, request):
+    def __init__(self, *, config, storage, store, state, files, actions, publish, start, view, request, model_usage):
         self.config, self.storage, self.store, self.state = config, storage, store, state
         self.workspace, self.checked_file = files.workspace, files.checked_file
         self.conversations, self.publish, self.start_stream = actions, publish, start
         self.conversation, self.request_agent = view, request
+        self.model_usage = model_usage
         self.public_run = lambda run: {key: run[key] for key in ("id", "conversation_id", "message_id", "status", "error")} if run else None
         self.ledger = state.runtime_journal.ledger
 
@@ -394,6 +395,10 @@ class ConversationRuntime:
             profile = self.config.get_model_profile(p.get("model_id"))
             if not profile or not profile.get("api_key"):
                 raise ValueError("请先在“模型与服务”中填写 API Key，或导入现有设置。输入内容已保留。")
+            usage = self.model_usage(profile)
+            if usage.get("chat_supported") is False:
+                log.info("chat_model_rejected session=%s model=%s purpose=%s", cid, profile["id"], usage.get("purpose_label"))
+                raise ValueError("当前模型用于" + usage.get("purpose_label", "专用功能") + "，请在输入区选择对话模型。输入与附件已保留。")
             text = str(p.get("text") or "").strip()
             display_text = str(p.get("display_text") or text)
             attachments = p.get("attachments") or []
@@ -421,8 +426,12 @@ class ConversationRuntime:
                     raise ValueError("原项目目录暂时不可用，请恢复该目录后继续。输入和历史记录已保留。")
             protected_audio = bool(preferences.get("keep_audio_local"))
             prior_attachments = set()
+            submitted_skills = p.get("skills", preferences.get("selected_skill_names", []))
             if p.get("rewrite"):
                 source = next((message for message in self.storage.get_messages(cid) if message["id"] == p["rewrite"].get("message_id")), {})
+                if "skills" not in p and "skills" in ((source.get("meta") or {}).get("ui_context") or {}):
+                    submitted_skills = source["meta"]["ui_context"]["skills"]
+                    log.info("history_skills_restored session=%s message=%s count=%s", cid, source["id"], len(submitted_skills))
                 protected_audio = protected_audio or bool((source.get("meta") or {}).get("local_only_audio_files") or (source.get("meta") or {}).get("transcription_only_audio_files"))
                 prior_attachments = {str(Path(path).resolve()) for path in (source.get("meta") or {}).get("user_added_files", [])}
             paths = []
@@ -447,7 +456,7 @@ class ConversationRuntime:
             payload = {"conversation_id": cid, "request_id": str(p["request_id"]),
                        "message_id": str(p["message_id"]), "content": message["content"], "display_text": display_text,
                        "workspace_dir": str(self.workspace(cid)), "model_id": profile["id"],
-                       "skills": p.get("skills", preferences.get("selected_skill_names", [])), "attachments": attachments,
+                       "skills": submitted_skills, "attachments": attachments,
                        "preferences": preferences, "input_hash": input_hash, "draft_revision": p.get("draft_revision"),
                        "content_parts": message.get("content_parts"), "message_meta": message_meta, "rewrite": p.get("rewrite"), "multimedia_images": media_images}
             if payload["rewrite"]:

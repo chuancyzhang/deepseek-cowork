@@ -31,6 +31,15 @@ from core.deliverable_editing import (
 
 
 class DeliverableEditingCoreTest(unittest.TestCase):
+    def test_editor_presentation_keeps_source_serialization_and_specialized_formats(self):
+        from core.file_capabilities import editor_presentation
+        for extension, language in {".java": "java", ".py": "python", ".ts": "typescript", ".tsx": "tsx", ".js": "javascript", ".jsx": "jsx", ".json": "json", ".yml": "yaml"}.items():
+            self.assertEqual(editor_presentation("sample" + extension), {"editor_target": "code", "language": language})
+            self.assertEqual(editor_descriptor(extension).kind, "text")
+        self.assertEqual(editor_presentation("readme.md")["editor_target"], "markdown")
+        self.assertEqual(editor_presentation("debug.log")["editor_target"], "text")
+        self.assertEqual(editor_presentation("index.html"), {})
+
     def test_registry_covers_planned_formats_only(self):
         for extension in (
             ".docx",

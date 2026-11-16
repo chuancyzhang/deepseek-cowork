@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from . import ADAPTERS, CAPABILITIES, normalize, snapshot, validate_binding
+from . import ADAPTERS, CAPABILITIES, KNOWN_MODELS, normalize, snapshot, validate_binding, quick_actions, binding_error
 from .adapters import Adapter, MediaError, safe_message
 
 log = logging.getLogger("multimedia")
@@ -103,10 +103,26 @@ class MediaRuntime:
     def config(self):
         from core.desktop_settings import DesktopSettings
         value = normalize(self.s.config.get("experimental_multimedia"))
+        source_channels = self.s.config.get_model_channels()
         channels = [{key: item[key] for key in ("channel_id", "display_name", "base_url", "provider_type")}
                     | {"configured": bool(item["api_key"]), "models": [model["model_name"] for model in item["models"]]}
-                    for item in self.s.config.get_model_channels()]
+                    for item in source_channels]
+        records = self.host.records()
+        statuses = {}
+        for kind, binding in value["bindings"].items():
+            channel = next((item for item in channels if item["channel_id"] == binding.get("channel_id")), {})
+            reason = binding_error(kind, binding, next((item for item in source_channels if item["channel_id"] == binding.get("channel_id")), {}))
+            if reason:
+                statuses[kind] = {"label": "配置需修正", "message": reason, "valid": False}
+                continue
+            recent = next((item for item in records if item["capability"] == kind and all(
+                item.get("profile", {}).get(key) == binding.get(key) for key in ("channel_id", "model", "adapter"))
+                and item.get("profile", {}).get("base_url") == channel.get("base_url")), None)
+            statuses[kind] = {"label": "已配置，未验证"} if not recent else {
+                "label": "最近调用成功" if recent["status"] == "completed" else "最近调用失败" if recent["status"] in {"failed", "download_failed"} else recent["message"],
+                "message": recent["message"], "updated_at": recent.get("updated_at"), "status": recent["status"]}
         return {"bindings": value["bindings"], "channels": channels, "adapters": ADAPTERS,
+                "known_models": KNOWN_MODELS, "actions": quick_actions(value["bindings"], source_channels), "binding_status": statuses,
                 "revision": DesktopSettings.revision(value), "tasks": [self.public(item) for item in self.host.records()]}
 
     def save_config(self, p):
@@ -137,6 +153,9 @@ class MediaRuntime:
                 channel = by_id.get(binding["channel_id"])
                 if not channel or channel["provider_type"] != "openai":
                     raise ValueError("请选择 OpenAI 兼容服务。")
+                reason = binding_error(kind, binding, channel)
+                if reason:
+                    raise ValueError(reason)
                 Adapter({**binding, "base_url": channel["base_url"], "api_key": channel["api_key"]})
             with self.s.config.batch_save():
                 if p.get("services"):
@@ -154,9 +173,9 @@ class MediaRuntime:
         if method == "media.tasks":
             return [self.public(item) for item in self.host.records(str(p.get("conversation_id") or ""))]
         if method == "media.resume":
-            return self.public(self.resume(str(p["id"]), remote_id=str(p.get("remote_id") or "")))
+            return self.public(self.resume(str(p["id"]), cid=str(p.get("conversation_id") or ""), remote_id=str(p.get("remote_id") or "")))
         if method == "media.stop":
-            return self.public(self.stop(str(p["id"])))
+            return self.public(self.stop(str(p["id"]), cid=str(p.get("conversation_id") or "")))
         raise ValueError("不支持此多媒体操作。")
 
     def get(self, identity, cid=""):
@@ -167,14 +186,8 @@ class MediaRuntime:
 
     @staticmethod
     def public(record):
-        result = {key: copy.deepcopy(record[key]) for key in (
-            "id", "conversation_id", "capability", "status", "message", "created_at", "updated_at", "model",
-            "service_name", "remote_id", "provider_task_id", "progress", "files", "text", "job_id") if key in record}
-        result["task_id"] = result["id"]
-        result["text"] = result.get("text", "")[:16000]
-        result["can_resume"] = record["status"] not in ACTIVE | {"completed", "failed", "cancelled"} and bool(record.get("remote_id") or record.get("sources") or record.get("receipt") or record.get("files") or (Path(record["destination"]) / "receipt.json").is_file())
-        result["can_attach_id"] = record["status"] == "unknown" and record["capability"] == "video_generate"
-        return result
+        from core.desktop_media import DesktopMedia
+        return DesktopMedia.public(record)
 
     def save(self, record, **changes):
         with self.lock:
@@ -184,7 +197,8 @@ class MediaRuntime:
             record.update(changes, updated_at=time.time())
             self.s.store.put_state("media:" + record["id"], record)
             self.s.publish({"event": "media_task", "conversation_id": record["conversation_id"], "data": self.public(record)})
-        log.info("media_task_state id=%s session=%s phase=%s", record["id"], record["conversation_id"], record["status"])
+        log.info("media_task_state id=%s session=%s run=%s capability=%s adapter=%s phase=%s", record["id"], record["conversation_id"],
+                 record.get("run_id", ""), record["capability"], record.get("profile", {}).get("adapter", ""), record["status"])
 
     def submit(self, capability, prompt, inputs, options, profile, workspace, context):
         if capability not in CAPABILITIES:
@@ -221,6 +235,7 @@ class MediaRuntime:
             record = {"id": identity, "conversation_id": cid, "workspace": str(root), "destination": str(destination),
                       "fingerprint": fingerprint, "request": request, "profile": {key: value for key, value in profile.items() if key != "api_key"},
                       "model": profile["model"], "service_name": profile["service_name"], "capability": capability,
+                      "run_id": str(context.get("run_id") or context.get("turn_id") or ""),
                       "created_at": time.time(), "status": "queued", "message": "等待提交", "files": []}
             self.save(record)
             self.start(record, adapter, prepared)

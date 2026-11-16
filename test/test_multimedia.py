@@ -202,6 +202,31 @@ class MultimediaTests(unittest.TestCase):
         self.assertEqual(body["duration"], 6)
         self.assertEqual(body["content"][1]["type"], "image_url")
 
+    def test_flash_constraints_reject_before_submission_and_known_usage_survives_disable(self):
+        from core.multimedia import validate_binding
+        profile = self.profile(model="agnes-video-2.5-flash")
+        adapter = Adapter(profile)
+        for inputs, options, message in [([], {"size": "1080P"}, "720P"),
+            ([self.base + "/reference.png"] * 6, {}, "5 张"), ([], {"seconds": 3}, "4–12")]:
+            with self.assertRaisesRegex(ValueError, message):
+                adapter.prepare("video_generate", "咖啡短片", inputs, options, str(self.root / "one"))
+        self.assertEqual(self.calls, [])
+        prepared = adapter.prepare("video_generate", "咖啡短片", [self.base + "/reference.png"] * 5,
+                                   {"seconds": 4, "size": "720P"}, str(self.root / "one"))
+        self.assertEqual(len(prepared["body"]["images"]), 5)
+        binding = {"adapter": "agnes", "channel_id": "media", "model": profile["model"]}
+        with self.assertRaisesRegex(ValueError, "只支持视频生成"):
+            validate_binding("image_generate", binding)
+        self.config.set("experimental_multimedia", {"enabled": True, "bindings": {"video_generate": binding}})
+        chat_profile = {**profile, "model_name": profile["model"]}
+        self.assertFalse(self.host.model_usage(chat_profile)["chat_supported"])
+        self.config.value["experimental_multimedia"]["enabled"] = False
+        self.assertFalse(self.host.model_usage(chat_profile)["chat_supported"])
+        self.assertEqual(self.host.actions(), [])
+        self.assertIsNone(self.host.model_usage({**chat_profile, "model_name": "my-video-chat-model"})["chat_supported"])
+        self.assertTrue(self.host.model_usage({**chat_profile, "model_name": "dual-model", "discovery": {"endpoints": ["/v1/chat/completions", "/v1/videos"]}})["chat_supported"])
+        self.assertFalse(self.host.model_usage({**chat_profile, "discovery": {"endpoints": ["/v1/chat/completions"]}})["chat_supported"])
+
     def test_audio_and_understanding_save_text_and_media(self):
         source = self.root / "one" / "sample.wav"
         source.write_bytes(b"RIFFfixture")
@@ -364,11 +389,24 @@ class MultimediaServiceTests(unittest.TestCase):
                                     bindings={"image_generate": {"adapter": "agnes", "model": "agnes-image-2.0-flash", "channel_id": "agnes-fixture"}},
                                     services=[{"channel_id": "agnes-fixture", "display_name": "Agnes", "base_url": "https://apihub.agnes-ai.com/v1", "api_key": "private-media-key"}])
                 self.assertNotIn("private-media-key", json.dumps(saved))
+                models = client.call("settings.save_model", channel_id="agnes-fixture", model_name="agnes-video-2.5-flash",
+                                     name="Agnes", base_url="https://apihub.agnes-ai.com/v1")
+                model = next(item for item in models["models"] if item["model_name"] == "agnes-video-2.5-flash")
+                self.assertFalse(model["chat_supported"])
+                conversation = client.call("conversation.create")
+                import uuid
+                request = {"conversation_id": conversation["id"], "request_id": uuid.uuid4().hex, "message_id": uuid.uuid4().hex,
+                           "text": "不应发往聊天接口", "model_id": model["id"]}
+                with self.assertRaisesRegex(RuntimeError, "选择对话模型"):
+                    client.call("conversation.send", **request)
+                self.assertEqual(client.call("conversation.get", conversation_id=conversation["id"])["messages"], [])
                 with self.assertRaisesRegex(RuntimeError, "已更新"):
                     client.call("media.save", revision=settings["revision"], bindings={})
                 page = client.call("settings.page", page="experiments")
                 client.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "multimedia": False})
                 self.assertFalse(client.call("settings.get")["multimedia_enabled"])
+                with self.assertRaisesRegex(RuntimeError, "选择对话模型"):
+                    client.call("conversation.send", **request)
             finally:
                 client.close()
             client = ServiceClient(directory)

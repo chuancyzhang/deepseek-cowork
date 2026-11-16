@@ -6,6 +6,21 @@ import {HostSDK} from '../src/host/sdk.ts';
 import {PluginRegistry} from '../src/plugins/registry.ts';
 import {SaveCoordinator} from '../src/host/saveCoordinator.ts';
 import {MessageProjection,mergeEvents} from '../src/runtime.ts';
+
+test('media task state belongs to its conversation and newer events survive late snapshots',()=>{
+  const host=new HostStore();host.set('navigation:selected','b');
+  receiveConversation(host,'a',{id:'a',meta:{},media_tasks:[]});
+  const task={id:'task',conversation_id:'a',capability:'video_generate',status:'running',created_at:1,updated_at:2,files:[]};
+  receiveEvents(host,[{event:'media_task',conversation_id:'a',data:task}]);
+  receiveConversation(host,'a',{id:'a',meta:{},media_tasks:[{...task,status:'queued',updated_at:1}]});
+  assert.equal(conversationAt(host,'a').media_tasks[0].status,'running');
+  assert.equal(host.get('navigation:selected'),'b');
+  assert.deepEqual(host.get(host.sessionKey('media_tasks','b'),[]),[]);
+  receiveEvents(host,[{event:'media_task',conversation_id:'b',data:{...task,status:'completed',updated_at:3}}]);
+  assert.deepEqual(host.get(host.sessionKey('media_tasks','b'),[]),[]);
+  receiveEvents(host,[{event:'media_task',conversation_id:'a',data:{...task,status:'completed',updated_at:4}}]);
+  assert.equal(conversationAt(host,'a').media_tasks[0].status,'completed');
+});
 import {activeReview,reviewTitle} from '../src/reviews.ts';
 
 test('review status uses durable revisions and the active conversation/run even before a snapshot loads',()=>{

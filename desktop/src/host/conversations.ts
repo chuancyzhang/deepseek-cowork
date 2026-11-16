@@ -1,7 +1,13 @@
-import type {Conversation,HostEvent,Run,RuntimeEvent} from '../types';
+import type {Conversation,HostEvent,Run,RuntimeEvent,MediaTask} from '../types';
 import type {HostStore,Update} from './store';
 import {mergeEvents,isActive} from '../runtime.ts';
 import {mergeReviews,type ReviewSummary} from '../reviews.ts';
+
+export function mergeMediaTasks(previous:MediaTask[], incoming:MediaTask[]) {
+  const merged=new Map(previous.map(item=>[item.id,item]));let changed=false;
+  for(const item of incoming)if(!merged.has(item.id)||item.updated_at>(merged.get(item.id)?.updated_at||0)){merged.set(item.id,item);changed=true;}
+  return changed?[...merged.values()].sort((a,b)=>a.created_at-b.created_at).slice(-100):previous;
+}
 
 /** Backend snapshots and durable increments enter the same host projection. */
 export function receiveRun(store:HostStore,run:Run|null,id:string) {
@@ -12,14 +18,15 @@ export function receiveRun(store:HostStore,run:Run|null,id:string) {
 }
 export function conversationAt(store:HostStore,id:string):Conversation|null {
   const value=store.get<Conversation|null>(store.sessionKey('current',id),null);
-  return value?{...value,run:store.get<Record<string,Run>>('runs',{})[id]||null,reviews:store.get<ReviewSummary[]>(store.sessionKey('reviews',id),[])}:null;
+  return value?{...value,run:store.get<Record<string,Run>>('runs',{})[id]||null,reviews:store.get<ReviewSummary[]>(store.sessionKey('reviews',id),[]),media_tasks:store.get<MediaTask[]>(store.sessionKey('media_tasks',id),[])}:null;
 }
 export function receiveConversation(store:HostStore,id:string,update:Update<Conversation|null>) {
   const previous=conversationAt(store,id),value=typeof update==='function'?update(previous):update;
   if(!value){store.set(store.sessionKey('current',id),null);return;}
   if(value.run===null&&!isActive(previous?.run?.status))store.set<Record<string,Run>>('runs',runs=>Object.fromEntries(Object.entries(runs).filter(([key])=>key!==id)));
   if('run' in value)receiveRun(store,value.run||null,id);
-  const {run,reviews,...body}=value;
+  const {run,reviews,media_tasks,...body}=value;
+  if(media_tasks)store.set<MediaTask[]>(store.sessionKey('media_tasks',id),previous=>mergeMediaTasks(previous||[],media_tasks));
   if(reviews)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],reviews));
   store.set(store.sessionKey('current',id),body);
 }
@@ -28,6 +35,7 @@ export function receiveEvents(store:HostStore,batch:HostEvent[]) {
   for(const event of batch){
     const id=event.conversation_id;if(!id)continue;
     if(event.run)receiveRun(store,event.run,id);
+    if(event.event==='media_task' && event.data?.id && event.data.conversation_id===id)store.set<MediaTask[]>(store.sessionKey('media_tasks',id),previous=>mergeMediaTasks(previous||[],[event.data]));
     if(event.event==='review_changed' && event.data?.id)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],[event.data]));
     if(event.event!=='runtime')continue;
     if(!grouped.has(id))grouped.set(id,[]);grouped.get(id)!.push(event.data);

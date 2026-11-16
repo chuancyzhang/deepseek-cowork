@@ -5,12 +5,12 @@ import {rpc} from '../../managementApi';
 import {useHostField} from '../../host/context';
 import './multimedia.css';
 
-type Props = {onError:(message:string)=>void; onDirty:(value:boolean)=>void; openConversation:(id:string)=>void; manageServices:()=>void;
+type Props = {useAction:(id:string)=>Promise<void>;onError:(message:string)=>void; onDirty:(value:boolean)=>void; openConversation:(id:string)=>void; manageServices:()=>void;
   confirm:(title:string,detail:string,choices:string[])=>Promise<number>};
 const labels:Record<string,string> = {image_generate:'图片生成',image_understand:'图片理解',video_generate:'视频生成',video_understand:'视频理解',audio_generate:'语音生成',audio_understand:'音频转写'};
 const statuses:Record<string,string> = {queued:'等待提交',submitting:'正在提交',running:'正在生成',downloading:'保存成果',completed:'已完成',paused:'已暂停',unknown:'提交待核查',download_failed:'下载未完成',failed:'失败',cancelled:'已停止'};
 const active = ['queued','submitting','running','downloading'];
-const examples:Record<string,string[]> = {agnes:['agnes-image-2.0-flash','agnes-video-2.5'],ark:[],openai:[]};
+const examples:Record<string,string[]> = {agnes:['agnes-image-2.0-flash','agnes-video-2.5-flash'],ark:[],openai:[]};
 
 export default function Multimedia(props:Props) {
   const [data,setData]=useState<any>(null),[failure,setFailure]=useState('');
@@ -19,7 +19,7 @@ export default function Multimedia(props:Props) {
   return <div className="multimedia-plugin">{failure&&<ErrorState message={failure} retry={()=>void load()}/>} {data?<MediaForm {...props} data={data} loaded={setData}/>:!failure&&<p role="status"><LoaderCircle className="spin" size={16}/>正在读取多媒体配置…</p>}</div>;
 }
 
-function MediaForm({data,loaded,onDirty,onError,confirm,openConversation,manageServices}:Props & {data:any;loaded:(value:any)=>void}) {
+function MediaForm({useAction,data,loaded,onDirty,onError,confirm,openConversation,manageServices}:Props & {data:any;loaded:(value:any)=>void}) {
   const form=useFormDraft('multimedia',{bindings:data.bindings,services:[],apiKeys:{}},onDirty,['apiKeys']);
   const [editing,setEditing]=useHostField('multimedia:editing','');
   const [revision,setRevision]=useState(data.revision),[busy,setBusy]=useState(false),[failure,setFailure]=useState('');
@@ -31,6 +31,7 @@ function MediaForm({data,loaded,onDirty,onError,confirm,openConversation,manageS
   function editBinding(values:any){patch({bindings:{...form.value.bindings,[editing]:{...binding,...values}}});}
   useEffect(()=>window.cowork.onEvents(events=>{
     const changes=events.filter(event=>event.event==='media_task').map(event=>event.data);
+    if(changes.some(item=>item&&!active.includes(item.status)))void rpc('media.config').then(loaded).catch(error=>setFailure(error.message));
     if(changes.length)setTasks(previous=>{
       const merged=new Map(previous.map(item=>[item.id,item]));
       for(const item of changes)if(item&&(!merged.has(item.id)||item.updated_at>=(merged.get(item.id)?.updated_at||0)))merged.set(item.id,item);
@@ -50,15 +51,15 @@ function MediaForm({data,loaded,onDirty,onError,confirm,openConversation,manageS
       form.done({bindings:result.bindings,services:[],apiKeys:{}});setRevision(result.revision);loaded(result);onError('多媒体配置已保存，下一轮任务生效。');
     }catch(error){setFailure((error as Error).message);}finally{setBusy(false);}}}>
       <table className="media-model-table"><caption className="sr-only">选择各类素材的生成与理解模型</caption><thead><tr><th scope="col">素材</th><th scope="col">生成</th><th scope="col">理解</th></tr></thead><tbody>
-        {[['image','图片'],['video','视频'],['audio','音频']].map(([kind,label])=><tr key={kind}><th scope="row">{label}</th>{['generate','understand'].map(operation=>{const key=kind+'_'+operation,item=form.value.bindings[key],channel=channels.find((c:any)=>c.channel_id===item?.channel_id);return <td key={key}><button type="button" className={'media-model-choice'+(editing===key?' selected':'')} aria-label={'配置'+labels[key]} aria-pressed={editing===key} onClick={()=>setEditing(key)}><span>{item?.model||'选择模型'}</span>{item?.model&&<small>{channel?.display_name||'服务已移除'}</small>}</button></td>;})}</tr>)}
+        {[['image','图片'],['video','视频'],['audio','音频']].map(([kind,label])=><tr key={kind}><th scope="row">{label}</th>{['generate','understand'].map(operation=>{const key=kind+'_'+operation,item=form.value.bindings[key],channel=channels.find((c:any)=>c.channel_id===item?.channel_id);return <td key={key}><button type="button" className={'media-model-choice'+(editing===key?' selected':'')} aria-label={'配置'+labels[key]} aria-pressed={editing===key} onClick={()=>setEditing(key)}><span>{item?.model||'选择模型'}</span>{item?.model&&<small>{channel?.display_name||'服务已移除'}</small>}<small>{!item?.model?'未配置':JSON.stringify(item)!==JSON.stringify(data.bindings[key])?'尚未保存':data.binding_status?.[key]?.label||'已配置，未验证'}</small></button></td>;})}</tr>)}
       </tbody></table>
       {editing&&<section className="media-binding-editor settings-section"><div className="section-heading"><h3>{labels[editing]}</h3><button type="button" className="icon-button" title="收起模型配置" onClick={()=>setEditing('')}><X size={16}/></button></div><div className="form-grid">
         <Field label="接入预设"><select value={binding.adapter} disabled={busy} onChange={e=>editBinding({adapter:e.target.value})}>{Object.entries(data.adapters).filter(([,v]:any)=>v.capabilities.includes(editing)).map(([key,value]:any)=><option key={key} value={key}>{value.label}</option>)}</select></Field>
         <Field label="服务"><div className="input-action"><select value={binding.channel_id} disabled={busy} onChange={e=>editBinding({channel_id:e.target.value})}><option value="">选择服务</option>{channels.filter((item:any)=>!item.provider_type||item.provider_type==='openai').map((item:any)=><option key={item.channel_id} value={item.channel_id}>{item.display_name||'新服务'}</option>)}</select><button type="button" className="secondary" disabled={busy} onClick={newService}><Plus size={14}/>添加</button></div></Field>
-        <Field label="模型" wide><input list="media-models" value={binding.model} disabled={busy} onChange={e=>editBinding({model:e.target.value})} placeholder="填写模型标识"/><datalist id="media-models">{[...new Set([...(examples[binding.adapter]||[]),...(channels.find((item:any)=>item.channel_id===binding.channel_id)?.models||[])])].map(name=><option key={name} value={name}/>)}</datalist></Field>
+        <Field label="模型" wide><input list="media-models" value={binding.model} disabled={busy} onChange={e=>editBinding({model:e.target.value})} placeholder="填写模型标识"/><datalist id="media-models">{[...new Set([...(examples[binding.adapter]||[]),...(channels.find((item:any)=>item.channel_id===binding.channel_id)?.models||[])])].filter(name=>binding.adapter!=='agnes'||!data.known_models?.[name]||data.known_models[name].capabilities.includes(editing)).map(name=><option key={name} value={name}/>)}</datalist></Field>
         {newChannel&&<><Field label="服务名称"><input value={newChannel.display_name} disabled={busy} onChange={e=>serviceField('display_name',e.target.value)}/></Field><Field label="服务地址"><input type="url" value={newChannel.base_url} disabled={busy} onChange={e=>serviceField('base_url',e.target.value)} placeholder="https://example.com/v1"/></Field><Field label="API Key" wide><input type="password" autoComplete="off" value={form.value.apiKeys[newChannel.channel_id]||''} disabled={busy} onChange={e=>patch({apiKeys:{...form.value.apiKeys,[newChannel.channel_id]:e.target.value}})}/></Field></>}
-      </div>{editing==='video_understand'&&<p className="muted">使用支持 video_url 的原生视频理解模型。素材需提供服务可访问的链接。</p>}{editing==='audio_understand'&&<p className="muted">将本地音频转为文字。</p>}{editing==='audio_generate'&&<p className="muted">将文字转为 AI 合成语音。</p>}{binding.model&&<button type="button" className="text-link" disabled={busy} onClick={()=>{const next={...form.value.bindings};delete next[editing];patch({bindings:next});}}>此项暂不使用</button>}</section>}
-      <div className="form-actions"><span className="muted">在聊天中描述需求或添加素材。</span><button type="button" className="secondary" disabled={busy||!form.dirty} onClick={form.reset}>取消修改</button><button className="primary" disabled={busy||!form.dirty}><Check size={16}/>{busy?'正在保存…':'保存'}</button></div>
+      </div>{editing==='video_understand'&&<p className="muted">使用支持 video_url 的原生视频理解模型。素材需提供服务可访问的链接。</p>}{editing==='audio_understand'&&<p className="muted">将本地音频转为文字。</p>}{editing==='audio_generate'&&<p className="muted">将文字转为 AI 合成语音。</p>}{binding.adapter==='agnes'&&editing==='video_generate'&&<p className="muted">Flash：720P、4–12 秒，最多 5 张参考图。图片需提供服务可访问的链接，不会自动上传本地文件。</p>}{data.binding_status?.[editing]?.message&&<p className="muted">{data.binding_status[editing].message}{data.binding_status[editing].updated_at?' · '+new Date(data.binding_status[editing].updated_at*1000).toLocaleString():''}</p>}<div className="button-row"><button type="button" className="secondary" disabled={busy||form.dirty||!data.bindings[editing]?.model||data.binding_status?.[editing]?.valid===false} onClick={()=>void useAction(editing).catch(error=>setFailure(error.message))}>去聊天试用</button>{form.dirty&&<small>先保存配置</small>}</div>{binding.model&&<button type="button" className="text-link" disabled={busy} onClick={()=>{const next={...form.value.bindings};delete next[editing];patch({bindings:next});}}>此项暂不使用</button>}</section>}
+      <div className="form-actions"><span className="muted">使用对话模型发起任务，多媒体模型负责生成或理解素材。试用会填入可编辑示例，发送后才调用服务。</span><button type="button" className="secondary" disabled={busy||!form.dirty} onClick={form.reset}>取消修改</button><button className="primary" disabled={busy||!form.dirty}><Check size={16}/>{busy?'正在保存…':'保存'}</button></div>
     </form>
     {failure&&<ErrorState message={failure}/>}
     <section className="settings-section media-tasks"><div className="section-heading"><h3>任务与成果</h3><button className="icon-button" title="刷新任务" onClick={()=>void refresh()}><RefreshCw size={16}/></button></div>

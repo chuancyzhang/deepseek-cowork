@@ -234,6 +234,23 @@ def editable_extensions() -> frozenset[str]:
     )
 
 
+def editor_presentation(path: str) -> dict[str, str]:
+    """UI routing is separate from the text serialization contract."""
+    capability = file_capability(path)
+    if not capability or capability.editor_kind != "text":
+        return {}
+    extension = os.path.splitext(path)[1].lower()
+    if extension in {".md", ".markdown"}:
+        return {"editor_target": "markdown", "language": "markdown"}
+    if extension in {".txt", ".log"}:
+        return {"editor_target": "text", "language": "text"}
+    languages = {".py": "python", ".pyw": "python", ".java": "java", ".js": "javascript",
+                 ".jsx": "jsx", ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript",
+                 ".tsx": "tsx", ".json": "json", ".css": "css", ".sql": "sql", ".xml": "xml",
+                 ".yaml": "yaml", ".yml": "yaml"}
+    return {"editor_target": "code", "language": languages.get(extension, extension.lstrip("."))}
+
+
 def editor_extensions(kind: str) -> tuple[str, ...]:
     return tuple(
         extension

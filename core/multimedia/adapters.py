@@ -71,6 +71,10 @@ class Adapter:
     def __init__(self, profile):
         self.profile = dict(profile)
         self.root = api_root(profile)
+        from . import model_usage
+        self.known = model_usage({**profile, "model_name": profile.get("model")}, {"binding": profile})
+        if self.known and profile["adapter"] != "agnes":
+            raise ValueError("此 Agnes 模型需要 Agnes 接入预设，请在多媒体页修改后保存。")
         if not profile.get("api_key"):
             raise ValueError("此服务尚未填写 API Key，请到模型与服务中补充。")
         self.headers = {"Authorization": "Bearer " + profile["api_key"]}
@@ -107,6 +111,8 @@ class Adapter:
 
     def prepare(self, kind, prompt, inputs, options, workspace):
         """Validate and resolve inputs before the durable submitting boundary."""
+        if self.known and kind not in self.known["capabilities"]:
+            raise ValueError("此模型只支持" + self.known["purpose_label"] + "，请修改多媒体配置。")
         if not isinstance(options, dict) or not isinstance(inputs, list) or len(inputs) > 8:
             raise ValueError("素材与生成参数格式无效，单次最多 8 个素材。")
         if not all(isinstance(value, str) and value for value in inputs):
@@ -152,6 +158,11 @@ class Adapter:
                 if not 4 <= seconds <= 12:
                     raise ValueError("Agnes 视频时长须为 4–12 秒。")
                 size = options.get("size") or "720P"
+                if profile["model"] == "agnes-video-2.5-flash":
+                    if size != "720P":
+                        raise ValueError("Agnes Video 2.5 Flash 仅支持 720P 分辨率。")
+                    if len(inputs) > 5:
+                        raise ValueError("Agnes Video 2.5 Flash 最多支持 5 张参考图。")
                 if size not in {"720P", "1080P", "1K", "2K"}:
                     raise ValueError("Agnes 分辨率使用 720P、1080P、1K 或 2K。")
                 body.update(prompt=prompt, seconds=str(seconds), size=size, aspect_ratio=ratio, mode="reference" if inputs else "text")

@@ -13,7 +13,7 @@ import SnippetPreview from './SnippetPreview';
 import ImageAttachment, {isImageAttachment} from './ImageAttachment';
 import {reviewTitle, type ReviewSummary} from './reviews';
 
-function MediaResult({file,cid,onFile}:{file:FileReference;cid:string;onFile:(path:string)=>void}) {
+export function MediaResult({file,cid,onFile}:{file:FileReference;cid:string;onFile:(path:string)=>void}) {
   const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
   useEffect(()=>{let live=true;setUrl('');setFailure('');void window.cowork.call('file.open',{conversation_id:cid,path:file.path}).then(result=>{if(live)setUrl(result.payload.url);}).catch(error=>{if(live)setFailure(error.message);});return()=>{live=false;};},[cid,file.path]);
   return <figure>{url&&(file.kind==='video'?<video src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure&&<p role="alert" className="error-text">{failure}</p>}</figure>;

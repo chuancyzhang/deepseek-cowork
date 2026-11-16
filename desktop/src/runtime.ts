@@ -277,6 +277,7 @@ export function isUserStopped(run?: Pick<Run, 'status' | 'error'> | null) {
 }
 
 export function runErrorSummary(error: string) {
+  if (/is a (video|image) model|use \/v1\/(videos|images)/i.test(error)) return '当前选择的是多媒体专用模型，请在输入区切换对话模型；生成模型在多媒体配置中选择。';
   if (/Image generation is not enabled/i.test(error)) return '模型服务未开放请求所需的图片生成能力。请核对该服务的模型能力配置，或选择其他已配置模型后继续。';
   if (/\b(401|403)\b|permission_error|authentication/i.test(error)) return '模型服务拒绝了请求。请核对 API Key、模型权限和服务配置后再试。';
   if (/\b429\b|rate.limit/i.test(error)) return '模型服务暂时限流。请稍后继续，或在输入区选择其他已配置模型。';

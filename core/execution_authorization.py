@@ -154,7 +154,7 @@ def trusted_kind(name, handler):
     # to the application's conversation-scoped preview directory.
     if name in {"document_read", "document_render"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "documents", "impl.py"))):
         return "read"
-    if name in {"browser_tabs", "terminal_read", "browser_observe"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "workbench", "impl.py"))):
+    if name in {"browser_tabs", "terminal_read", "browser_observe", "browser_read", "browser_wait"} and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", "workbench", "impl.py"))):
         return "read"
     for skill, names in _READERS.items():
         if name in names and source == os.path.normcase(os.path.realpath(os.path.join(_ROOT, "skills", skill, "impl.py"))):

@@ -58,6 +58,8 @@ module.exports = [
   "settings.delete_model",
   "settings.general",
   "skills.configure",
+  "skills.browser_status",
+  "skills.browser_action",
   "skills.delete",
   "skills.enable",
   "skills.export",

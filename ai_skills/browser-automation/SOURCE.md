@@ -2,9 +2,9 @@
 
 - Project: Tencent BrowserSkill
 - Repository: https://github.com/Tencent/BrowserSkill
-- Adapted workflow source: `skill/SKILL.md`
-- Supported CLI release: `0.3.3`
-- Supported Chrome/Edge extension release: `0.3.3`
+- Adapted workflow source: `crates/bsk-cli/skill/SKILL.md`
+- Supported CLI release: `0.5.0`
+- Supported Chrome/Edge extension release: `0.5.0`
 - Bundled artifact manifest: `resources/browser_skill/bundle.json`
 - License: MIT
 

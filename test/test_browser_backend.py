@@ -30,54 +30,71 @@ class BrowserBackendTest(unittest.TestCase):
         bind_run(self.config, auth, worker=worker)
         return auth
 
-    def test_default_persistence_both_directions_and_legacy_toggle(self):
-        self.assertEqual(self.coordinator.snapshot()["backend"], EXTERNAL)
-        self.config.config["disabled_skills"] = ["browser-automation"]
+    def select(self, backend):
+        self.config.set_skill_enabled("browser-automation", backend == EXTERNAL, persist_strict=True)
+        return self.coordinator.snapshot()
+
+    def test_default_internal_and_explicit_skill_choice(self):
+        self.config.config = {"experimental_browser_automation": {"enabled": False}}
+        self.config._write_config_or_raise()
+        self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
+        self.assertFalse(self.config.is_skill_enabled("browser-automation"))
+        first = self.select(EXTERNAL)
+        self.assertEqual(first["backend"], EXTERNAL)
         self.assertTrue(self.config.is_skill_enabled("browser-automation"))
-        first = self.coordinator.save(True)
-        self.assertEqual(first["backend"], INTERNAL)
-        self.assertEqual(BrowserBackendCoordinator(self.config).snapshot(), self.coordinator.snapshot())
-        self.assertFalse(self.config.set_skill_enabled("browser-automation", True))
-        second = self.coordinator.save(False)
-        self.assertEqual(second["backend"], EXTERNAL)
+        second = self.select(INTERNAL)
+        self.assertEqual(second["backend"], INTERNAL)
         self.assertGreater(second["generation"], first["generation"])
 
-    def test_wait_cancel_and_new_run_rejected_while_old_run_continues(self):
-        auth = self.auth()
-        context = {"execution_authorization": auth}
-        with browser_operation(context, EXTERNAL):
-            pending = self.coordinator.save(True)
-            self.assertTrue(pending["pending"])
+    def test_active_external_and_new_internal_runs_coexist(self):
+        old = self.auth()
+        with browser_operation({"execution_authorization": old}, EXTERNAL):
+            self.assertFalse(self.select(INTERNAL)["pending"])
             new = self.auth("new")
-            with self.assertRaisesRegex(BrowserBackendError, "暂不启动"):
+            with browser_operation({"execution_authorization": new}, INTERNAL): pass
+            with self.assertRaises(BrowserBackendError):
                 with browser_operation({"execution_authorization": new}, EXTERNAL): pass
-            self.assertFalse(self.coordinator.save(False)["pending"])
-        self.coordinator.save(True)
-        with browser_operation(context, EXTERNAL): pass
-        finish_run(auth)
-        self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
+        with browser_operation({"execution_authorization": old}, EXTERNAL): pass
+        finish_run(old)
         with self.assertRaises(BrowserBackendError):
-            with browser_operation(context, EXTERNAL): pass
+            with browser_operation({"execution_authorization": old}, EXTERNAL): pass
+
+    def test_legacy_switch_migrates_without_inventing_skill_enablement(self):
+        from core.config_manager import ConfigManager
+        for old, enabled, disabled in ((False, [], []), (True, [], []), (True, ["browser-automation"], []), (False, ["browser-automation"], ["browser-automation"])):
+            with self.subTest(old=old, enabled=enabled, disabled=disabled), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({"experimental_browser_automation": {"enabled": old}, "enabled_skills": enabled,
+                                            "disabled_skills": disabled, "skill_configs": {"browser-automation": {"retained": "yes"}}}), encoding="utf-8")
+                with patch("core.config_manager.get_app_data_dir", return_value=directory):
+                    config = ConfigManager(migrate_legacy=False)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertNotIn("experimental_browser_automation", saved)
+                self.assertEqual(config.is_skill_enabled("browser-automation"), bool(enabled and not disabled))
+                self.assertEqual(saved["skill_configs"]["browser-automation"]["retained"], "yes")
 
     def test_save_failure_keeps_disk_and_memory(self):
         before = Path(self.config.config_path).read_bytes()
         with patch.object(self.config, "_write_config_or_raise", side_effect=OSError("full")):
-            with self.assertRaises(OSError): self.coordinator.save(True)
+            with self.assertRaises(OSError): self.select(INTERNAL)
         self.assertEqual(Path(self.config.config_path).read_bytes(), before)
-        self.assertNotIn("experimental_browser_automation", self.config.config)
+        self.assertTrue(self.config.is_skill_enabled("browser-automation"))
         self.assertEqual(self.coordinator.snapshot()["backend"], EXTERNAL)
 
-    def test_coordinator_failure_restores_saved_preference(self):
-        with patch.object(self.coordinator, "_state", side_effect=OSError("database full")):
-            with self.assertRaises(OSError): self.coordinator.save(True)
-        self.assertEqual(self.coordinator.snapshot()["backend"], EXTERNAL)
-        self.assertEqual(json.loads(Path(self.config.config_path).read_text())["experimental_browser_automation"], {"enabled": False})
-
-    def test_old_pinned_generation_rejected_even_after_switching_back(self):
+    def test_pin_remains_valid_before_first_browser_call(self):
         auth = self.auth()
-        self.coordinator.save(True); self.coordinator.save(False)
-        with self.assertRaisesRegex(BrowserBackendError, "切换"):
-            with browser_operation({"execution_authorization": auth}, EXTERNAL): pass
+        self.select(INTERNAL)
+        with browser_operation({"execution_authorization": auth}, EXTERNAL): pass
+        self.select(EXTERNAL)
+        with browser_operation({"execution_authorization": auth}, EXTERNAL): pass
+
+    def test_component_repair_refuses_active_external_lease(self):
+        auth = self.auth()
+        with browser_operation({"execution_authorization": auth}, EXTERNAL):
+            with self.assertRaisesRegex(BrowserBackendError, "尚未结束"):
+                with self.coordinator.maintenance(): pass
+        finish_run(auth)
+        with self.coordinator.maintenance(): pass
 
     def test_reconstructed_finished_run_cannot_reacquire_after_cleanup(self):
         auth = self.auth()
@@ -89,15 +106,15 @@ class BrowserBackendTest(unittest.TestCase):
         with self.assertRaisesRegex(BrowserBackendError, "已结束"):
             with browser_operation({"execution_authorization": resumed}, EXTERNAL): pass
 
-    def test_cleanup_failure_blocks_switch_and_retry_stops_only_owned_session(self):
+    def test_cleanup_failure_does_not_block_internal_and_retry_stops_only_owned_session(self):
         auth = self.auth()
         with browser_operation({"execution_authorization": auth}, EXTERNAL) as (coordinator, _):
             coordinator.track_session("chat", "run", "owned")
-        self.coordinator.save(True)
+        self.select(INTERNAL)
         with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": False}) as stop:
             finish_run(auth)
             stop.assert_called_once_with("owned")
-        self.assertTrue(self.coordinator.snapshot()["pending"])
+        self.assertFalse(self.coordinator.snapshot()["pending"])
         self.assertTrue(self.coordinator.snapshot()["cleanup_errors"])
         with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}) as stop:
             self.coordinator.recover()
@@ -108,11 +125,11 @@ class BrowserBackendTest(unittest.TestCase):
         auth = self.auth()
         bind_run(self.config, auth, worker=True)
         with browser_operation({"execution_authorization": auth}, EXTERNAL):
-            self.coordinator.save(True)
+            self.select(INTERNAL)
             finish_run(auth)
             self.assertFalse(auth._browser_state["finished"])
             finish_run(auth)
-            self.assertTrue(self.coordinator.snapshot()["pending"])
+            self.assertFalse(self.coordinator.snapshot()["pending"])
         self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
 
     def test_concurrent_switch_and_acquire_are_serialized(self):
@@ -127,9 +144,9 @@ class BrowserBackendTest(unittest.TestCase):
             except BrowserBackendError:
                 results.append("rejected")
         thread = threading.Thread(target=acquire); thread.start()
-        barrier.wait(); state = self.coordinator.save(True); thread.join(5)
+        barrier.wait(); state = self.select(INTERNAL); thread.join(5)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(results, ["acquired"] if state["pending"] else ["rejected"])
+        self.assertEqual(results, ["acquired"])
         finish_run(auth)
         self.assertEqual(self.coordinator.snapshot()["backend"], INTERNAL)
 
@@ -143,7 +160,7 @@ class BrowserBackendTest(unittest.TestCase):
     def test_exposure_search_validation_and_prefix_pinning(self):
         manager = self.manager()
         for backend in (EXTERNAL, INTERNAL):
-            self.coordinator.save(backend == INTERNAL)
+            self.select(backend)
             context = {"browser_backend": {k: self.coordinator.snapshot()[k] for k in ("backend", "generation")}}
             manager.browser_run_context = context
             all_names = set(manager.tools)
@@ -163,9 +180,25 @@ class BrowserBackendTest(unittest.TestCase):
             found = manager._tool_search(forbidden, include_loaded=True, _context={"run_context": context})
             self.assertNotIn(forbidden, found["discovered_tools"])
             before = json.dumps(definitions, sort_keys=True)
-            self.coordinator.save(backend != INTERNAL)
+            self.select(EXTERNAL if backend == INTERNAL else INTERNAL)
             after = manager.get_tool_definitions(run_context=context, discovered_tool_names=all_names)
             self.assertEqual(json.dumps(after, sort_keys=True), before)
+            # A catalog refresh must retain the pinned run view even after the
+            # new inventory was built under the opposite saved preference.
+            fresh = self.manager()
+            snapshot = type("Snapshot", (), {"revision": "refreshed", "runtime": lambda *_args, **_kwargs: fresh})()
+            manager.apply_snapshot(snapshot)
+            self.assertEqual(json.dumps(manager.get_tool_definitions(run_context=context, discovered_tool_names=all_names), sort_keys=True), before)
+
+    def test_workers_inherit_authorization_backend_after_saved_toggle(self):
+        auth = self.auth()
+        self.select(INTERNAL)
+        self.assertEqual(bind_run(self.config, auth, worker=True)["backend"], EXTERNAL)
+        self.assertEqual(auth.runtime_snapshot()["browser_backend"]["backend"], EXTERNAL)
+        finish_run(auth)
+        self.assertFalse(auth._browser_state["finished"])
+        finish_run(auth)
+        self.assertTrue(auth._browser_state["finished"])
 
     def test_bridge_rejects_wrong_backend_before_dispatch_and_stop_blocks(self):
         auth = self.auth()
@@ -204,6 +237,19 @@ class BrowserBackendTest(unittest.TestCase):
         with patch("core.browser_skill_component._stop_session_after_interruption", return_value={"stopped": True}) as stop:
             finish_run(auth)
             stop.assert_called_once_with("owned")
+
+    def test_not_ready_before_session_start_does_not_block_component_preparation(self):
+        spec = importlib.util.spec_from_file_location("not_ready_browser", ROOT / "ai_skills/browser-automation/impl.py")
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        auth = self.auth()
+        with patch.object(module, "run_browser_skill_cli", return_value={"status": "incomplete", "executed": False, "error": {"code": "browser_skill_not_ready"}}):
+            self.assertEqual(module.browser_skill_cli(["session", "start"], _context={"execution_authorization": auth})["status"], "incomplete")
+        with patch("core.browser_skill_component._run_bsk") as cleanup:
+            finish_run(auth)
+            cleanup.assert_not_called()
+        self.assertEqual(self.coordinator.snapshot()["cleanup_errors"], [])
+        with self.coordinator.maintenance():
+            self.assertEqual(self.coordinator.snapshot()["active_runs"], 0)
 
 
 if __name__ == "__main__": unittest.main()

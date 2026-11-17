@@ -3,6 +3,8 @@ const { readFileSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
+const {randomUUID} = require('node:crypto');
+const { BrowserAutomation } = require('./browser-automation.cjs');
 
 class BrowserHost {
   constructor({ root, backend, getWindow, diagnostic = () => {} }) {
@@ -12,15 +14,17 @@ class BrowserHost {
     this.inputShield = null;
     this.backgroundWindows = new Map();
     this.localSessions = new Set();
+    this.controller = new BrowserAutomation(this);
     this.automation = readFileSync(path.join(root, 'web/editors/dist/browser-automation.js'), 'utf8');
   }
   async state(item) {
+    await item.registration;
     if (item.view.webContents.isDestroyed()) return;
     const wc = item.view.webContents;
     await this.backend.call('browser.host_state', { conversation_id: item.cid, tab_id: item.id, title: wc.getTitle(), url: wc.getURL(), status: item.ready ? 'ready' : item.failed ? 'failed' : 'loading' });
   }
-  create(cid, tab) {
-    const view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false, partition: 'persist:cowork-web-' + cid } });
+  create(cid, tab, options={}) {
+    const view = new WebContentsView({ webPreferences: { ...options.webPreferences, sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false, partition: 'persist:cowork-web-' + cid }, ...(options.webContents ? {webContents:options.webContents} : {}) });
     const wc = view.webContents;
     const item = { id: tab.id, cid, view, revision: 0, ready: false, failed: false, owner: tab.owner };
     item.localRoot = tab.path ? path.dirname(tab.path) : null;
@@ -44,9 +48,32 @@ class BrowserHost {
     this.park(view);
     wc.setBackgroundThrottling(false);
     this.views.set(tab.id, item);
+    item.protocolReady = this.controller.attach(item);
+    item.protocolReady.catch(error => this.diagnostic('browser_protocol_failed', {tab_id:item.id,error:error.message}));
     wc.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
     wc.session.setPermissionCheckHandler(() => false);
-    wc.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//i.test(url) && item.owner === 'human') void wc.loadURL(url).catch(() => {}); return { action: 'deny' }; });
+    wc.setWindowOpenHandler(({url}) => {
+      if ((!/^https?:\/\//i.test(url)&&url!=='about:blank') || item.popups.length >= 10) return {action:'deny'};
+      // Let Chromium preserve opener, POST body and named-window behavior. The
+      // surface stays inside the owning chat; it never becomes a native window.
+      return {action:'allow',outlivesOpener:true,createWindow:options=>{
+        const popup=this.create(cid,{id:'pending-'+randomUUID(),owner:item.owner,url},options);
+        const entry={tab_id:popup.id,url};item.popups.push(entry);
+        popup.registration=this.backend.call('browser.host_popup',{conversation_id:cid,tab_id:item.id,url}).then(({tab:child})=>{
+          this.views.delete(popup.id);popup.id=child.id;entry.tab_id=child.id;
+          if(!popup.view.webContents.isDestroyed())this.views.set(child.id,popup);
+        });
+        popup.registration.then(()=>this.state(popup)).catch(error=>{
+          this.diagnostic('browser_popup_failed',{tab_id:item.id,error:error.message});
+          if(!popup.view.webContents.isDestroyed())popup.view.webContents.close();
+        });
+        popup.view.webContents.once('destroyed',()=>{
+          this.release(popup);
+          if(!popup.toolClosing)void popup.registration.then(()=>this.backend.call('browser.host_closed',{conversation_id:cid,tab_id:popup.id})).catch(error=>this.diagnostic('browser_popup_close_failed',{tab_id:popup.id,error:error.message}));
+        });
+        return popup.view.webContents;
+      }};
+    });
     wc.on('will-navigate', (event, url) => { if (!/^https?:\/\//i.test(url) && !(item.localRoot && url.startsWith(`cowork-local://${tab.id}/`))) event.preventDefault(); });
     wc.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { item.ready = false; item.failed = false; item.revision++; } });
     wc.on('did-finish-load', () => { item.ready = true; void this.state(item).catch(() => {}); });
@@ -65,8 +92,11 @@ class BrowserHost {
     return item;
   }
   async checked(request) { return this.backend.call('browser.host_check', { id: request.id }); }
-  async js(item, code) {
-    return item.view.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: this.automation + '\n' + code }]);
+  release(item) {
+    if(this.visible===item)this.hide();
+    const background=this.backgroundWindows.get(item.view);
+    if(background&&!background.isDestroyed()){background.contentView.removeChildView(item.view);background.destroy();}
+    this.backgroundWindows.delete(item.view);this.views.delete(item.id);
   }
   async capture(wc) {
     if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
@@ -99,14 +129,16 @@ class BrowserHost {
         const wc = item.view.webContents, args = request.arguments;
         item.owner = request.tab.owner;
         if (request.action === 'close') {
-          if (this.visible === item) this.hide();
-          const background = this.backgroundWindows.get(item.view);
-          background?.contentView.removeChildView(item.view);
-          wc.close(); background?.destroy();
-          this.backgroundWindows.delete(item.view); this.views.delete(item.id);
+          item.toolClosing=true;wc.close();this.release(item);
           result = { ok: true };
         }
-        else if (request.action === 'navigate') { void wc.loadURL(args.url).catch(() => {}); result = { ok: true, status: 'loading' }; }
+        else if (request.action === 'navigate') {
+          const navigation=wc.navigationHistory,mode=args.navigation||'url';
+          if((mode==='back'&&!navigation.canGoBack())||(mode==='forward'&&!navigation.canGoForward()))throw Error('没有可用的历史页面。');
+          await this.controller.dispatch(request,item,'navigate',0);
+          if(mode==='back')navigation.goBack();else if(mode==='forward')navigation.goForward();else if(mode==='reload')wc.reload();else void wc.loadURL(args.url).catch(()=>{});
+          result=await this.controller.receipt(request,{ok:true,status:'dispatched',loading:true});
+        }
         else if (request.action === 'command') {
           const navigation = wc.navigationHistory;
           if (args.command === 'back' && navigation.canGoBack()) navigation.goBack();
@@ -117,71 +149,17 @@ class BrowserHost {
           else if (args.command === 'zoom') { const zoom = Number(args.value); if (!Number.isFinite(zoom) || zoom < .25 || zoom > 3) throw new Error('网页缩放应在 25% 到 300% 之间。'); wc.setZoomFactor(zoom); item.revision++; }
           result = {ok:true, canBack:navigation.canGoBack(), canForward:navigation.canGoForward(), zoom:wc.getZoomFactor()};
         }
-        else {
-          if (!item.ready) throw new Error('网页尚未加载完成，请稍后重新观察。');
-          const revision = item.revision;
-          if (request.action === 'observe') {
-            const value = await this.js(item, 'window.coworkObserve()');
-            await this.checked(request);
-            if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
-            result = { ...value, ok: true, tab_id: item.id, page_version: revision + ':' + value.dom_version };
-            try {
-              const screenshot = await this.capture(wc);
-              if (screenshot.isEmpty()) throw new Error('截图为空');
-              // Native pixels include Windows DPI and page zoom. Tool coordinates
-              // use CSS pixels, so the image must match the observed viewport.
-              result.screenshot = { type: 'image_url', image_url: { url: screenshot.resize(value.viewport).toDataURL() } };
-              result.image_status = 'ready';
-            } catch (error) {
-              result.image_status = 'failed';
-              result.screenshot_note = '截图未完成：' + error.message + '。文字和元素结果已保留；坐标操作前请重新观察并取得截图。';
-              this.diagnostic('browser_capture_failed', { ...context, error: error.message });
-            }
-            await this.checked(request);
-            if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
-            delete result.dom_version;
-          } else if (request.action === 'browser_action') {
-            const prefix = revision + ':';
-            if (!String(args.page_version || '').startsWith(prefix)) throw new Error('页面已变化，请重新观察。');
-            const operation = { ...args, dom_version: args.page_version.slice(prefix.length) };
-            const native = ['click', 'click_at', 'key'].includes(args.action);
-            const checked = await this.js(item, 'window.coworkAct(' + JSON.stringify({ ...operation, action: 'validate', target_action: args.action }) + ')');
-            if (!checked?.ok) result = { ...checked, executed: false };
-            else {
-              await this.checked(request);
-              if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
-              result = await this.js(item, 'window.coworkAct(' + JSON.stringify(native ? { ...operation, action: 'prepare_native', target_action: args.action } : operation) + ')');
-              if (native && result?.ok) {
-                await this.checked(request);
-                if (revision !== item.revision) throw new Error('页面已跳转，请重新观察。');
-                // Dispatch through the owned WebContents protocol so background
-                // pages work without stealing focus or unlocking human input.
-                if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
-                if (args.action === 'key') {
-                  const keys = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39 };
-                  if (!keys[args.key]) throw new Error('不支持此按键。');
-                  await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: args.key, windowsVirtualKeyCode: keys[args.key], ...(args.key === 'Enter' ? { text: '\r' } : {}) });
-                  await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: args.key, windowsVirtualKeyCode: keys[args.key] });
-                } else {
-                  const coords = args.action === 'click' ? result : args;
-                  // coworkAct has checked these CSS coordinates against the DOM
-                  // viewport. Native view bounds use DIPs and differ under zoom.
-                  const x = Math.round(coords.x), y = Math.round(coords.y);
-                  await wc.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-                  await wc.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-                }
-                item.revision++;
-                result = { ok: true, status: 'dispatched', verification: '请重新观察页面确认结果，勿重复执行。' };
-              } else if (args.action === 'fill' && result?.ok) {
-                await new Promise(resolve => setTimeout(resolve, 80));
-                await this.checked(request);
-                result = await this.js(item, 'window.coworkVerifyFill(' + JSON.stringify(operation) + ')');
-              }
-            }
-          } else throw new Error('不支持的网页操作。');
-        }
+        else result = await this.controller.handle(request, item);
       }
-    } catch (error) { result = { ok: false, status: 'failed', error: error.message, verification: '请检查实际页面后继续，操作不会自动重复。' }; }
+    } catch (error) {
+      result = {ok:false,status:request.dispatched || request.lastReceipt ? 'unknown' : 'failed',executed:Boolean(request.dispatched || request.lastReceipt),error:error.message,verification:'请核对实际页面和动作回执，不要自动重复操作。'};
+      if(request.dispatched || request.lastReceipt) {
+        result = {...request.lastReceipt,...result,effect_state:'unknown'};
+        try { if(request.dispatched) result = await this.controller.receipt(request,result);
+          else await this.backend.call('browser.host_receipt',{id:request.id,result});
+        } catch(saveError) {result.receipt_error=saveError.message;}
+      }
+    }
     this.diagnostic('browser_request_finished', { ...context, elapsed_ms: Date.now() - started, ok: result.ok, status: result.status, image_status: result.image_status, error: result.error });
     await this.backend.call('browser.host_result', { id: request.id, result }).catch(error => this.diagnostic('browser_result_rejected', { ...context, error: error.message }));
   }

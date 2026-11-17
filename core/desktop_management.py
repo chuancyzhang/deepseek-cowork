@@ -19,6 +19,7 @@ class Management:
     methods = frozenset({
         "jobs.list", "jobs.get", "jobs.cancel", "skills.inventory", "skills.get", "skills.enable",
         "skills.configure", "skills.read", "skills.write", "skills.import", "skills.export", "skills.delete",
+        "skills.browser_status", "skills.browser_action",
         "mcp.list", "mcp.parse", "mcp.save", "mcp.delete", "mcp.test", "experts.list", "experts.save", "experts.delete",
         "favorites.list", "favorites.save", "favorites.delete", "favorites.history", "favorites.run",
         "variables.list", "variables.save", "variables.delete", "variables.undo",
@@ -68,6 +69,8 @@ class Management:
         if method.startswith("jobs."):
             return self.s.jobs.list(query=p.get("query", ""), status=p.get("status", ""), before=p.get("before", ""), limit=p.get("limit", 100)) if action == "list" else getattr(self.s.jobs, action)(str(p["id"]))
         if method.startswith("skills."):
+            if action in {"browser_status", "browser_action"}:
+                return self.browser_component(action, p)
             catalog = self.s.state.skill_catalog
             snapshot = catalog.snapshot()
             manager = snapshot.manager
@@ -263,7 +266,7 @@ class Management:
             self.s.publish({"event": "appearance_changed"})
             return self._dispatch("themes.list", {"conversation_id": p.get("conversation_id")})
         if method == "settings.general":
-            permitted = {"chat_workspace_root", "experimental_browser_automation", "experimental_long_context", "context_budget_ratio", "deepseek_v4_context_window_tokens"}
+            permitted = {"chat_workspace_root", "experimental_long_context", "context_budget_ratio", "deepseek_v4_context_window_tokens"}
             if "value" in p:
                 unknown = set(p["value"]) - permitted
                 if unknown:
@@ -301,3 +304,30 @@ class Management:
             self.config.set_model_channels(channels, self.config.get_selected_model_id())
             return self.s.public_settings()
         raise ValueError("不支持的管理操作。")
+
+    def browser_component(self, action, p):
+        from core import browser_skill_component as component
+        from core.browser_backend import BrowserBackendCoordinator
+        coordinator = BrowserBackendCoordinator(self.config)
+        if action == "browser_status":
+            return {**component.browser_skill_status(), "enabled": self.config.is_skill_enabled("browser-automation"),
+                    "runs": coordinator.snapshot()}
+        command = p.get("command")
+        if command == "open_browser":
+            return component.launch_browser_skill_extension_manager(p.get("browser"))
+        if command not in {"prepare", "check", "recover"}:
+            raise ValueError("不支持的浏览器组件操作。")
+        def operate(cancelled, progress):
+            def report(message, percent=0):
+                if cancelled.is_set():
+                    raise RuntimeError("操作已停止，已准备的组件保留。")
+                progress(message, progress=percent)
+            if command == "recover":
+                return coordinator.recover()
+            if command == "prepare":
+                with coordinator.maintenance():
+                    component.install_browser_skill(report, require_idle=True)
+                    component.prepare_browser_skill_extension(report)
+                return component.browser_skill_status()
+            return component.browser_skill_status(run_diagnostics=True, progress_callback=report, abort_check=cancelled.is_set)
+        return self.s.jobs.submit({"prepare": "准备 BrowserSkill", "check": "检查浏览器连接", "recover": "释放已结束的浏览任务"}[command], operate)

@@ -1,7 +1,7 @@
-"""Application-wide browser selection and run leases shared by desktop and daemon.
+"""Per-run browser selection and owned leases shared by desktop and daemon.
 
 The saved preference is not an execution grant. A run pins a backend generation;
-the first browser call acquires a lease, and a switch waits for all leases to end.
+the first browser call acquires a lease. Skill changes affect only new runs.
 Only sessions created by that run are cleaned up. Never restart the shared bsk
 daemon or infer ownership from its global session list.
 """
@@ -18,10 +18,10 @@ import threading
 import uuid
 
 log = logging.getLogger(__name__)
-CONFIG_KEY = "experimental_browser_automation"
+SKILL_NAME = "browser-automation"
 INTERNAL = "internal"
 EXTERNAL = "external"
-WEB_TOOLS = frozenset({"browser_observe", "browser_navigate", "browser_action"})
+WEB_TOOLS = frozenset({"browser_observe", "browser_navigate", "browser_action", "browser_read", "browser_wait", "browser_file"})
 SHARED_TOOLS = frozenset({"browser_tabs", "browser_open", "browser_close"})
 INTERNAL_TOOLS = WEB_TOOLS | SHARED_TOOLS
 _PROCESS_TOKEN = uuid.uuid4().hex
@@ -34,8 +34,10 @@ class BrowserBackendError(Exception):
         self.code = code
 
 
-def normalize_policy(value):
-    return {"enabled": isinstance(value, dict) and value.get("enabled") is True}
+def selected_backend(config):
+    """Only explicit skill enablement selects the external browser."""
+    return (EXTERNAL if is_windows() and SKILL_NAME in config.get("enabled_skills", [])
+            and SKILL_NAME not in config.get("disabled_skills", []) else INTERNAL)
 
 
 def _alive(pid):
@@ -103,28 +105,27 @@ class BrowserBackendCoordinator:
             return INTERNAL
         if self.config_path and self.config_path.exists():
             with self.config_path.open(encoding="utf-8") as stream:
-                value = json.load(stream).get(CONFIG_KEY)
+                value = json.load(stream)
         elif self.config is not None:
-            getter = getattr(self.config, "get", None)
-            value = getter(CONFIG_KEY, {}) if callable(getter) else {}
+            value = self.config
         else:
             # The host continuation uses the same directory as ConfigManager.
             from .config_manager import ConfigManager
             self.config = ConfigManager()
             self.config_path = Path(self.config.config_path)
-            value = self.config.get(CONFIG_KEY, {})
-        return INTERNAL if normalize_policy(value)["enabled"] else EXTERNAL
+            value = self.config
+        return selected_backend(value)
 
     def _state(self, db):
         row = db.execute("SELECT * FROM state WHERE id=1").fetchone()
         desired = self._desired()
         count = db.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
-        if row["backend"] != desired and not count:
+        if row["backend"] != desired:
             db.execute("UPDATE state SET backend=?, generation=generation+1 WHERE id=1", (desired,))
             row = db.execute("SELECT * FROM state WHERE id=1").fetchone()
             log.info("browser.backend_switched backend=%s generation=%s", row["backend"], row["generation"])
         return {"backend": row["backend"], "generation": row["generation"], "desired": desired,
-                "pending": row["backend"] != desired, "active_runs": count}
+                "pending": False, "active_runs": count}
 
     def snapshot(self):
         with self._transaction() as db:
@@ -138,42 +139,33 @@ class BrowserBackendCoordinator:
     def _orphaned(row):
         return (row["pid"] == os.getpid() and row["process_token"] != _PROCESS_TOKEN) or not _alive(row["pid"])
 
-    def save(self, enabled):
-        if not is_windows() and enabled is not True:
-            raise BrowserBackendError("unsupported", "此平台首版只支持内置浏览器自动化。")
-        if self.config is None:
-            raise BrowserBackendError("unavailable", "浏览器设置存储不可用。")
-        # Serialize preference writes against lease acquisition in both processes.
-        with self._transaction() as db:
-            previous = self._desired() == INTERNAL
-            self.config._save_browser_backend_preference({"enabled": enabled is True})
-            try:
-                result = self._state(db)
-                db.commit()
-            except Exception:
-                # Restore preference before releasing the coordinator lock.
-                try:
-                    self.config._save_browser_backend_preference({"enabled": previous})
-                except Exception as restore_error:
-                    raise BrowserBackendError("browser_save_uncertain", "浏览器设置写入后未能确认切换，也未能恢复原设置。请检查配置目录后重新读取当前状态。") from restore_error
-                raise
-        log.info("browser.backend_preference_saved desired=%s pending=%s", result["desired"], result["pending"])
-        return result
-
     def acquire(self, session, run, snapshot, backend):
+        from .file_write_locks import file_write_lock
+        with file_write_lock(str(self.path) + ".maintenance"):
+            return self._acquire(session, run, snapshot, backend)
+
+    @contextmanager
+    def maintenance(self):
+        from .file_write_locks import file_write_lock
+        with file_write_lock(str(self.path) + ".maintenance"):
+            with self._transaction() as db:
+                if db.execute("SELECT 1 FROM leases WHERE backend=? LIMIT 1", (EXTERNAL,)).fetchone():
+                    raise BrowserBackendError("browser_busy", "外部浏览器任务尚未结束，请结束任务或释放已结束任务后再准备组件。")
+            yield
+
+    def _acquire(self, session, run, snapshot, backend):
         if not is_windows() and backend != INTERNAL:
             raise BrowserBackendError("unsupported", "此平台首版不支持外部浏览器自动化。")
         with self._transaction() as db:
             if db.execute("SELECT 1 FROM finished_runs WHERE session=? AND run=?", (session, run)).fetchone():
                 raise BrowserBackendError("browser_run_finished", "本轮浏览器任务已结束，旧调用不会再次执行。")
-            state = self._state(db)
-            if snapshot.get("backend") != backend or state["backend"] != backend or snapshot.get("generation") != state["generation"]:
-                raise BrowserBackendError("browser_backend_changed", "浏览器后端已切换或本轮未启用此后端。请在新一轮任务继续；本次操作未执行。")
+            if snapshot.get("backend") != backend:
+                raise BrowserBackendError("browser_backend_changed", "本轮未启用此浏览器后端，本次操作未执行。")
             lease = db.execute("SELECT * FROM leases WHERE session=? AND run=?", (session, run)).fetchone()
             if lease and lease["finished"]:
                 raise BrowserBackendError("browser_run_finished", "本轮浏览器任务已结束，不能重新执行旧操作。")
-            if not lease and state["pending"]:
-                raise BrowserBackendError("browser_switch_pending", "正在等待已有浏览器任务结束后切换，暂不启动新的浏览器任务。")
+            if lease and lease["backend"] != backend:
+                raise BrowserBackendError("browser_backend_changed", "本轮浏览器已经固定，不能切换后端。")
             if not lease:
                 db.execute("INSERT INTO leases(session,run,backend,pid,process_token) VALUES (?,?,?,?,?)",
                            (session, run, backend, os.getpid(), _PROCESS_TOKEN))
@@ -314,10 +306,9 @@ def run_backend(run_context=None, config=None):
     if isinstance(value, dict) and value.get("backend") in {INTERNAL, EXTERNAL}:
         return value["backend"]
     if config is None:
-        return EXTERNAL
+        return INTERNAL
     if not isinstance(getattr(config, "config_path", None), (str, Path)):
-        getter = getattr(config, "get", None)
-        return INTERNAL if callable(getter) and normalize_policy(getter(CONFIG_KEY, {}))["enabled"] else EXTERNAL
+        return selected_backend(config)
     return BrowserBackendCoordinator(config).snapshot()["backend"]
 
 

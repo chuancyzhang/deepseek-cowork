@@ -72,14 +72,6 @@ class DesktopSettings:
                          field("history_dir", "聊天记录与记忆目录", "path", read_only=True),
                          field("data_dir", "应用数据目录", "path", read_only=True)],
                          "actions": [action("storage.open", "打开数据目录")]}]
-        elif name == "experiments":
-            from core.browser_backend import normalize_policy as browser_policy
-            # The persisted legacy flag enables the INTERNAL browser. The UI
-            # asks about the external browser, so both read and write invert it.
-            values = {"external_browser": not browser_policy(self.config.get("experimental_browser_automation"))["enabled"]}
-            title, description = "实验功能", "按需启用，设置从下一轮任务生效。"
-            sections = [{"title": "浏览器", "fields": [field("external_browser", "使用外部 Chrome / Edge", "toggle",
-                         help="关闭后使用工作区内置网页。正在运行的浏览任务结束后才能切换。")]}]
         elif name == "logs":
             title = "运行日志"
             values = {"days": 1, "keyword": ""}
@@ -103,10 +95,7 @@ class DesktopSettings:
         current = self.page(name, context)
         if p.get("revision") != current["revision"]:
             raise ValueError("设置已被其他操作修改。编辑已保留，请刷新后合并。")
-        # Older local form drafts can still contain controls retired from these pages.
-        # Do not let them overwrite runtime settings now managed elsewhere.
-        retired = {"experiments": {"context_target", "multimedia"}}
-        values = {key: value for key, value in (p.get("value") or {}).items() if key not in retired.get(name, set())}
+        values = p.get("value") or {}
         if set(values) - set(current["values"]):
             raise ValueError("不支持的设置项。")
         v = {**current["values"], **values}
@@ -125,11 +114,6 @@ class DesktopSettings:
                     if value and not Path(value).expanduser().is_dir():
                         raise ValueError("目录不存在，请选择已有目录。")
                     self.config.set(key, value)
-        elif name == "experiments":
-            # Keep the original backend coordinator and task-snapshot semantics.
-            with self.config.batch_save():
-                self.config.set_experimental_browser_automation({"enabled": not bool(v["external_browser"])})
-            self.s.publish({"event": "settings_changed"})
         elif name == "im":
             return self.s.messaging.save(v, p)
         else:

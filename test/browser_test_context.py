@@ -11,7 +11,7 @@ def browser_config(directory):
     config = ConfigManager.__new__(ConfigManager)
     config.data_dir = str(directory)
     config.config_path = str(Path(directory) / "config.json")
-    config.config = {}
+    config.config = {"enabled_skills": ["browser-automation"]}
     Path(config.config_path).write_text(json.dumps(config.config), encoding="utf-8")
     return config
 

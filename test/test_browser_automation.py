@@ -38,6 +38,18 @@ class BrowserAutomationUnitTests(unittest.TestCase):
         self.assertEqual(payload["status"], "incomplete")
         self.assertIn("JSON array", payload["error"]["message"])
 
+    def test_unknown_nested_step_and_interrupted_write_keep_effect_uncertain(self):
+        for args, reply in [
+            (["step", "--session", "abcd", "--action", "click", "--params", '{"selector":"#save"}'], {"status": "incomplete", "result": {"action": {"effect_state": "unknown"}}}),
+            (["click", "#save", "--session", "abcd"], {"status": "incomplete", "error": {"code": "timeout"}}),
+        ]:
+            with self.subTest(args=args), patch.object(self.module, "run_browser_skill_cli", return_value=reply):
+                result = self.module.browser_skill_cli(args)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["effect_state"], "unknown")
+        with patch.object(self.module, "run_browser_skill_cli", return_value={"status": "incomplete", "error": {"code": "timeout"}}):
+            self.assertEqual(self.module.browser_skill_cli(["read", "--session", "abcd"])["status"], "incomplete")
+
     def test_rejects_unsupported_command(self):
         payload = self.module.browser_skill_cli(["daemon", "start"])
         self.assertEqual(payload["status"], "incomplete")
@@ -210,7 +222,8 @@ class BrowserScreenshotTests(unittest.TestCase):
                 projections.append(encoder._prepare_chat_completions_messages(messages)[0])
             yield from original_stream(provider, messages, **kwargs)
 
-        with patch.object(SkillStub, "get_tool_definitions", definitions), \
+        with patch("core.browser_backend.selected_backend", return_value="external"), \
+                patch.object(SkillStub, "get_tool_definitions", definitions), \
                 patch.object(SkillStub, "call_tool", execute), \
                 patch.object(ProviderStub, "supports_vision", True, create=True), \
                 patch.object(ProviderStub, "chat_stream", stream), \

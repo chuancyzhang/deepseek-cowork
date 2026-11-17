@@ -89,7 +89,7 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         result = self.start()
         self.assertEqual(result["error"]["code"], "session_request_not_prepared")
         self.assertEqual(len(self.calls), 1)
-        self.assertTrue(self.coordinator.owns_session("chat", "run", "request:" + self.token))
+        self.assertFalse(self.coordinator.owns_session("chat", "run", "request:" + self.token))
 
     def test_cancel_after_prepare_does_not_create_window(self):
         self.cancel_after_prepare = True
@@ -120,7 +120,7 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
     def test_cancel_acknowledgement_is_not_cleanup_confirmation(self):
         self.start_error = True
         self.start()
-        self.coordinator.save(True)
+        self.config.set_skill_enabled("browser-automation", False, persist_strict=True)
         for state in ("cancelling", "cleanup_failed", "unknown", "closed"):
             with self.subTest(state=state), patch.object(component, "_run_bsk", return_value={
                     "returncode": 0, "stdout": json.dumps({"request_id": self.token, "state": state}), "stderr": "",
@@ -129,7 +129,7 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
                 self.assertEqual(cancel.call_args.args[0],
                                  ["--json", "--quiet", "session", "request", self.token, "--cancel"])
                 snapshot = self.coordinator.snapshot()
-                self.assertEqual(snapshot["pending"], state != "closed")
+                self.assertFalse(snapshot["pending"])
                 self.assertEqual(bool(snapshot["cleanup_errors"]), state != "closed")
 
 

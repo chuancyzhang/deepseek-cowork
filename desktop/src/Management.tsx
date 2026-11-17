@@ -18,7 +18,7 @@ const groups: Record<string, [string, string, any][]> = {
   favorites: [['favorites', '常用任务', Star], ['schedule_history', '运行记录', Clock3]],
   settings: [['appearance', '外观与阅读', Palette], ['preferences', '回答偏好', MessageSquare], ['models', '模型与服务', Boxes],
     ['im', '消息连接', Plug], ['enterprise', '企业账号', Users], ['security', '数据安全', ShieldCheck], ['variables', '变量与凭据', KeyRound],
-    ['storage', '文件与存储', Folder], ['memory', '长期记忆', BookOpen], ['experiments', '实验功能', SlidersHorizontal],
+    ['storage', '文件与存储', Folder], ['memory', '长期记忆', BookOpen],
     ['logs', '运行日志', Clock3], ['update', '更新与关于', Settings2], ['jobs', '后台操作', Clock3]],
   library: [['library', '资料库', BookOpen]], team: [['team', '团队空间', Users]],
 };
@@ -46,7 +46,7 @@ export default function Management({ returnToChat, route, settings, updateSettin
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>
-        : ['preferences','im','security','storage','memory','experiments','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
+        : ['preferences','im','security','storage','memory','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>
         : <Preferences key={tab} kind={tab} settings={settings} updateSettings={updateSettings} {...common}/>}
     </Suspense></div>
   </div>;

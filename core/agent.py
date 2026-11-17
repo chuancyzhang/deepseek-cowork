@@ -1872,14 +1872,16 @@ class LLMWorker(TaskWorker):
             capability_lines.append(catalog_prompt)
         if self.run_context.get("browser_backend", {}).get("backend") == "internal":
             capability_lines.append(
-                "本轮浏览器：内置网页工具（实验功能）。网页任务只使用已暴露的 browser_* 工具；"
+                "本轮浏览器：默认内置浏览器。网页任务只使用已暴露的 browser_* 工具；"
                 "外部 BrowserSkill 已禁用，不得通过 CLI 或其他工具绕过。先列出当前聊天标签，"
-                "观察取得元素和 page_version 后操作，每次有意义的页面变化后重新观察并验证结果。"
+                "观察取得元素和 page_version 后操作；语义观察优先，截图按需，坐标使用 CSS 像素和 screenshot_id。"
+                "动作、等待和观察分别看回执；未知结果先读取现场并核对原回执，重新观察不代表可以再次提交。"
                 "用户接管后等待交还，不另开标签绕过；结果未知时不重放。没有桌面宿主时说明不可用。")
         else:
             capability_lines.append(
-                "本轮浏览器：外部 BrowserSkill。网页任务使用 browser_skill_cli（未暴露时通过 tool_search 发现）；"
-                "内置网页自动化已关闭。连接未就绪时提示设置，不得自行切换后端或通过其他工具绕过。")
+                "本轮浏览器：外部 BrowserSkill。网页任务使用 browser_skill_cli；"
+                "内置网页自动化已关闭。连接未就绪时提示前往能力 → 技能 → BrowserSkill（外部浏览器），"
+                "不得自行切换后端或通过其他工具绕过。技能启停只影响新任务。")
         if available_tool_names:
             tool_lines = []
             chunk_size = 12

@@ -18,6 +18,9 @@ from core.browser_backend import browser_operation, BrowserBackendError, EXTERNA
 
 
 _ALLOWED_COMMANDS = {
+    "sync", "read", "extract", "step", "plan", "ledger", "dialog", "operation",
+    "hover", "wheel", "drag", "scroll-to", "focus", "blur", "wait-for-element",
+    "upload", "download",
     "browsers",
     "click",
     "doctor",
@@ -113,8 +116,26 @@ def _normalize_args(args, workspace_root):
             raise ValueError('unsupported BrowserSkill command: start; use args=["session", "start"]')
         raise ValueError(f"unsupported BrowserSkill command: {command}")
     normalized[0] = command
+    if any(item == "--scope" or item.startswith("--scope=") for item in normalized):
+        raise ValueError("Use the owned --session; caller scope is managed by Cowork")
+    for index, token in enumerate(list(normalized)):
+        if token in {"--file", "--save-full", "--baseline"} or (command == "download" and token == "--out"):
+            if index + 1 >= len(normalized):
+                raise ValueError(f"{token} requires a path")
+            value = os.path.abspath(os.path.join(workspace_root, normalized[index + 1]))
+            if not _is_within(value, workspace_root):
+                raise ValueError("Browser files must stay inside the active workspace")
+            if token in {"--file", "--baseline"} and not os.path.isfile(value):
+                raise ValueError("Browser input file does not exist")
+            normalized[index + 1] = value
+        if any(token.startswith(flag + "=") for flag in ("--file", "--save-full", "--baseline", "--out")) and command != "screenshot":
+            raise ValueError("Pass file options and their paths as separate arguments")
     if command == "navigate" and len(normalized) >= 2:
         _validated_file_url(normalized[1], workspace_root)
+    if command == "step" and "--params" in normalized:
+        params = json.loads(normalized[normalized.index("--params") + 1])
+        if isinstance(params, dict) and "url" in params:
+            _validated_file_url(params["url"], workspace_root)
     if command == "screenshot":
         # Own the output path: never infer image access from arbitrary paths in
         # CLI JSON, and do not leave the CLI's default shared temp file behind.
@@ -200,7 +221,13 @@ def _run_owned_command(normalized, context, timeout_seconds, abort_state):
         result = run_browser_skill_cli(normalized, timeout_seconds=timeout_seconds,
                                        abort_check=lambda: bool(abort_state["aborted"]))
         payload = result.get("result") or {}
-        if request_token and result.get("status") == "completed" and isinstance(payload, dict) and payload.get("session_id"):
+        if request_token and result.get("executed") is False:
+            # Preparation may fail before session start is sent. Keeping a
+            # fictitious owned session would prevent the user installing the
+            # missing component needed to recover that very first task.
+            coordinator.track_session(auth.session_id, auth.run_id, "request:" + request_token, stopped=True)
+            log_browser_skill_event("session_request_not_dispatched", session_id=auth.session_id, run_id=auth.run_id)
+        elif request_token and result.get("status") == "completed" and isinstance(payload, dict) and payload.get("session_id"):
             coordinator.track_session(auth.session_id, auth.run_id, str(payload["session_id"]))
             # Persist ownership before claiming; a crash or lost reply keeps the
             # request available for targeted cancellation by the run coordinator.
@@ -227,7 +254,7 @@ def _run_owned_command(normalized, context, timeout_seconds, abort_state):
                     "message": "浏览器窗口已创建，但未确认接管；请结束本轮后重试。已保留会话归属，任务结束时会定向清理。",
                 })
         elif request_token and result.get("status") == "completed":
-            result.update(status="incomplete", error={"code": "session_result_unknown", "message": "未获得可确认的会话 ID，请勿重复创建。任务结束时会清理本次创建请求，可在实验功能中查看释放状态。"})
+            result.update(status="incomplete", error={"code": "session_result_unknown", "message": "未获得可确认的会话 ID，请勿重复创建。任务结束时会清理本次创建请求，可在 BrowserSkill 技能详情中查看释放状态。"})
         stopped = not help_only and normalized[:2] == ["session", "stop"] and result.get("status") == "completed"
         if external_id and (stopped or (result.get("session_cleanup") or {}).get("stopped")):
             coordinator.track_session(auth.session_id, auth.run_id, external_id, stopped=True)
@@ -254,6 +281,15 @@ def browser_skill_cli(
         elif command == "session" and len(normalized) > 1 and normalized[1] == "stop":
             log_browser_skill_event("session_stop")
         result = _run_owned_command(normalized, context, timeout_seconds, abort_state)
+        def unknown(value):
+            if isinstance(value, dict):
+                return str(value.get("effect_state") or "").lower() == "unknown" or any(unknown(item) for item in value.values())
+            return isinstance(value, list) and any(unknown(item) for item in value)
+        passive = {"browsers", "doctor", "status", "snapshot", "sync", "observe", "read", "extract", "get-html", "screenshot", "console", "network", "wait-ms", "wait-for-element", "wait-for-navigation", "ledger"}
+        interrupted_write = ((result.get("error") or {}).get("code") in {"timeout", "aborted"}
+                             and command not in passive and command != "session")
+        if unknown(result) or interrupted_write:
+            result.update(status="unknown", effect_state="unknown")
         if result.get("status") == "completed":
             if command == "screenshot":
                 output_path = normalized[normalized.index("--out") + 1]

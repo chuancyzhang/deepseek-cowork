@@ -1,7 +1,7 @@
 {
   "version": 2,
   "name": "browser-automation",
-  "display_name": "浏览器自动化",
+  "display_name": "BrowserSkill（外部浏览器）",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -10,7 +10,7 @@
   "description_cn": "通过 Tencent BrowserSkill 在独立 Agent 窗口中读取和操作真实登录态的 Chrome 或 Edge 网页。",
   "presentation": {
     "category": "search_browse",
-    "short_name": "浏览器操作",
+    "short_name": "BrowserSkill（外部浏览器）",
     "summary": "让 AI 在独立窗口中读取和操作 Chrome 或 Edge 网页。",
     "examples": ["读取登录后的网页", "填写网页表单", "提取页面数据"],
     "access_note": "可访问浏览器中的登录态和网页内容；提交、发布或修改数据前仍需明确确认。"

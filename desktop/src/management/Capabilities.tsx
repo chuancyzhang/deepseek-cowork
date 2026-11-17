@@ -210,13 +210,37 @@ function SkillEditor({ item, onDirty, onError, confirm, back, saved }: Props & {
   useEffect(() => { void rpc('skills.get', { name: item.name }).then(setDetail).catch(error => setFailure(error.message)); }, [item.name]);
   useEffect(() => { setFile(null); void rpc('skills.read', { name: item.name, path }).then(setFile).catch(error => setFailure(error.message)); }, [item.name, path]);
   const [config, setConfig] = useState<any>({});
-  return <><PageHead title={item.display_name || item.name} detail={item.user_description || item.description} back={back}><button className="secondary" onClick={async () => { const target = await rpc('dialog.save', { name: item.name + '.zip' }); if (target) { try { await rpc('skills.export', { name: item.name, path: target }); onError('技能包已导出。'); } catch (error) { onError((error as Error).message); } } }}><Download size={16}/>导出</button></PageHead>
+  return <><PageHead title={detail?.display_name || item.display_name || item.name} detail={detail?.user_description || item.user_description || detail?.description || item.description} back={back}><button className="secondary" onClick={async () => { const target = await rpc('dialog.save', { name: item.name + '.zip' }); if (target) { try { await rpc('skills.export', { name: item.name, path: target }); onError('技能包已导出。'); } catch (error) { onError((error as Error).message); } } }}><Download size={16}/>导出</button></PageHead>
+    {item.name === 'browser-automation' && <BrowserSkillSetup saved={saved}/>}
     {failure && <ErrorState message={failure}/>} {detail?.fields?.length > 0 && <section className="settings-section"><h3>连接配置</h3><form onSubmit={async e => { e.preventDefault(); try { await rpc('skills.configure', { name: item.name, values: config }); setConfig({}); await saved(); onError('配置已保存。'); } catch (error) { setFailure((error as Error).message); } }}><div className="form-grid">{detail.fields.map((field: any) => <Field key={field.name} label={field.label} help={field.help}>
       {field.kind === 'select' ? <select value={config[field.name] ?? detail.values[field.name] ?? field.default} onChange={e => setConfig({ ...config, [field.name]: e.target.value })}>{field.options.map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}</select> : <input type={field.kind === 'secret' ? 'password' : 'text'} autoComplete="off" placeholder={detail.configured_fields.includes(field.name) ? '已配置，填写可替换' : field.placeholder} value={config[field.name] ?? detail.values[field.name] ?? ''} onChange={e => setConfig({ ...config, [field.name]: e.target.value })}/>}
     </Field>)}</div><button className="primary">保存配置</button></form></section>}
     {detail && <section className="settings-section"><div className="section-heading"><h3>技能文件</h3><select aria-label="选择技能文件" value={path} onChange={e => setPath(e.target.value)}>{detail.files.files.map((name: string) => <option key={name}>{name}</option>)}</select></div>
       {file && <SkillFile key={path} name={item.name} path={path} content={file.content} editable={detail.files.editable} onDirty={onDirty} onError={onError} saved={saved}/>}</section>}
   </>;
+}
+function BrowserSkillSetup({saved}: {saved: () => Promise<void>}) {
+  const [status,setStatus]=useState<any>(null), [failure,setFailure]=useState(''), [busy,setBusy]=useState(false), [job,setJob]=useState<any>(null);
+  const refresh=useCallback(async()=>{setStatus(await rpc('skills.browser_status'));setFailure('');},[]);
+  useEffect(()=>{void refresh().catch(error=>setFailure(error.message));},[refresh]);
+  async function run(command:string, browser='') {
+    setBusy(true);setFailure('');
+    try {await operation('skills.browser_action',{command,browser},setJob);await refresh();}
+    catch(error){setFailure((error as Error).message);} finally{setBusy(false);setJob(null);}
+  }
+  return <section className="settings-section"><div className="section-heading"><h3>外部浏览器</h3>
+    <label className="check-line"><input type="checkbox" disabled={busy||!status} checked={Boolean(status?.enabled)} onChange={async event=>{setBusy(true);setFailure('');try{await rpc('skills.enable',{name:'browser-automation',enabled:event.target.checked});await refresh();await saved();}catch(error){setFailure((error as Error).message);}finally{setBusy(false);}}}/>启用 BrowserSkill</label></div>
+    <p>{status?.enabled ? '新任务使用外部 Chrome / Edge；连接未就绪时保留任务并提示恢复。' : '新任务默认使用内置浏览器，无需安装扩展。'} 正在运行的任务保持原浏览器。</p>
+    {status && <p role="status">{status.state_text}{status.health_error ? '：'+status.health_error : ''}</p>}
+    {!status&&!failure&&<p role="status">正在读取浏览器组件状态…</p>}
+    <JobProgress job={job}/>{failure && <ErrorState message={failure} retry={()=>void refresh().catch(error=>setFailure(error.message))}/>}
+    <div className="button-row"><button className={!status?.installed||status?.needs_update||status?.needs_repair?'primary':'secondary'} disabled={busy||!status} onClick={()=>void run('prepare')}>准备或修复组件</button>
+      <button className={status?.installed&&!status?.needs_update&&!status?.needs_repair?'primary':'secondary'} disabled={busy||!status?.installed} onClick={()=>void run('check')}>检查连接</button>
+      {status?.runs?.recoverable && <button className="secondary" disabled={busy} onClick={()=>void run('recover')}>释放已结束任务</button>}</div>
+    {status?.extension_prepared && <><p>在浏览器扩展页打开开发者模式，加载以下目录；更新后重新加载扩展，再检查连接。</p><div className="form-grid"><Field label="扩展目录" wide><input aria-label="扩展目录" readOnly value={status.extension_path}/></Field></div>
+      <div className="button-row">{status.available_browsers?.map((browser:any)=><button key={browser.id} className="secondary" disabled={busy} onClick={()=>void run('open_browser',browser.id)}>打开 {browser.name || browser.id} 扩展页</button>)}</div></>}
+    {status?.runs?.cleanup_errors?.map((error:string,index:number)=><p className="error-text" key={index}>{error}</p>)}
+  </section>;
 }
 function SkillFile({ name, path, content, editable, onDirty, onError, saved }: any) {
   const form = useFormDraft('skill:' + name + ':' + path, { content }, onDirty);

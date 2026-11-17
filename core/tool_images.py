@@ -114,9 +114,15 @@ def _read_image_bytes(path):
 
 
 def persist_tool_image(path, history_dir, session_id, *, detail="auto"):
+    return persist_tool_image_bytes(_read_image_bytes(path), history_dir, session_id, name=os.path.basename(path), detail=detail)
+
+
+def persist_tool_image_bytes(raw, history_dir, session_id, *, name="browser.png", detail="auto"):
+    """Keep host captures in the same immutable attachment store as file images."""
     if detail not in IMAGE_DETAILS:
         raise ToolImageError("invalid_detail", "detail 必须是 auto、low 或 high。")
-    raw = _read_image_bytes(path)
+    if not raw or len(raw) > MAX_TOOL_IMAGE_BYTES:
+        raise ToolImageError("image_too_large", "图片为空或超过 20 MiB。")
     try:
         with Image.open(BytesIO(raw)) as image:
             image_format = str(image.format or "").upper()
@@ -155,7 +161,7 @@ def persist_tool_image(path, history_dir, session_id, *, detail="auto"):
     return {
         "type": "input_image",
         "path": target_path,
-        "name": os.path.basename(path),
+        "name": name,
         "mime_type": mime_type,
         "sha256": digest,
         "size_bytes": len(raw),

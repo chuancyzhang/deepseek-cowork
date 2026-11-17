@@ -127,12 +127,27 @@ class DesktopWorkbench:
         """Claims are trusted daemon snapshots; never accept them from renderer RPC."""
         cid, action, args = identity["session_id"], claim["action"], claim["arguments"]
         internal = (claim.get('policy', {}).get('browser_backend') or {}).get('backend') == 'internal'
-        if action in {'observe', 'navigate', 'browser_action'} or (action == 'open' and args.get('kind') == 'web') or (action == 'close' and self.store.get(cid, args.get('tab_id')).kind == 'web'):
+        if action in {'observe', 'navigate', 'browser_action', 'browser_read', 'browser_wait', 'browser_file'} or (action == 'open' and args.get('kind') == 'web') or (action == 'close' and self.store.get(cid, args.get('tab_id')).kind == 'web'):
             if not internal:
                 raise WorkbenchError('browser_backend_changed', '本轮使用外部浏览器，不能自动切换为内置网页。')
             result = self.browser.execute(cid, action, args, {**identity, 'token': claim['token']})
-            if not claim.get('model_supports_vision'):
-                result.pop('screenshot', None)
+            screenshot = result.pop('screenshot', None)
+            if screenshot:
+                if not claim.get('model_supports_vision'):
+                    result.update(image_status='unavailable', screenshot_note='当前模型不支持图片，文字结果已保留。')
+                    result.pop('screenshot_id', None)
+                else:
+                    try:
+                        from core.tool_images import persist_tool_image_bytes
+                        url = screenshot['image_url']['url']
+                        if not url.startswith('data:image/png;base64,'):
+                            raise ValueError('浏览器截图格式无效。')
+                        raw = base64.b64decode(url.split(',', 1)[1], validate=True)
+                        part = persist_tool_image_bytes(raw, self.s.config.get_chat_history_dir(), cid)
+                        result['content_parts'] = [part]
+                    except Exception as exc:
+                        result.update(image_status='failed', screenshot_note='截图未能保存，文字结果已保留：' + str(exc))
+                        result.pop('screenshot_id', None)
             return result
         with self.lock:
             active = self.s.request_agent({**identity, "token": claim["token"], "action": "workbench_active"})

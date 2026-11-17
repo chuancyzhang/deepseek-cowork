@@ -35,6 +35,14 @@ def _extension_archive_bytes(version=None):
 
 
 class BrowserSkillComponentTests(unittest.TestCase):
+    def test_running_versions_require_loaded_daemon_and_extension(self):
+        version = browser_skill_component.BROWSER_SKILL_VERSION
+        good = {"daemon_version": version, "browsers": [{"extension_version": version}]}
+        self.assertEqual(browser_skill_component._running_version_error(good), "")
+        self.assertIn("后台服务", browser_skill_component._running_version_error({**good, "daemon_version": "0.4.2"}))
+        self.assertIn("重新加载", browser_skill_component._running_version_error({**good, "browsers": [{"extension_version": "0.4.2"}]}))
+        self.assertTrue(browser_skill_component._running_version_error({**good, "browsers": []}))
+
     def setUp(self):
         service = patch.object(browser_skill_component, "_ensure_browser_skill_service", return_value={"ready": True, "pid": 42})
         service.start()
@@ -397,6 +405,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
                     "stderr": "",
                 },
             ]
+            command_results.append({"returncode": 0, "stdout": json.dumps({"daemon_version": browser_skill_component.BROWSER_SKILL_VERSION, "browsers": [{"extension_version": browser_skill_component.BROWSER_SKILL_EXTENSION_VERSION}]}), "stderr": ""})
             with patch.object(
                 browser_skill_component,
                 "browser_skill_root",
@@ -669,6 +678,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
                     "stderr": "",
                 },
             ]
+            command_results.append({"returncode": 0, "stdout": json.dumps({"daemon_version": browser_skill_component.BROWSER_SKILL_VERSION, "browsers": [{"extension_version": browser_skill_component.BROWSER_SKILL_EXTENSION_VERSION}]}), "stderr": ""})
             with patch.object(
                 browser_skill_component,
                 "browser_skill_root",

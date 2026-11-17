@@ -30,6 +30,15 @@ class Skills:
     def get_system_prompts(self, *args, **kwargs):
         return ""
 
+    def builtin_skill_catalog(self, *args):
+        return []
+
+    def select_builtin_skill_prompts(self, *args):
+        return []
+
+    def builtin_skill_catalog_prompt(self, *args):
+        return ""
+
     def get_brief_skill_prompt(self, *args):
         return ""
 
@@ -74,14 +83,14 @@ class ToolResultFreshnessTests(unittest.TestCase):
     def setUp(self):
         self.root = self.enterContext(tempfile.TemporaryDirectory())
 
-    def run_worker(self, operations, execute, *, session="freshness", run="run-1"):
+    def run_worker(self, operations, execute, *, session="freshness", run="run-1", external=False):
         skills, provider = Skills(execute), Provider(operations)
         finished, events = [], []
         with patch("core.agent.SkillManager", return_value=skills), \
                 patch("core.agent.LLMFactory.create_provider", return_value=provider):
             worker = LLMWorker(
                 [{"role": "user", "content": "Inspect current state after each operation."}],
-                _DaemonConfigStub(self.root, {"api_key": "test-key"}),
+                _DaemonConfigStub(self.root, {"api_key": "test-key", "enabled_skills": ["browser-automation"] if external else []}),
                 workspace_dir=self.root, session_id=session, request_id=run, turn_id=run,
                 run_context={"mode": "execution"},
             )
@@ -128,7 +137,7 @@ class ToolResultFreshnessTests(unittest.TestCase):
                 patch.object(browser, "log_browser_skill_event"):
             skills, provider, events, _ = self.run_worker(
                 operations, lambda name, args, context: browser.browser_skill_cli(
-                    **args, workspace_dir=self.root, _context=context))
+                    **args, workspace_dir=self.root, _context=context), external=True)
         self.assertEqual(skills.calls, operations)
         self.assertEqual(observations, ["overview", "metrics", "about", "metrics"])
         self.assertFalse(any(e.get("type") == "tool_result_reused" for e in events))
@@ -230,7 +239,7 @@ class ToolResultFreshnessTests(unittest.TestCase):
             return result
 
         try:
-            skills, provider, events, _ = self.run_worker(operations, execute)
+            skills, provider, events, _ = self.run_worker(operations, execute, external=True)
             results = [m["result_obj"] for m in provider.requests[-1] if m.get("role") == "tool"]
             self.assertTrue(all(r.get("status") == "completed" for r in results), results)
             snapshots = [results[i]["result"]["text"] for i in [2, 4, 6]]

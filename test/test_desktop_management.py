@@ -250,7 +250,7 @@ class ManagementTests(unittest.TestCase):
 
     def test_settings_pages_preserve_conflicts_and_memory_scopes(self):
         c = self.client
-        for name in ("preferences", "memory", "security", "storage", "experiments", "logs", "update", "im"):
+        for name in ("preferences", "memory", "security", "storage", "logs", "update", "im"):
             self.assertIn("sections", c.call("settings.page", page=name))
         page = c.call("settings.page", page="preferences")
         saved = c.call("settings.page_save", page="preferences", revision=page["revision"], value={"soul": "先给结论，再给证据。"})
@@ -267,9 +267,10 @@ class ManagementTests(unittest.TestCase):
     def test_retired_controls_do_not_overwrite_settings_or_restore_speech(self):
         c = self.client
         c.call("settings.context", target_tokens=1000000)
-        page = c.call("settings.page", page="experiments")
-        self.assertNotIn("context_target", page["values"])
-        c.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "context_target": 0})
+        with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
+            c.call("settings.page", page="experiments")
+        with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
+            c.call("settings.page_save", page="experiments", value={"context_target": 0})
         self.assertEqual(c.call("settings.get")["context_policy"]["target_tokens"], 1000000)
         with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
             c.call("settings.page", page="components")
@@ -296,25 +297,17 @@ class ManagementTests(unittest.TestCase):
             c = ServiceClient(directory)
             try:
                 data = Path(c.call("settings.get")["data_dir"])
-                page = c.call("settings.page", page="experiments")
-                policy = json.loads((data / "config.json").read_text(encoding="utf-8"))["experimental_browser_automation"]
-                self.assertEqual(page["values"]["external_browser"], not policy["enabled"])
-                for external in (False, True, False):
-                    saved = c.call("settings.page_save", page="experiments", revision=page["revision"],
-                                   value={"external_browser": external})
-                    self.assertEqual(saved["values"]["external_browser"], external)
-                    policy = json.loads((data / "config.json").read_text(encoding="utf-8"))["experimental_browser_automation"]
-                    self.assertEqual(policy["enabled"], not external)
-                    with closing(sqlite3.connect(data / "browser_backend.sqlite")) as db:
-                        self.assertEqual(db.execute("SELECT backend FROM state WHERE id=1").fetchone()[0],
-                                         "external" if external else "internal")
-                    page = c.call("settings.page", page="experiments")
-                    self.assertEqual(page["values"]["external_browser"], external)
+                self.assertFalse(next(item for item in c.call("skills.inventory") if item["name"] == "browser-automation")["enabled"])
+                for external in (True, False, True, False):
+                    c.call("skills.enable", name="browser-automation", enabled=external)
+                    config = json.loads((data / "config.json").read_text(encoding="utf-8"))
+                    self.assertNotIn("experimental_browser_automation", config)
+                    self.assertEqual("browser-automation" in config["enabled_skills"], external)
+                    inventory = c.call("skills.inventory")
+                    self.assertEqual(next(item for item in inventory if item["name"] == "browser-automation")["enabled"], external)
                 c.close()
                 c = ServiceClient(directory)
-                self.assertFalse(c.call("settings.page", page="experiments")["values"]["external_browser"])
-                with closing(sqlite3.connect(data / "browser_backend.sqlite")) as db:
-                    self.assertEqual(db.execute("SELECT backend FROM state WHERE id=1").fetchone()[0], "internal")
+                self.assertFalse(next(item for item in c.call("skills.inventory") if item["name"] == "browser-automation")["enabled"])
             finally:
                 c.close()
 

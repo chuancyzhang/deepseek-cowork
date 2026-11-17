@@ -133,6 +133,21 @@ async function run(){
   assert.equal(await read('document.documentElement.scrollWidth<=innerWidth+1'),true);
   assert.equal(await read('(()=>{const r=document.querySelector(".global-search").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()'),true);
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".app-navigation button")];return buttons.every(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth})})()'),true);
+  await read('document.querySelector(".global-search .section-heading button").click()');
+  await read('document.querySelector(".sidebar-utilities button").click()');await until('!!document.querySelector(".management-nav")');
+  assert.equal(await read('document.querySelector(".management-nav").textContent.includes("实验")'),false);
+  await read('[...document.querySelectorAll(".sidebar-destinations button")].find(e=>e.textContent==="能力").click()');
+  await until('[...document.querySelectorAll(".resource-title")].some(e=>e.textContent.includes("BrowserSkill"))');
+  await read('[...document.querySelectorAll(".resource-title")].find(e=>e.textContent.includes("BrowserSkill")).click()');
+  await until('document.body.textContent.includes("准备或修复组件")&&!document.querySelector(".settings-section input[type=checkbox]").disabled');
+  assert.equal((await rpc('skills.browser_status')).enabled,false);
+  await read('document.querySelector(".settings-section input[type=checkbox]").click()');
+  await until('document.querySelector(".settings-section input[type=checkbox]").checked&&!document.querySelector(".settings-section input[type=checkbox]").disabled');
+  assert.equal((await rpc('skills.browser_status')).enabled,true);
+  const recovery=await rpc('skills.browser_action',{command:'recover'});assert(recovery.job_id);
+  await snap('browser-skill-dark-scaled');
+  await read('document.querySelector(".settings-section input[type=checkbox]").click()');
+  await until('!document.querySelector(".settings-section input[type=checkbox]").checked&&!document.querySelector(".settings-section input[type=checkbox]").disabled');
   assert.deepEqual(errors,[]);
   console.log('NAVIGATION_OK '+JSON.stringify({native:Boolean(process.env.COWORK_NAVIGATION_NATIVE),scale:screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));
 }

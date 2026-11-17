@@ -2902,6 +2902,8 @@ class SkillManager:
                     info["type"] = "ai_generated"
                     info["created_by"] = "ai"
                 info["enabled"] = self._is_skill_enabled_for_path(skill_name, skill_path)
+                if skill_name == "browser-automation":
+                    info["enabled"] = bool(self.config_manager and self.config_manager.is_skill_enabled(skill_name, False))
                 info.update({k: v for k, v in record["meta"].items() if k != "allowed-tools"})
                 info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
                 if info.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
@@ -3267,6 +3269,8 @@ class SkillManager:
         discovered_tool_names = set(discovered_tool_names or [])
         if backend == "internal":
             discovered_tool_names.update(INTERNAL_TOOLS)
+        else:
+            discovered_tool_names.add("browser_skill_cli")
         definitions = self.tool_registry.definitions(
             run_mode=run_mode,
             discovered_tool_names=discovered_tool_names,

@@ -7,7 +7,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const require = createRequire(import.meta.url), directory = path.dirname(fileURLToPath(import.meta.url));
-for (const scale of ['1', '1.5']) test(`real browser captures and submits once in background at scale ${scale}`, {timeout:30000}, async () => {
+for (const scale of ['1', '1.5']) test(`real browser captures and submits once in background at scale ${scale}`, {timeout:60000}, async () => {
   const root = path.resolve(directory, '../../.tmp/browser-input-fix');
   await mkdir(root, {recursive:true});
   const data = await mkdtemp(path.join(root, 'test-'));

@@ -9,8 +9,8 @@ metadata:
   author: deepseek-cowork team
   version: "3.1.1"
   upstream: "Tencent/BrowserSkill"
-  upstream_cli: "0.3.3"
-  upstream_extension: "0.3.3"
+  upstream_cli: "0.5.0"
+  upstream_extension: "0.5.0"
   permissions: ["screen_access", "internet"]
 security_level: high
 allowed-tools: [browser_skill_cli]
@@ -21,11 +21,11 @@ allowed-tools: [browser_skill_cli]
 Prefer an available task-specific tool or connector when it can complete the requested work.
 Use `browser_skill_cli` to invoke Tencent BrowserSkill's `bsk` CLI. The plugin requires
 the application-managed CLI and the BrowserSkill Chrome/Edge extension. If the tool
-reports `browser_skill_not_ready`, direct the user to **AI 能力商城 → 浏览器自动化**.
-This backend is available only when **设置 → 实验功能 → 内置浏览器自动化** is off.
-Do not switch backends or invoke a CLI through other tools to bypass the current
-run's backend selection. A pending switch blocks new browser tasks until existing
-tasks release their sessions.
+reports `browser_skill_not_ready`, direct the user to **能力 → 技能 → BrowserSkill（外部浏览器）**.
+This backend is selected when the user enables BrowserSkill（外部浏览器） in 能力 → 技能.
+Without that skill, new runs use the built-in browser. Each run pins its backend;
+changing the skill affects only new runs. Connection failure never changes backend.
+Do not invoke another backend through shell tools to bypass this selection.
 
 ## Mandatory lifecycle
 
@@ -42,31 +42,33 @@ Only use session IDs created in this run. Cowork owns the recoverable start toke
 and performs final cleanup; do not supply `--request-id`, manage start requests,
 list global sessions, or stop all sessions. Never restart the shared daemon.
 
-## Interaction loop
+## Interaction loop (CLI/extension 0.5.0)
 
-1. Navigate or create/select the target tab. Keep its returned tab id and session id.
-2. Run `["observe", "--session", "<id>", "--tab-id", "<tab-id>"]` to obtain the
-   current page and `@eN` refs. `snapshot` is also supported for accessibility snapshots.
-3. Use refs from the latest observation of that same tab and session. Do not infer
-   a URL or CSS selector from a navigation label; use the observed target.
-4. Click, fill, select, or press the smallest required action.
-5. Observe again after navigation or DOM changes, then verify the result before
-   acting. A new observation is required even when its arguments are unchanged.
+1. Navigate or select the owned tab, then `sync --session <id> --tab-id <id>`.
+2. Reuse the returned control context with `--context`; DOM refs bind their original
+   document/node. Check business facts using `--expect` before consequential actions.
+3. Use `read` / `extract` for bounded current DOM fields, tables and lists. Saved
+   observations are reading material, not current control credentials.
+4. Use `step` for one action plus a bounded condition wait and synchronized state.
+   Use `plan --steps <JSON>` only for 1–20 already decided steps. It stops at the
+   first incomplete step and is not a transaction; completed steps are never replayed.
+5. Separate action dispatch, wait, and sync outcomes. A failed post-action wait or
+   observation does not undo input. Inspect the page and `ledger` on UNKNOWN results;
+   do not clear an unknown intent or resubmit merely because another sync succeeded.
 
-If a ref is unknown or stale, run `observe` for that tab and retry the intended
-action once with a newly returned ref. If it still fails, inspect the current
-page and report the obstacle instead of looping. Use current refs before
-continuing an observation with `--cursor`.
+Use exact refs, unique observed selectors, and the returned context/observation from
+this tab. Visual and untargeted actions require `--observation`. If a target was
+replaced, explicitly re-identify it and check business facts before the next action.
+Use `hover`, `scroll-to`, `drag`, `wait-for-element`, `upload`, and `download` for their
+specific browser mechanisms. Native dialogs use `dialog`; `operation` retrieves the
+original suspended action. Never dispatch a replacement action to escape a dialog.
 
-Use only supported command options. If uncertain, call `["<command>", "--help"]`
-through this tool before executing. `snapshot --live` does not exist in CLI 0.3.3.
-After a navigation timeout, inspect the reported final URL and observe the page
-before deciding whether another navigation is needed; a timeout does not prove
-that navigation had no effect.
-
-Use `get-html` only when the snapshot cannot expose required markup or metadata.
-Use `screenshot` only for visual layout, canvas, images, or styling that cannot be
-understood from the snapshot.
+Call `<command> --help` through this tool for exact flags. `step` and `plan` accept
+JSON strings as individual arguments, not shell commands. Always pass the owned
+`--session`; Cowork deliberately retains its recoverable session start/stop lifecycle
+instead of relying on the shared default session used by bare `open` or `close`.
+Upload inputs and saved outputs must stay within this task's workspace. Do not
+supply `--scope`, override a session inside a batch, or use a shared default context.
 
 ## Screenshots and visual feedback
 

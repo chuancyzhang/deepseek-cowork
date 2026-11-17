@@ -13,7 +13,6 @@ def settings_page_config_snapshot(config):
         "model_channels", "selected_model_id", "default_workspace",
         "chat_history_dir", "chat_workspace_root", "god_mode", "data_security",
         "im_gateway", "experimental_long_context",
-        "experimental_browser_automation",
     )
 
     def values(value):

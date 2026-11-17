@@ -157,7 +157,8 @@ class WorkbenchRequest:
                 self.event.set()
 
     def fail(self, exc):
-        self.finish({"ok": False, "status": getattr(exc, "code", "failed"),
+        uncertain = self.started and self.action in {"browser_action", "browser_file", "navigate"}
+        self.finish({"ok": False, "status": "unknown" if uncertain else getattr(exc, "code", "failed"),
                      "error": str(exc), "executed": self.started})
 
 
@@ -196,7 +197,7 @@ class WorkbenchBridge:
         auth = current_authorization(context)
         browser = getattr(auth, "_browser_state", {})
         internal = browser.get("snapshot", {}).get("backend") == INTERNAL
-        is_web = action in {"observe", "navigate", "browser_action"} or (action == "open" and arguments.get("kind") == "web")
+        is_web = action in {"observe", "navigate", "browser_action", "browser_read", "browser_wait", "browser_file"} or (action == "open" and arguments.get("kind") == "web")
         if action == "list":
             is_web = internal
         if action == "close" and auth and self.available:

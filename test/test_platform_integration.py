@@ -30,13 +30,11 @@ class PlatformIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             class Config:
                 config_path = str(Path(root) / "config.json")
-            Path(Config.config_path).write_text('{"experimental_browser_automation":{"enabled":false}}')
+            Path(Config.config_path).write_text('{"enabled_skills":["browser-automation"]}')
             with patch("core.browser_backend.is_windows", return_value=False):
                 coordinator = BrowserBackendCoordinator(Config())
                 self.assertEqual(coordinator.snapshot()["backend"], "internal")
                 self.assertEqual(run_backend({"browser_backend": {"backend": "external"}}), "internal")
-                with self.assertRaises(BrowserBackendError):
-                    coordinator.save(False)
                 with self.assertRaises(BrowserBackendError):
                     coordinator.acquire("session", "run", {"backend": "external", "generation": 0}, "external")
 

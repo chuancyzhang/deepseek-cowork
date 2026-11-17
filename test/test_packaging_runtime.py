@@ -127,7 +127,9 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         for module_name in (
             "core.apply_patch",
             "core.filesystem_ops",
-            "core.remote_skill_installer",
+            "core.skill_install",
+            "core.skill_package",
+            "core.capability_search",
         ):
             self.assertIn(module_name, hiddenimports)
 

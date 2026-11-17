@@ -1199,7 +1199,7 @@ def build_skill_json(draft):
         "node_dependencies": _string_list(draft.get("node_dependencies")),
         "script_refs": [item["path"] for item in script_assets],
         "script_entries": script_entries,
-        "asset_refs": [],
+        "asset_refs": [item["path"] for item in resources if item["kind"] == "asset"],
         "source_format": "cowork",
     }
 
@@ -1224,20 +1224,28 @@ def _atomic_write_json(path, payload):
 
 
 def normalize_draft_resources(value):
+    from core.skill_package import package_path
     resources = []
     seen_paths = set()
     for item in _dict_list(value):
         kind = _string(item.get("kind"), "reference").lower()
-        if kind not in {"script", "reference"}:
+        if kind not in {"script", "reference", "asset"}:
             continue
         path = _string(item.get("path")).replace("\\", "/").strip("/")
-        expected_prefix = "scripts/" if kind == "script" else "references/"
+        expected_prefix = {"script": "scripts/", "reference": "references/", "asset": "assets/"}[kind]
         if not path.startswith(expected_prefix):
             continue
         if ".." in path.split("/") or path.lower() in seen_paths:
             continue
+        try:
+            package_path(os.getcwd(), path)
+        except ValueError:
+            continue
         content = str(item.get("content") or "")
-        if not content.strip():
+        if kind == "asset":
+            if not item.get("source_path") or not re.fullmatch(r"[a-f0-9]{64}", str(item.get("sha256") or "")):
+                continue
+        elif not content.strip():
             continue
         seen_paths.add(path.lower())
         resources.append(
@@ -1248,6 +1256,7 @@ def normalize_draft_resources(value):
                 "content": content,
                 "source_message_ids": _source_refs(item.get("source_message_ids")),
                 "selected": bool(item.get("selected", True)),
+                **({"source_path": str(item["source_path"]), "sha256": item["sha256"], "size": item.get("size", 0)} if kind == "asset" else {}),
             }
         )
     return resources
@@ -1291,10 +1300,15 @@ def write_script_assets(skill_dir, draft):
 
 
 def write_draft_resources(skill_dir, draft):
+    from core.skill_package import copy_asset, package_path
     resources = normalize_draft_resources(draft.get("resources"))
     for item in resources:
+        destination = package_path(skill_dir, item["path"])
+        if item["kind"] == "asset":
+            copy_asset(item["source_path"], destination, item["sha256"])
+            continue
         _atomic_write_text(
-            os.path.join(skill_dir, item["path"]),
+            str(destination),
             item["content"].rstrip() + "\n",
         )
     return resources
@@ -1397,6 +1411,14 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
         if path not in normalized_paths:
             add("error", "invalid_resource_path", f"资源路径无效：{path or '(空)'}", path)
             continue
+        if item.get("kind") == "asset":
+            from core.skill_package import file_digest, MAX_PACKAGE_BYTES
+            source_path = str(item.get("source_path") or "")
+            try:
+                if os.path.getsize(source_path) > MAX_PACKAGE_BYTES or file_digest(source_path) != item.get("sha256"):
+                    raise ValueError("asset changed")
+            except (OSError, ValueError):
+                add("error", "asset_changed", "模板原件不可用或已变化，请重新检查并附带。", path)
         refs = _source_refs(item.get("source_message_ids"))
         invalid = [ref for ref in refs if allowed_ids and ref not in allowed_ids]
         if invalid:
@@ -1637,6 +1659,8 @@ def save_new_skill(draft, target_root=None):
             _atomic_write_text(os.path.join(staging_dir, "impl.py"), impl_py.rstrip() + "\n")
         write_script_assets(staging_dir, draft)
         write_draft_resources(staging_dir, draft)
+        from core.skill_package import validate_package
+        validate_package(staging_dir, skill_name)
         os.replace(staging_dir, target_dir)
         staging_dir = ""
         return SaveResult(True, f"Skill '{skill_name}' created.", target_dir)
@@ -1698,12 +1722,17 @@ def merge_draft_resources_metadata(skill_record, draft):
         payload = parsed if isinstance(parsed, dict) else {}
     references = _string_list(payload.get("references"))
     script_refs = _string_list(payload.get("script_refs"))
+    asset_refs = _string_list(payload.get("asset_refs"))
     script_entries = _dict_list(payload.get("script_entries"))
     known_entries = {
         _string(item.get("path")).replace("\\", "/").lower()
         for item in script_entries
     }
     for item in resources:
+        if item["kind"] == "asset":
+            if item["path"] not in asset_refs:
+                asset_refs.append(item["path"])
+            continue
         if item["kind"] == "reference":
             if item["path"] not in references:
                 references.append(item["path"])
@@ -1726,6 +1755,7 @@ def merge_draft_resources_metadata(skill_record, draft):
     payload.setdefault("version", 2)
     payload.setdefault("name", skill_record.get("name") or os.path.basename(skill_record.get("path") or ""))
     payload["references"] = references
+    payload["asset_refs"] = asset_refs
     payload["script_refs"] = script_refs
     payload["script_entries"] = script_entries
     _atomic_write_json(json_path, payload)

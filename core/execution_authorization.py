@@ -24,6 +24,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Exact, application-owned implementations only. Never infer trust from names.
 _READERS = {
+    "capability-manager": {"inspect_capabilities"},
     "file-system": {"workspace_list_files", "text_file_read", "glob", "grep"},
     "command-tools": {"glob", "grep"},
     "history-query": {"query_history"},

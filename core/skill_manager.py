@@ -730,6 +730,9 @@ class SkillManager:
         }
 
     def _infer_execution_surface(self, spec):
+        declared = spec.get("execution_surface")
+        if declared == "tool_refs" and spec.get("tool_refs"):
+            return declared
         script_entries = spec.get("script_entries") or []
         tool_refs = spec.get("tool_refs") or []
         if script_entries:
@@ -749,6 +752,8 @@ class SkillManager:
         return "full_on_match" if should_upgrade else "brief_only"
 
     def _infer_preferred_script_name(self, spec):
+        if self._infer_execution_surface(spec) != "skill_script":
+            return ""
         script_entries = spec.get("script_entries") or []
         if len(script_entries) != 1:
             return ""
@@ -1482,45 +1487,14 @@ class SkillManager:
         }
 
     def _skill_search_score(self, record, query_tokens, query_text):
-        spec = record.get("spec") or {}
-        if spec.get("allow_implicit_invocation") is False:
+        from .capability_search import score, phrase_in
+        spec, meta = record.get("spec") or {}, record.get("meta") or {}
+        names = [record.get("name", ""), meta.get("display_name", ""), meta.get("name", "")]
+        if spec.get("allow_implicit_invocation") is False and not any(phrase_in(n, query_text) for n in names):
             return 0.0
-        meta = record.get("meta") or {}
-        search_text = "\n".join(
-            [
-                record.get("name", ""),
-                meta.get("display_name", ""),
-                meta.get("name", ""),
-                spec.get("description", ""),
-                meta.get("description", ""),
-                record.get("body", ""),
-                record.get("search_text", ""),
-            ]
-        )
-        search_tokens = _tokenize(search_text)
-        if not search_tokens:
-            return 0.0
-        score = 0.0
-        explicit_tokens = _tokenize(
-            " ".join(
-                [
-                    record.get("name", ""),
-                    meta.get("display_name", ""),
-                    meta.get("name", ""),
-                    " ".join(spec.get("tags") or []),
-                    " ".join(spec.get("triggers") or []),
-                ]
-            )
-        )
-        normalized_query = _normalize_search_text(query_text)
-        normalized_text = _normalize_search_text(search_text)
-        if normalized_query and normalized_text and normalized_query in normalized_text:
-            score += 10.0
-        score += len(query_tokens & explicit_tokens) * 8.0
-        score += len(query_tokens & search_tokens) * 3.0
-        anti_tokens = _tokenize(" ".join(spec.get("anti_triggers") or []))
-        score -= len(query_tokens & anti_tokens) * 20.0
-        return score
+        return score(query_text, names=names, phrases=[*(spec.get("tags") or []), *(spec.get("triggers") or [])],
+                     description=" ".join([spec.get("description", ""), meta.get("description", "")]),
+                     body=record.get("body") or record.get("search_text", ""), anti=spec.get("anti_triggers") or [])
 
     def _search_skills(self, query, limit=8, run_context=None):
         query_tokens = _tokenize(query)
@@ -3267,38 +3241,14 @@ class SkillManager:
             self.skill_to_tools.setdefault(skill_name, list(record.get("tool_refs") or []))
         self._load_mcp_servers(load_tools=self.load_mcp_tools)
 
-    def _explicit_skill_matches(self, query_tokens):
-        matches = []
-        for skill_name in self.skill_records:
-            name_tokens = _tokenize(skill_name.replace("-", " "))
-            if query_tokens & name_tokens:
-                matches.append(skill_name)
-        return matches
-
     def select_relevant_skills(self, query_text, limit=5):
         query_tokens = _tokenize(query_text)
         normalized_query = _normalize_search_text(query_text)
         if not query_tokens and not normalized_query:
             return []
-        explicit = set(self._explicit_skill_matches(query_tokens))
         ranked = []
         for skill_name, record in self.skill_records.items():
-            spec = record["spec"]
-            score = 100 if skill_name in explicit else 0
-            tags = _tokenize(" ".join(spec.get("tags") or []))
-            triggers = _tokenize(" ".join(spec.get("triggers") or []))
-            anti = _tokenize(" ".join(spec.get("anti_triggers") or []))
-            search_tokens = _tokenize(record["search_text"])
-            score += len(query_tokens & tags) * 15
-            score += len(query_tokens & triggers) * 12
-            score += len(query_tokens & search_tokens) * 3
-            score -= len(query_tokens & anti) * 20
-            normalized_search = _normalize_search_text(record["search_text"])
-            if normalized_query and normalized_search and normalized_query in normalized_search:
-                score += 10
-            priority = spec.get("priority", 0)
-            if isinstance(priority, int):
-                score += priority
+            score = self._skill_search_score(record, query_tokens, query_text)
             if score > 0:
                 ranked.append((score, skill_name))
         ranked.sort(key=lambda item: (-item[0], item[1]))

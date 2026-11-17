@@ -5,6 +5,8 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+import hashlib
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -147,6 +149,71 @@ class TestSkillBuilder(unittest.TestCase):
             )
         self.assertIn("reload failed", result)
         self.assertFalse(os.path.exists(os.path.join(self.ai_dir, "rollback-test")))
+
+    def test_partial_edit_preserves_yaml_resources_and_unrelated_instructions(self):
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.create_new_skill(self.temp_dir, "partial", "Task scope",
+                instructions_md="# Task\n\nOld step.\n\nKeep this section.\n",
+                resources=[{"kind": "reference", "path": "references/rules.md", "content": "Keep rules."}],
+                _context=self.context)
+            self.assertIn("Success", result)
+            root = Path(self.ai_dir, "partial")
+            original = (root / "SKILL.md").read_text(encoding="utf-8")
+            original = original.replace("type: ai_generated", "metadata:\n  author: original\n  nested:\n    keep: yes\ntype: ai_generated")
+            (root / "SKILL.md").write_text(original, encoding="utf-8")
+            result = skill_builder_impl.update_skill(self.temp_dir, "partial", description="New scope",
+                instruction_edits=[{"old_text": "Old step.", "new_text": "New step."}], _context=self.context)
+            self.assertIn("Success", result)
+            edited = (root / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("metadata:\n  author: original\n  nested:\n    keep: yes", edited)
+            self.assertIn("Keep this section.", edited)
+            self.assertNotIn("Describe cases", edited)
+            self.assertEqual((root / "references/rules.md").read_text(), "Keep rules.")
+            result = skill_builder_impl.update_skill(self.temp_dir, "partial",
+                instruction_edits=[{"old_text": "Old step.", "new_text": "Wrong stale edit."}], _context=self.context)
+            self.assertIn("exactly once", result)
+            self.assertEqual((root / "SKILL.md").read_text(encoding="utf-8"), edited)
+
+    def test_template_asset_copy_and_checked_replacement(self):
+        source = Path(self.temp_dir, "reference.docx")
+        source.write_bytes(b"template reference")
+        resource = {"kind": "asset", "path": "assets/reference.docx", "source_path": str(source)}
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.create_new_skill(self.temp_dir, "template", "Reusable template",
+                instructions_md="Use [the reference](assets/reference.docx).", resources=[resource], _context=self.context)
+            self.assertIn("Success", result)
+            target = Path(self.ai_dir, "template", "assets/reference.docx")
+            old = hashlib.sha256(target.read_bytes()).hexdigest()
+            source.write_bytes(b"new reference")
+            result = skill_builder_impl.update_skill(self.temp_dir, "template", resources=[resource], _context=self.context)
+            self.assertIn("already exists", result)
+            self.assertEqual(target.read_bytes(), b"template reference")
+            result = skill_builder_impl.update_skill(self.temp_dir, "template",
+                resources=[{**resource, "previous_sha256": old}], _context=self.context)
+            self.assertIn("Success", result)
+            self.assertEqual(target.read_bytes(), b"new reference")
+            self.assertEqual(json.loads((target.parent.parent / "skill.json").read_text())["asset_refs"], ["assets/reference.docx"])
+
+    def test_missing_declared_binding_fails_before_publication(self):
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.create_new_skill(self.temp_dir, "missing-binding", "Task",
+                tools_list=[{"name": "hello", "binding": "impl.py:missing"}],
+                tool_code="def hello():\n    return 'ok'\n", _context=self.context)
+        self.assertIn("Tool binding is missing", result)
+        self.assertFalse(Path(self.ai_dir, "missing-binding").exists())
+        self.assertEqual(self.events, [])
+
+    def test_invalid_resource_and_missing_link_roll_back_creation(self):
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            for resource in ({"kind": "reference", "path": "references/../../escape", "content": "bad"},
+                             {"kind": "asset", "path": "assets/missing", "source_path": "missing.docx"}):
+                result = skill_builder_impl.create_new_skill(self.temp_dir, "invalid", "Task", resources=[resource], _context=self.context)
+                self.assertIn("Error", result)
+                self.assertFalse(Path(self.ai_dir, "invalid").exists())
+            result = skill_builder_impl.create_new_skill(self.temp_dir, "invalid", "Task",
+                instructions_md="Read [rules](references/missing.md).", _context=self.context)
+            self.assertIn("Missing", result)
+            self.assertFalse(Path(self.ai_dir, "invalid").exists())
 
 
 if __name__ == "__main__":

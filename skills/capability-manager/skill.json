@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "name": "capability-manager",
+  "kind": "knowledge",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "发现能力，检查配置、依赖、启用和会话范围，指向恢复入口。",
+  "tags": [
+    "能力管理",
+    "插件",
+    "连接器",
+    "配置",
+    "不能使用",
+    "查找技能",
+    "capability",
+    "connection"
+  ],
+  "triggers": [
+    "能力管理",
+    "插件",
+    "连接器",
+    "配置",
+    "不能使用",
+    "查找技能",
+    "capability",
+    "connection"
+  ],
+  "tool_refs": [
+    "inspect_capabilities",
+    "tool_search"
+  ],
+  "references": [],
+  "display_name": "能力管理",
+  "description_cn": "发现能力，检查配置、依赖、启用和会话范围，指向恢复入口。"
+}

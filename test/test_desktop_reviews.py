@@ -18,7 +18,8 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("COWORK_APP_DATA_DIR", str(tmp_path / "data"))
     storage = DesktopChatStorage(str(tmp_path / "chat.db"))
     store = DesktopStore(storage)
-    config = SimpleNamespace(data_dir=str(tmp_path / "data"), get_chat_workspace_root=lambda: str(tmp_path), get_selected_model_id=lambda: "fixture")
+    config = SimpleNamespace(data_dir=str(tmp_path / "data"), get_chat_workspace_root=lambda: str(tmp_path),
+                             get_chat_history_dir=lambda: str(tmp_path / "history"), get_selected_model_id=lambda: "fixture")
     files = DesktopFiles(storage, config)
     for cid in ("a", "b"):
         root = tmp_path / cid
@@ -85,6 +86,36 @@ def test_skill_saving_filters_resources_and_returns_one_receipt(service):
     assert meta["description"] == "核对资料: 保留依据"
     assert s.reviews.dispatch("reviews.save", p)["saved_path"] == str(target)
     assert s.management.skill_change.call_count == 1
+
+
+def test_template_asset_is_retained_before_review_and_saved_from_same_bytes(service):
+    s = service
+    source = s.workspace("a") / "template.docx"
+    source.write_bytes(b"selected template")
+    identity = skill(s, resources=[{"kind": "asset", "path": "assets/reference.docx", "source_path": str(source)}])["review"]["id"]
+    value = s.reviews.get("a", identity)
+    asset = value["content"]["resources"][0]
+    assert asset["sha256"] and Path(asset["source_path"]).read_bytes() == b"selected template"
+    source.write_bytes(b"later unrelated edit")
+    saved = s.reviews.dispatch("reviews.save", {"conversation_id": "a", "id": identity, "revision": value["revision"]})
+    target = Path(saved["saved_path"])
+    assert (target / "assets/reference.docx").read_bytes() == b"selected template"
+    assert json.loads((target / "skill.json").read_text(encoding="utf-8"))["asset_refs"] == ["assets/reference.docx"]
+
+
+def test_review_asset_cannot_read_another_conversation_or_changed_snapshot(service):
+    s = service
+    other = s.workspace("b") / "private.docx"
+    other.write_bytes(b"private")
+    with pytest.raises((ValueError, PermissionError)):
+        skill(s, resources=[{"kind": "asset", "path": "assets/private.docx", "source_path": str(other)}])
+    source = s.workspace("a") / "template.docx"
+    source.write_bytes(b"original")
+    identity = skill(s, resources=[{"kind": "asset", "path": "assets/reference.docx", "source_path": str(source)}])["review"]["id"]
+    value = s.reviews.get("a", identity)
+    Path(value["content"]["resources"][0]["source_path"]).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="变化"):
+        s.reviews.dispatch("reviews.save", {"conversation_id": "a", "id": identity, "revision": value["revision"]})
 
 
 def test_target_changed_after_review_needs_explicit_rebase(service):

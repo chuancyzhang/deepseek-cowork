@@ -39,7 +39,16 @@ app.whenReady().then(async()=>{
   await read('window.createReview()');await until('document.querySelectorAll(".workspace-tab").length===3');
   assert.equal(await read('Boolean(document.querySelector(".library-row"))'),true);
   await read('document.querySelector("#reopen").click()');await until('Boolean(document.querySelector(".review-paper"))');
+  await read('document.querySelector(".review-sources").open=true;document.querySelector(".review-sources details").open=true');
+  await until('document.querySelector(".review-sources")?.textContent.includes("模板原件已保留")');
   await snap('skill-review');
+  window.setSize(800,650);window.webContents.setZoomFactor(1.25);
+  await read("document.documentElement.dataset.theme='dark'");
+  assert.ok(await read('document.querySelector(".review-workspace").scrollWidth<=document.querySelector(".review-workspace").clientWidth+1'));
+  await read('document.querySelector(".review-sources").scrollIntoView({block:"center"})');
+  await snap('skill-assets-narrow-dark');
+  window.setSize(1180,820);window.webContents.setZoomFactor(1);
+  await read("document.documentElement.dataset.theme='light'");
   await click('编辑内容');await until('Boolean(document.querySelector(".review-skill-editor"))');
   await read(`(()=>{const field=document.querySelectorAll('.review-skill-editor textarea')[1];Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(field,'用户保留的指导内容');field.dispatchEvent(new Event('input',{bubbles:true}));})()`);
   await until('document.querySelector(".review-footer")?.textContent.includes("有未保存")');

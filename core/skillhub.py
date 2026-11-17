@@ -162,7 +162,7 @@ class SkillHubInstallError(ValueError):
 
 class SkillHubClient:
     def icon(self, url):
-        from core.remote_skill_installer import validate_public_https_url
+        from core.skill_install import validate_public_https_url
         for _ in range(4):
             validate_public_https_url(url)
             with requests.get(url, stream=True, allow_redirects=False, timeout=(5, 10)) as response:
@@ -251,7 +251,7 @@ class SkillHubClient:
         identifier(version)
         url = f"{BASE_URL}/api/v1/download?slug={identifier(slug)}&version={identifier(version)}"
         # Signed object-store URLs are transient and must never be logged or saved.
-        from core.remote_skill_installer import validate_public_https_url
+        from core.skill_install import validate_public_https_url
         for _ in range(6):
             validate_public_https_url(url)
             with requests.get(url, stream=True, allow_redirects=False, timeout=(5, 20),

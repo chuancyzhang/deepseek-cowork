@@ -408,7 +408,7 @@ def _build_skill_json(skill_name, description, tool_refs, source_path, reference
     }
 
 
-def adapt_skill_directory(source_path, target_path, skill_name=None, source_format="auto"):
+def adapt_skill_directory(source_path, target_path, skill_name=None, source_format="auto", expected_sha256=""):
     if not os.path.isdir(source_path):
         raise ValueError("Source is not a directory")
     skill_md_path = os.path.join(source_path, "SKILL.md")
@@ -424,7 +424,13 @@ def adapt_skill_directory(source_path, target_path, skill_name=None, source_form
 
     source_basename = os.path.basename(os.path.normpath(source_path))
     skill_name = _slugify_skill_name(skill_name or original_name or source_basename)
-    shutil.copytree(source_path, target_path)
+    from core.skill_package import package_digest
+    digest = package_digest(source_path)
+    if expected_sha256 and digest != expected_sha256:
+        raise ValueError("Skill source changed since inspection.")
+    shutil.copytree(source_path, target_path, ignore=shutil.ignore_patterns(*EXCLUDED_DIRS))
+    if package_digest(target_path) != digest:
+        raise ValueError("Skill source changed while copying; target was not installed.")
 
     summary = _collect_folder_summary(target_path)
     tool_refs = _discover_impl_tool_refs(target_path)
@@ -459,7 +465,6 @@ def adapt_skill_directory(source_path, target_path, skill_name=None, source_form
             ensure_ascii=False,
             indent=2,
         )
-    os.makedirs(os.path.join(target_path, "experience"), exist_ok=True)
     return {
         "skill_name": skill_name,
         "source_format": "agent_skill",
@@ -497,13 +502,17 @@ def _extract_zip_to_tempdir(source_path):
         raise
 
 
-def resolve_agent_skill_source(source_path):
+def resolve_agent_skill_source(source_path, *, select_root=True):
     temp_dir = None
     if os.path.isfile(source_path):
         ext = os.path.splitext(source_path)[1].lower()
         if ext == ".zip":
             temp_dir = _extract_zip_to_tempdir(source_path)
-            return _resolve_skill_package_dir(temp_dir), temp_dir
+            try:
+                return (_resolve_skill_package_dir(temp_dir) if select_root else temp_dir), temp_dir
+            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise
         if ext not in {".md", ".markdown"}:
             raise ValueError("Source file must be a Markdown SKILL.md file or ZIP package.")
         temp_dir = tempfile.mkdtemp(prefix="cowork-agent-skill-md-")

@@ -188,21 +188,6 @@ class TeamSpaceClientTests(unittest.TestCase):
         self.assertIsNone(task_context_message(binding, original + [message]))
         self.assertEqual(original[0]["content"], "stable")
 
-    def test_internal_skill_agent_cannot_bypass_space_policy(self):
-        from core.remote_skill_installer import RemoteSkillInstallerAgentRunner
-        profile = {"provider": "openai", "api_key": "private-key", "base_url": "https://supplier.invalid/v1",
-                   "model_name": "test-model", "api_protocol": "chat_completions"}
-        provider = LLMFactory.create_provider_from_profile(profile)
-        sdk = provider.client
-        provider.client = Mock()
-        with patch("core.remote_skill_installer.LLMFactory.create_provider", return_value=provider):
-            runner = RemoteSkillInstallerAgentRunner(Mock(), profile, context={"chat_storage": self.storage,
-                "conversation_id": "conversation", "run_context": {}, "team_space_client": self.client})
-        self.denied = True
-        result = list(runner.provider.chat_stream([{"role": "user", "content": "private"}]))
-        self.assertTrue(any(c.get("error_type") == "TeamSpaceError" for c in result))
-        self.assertEqual(runner.provider.client.mock_calls, [])
-        sdk.close()
 
 
 if __name__ == "__main__":

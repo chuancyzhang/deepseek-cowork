@@ -232,6 +232,23 @@ class DesktopReviews:
         for resource in fields.get("resources", []):
             if not isinstance(resource, dict) or re.search(r'[:\x00-\x1f]', str(resource.get("path", ""))):
                 raise ValueError("技能资源路径无效。")
+            if resource.get("kind") == "asset":
+                from core.skill_package import copy_asset, package_path
+                relative = str(resource.get("path") or "")
+                if not relative.startswith("assets/"):
+                    raise ValueError("模板原件须放在 assets/。")
+                root = Path(self.s.config.data_dir) / "review-drafts" / cid / value["id"] / "skill-assets"
+                package_path(root, relative)
+                source = Path(str(resource.get("source_path") or ""))
+                if source.is_absolute() and source.resolve().is_relative_to(root.resolve()):
+                    # A previous submission already retained this draft-owned copy.
+                    if not resource.get("sha256") or file_hash(source) != resource["sha256"]:
+                        raise ValueError("已保留的模板原件已变化，请重新提交。")
+                else:
+                    source = self.s.checked_file(cid, str(source))
+                    destination = root / (uuid.uuid4().hex + source.suffix)
+                    evidence = copy_asset(source, destination, str(resource.get("sha256") or ""))
+                    resource.update(source_path=str(destination), **evidence)
         if not is_valid_skill_name(fields.get("skill_name", "")) or not str(fields.get("description", "")).strip() or not str(fields.get("instructions_md", "")).strip():
             raise ValueError("请补齐有效的技能名称、使用说明和指导正文。")
         fields["description"] = " ".join(str(fields["description"]).split())

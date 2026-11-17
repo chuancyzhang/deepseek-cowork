@@ -6,7 +6,7 @@
   "capability_group": "data-analysis",
   "source_type": "builtin",
   "default_enabled": true,
-  "description": "分析数据、比较指标、解释变化并核验结论。",
+  "description": "分析业务数据、诊断指标、设计 KPI、估算市场、构建报告与看板，并执行验证 Notebook。",
   "description_cn": "分析数据、比较指标、解释变化并核验结论。",
   "presentation": {
     "category": "data_analysis",
@@ -26,7 +26,19 @@
     "环比",
     "指标变化",
     "数据质量",
-    "data analysis"
+    "data analysis",
+    "经营月报",
+    "KPI",
+    "OKR",
+    "指标设计",
+    "漏斗",
+    "留存",
+    "实验分析",
+    "市场规模",
+    "报告",
+    "看板",
+    "Notebook",
+    "ipynb"
   ],
   "triggers": [
     "数据分析",
@@ -35,21 +47,53 @@
     "环比",
     "指标变化",
     "数据质量",
-    "data analysis"
+    "data analysis",
+    "经营月报",
+    "KPI",
+    "OKR",
+    "指标设计",
+    "漏斗",
+    "留存",
+    "实验分析",
+    "市场规模",
+    "报告",
+    "看板",
+    "Notebook",
+    "ipynb"
   ],
   "anti_triggers": [
     "仅重命名文件",
-    "仅调整文件样式"
+    "仅调整文件样式",
+    "只改表格颜色",
+    "仅调整表格样式"
   ],
   "tool_refs": [
     "document_read",
     "run_python_code",
-    "view_image"
+    "view_image",
+    "run_skill_script"
   ],
   "references": [
     "references/quality-and-diagnostics.md",
-    "references/statistics.md"
+    "references/statistics.md",
+    "references/business.md",
+    "references/kpi.md",
+    "references/market-sizing.md",
+    "references/reports-and-dashboards.md",
+    "references/notebooks.md"
   ],
   "python_dependencies": [],
-  "node_dependencies": []
+  "node_dependencies": [],
+  "script_refs": [
+    "scripts/execute_notebook.py"
+  ],
+  "script_entries": [
+    {
+      "name": "execute_notebook",
+      "path": "scripts/execute_notebook.py",
+      "runtime": "python",
+      "description": "用新内核顺序执行 Python Notebook，保留逐单元格结果。"
+    }
+  ],
+  "execution_surface": "tool_refs"
 }

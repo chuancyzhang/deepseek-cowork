@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 
 
-DATA_ANALYSIS_DISTS = ("numpy", "pandas", "scipy", "matplotlib", "seaborn", "scikit-learn")
+DATA_ANALYSIS_DISTS = ("numpy", "pandas", "scipy", "matplotlib", "seaborn", "scikit-learn", "nbformat", "nbclient", "ipykernel")
 
 
 def data_analysis_versions(lock_path):
@@ -31,17 +31,20 @@ def data_analysis_versions(lock_path):
 # Executed by the shipped interpreter, never the build interpreter. -I excludes
 # the host's PYTHONPATH/user site; origins also have to belong to this bundle.
 PYTHON_BUNDLE_PROBE = r'''
-import importlib, importlib.metadata as metadata, io, json, pathlib, socket, sys
+import importlib, importlib.metadata as metadata, io, json, pathlib, socket, sys, tempfile, ipaddress
 root = pathlib.Path(sys.executable).resolve().parent
-def no_network(*args, **kwargs):
-    raise RuntimeError("Bundled Python validation must not access the network")
+original_connect = socket.socket.connect
+def no_network(self, address, *args, **kwargs):
+    if isinstance(address, tuple) and ipaddress.ip_address(address[0]).is_loopback:
+        return original_connect(self, address, *args, **kwargs)
+    raise RuntimeError("Bundled Python validation must not access external networks")
 socket.socket.connect = no_network
 expected = json.loads(sys.argv[1])
 for name, version in expected.items():
     if metadata.version(name) != version:
         raise RuntimeError(f"{name}: expected {version}, found {metadata.version(name)}")
 for name in ('numpy', 'pandas', 'scipy', 'matplotlib', 'seaborn', 'sklearn',
-             'openpyxl', 'xlrd', 'docx', 'pptx', 'PIL.Image', 'pypdf', 'pypdfium2', 'pypdfium2_raw', 'reportlab'):
+             'nbformat', 'nbclient', 'ipykernel', 'zmq', 'openpyxl', 'xlrd', 'docx', 'pptx', 'PIL.Image', 'pypdf', 'pypdfium2', 'pypdfium2_raw', 'reportlab'):
     module = importlib.import_module(name)
     if not pathlib.Path(module.__file__).resolve().is_relative_to(root):
         raise RuntimeError(f"{name} loaded outside bundled Python: {module.__file__}")
@@ -92,7 +95,21 @@ picture.save('page.png')
 picture.close(); bitmap.close(); page.close(); pdf.close()
 with Image.open('page.png') as picture:
     picture.verify()
-print(json.dumps({'versions': expected, 'checks': ['imports', 'linear-algebra', 'regression', 'joblib-workers', 'aggregation', 'xlsx', 'plot', 'docx', 'pptx', 'pdf', 'pdf-raster']}))
+import nbformat
+from nbclient import NotebookClient
+from jupyter_client import AsyncKernelManager
+from jupyter_client.kernelspec import KernelSpecManager
+with tempfile.TemporaryDirectory() as temporary:
+    spec = pathlib.Path(temporary) / 'cowork-python'; spec.mkdir()
+    (spec / 'kernel.json').write_text(json.dumps({'argv': [sys.executable, '-m', 'ipykernel_launcher', '-f', '{connection_file}'], 'display_name': 'Cowork Python', 'language': 'python'}), encoding='utf-8')
+    notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell('print(6 * 7)')])
+    manager = AsyncKernelManager(kernel_name='cowork-python', kernel_spec_manager=KernelSpecManager(kernel_dirs=[temporary]))
+    NotebookClient(notebook, km=manager, timeout=15, force_raise_errors=True).execute(cleanup_kc=True)
+    nbformat.validate(notebook)
+    if notebook.cells[0].outputs[0].text.strip() != '42':
+        raise RuntimeError('Notebook kernel execution failed')
+    nbformat.write(notebook, 'executed.ipynb')
+print(json.dumps({'versions': expected, 'checks': ['imports', 'linear-algebra', 'regression', 'joblib-workers', 'aggregation', 'xlsx', 'plot', 'docx', 'pptx', 'pdf', 'pdf-raster', 'notebook-kernel']}))
 '''
 
 

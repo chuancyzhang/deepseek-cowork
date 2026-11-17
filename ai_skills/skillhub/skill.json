@@ -7,18 +7,40 @@
   "source_type": "bundled_plugin",
   "source_format": "agent_skill",
   "default_enabled": true,
-  "description": "Find relevant skills in SkillHub, check local installation and availability, reuse installed skills, and ask whether to install missing skills.",
-  "description_cn": "在 SkillHub 查找适合任务的技能，使用已安装能力，并在缺少技能时询问是否安装使用。",
+  "description": "Search the SkillHub external catalog and inspect versions, sources and local installation status.",
+  "description_cn": "搜索 SkillHub 外部目录，查看版本、来源和本地安装状态。",
   "presentation": {
     "category": "search_browse",
     "short_name": "SkillHub",
     "summary": "查找专业技能，优先使用已有能力，缺少时提示安装。",
-    "examples": ["帮我找一个适合当前任务的技能", "在 SkillHub 搜索 PDF 技能", "这个技能安装了吗"],
+    "examples": [
+      "帮我找一个适合当前任务的技能",
+      "在 SkillHub 搜索 PDF 技能",
+      "这个技能安装了吗"
+    ],
     "access_note": "搜索关键词会发送到 SkillHub 公开接口，无需账号；安装和开启通过 AI 能力商城完成。"
   },
-  "tags": ["SkillHub", "skills", "find skills", "技能搜索", "技能发现", "安装技能", "扩展能力"],
-  "triggers": ["SkillHub", "找技能", "搜索技能", "安装技能", "有没有适合的技能", "缺少专业能力"],
-  "tool_refs": ["search_skillhub", "get_skillhub_skill"],
+  "tags": [
+    "SkillHub",
+    "skills",
+    "find skills",
+    "技能搜索",
+    "技能发现",
+    "安装技能",
+    "扩展能力"
+  ],
+  "triggers": [
+    "SkillHub",
+    "找技能",
+    "搜索技能",
+    "安装技能",
+    "有没有适合的技能",
+    "缺少专业能力"
+  ],
+  "tool_refs": [
+    "search_skillhub",
+    "get_skillhub_skill"
+  ],
   "config_fields": [],
   "python_dependencies": [],
   "node_dependencies": [],
@@ -26,14 +48,24 @@
     {
       "name": "search_skillhub",
       "binding": "impl.py:search_skillhub",
-      "description": "搜索 SkillHub 专业技能并核对本地安装、开启与当前会话可用状态。已安装技能通过 tool_search 使用；缺少时先询问用户是否安装。",
+      "description": "搜索 SkillHub 专业技能并核对本地安装与可用状态，不安装或开启能力。",
       "parameters": {
         "type": "object",
         "properties": {
-          "query": {"type": "string", "description": "技能名称或任务关键词，例如 PDF、演示文稿、数据分析。"},
-          "page": {"type": "integer", "minimum": 1, "default": 1, "description": "页码，每页最多 20 个结果。"}
+          "query": {
+            "type": "string",
+            "description": "技能名称或任务关键词，例如 PDF、演示文稿、数据分析。"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "页码，每页最多 20 个结果。"
+          }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       },
       "read_only": true,
       "destructive": false,
@@ -48,9 +80,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "slug": {"type": "string", "description": "搜索结果返回的准确 SkillHub slug。"}
+          "slug": {
+            "type": "string",
+            "description": "搜索结果返回的准确 SkillHub slug。"
+          }
         },
-        "required": ["slug"]
+        "required": [
+          "slug"
+        ]
       },
       "read_only": true,
       "destructive": false,

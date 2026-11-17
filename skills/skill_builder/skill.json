@@ -2,7 +2,7 @@
   "version": 2,
   "name": "skill-builder",
   "kind": "system",
-  "description": "Create, update, or install reusable standard Agent Skills, including approval-gated remote Skill installation through a constrained specialist agent.",
+  "description": "创建、更新或安装标准 Agent Skill，支持模板资产和本地/HTTPS 来源。",
   "tags": [
     "skill",
     "builder",
@@ -12,12 +12,11 @@
   "triggers": [
     "create skill",
     "update skill",
-    "new skill",
-    "skill metadata",
-    "install remote skill",
-    "read skill.md and install",
-    "安装远程 Skill",
-    "阅读 skill.md 安装"
+    "install skill",
+    "创建技能",
+    "修改技能",
+    "安装技能",
+    "沉淀为 Skill"
   ],
   "anti_triggers": [
     "simple file edit"
@@ -27,15 +26,11 @@
     "create_new_skill",
     "update_skill",
     "install_agent_skill",
-    "remote_skill_installer_agent",
     "review_draft"
   ],
   "workflow": [
-    "Draft skill metadata first.",
-    "Reference existing lightweight tools when possible.",
-    "Only create new impl.py tool sources when the user explicitly wants them.",
-    "When installing standard Agent Skills, preserve the upstream SKILL.md and generate Cowork indexing metadata only.",
-    "For a remote HTTPS Skill entry, use remote_skill_installer_agent instead of shell, npx, Git, or install_agent_skill.",
-    "When remote_skill_installer_agent returns needs_confirmation, request user approval before continuing with decision=confirm."
+    "Read existing materials and preserve unrelated content.",
+    "Use exact local edits for small changes and validate real references.",
+    "Resolve the source in the main conversation, then install the same validated bytes."
   ]
 }

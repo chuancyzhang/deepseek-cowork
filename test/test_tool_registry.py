@@ -1154,10 +1154,10 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
 
         self.assertIn("install_agent_skill", tool_names)
-        self.assertIn("remote_skill_installer_agent", tool_names)
-        remote_record = sm.tool_records["remote_skill_installer_agent"]
+        self.assertNotIn("remote_skill_installer_agent", tool_names)
+        remote_record = sm.tool_records["install_agent_skill"]
         self.assertTrue(remote_record["destructive"])
-        self.assertTrue(remote_record["requires_user_interaction"])
+        self.assertFalse(remote_record.get("requires_user_interaction", False))
         self.assertNotIn("inspect_remote_skill_install", tool_names)
         self.assertNotIn("install_remote_agent_skills", tool_names)
         self.assertNotIn("convert_claude_skill", tool_names)
@@ -1167,7 +1167,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         discovered = set()
         result = sm.call_tool(
             "tool_search",
-            {"query": "阅读 skill.md 安装远程带 Key 能力"},
+            {"query": "install_agent_skill"},
             context={
                 "run_context": {"mode": RUN_MODE_EXECUTION},
                 "discovered_tool_names": discovered,
@@ -1175,7 +1175,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn(
-            "remote_skill_installer_agent",
+            "install_agent_skill",
             [item["name"] for item in result["tools"]],
         )
 

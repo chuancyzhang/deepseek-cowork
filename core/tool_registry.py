@@ -1,5 +1,4 @@
 import copy
-import math
 import re
 from dataclasses import dataclass, field
 
@@ -302,26 +301,10 @@ class ToolRegistry:
         return [self._search_payload(record, score) for score, _name, record in results[:max_results]]
 
     def _score_record(self, record, query_tokens):
-        text_tokens = _tokenize(record.search_text())
-        if not text_tokens:
-            return 0
-        frequencies = {}
-        for token in text_tokens:
-            frequencies[token] = frequencies.get(token, 0) + 1
-        score = 0.0
-        text_set = set(text_tokens)
-        for token in query_tokens:
-            if token in frequencies:
-                score += 4.0 + math.log1p(frequencies[token])
-                continue
-            if any(token in item or item in token for item in text_set):
-                score += 1.5
-        if record.name in query_tokens:
-            score += 8.0
-        if record.search_hint:
-            hint_tokens = set(_tokenize(record.search_hint))
-            score += len(set(query_tokens) & hint_tokens) * 2.0
-        return score
+        from .capability_search import score
+        return score(" ".join(query_tokens), names=[record.name, *record.aliases],
+                     phrases=[record.search_hint] if record.search_hint else [],
+                     description=record.search_text())
 
     def _search_payload(self, record, score):
         return {

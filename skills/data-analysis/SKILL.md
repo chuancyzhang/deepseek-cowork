@@ -8,12 +8,23 @@ default_enabled: true
 metadata:
   author: deepseek-cowork team
   version: "1.0"
-allowed-tools: [document_read, run_python_code, view_image]
+allowed-tools: [document_read, run_python_code, run_skill_script, view_image]
 ---
 
 # 数据分析
 
 根据问题选择深度，简单计算直接完成；仅处理任务相关数据，不无目的遍历全部字段。输入 Excel 不决定交付格式；单纯重命名、转换格式或调整样式不启动本流程。
+
+## 按任务选择指导
+
+已有明确问题直接开始；需要入门时给两三个与手头资料相关的示例，避免固定问卷。专项任务只读取相应参考：
+
+- 漏斗、留存、分群、实验和决策：[业务分析](references/business.md)。
+- 质量、指标变化与独立复核：[质量与诊断](references/quality-and-diagnostics.md)。
+- KPI/OKR 定义、目标与经营汇报：[指标与汇报](references/kpi.md)。
+- 市场范围、估算链与敏感性：[市场规模](references/market-sizing.md)。
+- 报告、交互看板、可视化协作及自定义规范：[报告与看板](references/reports-and-dashboards.md)。
+- 创建、修改、执行 .ipynb：[Notebook](references/notebooks.md)。
 
 ## 从问题到证据
 

@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "name": "template-creator",
+  "kind": "knowledge",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "把参考文件和样式沉淀为可复用模板 Skill，并验证新内容替换。",
+  "tags": [
+    "模板",
+    "模板创建",
+    "可复用",
+    "template",
+    "保存模板"
+  ],
+  "triggers": [
+    "模板",
+    "模板创建",
+    "可复用",
+    "template",
+    "保存模板"
+  ],
+  "tool_refs": [
+    "document_read",
+    "view_image",
+    "create_new_skill",
+    "update_skill",
+    "review_draft"
+  ],
+  "references": [],
+  "display_name": "模板创建",
+  "description_cn": "把参考文件和样式沉淀为可复用模板 Skill，并验证新内容替换。"
+}

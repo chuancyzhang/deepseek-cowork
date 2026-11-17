@@ -16,6 +16,7 @@ SANDBOX_VERSION = "v1"
 PYTHON_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 BUNDLED_PYTHON_IMPORTS = frozenset({
     "numpy", "pandas", "scipy", "matplotlib", "seaborn", "sklearn",
+    "nbformat", "nbclient", "ipykernel", "jupyter_client", "zmq",
     "openpyxl", "xlrd", "docx", "pptx", "PIL", "pypdf", "pypdfium2", "pypdfium2_raw", "reportlab",
 })
 _RUNTIME_CACHE = None

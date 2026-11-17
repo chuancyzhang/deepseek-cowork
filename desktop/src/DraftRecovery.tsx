@@ -1,11 +1,9 @@
-import { AlertCircle, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
-export default function DraftRecovery({ conflict, pending, busy = false, resolve, recover }: {
-  conflict: boolean; pending: boolean; busy?: boolean; resolve: (keepLocal: boolean) => void; recover: (retry: boolean) => void;
+export default function DraftRecovery({ pending, busy = false, recover }: {
+  pending: boolean; busy?: boolean; recover: (retry: boolean) => void;
 }) {
-  if (pending) return <div className="draft-recovery" role="status"><RefreshCw size={15}/><span>上一条消息的接收结果待确认，当前输入已保留。</span>
+  if (!pending) return null;
+  return <div className="draft-recovery" role="status"><RefreshCw size={15}/><span>上一条消息的接收结果待确认，当前输入已保留。</span>
     <button disabled={busy} onClick={() => recover(false)}>{busy?'正在核对…':'核对状态'}</button><button disabled={busy} onClick={() => recover(true)}>重试原消息</button></div>;
-  if (!conflict) return null;
-  return <div className="draft-recovery" role="status"><AlertCircle size={15}/><span>恢复的草稿与已保存版本不同。</span>
-    <button onClick={() => resolve(true)}>保留当前输入</button><button onClick={() => resolve(false)}>载入已保存版本</button></div>;
 }

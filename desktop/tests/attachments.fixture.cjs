@@ -64,13 +64,12 @@ app.whenReady().then(async()=>{
   for(let count=1;count<=3;count++){await paste();await until(`document.querySelectorAll('.composer .image-attachment img').length===${count}`);}
   await copyImage('.composer .image-attachment img',true);
   const cid=(await read("window.cowork.call('conversation.list')")).conversations?.[0]?.id;
-  // Obtain the durable draft through the same API used when reopening history.
+  // Input recovery is local; reopening the renderer must preserve attachments.
   const list=await read("window.cowork.call('conversation.list')");
   const id=cid || (Array.isArray(list)?list[0]?.id:list.items?.[0]?.id);
   assert.ok(id,JSON.stringify(list));
-  let conversation;
-  for(let i=0;i<80;i++){conversation=await read(`window.cowork.call('conversation.get',{conversation_id:${JSON.stringify(id)}})`);if(conversation.draft.attachments.length===3)break;await delay(50);}
-  assert.equal(conversation.draft.attachments.length,3);imagePath=conversation.draft.attachments[0].path;
+  const input=await read(`JSON.parse(localStorage.getItem('cowork-pending-draft:'+${JSON.stringify(id)})).value`);
+  assert.equal(input.attachments.length,3);imagePath=input.attachments[0].path;
   for(const name of ['image-review','summary-writing'])await read(`window.cowork.call('skills.enable',{name:${JSON.stringify(name)},enabled:true})`);
   await read(`window.cowork.call('conversation.preferences',{conversation_id:${JSON.stringify(id)},value:{selected_skill_names:['image-review']}})`);
   await until("!!document.querySelector('[aria-label=\"选择技能 image-review\"]')");

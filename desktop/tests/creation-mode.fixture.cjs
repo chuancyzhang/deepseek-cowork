@@ -51,7 +51,7 @@ async function run(){
   await until('Boolean(document.querySelector("[aria-label=消息输入]"))');
   const conversations=await rpc('conversation.list');
   const design=conversations.find(item=>item.meta.creation_session),cid=design.id,source=design.meta.creation_source_id;
-  assert.equal((await rpc('conversation.get',{conversation_id:source})).draft.text,'保留原对话输入');
+  assert.equal(await read(`JSON.parse(localStorage.getItem('cowork-pending-draft:'+${JSON.stringify(source)})).value.text`),'保留原对话输入');
   const workspace=design.meta.workspace_dir;
   assert.ok((await fs.stat(path.join(workspace,'reference/sdk/client.d.ts'))).isFile());
   await click('选择界面区域');

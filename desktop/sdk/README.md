@@ -65,6 +65,8 @@ send.addEventListener('click', () => cowork.runs.send().catch(showError));
 // 销毁时 unsubscribe() 和 cowork.dispose()。
 ```
 
+`drafts.change` 保留当前宿主输入及本机恢复副本，`drafts.save` 确保该副本写入；两者不向后台同步草稿，不需要处理草稿 revision。新建聊天携带未发送输入，切换已有聊天恢复各自的输入，发送成功后只消费已提交部分。
+
 实际表单应保留输入光标，不用每个快照重设正在输入的 DOM。调用失败显示具体原因，保留输入；不要换用其他后端方法或重新生成提交 ID 自动重发。
 
 完整方法和类型见 [client.d.ts](client.d.ts)，实现见 [client.js](client.js)。

@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import apply_patch as patch_module
 from core.apply_patch import MAX_PATCH_FILES, apply_patch
-from core.filesystem_ops import MAX_TEXT_FILE_BYTES, glob_paths, grep_contents, read_text_file
+from core.filesystem_ops import MAX_TEXT_FILE_BYTES, glob_paths, grep_contents, read_text_file, list_files
 from core.llm.providers import API_PROTOCOL_CHAT_COMPLETIONS, AnthropicProvider, OpenAIProvider
 
 
@@ -500,6 +500,43 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertEqual(scoped_grep["warnings"][0]["code"], "reparse_point_skipped")
         self.assertTrue(any(item["code"] == "reparse_point_skipped" for item in glob_result["warnings"]))
         self.assertTrue(any(item["code"] == "reparse_point_skipped" for item in grep_result["warnings"]))
+
+    def test_authorized_external_search_returns_paths_that_can_be_read(self):
+        with tempfile.TemporaryDirectory() as external:
+            nested = os.path.join(external, '中文目录')
+            os.makedirs(nested)
+            target = os.path.join(nested, '资料.txt')
+            with open(target, 'w', encoding='utf-8') as handle:
+                handle.write('needle 中文')
+            context = {'config_manager': _GodModeConfig()}
+            found = glob_paths(self.workspace, path=external, pattern='中文目录/*.txt', context=context)
+            self.assertEqual(found['items'], [target])
+            self.assertTrue(read_text_file(self.workspace, found['items'][0], context=context)['ok'])
+            self.assertEqual(grep_contents(self.workspace, 'needle', path=external, context=context)['matches'][0]['path'], target)
+            self.assertIn(target, list_files(self.workspace, path=external, recursive=True, context=context)['items'])
+            self.assertFalse(glob_paths(self.workspace, path=external)['ok'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows drive semantics')
+    def test_cross_drive_results_and_warnings_never_compute_workspace_relpath(self):
+        workspace, target = 'E:\\工作区', 'F:\\资料'
+        context = {'config_manager': _GodModeConfig()}
+        with mock_patch('core.filesystem_ops.os.path.exists', return_value=True), \
+             mock_patch('core.filesystem_ops.os.path.isdir', return_value=True), \
+             mock_patch('core.filesystem_ops._is_reparse_point', return_value=False), \
+             mock_patch('core.filesystem_ops.os.listdir', return_value=['样例.txt']), \
+             mock_patch('core.filesystem_ops.os.walk', return_value=[(target, [], ['样例.txt'])]), \
+             mock_patch('core.filesystem_ops.os.path.getsize', return_value=6), \
+             mock_patch('core.filesystem_ops._read_file_bytes', return_value=b'needle'):
+            path = os.path.join(target, '样例.txt')
+            self.assertEqual(glob_paths(workspace, path=target, context=context)['items'], [path])
+            self.assertEqual(list_files(workspace, path=target, context=context)['items'], [path])
+            self.assertEqual(list_files(workspace, path=target, recursive=True, context=context)['items'], [path])
+            self.assertEqual(grep_contents(workspace, 'needle', path=target, context=context)['matches'][0]['path'], path)
+            with mock_patch('core.filesystem_ops._read_file_bytes', side_effect=PermissionError('denied')):
+                self.assertEqual(grep_contents(workspace, 'needle', path=target, context=context)['warnings'][0]['path'], path)
+            with mock_patch('core.filesystem_ops._is_reparse_point', side_effect=lambda p: p == path):
+                self.assertEqual(glob_paths(workspace, path=target, context=context)['warnings'][0]['path'], path)
+            self.assertFalse(glob_paths(workspace, path=target)['ok'])
 
     @unittest.skipUnless(os.name == "nt", "Windows junction behavior")
     def test_windows_junction_is_rejected_for_writes(self):

@@ -39,6 +39,16 @@ def _is_god_mode(context):
     return False
 
 
+def _result_path(path, workspace_dir):
+    """Workspace-relative internally; absolute for an authorized external path."""
+    absolute, workspace = os.path.abspath(path), os.path.abspath(workspace_dir)
+    try:
+        inside = os.path.normcase(os.path.commonpath([absolute, workspace])) == os.path.normcase(workspace)
+    except ValueError:  # Windows paths on different drives have no common root.
+        inside = False
+    return _normalize_rel_path(os.path.relpath(absolute, workspace)) if inside else absolute
+
+
 def _normalize_rel_path(path):
     normalized = os.path.normpath(path or ".")
     if normalized == ".":
@@ -370,15 +380,7 @@ def resolve_path(
         return None, None, _build_error(action, "path_not_found", "Path does not exist.", path=display_path)
 
     if god_mode:
-        try:
-            common = os.path.commonpath([workspace_abs, abs_path])
-        except Exception:
-            common = ""
-        rel_path = (
-            _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
-            if os.path.normcase(common) == os.path.normcase(workspace_abs)
-            else abs_path
-        )
+        rel_path = _result_path(abs_path, workspace_abs)
     else:
         rel_path = _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
     return abs_path, rel_path, None
@@ -457,7 +459,7 @@ def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, l
                     if not include_hidden_flag and _is_hidden_name(name):
                         continue
                     child_abs = os.path.join(root, name)
-                    child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
+                    child_rel = _result_path(child_abs, workspace_dir)
                     items.append(child_rel)
                     if len(items) >= parsed_limit:
                         truncated = True
@@ -472,7 +474,7 @@ def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, l
                 if not include_hidden_flag and _is_hidden_name(name):
                     continue
                 child_abs = os.path.join(abs_path, name)
-                child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
+                child_rel = _result_path(child_abs, workspace_dir)
                 items.append(child_rel)
                 if len(items) >= parsed_limit:
                     truncated = len(sorted(os.listdir(abs_path))) > parsed_limit
@@ -507,7 +509,7 @@ def glob_paths(workspace_dir, pattern="*", path=".", limit=200, include_hidden=F
         if len(warnings) < MAX_SEARCH_WARNINGS:
             warnings.append(
                 {
-                    "path": _normalize_rel_path(os.path.relpath(target, workspace_dir)),
+                    "path": _result_path(target, workspace_dir),
                     "code": code,
                     "message": message,
                 }
@@ -550,9 +552,10 @@ def glob_paths(workspace_dir, pattern="*", path=".", limit=200, include_hidden=F
                 if _is_reparse_point(child_abs):
                     add_warning(child_abs, "reparse_point_skipped", "Symbolic-link files are not searched.")
                     continue
-                child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
+                child_rel = _result_path(child_abs, workspace_dir)
                 basename = os.path.basename(child_rel)
-                if fnmatch.fnmatch(child_rel, normalized_pattern) or fnmatch.fnmatch(basename, normalized_pattern):
+                match_path = _normalize_rel_path(os.path.relpath(child_abs, abs_path)) if os.path.isabs(child_rel) else child_rel
+                if fnmatch.fnmatch(match_path, normalized_pattern) or fnmatch.fnmatch(basename, normalized_pattern):
                     items.append(child_rel)
                     if len(items) >= parsed_limit:
                         truncated = True
@@ -609,7 +612,7 @@ def grep_contents(workspace_dir, pattern, path=".", include="*", exclude=None, r
         if len(warnings) < MAX_SEARCH_WARNINGS:
             warnings.append(
                 {
-                    "path": _normalize_rel_path(os.path.relpath(target, workspace_dir)),
+                    "path": _result_path(target, workspace_dir),
                     "code": code,
                     "message": message,
                 }
@@ -655,7 +658,7 @@ def grep_contents(workspace_dir, pattern, path=".", include="*", exclude=None, r
                 if not fnmatch.fnmatch(name, include_pattern):
                     continue
                 child_abs = os.path.join(root, name)
-                child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
+                child_rel = _result_path(child_abs, workspace_dir)
                 if _is_reparse_point(child_abs):
                     add_warning(child_abs, "reparse_point_skipped", "Symbolic-link files are not searched.")
                     continue

@@ -36,8 +36,7 @@ export function useWorkbenchController() {
   useEffect(() => { setNotice(''); }, [current?.id, route]);
   const [drafts] = useState(() => new Drafts(call, localStorage));
   const draftEntry = useDraft(drafts, selectedConversationId);
-  const draft = draftEntry.value.text, attachments = draftEntry.value.attachments, draftConflict = draftEntry.conflict;
-  const setDraftConflict = (value:boolean) => { const id=selectedId.current; drafts.get(id).conflict=value; drafts.persist(id); };
+  const draft = draftEntry.value.text, attachments = draftEntry.value.attachments;
   const [sending, setSending] = useSessionField('sending', false);
   const [query, setQuery] = useState('');
   const [sidebar, setSidebar] = useState(true);
@@ -118,13 +117,13 @@ export function useWorkbenchController() {
   }
 
   const refreshList = useCallback(async () => {
-    const page = await call<Conversation[]>('conversation.list');
+    const page = draftSummaries(await call<Conversation[]>('conversation.list'));
     setConversations(previous => [...page, ...previous.slice(500).filter(item => !page.some(next => next.id === item.id))]);
     setHasMoreConversations(page.length === 500);
   }, []);
   async function moreConversations() {
     try {
-      const page = await call<Conversation[]>('conversation.list', { offset: conversations.length });
+      const page = draftSummaries(await call<Conversation[]>('conversation.list', { offset: conversations.length }));
       setConversations(previous => [...previous, ...page.filter(item => !previous.some(current => current.id === item.id))]);
       setHasMoreConversations(page.length === 500);
     } catch (failure) { error((failure as Error).message); }
@@ -147,6 +146,15 @@ export function useWorkbenchController() {
       setEvents(previous => mergeEvents(unwrapEvents(older.events || []), previous));
       requestAnimationFrame(() => { if (element) element.scrollTop = oldTop + element.scrollHeight - oldHeight; });
     } catch (failure) { error((failure as Error).message); } finally { setOlderLoading(false); }
+  }
+  function draftSummaries(items: Conversation[]) {
+    return items.map(item => {
+      const entry = drafts.recovery(item.id);
+      if (!entry || item.has_messages || item.meta.manual_title) return item;
+      if (!entry.value.text.trim() && !entry.value.attachments.length) return {...item, display_title:item.title};
+      return {...item, has_content:true, display_title: '草稿 · ' +
+        (entry.value.text.trim().slice(0,32) || entry.value.attachments[0]?.name || item.title)};
+    });
   }
   function openReview(review: string, cid = selectedId.current) {
     if (!cid) return;
@@ -216,7 +224,7 @@ export function useWorkbenchController() {
       if (selectedId.current === item.id && ['archive', 'delete'].includes(action)) {
         selectedId.current = ''; setCurrent(null); setEvents([]); setInteraction(null); setEditors([]); setActiveFile(''); setWorkspaceOpen(false);
         const state = await call('app.bootstrap');
-        const entry = drafts.restore('', state.home_draft); applyDraft(entry.value, false); setDraftConflict(entry.conflict);
+        const entry = drafts.restore('', state.home_draft); applyDraft(entry.value, false);
       }
       await refreshList();
     } catch (failure) { error((failure as Error).message); }
@@ -270,10 +278,10 @@ export function useWorkbenchController() {
     const finished = pending && unwrapEvents(value.events || []).some(event => event.type === 'interaction_finished' && event.data?.request_id === pending.data?.request_id);
     setInteraction(isActive(value.run?.status) && !finished ? pending?.data || null : null);
     if (!preserve) {
-      drafts.restore(id, { value: value.draft || { text: '', attachments: [] }, revision: value.draft_revision ?? -1 });
+      drafts.restore(id, {value: value.draft || {text:'', attachments:[]}});
       await drafts.recoverSubmission(id);
       if (selectedId.current !== id || generation !== loadGeneration.current) return;
-      applyDraft(drafts.get(id).value, false); setDraftConflict(drafts.get(id).conflict);
+      applyDraft(drafts.get(id).value, false);
       viewRevisions.current.set(id, value.view_revision ?? -1);
       setCreationOpen(value.view?.creationOpen ?? Boolean(value.meta.creation_session));
       setCreationTab(value.view?.creationTab || 'design'); setCreationScope(value.view?.creationScope || '整个界面');
@@ -307,14 +315,20 @@ export function useWorkbenchController() {
   async function newConversation(workspace?: string) {
     if (!await leaveManagement.current()) return;
     await saveDraft(); await saveView();
+    const sourceId = selectedId.current;
     const blank = stateRef.current.current;
-    if (blank && !blank.meta.creation_session && !workspace && !blank.has_messages && !blank.messages?.length && !drafts.get(blank.id).value.text.trim() && !drafts.get(blank.id).value.attachments.length && !blank.meta.manual_title && !blank.meta.has_file_changes && !blank.meta.conversation_agent && !blank.meta.selected_skill_names?.length && !blank.meta.knowledge_refs?.length && !blank.meta.conversation_refs?.length && blank.meta.mode !== 'grilling' && !editorsRef.current.length && !isActive(blank.run?.status)) {
+    if (blank && !blank.meta.creation_session && !workspace && !blank.has_messages && !blank.messages?.length && !drafts.get(blank.id).pending && !blank.meta.manual_title && !blank.meta.has_file_changes && !blank.meta.conversation_agent && !blank.meta.selected_skill_names?.length && !blank.meta.knowledge_refs?.length && !blank.meta.conversation_refs?.length && blank.meta.mode !== 'grilling' && !editorsRef.current.length && !isActive(blank.run?.status)) {
       setRoute('chat'); composer.current?.focus(); return blank;
     }
     const value = await call<Conversation>('conversation.create', { workspace_dir: workspace });
+    await drafts.carry(sourceId, value.id, async input => {
+      const copied = input.attachments.length ? await call<Attachment[]>('workspace.attach', {
+        conversation_id:value.id, paths:input.attachments.map(file => file.path),
+      }) : [];
+      return {...input, attachments:copied.map((file,index) => ({...file, name:input.attachments[index].name}))};
+    });
     selectedId.current = value.id; setCurrent(value); setEvents([]);
-    drafts.restore(value.id, { value: { text: '', attachments: [] }, revision: -1 });
-    applyDraft({ text: '', attachments: [] }, false); setDraftConflict(false); viewRevisions.current.set(value.id, -1);
+    viewRevisions.current.set(value.id, -1);
     setEditors([]); setActiveFile(''); setWorkspaceView(emptyWorkspace());
     setShowUsage(false);
     setWorkspaceOpen(false); setWorkspaceExpanded(false); setInteraction(null); setRoute('chat'); nearBottom.current = true;
@@ -326,12 +340,12 @@ export function useWorkbenchController() {
     let mounted = true;
     call('app.bootstrap').then(async value => {
       if (!mounted) return;
-      setSettings(value.settings); setConversations(value.conversations);
+      setSettings(value.settings); setConversations(draftSummaries(value.conversations));
       setHasMoreConversations(value.conversations.length === 500);
       for(const run of value.active_runs)receiveRun(host,run,run.conversation_id);
       const id = value.last_conversation;
       if (id && value.conversations.some((c: Conversation) => c.id === id && !c.meta.archived)) { selectedId.current = id; await loadConversation(id); }
-      else { const entry = drafts.restore('', value.home_draft); applyDraft(entry.value, false); setDraftConflict(entry.conflict); }
+      else { const entry = drafts.restore('', value.home_draft); applyDraft(entry.value, false); }
       setLoading(false);
       requestAnimationFrame(() => { void call('app.ready').catch(failure => error(failure.message)); });
     }).catch(failure => { if (mounted) { setServiceError(failure.message); setLoading(false); } });
@@ -361,11 +375,9 @@ export function useWorkbenchController() {
     return () => { mounted = false; media.removeEventListener('change', apply); unsubscribe(); };
   }, [theme]);
   useEffect(() => {
-    if (loading) return;
-    const id = current?.id || '';
-    const timer = setTimeout(() => { void saveDraft(id).then(() => id ? refreshList() : undefined).catch(failure => error('草稿尚未保存：' + failure.message)); }, 400);
-    return () => clearTimeout(timer);
-  }, [draft, attachments, current?.id, saveDraft, error, loading]);
+    if (loading || !current?.id) return;
+    setConversations(previous => previous.map(item => item.id === current.id ? draftSummaries([item])[0] : item));
+  }, [draft, attachments, current?.id, loading]);
   useEffect(() => {
     if (loading || !current) return;
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
@@ -459,7 +471,6 @@ export function useWorkbenchController() {
       }
       if (selectedId.current === id) applyDraft(drafts.get(id).value, false);
       await saveDraft(id);
-      if (!requestedId) { drafts.change('', { text: '', attachments: [] }); await saveDraft(''); }
       nearBottom.current = true; await loadConversation(id, true); await refreshList();
     } catch (failure) { error((failure as Error).message); throw failure; } finally { host.set(sendingKey, false);host.set(targetSendingKey, false); if(selectedId.current===requestedId)composer.current?.focus(); }
   }
@@ -468,16 +479,6 @@ export function useWorkbenchController() {
     const id = current.id;
     try { await call('conversation.stop', { conversation_id: id, run_id: current.run.id }); await loadConversation(id, true); }
     catch (failure) { error((failure as Error).message); }
-  }
-  async function resolveDraft(keepLocal: boolean) {
-    const id = selectedId.current;
-    try {
-      const data = id ? await call('conversation.get', { conversation_id: id }) : await call('app.bootstrap');
-      const remote = id ? { value: data.draft, revision: data.draft_revision } : data.home_draft;
-      const value = drafts.resolve(id, keepLocal, remote);
-      if (id === selectedId.current) { applyDraft(value, false); setDraftConflict(false); }
-      if (keepLocal) await saveDraft(id);
-    } catch (failure) { error((failure as Error).message); }
   }
   async function recoverSend(retry = false) {
     const id = selectedId.current;
@@ -489,7 +490,7 @@ export function useWorkbenchController() {
       if (!pending) return;
       const receipt = retry ? await drafts.submit(id, JSON.parse(pending.signature)) : await drafts.recoverSubmission(id);
       if (receipt?.accepted) {
-        if (selectedId.current === id) { applyDraft(drafts.get(id).value, false); setDraftConflict(false); }
+        if (selectedId.current === id) { applyDraft(drafts.get(id).value, false); }
         await loadConversation(id, true); await saveDraft(id);
       } else error('尚未找到接收记录，可重试原消息。当前新输入会保留。');
     } catch (failure) { error((failure as Error).message); }
@@ -502,13 +503,10 @@ export function useWorkbenchController() {
     creatingConversation.current = (async () => {
       await saveDraft('');
       const value = await call<Conversation>('conversation.create');
-      drafts.restore(value.id, {value: {text: '', attachments: []}, revision: -1});
-      const homeDraft = drafts.get('').value;
-      drafts.change(value.id, homeDraft); viewRevisions.current.set(value.id, -1);
+      await drafts.carry('', value.id); viewRevisions.current.set(value.id, -1);
       receiveConversation(host, value.id, value);
       if (!selectedId.current) selectedId.current = value.id;
       await saveDraft(value.id);
-      if (drafts.get('').value === homeDraft) { drafts.change('', {text: '', attachments: []}); await saveDraft(''); }
       await refreshList();
       return value.id;
     })();
@@ -718,6 +716,6 @@ export function useWorkbenchController() {
     for(const id of drafts.entries.keys()) await saveDraft(id);
     for(const key of host.values.keys()) if(key.startsWith('session:')&&key.endsWith(':current')&&host.get(key)) await saveView(key.slice(8,-8));
   }), [saves]);
-  return {usePluginAction,creationOpen,setCreationOpen,creationTab,setCreationTab,creationScope,setCreationScope,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, draftConflict, setDraftConflict, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, resolveDraft, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
+  return {usePluginAction,creationOpen,setCreationOpen,creationTab,setCreationTab,creationScope,setCreationScope,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
 }
 export type WorkbenchController = ReturnType<typeof useWorkbenchController>;

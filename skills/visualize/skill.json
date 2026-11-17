@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "visualize",
   "display_name": "交互可视化",
   "kind": "knowledge",

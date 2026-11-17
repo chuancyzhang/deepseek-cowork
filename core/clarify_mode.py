@@ -134,6 +134,8 @@ def normalize_selected_skill_names(values):
     seen = set()
     for item in values or []:
         text = str(item or "").strip()
+        if text == "favorites-manager":
+            text = "task-automation"
         if not text or text in seen:
             continue
         seen.add(text)

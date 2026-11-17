@@ -46,6 +46,15 @@ class ConfigStub:
 
 
 class SkillStub:
+    def select_builtin_skill_prompts(self, *_args):
+        return []
+
+    def builtin_skill_catalog(self, *_args):
+        return []
+
+    def builtin_skill_catalog_prompt(self, *_args):
+        return ""
+
     def __init__(self):
         self.calls = []
 

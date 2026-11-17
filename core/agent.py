@@ -1645,6 +1645,26 @@ class LLMWorker(TaskWorker):
                     parts.append(content.strip())
         return "\n".join(parts)
 
+    def _reconcile_builtin_skill_states(self, current_messages, generated_messages, disclosed_skills):
+        tools = self._available_tool_names()
+        available = {entry["name"] for entry in self.skill_manager.builtin_skill_catalog(tools, self.run_context)}
+        for name, state in fold_skill_state_events(current_messages).items():
+            record = getattr(self.skill_manager, "skill_records", {}).get(name, {})
+            if ((record.get("source_kind") == "core_builtin" or state.get("source") in {"builtin_task_match", "builtin_scope_unavailable"})
+                    and state.get("state") == "enabled" and name not in available):
+                self._append_skill_state_message(name, "disabled", state.get("content_hash") or "",
+                    "builtin_scope_unavailable", current_messages, generated_messages, selection_scoped=False)
+                disclosed_skills.discard(f"{name}:{state.get('content_hash') or ''}")
+        from .conversation_render import _is_hidden_context_message
+        submission = next((message for message in reversed(current_messages)
+                           if message.get("role") == "user" and not _is_hidden_context_message(message)), {})
+        task = submission.get("content") or ""
+        if isinstance(task, list):
+            task = "\n".join(str(part.get("text") or "") for part in task if isinstance(part, dict) and part.get("type") == "text")
+        names = self.skill_manager.select_builtin_skill_prompts(task, tools, self.run_context)
+        self._append_skill_prompts_for_names(names, current_messages, disclosed_skills, generated_messages,
+                                            source="builtin_task_match")
+
     def _append_tool_search_skill_prompts(self, result_obj, current_messages, disclosed_skills, generated_messages=None):
         if not isinstance(result_obj, dict):
             return
@@ -1701,9 +1721,10 @@ class LLMWorker(TaskWorker):
             "策略 [能力暴露]: 应用 `skills/` 中符合当前模式和上下文的核心内置 Tool 已直接出现在当前工具清单，可直接调用；不要先用 'tool_search' 搜索这些内置 Tool。",
             "策略 [能力暴露]: `ai_skills/` 可选能力只有被当前会话显式选择时才直接暴露；已启用但未选择的可选能力、用户扩展和 MCP 可通过 'tool_search' 按需发现，禁用能力不可发现或调用。",
             "策略 [工具权威]: 只能调用当前工具清单中的真实名称。需要当前未暴露的非内置能力时才使用 'tool_search'；不要臆造工具名称、旧别名或不存在的参数。",
+            "策略 [内置技能目录]: 按运行上下文中的内置技能用途选择能力，无需用户先安装或手动选择。遵循本轮加载的技能说明；目录不代表额外授权。查询能力配置与不可用原因使用 capability-manager；可复用任务和定时计划使用 task-automation；参考材料沉淀为模板 Skill 使用 template-creator，创建、更新或安装 Skill 使用 skill_builder。只有用户明确要求未来执行或周期运行时才安排计划，不把当前任务等待完成自动转为计划。",
             "Imported / agent script skill 规则: 已命中包含 `script_entries` 的 imported/agent skill 时，优先调用 `run_skill_script`，不要用 `glob`、`grep` 或 `bash` 猜测 Skill 目录和脚本路径。",
             "策略 [命令]: 当前清单暴露对应工具时，数据处理、批量文本、计算和 Python 检查优先用 'run_python_code'；项目命令、构建测试、git/npm/npx、管道或现有 CLI 使用 'bash'。Node.js 工具选择必须服从动态运行时判定；不要为内联 Python/JavaScript 额外套一层 shell。",
-            "能力分层: 浏览器自动化、网页搜索、金融数据等可选随包能力位于 `ai_skills/`；文档读取等基础能力内置可用。浏览器自动化在“AI 能力商城 → 浏览器自动化”中配置；文档与数据分析基础依赖随应用提供。",
+            "能力分层: 浏览器自动化、网页搜索、金融数据等可选随包能力位于 `ai_skills/`；文档读取等基础能力内置可用。可选能力在“能力 → 技能”中管理，配置入口以能力状态返回的信息为准；文档与数据分析基础依赖随应用提供。",
             "策略 [文本文件]: 'glob' 只查路径，'grep' 只定位内容，'text_file_read' 获取单个文件完整且有序的内容，'apply_patch' 是创建、更新、移动或删除普通文本内容的唯一工具；这些工具不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
             "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
             "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
@@ -1846,6 +1867,9 @@ class LLMWorker(TaskWorker):
             )
 
         capability_lines = []
+        catalog_prompt = self.skill_manager.builtin_skill_catalog_prompt(available_tool_names, self.run_context)
+        if catalog_prompt:
+            capability_lines.append(catalog_prompt)
         if self.run_context.get("browser_backend", {}).get("backend") == "internal":
             capability_lines.append(
                 "本轮浏览器：内置网页工具（实验功能）。网页任务只使用已暴露的 browser_* 工具；"
@@ -3199,6 +3223,9 @@ class LLMWorker(TaskWorker):
                     self._reconcile_selected_skill_states(
                         current_messages, generated_messages, disclosed_skills,
                     )
+                    # Knowledge-only skills can share a tool owner. Load relevant guidance
+                    # before the first model call, rather than after it chooses that tool.
+                    self._reconcile_builtin_skill_states(current_messages, generated_messages, disclosed_skills)
                     stable_system_prompt = self._get_stable_system_prompt()
                     if runtime_snapshot is None:
                         runtime_snapshot = get_runtime_snapshot()
@@ -4290,6 +4317,7 @@ class LLMWorker(TaskWorker):
                                 "memory_project_dir": self.memory_project_dir,
                                 "step_signal": self.step_signal,
                                 "config_manager": self.config_manager,
+                                "task_automation_service": getattr(self.config_manager, "task_automation_service", None),
                                 "skill_manager": self.skill_manager,
                                 "chat_storage": self.chat_storage,
                                 "team_space_client": getattr(self, "_team_space_client", None),

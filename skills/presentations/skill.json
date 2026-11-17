@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "presentations",
   "display_name": "演示文稿",
   "kind": "knowledge",

@@ -667,6 +667,9 @@ ripgrep_env = [
 
 
 application_datas = []
+application_datas.extend(collect_data_files("tzdata"))
+application_datas.extend(copy_metadata("tzdata"))
+application_datas.extend(copy_metadata("tzlocal"))
 _add_analysis_data_file(application_datas, os.path.join(SPEC_DIR, "resources", "enterprise_capabilities.json"), ".")
 application_datas.extend(copy_metadata("pywinpty"))
 application_datas.extend(collect_data_files("winpty", includes=["*.exe"]))

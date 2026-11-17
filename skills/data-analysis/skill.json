@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "data-analysis",
   "display_name": "数据分析",
   "kind": "knowledge",

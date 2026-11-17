@@ -15,6 +15,7 @@ import threading
 import hashlib
 
 RETIRED_SKILLS = {
+    "favorites-manager": "常用任务已统一为 task-automation（任务自动化），已有配置和历史保留。",
     "speech-to-text": "语音转文字已下线，已有音频与转写记录保留。",
     "document-reader": "旧文档技能已移除，请选择 documents（文档处理）；旧配置不自动迁移。",
 }
@@ -3323,7 +3324,8 @@ class SkillManager:
     def _allowed_skill_names(self, run_context):
         ctx = self._normalize_run_context_for_tools(run_context)
         allowed = normalize_selected_skill_names(ctx.get("allowed_skill_names"))
-        return [name for name in allowed if name in self.skill_records]
+        # A missing selected skill must not turn a restricted profile into unrestricted access.
+        return allowed
 
     def _source_skill_for_record(self, skill_name):
         record = self.skill_records.get(str(skill_name or "").strip()) or {}
@@ -3373,10 +3375,6 @@ class SkillManager:
 
     def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
         resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
-        if (run_context or {}).get("knowledge_context"):
-            owner = self.tool_to_skill_map.get(resolved_name)
-            if owner and not self._is_skill_allowed_by_scope(owner, run_context):
-                return False
         if resolved_name == "lookup_app_variable":
             return bool((run_context or {}).get("app_variable_access"))
         if resolved_name in {"history_search", "history_read"}:
@@ -3389,7 +3387,11 @@ class SkillManager:
         skill_name = self.tool_to_skill_map.get(resolved_name)
         if not skill_name:
             return False
-        return self._is_skill_allowed_by_scope(skill_name, run_context)
+        if self._is_skill_allowed_by_scope(skill_name, run_context):
+            return True
+        # Knowledge skills intentionally reuse tools owned by file/Python skills.
+        # Their declared references grant that tool, not the owner's entire surface.
+        return any(resolved_name in self.get_tools_for_skill(name) for name in allowed_skill_names)
 
     def _filter_definitions_by_allowed_skills(self, definitions, run_context):
         filtered = []
@@ -3448,6 +3450,87 @@ class SkillManager:
                 if tool_name not in tool_names:
                     tool_names.append(tool_name)
         return tool_names
+
+    def get_skill_readiness(self, skill_name, run_context=None):
+        """Read directory readiness only; never connect, install or expand the tool scope."""
+        normalized = normalize_selected_skill_names([skill_name])
+        name = normalized[0] if normalized else ""
+        record = self.skill_records.get(name) or {}
+        issues, messages = [], []
+        if not record:
+            item = next((item for item in self.get_all_skills() if item["name"] == name), None)
+            issue = "disabled" if item and not item.get("enabled", True) else "not_loaded"
+            issues.append(issue)
+            messages.append("能力未开启。" if issue == "disabled" else "能力不存在或尚未加载。")
+        else:
+            server = record.get("mcp_server") or {}
+            if not server.get("enabled", True):
+                issues.append("disabled")
+                messages.append("能力未开启。")
+            configuration = self.get_skill_config_status(name)
+            if configuration.get("complete") is False:
+                issues.append("needs_configuration")
+                messages.append("缺少配置：" + "、".join(configuration.get("missing_required") or ["必需字段"]))
+            dependency = record.get("dependency_status") or {}
+            if record.get("load_error") or dependency.get("ok") is False:
+                issues.append("load_or_dependency_error")
+                messages.append("能力加载或依赖失败，请在能力设置中查看具体原因。")
+        if not self._is_skill_allowed_by_scope(name, run_context):
+            issues.append("out_of_scope")
+            messages.append("当前会话或 Agent 不允许使用此能力。")
+        return {"name": name, "issues": issues, "status": issues[0] if issues else "available", "message": "；".join(messages)}
+
+    def builtin_skill_catalog(self, available_tool_names, run_context=None):
+        """A deterministic, scope-filtered index; tool visibility remains authoritative."""
+        available = set(available_tool_names)
+        entries = []
+        for name, record in sorted(self.skill_records.items()):
+            if record.get("source_kind") != TOOL_SOURCE_CORE_BUILTIN:
+                continue
+            if self.get_skill_readiness(name, run_context)["issues"]:
+                continue
+            spec, meta = record.get("spec") or {}, record.get("meta") or {}
+            declared = self.get_tools_for_skill(name)
+            visible = sorted(set(declared) & available)
+            if declared and not visible:
+                continue
+            description = spec.get("description_cn") or meta.get("description_cn") or spec.get("description") or meta.get("description") or ""
+            entry = {"name": name, "display_name": self.get_skill_display_name(name), "description": description,
+                     "tools": visible, "partial": bool(set(declared) - available)}
+            if name == "workbench" and self._browser_backend(run_context) == "external":
+                entry["description"] = "打开当前聊天的文件与交互终端；本轮不提供内置网页操作。"
+            entries.append(entry)
+        return entries
+
+    def builtin_skill_catalog_prompt(self, available_tool_names, run_context=None):
+        entries = self.builtin_skill_catalog(available_tool_names, run_context)
+        if not entries:
+            return ""
+        lines = ["# 本轮可用的内置技能", "以下能力已内置，无需先安装或手动选择。按任务用途使用；目录不代表额外执行授权。"]
+        for entry in entries:
+            line = f"- `{entry['name']}`｜{entry['display_name']}：{entry['description']}"
+            if entry["partial"]:
+                line += " 本轮仅提供：" + "、".join(entry["tools"]) + "。"
+            lines.append(line)
+        lines.append("具体步骤遵循已加载的技能说明；实际可调用的名称、参数及权限以当前工具定义为准。")
+        return "\n".join(lines)
+
+    def select_builtin_skill_prompts(self, query, available_tool_names, run_context=None, limit=3):
+        from .capability_search import score
+        if not str(query or "").strip():
+            return []
+        matches = []
+        for entry in self.builtin_skill_catalog(available_tool_names, run_context):
+            record = self.skill_records[entry["name"]]
+            spec = record.get("spec") or {}
+            if spec.get("prompt_disclosure") != "full_on_match":
+                continue
+            rank = score(query, names=[entry["name"], entry["display_name"]],
+                         phrases=[*(spec.get("triggers") or []), *(spec.get("tags") or [])],
+                         description=spec.get("description") or entry["description"], anti=spec.get("anti_triggers") or [])
+            if rank > 0:
+                matches.append((-rank, entry["name"]))
+        return [name for _, name in sorted(matches)[:limit]]
 
     def get_skill_display_name(self, skill_name):
         record = self.skill_records.get(skill_name)

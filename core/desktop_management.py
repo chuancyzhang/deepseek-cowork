@@ -196,18 +196,16 @@ class Management:
             return {"saved": True}
         if method.startswith("favorites."):
             if action == "list":
-                return self.config.get_favorites()
+                return self.s.automations.list()
             if action == "history":
-                return self.config.get_favorite_run_history()
+                return self.s.automations.history(limit=100)
             if action == "save":
+                from core.task_automation import editable_task
                 value = p["value"]
-                if not str(value.get("name") or "").strip() or not str(value.get("prompt") or "").strip():
-                    raise ValueError("请填写任务名称和内容。")
-                return self.config.upsert_favorite(value)
+                return self.s.automations.save(editable_task(value), value.get("id") or "", value.get("revision"))
             if action == "delete":
-                self.config.set_favorites([item for item in self.config.get_favorites() if item["id"] != p["id"]])
-                return {"saved": True}
-            return self.s.scheduler.run(p["id"])
+                return self.s.automations.delete(p["id"], p.get("revision"))
+            return self.s.automations.run(p["id"], source=p.get("source") or "task", operation_id=p.get("request_id") or "")
         if method.startswith("variables."):
             if action == "list":
                 return self.config.list_app_variables(query=str(p.get("query") or ""))

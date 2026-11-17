@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "capability-manager",
   "kind": "knowledge",
   "source_type": "builtin",

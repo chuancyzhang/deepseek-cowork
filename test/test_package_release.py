@@ -215,6 +215,8 @@ class PackageReleaseTests(unittest.TestCase):
             "resources/service/_internal/skills/skill-importer/impl.py",
             "resources/service/_internal/skills/document-reader/impl.py",
             "resources/service/_internal/ai_skills/document-reader/impl.py",
+            "resources/service/_internal/skills/favorites-manager/impl.py",
+            "resources/service/_internal/ai_skills/favorites-manager/impl.py",
         )
         for relative in cases:
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp_dir:

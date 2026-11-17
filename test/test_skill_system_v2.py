@@ -16,6 +16,51 @@ from core.execution_authorization import ExecutionAuthorization
 
 
 class TestSkillSystemV2(unittest.TestCase):
+    def _builtin_manager(self):
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
+        manager = SkillManager(workspace_dir=self.temp_dir, auto_load=False, load_mcp_tools=False, prepare_dependencies=False)
+        manager.skills_dirs = [root]
+        manager.skill_root_kinds = {root: "core_builtin"}
+        manager.load_skills()
+        return manager
+
+    def test_builtin_catalog_and_knowledge_selection_precede_tool_owner_choice(self):
+        manager = self._builtin_manager()
+        context = {"mode": "execution"}
+        tools = [item["function"]["name"] for item in manager.get_tool_definitions(run_context=context)]
+        catalog = manager.builtin_skill_catalog_prompt(tools, context)
+        for name in ("task-automation", "template-creator", "capability-manager", "data-analysis", "skill_builder"):
+            self.assertIn("`" + name + "`", catalog)
+        self.assertNotIn("favorites-manager", catalog)
+        self.assertNotIn("launch_favorite", tools)
+        self.assertIn("run_automation", tools)
+        self.assertIn("template-creator", manager.select_builtin_skill_prompts("把这份 PPT 保存为可复用模板 Skill", tools, context))
+        self.assertIn("data-analysis", manager.select_builtin_skill_prompts("分析销售数据下降原因，核对指标口径", tools, context))
+        self.assertIn("task-automation", manager.select_builtin_skill_prompts("每天九点检查网页并生成日报", tools, context))
+        self.assertEqual(catalog, manager.builtin_skill_catalog_prompt(list(reversed(tools)), context))
+
+    def test_builtin_catalog_never_advertises_blocked_skills(self):
+        manager = self._builtin_manager()
+        context = {"mode": "execution", "allowed_skill_names": ["data-analysis"]}
+        tools = [item["function"]["name"] for item in manager.get_tool_definitions(run_context=context)]
+        catalog = manager.builtin_skill_catalog_prompt(tools, context)
+        self.assertIn("`data-analysis`", catalog)
+        self.assertNotIn("`task-automation`", catalog)
+        self.assertNotIn("`template-creator`", catalog)
+        self.assertEqual(manager.select_builtin_skill_prompts("每天九点运行任务", tools, context), [])
+        self.assertFalse(manager._is_skill_allowed_by_scope("data-analysis", {"allowed_skill_names": ["no-longer-installed"]}))
+        library_context = {**context, "knowledge_context": {"refs": [{"id": "fixture"}]}}
+        declared = manager.get_tools_for_skill("data-analysis")
+        self.assertTrue(declared)
+        self.assertTrue(all(manager._is_tool_allowed_by_skill_scope(name, library_context) for name in declared))
+        self.assertFalse(manager._is_tool_allowed_by_skill_scope("run_automation", library_context))
+
+    def test_builtin_load_failure_is_not_advertised_as_available(self):
+        manager = self._builtin_manager()
+        tools = list(manager.tools)
+        manager.skill_records["template-creator"]["load_error"] = "fixture failure"
+        self.assertNotIn("`template-creator`", manager.builtin_skill_catalog_prompt(tools))
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.authorization = ExecutionAuthorization("skill-test", "run", True, self.temp_dir)

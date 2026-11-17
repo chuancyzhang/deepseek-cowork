@@ -94,6 +94,9 @@ REQUIRED_PATHS = (
     *(f"resources/service/_internal/skills/{skill}/{entry}" for skill in ("visualize", "documents", "view-image") for entry in ("skill.json", "impl.py")),
     "resources/service/_internal/skills/visualize/SKILL.md",
     "resources/service/_internal/skills/documents/SKILL.md",
+    *(f"resources/service/_internal/skills/task-automation/{entry}" for entry in ("skill.json", "SKILL.md", "impl.py")),
+    "resources/service/_internal/tzdata/zoneinfo/Asia/Shanghai",
+    "resources/service/_internal/tzdata/zoneinfo/America/New_York",
     *(f"resources/service/_internal/skills/{skill}/{entry}" for skill in ("presentations", "data-analysis", "template-creator", "capability-manager") for entry in ("skill.json", "SKILL.md")),
     *(f"resources/service/_internal/skills/{entry}" for entry in (
         "documents/references/word.md", "presentations/references/authoring.md",
@@ -170,7 +173,8 @@ def _forbidden_reason(relative: Path) -> str:
         return "Node development dependency"
     removed_packages = ("ai_skills/frontend-slides", "ai_skills/huashu-design",
                         "ai_skills/guizang-ppt-skill", "skills/skill-importer", "skills/general-experience",
-                        "skills/document-reader", "ai_skills/document-reader")
+                        "skills/document-reader", "ai_skills/document-reader",
+                        "skills/favorites-manager", "ai_skills/favorites-manager")
     if any(lowered.startswith("resources/service/_internal/" + package + "/") for package in removed_packages):
         return "Removed built-in Skill is still bundled; rebuild the desktop distribution"
     if "/web/editors/dist/" in "/" + lowered and lowered.endswith(".map"):

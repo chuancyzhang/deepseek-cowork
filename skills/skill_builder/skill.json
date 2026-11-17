@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "skill-builder",
   "kind": "system",
   "description": "创建、更新或安装标准 Agent Skill，支持模板资产和本地/HTTPS 来源。",

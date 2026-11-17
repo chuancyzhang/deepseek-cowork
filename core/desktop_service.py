@@ -78,6 +78,10 @@ class DesktopService:
         from core.desktop_skillhub import DesktopSkillHub
         self.skillhub = DesktopSkillHub(self)
         self.scheduler = DesktopScheduler(self)
+        from core.task_automation import TaskAutomationService
+        self.automations = TaskAutomationService(self)
+        self.scheduler.lock = self.automations.lock
+        self.config.task_automation_service = self.automations
         from core.desktop_connections import Connections
         self.connections = Connections(self)
         from core.desktop_workbench import DesktopWorkbench

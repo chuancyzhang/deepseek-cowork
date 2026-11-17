@@ -1,10 +1,12 @@
 import calendar
 import json
+import logging
 import os
 import re
 import time
 import uuid
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clarify_mode import normalize_selected_skill_names
 from .favorite_delivery import normalize_favorite_delivery
@@ -49,6 +51,7 @@ FAVORITE_RUN_STATUSES = {
     FAVORITE_RUN_STATUS_ERROR,
     FAVORITE_RUN_STATUS_INTERRUPTED,
     FAVORITE_RUN_STATUS_MISSED,
+    "skipped",
 }
 
 DEFAULT_FAVORITES_TIMER_INTERVAL_MS = 30000
@@ -175,36 +178,44 @@ def cron_expression_from_schedule(schedule):
     return f"{minute} {hour} * * *"
 
 
-def _cron_matches(candidate, expression):
-    parts = expression.split()
-    minutes = _parse_cron_part(parts[0], 0, 59)
-    hours = _parse_cron_part(parts[1], 0, 23)
-    days = _parse_cron_part(parts[2], 1, 31)
-    months = _parse_cron_part(parts[3], 1, 12)
-    weekdays = _parse_cron_part(parts[4], 0, 7)
-    cron_weekday = (candidate.weekday() + 1) % 7
-    weekday_match = cron_weekday in weekdays or (cron_weekday == 0 and 7 in weekdays)
-    return (
-        candidate.minute in minutes
-        and candidate.hour in hours
-        and candidate.day in days
-        and candidate.month in months
-        and weekday_match
-    )
+def schedule_timezone(schedule):
+    """Missing/local preserves legacy system-local schedules, including their next receipt."""
+    name = str((schedule or {}).get("timezone") or "local").strip()
+    if name == "local":
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"时区不可用：{name}，请填写 IANA 时区，例如 Asia/Shanghai。") from exc
 
 
-def compute_next_cron_run_at(expression, now_ts=None, after_ts=None):
+def _wall_timestamp(wall, zone):
+    if zone is None:
+        return int(wall.timestamp())
+    # fold=0 always chooses the first occurrence; a repeated wall minute is never rerun.
+    candidate = wall.replace(tzinfo=zone, fold=0)
+    timestamp = int(candidate.timestamp())
+    if datetime.fromtimestamp(timestamp, zone).replace(tzinfo=None) != wall:
+        logging.getLogger("desktop.scheduler").warning(
+            "schedule_time_skipped timezone=%s local_time=%s reason=nonexistent_wall_time", zone, wall.isoformat())
+        return None
+    return timestamp
+
+
+def compute_next_cron_run_at(expression, now_ts=None, after_ts=None, timezone="local"):
     expression = normalize_cron_expression(expression)
     now_ts = int(now_ts or time.time())
     base_ts = int(after_ts if after_ts is not None else now_ts)
-    base_dt = datetime.fromtimestamp(base_ts)
-    if croniter:
-        return int(croniter(expression, base_dt).get_next(datetime).timestamp())
-    candidate = base_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    for _index in range(366 * 24 * 60 * 5):
-        if _cron_matches(candidate, expression):
-            return int(candidate.timestamp())
-        candidate += timedelta(minutes=1)
+    zone = schedule_timezone({"timezone": timezone})
+    base_dt = datetime.fromtimestamp(base_ts, zone).replace(tzinfo=None)
+    if croniter is None:
+        raise ValueError("Cron 计算依赖 croniter 不可用，请修复应用依赖。")
+    iterator = croniter(expression, base_dt, max_years_between_matches=5)
+    for _index in range(4096):
+        candidate = iterator.get_next(datetime)
+        timestamp = _wall_timestamp(candidate, zone)
+        if timestamp is not None and timestamp > base_ts:
+            return timestamp
     raise ValueError("无法在五年范围内计算下一次 Cron 运行时间。")
 
 
@@ -221,7 +232,8 @@ def compute_next_run_at(schedule, now_ts=None, after_ts=None):
             raise ValueError("单次计划必须设置执行时间。")
         return one_time_at
     if schedule_type == FAVORITE_SCHEDULE_CRON:
-        return compute_next_cron_run_at(source.get("cron_expression"), now_ts=now_ts, after_ts=base_ts)
+        return compute_next_cron_run_at(source.get("cron_expression"), now_ts=now_ts, after_ts=base_ts,
+                                       timezone=source.get("timezone") or "local")
     if schedule_type == FAVORITE_SCHEDULE_INTERVAL:
         interval_minutes = int(source.get("interval_minutes") or 60)
         if interval_minutes < 1 or interval_minutes > 24 * 60:
@@ -232,29 +244,33 @@ def compute_next_run_at(schedule, now_ts=None, after_ts=None):
             return anchor_at
         return anchor_at + ((max(0, base_ts - anchor_at) // interval_seconds) + 1) * interval_seconds
     _time_text, hour, minute = _parse_time_of_day(source.get("time_of_day"))
-    current = datetime.fromtimestamp(base_ts)
+    zone = schedule_timezone(source)
+    current = datetime.fromtimestamp(base_ts, zone).replace(tzinfo=None)
     today = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if schedule_type == FAVORITE_SCHEDULE_DAILY:
-        return int(today.timestamp()) if today.timestamp() > base_ts else int((today + timedelta(days=1)).timestamp())
+        for offset in range(370):
+            timestamp = _wall_timestamp(today + timedelta(days=offset), zone)
+            if timestamp is not None and timestamp > base_ts:
+                return timestamp
     if schedule_type == FAVORITE_SCHEDULE_WEEKLY:
         weekdays = _normalize_weekdays(source.get("weekdays"))
-        for offset in range(8):
+        for offset in range(370):
             candidate_day = current + timedelta(days=offset)
             if candidate_day.weekday() in weekdays:
                 candidate = candidate_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if candidate.timestamp() > base_ts:
-                    return int(candidate.timestamp())
+                timestamp = _wall_timestamp(candidate, zone)
+                if timestamp is not None and timestamp > base_ts:
+                    return timestamp
     if schedule_type == FAVORITE_SCHEDULE_MONTHLY:
         day = int(source.get("day_of_month") or 1)
         if day < 1 or day > 31:
             raise ValueError("每月执行日期必须在 1 到 31 之间。")
-        candidate = _candidate_for_month(current.year, current.month, day, hour, minute)
-        if candidate.timestamp() > base_ts:
-            return int(candidate.timestamp())
-        year, month = current.year, current.month + 1
-        if month > 12:
-            year, month = year + 1, 1
-        return int(_candidate_for_month(year, month, day, hour, minute).timestamp())
+        for offset in range(60):
+            year, month_index = divmod(current.year * 12 + current.month - 1 + offset, 12)
+            candidate = _candidate_for_month(year, month_index + 1, day, hour, minute)
+            timestamp = _wall_timestamp(candidate, zone)
+            if timestamp is not None and timestamp > base_ts:
+                return timestamp
     raise ValueError(f"无法计算定时类型：{schedule_type}")
 
 
@@ -263,7 +279,7 @@ def describe_schedule(schedule):
     schedule_type = str(source.get("schedule_type") or FAVORITE_SCHEDULE_DAILY).strip().lower()
     if schedule_type == FAVORITE_SCHEDULE_ONCE:
         one_time_at = int(source.get("one_time_at") or 0)
-        return datetime.fromtimestamp(one_time_at).strftime("单次 · %Y-%m-%d %H:%M") if one_time_at else "单次"
+        return datetime.fromtimestamp(one_time_at, schedule_timezone(source)).strftime("单次 · %Y-%m-%d %H:%M") if one_time_at else "单次"
     if schedule_type == FAVORITE_SCHEDULE_INTERVAL:
         return f"每隔 {int(source.get('interval_minutes') or 60)} 分钟"
     if schedule_type == FAVORITE_SCHEDULE_CRON:
@@ -290,6 +306,7 @@ def normalize_favorite_schedule(schedule, favorite_prompt="", now_ts=None):
     if schedule is None:
         return None
     source = dict(schedule or {})
+    schedule_timezone(source)
     now_ts = int(now_ts or time.time())
     schedule_type = str(source.get("schedule_type") or FAVORITE_SCHEDULE_DAILY).strip().lower()
     if schedule_type not in FAVORITE_SCHEDULE_TYPES:
@@ -320,6 +337,7 @@ def normalize_favorite_schedule(schedule, favorite_prompt="", now_ts=None):
     else:
         cron_expression = cron_expression_from_schedule(source)
     normalized = {
+        "timezone": str(source.get("timezone") or "local").strip(),
         "enabled": bool(source.get("enabled", False)),
         "prompt_mode": prompt_mode,
         "custom_prompt": custom_prompt,
@@ -373,6 +391,9 @@ def normalize_favorite(favorite, now_ts=None):
         "schedule": schedule,
         "created_at": created_at,
         "updated_at": int(source.get("updated_at") or created_at or now_ts),
+        "revision": max(1, int(source.get("revision") or 1)),
+        "last_operation_id": str(source.get("last_operation_id") or ""),
+        "last_operation_hash": str(source.get("last_operation_hash") or ""),
     }
 
 
@@ -411,6 +432,10 @@ def normalize_favorite_run_record(record):
         "delivery_id": str(source.get("delivery_id") or "").strip(),
         "delivery_status": str(source.get("delivery_status") or "").strip(),
         "delivery_error": str(source.get("delivery_error") or "").strip(),
+        "run_id": str(source.get("run_id") or ""),
+        "task_revision": int(source.get("task_revision") or 0),
+        "model_id": str(source.get("model_id") or ""),
+        "skill_versions": dict(source.get("skill_versions") or {}),
         "created_at": created_at,
     }
 
@@ -436,6 +461,7 @@ def make_favorite_run_record(favorite, status=FAVORITE_RUN_STATUS_RUNNING, trigg
         FAVORITE_RUN_STATUS_ERROR,
         FAVORITE_RUN_STATUS_INTERRUPTED,
         FAVORITE_RUN_STATUS_MISSED,
+        "skipped",
     }
     return normalize_favorite_run_record(
         {

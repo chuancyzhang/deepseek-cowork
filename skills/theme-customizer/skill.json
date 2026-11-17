@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "prompt_disclosure": "full_on_match",
   "name": "theme-customizer",
   "kind": "knowledge",
   "capability_group": "appearance",

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, Pencil, Play, Plus, Search, Sparkles, Star, Trash2, Upload } from 'lucide-react';
+import { ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, Search, Sparkles, Trash2, Upload } from 'lucide-react';
 import { Empty, ErrorState, Field, JobProgress, PageHead, PageToolbar, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import { skillInMode, skillMatches, skillScenes } from '../skills';
+import { sameFormValue } from '../host/forms';
 import SkillHub from './SkillHub';
 
 type Props = { kind: string; onError: (message: string) => void; onDirty: (value: boolean) => void;
@@ -21,6 +22,10 @@ export default function Capabilities(props: Props) {
     catch (error) { setFailure((error as Error).message); } finally { setBusy(false); }
   }, [kind]);
   useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    if (!['favorites', 'schedule_history'].includes(kind)) return;
+    return window.cowork.onEvents(events => { if (events.some(event => event.event === 'schedule_changed')) void reload(); });
+  }, [kind, reload]);
   async function act(method: string, params: any) {
     setBusy(true);
     try { const result = await operation(method, params, setJob); await reload(); return result; }
@@ -37,7 +42,7 @@ export default function Capabilities(props: Props) {
     </div>
   </>;
   if (selected) return kind === 'skills' ? <SkillEditor key={selected.name} {...props} item={selected} back={() => setSelected(null)} saved={reload}/>
-    : <ItemEditor key={selected.id || 'new'} {...props} item={selected} back={() => { setSelected(null); void reload(); }}/ >;
+    : <ItemEditor key={selected.id || 'new'} {...props} item={selected} refresh={setSelected} back={() => { setSelected(null); void reload(); }}/ >;
   if (kind === 'skills' && mode === 'hub') return <SkillHub back={() => setMode('library')} mine={() => {setMode('mine'); void reload();}} onError={onError}/>;
   const candidates = kind === 'skills' ? items.filter(item => skillInMode(item, mode) && skillMatches(item, query)) : items.filter(item => [item.name, item.display_name, item.description, item.user_description, item.favorite_name].some(value => String(value || '').toLowerCase().includes(query.toLowerCase())));
   const rows = candidates.filter(item => kind !== 'skills' || mode !== 'library' || !scene || item.presentation?.category === scene);
@@ -50,28 +55,53 @@ export default function Capabilities(props: Props) {
     {kind === 'skills' && mode === 'library' && <label className="skill-category-select"><span>分类</span><select aria-label="技能分类" value={scene} onChange={event => setScene(event.target.value)}>{[['','全部任务'],...skillScenes].map(([key,label]) => <option key={key} value={key}>{label} · {candidates.filter(item => !key || item.presentation?.category === key).length}</option>)}</select></label>}
     <JobProgress job={job}/>{failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {busy && !items.length ? <div className="loading"><LoaderCircle className="spin"/>正在载入…</div> : !rows.length ? <Empty title={query ? '没有匹配的内容' : '从你的第一项开始'} detail={query ? '换一个名称或用途试试。' : descriptions[kind]}/> :
+    kind === 'favorites' ? <div className="automation-list">{rows.map(item => <AutomationRow key={item.id} item={item} busy={busy} edit={() => setSelected(item)} act={act} {...props}/>)}</div> :
     <div className={kind === 'skills' ? 'capability-grid' : 'resource-list'}>{rows.map(item => <article className="resource-card" key={item.id || item.name}>
-      <div className="resource-symbol">{kind === 'skills' ? <Sparkles size={20}/> : kind === 'favorites' ? <Star size={20}/> : <FileCode2 size={20}/>}</div>
+      <div className="resource-symbol">{kind === 'skills' ? <Sparkles size={20}/> : <FileCode2 size={20}/>}</div>
       <div className="resource-body"><button className="resource-title" onClick={() => { if (kind === 'schedule_history') { if (item.session_id) openConversation(item.session_id); } else setSelected(item); }}>{item.presentation?.short_name || item.display_name || item.name || item.favorite_name}</button>
         <p>{item.presentation?.summary || item.user_description || item.description || (kind === 'mcp' ? item.url || item.command : '') || item.summary || item.error}</p>
         {kind === 'experts' && item.builtin && <small>内置专家</small>}
         {kind === 'skills' && item.config_status?.has_config && !item.config_status?.complete && <button className="text-link" onClick={() => setSelected(item)}>完成连接配置</button>}
-        {item.schedule && <small>{item.schedule.enabled ? item.schedule.schedule_summary : '计划已暂停'}</small>}
-        {kind === 'schedule_history' && <small>{({ running: '正在运行', completed: '已完成', error: '失败', missed: '已错过', interrupted: '已停止' } as any)[item.status]} · {new Date((item.started_at || item.created_at) * 1000).toLocaleString()}{item.delivery_error && <span className="error-text">{item.delivery_error}</span>}</small>}
+        {item.schedule && <small>{item.schedule.enabled ? item.schedule.schedule_summary : '计划已暂停'} · {item.schedule.timezone_label || item.schedule.timezone || '本机时区'}{item.schedule.enabled && item.schedule.next_run_at ? ' · 下次 ' + new Date(item.schedule.next_run_at * 1000).toLocaleString('zh-CN', {timeZone: item.schedule.timezone === 'local' ? undefined : item.schedule.timezone}) : ''}</small>}
+        {item.configuration_issues?.map((issue: any, index: number) => <p className="error-text" key={index}>{issue.skill_name ? issue.skill_name + '：' : ''}{issue.reason}</p>)}
+        {kind === 'schedule_history' && <small>{item.waiting_for_input ? '等待输入或批准' : ({ running: '正在运行', completed: '已完成', error: '失败', missed: '已错过', skipped: '已跳过', interrupted: '已中断' } as any)[item.status]} · {new Date((item.started_at || item.created_at) * 1000).toLocaleString()}{item.delivery_status && <span> · {({pending:'等待发送',sending:'正在发送',completed:'已发送',partial:'部分发送',failed:'发送失败',unknown:'发送结果未确认',blocked:'暂不能发送',retry_wait:'等待重试'} as any)[item.delivery_status] || '发送状态待核对'}</span>}{item.delivery_error && <span className="error-text">{item.delivery_error}</span>}</small>}
       </div><div className="resource-actions">
         {kind === 'skills' ? item.source_kind === 'core_builtin' ? <small>默认启用</small> : <button className={`toggle ${item.enabled ? 'on' : ''}`} role="switch" aria-checked={Boolean(item.enabled)} aria-label={(item.enabled ? '停用' : '启用') + (item.display_name || item.name)} disabled={busy} onClick={() => void act('skills.enable', { name: item.name, enabled: !item.enabled })}><span/></button> :
-          kind === 'favorites' ? <button className="icon-button" title="立即运行" disabled={busy} onClick={async () => { const result = await act('favorites.run', { id: item.id }); if (result?.conversation_id) openConversation(result.conversation_id); }}><Play size={17}/></button> :
           kind === 'mcp' ? <button className="secondary" disabled={busy} onClick={() => void act('mcp.test', { id: item.id })}>测试连接</button> : null}
         {kind !== 'schedule_history' && (kind === 'experts' && item.builtin ? <button className="secondary" onClick={() => setSelected(item)}>查看</button> : <button className="icon-button" title="编辑" onClick={() => setSelected(item)}><Pencil size={16}/></button>)}
         {kind !== 'schedule_history' && !(kind === 'experts' && item.builtin) && (kind !== 'skills' || item.editable) && <button className="icon-button" title="删除" disabled={busy} onClick={async () => {
-          if (await confirm('删除' + (item.display_name || item.name) + '？', kind === 'skills' ? '将删除此技能的本地文件。可以先打开详情导出备份。' : '已存在的对话和运行结果会保留。', ['取消', '删除']) === 1) await act(kind + '.delete', { id: item.id, name: item.name });
+          if (await confirm('删除' + (item.display_name || item.name) + '？', kind === 'skills' ? '将删除此技能的本地文件。可以先打开详情导出备份。' : kind === 'favorites' ? '任务及定时计划会删除；已有对话、运行记录和当前正在执行的任务会保留。' : '已存在的对话和运行结果会保留。', ['取消', '删除']) === 1) await act(kind + '.delete', { id: item.id, name: item.name, revision: item.revision });
         }}><Trash2 size={16}/></button>}
       </div></article>)}</div>}
     {kind === 'skills' && mode !== 'builtin' && <button className="skillhub-entry" onClick={() => setMode('hub')}>没有找到合适的？　去 SkillHub 查找更多 <ExternalLink size={15}/></button>}
   </>;
 }
 
-function ItemEditor({ item, kind, onDirty, onError, confirm, back }: Props & { item: any; back: () => void }) {
+function AutomationRow({item, busy, edit, act, onError, openConversation, confirm}: Props & {item: any; busy: boolean; edit: () => void; act: (method: string, params: any) => Promise<any>}) {
+  const menu = useRef<HTMLDetailsElement>(null), schedule = item.schedule;
+  async function run(source: string) {
+    const result = await act('favorites.run', {id: item.id, source, request_id: crypto.randomUUID()});
+    if (result?.error) onError(result.error);
+    if (result?.conversation_id) openConversation(result.conversation_id);
+  }
+  return <article className="automation-row">
+    <div className="automation-task"><button className="resource-title" onClick={edit}>{item.name}</button><p>{item.description || item.prompt || '打开后输入任务'}</p>
+      {item.configuration_issues?.map((issue: any, index: number) => <p className="error-text" key={index}>{issue.skill_name ? issue.skill_name + '：' : ''}{issue.reason}</p>)}
+    </div>
+    <div className="automation-time">{schedule ? <><span>{schedule.schedule_summary}</span><small>{schedule.enabled ? (schedule.next_run_at ? '下次 ' + new Date(schedule.next_run_at * 1000).toLocaleString('zh-CN', {timeZone: schedule.timezone === 'local' ? undefined : schedule.timezone}) : '已启用') : '计划已暂停'}</small><small>{schedule.timezone_label || schedule.timezone || '本机时区'}</small></> : <span className="muted">手动运行</span>}</div>
+    <div className="automation-actions"><button className="secondary" disabled={busy} title={item.prompt ? '立即运行任务' : '打开能力组合'} onClick={() => void run('task')}><Play size={15}/>{item.prompt ? '运行' : '打开'}</button>
+      <details ref={menu} className="automation-menu" onKeyDown={event => {if(event.key === 'Escape' && menu.current) {menu.current.open = false; menu.current.querySelector('summary')?.focus();}}} onBlur={event => {if(!event.currentTarget.contains(event.relatedTarget as Node) && menu.current) menu.current.open = false;}}>
+        <summary className="icon-button" aria-label={'更多操作：' + item.name}><MoreHorizontal size={18}/></summary>
+        <div onClick={() => {if(menu.current) menu.current.open = false;}}><button disabled={busy} onClick={edit}>编辑任务</button>
+          {schedule && <><button disabled={busy} onClick={() => void run('schedule')}>执行一次计划</button><button disabled={busy} onClick={() => void act('favorites.save', {value: {id: item.id, revision: item.revision, schedule: {enabled: !schedule.enabled}}})}>{schedule.enabled ? '暂停计划' : '启用计划'}</button></>}
+          <button className="automation-delete" disabled={busy} onClick={async () => {if(await confirm('删除' + item.name + '？', '任务和计划会删除；已有对话、运行记录及正在执行的任务会保留。', ['取消', '删除']) === 1) await act('favorites.delete', {id: item.id, revision: item.revision});}}>删除任务</button>
+        </div>
+      </details>
+    </div>
+  </article>;
+}
+
+function ItemEditor({ item, kind, onDirty, onError, confirm, back, refresh }: Props & { item: any; back: () => void; refresh: (item: any) => void }) {
   const initial = kind === 'mcp' ? { name: '', transport: 'stdio', command: '', args: [], url: '', enabled: true, ...item,
     _importJson: '', _connectionJson: JSON.stringify({ env: item.env || {}, headers: item.headers || {}, auth: item.auth || {} }, null, 2) }
     : kind === 'experts' ? { name: '', description: '', system_prompt: '', skill_names: [], enabled: true, ...item }
@@ -81,7 +111,19 @@ function ItemEditor({ item, kind, onDirty, onError, confirm, back }: Props & { i
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState(''), [skills, setSkills] = useState<any[]>([]);
   useEffect(() => { if (kind !== 'mcp') void rpc('skills.list').then(setSkills).catch(error => onError(error.message)); }, [kind]);
   const schedule = v.schedule || {};
-  const setSchedule = (values: any) => set('schedule', { ...schedule, ...values, next_run_at: 0 });
+  const setSchedule = (values: any) => set('schedule', { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    time_of_day: '09:00', weekdays: [0], day_of_month: 1, interval_minutes: 60, ...schedule, ...values });
+  async function reloadTask() {
+    setBusy(true);
+    try {
+      const latest = (await rpc<any[]>('favorites.list')).find(value => value.id === item.id);
+      if (!latest) throw Error('任务已被删除，当前编辑仍保留；可复制内容后新建任务。');
+      const names: Record<string,string> = {name:'名称',description:'用途',prompt:'任务内容',skill_names:'技能',execution_mode:'执行位置',workspace_dir:'工作目录',schedule:'定时计划'};
+      const conflicts = Object.keys(names).filter(key => !sameFormValue(v[key],form.saved[key]) && !sameFormValue(latest[key],form.saved[key]) && !sameFormValue(v[key],latest[key]));
+      if (conflicts.length && await confirm('合并最新版本？', conflicts.map(key => names[key]).join('、') + '同时有其他修改。保留当前编辑会在这些部分使用你的内容，其余部分读取最新版本；核对后再保存。', ['继续编辑', '保留当前编辑并合并']) !== 1) return;
+      refresh(latest); setFailure('');
+    } catch (error) {setFailure((error as Error).message);} finally {setBusy(false);}
+  }
   async function leave() { if (!form.dirty || await confirm('保留编辑草稿？', '下次打开可以继续编辑。', ['继续编辑', '保留并返回']) === 1) back(); }
   return <><header className="item-editor-heading"><button className="icon-button" title={'返回' + titles[kind]} aria-label={'返回' + titles[kind]} onClick={() => void leave()}><ArrowLeft size={18}/></button><h2>{item.id ? v.name || titles[kind] : '新建' + titles[kind]}</h2></header>
     <form className={'detail-form' + (kind === 'mcp' ? ' mcp-form' : '')} onSubmit={async e => { e.preventDefault(); setBusy(true); setFailure('');
@@ -100,24 +142,32 @@ function ItemEditor({ item, kind, onDirty, onError, confirm, back }: Props & { i
         {v.transport === 'stdio' ? <><Field label="程序"><input required value={v.command} onChange={e => set('command', e.target.value)}/></Field><Field label="启动参数" wide><textarea rows={3} placeholder="每行一个参数" value={v.args.join('\n')} onChange={e => set('args', e.target.value.split('\n'))}/></Field></> : <Field label="服务地址"><input type="url" required value={v.url} onChange={e => set('url', e.target.value)}/></Field>}
         <details className="wide"><summary>环境变量、请求头与认证</summary><textarea aria-label="连接配置 JSON" className="code-input" rows={10} value={v._connectionJson} onChange={e => set('_connectionJson', e.target.value)}/><small>敏感凭据只在当前应用内保留，未保存时退出应用需重新填写。</small></details>
       </> : <>
-        <Field label={kind === 'experts' ? '工作指引' : '任务内容'} wide><textarea rows={9} required value={v[kind === 'experts' ? 'system_prompt' : 'prompt']} onChange={e => set(kind === 'experts' ? 'system_prompt' : 'prompt', e.target.value)}/></Field>
+        <Field label={kind === 'experts' ? '工作指引' : '任务内容'} wide help={kind === 'favorites' ? '只保存技能组合时可留空，打开后再输入任务。' : undefined}><textarea rows={9} required={kind === 'experts' || !v.skill_names.length} value={v[kind === 'experts' ? 'system_prompt' : 'prompt']} onChange={e => set(kind === 'experts' ? 'system_prompt' : 'prompt', e.target.value)}/></Field>
         <details className="wide"><summary>指定可用技能 · {v.skill_names.length} 项</summary><div className="skill-picker">{skills.map(skill => <label key={skill.name} className={v.skill_names.includes(skill.name) ? 'selected' : ''}><input type="checkbox" checked={v.skill_names.includes(skill.name)} onChange={e => set('skill_names', e.target.checked ? [...v.skill_names, skill.name] : v.skill_names.filter((name: string) => name !== skill.name))}/><span>{skill.display_name || skill.name}</span></label>)}</div></details>
         {kind === 'favorites' && <>
           <Field label="工作目录" wide><div className="input-action"><input readOnly placeholder="自动创建独立工作目录" value={v.workspace_dir}/><button type="button" className="secondary" onClick={async () => { const path = await rpc('dialog.workspace'); if (path) form.change({ ...v, workspace_dir: path, execution_mode: 'workspace' }); }}><FolderOpen size={16}/>选择</button></div></Field>
-          <label className="check-line wide"><input type="checkbox" checked={Boolean(schedule.enabled)} onChange={e => setSchedule({ enabled: e.target.checked, schedule_type: schedule.schedule_type || 'daily' })}/>按计划运行</label>
-          {schedule.enabled && <>
-            <Field label="频率"><select value={schedule.schedule_type || 'daily'} onChange={e => setSchedule({ schedule_type: e.target.value })}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option><option value="once">只运行一次</option><option value="cron">Cron</option></select></Field>
-            {['daily', 'weekly', 'monthly'].includes(schedule.schedule_type || 'daily') && <Field label="时间"><input type="time" required value={schedule.time_of_day || '09:00'} onChange={e => setSchedule({ time_of_day: e.target.value })}/></Field>}
-            {schedule.schedule_type === 'weekly' && <div className="weekday-picker wide">{['一','二','三','四','五','六','日'].map((day, i) => <label key={day}><input type="checkbox" checked={(schedule.weekdays || [0]).includes(i)} onChange={e => setSchedule({ weekdays: e.target.checked ? [...(schedule.weekdays || [0]), i] : (schedule.weekdays || [0]).filter((n: number) => n !== i) })}/>{day}</label>)}</div>}
-            {schedule.schedule_type === 'monthly' && <Field label="日期"><input type="number" min={1} max={31} value={schedule.day_of_month || 1} onChange={e => setSchedule({ day_of_month: +e.target.value })}/></Field>}
-            {schedule.schedule_type === 'interval' && <Field label="间隔（分钟）"><input type="number" min={1} max={1440} value={schedule.interval_minutes || 60} onChange={e => setSchedule({ interval_minutes: +e.target.value })}/></Field>}
-            {schedule.schedule_type === 'once' && <Field label="运行时间"><input required type="datetime-local" value={schedule.one_time_at ? new Date((schedule.one_time_at * 1000) - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : ''} onChange={e => setSchedule({ one_time_at: Date.parse(e.target.value)/1000 })}/></Field>}
-            {schedule.schedule_type === 'cron' && <Field label="Cron 表达式"><input required value={schedule.cron_expression || ''} onChange={e => setSchedule({ cron_expression: e.target.value })} placeholder="0 9 * * 1-5"/></Field>}
-            <p className="muted wide">后台运行时自动执行。电脑关机或后台停止期间错过的计划会记录为“已错过”，可以手动运行。</p>
-          </>}
+          <section className="automation-schedule wide" aria-label="定时执行">
+            <header><h3>定时执行</h3><label className="check-line"><input type="checkbox" checked={Boolean(schedule.enabled)} onChange={e => setSchedule({ enabled: e.target.checked, schedule_type: schedule.schedule_type || 'daily' })}/>{schedule.enabled ? '已启用' : v.schedule ? '已暂停' : '启用'}</label></header>
+            {v.schedule && <>
+              <div className="automation-timing">
+                <Field label="频率"><select value={schedule.schedule_type || 'daily'} onChange={e => setSchedule({ schedule_type: e.target.value })}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="interval">固定间隔</option><option value="once">只运行一次</option><option value="cron">Cron</option></select></Field>
+                {['daily', 'weekly', 'monthly'].includes(schedule.schedule_type || 'daily') && <Field label="时间"><input type="time" required value={schedule.time_of_day || '09:00'} onChange={e => setSchedule({ time_of_day: e.target.value })}/></Field>}
+                {schedule.schedule_type === 'monthly' && <Field label="日期"><input type="number" min={1} max={31} value={schedule.day_of_month || 1} onChange={e => setSchedule({ day_of_month: +e.target.value })}/></Field>}
+                {schedule.schedule_type === 'interval' && <Field label="间隔（分钟）"><input type="number" min={1} max={1440} value={schedule.interval_minutes || 60} onChange={e => setSchedule({ interval_minutes: +e.target.value })}/></Field>}
+                {schedule.schedule_type === 'once' && <Field label="运行时间" help="按本机时区输入。"><input required type="datetime-local" value={schedule.one_time_at ? new Date((schedule.one_time_at * 1000) - new Date(schedule.one_time_at * 1000).getTimezoneOffset()*60000).toISOString().slice(0,16) : ''} onChange={e => setSchedule({ one_time_at: Date.parse(e.target.value)/1000 })}/></Field>}
+                {schedule.schedule_type === 'cron' && <Field label="Cron 表达式"><input required value={schedule.cron_expression || ''} onChange={e => setSchedule({ cron_expression: e.target.value })} placeholder="0 9 * * 1-5"/></Field>}
+              </div>
+              {schedule.schedule_type === 'weekly' && <div className="weekday-picker" role="group" aria-label="每周执行日期">{['一','二','三','四','五','六','日'].map((day, i) => <label key={day}><input type="checkbox" checked={(schedule.weekdays || [0]).includes(i)} onChange={e => setSchedule({ weekdays: e.target.checked ? [...(schedule.weekdays || [0]), i] : (schedule.weekdays || [0]).filter((n: number) => n !== i) })}/>周{day}</label>)}</div>}
+              <details className="automation-timezone"><summary>{schedule.timezone === 'local' ? '本机时区' : schedule.timezone || '本机时区'}</summary><Field label="时区" help="填写 Asia/Shanghai 等时区名称；local 跟随本机。"><input required value={schedule.timezone || 'local'} onChange={e => setSchedule({timezone: e.target.value})}/></Field></details>
+              <div className="automation-prompt"><Field label="执行内容"><select value={schedule.prompt_mode || 'inherit'} onChange={e => setSchedule({prompt_mode: e.target.value})}><option value="inherit">使用上面的任务内容</option><option value="custom">单独填写计划内容</option></select></Field>
+                {schedule.prompt_mode === 'custom' && <textarea aria-label="计划专用内容" required rows={4} value={schedule.custom_prompt || ''} onChange={e => setSchedule({custom_prompt: e.target.value})}/>}
+              </div>
+              <footer><small>后台需保持运行；错过的计划可在运行记录中查看。</small><button type="button" className="text-link" onClick={() => set('schedule', null)}>移除计划</button></footer>
+            </>}
+          </section>
         </>}
       </>}
-    </div>{failure && <ErrorState message={failure}/>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16}/> : <Check size={16}/>}保存</button></div></form>
+    </div>{failure && <><ErrorState message={failure}/>{kind === 'favorites' && item.id && <button type="button" className="secondary" disabled={busy} onClick={() => void reloadTask()}>读取最新版本并合并编辑</button>}</>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16}/> : <Check size={16}/>}保存</button></div></form>
   </>;
 }
 

@@ -33,6 +33,17 @@ class Provider(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         try:
+            trigger = next((m.get("content", "") for m in value["messages"] if m["role"] == "user" and
+                            str(m.get("content", "")).startswith("AUTOMATION-TOOL:")), "")
+            if trigger and not any(m["role"] == "tool" for m in value["messages"]):
+                task_id = trigger.split(":", 1)[1].strip()
+                chunk = {"id": "fixture", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0,
+                    "id": "automation-tool-call", "type": "function", "function": {"name": "run_automation",
+                    "arguments": json.dumps({"task_id": task_id})}}]}, "finish_reason": None}]}
+                self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                self.wfile.write(b'data: {"id":"fixture","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n')
+                self.wfile.flush()
+                return
             for text in (["阶段输出。"] * 12 if guidance_check else ["已收到。", "这是本地流式验证。"] if not slow else ["保留这部分回答。"] + ["继续输出。"] * 200):
                 chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                          "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
@@ -249,6 +260,67 @@ class DesktopIntegrationTests(unittest.TestCase):
         params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex, text=text, model_id=self.model_id)
         self.client.call("conversation.send", **params)
         return params
+
+    def test_automation_uses_real_worker_and_discloses_builtin_guidance_before_first_call(self):
+        task = self.client.call("favorites.save", value={"name": "自动分析", "prompt": "AUTOMATION-CHECK 分析销售数据并核对指标口径", "skill_names": ["data-analysis"]})
+        result = self.client.call("favorites.run", id=task["id"], request_id="automation-replay")
+        self.assertTrue(result["run_id"])
+        conversation = self.client.wait_run(result["conversation_id"])
+        self.assertEqual(conversation["run"]["status"], "completed")
+        replay = self.client.call("favorites.run", id=task["id"], request_id="automation-replay")
+        self.assertEqual(replay["run_id"], result["run_id"])
+        request = next(value for value in reversed(Provider.requests) if any("AUTOMATION-CHECK" in str(m.get("content")) for m in value["messages"] if m["role"] == "user"))
+        system = "\n".join(str(m.get("content")) for m in request["messages"] if m["role"] == "system")
+        self.assertIn("本轮可用的内置技能", system)
+        self.assertIn("task-automation", system)
+        self.assertIn("两个图共用同一计算函数不算独立核验", system)
+        self.client.call("favorites.delete", id=task["id"], revision=task["revision"])
+        self.assertTrue(any(row["favorite_id"] == task["id"] for row in self.client.call("favorites.history")))
+        self.assertEqual(self.client.call("conversation.get", conversation_id=result["conversation_id"])["run"]["status"], "completed")
+
+    def test_builtin_template_guidance_is_loaded_without_manual_skill_selection(self):
+        cid = self.client.call("conversation.create")["id"]
+        self.submit(cid, "TEMPLATE-CATALOG-CHECK 把参考 PPT 保存为可复用模板 Skill")
+        self.assertEqual(self.client.wait_run(cid)["run"]["status"], "completed")
+        request = next(value for value in reversed(Provider.requests) if any("TEMPLATE-CATALOG-CHECK" in str(m.get("content")) for m in value["messages"] if m["role"] == "user"))
+        system = "\n".join(str(m.get("content")) for m in request["messages"] if m["role"] == "system")
+        self.assertIn("用一组与原件不同的新内容试做", system)
+
+    def test_automation_tool_launches_a_distinct_real_worker(self):
+        task = self.client.call("favorites.save", value={"name": "工具启动", "prompt": "CHILD-AUTOMATION-RESULT"})
+        cid = self.client.call("conversation.create")["id"]
+        self.client.call("settings.permission", enabled=True)
+        self.submit(cid, "AUTOMATION-TOOL:" + task["id"])
+        parent = self.client.wait_run(cid)
+        self.assertEqual(parent["run"]["status"], "completed")
+        rows = self.client.call("favorites.history")
+        row = next(item for item in rows if item["favorite_id"] == task["id"])
+        self.assertNotEqual(row["session_id"], cid)
+        self.assertTrue(row["run_id"])
+        child = self.client.wait_run(row["session_id"])
+        self.assertEqual(child["run"]["status"], "completed")
+        request = next(value for value in reversed(Provider.requests) if any(m["role"] == "tool" and
+                       m.get("tool_call_id") == "automation-tool-call" for m in value["messages"]))
+        receipt = next(m["content"] for m in request["messages"] if m["role"] == "tool" and m.get("tool_call_id") == "automation-tool-call")
+        self.assertIn(row["run_id"], receipt)
+
+    def test_automation_once_schedule_runs_and_restart_does_not_repeat(self):
+        task = self.client.call("favorites.save", value={"name": "单次触发", "prompt": "ONCE-SCHEDULE-RESULT",
+            "schedule": {"enabled": True, "schedule_type": "once", "delay_seconds": 1}})
+        deadline = time.monotonic() + 18
+        rows = []
+        while time.monotonic() < deadline:
+            rows = self.client.call("favorites.history")
+            if rows and rows[0]["status"] == "completed":
+                break
+            time.sleep(.15)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "completed")
+        self.assertFalse(self.client.call("favorites.list")[0]["schedule"]["enabled"])
+        self.client.close()
+        self.client = ServiceClient(self.temp.name)
+        self.assertEqual(self.client.call("favorites.history"), rows)
+        self.assertFalse(self.client.call("favorites.list")[0]["schedule"]["enabled"])
 
     def test_creation_sessions_preserve_source_and_enforce_mode_lifecycle(self):
         from core.chat_storage import ChatStorage

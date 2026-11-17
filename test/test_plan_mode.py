@@ -21,6 +21,18 @@ from core.clarify_mode import (
 from core.message_persistence import fold_skill_state_events
 
 
+class _BuiltinCatalogStub:
+    """These fixtures model optional skills only; builtin matching is tested separately."""
+    def builtin_skill_catalog(self, *_args):
+        return []
+
+    def builtin_skill_catalog_prompt(self, *_args):
+        return ""
+
+    def select_builtin_skill_prompts(self, *_args):
+        return []
+
+
 def test_bundled_grilling_plugin_preserves_existing_prompt_bytes():
     import hashlib
     from core.mode_plugins import GRILLING
@@ -150,8 +162,36 @@ class TestClarifyModeHelpers(unittest.TestCase):
 
 
 class TestAppendOnlySkillStateLedger(unittest.TestCase):
+    def test_builtin_guidance_reconciles_scope_without_rewriting_history(self):
+        class Manager(_BuiltinCatalogStub):
+            catalog_revision = 1
+            available = True
+            def __init__(self, *_args, **_kwargs): pass
+            def get_tool_definitions(self, *_args, **_kwargs): return []
+            def get_tools_for_skill(self, _name): return []
+            def get_full_skill_prompt(self, _name): return "# Builtin instructions"
+            def builtin_skill_catalog(self, *_args): return [{"name": "demo"}] if self.available else []
+            def select_builtin_skill_prompts(self, query, *_args): return ["demo"] if self.available and query == "Use builtin" else []
+        from core.agent import LLMWorker
+        with tempfile.TemporaryDirectory() as directory, patch("core.agent.SkillManager", Manager):
+            worker = LLMWorker([], _ConfigStub(directory), workspace_dir=directory, run_context={"mode": RUN_MODE_EXECUTION})
+            messages, generated, disclosed = [{"role": "user", "content": [{"type": "text", "text": "Use builtin"}]},
+                {"role": "user", "content": "Internal references", "meta": {"hidden": True, "kind": "runtime_context"}}], [], set()
+            worker._reconcile_builtin_skill_states(messages, generated, disclosed)
+            original = json.loads(json.dumps(messages))
+            worker._reconcile_builtin_skill_states(messages, generated, disclosed)
+            self.assertEqual(messages, original)
+            worker.skill_manager.available = False
+            worker._reconcile_builtin_skill_states(messages, generated, disclosed)
+            self.assertEqual(fold_skill_state_events(messages)["demo"]["state"], "disabled")
+            self.assertEqual(messages[:len(original)], original)
+            worker.skill_manager.available = True
+            worker._reconcile_builtin_skill_states(messages, generated, disclosed)
+            self.assertEqual(fold_skill_state_events(messages)["demo"]["state"], "enabled")
+            self.assertEqual(sum(m.get("meta", {}).get("kind") == "skill_context" for m in messages), 1)
+
     def test_skill_enable_disable_reenable_upgrade_and_duplicate_events(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 self.catalog_revision = 1
                 self.prompts = {"demo-skill": "# Demo Skill v1"}
@@ -245,7 +285,7 @@ class TestAppendOnlySkillStateLedger(unittest.TestCase):
 
 class TestClarifyModeLLMWorker(unittest.TestCase):
     def test_llm_worker_emits_necessary_clarification_policy(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -321,7 +361,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_includes_user_selected_skills_in_system_prompt(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -387,7 +427,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_includes_office_mode_prompt(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -447,7 +487,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_legacy_ppt_context_uses_ordinary_prompt_and_tools(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -524,7 +564,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_injects_selected_presentation_skill_in_ordinary_chat(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -590,7 +630,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_ignores_tool_calls_without_function_name(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -665,7 +705,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_selected_skill_tools_are_visible_without_tool_search(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -703,7 +743,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_refreshes_system_prompt_after_tool_search_discovery(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -804,8 +844,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_does_not_inject_full_prompt_from_query_match(self):
-        class _SkillManagerStub:
+    def test_llm_worker_does_not_inject_optional_skill_from_query_match(self):
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -888,7 +928,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_injects_full_prompt_after_tool_search_skill_match(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -997,7 +1037,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_skill_context_injection_deduplicates_by_content_hash(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
                 return f"full prompt for {skill_name}"
 
@@ -1044,7 +1084,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         self.assertTrue(skill_contexts[0]["meta"]["content_hash"])
 
     def test_legacy_clarifying_context_runs_as_execution(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1093,7 +1133,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_accepts_legacy_planning_context_as_execution(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1120,7 +1160,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_llm_worker_does_not_limit_ordinary_clarification_rounds(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1204,7 +1244,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_grilling_allows_tenth_question_and_blocks_eleventh(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1306,7 +1346,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_grill_checkpoint_execute_continue_and_custom_transitions(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1395,7 +1435,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_grill_interruption_checkpoint_projects_question_and_answer_without_reasoning(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1462,7 +1502,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_grill_checkpoint_timeout_stops_without_another_model_request(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -1563,7 +1603,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_grill_question_timeout_stops_without_another_model_request(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_BuiltinCatalogStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 

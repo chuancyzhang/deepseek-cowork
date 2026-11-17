@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "name": "task-automation",
+  "display_name": "任务自动化",
+  "kind": "knowledge",
+  "source_type": "builtin",
+  "default_enabled": true,
+  "description": "保存可复用任务和技能组合，创建、调整或暂停定时计划，立即运行并查询执行记录。",
+  "description_cn": "保存常用任务，安排定时执行，查看真实运行结果。",
+  "presentation": {"category": "productivity", "short_name": "任务自动化", "summary": "保存常用任务，安排定时执行，查看真实运行结果。", "examples": ["每天九点整理日报", "十分钟后提醒我", "暂停每周检查", "运行已保存的任务"]},
+  "tags": ["定时", "周期", "每天", "每周", "每月", "提醒", "未来执行", "保存任务", "常用", "自动化", "计划", "运行记录", "automation", "schedule"],
+  "triggers": ["定时", "每天", "每周", "每月", "分钟后", "小时后", "提醒", "暂停计划", "保存为常用", "常用任务", "运行记录", "automation", "schedule"],
+  "tool_refs": ["list_automations", "get_automation", "save_automation", "set_automation_schedule", "run_automation", "list_automation_runs", "delete_automation"],
+  "prompt_disclosure": "full_on_match"
+}

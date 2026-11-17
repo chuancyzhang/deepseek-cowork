@@ -550,6 +550,17 @@ class FavoriteDeliveryService:
             ).fetchall()
         return [self._job_row(row) for row in rows]
 
+    def get_jobs_for_runs(self, run_history_ids):
+        ids = [str(item) for item in run_history_ids if item]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.chat_storage._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM favorite_delivery_jobs WHERE run_history_id IN ({placeholders}) ORDER BY created_at, id", ids,
+            ).fetchall()
+        return [self._job_row(row) for row in rows]
+
     def claim_next_job(self, provider, now_ts=None):
         provider = str(provider or "").strip().lower()
         now_ts = int(now_ts or time.time())

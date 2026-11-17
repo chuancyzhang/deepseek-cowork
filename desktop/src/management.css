@@ -134,3 +134,5 @@ body{font-family:var(--font-family);font-size:calc(14px * var(--font-scale))}
 .settings-draft-recovery{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding:14px 16px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font-size:13px;line-height:1.7}.settings-draft-recovery p{flex:1 1 260px;margin:0}.settings-draft-recovery .button-row{flex-shrink:0}
 
 .library-collection-group h3{font-size:11px;font-weight:500;color:var(--muted);padding:12px 12px 4px;margin:0}.library-collection-group small{display:block;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;margin-top:3px}.library-collection-group button{width:100%}
+
+.library-heading{flex-wrap:wrap}.library-heading .button-row{flex-wrap:wrap;flex-shrink:1}.library-dragging{outline:2px dashed var(--muted);outline-offset:-2px}

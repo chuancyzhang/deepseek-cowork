@@ -173,3 +173,31 @@ class InteractionLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_questionnaire_whole_submission_keeps_choice_and_text():
+    from core.interaction import parse_interaction_reply
+    request = {"request_id":"q", "kind":"questionnaire", "questions":[
+        {"id":"choice", "question":"选择", "options":[{"value":"one","label":"选项一"}]},
+        {"id":"text", "question":"补充"}]}
+    response, valid, _ = parse_interaction_reply(request, {"choice":{"selected_options":["one"]},"text":{"text":"用户补充"}})
+    assert valid and response["answers"]["choice"]["selected_options"] == ["one"]
+    assert response["answers"]["text"]["text"] == "用户补充"
+    for values in ({}, {"choice":"one"}, {"choice":"one", "text":"  "}):
+        _, valid, reason = parse_interaction_reply(request, values)
+        assert not valid and "每一项" in reason
+
+
+def test_desktop_questionnaire_accepts_current_and_legacy_ui_payloads():
+    from core.desktop_conversations import ConversationRuntime
+    from unittest.mock import Mock, patch
+    request={"request_id":"request","kind":"questionnaire","questions":[{"id":"keyword","question":"关键词"}]}
+    service=ConversationRuntime.__new__(ConversationRuntime)
+    service.request_agent=Mock(side_effect=lambda params: {"resolved":True,"response":params["result"]})
+    with patch('core.interaction.interaction_service.get_pending_request',return_value=request):
+        for value in ({"keyword":{"text":"大苏打撒"}},{"answers":{"keyword":"大苏打撒"}}):
+            result=service.dispatch('interaction.respond',{"conversation_id":"session","request_id":"request","value":value})
+            assert result['response']['answers']['keyword']['text']=='大苏打撒'
+        request['questions']=[{"id":"answers","question":"合法的题目ID"}]
+        result=service.dispatch('interaction.respond',{"conversation_id":"session","request_id":"request","value":{"answers":{"text":"answer"}}})
+        assert result['response']['answers']['answers']['text']=='answer'

@@ -7,15 +7,16 @@ class HiddenWindow extends electron.BrowserWindow{constructor(options){super({..
 Module._load=function(name,...rest){return name==='electron'?{...electron,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
 app.commandLine.appendSwitch('disable-gpu');
 const {Backend}=require('../electron/backend.cjs'),backendCall=Backend.prototype.call;
-let holdRead=false,readSequence=0,createDelay=0;const jobs=new Map(),cancelled=[],errors=[];
+let holdRead=false,readSequence=0,createDelay=0;const libraryRequests=[];const jobs=new Map(),cancelled=[],errors=[];
 const pdfPath=path.join(process.env.COWORK_APP_DATA_DIR,'remote.pdf');
 Backend.prototype.call=async function(method,p={}){
   if(method==='workspace.create'&&createDelay){const result=await backendCall.call(this,method,p);await delay(createDelay);return result;}
   if(method==='library.status')return {active:'weknora',sources:Object.fromEntries(['weknora','tencent-docs','lexiang'].map(source=>[source,{source,user_id:'fixture'}]))};
   if(method==='library.catalog'&&p.source!=='local')return {mine:[{id:'own',name:'个人资料'}],shared:[{id:'own',name:'个人资料',organization_name:'产品团队'},{id:'shared',name:'团队资料',organization_name:'产品团队'},{id:'shared',name:'团队资料',organization_name:'研究团队'}]};
   if(method==='library.children'&&p.source!=='local'){
+    assert.ok(p.collection,'file pagination requires collection');libraryRequests.push(p);
     const files=[{id:'document',title:'培训说明.pdf',file_type:'pdf'},{id:'text',title:'工作说明',file_type:'md'}];
-    return p.source==='weknora'?{files,folders:{folders:[]}}:[files,false];
+    return p.source==='weknora'?{items:files,has_more:false,total:2}:[files,false];
   }
   if(method==='library.read'&&p.source!=='local'){
     if(p.item==='text')return {text:'# 工作说明\n\n正文内容可见',format:'markdown'};
@@ -76,9 +77,17 @@ async function run(){
   const xref=Buffer.byteLength(pdf);pdf+=`xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(offset=>String(offset).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF`;
   await fs.writeFile(pdfPath,pdf);
   await click('资料库');await until('Boolean(document.querySelector("[aria-label=选择资料空间]"))');
+  await until('document.querySelector(".library-heading")?.textContent.includes("公共资料")');
+  const imported=await rpc('library.import',{source:'local',collection:'public',paths:[external]});await until(`window.cowork.call('jobs.get',{id:${JSON.stringify(imported.job_id)}}).then(job=>job.status==='completed')`);await until('document.querySelector("[aria-label=刷新资料]").disabled===false');await read('document.querySelector("[aria-label=刷新资料]").click()');
+  await until('document.querySelector(".library-list-scroll")?.textContent.includes("outside.md")');await snapshot('library-public');
+  await click('outside.md');await until('document.querySelector(".library-document-content")?.textContent.includes("工作目录外的正文")');
+  await click('返回列表');await click('项目资料');await until('document.querySelector(".library-heading")?.textContent.includes("项目资料")');
+  assert.equal(await read('Boolean(document.querySelector(".library-load-more"))'),false);
   const source=async name=>{await read(`(()=>{const el=document.querySelector('[aria-label=选择资料空间]');el.value=${JSON.stringify(name)};el.dispatchEvent(new Event('change',{bubbles:true}));})()`);await until('document.querySelectorAll(".library-collections .library-collection-group button").length===2');};
   await source('weknora');assert.equal(await read('document.querySelectorAll(".library-row").length'),2);await snapshot('library-grouped');
-  const collection=async name=>{await read(`[...document.querySelectorAll('.library-collections button')].find(el=>el.textContent.startsWith(${JSON.stringify(name)})).click()`);await until('document.querySelectorAll(".library-row").length===2&&Boolean(document.querySelector(".library-list-actions"))');};
+  const collection=async name=>{await click('全部资料空间');await until('!document.querySelector(".library-list-actions")');await read(`[...document.querySelectorAll('.library-item-name')].find(el=>el.textContent.startsWith(${JSON.stringify(name)})).click()`);await until('document.querySelectorAll(".library-row").length===2&&Boolean(document.querySelector(".library-list-actions"))');};
+  await click('产品团队');await until('document.querySelectorAll(".library-row").length===2');
+  assert.equal(await read('Boolean(document.querySelector(".library-load-more"))'),false);
   await collection('个人资料');holdRead=true;await click('培训说明.pdf');await until('document.querySelector(".library-document-content")?.textContent.includes("正在读取")');
   assert.equal(await read('[...document.querySelectorAll(".library-collections button")].some(el=>el.disabled)'),false);
   await collection('团队资料');await until('!document.querySelector(".library-document")');await delay(100);assert.equal(cancelled.length,1);

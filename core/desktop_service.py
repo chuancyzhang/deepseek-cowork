@@ -138,7 +138,7 @@ class DesktopService:
         models = []
         for profile in self.config.iter_model_profiles():
             models.append({key: profile.get(key) for key in ("id", "display_name", "model_name", "channel_id", "channel_display_name", "provider_type", "base_url", "reasoning_effort", "reasoning_efforts")}
-                          | {"configured": bool(profile.get("api_key")), "label": self.config.get_model_label(profile["id"]), **self.media.model_usage(profile)})
+                          | {"configured": bool(profile.get("api_key")), "label": self.config.get_model_label(profile["id"]), "connection_test": self.media.connection_test(profile), **self.media.model_usage(profile)})
         return {"models": models, "selected_model_id": self.config.get_selected_model_id(),
                 "god_mode": self.config.get_god_mode(), "theme": self.management.themes.load_appearance()["mode"],
                 "data_dir": self.config.data_dir, "projects": self.config.get_projects(),

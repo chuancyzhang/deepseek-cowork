@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {libraryCollections} from '../src/management/libraryCatalog.ts';
+import {libraryCollections,librarySpaces,appendLibraryRows} from '../src/management/libraryCatalog.ts';
 import {operation} from '../src/managementApi.ts';
 
 test('a library shared through multiple spaces is listed once with its memberships',()=>{
@@ -38,4 +38,15 @@ test('binary preview results are authorized by the host and storage errors settl
   const pending=operation('library.read',{});await new Promise(resolve=>setImmediate(resolve));
   listener([{event:'job',data:{id:'failed',status:'failed',error:'无法保存'}}]);
   await assert.rejects(pending,/无法保存/);assert.equal(listeners,0);
+});
+
+
+test('space membership survives a resource also owned by the user',()=>{
+  const catalog={mine:[{id:'a',name:'我的库'}],shared:[{id:'a',organization_id:'finance',name:'我的库'},{id:'a',organization_id:'hr',name:'我的库'}],organizations:[{id:'finance',name:'财务部'},{id:'hr',name:'人力资源'},{id:'empty',name:'空空间'}]};
+  assert.equal(libraryCollections(catalog).length,1);
+  assert.equal(libraryCollections(catalog,'org:finance').length,1);
+  assert.equal(libraryCollections(catalog,'org:hr').length,1);
+  assert.equal(librarySpaces(catalog).length,3);
+  assert.equal(libraryCollections(catalog,'org:empty').length,0);
+  assert.equal(appendLibraryRows([{id:'a'}],[{id:'a'},{id:'b'}]).length,2);
 });

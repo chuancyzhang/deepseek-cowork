@@ -44,7 +44,7 @@ window.cowork={onEvents:listener=>{listeners.add(listener);return()=>listeners.d
   if(method==='experts.list')return [{id:'analyst',name:'分析专家',description}];
   if(method==='workbench.list')return {tabs:[]};
   if(method==='workbench.profiles')return [{id:'powershell',name:'PowerShell'}];
-  if(method==='library.catalog')return {mine:[{id:'project',name:'客户研究'}]};
+  if(method==='library.catalog')return {public:{id:'public',name:'公共资料'},mine:[{id:'project',name:'客户研究'}]};
   if(method==='library.children')return {items:[{id:'notes',collection_id:'project',name:'访谈记录.md',relative:'访谈记录.md',project:'客户研究'}],total:1};
   if(method==='library.reference')return {path:'D:/projects/research/访谈记录.md',name:'访谈记录.md'};
   if(method==='reviews.list')return clone(Object.values(entries[p.conversation_id]));

@@ -237,30 +237,44 @@ function Identity($process) {
  return $process.StartTime.ToUniversalTime().Ticks.ToString()
 }
 function Discover-Owned {
- $all=@(Get-CimInstance Win32_Process)
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ Write-Diagnostic 'process_discovery_start'
+ $all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 5)
  $exclude=@{}; $exclude[[int]$PID]=$true
- # Never classify the independent updater or its descendants as application children.
+ # Exclude the updater tree before considering application ownership.
  do {
   $changed=$false
   foreach($p in $all) { if($exclude.ContainsKey([int]$p.ParentProcessId) -and -not $exclude.ContainsKey([int]$p.ProcessId)) { $exclude[[int]$p.ProcessId]=$true; $changed=$true } }
  } while($changed)
- foreach($p in $all) {
-  $id=[int]$p.ProcessId
-  if($exclude.ContainsKey($id)) { continue }
-  $process=Get-Process -Id $id -ErrorAction SilentlyContinue
-  if(-not $process) { continue }
-  try {
-   $identity=Identity $process
-   $known=$script:owned.ContainsKey($id) -and $script:owned[$id] -eq $identity
+ $checked=@{}; $candidates=0; $unavailable=0
+ do {
+  $changed=$false
+  foreach($p in $all) {
+   if(-not $script:committed -and -not $Recover -and (Test-Path -LiteralPath (Join-Path $root 'abort.json'))) { Write-Diagnostic 'installer_cancelled'; exit 0 }
+   $id=[int]$p.ProcessId
+   if($exclude.ContainsKey($id) -or $checked.ContainsKey($id)) { continue }
    $ownedPath=App-Path $p.ExecutablePath
    $parentKnown=$script:owned.ContainsKey([int]$p.ParentProcessId)
-   if($parentKnown) {
-    $parent=Get-Process -Id ([int]$p.ParentProcessId) -ErrorAction SilentlyContinue
-    $parentKnown=$parent -and (Identity $parent) -eq $script:owned[[int]$p.ParentProcessId]
+   if(-not ($ownedPath -or $parentKnown -or $script:owned.ContainsKey($id))) { continue }
+   $checked[$id]=$true; $candidates++
+   $process=Get-Process -Id $id -ErrorAction SilentlyContinue
+   if(-not $process) { continue }
+   try {
+    $identity=Identity $process
+    $known=$script:owned.ContainsKey($id) -and $script:owned[$id] -eq $identity
+    if($parentKnown) {
+     $parent=Get-Process -Id ([int]$p.ParentProcessId) -ErrorAction SilentlyContinue
+     $parentKnown=$parent -and (Identity $parent) -eq $script:owned[[int]$p.ParentProcessId]
+    }
+    if($known -or $ownedPath -or $parentKnown) { $script:owned[$id]=$identity; $changed=$true }
+   } catch {
+    $unavailable++
+    Write-Diagnostic 'process_identity_unavailable' @{process_id=$id; error=$_.Exception.Message}
+    throw ('无法核验应用相关进程 '+$id+'，尚未结束该进程。'+$_.Exception.Message)
    }
-   if($known -or $ownedPath -or $parentKnown) { $script:owned[$id]=$identity }
-  } catch { Log ('process identity unavailable PID '+$id) }
- }
+  }
+ } while($changed)
+ Write-Diagnostic 'process_discovery_complete' @{scanned=$all.Count; candidates=$candidates; owned=$script:owned.Count; unavailable=$unavailable; elapsed_ms=$watch.Elapsed.TotalMilliseconds}
 }
 function Live-Owned {
  $live=@()
@@ -590,7 +604,7 @@ try {
   $p=Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
   if($p -and [int]$id -ne $PID -and (App-Path $p.Path)) { $script:owned[[int]$id]=Identity $p }
  }
- Discover-Owned; Discover-Owned
+ Discover-Owned
  $launchParent=Get-Process -Id ([int]$cfg.wait_pids[0]) -ErrorAction SilentlyContinue
  $launchParentIdentity=if($launchParent){Identity $launchParent}else{''}
  Save-Json 'ready.json' @{id=$cfg.id; pid=$PID}

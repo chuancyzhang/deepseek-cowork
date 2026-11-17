@@ -182,6 +182,12 @@ else {
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
       if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
       if (method === 'library.read_result' || (method === 'library.read' && params.source === 'local')) return fileHost.register(await backend.call(method, params));
+      if (method === 'library.open_folder' && params.source === 'local') {
+        const item = await backend.call('library.folder', params);
+        const failure = await shell.openPath(item.path);
+        if (failure) throw new Error(failure);
+        return {opened:true};
+      }
       if (method === 'library.external' && params.source === 'local') {
         const item = await backend.call('library.reference', params);
         const failure = await shell.openPath(item.path);
@@ -213,8 +219,8 @@ else {
       if (method === 'dialog.choose') {
         const filters = params.kind === 'skill' ? [{ name: '技能包', extensions: ['zip'] }]
           : params.kind === 'theme' ? [{ name: '主题', extensions: ['cowork-theme', 'json'] }] : [];
-        const result = await dialog.showOpenDialog(window, { title: '选择文件', filters, properties: ['openFile'] });
-        return result.canceled ? null : result.filePaths[0];
+        const result = await dialog.showOpenDialog(window, { title: '选择文件', filters, properties: params.kind === 'files' ? ['openFile','multiSelections'] : ['openFile'] });
+        return params.kind === 'files' ? (result.canceled ? [] : result.filePaths) : result.canceled ? null : result.filePaths[0];
       }
       if (method === 'dialog.save') {
         const result = await dialog.showSaveDialog(window, { title: '保存文件', defaultPath: path.basename(String(params.name || '导出文件')) });

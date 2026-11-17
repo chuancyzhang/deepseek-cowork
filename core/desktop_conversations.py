@@ -523,8 +523,14 @@ class ConversationRuntime:
             request = interaction_service.get_pending_request(cid)
             if not request or request["request_id"] != p["request_id"]:
                 raise ValueError("这项操作已经结束或不属于当前对话。")
-            result, valid, reason = parse_interaction_reply(request, p["value"])
+            value = p["value"]
+            if (request.get("kind") == "questionnaire" and isinstance(value, dict) and isinstance(value.get("answers"), dict)
+                    and "answers" not in {question.get("id") for question in request.get("questions", [])}):
+                value = value["answers"]
+            result, valid, reason = parse_interaction_reply(request, value)
             if not valid:
+                log.info("interaction_reply_rejected session=%s request=%s kind=%s", cid, p["request_id"], request.get("kind"))
                 raise ValueError(reason or "请完成填写。")
+            log.info("interaction_reply_submit session=%s request=%s kind=%s", cid, p["request_id"], request.get("kind"))
             return self.request_agent({"action": "respond_interaction", "request_id": p["request_id"], "result": result})
         raise ValueError("不支持的操作：" + method)

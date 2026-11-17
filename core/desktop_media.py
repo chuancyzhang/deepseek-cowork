@@ -83,8 +83,33 @@ class DesktopMedia:
         finally:
             self.release()
 
+    @staticmethod
+    def test_identity(profile):
+        # Include credentials and protocol in the digest; never persist their plaintext.
+        provider = profile.get("provider_type") or "openai"
+        profile = {**profile, "provider_type": provider,
+                   "base_url": str(profile.get("base_url") or "").rstrip("/"),
+                   "api_protocol": profile.get("api_protocol") or ("anthropic" if provider == "anthropic" else "chat_completions")}
+        return hashlib.sha256(json.dumps([profile.get(key) or "" for key in
+            ("channel_id", "base_url", "model_name", "provider_type", "api_protocol", "api_key")]).encode()).hexdigest()
+
+    def connection_test(self, profile):
+        return copy.deepcopy(self.s.config.get("model_connection_tests", {}).get(self.test_identity(profile)))
+
+    def record_connection_test(self, profile, success, message):
+        from datetime import datetime, timezone
+        result = {"success": success, "message": message, "checked_at": datetime.now(timezone.utc).isoformat()}
+        with self.lock:
+            records = copy.deepcopy(self.s.config.get("model_connection_tests", {}))
+            records[self.test_identity(profile)] = result
+            self.s.config.set("model_connection_tests", records)
+        return result
+
     def model_usage(self, profile):
         from core.llm.gateway_catalog import ENDPOINTS
+        tested = self.connection_test(profile)
+        if tested and tested["success"]:
+            return {"chat_supported": True, "purpose_label": "对话"}
         identity = hashlib.sha256(json.dumps([profile.get(key) for key in ("channel_id", "base_url", "model_name")]).encode()).hexdigest()
         with self.lock:
             known = copy.deepcopy(self.s.config.get("model_usage", {}))
@@ -101,7 +126,7 @@ class DesktopMedia:
             return {"chat_supported": True, "purpose_label": "对话"}
         if endpoints:
             return {"chat_supported": False, "purpose_label": "专用接口", "reason": "此模型未声明支持对话接口，请在对应功能中使用。"}
-        return {"chat_supported": None, "purpose_label": "用途待验证"}
+        return {"chat_supported": None, "purpose_label": "服务未提供能力声明"}
 
     def actions(self):
         if not self.enabled:

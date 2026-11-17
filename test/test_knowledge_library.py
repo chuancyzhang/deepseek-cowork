@@ -787,3 +787,23 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_file_pages_use_total_and_do_not_repeat_folders():
+    from unittest.mock import Mock
+    service=KnowledgeService.__new__(KnowledgeService)
+    page=[{'id':str(i)} for i in range(30)]
+    service.files=Mock(return_value={'data':page,'total':30})
+    service.folders=Mock(return_value={'folders':[{'id':'folder'}]})
+    result=service.children({},'kb')
+    assert not result['has_more'] and len(result['items'])==31
+    service.files.assert_called_once()
+    service.files=Mock(return_value={'data':page,'total':60})
+    result=service.children({},'kb',page=2)
+    assert not result['has_more'] and len(result['items'])==30
+    assert service.folders.call_count==1
+    service.files=Mock(side_effect=[{'data':page},{'data':[]}])
+    assert not service.children({},'kb')['has_more']
+    service.files=Mock(side_effect=[{'data':page},{'data':page}])
+    import pytest
+    with pytest.raises(KnowledgeError,match='重复页'): service.children({},'kb')

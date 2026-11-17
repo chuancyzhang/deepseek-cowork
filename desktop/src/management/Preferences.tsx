@@ -24,7 +24,7 @@ function Models(props: Props) {
   const { settings, updateSettings, onError, confirm } = props;
   const [channels, setChannels] = useState<any[]>([]), [edit, setEdit] = useState<any>(null), [failure, setFailure] = useState('');
   const [accountSetup, setAccountSetup] = useState(false);
-  const reload = useCallback(() => rpc('settings.channels').then(setChannels).catch(error => setFailure(error.message)), []);
+  const reload = useCallback(() => Promise.all([rpc('settings.channels'),rpc('settings.get')]).then(([channels,settings])=>{setChannels(channels);updateSettings(settings);}).catch(error => setFailure(error.message)), [updateSettings]);
   useEffect(() => { void reload(); }, [reload]);
   if (accountSetup) return <GatewaySetup back={() => {setAccountSetup(false); void reload();}} saved={updateSettings} confirm={confirm}/>;
   if (edit) return <ModelForm {...props} item={edit} back={() => { setEdit(null); void reload(); }}/>;
@@ -32,7 +32,7 @@ function Models(props: Props) {
     {failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {!settings?.models.length && <Empty title="连接第一个模型" detail="填写服务地址和 API Key 后，即可开始对话。"/>}
     {channels.map(channel => <section className="settings-section" key={channel.channel_id}><div className="section-heading"><h3>{channel.display_name}</h3><button className="secondary" onClick={() => setEdit(channel)}><Pencil size={15}/>编辑服务</button></div>
-      {channel.models.map((model: any) => <div className="model-row" key={model.id}><div><strong>{model.display_name || model.model_name}</strong><small>{model.model_name} · {channel.configured ? '已连接凭据' : '需要 API Key'}</small></div>
+      {channel.models.map((model: any) => <div className="model-row" key={model.id}><div><strong>{model.display_name || model.model_name}</strong><small>{model.model_name} · {channel.configured ? '已配置凭据' : '需要 API Key'}</small><small>{settings?.models.find(item=>item.id===model.id)?.connection_test?.message || '尚未测试对话接口'}</small><small>能力：{settings?.models.find(item=>item.id===model.id)?.purpose_label || '服务未提供能力声明'}</small></div>
         {settings?.selected_model_id === model.id ? <span className="subtle-badge"><Check size={12}/>当前使用</span> : <button className="secondary" onClick={async () => { try { updateSettings(await rpc('settings.select_model', { model_id: model.id })); } catch (error) { onError((error as Error).message); } }}>使用</button>}
         <button className="icon-button" title="删除模型" onClick={async () => { if (await confirm('删除这个模型？', '已有对话仍然保留，可以选择其他模型继续。', ['取消', '删除']) === 1) { try { updateSettings(await rpc('settings.delete_model', { id: model.id })); await reload(); } catch (error) { onError((error as Error).message); } } }}><Trash2 size={16}/></button>
       </div>)}</section>)}
@@ -47,7 +47,9 @@ function ModelForm({ item, back, onDirty, updateSettings, confirm }: Props & { i
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
   const [job, setJob] = useState<any>(null), [catalog, setCatalog] = useState<any[]>([]), [chosen, setChosen] = useState<string[]>([]), [testResult, setTestResult] = useState('');
   async function discover() {setBusy(true);setFailure('');try {const result=await operation('models.discover',{channel:v},setJob);setCatalog(result.models);setChosen(result.models.filter((model:any)=>!v.models.some((existing:any)=>existing.model_name===model.model_name)).map((model:any)=>model.model_name));}catch(error){setFailure((error as Error).message);}finally{setBusy(false);setJob(null);}}
-  async function test(model:any) {setBusy(true);setFailure('');setTestResult('');try{const result=await operation('models.test',{channel:v,model},setJob);setTestResult(result.message);}catch(error){setFailure((error as Error).message);}finally{setBusy(false);setJob(null);}}
+  const latestValue=useRef(v);latestValue.current=v;
+  async function test(model:any) {const tested=v;setBusy(true);setFailure('');setTestResult('');try{await operation('models.test',{channel:tested,model},setJob);setTestResult(latestValue.current===tested?(model.display_name || model.model_name)+'：对话接口测试通过':'测试已完成，配置已修改，请重新测试。');updateSettings(await rpc('settings.get'));}catch(error){setFailure((error as Error).message);}finally{setBusy(false);setJob(null);}}
+  useEffect(()=>setTestResult(''),[v]);
   const add = () => set('models', [...v.models, { id: crypto.randomUUID(), display_name: '', model_name: '', api_protocol: 'chat_completions', supports_vision: false }]);
   const changeModel = (index: number, values: any) => set('models', v.models.map((model: any, i: number) => i === index ? { ...model, ...values } : model));
   async function leave() { if (!form.dirty || await confirm('保留编辑草稿？', '普通字段会保留。API Key 不写入草稿，下次需要重新填写。', ['继续编辑', '返回']) === 1) back(); }

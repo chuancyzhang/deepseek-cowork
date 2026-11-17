@@ -509,6 +509,38 @@ class KnowledgeService:
             params["folder_path"] = folder
         return self.request(scope, "GET", f"/api/v1/knowledge-bases/{segment(kb_id)}/knowledge", params=params)
 
+    def children(self, scope, kb_id, parent="", page=1):
+        if not kb_id:
+            raise KnowledgeError("invalid_id", "请先选择一个资料库，再读取文件。")
+        page = max(1, int(page))
+        payload = self.files(scope, kb_id, page, parent)
+        data = response_data(payload)
+        files = data if isinstance(data, list) else next((data[k] for k in ("items", "knowledge", "files", "list") if isinstance(data.get(k), list)), None) if isinstance(data, dict) else None
+        if files is None:
+            raise KnowledgeError("invalid_response", "资料列表格式不匹配，请检查服务版本。")
+        metadata = [payload, data] + [value.get("pagination", {}) for value in (payload, data) if isinstance(value, dict)]
+        total = next((value[k] for value in metadata if isinstance(value, dict) for k in ("total", "total_count") if type(value.get(k)) is int and value[k] >= 0), None)
+        more = next((value["has_more"] for value in metadata if isinstance(value, dict) and type(value.get("has_more")) is bool), None)
+        if more is None:
+            if total is not None:
+                more = page * 30 < total
+            elif len(files) < 30:
+                more = False
+            else:
+                # Older servers omit totals. One bounded lookahead confirms another page.
+                following = response_data(self.files(scope, kb_id, page + 1, parent))
+                if isinstance(following, dict):
+                    following = next((following[k] for k in ("items", "knowledge", "files", "list") if isinstance(following.get(k), list)), None)
+                if not isinstance(following, list):
+                    raise KnowledgeError("invalid_response", "无法确认下一页资料，请检查服务分页响应。")
+                if following and {str(x.get("id")) for x in following} <= {str(x.get("id")) for x in files}:
+                    raise KnowledgeError("invalid_response", "资料服务返回了重复页，请检查服务分页配置。")
+                more = bool(following)
+        folders = self.folders(scope, kb_id).get("folders", []) if page == 1 else []
+        items = [{**item, "is_folder": True} for item in folders] + files
+        log.info("knowledge_children kb=%s page=%s count=%s has_more=%s", kb_id, page, len(files), more)
+        return {"items": items, "has_more": more, "total": total}
+
     def allowed_targets(self, scope, cancelled=None):
         self._identity(scope, self.store.connection())
         refs = scope.get("refs", [])

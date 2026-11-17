@@ -618,3 +618,28 @@ def test_job_storage_failure_publishes_terminal_failure(tmp_path):
         assert jobs.active == {}
     finally:
         jobs.close()
+
+
+def test_public_library_import_conflicts_and_scope(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import pytest
+    from core.local_library import LocalLibrary
+    service = SimpleNamespace(config=SimpleNamespace(data_dir=str(tmp_path/'data'),get_projects=lambda:[]),storage=SimpleNamespace(list_conversations_by_workspace=lambda:{}))
+    library=LocalLibrary(service); public=library.public(); root=Path(public['path'])
+    source=tmp_path/'source.bin';source.write_bytes(b'public data')
+    params={'collection':'public','paths':[str(source)]}
+    result=library.import_files(params,threading.Event(),Mock())
+    assert len(result['added'])==1 and not result['failed'] and source.read_bytes()==b'public data'
+    assert library.read({'collection':'public','item':str(root/'source.bin')})['payload']['preview_kind']=='external'
+    source.write_bytes(b'new content')
+    result=library.import_files(params,threading.Event(),Mock())
+    assert result['failed'] and (root/'source.bin').read_bytes()==b'public data'
+    assert library.files({'collection':'public'},threading.Event(),Mock())['total']==1
+    folder=library.mkdir({'collection':'public','name':'参考资料'})
+    assert Path(folder['path']).is_dir()
+    for item in ('../escape',str(tmp_path)):
+        with pytest.raises(ValueError): library.folder({'collection':'public','parent':item})
+    with pytest.raises(ValueError): library.mkdir({'collection':'public','name':'../escape'})
+    assert library.projects()==[]

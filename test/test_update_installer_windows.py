@@ -16,6 +16,28 @@ from core.process_utils import subprocess_kwargs_no_window
 
 @unittest.skipUnless(os.name == "nt", "Windows installer integration")
 class WindowsInstallerTests(unittest.TestCase):
+    def test_discovery_ignores_unrelated_processes_and_finds_reverse_order_children(self):
+        from core.update_installer import INSTALLER_SCRIPT
+        names = [("Within", "App-Path"), ("App-Path", "Safe-Path"), ("Discover-Owned", "Live-Owned")]
+        functions = "\n".join(INSTALLER_SCRIPT[INSTALLER_SCRIPT.index("function " + first):INSTALLER_SCRIPT.index("function " + second)] for first, second in names)
+        probe = self.root / "discovery.ps1"
+        probe.write_text("""$ErrorActionPreference='Stop'
+$install='C:\\FixtureApp'; $root=$PSScriptRoot; $script:owned=@{}; $script:committed=$false; $Recover=$false
+$script:probed=@()
+function Write-Diagnostic($phase,$fields=@{}) {}
+function Get-CimInstance {
+ [PSCustomObject]@{ProcessId=202;ParentProcessId=201;ExecutablePath='C:\\Elsewhere\\child.exe'}
+ foreach($number in 1000..6000) { [PSCustomObject]@{ProcessId=$number;ParentProcessId=0;ExecutablePath=$null} }
+ [PSCustomObject]@{ProcessId=201;ParentProcessId=0;ExecutablePath='C:\\FixtureApp\\app.exe'}
+}
+function Get-Process($Id) { $script:probed+= $Id; if($Id -notin @(201,202)){throw 'unrelated process queried'}; return [PSCustomObject]@{Id=$Id} }
+function Identity($process) { return 'identity-'+$process.Id }
+""" + functions + "\nDiscover-Owned; if($script:owned.Count -ne 2){throw 'descendant missing'}; if($script:probed.Count -gt 4){throw 'repeated probes'}; 'DISCOVERY_OK'", encoding="utf-8-sig")
+        result = subprocess.run([self.ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe)], capture_output=True, timeout=15,
+                                **subprocess_kwargs_no_window())
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertIn(b"DISCOVERY_OK", result.stdout)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="cowork-updater-qa-")
         self.root = Path(self.temp.name)

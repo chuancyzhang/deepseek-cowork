@@ -293,13 +293,13 @@ def parse_interaction_reply(
                 "text": text,
                 "raw_value": raw_answer,
             }
-        if not answers:
+        if len(answers) != len(questions) or not answers:
             return _build_response_payload(
                 req,
                 status="invalid",
                 approved=False,
                 raw_value=raw_value,
-            ), False, "questionnaire reply is empty"
+            ), False, "请完成每一项回答后再提交，已填写的内容会保留。"
         return _build_response_payload(
             req,
             status="completed",

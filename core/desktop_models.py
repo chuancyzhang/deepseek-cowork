@@ -37,6 +37,9 @@ class DesktopModels:
                 raise ValueError("请先填写服务地址与 API Key。")
             def run(cancelled, progress):
                 from core.llm.model_catalog import list_available_models, _safe_error_message
+                profile = {**channel, **p.get("model", {})}
+                if method == "models.test":
+                    log.info("model_test_start model=%s protocol=%s", profile.get("id"), profile.get("api_protocol"))
                 try:
                     if method == "models.discover":
                         from core.llm.gateway_catalog import catalog_record, new_catalog_model
@@ -45,16 +48,22 @@ class DesktopModels:
                         result = {"models": [new_catalog_model(record if "provider_type" in record else catalog_record(record, default_provider=channel.get("provider_type", "openai")), identity, channel["base_url"]) for record in records]}
                     else:
                         from core.llm.factory import LLMFactory
-                        profile = {**channel, **p["model"]}
                         provider = LLMFactory.create_provider_from_profile(profile)
                         result = {"message": str(provider.test_connection(timeout=20) or "连接测试通过。")}
                     if cancelled.is_set():
                         raise JobCancelled("已取消，模型配置保持不变。")
+                    if method == "models.test":
+                        result["connection_test"] = self.s.media.record_connection_test(profile, True, "对话接口测试通过")
+                        log.info("model_test_complete model=%s protocol=%s", profile.get("id"), profile.get("api_protocol"))
                     return result
                 except JobCancelled:
                     raise
                 except Exception as exc:
-                    raise ValueError(_safe_error_message(exc, channel["api_key"])) from None
+                    message = _safe_error_message(exc, channel["api_key"])
+                    if method == "models.test" and not cancelled.is_set():
+                        self.s.media.record_connection_test(profile, False, message)
+                        log.info("model_test_failed model=%s error_type=%s", profile.get("id"), type(exc).__name__)
+                    raise ValueError(message) from None
             return self.s.jobs.submit("获取模型" if method.endswith("discover") else "测试模型", run)
         if method == "models.account_open":
             from core.llm.gateway_accounts import GatewayAccount

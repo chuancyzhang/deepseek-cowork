@@ -1,4 +1,4 @@
-"""Read-only project material browser; adding a file uses normal chat attachments."""
+"""Public local files and project browsing; references use normal chat attachments."""
 import hashlib
 import logging
 import os
@@ -15,6 +15,66 @@ EXCLUDED = frozenset({"node_modules", "__pycache__", "venv", "node_env", "git_ba
 class LocalLibrary:
     def __init__(self, service):
         self.s = service
+
+    def public(self):
+        root = (Path(self.s.config.data_dir) / "library" / "public").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return {"id": "public", "name": "公共资料", "path": str(root), "available": True}
+
+    def folder(self, params):
+        project, target = self.checked(params.get("collection", "public"), params.get("parent", ""))
+        if not target.is_dir():
+            raise ValueError("请选择一个资料文件夹。")
+        return {"path": str(target), "collection_id": project["id"]}
+
+    def mkdir(self, params):
+        if params.get("collection") != "public":
+            raise ValueError("请在公共资料中新建文件夹。")
+        name = str(params.get("name", "")).strip()
+        if not name or name in {".", ".."} or any(c in name for c in '/\\:*?"<>|') or name.endswith((".", " ")):
+            raise ValueError("请输入有效的文件夹名称。")
+        target = Path(self.folder(params)["path"]) / name
+        try:
+            target.mkdir()
+        except FileExistsError:
+            raise ValueError("同名文件或文件夹已存在，请使用其他名称。") from None
+        log.info("local_library_folder_created collection=public")
+        return self.row(self.public(), target)
+
+    def import_files(self, params, cancelled, progress):
+        if params.get("collection") != "public":
+            raise ValueError("请将文件添加到公共资料。")
+        target = Path(self.folder(params)["path"])
+        added, failed = [], []
+        paths = params.get("paths") or []
+        log.info("local_library_import_start count=%s", len(paths))
+        for raw in paths:
+            if cancelled.is_set():
+                raise JobCancelled(f"已取消添加，已添加的 {len(added)} 个文件保留在公共资料中，请刷新查看。")
+            source = Path(raw).resolve()
+            if not source.is_file():
+                failed.append({"name": source.name, "reason": "文件不存在或不是普通文件"}); continue
+            destination = target / source.name
+            progress("正在添加：" + source.name)
+            created = False
+            try:
+                with destination.open("xb") as output:
+                    created = True
+                    with source.open("rb") as incoming:
+                        while chunk := incoming.read(1024 * 1024):
+                            if cancelled.is_set():
+                                raise JobCancelled("已取消添加，之前已添加的文件保留，请刷新查看。")
+                            output.write(chunk)
+                added.append(self.row(self.public(), destination))
+            except (OSError, JobCancelled) as exc:
+                if created:
+                    destination.unlink()
+                if isinstance(exc, JobCancelled):
+                    raise
+                failed.append({"name": source.name, "reason": "同名文件已存在，未覆盖" if isinstance(exc, FileExistsError) else "文件读取或写入失败"})
+                log.warning("local_library_import_failed error=%s", type(exc).__name__)
+        log.info("local_library_import_complete added=%s failed=%s", len(added), len(failed))
+        return {"added": added, "failed": failed}
 
     def projects(self):
         projects = {}
@@ -35,7 +95,7 @@ class LocalLibrary:
                  "available": Path(item["path"]).is_dir()} for path, item in projects.items()]
 
     def checked(self, collection, item=""):
-        project = next((p for p in self.projects() if p["id"] == collection), None)
+        project = self.public() if collection == "public" else next((p for p in self.projects() if p["id"] == collection), None)
         if not project:
             raise ValueError("此项目已不在资料库中，请刷新列表。")
         root = Path(project["path"])
@@ -75,14 +135,14 @@ class LocalLibrary:
                 unavailable.append(project["name"]); continue
             progress("正在读取项目资料：" + project["name"])
             for folder, dirs, files in os.walk(project.get("scan_root", root), onerror=failed, followlinks=False):
-                dirs[:] = sorted(name for name in dirs if not name.startswith(".") and name not in EXCLUDED
+                dirs[:] = sorted(name for name in dirs if not name.startswith(".") and (project["id"] == "public" or name not in EXCLUDED)
                                  and not Path(folder, name).is_symlink() and not Path(folder, name).is_junction())
                 names = files if recursive else [*dirs, *files]
                 for name in names:
                     if cancelled.is_set():
                         raise JobCancelled("已取消读取，本地文件未改变。")
                     path = Path(folder, name)
-                    if name.startswith(".") or (not path.is_dir() and path.suffix.lower() not in DOCUMENTS):
+                    if name.startswith(".") or (project["id"] != "public" and not path.is_dir() and path.suffix.lower() not in DOCUMENTS):
                         continue
                     if query and query not in str(path.relative_to(root)).casefold():
                         continue
@@ -104,13 +164,14 @@ class LocalLibrary:
 
     def describe(self, params):
         project, path = self.checked(params["collection"], params["item"])
-        if not path.is_file() or path.suffix.lower() not in DOCUMENTS:
+        if not path.is_file():
             raise ValueError("请选择一份本地资料文件。")
         return self.row(project, path)
 
     def read(self, params):
         item = self.describe(params); path = Path(item["path"])
-        kind = file_capability(str(path)).preview_kind
+        capability = file_capability(str(path))
+        kind = capability.preview_kind if capability else "external"
         result = {"path": str(path), "payload": {"kind": "preview", "preview_kind": kind}}
         if kind in {"markdown", "text"}:
             if item["size"] > 10 * 1024 * 1024:

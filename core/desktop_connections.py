@@ -10,7 +10,7 @@ from core.team_spaces import TeamSpaceClient
 class Connections:
     methods = frozenset({"library.status", "library.select", "library.login", "library.authorize", "library.confirm",
         "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.read_result", "library.reference",
-        "library.upload", "library.uploads", "library.check_upload", "library.tenant",
+        "library.upload", "library.uploads", "library.check_upload", "library.tenant", "library.import", "library.mkdir", "library.folder",
         "enterprise.status", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
         "team.list", "team.detail", "team.collection", "team.object", "team.execute", "team.upload", "team.download", "team.conversation"})
 
@@ -29,7 +29,13 @@ class Connections:
             source = p.get("source") or self.library.source
             if source == "local":
                 if action == "catalog":
-                    return {"mine": self.local.projects()}
+                    return {"mine": self.local.projects(), "public": self.local.public()}
+                if action == "folder":
+                    return self.local.folder(p)
+                if action == "mkdir":
+                    return self.local.mkdir(p)
+                if action == "import":
+                    return self.s.jobs.submit("添加公共资料", lambda cancelled, progress: self.local.import_files(p, cancelled, progress))
                 if action in {"children", "search"}:
                     return self.s.jobs.submit("读取本地资料", lambda cancelled, progress: self.local.files(p, cancelled, progress))
                 if action == "read":
@@ -82,7 +88,7 @@ class Connections:
                     return provider.catalog(scope)
                 if action == "children":
                     if source == "weknora":
-                        return {"files": provider.files(scope, p["collection"], p.get("page", 1), p.get("parent")), "folders": provider.folders(scope, p["collection"])}
+                        return provider.children(scope, p["collection"], p.get("parent", ""), p.get("page", 1))
                     return provider.children(scope, p["collection"], p.get("parent", ""), p.get("page", 1))
                 if action == "search":
                     if source == "weknora":

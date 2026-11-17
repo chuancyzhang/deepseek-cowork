@@ -107,6 +107,17 @@ class MultimediaTests(unittest.TestCase):
         self.host = DesktopMedia(self.service)
         self.runtime = self.host.acquire()
 
+    def test_connection_evidence_is_scoped_to_model_protocol_and_credentials(self):
+        profile={"channel_id":"chat","base_url":self.base,"model_name":"custom","provider_type":"openai","api_protocol":"chat_completions","api_key":"secret"}
+        self.assertIsNone(self.host.model_usage(profile)["chat_supported"])
+        self.host.record_connection_test(profile,True,"对话接口测试通过")
+        self.assertTrue(self.host.model_usage(profile)["chat_supported"])
+        for key,value in (("api_key","changed"),("api_protocol","responses"),("model_name","another"),("base_url",self.base+'/other')):
+            self.assertIsNone(self.host.connection_test({**profile,key:value}))
+        self.assertNotIn('secret',json.dumps(self.config.value))
+        self.host.record_connection_test(profile,False,"当前连接不可用")
+        self.assertFalse(self.host.connection_test(profile)["success"])
+
     def tearDown(self):
         self.service.jobs.close()
         self.host.release()

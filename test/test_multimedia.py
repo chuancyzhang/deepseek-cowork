@@ -32,12 +32,22 @@ PNG = _png.getvalue()
 class Config:
     def __init__(self, root, base):
         self.data_dir = str(root)
-        self.value = {"experimental_multimedia": {"enabled": True, "bindings": {}}}
+        self.value = {"enabled_skills": ["multimedia"], "disabled_skills": [], "skill_configs": {}}
         self.channels = [{"channel_id": "media", "display_name": "Fixture", "base_url": base, "api_key": "private-test-key", "models": [], "provider_type": "openai"}]
     def get(self, key, default=None):
         return copy.deepcopy(self.value.get(key, default))
     def set(self, key, value):
         self.value[key] = copy.deepcopy(value)
+    def is_skill_enabled(self, name, default_enabled=True):
+        return name not in self.value['disabled_skills'] and (name in self.value['enabled_skills'] or default_enabled)
+    def set_skill_enabled(self, name, enabled, **_kwargs):
+        self.value['enabled_skills'] = [name] if enabled else []
+        self.value['disabled_skills'] = [] if enabled else [name]
+    def set_skill_config(self, name, values):
+        self.value['skill_configs'][name] = copy.deepcopy(values)
+    def set_media(self, value):
+        self.set_skill_config('multimedia', {'bindings': json.dumps(value['bindings'])})
+        self.set_skill_enabled('multimedia', value['enabled'])
     def get_model_channels(self):
         return copy.deepcopy(self.channels)
     def set_model_channels(self, channels, selected=None):
@@ -45,7 +55,7 @@ class Config:
     def get_selected_model_id(self):
         return ""
     @contextmanager
-    def batch_save(self):
+    def batch_save(self, **_kwargs):
         yield
 
 
@@ -149,7 +159,8 @@ class MultimediaTests(unittest.TestCase):
         self.assertEqual(failed["status"], "download_failed")
         self.assertEqual(self.service.jobs.get(failed["job_id"])["status"], "failed")
         self.fail_download = False
-        self.runtime.resume(task["id"], "one")
+        self.config.set_skill_enabled("multimedia", False)
+        self.host.dispatch("media.resume", {"id": task["id"], "conversation_id": "one"})
         result = self.wait(task["id"])
         self.assertEqual(result["status"], "completed")
         self.assertEqual(Path(result["files"][0]).read_bytes(), PNG)
@@ -160,6 +171,8 @@ class MultimediaTests(unittest.TestCase):
         self.assertNotIn("private-test-key", json.dumps(result))
         self.assertNotIn("private-test-key", json.dumps(self.events))
         self.assertEqual(self.submit()["id"], task["id"])
+        with self.assertRaisesRegex(ValueError, "已停用"):
+            self.submit(identity="new-after-disable")
         with self.assertRaisesRegex(ValueError, "此对话中没有"):
             self.runtime.get(task["id"], "two")
 
@@ -228,10 +241,10 @@ class MultimediaTests(unittest.TestCase):
         binding = {"adapter": "agnes", "channel_id": "media", "model": profile["model"]}
         with self.assertRaisesRegex(ValueError, "只支持视频生成"):
             validate_binding("image_generate", binding)
-        self.config.set("experimental_multimedia", {"enabled": True, "bindings": {"video_generate": binding}})
+        self.config.set_media({"enabled": True, "bindings": {"video_generate": binding}})
         chat_profile = {**profile, "model_name": profile["model"]}
         self.assertFalse(self.host.model_usage(chat_profile)["chat_supported"])
-        self.config.value["experimental_multimedia"]["enabled"] = False
+        self.config.set_skill_enabled("multimedia", False)
         self.assertFalse(self.host.model_usage(chat_profile)["chat_supported"])
         self.assertEqual(self.host.actions(), [])
         self.assertIsNone(self.host.model_usage({**chat_profile, "model_name": "my-video-chat-model"})["chat_supported"])
@@ -242,7 +255,7 @@ class MultimediaTests(unittest.TestCase):
         self.config.channels[0]["base_url"] = "https://apihub.agnes-ai.com/v1"
         runtime = self.host.acquire(existing=True)
         try:
-            original = self.config.get("experimental_multimedia")
+            original = self.config.get("skill_configs")
             binding = {"adapter": "openai", "channel_id": "media", "model": "agnes-video-2.5-flash"}
             invalid = runtime.dispatch("media.validate", {"bindings": {"video_generate": binding}})
             self.assertFalse(invalid["video_generate"]["valid"])
@@ -250,34 +263,32 @@ class MultimediaTests(unittest.TestCase):
             corrected = runtime.dispatch("media.validate", {"bindings": {"video_generate": {**binding, "adapter": "agnes"}}})
             self.assertTrue(corrected["video_generate"]["valid"])
             self.assertEqual(corrected["video_generate"]["message"], "")
-            self.assertEqual(self.config.get("experimental_multimedia"), original)
+            self.assertEqual(self.config.get("skill_configs"), original)
             self.assertEqual(self.calls, [])
             self.assertEqual(self.host.records(), [])
             usage = self.host.model_usage({"base_url": "https://apihub.agnes-ai.com/v1", "model_name": "agnes-image-2.5-flash"})
             self.assertFalse(usage["chat_supported"])
-            self.config.set("experimental_multimedia", {"enabled": True, "bindings": {"video_generate": {}}})
+            self.config.set_media({"enabled": True, "bindings": {"video_generate": {}}})
             self.assertFalse(runtime.config()["binding_status"]["video_generate"]["valid"])
+            lease = self.host.bind_run()
+            self.assertEqual(lease.profiles, {})
+            lease.close()
         finally:
             self.host.release()
 
-    def test_audio_and_understanding_save_text_and_media(self):
-        source = self.root / "one" / "sample.wav"
-        source.write_bytes(b"RIFFfixture")
-        for kind, inputs in (("audio_generate", []), ("audio_understand", [str(source)]),
-                             ("image_understand", [self.base + "/picture.png"]), ("video_understand", [self.base + "/movie.mp4"])):
-            task = self.submit(kind, "openai", inputs=inputs, identity=kind)
-            result = self.wait(task["id"])
-            self.assertEqual(result["status"], "completed", result)
-            self.assertTrue(Path(result["files"][0]).is_file())
-        speech = next(item for item in self.calls if item[1].endswith('/audio/speech'))
-        self.assertEqual(speech[2]["response_format"], "mp3")
-        transcription = next(item for item in self.calls if item[1].endswith('/audio/transcriptions'))
-        self.assertIn('name="file"', transcription[2])
+    def test_video_understanding_saves_text_and_retired_capabilities_reject_new_tasks(self):
+        task = self.submit("video_understand", "openai", inputs=[self.base + "/movie.mp4"])
+        result = self.wait(task["id"])
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(Path(result["files"][0]).read_text(encoding="utf-8"), "解析结果")
+        for kind in ("audio_generate", "audio_understand", "image_understand"):
+            with self.assertRaisesRegex(ValueError, "不支持"):
+                self.submit(kind, "openai", identity=kind)
 
     def test_off_state_releases_only_after_run_and_job_leases(self):
-        self.config.set("experimental_multimedia", {"enabled": True, "bindings": {"image_generate": {"adapter": "agnes", "model": "original", "channel_id": "media"}}})
+        self.config.set_media({"enabled": True, "bindings": {"image_generate": {"adapter": "agnes", "model": "original", "channel_id": "media"}}})
         lease = self.host.bind_run()
-        self.config.value["experimental_multimedia"]["bindings"]["image_generate"]["model"] = "changed"
+        self.config.set_media({"enabled": True, "bindings": {"image_generate": {"adapter": "agnes", "model": "changed", "channel_id": "media"}}})
         self.assertEqual(lease.profiles["image_generate"]["model"], "original")
         manager = SkillManager(str(self.root / "one"), auto_load=False)
         before = manager.tool_registry.definitions("execution")
@@ -285,11 +296,10 @@ class MultimediaTests(unittest.TestCase):
         self.assertEqual(before, manager.tool_registry.definitions("execution"))
         self.assertIn("media_create", [item["name"] for item in manager.tool_registry.search("生成图片")])
         self.assertIn("media_task", [item["name"] for item in manager.tool_registry.search("video progress")])
-        self.config.value["experimental_multimedia"]["enabled"] = False
+        self.config.set_skill_enabled("multimedia", False)
         self.host.reconcile()
         self.assertIsNone(self.host.bind_run())
-        with self.assertRaisesRegex(ValueError, "启用"):
-            self.host.dispatch("media.config", {})
+        self.assertFalse(self.host.dispatch("media.config", {})["enabled"])
         self.assertIs(self.host.instance, self.runtime)
         lease.close()
         self.host.release()
@@ -337,12 +347,45 @@ class MultimediaTests(unittest.TestCase):
         self.assertFalse(self.runtime.active)
         self.assertFalse(self.calls)
 
-    def test_interrupted_speech_response_is_unknown_and_never_resubmitted(self):
-        with patch.object(Adapter, "write_stream", side_effect=MediaError("download interrupted", retryable=True)):
-            task = self.submit("audio_generate", "openai")
+    def test_interrupted_generation_response_is_unknown_and_never_resubmitted(self):
+        submit = Adapter.submit
+        def interrupted(adapter, *args):
+            submit(adapter, *args)
+            raise MediaError("response interrupted", uncertain=True)
+        with patch.object(Adapter, "submit", interrupted):
+            task = self.submit("image_generate", "openai")
             self.assertEqual(self.wait(task["id"])["status"], "unknown")
-        self.submit("audio_generate", "openai")
+        self.submit("image_generate", "openai")
         self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
+
+    def test_pending_configuration_survives_restart_and_continues_once_in_its_conversation(self):
+        lease = self.host.bind_run()
+        create = next(tool["handler"] for tool in lease.tools() if tool["name"] == "media_create")
+        context = {"conversation_id": "one", "logical_execution_id": "pending"}
+        args = dict(capability="image_generate", prompt="保留这条需求", workspace_dir=str(self.root / "one"), _context=context)
+        task = create(**args)
+        self.assertEqual(task["status"], "needs_configuration")
+        self.assertEqual(create(**args)["id"], task["id"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.host.records()), 1)
+        self.config.set_media({"enabled": True, "bindings": {"image_generate": {"channel_id": "media", "adapter": "openai", "model": "configured"}}})
+        restarted = DesktopMedia(self.service)
+        self.assertEqual(restarted.records()[0]["status"], "needs_configuration")
+        runtime = restarted.acquire()
+        try:
+            with self.assertRaisesRegex(ValueError, "此对话"):
+                runtime.continue_pending(task["id"], "two")
+            runtime.continue_pending(task["id"], "one")
+            runtime.continue_pending(task["id"], "one")
+            deadline = time.monotonic() + 8
+            while task["id"] in runtime.active and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(runtime.get(task["id"])["status"], "completed")
+            self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
+            self.assertEqual(runtime.get(task["id"])["request"]["prompt"], "保留这条需求")
+        finally:
+            restarted.release()
+            lease.close()
 
     def test_real_worker_discovers_media_and_returns_saved_file(self):
         requests_seen = []
@@ -379,8 +422,7 @@ class MultimediaTests(unittest.TestCase):
         try:
             settings = client.call("settings.save_model", name="Chat", model_name="fixture", api_key="chat-key", base_url=f"http://127.0.0.1:{chat.server_port}/v1")
             client.call("settings.permission", enabled=True)
-            page = client.call("settings.page", page="experiments")
-            client.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "multimedia": True})
+            client.call("skills.enable", name="multimedia", enabled=True)
             config = client.call("media.config")
             client.call("media.save", revision=config["revision"], bindings={"image_generate": {"channel_id": "media-fixture", "model": "agnes-image", "adapter": "agnes"}},
                         services=[{"channel_id": "media-fixture", "display_name": "Media", "base_url": self.base, "api_key": "private-media-key"}])
@@ -408,17 +450,62 @@ class MultimediaTests(unittest.TestCase):
 
 
 class MultimediaServiceTests(unittest.TestCase):
-    def test_experiment_routes_and_configuration_survive_disable_and_restart(self):
+    def test_legacy_configuration_migrates_once_and_explicit_skill_state_wins(self):
+        from core.desktop_config import DesktopConfigManager
+        from core.multimedia import configuration
+        legacy = {"image_generate": {"adapter": "openai", "channel_id": "old", "model": "image"},
+                  "audio_understand": {"adapter": "openai", "channel_id": "old", "model": "transcribe"}}
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+                value = {"experimental_multimedia": {"enabled": True, "bindings": legacy}}
+                if explicit:
+                    value["disabled_skills"] = ["multimedia"]
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps(value), encoding="utf-8")
+                with patch("core.config_manager.get_app_data_dir", return_value=directory):
+                    config = DesktopConfigManager(migrate_legacy=False)
+                    self.assertEqual(configuration(config)["bindings"], legacy)
+                    self.assertEqual(configuration(config)["enabled"], not explicit)
+                    self.assertNotIn("experimental_multimedia", config.config)
+                    config.set_skill_enabled("multimedia", False)
+                    reloaded = DesktopConfigManager(migrate_legacy=False)
+                    self.assertFalse(configuration(reloaded)["enabled"])
+                    self.assertEqual(configuration(reloaded)["bindings"], legacy)
+                    self.assertNotIn("experimental_multimedia", json.loads(path.read_text(encoding="utf-8")))
+
+    def test_model_configuration_save_failure_preserves_settings_and_emits_no_success(self):
+        from core.desktop_config import DesktopConfigManager
+        from core.multimedia.runtime import MediaRuntime
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            with patch("core.config_manager.get_app_data_dir", return_value=directory):
+                config = DesktopConfigManager(migrate_legacy=False)
+            events = []
+            service = SimpleNamespace(config=config, publish=events.append)
+            host = SimpleNamespace(s=service, lock=threading.RLock(), records=lambda: [])
+            runtime = MediaRuntime(host)
+            before = copy.deepcopy(config.config)
+            request = {"revision": runtime.config()["revision"], "enabled": True,
+                       "bindings": {"image_generate": {"adapter": "openai", "model": "image", "channel_id": "new"}},
+                       "services": [{"channel_id": "new", "display_name": "New", "base_url": "https://example.test/v1", "api_key": "private"}]}
+            with patch.object(config, "_write_config_or_raise", side_effect=OSError("disk unavailable")):
+                with self.assertRaisesRegex(OSError, "disk unavailable"):
+                    runtime.save_config(request)
+            self.assertEqual(config.config, before)
+            self.assertEqual(events, [])
+
+    def test_skill_routes_and_configuration_survive_disable_and_restart(self):
         with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
             client = ServiceClient(directory)
             try:
                 self.assertFalse(client.call("settings.get")["multimedia_enabled"])
-                with self.assertRaisesRegex(RuntimeError, "启用"):
-                    client.call("media.config")
+                self.assertEqual(client.call("media.config")["bindings"], {})
                 page = client.call("settings.page", page="experiments")
-                client.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "multimedia": True})
+                self.assertNotIn("multimedia", page["values"])
+                skill = next(item for item in client.call("skills.inventory") if item["name"] == "multimedia")
+                self.assertFalse(skill["enabled"])
+                self.assertEqual(skill["source_type"], "bundled_plugin")
                 settings = client.call("media.config")
-                saved = client.call("media.save", revision=settings["revision"],
+                saved = client.call("media.save", revision=settings["revision"], enabled=True,
                                     bindings={"image_generate": {"adapter": "agnes", "model": "agnes-image-2.0-flash", "channel_id": "agnes-fixture"}},
                                     services=[{"channel_id": "agnes-fixture", "display_name": "Agnes", "base_url": "https://apihub.agnes-ai.com/v1", "api_key": "private-media-key"}])
                 self.assertNotIn("private-media-key", json.dumps(saved))
@@ -435,8 +522,7 @@ class MultimediaServiceTests(unittest.TestCase):
                 self.assertEqual(client.call("conversation.get", conversation_id=conversation["id"])["messages"], [])
                 with self.assertRaisesRegex(RuntimeError, "已更新"):
                     client.call("media.save", revision=settings["revision"], bindings={})
-                page = client.call("settings.page", page="experiments")
-                client.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "multimedia": False})
+                client.call("skills.enable", name="multimedia", enabled=False)
                 self.assertFalse(client.call("settings.get")["multimedia_enabled"])
                 with self.assertRaisesRegex(RuntimeError, "选择对话模型"):
                     client.call("conversation.send", **request)
@@ -444,8 +530,7 @@ class MultimediaServiceTests(unittest.TestCase):
                 client.close()
             client = ServiceClient(directory)
             try:
-                page = client.call("settings.page", page="experiments")
-                client.call("settings.page_save", page="experiments", revision=page["revision"], value={**page["values"], "multimedia": True})
+                client.call("skills.enable", name="multimedia", enabled=True)
                 self.assertEqual(client.call("media.config")["bindings"], saved["bindings"])
             finally:
                 client.close()

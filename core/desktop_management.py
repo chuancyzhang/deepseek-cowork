@@ -93,10 +93,18 @@ class Management:
             if action == "enable":
                 if not p["enabled"] and (manager.skill_records.get(name) or {}).get("source_kind") == "core_builtin":
                     raise ValueError("内置技能默认启用，不能停用。")
-                self.config.set_skill_enabled(name, bool(p["enabled"]), persist_strict=True)
+                if name == "multimedia":
+                    with self.s.media.lock:
+                        self.config.set_skill_enabled(name, bool(p["enabled"]), persist_strict=True)
+                        self.s.media.reconcile()
+                    self.s.publish({"event": "settings_changed"})
+                else:
+                    self.config.set_skill_enabled(name, bool(p["enabled"]), persist_strict=True)
                 self.skill_change("enabled" if p["enabled"] else "disabled", [name])
                 return {"saved": True}
             if action == "configure":
+                if name == "multimedia":
+                    raise ValueError("请在多媒体技能的模型配置页保存，保留配置校验与版本检查。")
                 values = {**self.config.get_skill_config(name), **p["values"]}
                 status = manager.get_skill_config_status(name, values)
                 if not status.get("complete"):

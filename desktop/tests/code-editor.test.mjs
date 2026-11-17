@@ -8,12 +8,12 @@ import {fileURLToPath} from 'node:url';
 import {build} from 'vite';
 const require=createRequire(import.meta.url),directory=path.dirname(fileURLToPath(import.meta.url));
 
-test('source editors and media shortcuts preserve drafts using real desktop IPC',{timeout:120000},async()=>{
+test('source editors and multimedia skill configuration preserve drafts and resume the original task',{timeout:120000},async()=>{
   const root=path.resolve(directory,'../../.tmp/multimedia-editor');await mkdir(root,{recursive:true});
   const data=await mkdtemp(path.join(root,'ui-'));
   try {
     await build({root:path.resolve(directory,'..'),logLevel:'silent'});
-    const env={...process.env,COWORK_APP_DATA_DIR:data,APPDATA:path.join(data,'roaming'),LOCALAPPDATA:path.join(data,'local'),TEMP:data,TMP:data};delete env.ELECTRON_RUN_AS_NODE;
+    const env={...process.env,COWORK_APP_DATA_DIR:data,APPDATA:path.join(data,'roaming'),LOCALAPPDATA:path.join(data,'local'),TEMP:data,TMP:data,NO_PROXY:'127.0.0.1,localhost,::1'};delete env.ELECTRON_RUN_AS_NODE;
     const child=spawn(require('electron'),[path.join(directory,'code-editor.fixture.cjs')],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
     let output='';child.stdout.on('data',value=>output+=value);child.stderr.on('data',value=>output+=value);
     const code=await new Promise((resolve,reject)=>{child.on('exit',resolve);child.on('error',reject);});

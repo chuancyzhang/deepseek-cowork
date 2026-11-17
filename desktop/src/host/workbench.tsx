@@ -683,7 +683,7 @@ export function useWorkbenchController() {
     if (next !== route && !await leaveManagement.current()) return;
     try {
       if (next === 'plugins') { host.set('management:tab:capabilities', 'plugins'); next = 'capabilities'; }
-      if (next === 'multimedia') { host.set('management:tab:settings', 'multimedia'); next = 'settings'; }
+      if (next === 'multimedia') { host.set('management:tab:capabilities', 'skills'); host.set('management:skill','multimedia'); next = 'capabilities'; }
       await saveDraft(); await saveView(); setRoute(next); setShowUsage(false);
       if (next === 'settings') setSettings(await call('settings.get'));
     } catch (failure) { error((failure as Error).message); }

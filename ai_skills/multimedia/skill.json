@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "name": "multimedia",
+  "display_name": "多媒体",
+  "kind": "knowledge",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "Generate or edit images, generate videos, and analyze videos with configured media models.",
+  "description_cn": "生成或编辑图片、生成视频、分析视频内容。",
+  "presentation": {
+    "category": "content_creation",
+    "short_name": "多媒体",
+    "summary": "生成图片和视频，分析视频内容。",
+    "examples": ["制作宣传海报", "生成短片", "整理视频内容与关键时间点"]
+  },
+  "tags": ["图片", "视频", "生成", "理解", "multimedia"],
+  "tool_refs": ["media_create", "media_task"]
+}

@@ -11,7 +11,6 @@ const SystemSettings = lazy(() => import('./management/SystemSettings'));
 const Enterprise = lazy(() => import('./management/Enterprise'));
 const Updates = lazy(() => import('./management/Updates'));
 const PluginManager = lazy(() => import('./plugins/PluginManager'));
-const Multimedia = lazy(() => import('./plugins/multimedia/Multimedia'));
 
 export const managementNames: Record<string, string> = { capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间', settings: '设置' };
 const groups: Record<string, [string, string, any][]> = {
@@ -24,28 +23,26 @@ const groups: Record<string, [string, string, any][]> = {
   library: [['library', '资料库', BookOpen]], team: [['team', '团队空间', Users]],
 };
 
-export default function Management({ useAction, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
-  useAction: (id:string)=>Promise<void>; route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
+export default function Management({ returnToChat, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
+  returnToChat:()=>void; route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
   onReference: (ref: any) => Promise<void>; onError: (message: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
-  const tabs = (groups[route] || groups.settings).flatMap(item => item[0] === 'experiments' && settings?.multimedia_enabled ? [item, ['multimedia', '多媒体', Sparkles] as [string,string,any]] : [item]);
+  const tabs = groups[route] || groups.settings;
   const [selectedTab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
   const tab = tabs.some(([id]) => id === selectedTab) ? selectedTab : tabs[0][0];
   const [dirty, setDirty] = useState(false), [query, setQuery] = useState('');
   useEffect(() => window.cowork.onEvents(events => {
     if (events.some(event => event.event === 'settings_changed')) void rpc('settings.get').then(updateSettings).catch(error => onError(error.message));
   }), [updateSettings, onError]);
-  useEffect(() => {if (selectedTab === 'multimedia' && !settings?.multimedia_enabled) setTab('experiments');}, [selectedTab, settings?.multimedia_enabled]);
   const leave = useCallback(async () => !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1, [dirty, confirm]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
   return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>
     {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} aria-current={tab === id ? 'page' : undefined} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}</nav>}
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
-      {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation}/>
+      {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation} returnToChat={returnToChat}/>
         : tab === 'plugins' ? <PluginManager/>
-        : tab === 'multimedia' && settings?.multimedia_enabled ? <Multimedia useAction={useAction} {...common} openConversation={openConversation} manageServices={async () => {if (await leave()) {setDirty(false); setTab('models');}}}/>
         : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])} projectsChanged={async()=>updateSettings(await rpc('settings.get'))}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>

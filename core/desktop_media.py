@@ -10,7 +10,7 @@ log = logging.getLogger("desktop.media")
 
 
 class DesktopMedia:
-    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.stop"})
+    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.continue", "media.stop"})
 
     def __init__(self, service):
         self.s = service
@@ -28,12 +28,12 @@ class DesktopMedia:
 
     @property
     def enabled(self):
-        return (self.s.config.get("experimental_multimedia") or {}).get("enabled") is True
+        return self.s.config.is_skill_enabled("multimedia", default_enabled=False)
 
     def acquire(self, *, existing=False):
         with self.lock:
             if not existing and not self.enabled:
-                raise ValueError("请先在实验功能中启用多媒体。")
+                raise ValueError("请在能力 → 技能中启用多媒体。")
             if self.instance is None:
                 from core.multimedia.runtime import MediaRuntime
                 self.instance = MediaRuntime(self)
@@ -77,7 +77,7 @@ class DesktopMedia:
                 " ORDER BY json_extract(value, '$.created_at') DESC LIMIT ?", params)]
 
     def dispatch(self, method, p):
-        runtime = self.acquire()
+        runtime = self.acquire(existing=True)
         try:
             return runtime.dispatch(method, p)
         finally:
@@ -114,8 +114,8 @@ class DesktopMedia:
         with self.lock:
             known = copy.deepcopy(self.s.config.get("model_usage", {}))
             if self.enabled:
-                from core.multimedia import model_usage
-                fact = model_usage(profile, (self.s.config.get("experimental_multimedia") or {}).get("bindings") or {})
+                from core.multimedia import model_usage, configuration
+                fact = model_usage(profile, configuration(self.s.config)["bindings"])
                 if fact and known.get(identity) != fact:
                     known[identity] = fact
                     self.s.config.set("model_usage", known)
@@ -129,10 +129,15 @@ class DesktopMedia:
         return {"chat_supported": None, "purpose_label": "服务未提供能力声明"}
 
     def actions(self):
+        return []
+
+    def configured_capabilities(self):
         if not self.enabled:
             return []
-        from core.multimedia import quick_actions
-        return quick_actions((self.s.config.get("experimental_multimedia") or {}).get("bindings") or {}, self.s.config.get_model_channels())
+        from core.multimedia import configuration, binding_error, SKILL_CAPABILITIES
+        channels = {item["channel_id"]: item for item in self.s.config.get_model_channels()}
+        return [kind for kind, binding in configuration(self.s.config)["bindings"].items()
+                if kind in SKILL_CAPABILITIES and not binding_error(kind, binding, channels.get(binding.get("channel_id")))]
 
     @staticmethod
     def public(record):
@@ -143,4 +148,5 @@ class DesktopMedia:
         result["text"] = result.get("text", "")[:16000]
         result["can_resume"] = record["status"] not in {"queued", "submitting", "running", "downloading", "completed", "failed", "cancelled"} and bool(record.get("remote_id") or record.get("sources") or record.get("receipt") or record.get("files") or (Path(record["destination"]) / "receipt.json").is_file())
         result["can_attach_id"] = record["status"] == "unknown" and record["capability"] == "video_generate"
+        result["needs_configuration"] = record["status"] == "needs_configuration"
         return result

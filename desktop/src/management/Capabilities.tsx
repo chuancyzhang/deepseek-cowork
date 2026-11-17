@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileCode2, FolderOpen, LoaderCircle, MoreHorizontal, Pencil, Play, Plus, Search, Sparkles, Trash2, Upload } from 'lucide-react';
 import { Empty, ErrorState, Field, JobProgress, PageHead, PageToolbar, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import { skillInMode, skillMatches, skillScenes } from '../skills';
 import { sameFormValue } from '../host/forms';
 import SkillHub from './SkillHub';
+import {useHostField} from '../host/context';
+const Multimedia = lazy(()=>import('../plugins/multimedia/Multimedia'));
 
 type Props = { kind: string; onError: (message: string) => void; onDirty: (value: boolean) => void;
-  confirm: (title: string, detail: string, choices: string[]) => Promise<number>; openConversation: (id: string) => void };
+  confirm: (title: string, detail: string, choices: string[]) => Promise<number>; openConversation: (id: string) => void; returnToChat:()=>void };
 const titles: Record<string, string> = { skills: '技能', mcp: 'MCP 服务', experts: '专家', favorites: '常用任务', schedule_history: '运行记录' };
 const descriptions: Record<string, string> = { skills: '按任务选择能力，也可以安装自己的技能。', mcp: '连接已有工具与服务，让 DeepSeek Cowork 在你的工作环境中完成任务。', experts: '保存角色、工作方法与可用技能，在对话中随时选择。', favorites: '把经常做的事保存下来，一键运行或安排时间。', schedule_history: '查看任务结果、错过的计划和需要恢复的操作。' };
 
@@ -16,6 +18,8 @@ export default function Capabilities(props: Props) {
   const [items, setItems] = useState<any[]>([]), [selected, setSelected] = useState<any>(null);
   const [query, setQuery] = useState(''), [failure, setFailure] = useState(''), [busy, setBusy] = useState(false), [job, setJob] = useState<any>(null);
   const [mode, setMode] = useState('library'), [scene, setScene] = useState('');
+  const [requestedSkill,setRequestedSkill]=useHostField('management:skill','');
+  useEffect(()=>{if(kind==='skills'&&requestedSkill){setSelected({name:requestedSkill});setRequestedSkill('');}},[kind,requestedSkill]);
   const reload = useCallback(async () => {
     setBusy(true); setFailure('');
     try { setItems(await rpc(kind === 'skills' ? 'skills.inventory' : kind === 'schedule_history' ? 'favorites.history' : kind + '.list')); }
@@ -41,6 +45,7 @@ export default function Capabilities(props: Props) {
       })}>复制为自建专家</button></div>
     </div>
   </>;
+  if(selected?.name==='multimedia'&&kind==='skills')return <Multimedia {...props} back={()=>{setSelected(null);void reload();}} saved={reload}/>;
   if (selected) return kind === 'skills' ? <SkillEditor key={selected.name} {...props} item={selected} back={() => setSelected(null)} saved={reload}/>
     : <ItemEditor key={selected.id || 'new'} {...props} item={selected} refresh={setSelected} back={() => { setSelected(null); void reload(); }}/ >;
   if (kind === 'skills' && mode === 'hub') return <SkillHub back={() => setMode('library')} mine={() => {setMode('mine'); void reload();}} onError={onError}/>;
@@ -68,7 +73,7 @@ export default function Capabilities(props: Props) {
       </div><div className="resource-actions">
         {kind === 'skills' ? item.source_kind === 'core_builtin' ? <small>默认启用</small> : <button className={`toggle ${item.enabled ? 'on' : ''}`} role="switch" aria-checked={Boolean(item.enabled)} aria-label={(item.enabled ? '停用' : '启用') + (item.display_name || item.name)} disabled={busy} onClick={() => void act('skills.enable', { name: item.name, enabled: !item.enabled })}><span/></button> :
           kind === 'mcp' ? <button className="secondary" disabled={busy} onClick={() => void act('mcp.test', { id: item.id })}>测试连接</button> : null}
-        {kind !== 'schedule_history' && (kind === 'experts' && item.builtin ? <button className="secondary" onClick={() => setSelected(item)}>查看</button> : <button className="icon-button" title="编辑" onClick={() => setSelected(item)}><Pencil size={16}/></button>)}
+        {kind !== 'schedule_history' && (kind === 'skills' && item.name === 'multimedia' ? <button className="secondary" onClick={()=>setSelected(item)}>配置模型</button> : kind === 'experts' && item.builtin ? <button className="secondary" onClick={() => setSelected(item)}>查看</button> : <button className="icon-button" title="编辑" onClick={() => setSelected(item)}><Pencil size={16}/></button>)}
         {kind !== 'schedule_history' && !(kind === 'experts' && item.builtin) && (kind !== 'skills' || item.editable) && <button className="icon-button" title="删除" disabled={busy} onClick={async () => {
           if (await confirm('删除' + (item.display_name || item.name) + '？', kind === 'skills' ? '将删除此技能的本地文件。可以先打开详情导出备份。' : kind === 'favorites' ? '任务及定时计划会删除；已有对话、运行记录和当前正在执行的任务会保留。' : '已存在的对话和运行结果会保留。', ['取消', '删除']) === 1) await act(kind + '.delete', { id: item.id, name: item.name, revision: item.revision });
         }}><Trash2 size={16}/></button>}

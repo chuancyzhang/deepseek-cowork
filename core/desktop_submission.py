@@ -45,9 +45,10 @@ def referenced_images(text, workspace, existing):
 
 
 def media_image_inputs(config):
-    policy = config.get("experimental_multimedia") or {}
-    bindings = policy.get("bindings") or {}
-    return policy.get("enabled") is True and any(bindings.get(key) for key in ("image_generate", "image_understand"))
+    if not config.is_skill_enabled("multimedia", default_enabled=False):
+        return False
+    from core.multimedia import configuration
+    return bool(configuration(config)["bindings"].get("image_generate"))
 
 
 def user_payload(text, paths, *, workspace, supports_vision=False, keep_audio_local=False, media_images=False,

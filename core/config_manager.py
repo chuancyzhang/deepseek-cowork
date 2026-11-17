@@ -475,6 +475,16 @@ class ConfigManager:
             self.config["mcp_servers"] = normalized_mcp_servers
             updated = True
         normalized_skill_configs = self._normalize_skill_configs(self.config.get("skill_configs"))
+        legacy_media = self.config.pop("experimental_multimedia", None)
+        if isinstance(legacy_media, dict):
+            # Move once; explicit skill choices always win over the retired switch.
+            normalized_skill_configs.setdefault("multimedia", {
+                "bindings": json.dumps(legacy_media.get("bindings") or {}, ensure_ascii=False)
+            })
+            if "multimedia" not in self.config.get("enabled_skills", []) + self.config.get("disabled_skills", []):
+                key = "enabled_skills" if legacy_media.get("enabled") is True else "disabled_skills"
+                self.config[key] = [*self.config.get(key, []), "multimedia"]
+            updated = True
         if normalized_skill_configs != self.config.get("skill_configs"):
             self.config["skill_configs"] = normalized_skill_configs
             updated = True

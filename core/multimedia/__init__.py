@@ -1,6 +1,7 @@
 """Opt-in multimedia plugin. Imported only while a host or run owns a lease."""
 
 import copy
+import json
 from urllib.parse import urlsplit
 
 CAPABILITIES = {
@@ -8,6 +9,7 @@ CAPABILITIES = {
     "video_generate": "视频生成", "video_understand": "视频理解",
     "audio_generate": "语音生成", "audio_understand": "音频转写",
 }
+SKILL_CAPABILITIES = ("image_generate", "video_generate", "video_understand")
 ADAPTERS = {
     "openai": {"label": "OpenAI 兼容", "capabilities": list(CAPABILITIES), "base_url": ""},
     "agnes": {"label": "Agnes", "capabilities": ["image_generate", "video_generate"],
@@ -25,15 +27,6 @@ KNOWN_MODELS = {
     # https://agnes-ai.com/zh-Hans/docs/agnes-video-25-flash
     "agnes-video-2.5-flash": {"capabilities": ["video_generate"], "chat_supported": False, "purpose_label": "视频生成", "adapter": "agnes"},
 }
-EXAMPLES = {
-    "image_generate": ("生成图片", "生成一张极简咖啡店海报，暖色调，突出手冲咖啡。"),
-    "video_generate": ("生成视频", "生成一段介绍咖啡店的 5 秒短片，暖色调，横屏。"),
-    "audio_generate": ("文字配音", "把这段文字转为自然的中文配音：欢迎来到我们的咖啡店。"),
-    "image_understand": ("理解图片", "请分析我附上的图片，概括主要内容与细节。"),
-    "video_understand": ("理解视频", "请分析这个可公开访问的视频链接，概括内容与关键时间点："),
-    "audio_understand": ("音频转写", "请把我附上的音频转写为文字。"),
-}
-
 
 def model_usage(profile, bindings):
     agnes = urlsplit(profile.get("base_url", "")).hostname == "apihub.agnes-ai.com" or any(
@@ -56,21 +49,6 @@ def binding_error(kind, binding, channel):
     return ""
 
 
-def quick_actions(bindings, channels):
-    by_id = {item["channel_id"]: item for item in channels}
-    return [{"id": kind, "plugin": "multimedia", "label": label, "prompt": prompt,
-             "configured": bool(bindings.get(kind)) and not binding_error(kind, bindings[kind], by_id.get(bindings[kind].get("channel_id"))),
-             "page": "settings", "tab": "multimedia"}
-            for kind, (label, prompt) in EXAMPLES.items()]
-
-
-def normalize(value):
-    value = value if isinstance(value, dict) else {}
-    bindings = value.get("bindings") if isinstance(value.get("bindings"), dict) else {}
-    return {"enabled": value.get("enabled") is True,
-            "bindings": {key: copy.deepcopy(item) for key, item in bindings.items() if key in CAPABILITIES and isinstance(item, dict)}}
-
-
 def validate_binding(kind, value):
     if kind not in CAPABILITIES or not isinstance(value, dict):
         raise ValueError("多媒体配置无效。")
@@ -88,12 +66,22 @@ def validate_binding(kind, value):
 
 
 def snapshot(config):
-    policy = normalize(config.get("experimental_multimedia", {}))
+    policy = configuration(config)
     channels = {item["channel_id"]: item for item in config.get_model_channels()}
     profiles = {}
     for kind, binding in policy["bindings"].items():
+        if kind not in SKILL_CAPABILITIES:
+            continue
         channel = channels.get(binding.get("channel_id"))
-        if channel:
+        if channel and not binding_error(kind, binding, channel):
             profiles[kind] = {**binding, "base_url": channel["base_url"], "api_key": channel["api_key"],
                               "service_name": channel["display_name"]}
     return profiles
+
+
+def configuration(config):
+    values = (config.get("skill_configs", {}) or {}).get("multimedia", {})
+    bindings = json.loads(values.get("bindings") or "{}")
+    if not isinstance(bindings, dict):
+        raise ValueError("多媒体模型配置格式无效，请在技能配置页修正。")
+    return {"enabled": config.is_skill_enabled("multimedia", default_enabled=False), "bindings": bindings}

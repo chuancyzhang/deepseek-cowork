@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from . import ADAPTERS, CAPABILITIES, KNOWN_MODELS, normalize, snapshot, validate_binding, quick_actions, binding_error, model_usage
+from . import ADAPTERS, CAPABILITIES, SKILL_CAPABILITIES, KNOWN_MODELS, configuration, snapshot, validate_binding, binding_error, model_usage
 from .adapters import Adapter, MediaError, safe_message
 
 log = logging.getLogger("multimedia")
@@ -40,8 +40,6 @@ class RunLease:
             if self.closed:
                 raise ValueError("此轮多媒体能力已释放。")
             profile = self.profiles.get(capability)
-            if not profile:
-                return {"status": "not_configured", "error": "请在设置 → 多媒体中为此能力选择模型。"}
             return self.runtime.submit(capability, prompt, inputs or [], options or {}, profile, workspace_dir, _context or {})
 
         def task(task_id="", action="get", wait_seconds=0, _context=None):
@@ -68,22 +66,22 @@ class RunLease:
         task.__name__ = "media_task"
         return [
             {"name": "media_create", "handler": submit, "description":
-             "Generate/edit images, generate video or speech, understand images/videos, or transcribe audio using configured multimedia models. "
+             "Generate/edit images, generate videos, or understand videos using the multimedia skill's configured models. "
              "Returns a durable task_id; use media_task to wait. Never resubmit an unknown outcome. "
              "inputs are workspace file paths or HTTP URLs. Video understanding and Agnes video reference images require publicly accessible URLs. "
-             "Video generation inputs are reference images. Speech synthesis creates AI-generated voice. Link completed local files in the final answer.",
-             "search_hint": "multimedia media image video audio generate edit understand analyze transcription speech picture movie 图片 视频 音频 生成 解析 配音 转写",
+             "Video generation inputs are reference images. Missing configuration creates a pending task; ask the user to configure the skill and click Continue. Do not resubmit. Link completed local files in the final answer.",
+             "search_hint": "multimedia media image video generate edit understand analyze picture movie 图片 视频 生成 解析",
              "parameters": {"type": "object", "properties": {
-                 "capability": {"type": "string", "enum": list(CAPABILITIES)}, "prompt": {"type": "string"},
+                 "capability": {"type": "string", "enum": list(SKILL_CAPABILITIES)}, "prompt": {"type": "string"},
                  "inputs": {"type": "array", "items": {"type": "string"}},
                  "options": {"type": "object", "properties": {"size": {"type": "string"}, "seconds": {"type": "integer"},
-                     "aspect_ratio": {"type": "string"}, "voice": {"type": "string"}, "speed": {"type": "number"}, "language": {"type": "string"}},
+                     "aspect_ratio": {"type": "string"}},
                      "additionalProperties": False}}, "required": ["capability"], "additionalProperties": False},
              "requires_workspace": True, "read_only": False, "destructive": True, "should_defer": True},
             {"name": "media_task", "handler": task, "description":
              "List this conversation's multimedia tasks or inspect/wait up to 30 seconds for one. resume only queries the saved remote task or retries download; "
              "it never creates a new generation. stop_waiting pauses local polling; the remote generation may continue. Return completed files using local Markdown links.",
-             "search_hint": "multimedia media image video audio task status wait resume download progress 图片 视频 音频 任务 状态 恢复 下载",
+             "search_hint": "multimedia media image video task status wait resume download progress 图片 视频 任务 状态 恢复 下载",
              "parameters": {"type": "object", "properties": {"task_id": {"type": "string"},
                  "action": {"type": "string", "enum": ["get", "resume", "stop_waiting"]},
                  "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30}}, "additionalProperties": False},
@@ -119,15 +117,16 @@ class MediaRuntime:
 
     def config(self):
         from core.desktop_settings import DesktopSettings
-        value = normalize(self.s.config.get("experimental_multimedia"))
+        value = configuration(self.s.config)
+        visible = {key: item for key, item in value["bindings"].items() if key in SKILL_CAPABILITIES}
         source_channels = self.s.config.get_model_channels()
         channels = [{key: item[key] for key in ("channel_id", "display_name", "base_url", "provider_type")}
                     | {"configured": bool(item["api_key"]), "models": [model["model_name"] for model in item["models"]]}
                     for item in source_channels]
         records = self.host.records()
-        checks = self.validate({"bindings": value["bindings"]})
+        checks = self.validate({"bindings": visible})
         statuses = {}
-        for kind, binding in value["bindings"].items():
+        for kind, binding in visible.items():
             channel = next((item for item in channels if item["channel_id"] == binding.get("channel_id")), {})
             reason = checks[kind]["message"]
             if reason:
@@ -139,8 +138,8 @@ class MediaRuntime:
             statuses[kind] = {"label": "已配置，未验证"} if not recent else {
                 "label": "最近调用成功" if recent["status"] == "completed" else "最近调用失败" if recent["status"] in {"failed", "download_failed"} else recent["message"],
                 "message": recent["message"], "updated_at": recent.get("updated_at"), "status": recent["status"]}
-        return {"bindings": value["bindings"], "channels": channels, "adapters": ADAPTERS,
-                "known_models": KNOWN_MODELS, "actions": quick_actions(value["bindings"], source_channels), "binding_status": statuses,
+        return {"enabled": value["enabled"], "bindings": visible, "channels": channels, "adapters": ADAPTERS,
+                "known_models": KNOWN_MODELS, "binding_status": statuses,
                 "revision": DesktopSettings.revision(value), "tasks": [self.public(item) for item in self.host.records()]}
 
     def save_config(self, p):
@@ -150,6 +149,11 @@ class MediaRuntime:
                 raise ValueError("多媒体配置已更新，当前编辑已保留。请重新载入后合并。")
             bindings = {key: validate_binding(key, value) for key, value in p.get("bindings", {}).items()}
             bindings = {key: value for key, value in bindings.items() if value}
+            if set(bindings) - set(SKILL_CAPABILITIES):
+                raise ValueError("此技能仅支持图片生成、视频生成和视频理解。")
+            enabled = p.get("enabled", current["enabled"]) is True
+            if enabled and not bindings:
+                raise ValueError("请至少选择一个模型后保存并启用。")
             channels = self.s.config.get_model_channels()
             # Credentials always use the host's existing protected model channels.
             for value in p.get("services", []):
@@ -178,8 +182,11 @@ class MediaRuntime:
             with self.s.config.batch_save():
                 if p.get("services"):
                     self.s.config.set_model_channels(channels, self.s.config.get_selected_model_id())
-                self.s.config.set("experimental_multimedia", {"enabled": True, "bindings": bindings})
+                retained = {key: value for key, value in configuration(self.s.config)["bindings"].items() if key not in SKILL_CAPABILITIES}
+                self.s.config.set_skill_config("multimedia", {"bindings": json.dumps({**retained, **bindings}, ensure_ascii=False)})
+                self.s.config.set_skill_enabled("multimedia", enabled)
             log.info("media_configuration_saved bindings=%s", sorted(bindings))
+            self.s.management.skill_change("updated", ["multimedia"])
             self.s.publish({"event": "settings_changed"})
             return self.config()
 
@@ -194,6 +201,8 @@ class MediaRuntime:
             return [self.public(item) for item in self.host.records(str(p.get("conversation_id") or ""))]
         if method == "media.resume":
             return self.public(self.resume(str(p["id"]), cid=str(p.get("conversation_id") or ""), remote_id=str(p.get("remote_id") or "")))
+        if method == "media.continue":
+            return self.public(self.continue_pending(str(p["id"]), str(p.get("conversation_id") or "")))
         if method == "media.stop":
             return self.public(self.stop(str(p["id"]), cid=str(p.get("conversation_id") or "")))
         raise ValueError("不支持此多媒体操作。")
@@ -221,7 +230,7 @@ class MediaRuntime:
                  record.get("run_id", ""), record["capability"], record.get("profile", {}).get("adapter", ""), record["status"])
 
     def submit(self, capability, prompt, inputs, options, profile, workspace, context):
-        if capability not in CAPABILITIES:
+        if capability not in SKILL_CAPABILITIES:
             raise ValueError("不支持此多媒体能力。")
         cid = str(context.get("conversation_id") or context.get("session_id") or "")
         if not cid or not workspace:
@@ -246,20 +255,48 @@ class MediaRuntime:
                 if previous["fingerprint"] != fingerprint:
                     raise ValueError("相同执行编号不能提交不同的多媒体请求。")
                 return self.public(previous)
-            adapter = Adapter(profile)
-            prepared = adapter.prepare(capability, prompt, inputs, options, str(root))
+            if not self.host.enabled:
+                raise ValueError("多媒体技能已停用，请启用后开始新任务。")
+            adapter = Adapter(profile) if profile else None
+            prepared = adapter.prepare(capability, prompt, inputs, options, str(root)) if adapter else None
             destination = root / "media" / identity
             if not destination.resolve().is_relative_to(root):
                 raise ValueError("成果目录不能指向当前工作目录以外的位置。")
             destination.mkdir(parents=True, exist_ok=True)
             record = {"id": identity, "conversation_id": cid, "workspace": str(root), "destination": str(destination),
-                      "fingerprint": fingerprint, "request": request, "profile": {key: value for key, value in profile.items() if key != "api_key"},
-                      "model": profile["model"], "service_name": profile["service_name"], "capability": capability,
+                      "fingerprint": fingerprint, "request": request, "profile": {key: value for key, value in (profile or {}).items() if key != "api_key"},
+                      "model": (profile or {}).get("model", ""), "service_name": (profile or {}).get("service_name", ""), "capability": capability,
                       "run_id": str(context.get("run_id") or context.get("turn_id") or ""),
                       "created_at": time.time(), "status": "queued", "message": "等待提交", "files": []}
+            if not profile:
+                record.update(status="needs_configuration", message="需求已保留。请在多媒体技能中选择模型，返回后点击继续任务。")
             self.save(record)
-            self.start(record, adapter, prepared)
+            if adapter:
+                self.start(record, adapter, prepared)
             return self.public(self.get(identity))
+
+    def continue_pending(self, identity, cid):
+        with self.lock:
+            if not cid:
+                raise ValueError("缺少对话身份。")
+            record = self.get(identity, cid)
+            if record["status"] != "needs_configuration":
+                return record
+            if not self.host.enabled:
+                raise ValueError("请先启用多媒体技能。")
+            root = self.s.files.workspace(cid)
+            if root != Path(record["workspace"]).resolve():
+                raise ValueError("对话工作目录已改变，请恢复原目录后继续。")
+            profile = snapshot(self.s.config).get(record["capability"])
+            if not profile:
+                raise ValueError("请先为此任务配置模型，原需求已保留。")
+            adapter = Adapter(profile)
+            request = record["request"]
+            prepared = adapter.prepare(record["capability"], request["prompt"], request["inputs"], request["options"], str(root))
+            self.save(record, profile={key: value for key, value in profile.items() if key != "api_key"},
+                      model=profile["model"], service_name=profile["service_name"], status="queued", message="配置已就绪，等待提交。")
+            self.start(record, adapter, prepared)
+            return self.get(identity)
 
     def start(self, record, adapter, prepared=None):
         identity = record["id"]

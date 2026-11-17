@@ -147,6 +147,7 @@ class DesktopService:
                 "god_mode": self.config.get_god_mode(), "theme": self.management.themes.load_appearance()["mode"],
                 "data_dir": self.config.data_dir, "projects": self.config.get_projects(),
                 "multimedia_enabled": self.media.enabled,
+                "media_capabilities": self.media.configured_capabilities(),
                 "plugin_actions": self.media.actions(),
                 "context_policy": desktop_policy(self.config)}
 

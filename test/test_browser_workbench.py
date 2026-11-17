@@ -80,11 +80,11 @@ class WorkbenchStateTest(unittest.TestCase):
         manager._load_legacy_implementation("workbench", str(ROOT / "skills/workbench/impl.py"))
         self.assertNotIn("workbench", manager.skill_load_errors)
         names = manager.skill_to_tools["workbench"]
-        self.assertEqual(len(names), 10)
+        self.assertEqual(len(names), 13)
         for name in names:
             self.assertFalse(manager.tool_records[name]["should_defer"])
             self.assertFalse(manager.tool_records[name]["always_load"])
-        for name in ("browser_tabs", "browser_observe", "terminal_read"):
+        for name in ("browser_tabs", "browser_observe", "browser_read", "browser_wait", "terminal_read"):
             self.assertEqual(trusted_kind(name, manager.tools[name]), "read")
         self.assertEqual(trusted_kind("terminal_input", manager.tools["terminal_input"]), "opaque")
         after = [item["function"]["name"] for item in manager.tool_definitions]

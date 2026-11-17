@@ -1,5 +1,5 @@
 // One pipeline for DOM, native input, waits, files and decided batches.
-const {randomUUID,createHash} = require('node:crypto');
+const {randomUUID} = require('node:crypto');
 const {nativeImage} = require('electron');
 const fs = require('node:fs/promises');
 const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
@@ -96,7 +96,7 @@ class BrowserAutomation {
         await this.check(request,item);if(epoch!==item.revision)throw Error('截图期间页面已跳转');
         result.screenshot={type:'image_url',image_url:{url:screenshot.resize(dimensions).toDataURL()}};
         result.image_status='ready';result.coordinate_space='css';
-        if(args.screenshot!=='full'&&!args.region){result.screenshot_id=randomUUID();item.screenshots.set(result.screenshot_id,{version,zoom:item.view.webContents.getZoomFactor(),viewport:value.viewport,hash:createHash('sha256').update(screenshot.resize(value.viewport).toBitmap()).digest('hex')});while(item.screenshots.size>8)item.screenshots.delete(item.screenshots.keys().next().value);}
+        if(args.screenshot!=='full'&&!args.region){result.screenshot_id=randomUUID();item.screenshots.set(result.screenshot_id,{version,zoom:item.view.webContents.getZoomFactor(),viewport:value.viewport,image:screenshot.resize(value.viewport)});while(item.screenshots.size>8)item.screenshots.delete(item.screenshots.keys().next().value);}
       }catch(error){result.image_status='failed';result.screenshot_note='截图未完成：'+error.message+'。文字结果已保留。';this.host.diagnostic('browser_capture_failed',{request_id:request.id,tab_id:item.id,error:error.message});}
     }else result.image_status='not_requested';
     return result;
@@ -198,11 +198,19 @@ class BrowserAutomation {
     }
     if(args.action==='drag_at'&&(!Number.isFinite(args.to_x)||!Number.isFinite(args.to_y)))return failure('invalid_coordinate','拖拽终点无效。');
     if(['click_at','drag_at'].includes(args.action)){
-      const image=item.screenshots.get(args.screenshot_id),fresh=await this.host.capture(item.view.webContents);
-      if(createHash('sha256').update(fresh.resize(image.viewport).toBitmap()).digest('hex')!==image.hash)return failure('stale_page','截图画面已经变化，请取得新截图并核对目标。');
+      const image=item.screenshots.get(args.screenshot_id),points=[{x:args.x,y:args.y}];
       if(args.action==='drag_at'){
         const endpoint=await this.call(item,entry.frame,'coworkAct',{...operation,action:'validate',target_action:'click_at',x:args.to_x,y:args.to_y});
         if(!endpoint.ok)return endpoint;
+        points.push({x:args.to_x,y:args.to_y});
+      }
+      const fresh=(await this.host.capture(item.view.webContents)).resize(image.viewport);
+      for(const point of points){
+        // Compare only the hit area; clocks, animations and unrelated updates
+        // elsewhere on the page do not invalidate an observed coordinate.
+        const x=Math.max(0,Math.floor(point.x)-24),y=Math.max(0,Math.floor(point.y)-24);
+        const region={x,y,width:Math.min(48,image.viewport.width-x),height:Math.min(48,image.viewport.height-y)};
+        if(!image.image.crop(region).toBitmap().equals(fresh.crop(region).toBitmap()))return failure('stale_page','操作位置附近的画面已变化，请重新截图并核对目标。');
       }
     }
     // Check a stable hit point twice; never retry a side effect.
@@ -211,13 +219,14 @@ class BrowserAutomation {
     const native=['click','double_click','hover','check','type','key','click_at','drag','drag_at'].includes(args.action);
     if(native&&checked.x!==undefined)await this.coordinates(item,entry.frame,checked);
     if(native){const prepared=await this.call(item,entry.frame,'coworkAct',{...operation,action:'prepare_native',target_action:args.action});if(!prepared.ok)return prepared;checked=prepared;}
+    if(args.action==='upload'&&!checked.multiple&&args.files.length>1)return failure('invalid_files','此文件框只允许一个文件');
     let result;
     await this.dispatch(request,item,args.action,index);
+    try{await this.check(request,item);this.observation(request,item,args);}
+    catch(error){return this.receipt(request,{ok:false,status:'failed',effect_state:'not_dispatched',error:error.message});}
     try{
-      await this.check(request,item);this.observation(request,item,args);
       if(native){result=await this.effect(item,async()=>{await this.native(item,args.action,args,checked,entry);return {ok:true,status:'dispatched'};});}
       else if(args.action==='upload'){
-        if(!checked.multiple&&args.files.length>1)throw Error('此文件框只允许一个文件');
         const remote=await this.evaluate(item,entry.frame,'window.coworkElement('+JSON.stringify(args.target||{element_id:args.element_id})+')',false);
         if(!remote.objectId)throw Error('上传目标已失效');
         try{await this.command(item,'DOM.setFileInputFiles',{objectId:remote.objectId,files:args.files},remote.sessionId);result={ok:true,status:'dispatched',files:args.files};}
@@ -228,7 +237,7 @@ class BrowserAutomation {
       result=await this.receipt(request,result);
     }catch(error){result=await this.receipt(request,{ok:false,status:'unknown',error:error.message});}
     if(result.ok&&args.wait&&!item.dialog){const waiting=await this.wait(request,item,args.wait,args.wait_timeout_ms??5000,args.wait.frame_id||'');result.wait=waiting;
-      if(!waiting.ok){result={...result,ok:false,status:'unknown',effect_state:'unknown',error:'动作已派发，'+waiting.error};await this.host.backend.call('browser.host_receipt',{id:request.id,result});}}
+      if(!waiting.ok)result={...result,ok:false,status:'incomplete',error:'动作已派发，'+waiting.error+' 请继续等待或读取结果，不要重复派发。'};}
     if(args.observe!==false&&!item.dialog){try{result.observation=await this.observe(request,item,{frame_id:entry.frame});}catch(error){result.observation={ok:false,error:error.message};}}
     if(item.dialog)result.dialog={...item.dialog,sessionId:undefined};
     return result;
@@ -248,7 +257,7 @@ class BrowserAutomation {
         const end=Date.now()+Math.min(10000,Number(args.timeout_ms)||10000);
         while(!pending.result&&Date.now()<end){await this.check(request,item);await delay(75);}
         const downloaded=pending.result||failure('timeout','点击已派发，下载尚未完成。');
-        if(!downloaded.ok){const unknown={...result,ok:false,status:'unknown',effect_state:'unknown',download:downloaded,error:downloaded.error||'下载未完成'};await this.host.backend.call('browser.host_receipt',{id:request.id,result:unknown});return unknown;}
+        if(!downloaded.ok)return {...result,ok:false,status:'incomplete',download:downloaded,error:'点击已派发，下载未完成；尚在进行的下载已取消。请核对结果，不要重复提交。'};
         return {...result,status:'verified',effect_state:'verified',download:downloaded};
       }finally{pending.cancelled=true;if(pending.item&&!pending.result)pending.item.cancel();item.download=null;}
     }
@@ -268,9 +277,9 @@ class BrowserAutomation {
           const step=args.steps[i];if(!step||['batch','dialog','resolve_unknown'].includes(step.action)||step.steps)throw Error('批量步骤无效');
           let result;
           try{result=await this.action(request,item,{...args,...step,steps:undefined,page_version:version,observe:true},i);}
-          catch(error){result=failure(request.dispatched||request.lastReceipt?'unknown':'failed',error.message);
+          catch(error){result=failure(request.dispatched?'unknown':request.lastReceipt?'incomplete':'failed',error.message);
             if(request.dispatched)result=await this.receipt(request,{...result,effect_state:'unknown'});
-            else if(request.lastReceipt){result={...request.lastReceipt,...result,executed:true,effect_state:'unknown'};await this.host.backend.call('browser.host_receipt',{id:request.id,result});}}
+            else if(request.lastReceipt)result={...request.lastReceipt,...result,executed:request.lastReceipt.executed};}
           results.push(result);
           if(!result.ok||result.dialog)return {ok:false,status:result.status==='unknown'?'unknown':'incomplete',results,completed:results.filter(r=>r.ok).length,not_executed:args.steps.length-i-1};
           if(!result.observation?.ok)return {ok:false,status:'incomplete',results,completed:results.length,not_executed:args.steps.length-i-1};version=result.observation.page_version;

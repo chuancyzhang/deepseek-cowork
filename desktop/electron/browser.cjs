@@ -75,8 +75,11 @@ class BrowserHost {
       }};
     });
     wc.on('will-navigate', (event, url) => { if (!/^https?:\/\//i.test(url) && !(item.localRoot && url.startsWith(`cowork-local://${tab.id}/`))) event.preventDefault(); });
-    wc.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { item.ready = false; item.failed = false; item.revision++; } });
+    wc.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => { if (isMainFrame) { if(!inPlace)item.ready = false; item.failed = false; item.revision++; } });
     wc.on('did-finish-load', () => { item.ready = true; void this.state(item).catch(() => {}); });
+    // A 204/download/cancelled navigation can keep the current document and
+    // stop loading without emitting did-finish-load.
+    wc.on('did-stop-loading', () => { if(!item.failed)item.ready = true; void this.state(item).catch(() => {}); });
     wc.on('did-fail-load', (_event, code) => { if (code !== -3) { item.failed = true; void this.state(item).catch(() => {}); } });
     wc.on('page-title-updated', () => { void this.state(item).catch(() => {}); });
     const notify = (event, data = {}) => this.getWindow()?.webContents.send('cowork:events', [{event, conversation_id:cid, data:{tab_id:item.id,...data}}]);
@@ -152,12 +155,10 @@ class BrowserHost {
         else result = await this.controller.handle(request, item);
       }
     } catch (error) {
-      result = {ok:false,status:request.dispatched || request.lastReceipt ? 'unknown' : 'failed',executed:Boolean(request.dispatched || request.lastReceipt),error:error.message,verification:'请核对实际页面和动作回执，不要自动重复操作。'};
-      if(request.dispatched || request.lastReceipt) {
-        result = {...request.lastReceipt,...result,effect_state:'unknown'};
-        try { if(request.dispatched) result = await this.controller.receipt(request,result);
-          else await this.backend.call('browser.host_receipt',{id:request.id,result});
-        } catch(saveError) {result.receipt_error=saveError.message;}
+      result = {...request.lastReceipt,ok:false,status:request.dispatched ? 'unknown' : request.lastReceipt ? 'incomplete' : 'failed',executed:request.dispatched || Boolean(request.lastReceipt?.executed),error:error.message,verification:'请核对实际页面和动作回执，不要自动重复操作。'};
+      if(request.dispatched) {
+        try { result = await this.controller.receipt(request,{...result,effect_state:'unknown'}); }
+        catch(saveError) {result.receipt_error=saveError.message;}
       }
     }
     this.diagnostic('browser_request_finished', { ...context, elapsed_ms: Date.now() - started, ok: result.ok, status: result.status, image_status: result.image_status, error: result.error });

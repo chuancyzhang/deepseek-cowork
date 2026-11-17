@@ -200,7 +200,7 @@ def test_html_visual_draft_preview_and_save_preserve_scripts_and_head(tmp_path):
     with pytest.raises(Exception,match='缺少受保护'):
         files.dispatch('file.preview',{**params,'payload':'<html><body>broken</body></html>'})
 
-def test_browser_unknown_receipt_survives_observation_and_blocks_replay(tmp_path):
+def test_browser_unknown_receipt_blocks_only_its_tab_and_allows_inspection(tmp_path):
     import threading
     from core.chat_storage import ChatStorage
     from core.runtime_ledger import RuntimeLedger
@@ -218,7 +218,7 @@ def test_browser_unknown_receipt_survives_observation_and_blocks_replay(tmp_path
     browser.pending['first'] = request
     try:
         receipt = browser.dispatch('browser.host_dispatch', {'id': 'first', 'action': 'click', 'step': 0})
-        assert browser.unresolved('chat')['effect_state'] == 'pending'
+        assert browser.unresolved('chat', tab.id)['effect_state'] == 'pending'
         browser.dispatch('browser.host_receipt', {'id': 'first', 'result': {'receipt_id': receipt['receipt_id'], 'status': 'unknown', 'effect_state': 'unknown', 'executed': True}})
         browser.pending['second'] = {**request, 'receipt': None}
         import pytest
@@ -226,25 +226,82 @@ def test_browser_unknown_receipt_survives_observation_and_blocks_replay(tmp_path
             browser.dispatch('browser.host_dispatch', {'id': 'second', 'action': 'click', 'step': 0})
         # Read-only work remains possible and cannot clear the durable blocker.
         browser.dispatch('browser.host_check', {'id': 'second'})
-        assert browser.unresolved('chat')['receipt_id'] == receipt['receipt_id']
+        assert browser.unresolved('chat', tab.id)['receipt_id'] == receipt['receipt_id']
         before = ledger.record('browser/chat/actions/'+receipt['receipt_id'])
         assert before['effect_state'] == 'unknown'
-        other = workbench.store.open('other', 'web')
-        browser.pending['other'] = {**request, 'cid': 'other', 'tab_id': other.id, 'revision': other.control_revision, 'identity': None, 'receipt': None}
+        # Another tab in the SAME chat remains usable; its own unresolved
+        # receipt must not overwrite the first tab's blocker.
+        other = workbench.store.open('chat', 'web')
+        browser.pending['other'] = {**request, 'tab_id': other.id, 'revision': other.control_revision, 'identity': None, 'receipt': None}
         assert browser.dispatch('browser.host_dispatch', {'id': 'other', 'action': 'click'})['ok']
-        browser.dispatch('browser.host_receipt', {'id': 'other', 'result': {'status': 'dispatched', 'effect_state': 'dispatched'}})
-        reconciled = browser.execute('chat', 'browser_action', {'tab_id': tab.id, 'action': 'resolve_unknown', 'receipt_id': receipt['receipt_id'], 'resolution': 'completed', 'evidence': 'The result row contains the submitted order.'}, {'run_id': 'run'})
+        browser.dispatch('browser.host_receipt', {'id': 'other', 'result': {'status': 'unknown', 'effect_state': 'unknown'}})
+        assert browser.unresolved('chat', other.id)['effect_state'] == 'unknown'
+        for action in ('scroll', 'scroll_into_view', 'hover'):
+            assert browser.dispatch('browser.host_dispatch', {'id': 'second', 'action': action})['ok']
+            browser.dispatch('browser.host_receipt', {'id': 'second', 'result': {'status': 'dispatched', 'effect_state': 'dispatched', 'executed': True}})
+            assert browser.unresolved('chat', tab.id)['receipt_id'] == receipt['receipt_id']
+        with pytest.raises(Exception, match='没有匹配'):
+            browser.execute('chat', 'browser_action', {'tab_id': other.id, 'action': 'resolve_unknown', 'receipt_id': receipt['receipt_id'], 'resolution': 'completed'}, {'run_id': 'run'})
+        reconciled = browser.execute('chat', 'browser_action', {'tab_id': tab.id, 'action': 'resolve_unknown', 'receipt_id': receipt['receipt_id'], 'resolution': 'completed'}, {'run_id': 'run'})
         assert reconciled['status'] == 'reconciled'
-        assert browser.unresolved('chat') == {}
+        assert browser.unresolved('chat', tab.id) == {}
+        assert browser.unresolved('chat', other.id)['effect_state'] == 'unknown'
         assert ledger.record('browser/chat/actions/'+receipt['receipt_id'])['effect_state'] == 'completed'
         browser.dispatch('browser.host_dispatch', {'id': 'second', 'action': 'click', 'step': 0})
         # A host disappearing after intent registration remains unknown after restart.
         ledger.close()
         ledger = RuntimeLedger(storage)
         service.ledger = ledger
-        assert browser.unresolved('chat')['effect_state'] == 'pending'
+        assert browser.unresolved('chat', tab.id)['effect_state'] == 'pending'
         with pytest.raises(Exception, match='尚未核实'):
             browser.dispatch('browser.host_dispatch', {'id': 'second', 'action': 'click', 'step': 0})
+    finally:
+        ledger.close()
+
+
+def test_browser_legacy_unknown_can_be_resolved_with_next_action(tmp_path):
+    from core.chat_storage import ChatStorage
+    from core.runtime_ledger import RuntimeLedger
+    from core.desktop_workbench import DesktopWorkbench
+    ledger = RuntimeLedger(ChatStorage(str(tmp_path / 'history.sqlite')))
+    service = SimpleNamespace(ledger=ledger, request_agent=Mock(return_value={'status': 'ok'}))
+    workbench = DesktopWorkbench(service)
+    browser = workbench.browser
+    tab = workbench.store.open('chat', 'web')
+    workbench.store.set_owner('chat', tab.id, 'agent')
+    legacy = {'receipt_id': 'old:0', 'tab_id': tab.id, 'action': 'click', 'effect_state': 'unknown'}
+    ledger.append('chat', [{'kind': 'record', 'key': 'browser/chat/unresolved', 'value': legacy}])
+    dispatched = []
+    lose_result = False
+
+    def respond(event):
+        if event.get('event') != 'browser_host':
+            return
+        key = event['data']['id']
+        dispatched.append(browser.dispatch('browser.host_dispatch', {'id': key, 'action': 'click'}))
+        result = {'ok': True, 'status': 'dispatched', 'effect_state': 'dispatched', 'executed': True}
+        browser.dispatch('browser.host_receipt', {'id': key, 'result': result})
+        if lose_result:
+            browser.pending[key]['deadline'] = time.monotonic() - 1
+        else:
+            browser.dispatch('browser.host_result', {'id': key, 'result': result})
+
+    service.publish = respond
+    try:
+        other = workbench.store.open('chat', 'web')
+        assert browser.unresolved('chat', other.id) == {}
+        result = browser.execute('chat', 'browser_action', {'tab_id': tab.id, 'action': 'click',
+            'receipt_id': 'old:0', 'resolution': 'completed'}, {'run_id': 'run'})
+        assert result['ok'] and len(dispatched) == 1
+        assert result['reconciled_action']['effect_state'] == 'completed'
+        assert browser.unresolved('chat', tab.id) == {}
+        assert ledger.record('browser/chat/actions/old:0')['effect_state'] == 'completed'
+        # Losing the final observation/result cannot undo a durable dispatch receipt.
+        lose_result = True
+        result = browser.execute('chat', 'browser_action', {'tab_id': tab.id, 'action': 'click'}, {'run_id': 'run'})
+        assert result['status'] == 'incomplete' and result['effect_state'] == 'dispatched'
+        assert result['executed'] and len(dispatched) == 2
+        assert browser.unresolved('chat', tab.id) == {}
     finally:
         ledger.close()
 

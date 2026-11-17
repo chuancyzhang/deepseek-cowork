@@ -11,6 +11,7 @@ log = logging.getLogger("desktop.browser")
 
 class DesktopBrowser:
     methods = {"browser.open", "browser.navigate", "browser.close", "browser.command", "browser.host_check", "browser.host_result", "browser.host_state", "browser.host_dispatch", "browser.host_receipt", "browser.host_popup", "browser.host_closed"}
+    inspection_actions = frozenset({'scroll', 'scroll_into_view', 'hover'})
 
     def __init__(self, workbench):
         self.w = workbench
@@ -18,18 +19,24 @@ class DesktopBrowser:
         self.lock = threading.RLock()
         self.tab_locks = {}
 
-    def unresolved(self, cid):
-        return self.w.s.ledger.record(f"browser/{cid}/unresolved", {})
+    def unresolved(self, cid, tab_id):
+        record = self.w.s.ledger.record(f"browser/{cid}/tabs/{tab_id}/unresolved")
+        if record is not None:
+            return record
+        # Read pre-upgrade receipts only for their original tab. An empty new
+        # record is a tombstone, so a resolved legacy receipt cannot reappear.
+        legacy = self.w.s.ledger.record(f"browser/{cid}/unresolved", {})
+        return legacy if legacy.get('tab_id') == tab_id else {}
 
     def record_receipt(self, request, value):
         cid = request['cid']
         receipt = {**(request.get('receipt') or {}), **value, 'updated_at': time.time()}
         request['receipt'] = receipt
-        pending = receipt.get('effect_state') in {'pending', 'unknown'}
+        pending = receipt.get('effect_state') in {'pending', 'unknown'} and receipt.get('action') not in self.inspection_actions
         operations = [{'kind': 'record', 'key': f"browser/{cid}/actions/{receipt['receipt_id']}", 'value': receipt}]
-        current = self.unresolved(cid)
+        current = self.unresolved(cid, request['tab_id'])
         if pending or current.get('receipt_id') == receipt['receipt_id']:
-            operations.append({'kind': 'record', 'key': f"browser/{cid}/unresolved", 'value': receipt if pending else {}})
+            operations.append({'kind': 'record', 'key': f"browser/{cid}/tabs/{request['tab_id']}/unresolved", 'value': receipt if pending else {}})
         self.w.s.ledger.append(cid, operations)
         log.info('browser.receipt session=%s run=%s tab=%s receipt=%s effect=%s', cid, receipt.get('run_id'), request['tab_id'], receipt['receipt_id'], receipt.get('effect_state'))
         return receipt
@@ -99,9 +106,10 @@ class DesktopBrowser:
             self.check(request)
             if method == 'browser.host_dispatch':
                 with self.lock:
-                    blocked = self.unresolved(request['cid'])
-                    if blocked:
-                        raise WorkbenchError('unknown', '前一浏览器动作结果尚未核实，请先读取现场并明确核对回执。')
+                    blocked = self.unresolved(request['cid'], request['tab_id'])
+                    if blocked and p.get('action') not in self.inspection_actions:
+                        log.info('browser.action_blocked session=%s tab=%s receipt=%s action=%s', request['cid'], request['tab_id'], blocked['receipt_id'], p.get('action'))
+                        raise WorkbenchError('unknown', '此页面的前一动作结果尚未核实；可读取、等待、滚动或悬停核对，再携带原回执和结论继续。其他标签不受影响。')
                     identity = request.get('identity') or {}
                     receipt = self.record_receipt(request, {'receipt_id': f"{p['id']}:{p.get('step', 0)}", 'run_id': identity.get('run_id', ''),
                         'tab_id': request['tab_id'], 'action': p.get('action'), 'effect_state': 'pending', 'status': 'dispatching'})
@@ -152,17 +160,19 @@ class DesktopBrowser:
                 elif tab.owner != 'human' and action != 'close' and not (action == 'command' and args.get('command') == 'info'):
                     raise WorkbenchError('human_control', '请先接管网页。')
             arguments = dict(args)
-            if action == 'browser_action' and args.get('action') == 'resolve_unknown':
+            reconciled = None
+            if action == 'browser_action' and (args.get('action') == 'resolve_unknown' or args.get('receipt_id') or args.get('resolution')):
                 if identity and self.w.s.request_agent({**identity, 'action': 'workbench_active'}).get('status') != 'ok':
                     raise WorkbenchError('cancelled', '任务已取消，回执未修改。')
-                record = self.unresolved(cid)
+                record = self.unresolved(cid, tab.id)
                 if not record or args.get('receipt_id') != record.get('receipt_id'):
                     raise WorkbenchError('invalid_receipt', '没有匹配的待核实动作。')
-                if args.get('resolution') not in {'completed', 'not_executed', 'abandoned'} or not str(args.get('evidence') or '').strip():
-                    raise ValueError('请提供现场核对依据和 completed、not_executed 或 abandoned 结论。')
+                if args.get('resolution') not in {'completed', 'not_executed', 'abandoned'}:
+                    raise ValueError('请根据现场选择 completed、not_executed 或 abandoned 结论。')
                 request = {'cid': cid, 'tab_id': tab.id, 'receipt': record}
-                receipt = self.record_receipt(request, {'effect_state': args['resolution'], 'status': 'reconciled', 'evidence': str(args['evidence'])[:1000]})
-                return {'ok': True, 'status': 'reconciled', 'receipt': receipt}
+                reconciled = self.record_receipt(request, {'effect_state': args['resolution'], 'status': 'reconciled', 'evidence': str(args.get('evidence') or '')[:1000]})
+                if args.get('action') == 'resolve_unknown':
+                    return {'ok': True, 'status': 'reconciled', 'receipt': reconciled}
             if action == 'browser_file':
                 if args.get('operation') == 'upload':
                     files = args.get('files')
@@ -201,9 +211,11 @@ class DesktopBrowser:
                     raise WorkbenchError('host_unavailable', '浏览器界面未响应。请打开桌面界面并检查实际页面后继续，操作不会自动重试。')
                 self.check(request)
             result = request['result']
-            blocked = self.unresolved(cid)
+            blocked = self.unresolved(cid, tab.id)
             if blocked:
                 result['unresolved_action'] = blocked
+            if reconciled:
+                result['reconciled_action'] = reconciled
             if result.get('ok') and action == 'close':
                 with self.w.lock:
                     self.w.close_tab(cid, tab.id)
@@ -212,6 +224,9 @@ class DesktopBrowser:
             if request.get('receipt') and request['receipt'].get('effect_state') in {'pending', 'unknown'}:
                 receipt = self.record_receipt(request, {'effect_state': 'unknown', 'status': 'unknown', 'error': str(error)})
                 return {'ok': False, 'status': 'unknown', 'effect_state': 'unknown', 'error': str(error), 'receipt': receipt, 'executed': True}
+            if request.get('receipt'):
+                receipt = request['receipt']
+                return {'ok': False, 'status': 'incomplete', 'effect_state': receipt['effect_state'], 'error': str(error), 'receipt': receipt, 'executed': bool(receipt.get('executed'))}
             raise
         finally:
             with self.lock:

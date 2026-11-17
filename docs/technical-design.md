@@ -162,6 +162,8 @@ node desktop/node_modules/electron/install.js
 
 Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
 
+BrowserSkill 的 CLI 与扩展固定为 0.5.0。升级时须同步 `core/browser_skill_component.py`、`resources/browser_skill/bundle.json`、`scripts/fetch_runtimes.ps1`、`deepseek-cowork.spec` 与 `scripts/package_release.py` 的版本、归档名、下载地址及 SHA-256；构建和发行审计均拒绝不一致或损坏的资源。打包只收集清单与许可证及其中指定的两个 ZIP，本地缓存的旧版本不会进入发行包。`test/test_packaging_runtime.py` 核对上述五处的一致性，`test/test_package_release.py` 使用真实清单生成隔离夹具并验证发行审计。
+
 文档和数据分析依赖统一放在随包 `python_env`。`requirements-data-analysis.txt` 锁定数据分析库及完整传递依赖，由 `requirements.txt` 引入；spec 核验构建环境版本并收集包文件、元数据、原生库与资源。生成 ZIP 前，`scripts/package_release.py` 使用随包 Python 在隔离目录验证导入、科学计算、机器学习、并行 worker、图表与 Office/PDF 文件读写；失败阻止出包。应用不再提供组件管理页、下载源或安装超时配置，也不加载旧工具包目录。通用 Python 工具优先使用随包库，第三方技能保留独立依赖环境与内部默认安装参数。
 
 Electron 启动服务时通过 `COWORK_ELECTRON_EXE` 传递自身可执行文件，通用 JavaScript 工具可复用宿主 Node.js。版本探测和实际执行仅对目标子进程设置 `ELECTRON_RUN_AS_NODE=1`，Python、Bash 与桌面宿主不继承该模式。`run_node_code` 保留原进程取消和输出路径；npm/npx 的交付范围不变。独立运行 Python 服务且没有 Electron 宿主时，仍可显式配置独立 Node.js。

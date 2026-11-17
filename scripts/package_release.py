@@ -37,23 +37,23 @@ EDITOR_MAX_UNPACKED_BYTES = 30 * 1024 * 1024
 EDITOR_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
 EDITOR_ASSET_PREFIX = "resources/service/_internal/web/editors/dist/"
 BROWSER_SKILL_ASSET_PREFIX = "resources/service/_internal/resources/browser_skill/"
-BROWSER_SKILL_CLI_ARCHIVE = "bsk-v0.3.3-x86_64-pc-windows-msvc.zip"
-BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.3.3-chrome.zip"
+BROWSER_SKILL_CLI_ARCHIVE = "bsk-v0.5.0-x86_64-pc-windows-msvc.zip"
+BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.5.0-chrome.zip"
 BROWSER_SKILL_PINNED_ARTIFACTS = {
     "cli": {
-        "version": "0.3.3",
+        "version": "0.5.0",
         "archive": BROWSER_SKILL_CLI_ARCHIVE,
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.3.3/bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.5.0/bsk-v0.5.0-x86_64-pc-windows-msvc.zip",
     },
     "extension": {
-        "version": "0.3.3",
+        "version": "0.5.0",
         "archive": BROWSER_SKILL_EXTENSION_ARCHIVE,
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.3.3/browser-skill-extension-v0.3.3-chrome.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.5.0/browser-skill-extension-v0.5.0-chrome.zip",
     },
 }
 BROWSER_SKILL_ARTIFACT_HASHES = {
-    BROWSER_SKILL_CLI_ARCHIVE: "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02",
-    BROWSER_SKILL_EXTENSION_ARCHIVE: "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA",
+    BROWSER_SKILL_CLI_ARCHIVE: "1BBA7CD6D771DF48485C396B8D5F1E06F9BC93CD648B0552013C30F90AEAAA40",
+    BROWSER_SKILL_EXTENSION_ARCHIVE: "4DE785B340E401DE855448410BE3B7BAD5E685A9E5128C0BD4EC4EDEBA5C9FC9",
 }
 WECOM_CLI_VERSION = "1.1.0"
 WECOM_CLI_SHA256 = "51CCCBA7A9F84E1995C0AB284DD664A2F79E9ABA0C1FF8782AB9B93540297F1B"

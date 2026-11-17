@@ -82,30 +82,10 @@ class PackageReleaseTests(unittest.TestCase):
             elif relative.endswith("wecom_cli/LICENSE.txt"):
                 path.write_text("MIT License\nCopyright (c) 2026 WeCom\n", encoding="utf-8")
             elif relative.endswith("/bundle.json"):
-                path.write_text(
-                    json.dumps({
-                        "schema": 1,
-                        "component_id": "browser-skill",
-                        "license": "LICENSE.txt",
-                        "cli": {
-                            "version": "0.3.3",
-                            "archive": package_release.BROWSER_SKILL_CLI_ARCHIVE,
-                            "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["cli"]["url"],
-                            "sha256": self.fixture_hashes[
-                                package_release.BROWSER_SKILL_CLI_ARCHIVE
-                            ],
-                        },
-                        "extension": {
-                            "version": "0.3.3",
-                            "archive": package_release.BROWSER_SKILL_EXTENSION_ARCHIVE,
-                            "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["extension"]["url"],
-                            "sha256": self.fixture_hashes[
-                                package_release.BROWSER_SKILL_EXTENSION_ARCHIVE
-                            ],
-                        },
-                    }),
-                    encoding="utf-8",
-                )
+                manifest = json.loads((ROOT / "resources/browser_skill/bundle.json").read_text(encoding="utf-8"))
+                for kind in ("cli", "extension"):
+                    manifest[kind]["sha256"] = self.fixture_hashes[manifest[kind]["archive"]]
+                path.write_text(json.dumps(manifest), encoding="utf-8")
             elif relative.endswith("/LICENSE.txt") and "browser_skill" in relative:
                 path.write_text(
                     "MIT License\n\nCopyright (c) 2026 Tencent\n",
@@ -199,6 +179,18 @@ class PackageReleaseTests(unittest.TestCase):
                 artifact.write_bytes(artifact.read_bytes() + b"tampered")
                 with self.assertRaisesRegex(package_release.PackageAuditError, "SHA256"):
                     package_release.audit_distribution(dist)
+
+    def test_audit_rejects_browser_skill_manifest_pin_drift(self):
+        for kind in ("cli", "extension"):
+            for key in ("version", "archive", "url", "sha256"):
+                with self.subTest(kind=kind, key=key), tempfile.TemporaryDirectory() as temp_dir:
+                    dist = self._create_minimal_dist(temp_dir)
+                    manifest_path = dist / package_release.BROWSER_SKILL_ASSET_PREFIX / "bundle.json"
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest[kind][key] = "stale"
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                    with self.assertRaisesRegex(package_release.PackageAuditError, "pinned release"):
+                        package_release._audit_browser_skill_assets(dist)
 
     def test_audit_rejects_retired_and_development_resources(self):
         cases = (

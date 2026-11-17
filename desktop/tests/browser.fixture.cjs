@@ -15,13 +15,15 @@ const until = async predicate => {
 let parent, host, server;
 const deadline = setTimeout(() => { console.error('browser fixture timeout'); app.exit(1); }, 50000);
 app.whenReady().then(async () => {
-  const submissions = [], diagnostics = [], results = new Map();
-  let sequence = 0, rejected = false, rejectAfterReceipt = false;
-  const receipts=new Map();let unresolved=null;
+  const submissions = [], diagnostics = [], downloadRequests = [], results = new Map();
+  let sequence = 0, rejected = false, rejectAfterReceipt = false, rejectAfterDispatch = false;
+  const receipts=new Map(),unresolved=new Map(),requestTabs=new Map();
+  const inspection=new Set(['scroll','scroll_into_view','hover']);
   server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/submit') submissions.push(url.searchParams.get('q'));
     if(url.pathname==='/download'){res.setHeader('Content-Disposition','attachment; filename="result.txt"');res.end('download result');return;}
+    if(url.pathname==='/no-download'){downloadRequests.push(url.pathname);res.writeHead(204);res.end();return;}
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     if(url.pathname==='/frame'){res.end('<button onclick="this.textContent=\'Frame done\'">Frame action</button>');return;}
     if(url.pathname==='/advanced'){
@@ -30,7 +32,7 @@ app.whenReady().then(async () => {
       <select aria-label="City"><option value="a">A</option><option value="b">B</option></select><label><input type="checkbox">Agree</label>
       <button id="count" onclick="window.totalClicks=(window.totalClicks||0)+1;document.querySelector('#result').textContent='Count '+window.totalClicks">Count</button><p id="result">Count 0</p>
       <section aria-label="First"><button>Duplicate</button></section><section aria-label="Second"><button>Duplicate</button></section>
-      <input type="file" id="upload" aria-label="Upload" multiple style="display:none"><a download href="/download">Download</a>
+      <input type="file" id="upload" aria-label="Upload" multiple style="display:none"><a download href="/download">Download</a><a href="/no-download">Pending download</a>
       <button onclick="window.open('/frame')">Popup</button><button onclick="document.querySelector('#result').textContent=confirm('Continue?')?'Accepted':'Declined'">Dialog</button>
       <div id="shadow"></div><iframe src="/frame"></iframe><iframe src="http://localhost:${server.address().port}/frame"></iframe>
       <script>const shadow=document.querySelector('#shadow').attachShadow({mode:'open'});shadow.innerHTML='<button>Shadow action</button>';shadow.querySelector('button').onclick=function(){this.textContent='Shadow done'}</script>
@@ -49,10 +51,16 @@ app.whenReady().then(async () => {
     if (method === 'browser.host_check' && rejected) throw Error('control_changed');
     if (method === 'browser.host_result') results.set(args.id, args.result);
     if(method==='browser.host_dispatch'){
-      if(unresolved)throw Error('unknown action must be reconciled');
-      const receipt_id=args.id+':'+args.step;receipts.set(args.id,{receipt_id,effect_state:'pending'});unresolved=receipt_id;return {ok:true,receipt_id};
+      const tab_id=requestTabs.get(args.id);
+      if(unresolved.has(tab_id)&&!inspection.has(args.action))throw Error('unknown action must be reconciled');
+      const receipt_id=args.id+':'+args.step;receipts.set(args.id,{receipt_id,tab_id,action:args.action,effect_state:'pending'});
+      if(!inspection.has(args.action))unresolved.set(tab_id,receipt_id);
+      if(rejectAfterDispatch)rejected=true;return {ok:true,receipt_id};
     }
-    if(method==='browser.host_receipt'){const current=receipts.get(args.id);assert(current);receipts.set(args.id,{...current,...args.result});unresolved=['unknown','pending'].includes(args.result.effect_state)?current.receipt_id:null;if(rejectAfterReceipt)rejected=true;}
+    if(method==='browser.host_receipt'){const current=receipts.get(args.id);assert(current);receipts.set(args.id,{...current,...args.result});
+      if(!inspection.has(current.action)&&['unknown','pending'].includes(args.result.effect_state))unresolved.set(current.tab_id,current.receipt_id);
+      else if(unresolved.get(current.tab_id)===current.receipt_id)unresolved.delete(current.tab_id);
+      if(rejectAfterReceipt)rejected=true;}
     if(method==='browser.host_popup')return {tab:{id:'popup-'+(++sequence),owner:'agent',url:args.url}};
     if (method === 'workbench.list') return {tabs:[...host.views.values()].map(item => ({id:item.id, owner:item.owner}))};
     return {ok:true};
@@ -64,6 +72,7 @@ app.whenReady().then(async () => {
   await other.view.webContents.loadURL(url);
   const request = async (action, args = {}, target = item) => {
     const id = String(++sequence);
+    requestTabs.set(id,target.id);
     await host.handle({id, action, conversation_id:target.cid, tab:{id:target.id, owner:target.owner}, arguments:args});
     return results.get(id);
   };
@@ -150,6 +159,9 @@ app.whenReady().then(async () => {
   assert.equal(await wc.executeJavaScript('window.totalClicks'),1);
   await wc.executeJavaScript("document.querySelector('#count').outerHTML=document.querySelector('#count').outerHTML");
   acted=await request('browser_action',{action:'click',element_id:countRef,page_version:snapshot.page_version});assert.equal(acted.status,'element_unavailable');
+  acted=await request('browser_action',{action:'hover',target:{role:'button',name:'Count'},page_version:snapshot.page_version});
+  assert.equal(acted.status,'dispatched',JSON.stringify(acted));
+  assert.equal(await wc.executeJavaScript('window.totalClicks'),1,'semantic redraw must not replay the stale ref click');
   snapshot=await request('observe');
   acted=await request('browser_action',{action:'fill',target:{label:'Amount'},text:'abc',page_version:snapshot.page_version});
   assert.equal(acted.status,'dispatched',JSON.stringify(acted));assert.equal(acted.actual_value,'ABC');assert.equal(await wc.executeJavaScript("document.querySelector('input').value"),'ABC');
@@ -160,7 +172,12 @@ app.whenReady().then(async () => {
     {action:'fill',target:{label:'Name'},text:'Must not execute'}]});
   assert.equal(acted.completed,3,JSON.stringify(acted));assert.equal(acted.not_executed,1);
   assert.deepEqual(await wc.executeJavaScript("[document.querySelector('input[aria-label=Name]').value,document.querySelector('select').value,document.querySelector('input[type=checkbox]').checked]"),['Ada','b',true]);
-  const fields=await request('browser_read',{mode:'form'});assert.equal(fields.rows.find(row=>row.name==='Name').value,'Ada');
+  snapshot=await request('observe');
+  await wc.executeJavaScript("document.querySelector('[aria-label=Name]').oninput=function(){this.replaceWith(this.cloneNode(true))};true");
+  acted=await request('browser_action',{action:'fill',target:{label:'Name'},text:'Redrawn',page_version:snapshot.page_version});
+  assert.equal(acted.status,'dispatched',JSON.stringify(acted));assert.equal(unresolved.size,0);
+  assert.equal(await wc.executeJavaScript("document.querySelector('[aria-label=Name]').value"),'Redrawn');
+  const fields=await request('browser_read',{mode:'form'});assert.equal(fields.rows.find(row=>row.name==='Name').value,'Redrawn');
   snapshot=await request('observe');
   acted=await request('browser_action',{action:'click',target:{role:'button',name:'Shadow action'},page_version:snapshot.page_version});assert.equal(acted.ok,true,JSON.stringify(acted));
   assert.equal(await wc.executeJavaScript("document.querySelector('#shadow').shadowRoot.querySelector('button').textContent"),'Shadow done');
@@ -175,7 +192,12 @@ app.whenReady().then(async () => {
   snapshot=await request('observe');const downloaded=path.join(process.env.COWORK_BROWSER_TEST_DATA,'download.txt');
   acted=await request('browser_file',{operation:'download',page_version:snapshot.page_version,target:{role:'link',name:'Download'},path:downloaded});assert.equal(acted.status,'verified',JSON.stringify(acted));
   assert.equal(await fs.readFile(downloaded,'utf8'),'download result');
-  snapshot=await request('observe');acted=await request('browser_action',{action:'click',target:{role:'button',name:'Popup'},page_version:snapshot.page_version});assert.equal(acted.ok,true,JSON.stringify(acted));
+  snapshot=await request('observe');
+  acted=await request('browser_file',{operation:'download',page_version:snapshot.page_version,target:{role:'link',name:'Pending download'},path:path.join(process.env.COWORK_BROWSER_TEST_DATA,'missing-download.txt'),timeout_ms:100});
+  assert.equal(acted.status,'incomplete',JSON.stringify(acted));assert.equal(acted.effect_state,'dispatched');assert.equal(unresolved.size,0);
+  assert.equal(downloadRequests.length,1,'download timeout must not replay its click');
+  snapshot=await request('observe');assert.equal(snapshot.ok,true,JSON.stringify(snapshot));
+  acted=await request('browser_action',{action:'click',target:{role:'button',name:'Popup'},page_version:snapshot.page_version});assert.equal(acted.ok,true,JSON.stringify(acted));
   await until(()=>[...host.views.values()].some(v=>v.id.startsWith('popup-')));const popup=[...host.views.values()].find(v=>v.id.startsWith('popup-'));assert.equal(popup.cid,item.cid);
   await until(()=>popup.ready);assert.equal(await popup.view.webContents.executeJavaScript('!!window.opener'),true);
   await popup.view.webContents.executeJavaScript("window.opener.document.querySelector('#result').textContent='Popup returned'");
@@ -187,10 +209,11 @@ app.whenReady().then(async () => {
   const settled=await request('browser_action',{action:'dialog',dialog_id:acted.dialog.id,accept:true});assert.equal(settled.ok,true,JSON.stringify(settled));
   assert.equal(await wc.executeJavaScript("document.querySelector('#result').textContent"),'Accepted');
   snapshot=await request('observe');acted=await request('browser_action',{action:'click',target:{role:'button',name:'Count'},page_version:snapshot.page_version,wait:{state:'visible',target:{selector:'#never'}},wait_timeout_ms:100});
-  assert.equal(acted.status,'unknown',JSON.stringify(acted));assert.equal(await wc.executeJavaScript('window.totalClicks'),2);
-  snapshot=await request('observe');acted=await request('browser_action',{action:'click',target:{role:'button',name:'Count'},page_version:snapshot.page_version});assert.equal(acted.ok,false);assert.equal(await wc.executeJavaScript('window.totalClicks'),2);
-  // The service reconciliation path is covered against the actual durable ledger.
-  unresolved=null;
+  assert.equal(acted.status,'incomplete',JSON.stringify(acted));assert.equal(acted.effect_state,'dispatched');assert.equal(acted.wait.status,'timeout');
+  assert.equal(await wc.executeJavaScript('window.totalClicks'),2);assert.equal(unresolved.size,0);
+  const continued=await request('browser_wait',{condition:{state:'text',target:{selector:'#result'},equals:'Count 2'}});assert.equal(continued.ok,true);
+  snapshot=await request('observe');acted=await request('browser_action',{action:'fill',target:{label:'Name'},text:'Continue after wait',page_version:snapshot.page_version});
+  assert.equal(acted.ok,true,JSON.stringify(acted));assert.equal(await wc.executeJavaScript('window.totalClicks'),2);
   const visual=await request('observe',{screenshot:'viewport'});acted=await request('browser_action',{action:'click_at',x:3,y:3,page_version:visual.page_version});assert.equal(acted.ok,false);
   const full=await request('observe',{screenshot:'full'});assert.equal(full.image_status,'ready',full.screenshot_note);assert.equal(full.screenshot_id,undefined);
   const textOnly=await request('observe',{screenshot:'none'});assert.equal(textOnly.image_status,'not_requested');assert.equal(textOnly.screenshot,undefined);
@@ -202,13 +225,34 @@ app.whenReady().then(async () => {
   assert.equal(await wc.executeJavaScript('document.querySelector("[aria-label=Name]").value'),'Native text');
   await wc.executeJavaScript("{const e=document.createElement('canvas');e.id='drawing';e.width=100;e.height=60;e.style.cssText='position:fixed;top:300px;left:10px';document.body.append(e);e.onpointerdown=()=>window.dragStart=true;e.onpointerup=()=>window.dragDone=!!window.dragStart;true}");
   const drawing=await request('observe',{screenshot:'viewport'});
+  // Unrelated paint AND DOM attribute changes must not invalidate coordinates.
+  await wc.executeJavaScript("document.querySelector('#clock').textContent='Another time';document.querySelector('#clock').className='updated'");
   acted=await request('browser_action',{action:'drag_at',x:30,y:320,to_x:90,to_y:340,screenshot_id:drawing.screenshot_id,page_version:drawing.page_version});assert(acted.ok,JSON.stringify(acted));assert.equal(await wc.executeJavaScript('window.dragDone'),true);
   const canvasShot=await request('observe',{screenshot:'viewport'});await wc.executeJavaScript("document.querySelector('#drawing').getContext('2d').fillRect(0,0,100,60)");
   acted=await request('browser_action',{action:'click_at',x:30,y:320,screenshot_id:canvasShot.screenshot_id,page_version:canvasShot.page_version});assert.equal(acted.status,'stale_page');
   snapshot=await request('observe');rejectAfterReceipt=true;
   acted=await request('browser_action',{action:'batch',page_version:snapshot.page_version,steps:[{action:'click',target:{role:'button',name:'Count'},wait:{state:'visible',target:{selector:'#never'}}},{action:'click',target:{role:'button',name:'Count'}}]});
-  rejectAfterReceipt=false;rejected=false;unresolved=null;assert.equal(acted.status,'unknown');assert.equal(acted.not_executed,1);assert(acted.results[0].receipt_id);assert.equal(await wc.executeJavaScript('window.totalClicks'),3);
+  rejectAfterReceipt=false;rejected=false;assert.equal(acted.status,'incomplete');assert.equal(acted.not_executed,1);assert(acted.results[0].receipt_id);assert.equal(acted.results[0].effect_state,'dispatched');
+  assert.equal(unresolved.size,0);assert.equal(await wc.executeJavaScript('window.totalClicks'),3);
+  snapshot=await request('observe');rejectAfterDispatch=true;
+  acted=await request('browser_action',{action:'click',target:{role:'button',name:'Count'},page_version:snapshot.page_version});
+  rejectAfterDispatch=false;rejected=false;
+  assert.equal(acted.effect_state,'not_dispatched');assert.equal(acted.executed,false);
+  assert.equal(unresolved.size,0);assert.equal(await wc.executeJavaScript('window.totalClicks'),3);
+  acted=await request('navigate',{url:wc.getURL()+'#section'});assert.equal(acted.effect_state,'dispatched');
+  await until(()=>wc.getURL().endsWith('#section')&&item.ready);
+  assert.equal((await request('observe')).ok,true,'same-document navigation must remain observable');
+  // A genuinely lost dispatch response still blocks a repeat, while inspection
+  // remains available. The durable reconciliation path has Python coverage.
+  const native=host.controller.native;
+  host.controller.native=async function(...args){await native.apply(this,args);throw Error('test lost dispatch response');};
+  snapshot=await request('observe');acted=await request('browser_action',{action:'click',target:{role:'button',name:'Count'},page_version:snapshot.page_version});
+  host.controller.native=native;
+  assert.equal(acted.status,'unknown');assert.equal(await wc.executeJavaScript('window.totalClicks'),4);
+  snapshot=await request('observe');acted=await request('browser_action',{action:'click',target:{role:'button',name:'Count'},page_version:snapshot.page_version});
+  assert.equal(acted.ok,false);assert.equal(await wc.executeJavaScript('window.totalClicks'),4);
   snapshot=await request('observe');acted=await request('browser_action',{action:'scroll_into_view',target:{role:'button',name:'Far'},page_version:snapshot.page_version});assert.equal(acted.ok,true,JSON.stringify(acted));
+  assert.equal(unresolved.size,1,'inspection must retain the original uncertain action');
   assert(await wc.executeJavaScript('scrollY')>100);
   rejected = true;
   assert.equal((await request('observe', {screenshot:'viewport'})).ok, false);

@@ -24,16 +24,16 @@ ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
 BROWSER_SKILL_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "browser_skill")
 BROWSER_SKILL_BUILD_ARTIFACTS = {
     "cli": {
-        "version": "0.3.3",
-        "archive": "bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.3.3/bsk-v0.3.3-x86_64-pc-windows-msvc.zip",
-        "sha256": "5ED6AA00E60C0538A637FEBAC6BFBC6A0BD55A11083CD90A987968CFF4BC0E02",
+        "version": "0.5.0",
+        "archive": "bsk-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.5.0/bsk-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "sha256": "1BBA7CD6D771DF48485C396B8D5F1E06F9BC93CD648B0552013C30F90AEAAA40",
     },
     "extension": {
-        "version": "0.3.3",
-        "archive": "browser-skill-extension-v0.3.3-chrome.zip",
-        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.3.3/browser-skill-extension-v0.3.3-chrome.zip",
-        "sha256": "10EF76E68F352893FA22DD4CCE2F1B96CB90ED957B815D656E13180D07D3C6EA",
+        "version": "0.5.0",
+        "archive": "browser-skill-extension-v0.5.0-chrome.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.5.0/browser-skill-extension-v0.5.0-chrome.zip",
+        "sha256": "4DE785B340E401DE855448410BE3B7BAD5E685A9E5128C0BD4EC4EDEBA5C9FC9",
     },
 }
 WECOM_CLI_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "wecom_cli")
@@ -140,6 +140,10 @@ def _collect_browser_skill_bundle_for_analysis():
         license_text = handle.read()
     if "MIT License" not in license_text or "Copyright (c) 2026 Tencent" not in license_text:
         raise RuntimeError("BrowserSkill MIT license is missing or does not match Tencent's release.")
+    collected = [
+        (manifest_path, "resources/browser_skill"),
+        (license_path, "resources/browser_skill"),
+    ]
     for artifact_key, expected in BROWSER_SKILL_BUILD_ARTIFACTS.items():
         artifact = manifest.get(artifact_key) or {}
         mismatches = [
@@ -151,7 +155,7 @@ def _collect_browser_skill_bundle_for_analysis():
         if mismatches:
             raise RuntimeError(
                 f"BrowserSkill {artifact_key} manifest does not match the pinned release: "
-                + ", ".join(mismatches)
+                + ", ".join(f"{key} expected={expected[key]!r} actual={artifact.get(key)!r}" for key in mismatches)
             )
         archive_name = expected["archive"]
         expected_sha256 = expected["sha256"]
@@ -175,10 +179,9 @@ def _collect_browser_skill_bundle_for_analysis():
                 f"BrowserSkill {artifact_key} SHA256 mismatch: "
                 f"expected={expected_sha256} actual={actual_sha256} path={archive_path}"
             )
-    return _collect_tree_for_analysis(
-        BROWSER_SKILL_RESOURCE_ROOT,
-        "resources/browser_skill",
-    )
+        collected.append((archive_path, "resources/browser_skill/artifacts"))
+        print(f"[Packaging] BrowserSkill {artifact_key}: version={expected['version']} archive={archive_name} sha256={actual_sha256}")
+    return collected
 
 
 def _collect_wecom_cli_bundle_for_analysis():

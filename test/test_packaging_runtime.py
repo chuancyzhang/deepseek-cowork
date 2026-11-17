@@ -1,5 +1,9 @@
 import ast
+import copy
+import hashlib
+import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +55,96 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         module = ast.Module(body=[function_node], type_ignores=[])
         exec(compile(module, spec_path, "exec"), namespace)
         return namespace[function_name]
+
+    @staticmethod
+    def _browser_skill_build_artifacts():
+        tree = ast.parse(Path(ROOT, "deepseek-cowork.spec").read_text(encoding="utf-8"))
+        return ast.literal_eval(next(
+            node.value for node in tree.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "BROWSER_SKILL_BUILD_ARTIFACTS"
+                    for target in node.targets)
+        ))
+
+    def test_browser_skill_release_pins_match_real_manifest(self):
+        from core import browser_skill_component as component
+        from scripts import package_release as release
+
+        manifest = json.loads(Path(ROOT, "resources/browser_skill/bundle.json").read_text(encoding="utf-8"))
+        build = self._browser_skill_build_artifacts()
+        fetch = dict(re.findall(
+            r'^\$(BROWSER_SKILL_\w+)\s*=\s*"([^"]+)"',
+            Path(ROOT, "scripts/fetch_runtimes.ps1").read_text(encoding="utf-8"), re.MULTILINE,
+        ))
+        for kind, runtime_prefix, fetch_prefix in (
+            ("cli", "BROWSER_SKILL_", "BROWSER_SKILL_CLI_"),
+            ("extension", "BROWSER_SKILL_EXTENSION_", "BROWSER_SKILL_EXTENSION_"),
+        ):
+            expected = {key: manifest[kind][key] for key in ("version", "archive", "url", "sha256")}
+            runtime = {key: getattr(component, runtime_prefix + suffix) for key, suffix in (
+                ("version", "VERSION"), ("archive", "ARCHIVE"), ("url", "DOWNLOAD_URL"), ("sha256", "SHA256"),
+            )}
+            published = dict(release.BROWSER_SKILL_PINNED_ARTIFACTS[kind])
+            published["sha256"] = release.BROWSER_SKILL_ARTIFACT_HASHES[published["archive"]]
+            download = {key: re.sub(r'\$(\w+)', lambda match: fetch[match[1]], fetch[fetch_prefix + key.upper()])
+                        for key in expected}
+            for stage, actual in (("build", build[kind]), ("runtime", runtime),
+                                  ("release", published), ("download", download)):
+                with self.subTest(kind=kind, stage=stage):
+                    self.assertEqual(actual, expected)
+            self.assertIn(release.BROWSER_SKILL_ASSET_PREFIX + "artifacts/" + expected["archive"],
+                          release.REQUIRED_PATHS)
+
+    def _browser_skill_fixture(self, root):
+        manifest = json.loads(Path(ROOT, "resources/browser_skill/bundle.json").read_text(encoding="utf-8"))
+        (root / "artifacts").mkdir()
+        for kind in ("cli", "extension"):
+            payload = f"{kind}-archive-fixture".encode()
+            (root / "artifacts" / manifest[kind]["archive"]).write_bytes(payload)
+            manifest[kind]["sha256"] = hashlib.sha256(payload).hexdigest().upper()
+        (root / "bundle.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (root / "LICENSE.txt").write_bytes(Path(ROOT, "resources/browser_skill/LICENSE.txt").read_bytes())
+        collect = self._load_spec_function("_collect_browser_skill_bundle_for_analysis")
+        collect.__globals__.update(
+            json=json, hashlib=hashlib, BROWSER_SKILL_RESOURCE_ROOT=str(root),
+            BROWSER_SKILL_BUILD_ARTIFACTS=copy.deepcopy({kind: manifest[kind] for kind in ("cli", "extension")}),
+        )
+        return manifest, collect
+
+    def test_browser_skill_collection_excludes_unpinned_archives(self):
+        scratch = Path(ROOT, ".tmp/browser-skill-packaging/tests")
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            root = Path(directory)
+            manifest, collect = self._browser_skill_fixture(root)
+            (root / "artifacts/bsk-v0.3.3-x86_64-pc-windows-msvc.zip").write_bytes(b"old")
+            (root / "artifacts/unrelated.zip").write_bytes(b"unrelated")
+            (root / "download.log").write_text("local diagnostic", encoding="utf-8")
+            expected = {(str(root / name), "resources/browser_skill") for name in ("bundle.json", "LICENSE.txt")}
+            expected.update((str(root / "artifacts" / manifest[kind]["archive"]), "resources/browser_skill/artifacts")
+                            for kind in ("cli", "extension"))
+            self.assertEqual(set(collect()), expected)
+
+    def test_browser_skill_collection_rejects_mismatched_missing_or_tampered_artifacts(self):
+        scratch = Path(ROOT, ".tmp/browser-skill-packaging/tests")
+        scratch.mkdir(parents=True, exist_ok=True)
+        for kind in ("cli", "extension"):
+            for failure in ("version", "archive", "url", "sha256", "missing", "tampered"):
+                with self.subTest(kind=kind, failure=failure), tempfile.TemporaryDirectory(dir=scratch) as directory:
+                    root = Path(directory)
+                    manifest, collect = self._browser_skill_fixture(root)
+                    artifact = root / "artifacts" / manifest[kind]["archive"]
+                    if failure == "missing":
+                        artifact.unlink()
+                        error, message = FileNotFoundError, "Missing BrowserSkill"
+                    elif failure == "tampered":
+                        artifact.write_bytes(b"tampered")
+                        error, message = RuntimeError, "SHA256 mismatch"
+                    else:
+                        manifest[kind][failure] = "stale"
+                        (root / "bundle.json").write_text(json.dumps(manifest), encoding="utf-8")
+                        error, message = RuntimeError, "manifest does not match the pinned release"
+                    with self.assertRaisesRegex(error, message):
+                        collect()
 
     def test_document_libraries_ship_with_app_and_sandbox_runtime(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:

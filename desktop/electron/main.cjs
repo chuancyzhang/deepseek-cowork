@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { Backend } = require('./backend.cjs');
+const {applicationMenu} = require('./application-menu.cjs');
 const { PluginHost } = require('./plugins.cjs');
 const { BrowserHost } = require('./browser.cjs');
 const { FileHost } = require('./files.cjs');
@@ -81,10 +82,11 @@ async function requestExit() {
 }
 async function createWindow() {
   window = new BrowserWindow({ width: 1400, height: 930, minWidth: 850, minHeight: 620,
-    backgroundColor: '#fafafa', title: '', show: false,
-    ...(process.platform === 'win32' ? {titleBarStyle:'hidden', titleBarOverlay:{color:'#fafafa',symbolColor:'#303030',height:32}} : {}),
+    backgroundColor: '#fafafa', title: '', show: false, autoHideMenuBar:true,
+    ...(process.platform === 'win32' ? {titleBarStyle:'hidden', titleBarOverlay:{color:'#fafafa',symbolColor:'#303030',height:40}} : {}),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.setMenuBarVisibility(false);
   snippetHost.attach(window.webContents);
   window.webContents.on('console-message', details => {
     if (!details.message?.startsWith('workbench_render_failed ')) return;
@@ -152,13 +154,18 @@ else {
       return new Response(asset?.body || 'Plugin resource not available', {status:asset ? 200:404,
         headers:{'Content-Type':asset?.type || 'text/plain','Access-Control-Allow-Origin':'*','X-Content-Type-Options':'nosniff'}});
     });
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: '应用', submenu: [
-      { label: '重新载入界面', accelerator: 'CmdOrCtrl+R', click: () => publish({ event: 'reload_requested' }) },
-      { label: '恢复内置界面', click: () => publish({event:'plugins_recover_requested'}) },
-      { label: '打开诊断日志', click: () => shell.openPath(path.join(dataDir, 'logs')) },
-      { type: 'separator' }, { label: '退出应用', click: () => void requestExit() }
-    ] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-      { label: '视图', submenu: [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }]));
+    const menuFailure = error => {
+      console.error('application_menu_failed', error.message);
+      publish({event:'navigation_error',error:error.message});
+    };
+    Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu({
+      command: command => publish({event:'navigation_command',data:{command}}),
+      exit: () => void requestExit(),
+      logs: () => void shell.openPath(path.join(dataDir,'logs')).then(error => {if(error)throw Error(error);}).catch(menuFailure),
+      guide: () => void shell.openExternal('https://github.com/chuancyzhang/deepseek-cowork/blob/main/docs/user-guide.md').catch(menuFailure),
+      recover: () => publish({event:'plugins_recover_requested'}),
+      reload: () => publish({event:'reload_requested'}),
+    })));
     plugins = new PluginHost(dataDir, path.join(__dirname, '../plugins/writing'));
     try { backend = new Backend({ root, dataDir, resources: app.isPackaged ? process.resourcesPath : null, publish }); }
     catch (error) { await dialog.showMessageBox({ type: 'error', message: error.message }); quitting = true; app.quit(); return; }
@@ -277,8 +284,29 @@ else {
       if (method === 'app.ui_ready') { uiReady = true; return {ready:true}; }
       if (method === 'app.startup_status') return backend.startupState;
       if (method === 'app.reload') { window.webContents.reload(); return { accepted: true }; }
+      if (method === 'app.menu_state') {
+        Menu.getApplicationMenu().getMenuItemById('export-chat').enabled = Boolean(params.canExport);
+        return {accepted:true};
+      }
+      if (method === 'app.menu') {
+        if (!['file','edit','view','help'].includes(params.menu)) throw Error('菜单不存在。');
+        const submenu = Menu.getApplicationMenu().getMenuItemById(params.menu).submenu;
+        const zoom = window.webContents.getZoomFactor();
+        const bounds = window.getContentBounds();
+        const x = Math.max(0,Math.min(bounds.width,Math.round(Number(params.x || 0)*zoom)));
+        const y = Math.max(0,Math.min(bounds.height,Math.round(Number(params.y || 0)*zoom)));
+        return new Promise(resolve => submenu.popup({window,x,y,callback:()=>resolve({closed:true})}));
+      }
+      if (method === 'app.export_conversation') {
+        const value = await backend.call('conversation.export', {conversation_id:params.conversation_id});
+        const target = await dialog.showSaveDialog(window,{title:'导出当前聊天',defaultPath:value.name,filters:[{name:'聊天记录',extensions:['txt']}]});
+        if (target.canceled) return {cancelled:true};
+        await fs.writeFile(target.filePath,value.text,'utf8');
+        console.info('conversation_exported',{conversation_id:params.conversation_id});
+        return {saved:true};
+      }
       if (method === 'app.titlebar') {
-        if (process.platform === 'win32' && /^#[0-9a-f]{6}$/i.test(params.background) && /^#[0-9a-f]{6}$/i.test(params.foreground)) window.setTitleBarOverlay({color:params.background,symbolColor:params.foreground,height:32});
+        if (process.platform === 'win32' && /^#[0-9a-f]{6}$/i.test(params.background) && /^#[0-9a-f]{6}$/i.test(params.foreground)) window.setTitleBarOverlay({color:params.background,symbolColor:params.foreground,height:40});
         return {accepted:true};
       }
       if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; await startup.flush(); publish({ event: 'service_reconnected' }); return { connected: true }; }

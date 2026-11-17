@@ -1,38 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, BookOpen, Users, Sparkles, Star, ChevronDown, ChevronRight, Folder, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeftClose, Pin, Plus, Search, Settings, Undo2, Trash2, Pencil, X } from 'lucide-react';
+import { Archive, BookOpen, Users, Sparkles, Star, ChevronDown, ChevronRight, Folder, LoaderCircle, MessageSquare, MoreHorizontal, Pin, Plus, Settings, Undo2, Trash2, Pencil, SquarePen } from 'lucide-react';
 import type { Conversation } from './types';
 import {UpdateNotice} from './management/Updates';
 
 type Props = {
   conversations: Conversation[]; projects: any[]; selected: string; route: string; running: Set<string>;
   onSelect: (id: string) => void; onNew: (workspace?: string) => void; onRoute: (route: string) => void;
-  onCollapse: () => void; onProject: () => void; onAction: (action: string, conversation: Conversation) => void;
+  onProject: () => void; onAction: (action: string, conversation: Conversation) => void;
   onMore: () => Promise<void>; hasMore: boolean; onProjectAction: (action: string, project: any) => void;
 };
 const pathKey = (value: string) => /^[a-z]:|\\/i.test(value) ? value.replace(/\\/g, '/').toLowerCase().replace(/\/$/, '') : value.replace(/\/$/, '');
 
 export default function Sidebar(props: Props) {
-  const [query, setQuery] = useState('');
-  const [hits, setHits] = useState<Conversation[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState('');
   const [archive, setArchive] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [limit, setLimit] = useState(40);
   const [projectLimit, setProjectLimit] = useState(5);
   const [menu, setMenu] = useState<{ item?: Conversation; project?: any; x: number; y: number } | null>(null);
   const menuElement = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!query.trim()) { setHits([]); setSearching(false); setSearchError(''); return; }
-    let valid = true;
-    setSearching(true);
-    const timer = setTimeout(() => {
-      window.cowork.call<Conversation[]>('conversation.search', { query }).then(result => {
-        if (valid) { setHits(result); setSearchError(''); }
-      }).catch(error => { if (valid) setSearchError(error.message); }).finally(() => { if (valid) setSearching(false); });
-    }, 220);
-    return () => { valid = false; clearTimeout(timer); };
-  }, [query]);
   useEffect(() => {
     if (!menu) return;
     const close = (event: PointerEvent) => { if (!menuElement.current?.contains(event.target as Node)) setMenu(null); };
@@ -64,9 +49,9 @@ export default function Sidebar(props: Props) {
   const shownProjects = projects.filter(project => Boolean(project.archived || project.hidden) === archive);
   const archivedSessions = new Set(projects.filter(project => project.archived || project.hidden).flatMap(project => project.sessions.map((item: Conversation) => item.id)));
   const archivedPaths = new Set(projects.filter(project => project.archived || project.hidden).map(project => pathKey(project.path)));
-  const visible = (query.trim() ? hits : props.conversations).filter(item => {
+  const visible = props.conversations.filter(item => {
     const projectArchived = item.meta.workspace_source !== 'chat' && !item.meta.team_space_required && archivedPaths.has(pathKey(item.meta.workspace_dir || item.meta.workspace_path || ''));
-    return archive ? (item.meta.archived || projectArchived) && (query.trim() || !archivedSessions.has(item.id)) : !item.meta.archived && (query.trim() || item.has_content !== false && !projectArchived);
+    return archive ? (item.meta.archived || projectArchived) && !archivedSessions.has(item.id) : !item.meta.archived && item.has_content !== false && !projectArchived;
   });
   const grouped = new Set(projects.flatMap(project => project.sessions.map((item: Conversation) => item.id)));
   const pinned = visible.filter(item => item.meta.pinned);
@@ -94,21 +79,20 @@ export default function Sidebar(props: Props) {
           </section>;
   }
   return <aside className="sidebar">
-    <div className="brand"><strong>DeepSeek Cowork</strong><button className="icon-button" title="收起侧栏" onClick={props.onCollapse}><PanelLeftClose size={17}/></button></div>
-    <button className="new-chat" onClick={() => props.onNew()}><Plus size={18}/>新建聊天</button>
-    <label className="search"><Search size={15}/><input aria-label="搜索项目和聊天内容" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)}/>{query && <button title="清除搜索" onClick={() => setQuery('')}><X size={13}/></button>}</label>
+    <div className="brand"><strong>DeepSeek Cowork</strong></div>
+    <button className="new-chat" onClick={() => props.onNew()}><SquarePen size={18}/>新建聊天</button>
     <nav className="conversation-list" aria-label="项目与对话">
-      <div className="sidebar-section"><span>{query ? '搜索结果' : archive ? '已归档' : '项目'}</span><div>
+      <div className="sidebar-section"><span>{archive ? '已归档' : '项目'}</span><div>
         <button title={archive ? '返回最近对话' : '查看归档'} aria-pressed={archive} onClick={() => setArchive(!archive)}><Archive size={14}/></button>
         {!archive && <button title="添加项目" onClick={props.onProject}><Plus size={15}/></button>}
       </div></div>
-      {query || archive ? <>{archive && !query && shownProjects.map(projectRow)}{searching && <div className="sidebar-empty"><LoaderCircle size={13} className="spin"/> 正在搜索…</div>}{searchError && <p role="alert" className="sidebar-empty">{searchError}</p>}{visible.slice(0, limit).map(row)}</> : <>
+      {archive ? <>{shownProjects.map(projectRow)}{visible.slice(0, limit).map(row)}</> : <>
         {shownProjects.slice(0, projectLimit).map(projectRow)}
         {shownProjects.length > projectLimit && <button className="sidebar-more" onClick={() => setProjectLimit(projectLimit + 5)}><ChevronDown size={13}/>更多项目</button>}
         {!!pinned.length && <><div className="sidebar-section spaced">置顶</div>{pinned.map(row)}</>}
         <div className="sidebar-section spaced">最近</div>{recent.slice(0, limit).map(row)}
       </>}
-      {!visible.length && !searching && (query || !shownProjects.length) && <p className="sidebar-empty">{query ? '没有匹配的聊天' : archive ? '还没有归档的项目或聊天' : '从一个新想法开始'}</p>}
+      {!visible.length && !shownProjects.length && <p className="sidebar-empty">{archive ? '还没有归档的项目或聊天' : '从一个新想法开始'}</p>}
       {(visible.length > limit || props.hasMore) && <button className="sidebar-more" onClick={() => { setLimit(limit + 40); if (visible.length <= limit && props.hasMore) void props.onMore(); }}><ChevronDown size={13}/>更早的聊天</button>}
     </nav>
     <div className="sidebar-bottom"><div className="sidebar-destinations">{[['capabilities','能力',Sparkles],['library','资料库',BookOpen],['favorites','常用任务',Star],['team','团队空间',Users]].map(([route,label,Icon]: any) => <button key={route} className={(props.route === route || route === 'capabilities' && props.route === 'plugins') ? 'selected' : ''} onClick={() => props.onRoute(route)}><Icon size={17}/><span>{label}</span></button>)}</div><UpdateNotice/><div className="sidebar-utilities"><button className={props.route === 'settings' ? 'selected' : ''} aria-current={props.route === 'settings' ? 'page' : undefined} onClick={() => props.onRoute('settings')}><Settings size={17}/><span>设置</span><ChevronRight size={15} className="sidebar-settings-arrow" aria-hidden="true"/></button></div></div>

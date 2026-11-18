@@ -1,5 +1,6 @@
 import ast
 import copy
+import fnmatch
 import hashlib
 import json
 import os
@@ -64,6 +65,20 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             and any(isinstance(target, ast.Name) and target.id == "BROWSER_SKILL_BUILD_ARTIFACTS"
                     for target in node.targets)
         ))
+
+    def test_bundled_skill_sources_satisfy_release_audit(self):
+        from scripts import package_release
+
+        collect = self._load_spec_function('_collect_tree_for_analysis')
+        collect.__globals__['fnmatch'] = fnmatch
+        rejected = []
+        for source_name in ('skills', 'ai_skills'):
+            for source, destination in collect(os.path.join(ROOT, source_name), source_name):
+                relative = Path('resources/service/_internal', destination, Path(source).name)
+                reason = package_release._forbidden_reason(relative)
+                if reason:
+                    rejected.append(f'{relative.as_posix()}: {reason}')
+        self.assertEqual(rejected, [], 'Bundled Skill source tree violates the release audit')
 
     def test_browser_skill_release_pins_match_real_manifest(self):
         from core import browser_skill_component as component

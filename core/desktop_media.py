@@ -7,10 +7,19 @@ import hashlib
 from pathlib import Path
 
 log = logging.getLogger("desktop.media")
+ACTIVE = frozenset({"queued", "submitting", "running", "downloading"})
+RESUMABLE = frozenset({"paused", "download_failed", "unknown"})
+UNCONFIRMED = "服务未确认接单，需求已保留。"
+BUSY = "生成服务繁忙，尚未接单，需求已保留。"
+
+
+def has_media_result(record):
+    return bool(record.get("remote_id") and record.get("provider_task_id") or record.get("sources") or
+                record.get("text") or record.get("files"))
 
 
 class DesktopMedia:
-    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.continue", "media.stop"})
+    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.retry", "media.continue", "media.stop"})
 
     def __init__(self, service):
         self.s = service
@@ -18,13 +27,17 @@ class DesktopMedia:
         self.instance = None
         self.leases = 0
         service.config.multimedia_host = self
-        # Recovery is host work: disabled plugins are not imported on startup.
-        while unfinished := self.records(active=True):
-            for record in unfinished:
-                record["status"] = {"submitting": "unknown", "queued": "cancelled"}.get(record["status"], "paused")
-                record["message"] = {"unknown": "提交结果未确认，请先核对服务后台，避免重复生成。",
-                                     "cancelled": "应用退出时任务尚未提交，输入与记录已保留。"}.get(record["status"], "应用上次退出时任务未完成。记录已保留，可恢复查询或下载。")
-                self.s.store.put_state("media:" + record["id"], record)
+
+    def recover(self):
+        records = self.records(active=True)
+        if not records:
+            return
+        runtime = self.acquire(existing=True)
+        try:
+            for record in records:
+                runtime.recover_interrupted(record)
+        finally:
+            self.release()
 
     @property
     def enabled(self):
@@ -66,15 +79,18 @@ class DesktopMedia:
     def records(self, conversation_id="", limit=100, *, active=False):
         clauses, params = ["key LIKE 'media:%'"], []
         if active:
-            clauses.append("json_extract(value, '$.status') IN ('queued','submitting','running','downloading')")
+            clauses.append("json_extract(value, '$.status') IN (?, ?, ?, ?)")
+            params.extend(sorted(ACTIVE))
         if conversation_id:
             clauses.append("json_extract(value, '$.conversation_id') = ?")
             params.append(conversation_id)
-        params.append(max(1, min(500, int(limit))))
+        page = "" if active else " LIMIT ?"
+        if not active:
+            params.append(max(1, min(500, int(limit))))
         with self.s.storage._connect() as db:
             return [json.loads(row[0]) for row in db.execute(
                 "SELECT value FROM desktop_view_state WHERE " + " AND ".join(clauses) +
-                " ORDER BY json_extract(value, '$.created_at') DESC LIMIT ?", params)]
+                " ORDER BY json_extract(value, '$.created_at') DESC" + page, params)]
 
     def dispatch(self, method, p):
         runtime = self.acquire(existing=True)
@@ -146,7 +162,15 @@ class DesktopMedia:
             "service_name", "remote_id", "provider_task_id", "progress", "files", "text", "job_id") if key in record}
         result["task_id"] = result["id"]
         result["text"] = result.get("text", "")[:16000]
-        result["can_resume"] = record["status"] not in {"queued", "submitting", "running", "downloading", "completed", "failed", "cancelled"} and bool(record.get("remote_id") or record.get("sources") or record.get("receipt") or record.get("files") or (Path(record["destination"]) / "receipt.json").is_file())
-        result["can_attach_id"] = record["status"] == "unknown" and record["capability"] == "video_generate"
+        result["can_resume"] = record["status"] in RESUMABLE and (
+            has_media_result(record) or (Path(record["destination"]) / "receipt.json").is_file())
+        result["can_retry"] = record["status"] == "not_submitted"
         result["needs_configuration"] = record["status"] == "needs_configuration"
+        if record["status"] in ACTIVE and record.get("stop_requested"):
+            result.update(stop_requested=True, message="正在停止等待，已提交的生成可能继续。")
+        if record.get("error_detail"):
+            result["diagnostic"] = record["error_detail"]
+        if record["status"] == "unknown" or (record["status"] == "paused" and record.get("remote_id") and not result["can_resume"]):
+            result["status"] = "unknown"
+            result["message"] = UNCONFIRMED
         return result

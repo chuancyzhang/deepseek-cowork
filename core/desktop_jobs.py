@@ -16,6 +16,10 @@ class JobCancelled(RuntimeError):
     pass
 
 
+class JobCancellation(threading.Event):
+    for_shutdown = False
+
+
 class DesktopJobs:
     def __init__(self, service):
         self.service = service
@@ -78,7 +82,7 @@ class DesktopJobs:
 
     def _submit(self, title, operation, *, on_settled=None):
         identity = f"{time.time_ns()}-{uuid.uuid4().hex[:10]}"
-        cancelled = threading.Event()
+        cancelled = JobCancellation()
         job = {"id": identity, "title": title, "status": "queued", "message": "等待处理", "error": "", "result": None, "created_at": time.time()}
         self.save(job)
         log.info("job_submitted id=%s title=%s", identity, title)
@@ -117,7 +121,7 @@ class DesktopJobs:
                     self.active.pop(identity, None)
                 if on_settled is not None:
                     try:
-                        on_settled(job)
+                        on_settled(job, cancelled)
                     except Exception:
                         log.exception("job_cleanup_failed id=%s", identity)
         self.executor.submit(execute)
@@ -129,6 +133,7 @@ class DesktopJobs:
             if event:
                 job = self.get(identity)
                 if job["status"] in {"queued", "running", "stopping"}:
+                    event.for_shutdown = False
                     event.set()
                     job.update(status="stopping", message="正在取消，已完成内容会保留…")
                     self.save(job)
@@ -138,5 +143,7 @@ class DesktopJobs:
     def close(self):
         with self.lock:
             for cancelled in self.active.values():
-                cancelled.set()
+                if not cancelled.is_set():
+                    cancelled.for_shutdown = True
+                    cancelled.set()
         self.executor.shutdown(wait=True, cancel_futures=False)

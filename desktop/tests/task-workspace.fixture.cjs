@@ -25,6 +25,14 @@ app.whenReady().then(async()=>{
   await read('document.querySelector("#switch").click()');await until('Boolean(document.querySelector(".call-detail"))');
   assert.match(await read('document.body.textContent'),/已保存的最终回复/);
   assert.equal(await read('document.body.textContent.includes("[object Object]")'),false);
+  await read('document.querySelector("[title=返回调用记录]").click()');
+  await until('document.querySelectorAll(".call-row").length===2');
+  assert.match(await read('document.querySelectorAll(".call-row")[1].textContent'),/已返回/);
+  assert.match(await read('document.querySelectorAll(".process-tool")[1].textContent'),/已返回/);
+  await read('document.querySelectorAll(".call-row")[1].click()');
+  await until('document.querySelector(".call-detail")?.textContent.includes("调用返回时的结果")');
+  assert.match(await read('document.querySelector(".task-detail-heading").textContent'),/已返回/);
+  assert.match(await read('document.querySelector(".call-detail").textContent'),/"status": "queued"/);
   assert.deepEqual(errors,[]);
   console.log('TASK_WORKSPACE_FIXTURE_OK');
 }).then(()=>{clearTimeout(deadline);window?.destroy();app.exit(0);}).catch(error=>{console.error(error);clearTimeout(deadline);window?.destroy();app.exit(1);});

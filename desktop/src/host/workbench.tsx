@@ -417,7 +417,7 @@ export function useWorkbenchController() {
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
     return () => clearTimeout(timer);
   }, [editors, activeFile, workspaceOpen, workspaceView, creationOpen, creationTab, creationScope, saveView, error, loading]);
-  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, interaction]);
+  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, current?.media_tasks, interaction]);
 
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
     receiveEvents(host,batch);

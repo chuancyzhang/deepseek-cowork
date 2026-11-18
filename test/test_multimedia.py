@@ -63,7 +63,20 @@ class MultimediaTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=QA_ROOT)
         self.root = Path(self.temp.name)
-        self.calls, self.fail_download, self.pending, self.fail_submit = [], False, False, False
+        self.calls, self.fail_download, self.pending = [], False, False
+        self.create_responses, self.query_responses, self.download_responses = [], [], []
+        self.entered_backoff, self.release_backoff = threading.Event(), threading.Event()
+        from core.multimedia.runtime import MediaRuntime
+        wait = MediaRuntime.retry_wait
+        def fixture_wait(seconds, cancelled, job_cancelled):
+            if seconds == 5:
+                self.entered_backoff.set()
+                while not self.release_backoff.is_set() and not cancelled.is_set() and not job_cancelled.is_set():
+                    self.release_backoff.wait(.02)
+            wait(.01, cancelled, job_cancelled)
+        sleep = patch.object(MediaRuntime, "retry_wait", staticmethod(fixture_wait))
+        sleep.start()
+        self.addCleanup(sleep.stop)
         test = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -73,17 +86,19 @@ class MultimediaTests(unittest.TestCase):
                 self.send_response(status)
                 self.send_header("Content-Type", mime)
                 self.send_header("Content-Length", str(len(raw)))
+                self.send_header("X-Request-ID", "fixture-request")
                 self.end_headers()
                 self.wfile.write(raw)
             def do_POST(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 body = json.loads(raw) if "application/json" in self.headers.get("Content-Type", "") else raw.decode(errors="replace")
                 test.calls.append(("POST", self.path, body, self.headers.get("Authorization")))
-                if test.fail_submit:
-                    return self.reply({"error": {"message": "failure"}}, 500)
                 if self.path.endswith("images/generations"):
                     return self.reply({"data": [{"url": test.base + "/output.png"}]})
                 if self.path.endswith("/videos"):
+                    if test.create_responses:
+                        value, status = test.create_responses.pop(0)
+                        return self.reply(value, status)
                     return self.reply({"id": "task-1", "video_id": "video-2"})
                 if self.path.endswith("/tasks"):
                     return self.reply({"id": "ark-3"})
@@ -97,10 +112,15 @@ class MultimediaTests(unittest.TestCase):
             def do_GET(self):
                 test.calls.append(("GET", self.path, None, self.headers.get("Authorization")))
                 if self.path.startswith("/agnesapi"):
+                    if test.query_responses:
+                        value, status = test.query_responses.pop(0)
+                        return self.reply(value, status)
                     return self.reply({"status": "in_progress"} if test.pending else {"status": "completed", "url": test.base + "/output.mp4"})
                 if "/contents/generations/tasks/" in self.path:
                     return self.reply({"status": "succeeded", "content": {"video_url": test.base + "/output.mp4"}})
                 if self.path.startswith("/output"):
+                    if test.download_responses:
+                        return self.reply({}, test.download_responses.pop(0))
                     return self.reply({"error": {}}, 503) if test.fail_download else self.reply(PNG if self.path.endswith('.png') else b"video", mime="application/octet-stream")
                 self.reply({}, 404)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -139,8 +159,8 @@ class MultimediaTests(unittest.TestCase):
         return {"channel_id": "media", "model": model, "adapter": adapter, "base_url": self.base,
                 "api_key": "private-test-key", "service_name": "Fixture"}
 
-    def submit(self, kind="image_generate", adapter="agnes", inputs=None, options=None, identity="execution"):
-        return self.runtime.submit(kind, "请生成或解析", inputs or [], options or {}, self.profile(adapter),
+    def submit(self, kind="image_generate", adapter="agnes", inputs=None, options=None, identity="execution", model="fixture"):
+        return self.runtime.submit(kind, "请生成或解析", inputs or [], options or {}, self.profile(adapter, model),
                                    str(self.root / "one"), {"conversation_id": "one", "logical_execution_id": identity})
 
     def wait(self, identity):
@@ -195,15 +215,121 @@ class MultimediaTests(unittest.TestCase):
         self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
 
     def test_ambiguous_submission_is_durable_and_deduplicated(self):
-        self.fail_submit = True
+        for status, payload in ((503, {}), (503, {"error": {"code": "video_queue_full"}, "video_id": "unexpected"}), (408, {})):
+            with self.subTest(status=status, payload=payload):
+                count = len(self.calls)
+                self.create_responses = [(payload, status)]
+                task = self.submit("video_generate", identity=f"ambiguous-{count}")
+                record = self.wait(task["id"])
+                self.assertEqual(record["status"], "unknown")
+                self.assertEqual(record["error_detail"]["http_status"], status)
+                self.assertFalse(self.runtime.public(record)["can_retry"])
+                self.assertFalse(self.runtime.public(record)["can_resume"])
+                self.assertEqual(self.submit("video_generate", identity=f"ambiguous-{count}")["id"], task["id"])
+                self.runtime.retry(task["id"], "one", record["updated_at"])
+                with self.assertRaisesRegex(ValueError, "服务未返回"):
+                    self.runtime.resume(task["id"], "one")
+                with self.assertRaisesRegex(ValueError, "不接受手填编号"):
+                    self.host.dispatch("media.resume", {"id": task["id"], "conversation_id": "one", "remote_id": "1"})
+                self.assertEqual(len(self.calls), count + 1)
+
+    def test_queue_rejection_query_and_download_recover_without_user_or_another_generation(self):
+        self.release_backoff.set()
+        self.create_responses = [({"error": {"code": "video_queue_full", "message": "busy"}}, 503)]
+        self.query_responses = [({}, 503)]
+        self.download_responses = [503]
+        task = self.submit("video_generate", options={"seconds": 5, "size": "720p"}, model="agnes-video-2.5-flash")
+        result = self.wait(task["id"])
+        self.assertEqual(result["status"], "completed")
+        requests = self.calls
+        self.assertEqual([item[0] for item in requests], ["POST", "POST", "GET", "GET", "GET", "GET"])
+        self.assertEqual(requests[0][2], requests[1][2])
+        self.assertEqual(requests[1][2]["size"], "720P")
+        self.assertEqual(requests[2][1], requests[3][1])
+        self.assertEqual(requests[4][1], requests[5][1])
+        self.assertIsNone(requests[5][3])
+        self.assertEqual(Path(result["files"][0]).read_bytes(), b"video")
+        retry_events = [event["data"] for event in self.events if event["event"] == "media_task" and "diagnostic" in event["data"]]
+        self.assertEqual({event["diagnostic"]["stage"] for event in retry_events}, {"submit", "query", "download"})
+        self.assertTrue(all(event["id"] == task["id"] for event in retry_events))
+
+    def test_busy_exhaustion_allows_explicit_retry_of_same_request_only(self):
+        from core.multimedia.runtime import SUBMIT_BACKOFF
+        self.release_backoff.set()
+        self.create_responses = [({"error": {"code": "video_queue_full"}}, 503)] * (len(SUBMIT_BACKOFF) + 1)
         task = self.submit("video_generate")
-        self.assertEqual(self.wait(task["id"])["status"], "unknown")
-        self.submit("video_generate")
-        with self.assertRaisesRegex(ValueError, "没有可恢复"):
-            self.runtime.resume(task["id"])
+        failed = self.wait(task["id"])
+        self.assertEqual(failed["status"], "not_submitted")
+        self.assertTrue(self.runtime.public(failed)["can_retry"])
+        self.assertEqual(len(self.calls), len(SUBMIT_BACKOFF) + 1)
+        retry = {"id": task["id"], "conversation_id": "one", "updated_at": failed["updated_at"]}
+        with self.assertRaisesRegex(ValueError, "此对话"):
+            self.host.dispatch("media.retry", {**retry, "conversation_id": "two"})
+        self.host.dispatch("media.retry", {**retry, "updated_at": task["updated_at"]})
+        self.assertEqual(len(self.calls), len(SUBMIT_BACKOFF) + 1)
+        self.host.dispatch("media.retry", retry)
+        self.host.dispatch("media.retry", retry)
+        self.assertEqual(self.wait(task["id"])["status"], "completed")
+        self.assertEqual([item[2] for item in self.calls if item[0] == "POST"], [self.calls[0][2]] * (len(SUBMIT_BACKOFF) + 2))
+        self.assertEqual([item["id"] for item in self.host.records("one")], [task["id"]])
+
+    def test_stop_during_safe_submit_backoff_does_not_restart(self):
+        self.create_responses = [({"error": {"code": "video_queue_full"}}, 503)]
+        task = self.submit("video_generate")
+        self.assertTrue(self.entered_backoff.wait(3))
+        self.runtime.stop(task["id"], "one")
+        self.assertEqual(self.wait(task["id"])["status"], "cancelled")
+        self.host.recover()
         self.assertEqual(len(self.calls), 1)
-        self.fail_submit = False
-        self.runtime.resume(task["id"], remote_id="verified-video-id")
+
+    def test_reopen_continues_safe_submit_backoff_with_original_credentials(self):
+        self.create_responses = [({"error": {"code": "video_queue_full"}}, 503)]
+        task = self.submit("video_generate")
+        self.assertTrue(self.entered_backoff.wait(3))
+        self.service.jobs.close()
+        self.assertEqual(self.runtime.get(task["id"])["status"], "queued")
+        self.assertEqual(len(self.calls), 1)
+        self.service.jobs = DesktopJobs(self.service)
+        self.host.release()
+        self.host = DesktopMedia(self.service)
+        self.runtime = self.host.acquire()
+        self.host.recover()
+        self.assertEqual(self.wait(task["id"])["status"], "completed")
+        self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 2)
+
+    def test_restart_does_not_submit_under_changed_credentials(self):
+        self.create_responses = [({"error": {"code": "video_queue_full"}}, 503)]
+        task = self.submit("video_generate")
+        self.assertTrue(self.entered_backoff.wait(3))
+        self.service.jobs.close()
+        self.service.jobs = DesktopJobs(self.service)
+        self.host.release()
+        self.host = DesktopMedia(self.service)
+        self.runtime = self.host.acquire()
+        self.config.channels[0]["api_key"] = "changed-key"
+        self.host.recover()
+        self.assertEqual(self.runtime.get(task["id"])["status"], "not_submitted")
+        self.assertEqual(len(self.calls), 1)
+        saved = self.runtime.get(task["id"])
+        self.config.channels[0]["api_key"] = "private-test-key"
+        self.runtime.retry(task["id"], "one", saved["updated_at"])
+        self.assertEqual(self.wait(task["id"])["status"], "completed")
+        self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 2)
+
+    def test_reopen_resumes_query_but_never_recreates_accepted_video(self):
+        self.pending = True
+        task = self.submit("video_generate")
+        deadline = time.monotonic() + 3
+        while not any(item[1].startswith('/agnesapi') for item in self.calls) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.service.jobs.close()
+        self.assertEqual(self.runtime.get(task["id"])["status"], "running")
+        self.pending = False
+        self.service.jobs = DesktopJobs(self.service)
+        self.host.release()
+        self.host = DesktopMedia(self.service)
+        self.runtime = self.host.acquire()
+        self.host.recover()
         self.assertEqual(self.wait(task["id"])["status"], "completed")
         self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
 
@@ -230,7 +356,7 @@ class MultimediaTests(unittest.TestCase):
         from core.multimedia import validate_binding
         profile = self.profile(model="agnes-video-2.5-flash")
         adapter = Adapter(profile)
-        for inputs, options, message in [([], {"size": "1080P"}, "720P"),
+        for inputs, options, message in [([], {"size": "1080P"}, "720P"), ([], {"size": " "}, "720P"),
             ([self.base + "/reference.png"] * 6, {}, "5 张"), ([], {"seconds": 3}, "4–12")]:
             with self.assertRaisesRegex(ValueError, message):
                 adapter.prepare("video_generate", "咖啡短片", inputs, options, str(self.root / "one"))
@@ -242,6 +368,16 @@ class MultimediaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "只支持视频生成"):
             validate_binding("image_generate", binding)
         self.config.set_media({"enabled": True, "bindings": {"video_generate": binding}})
+        lease = self.host.bind_run()
+        try:
+            create = next(tool["handler"] for tool in lease.tools() if tool["name"] == "media_create")
+            result = create("video_generate", "咖啡短片", options={"size": "1080p"}, workspace_dir=str(self.root / "one"),
+                            _context={"conversation_id": "one", "logical_execution_id": "invalid"})
+            self.assertEqual(result["status"], "error")
+            self.assertIs(result["submitted"], False)
+            self.assertFalse(self.calls)
+        finally:
+            lease.close()
         chat_profile = {**profile, "model_name": profile["model"]}
         self.assertFalse(self.host.model_usage(chat_profile)["chat_supported"])
         self.config.set_skill_enabled("multimedia", False)
@@ -306,36 +442,37 @@ class MultimediaTests(unittest.TestCase):
         self.assertIsNone(self.host.instance)
 
     def test_receipt_recovers_after_missing_final_state(self):
-        task = self.submit()
-        record = self.wait(task["id"])
-        record.update(status="submitting", files=[])
-        record.pop("sources", None)
-        record.pop("receipt", None)
-        self.service.store.put_state("media:" + record["id"], record)
-        restarted = DesktopMedia(self.service)
-        runtime = restarted.acquire()
-        try:
-            self.assertEqual(runtime.get(record["id"])["status"], "unknown")
-            self.assertTrue(runtime.public(runtime.get(record["id"]))["can_resume"])
-            runtime.resume(record["id"])
-            deadline = time.monotonic() + 5
-            while record["id"] in runtime.active and time.monotonic() < deadline:
-                time.sleep(.02)
-            self.assertEqual(runtime.get(record["id"])["status"], "completed")
-            self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
-        finally:
-            restarted.release()
+        for capability in ("image_generate", "video_generate"):
+            with self.subTest(capability=capability):
+                count = len([item for item in self.calls if item[0] == "POST"])
+                task = self.submit(capability, identity=capability)
+                record = self.wait(task["id"])
+                record.update(status="submitting", files=[])
+                for key in ("remote_id", "provider_task_id", "sources", "receipt"):
+                    record.pop(key, None)
+                self.service.store.put_state("media:" + record["id"], record)
+                restarted = DesktopMedia(self.service)
+                runtime = restarted.acquire()
+                try:
+                    restarted.recover()
+                    deadline = time.monotonic() + 5
+                    while record["id"] in runtime.active and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    self.assertEqual(runtime.get(record["id"])["status"], "completed")
+                    self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), count + 1)
+                finally:
+                    restarted.release()
 
-    def test_restart_recovers_older_active_records_beyond_first_page(self):
+    def test_restart_recovers_older_active_records_without_replaying_uncertain_submissions(self):
         for index in range(105):
-            self.service.store.put_state("media:recovery-" + str(index), {
-                "id": "recovery-" + str(index), "status": "completed" if index else "submitting",
-                "created_at": index,
-            })
-        self.service.store.put_state("media:queued", {"id": "queued", "status": "queued", "created_at": -1})
-        DesktopMedia(self.service)
+            identity = f"recovery-{index}"
+            self.service.store.put_state("media:" + identity, {"id": identity, "status": "submitting",
+                "created_at": index, "conversation_id": "one", "workspace": str(self.root / "one"),
+                "destination": str(self.root / "one" / "media" / identity), "capability": "video_generate", "profile": {}})
+        DesktopMedia(self.service).recover()
         self.assertEqual(self.service.store.get_state("media:recovery-0")["status"], "unknown")
-        self.assertEqual(self.service.store.get_state("media:queued")["status"], "cancelled")
+        self.assertEqual(self.service.store.get_state("media:recovery-104")["status"], "unknown")
+        self.assertFalse(self.calls)
 
     def test_job_start_failure_does_not_leave_a_queued_task_or_lease(self):
         leases = self.host.leases
@@ -447,6 +584,79 @@ class MultimediaTests(unittest.TestCase):
             client.close()
             chat.shutdown()
             chat.server_close()
+
+    def test_video_task_survives_chat_completion_and_service_restart(self):
+        self.pending = True
+        requests_seen = []
+        class ChatHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests_seen.append(body)
+                tools = [message for message in body["messages"] if message["role"] == "tool"]
+                if not tools:
+                    name, args = "tool_search", {"query": "media_create multimedia video generate"}
+                elif len(tools) == 1:
+                    name, args = "media_create", {"capability": "video_generate", "prompt": "测试视频", "options": {"size": "720p"}}
+                else:
+                    name, args = None, {}
+                delta = {"content": "视频正在后台生成，完成后在这里播放。"} if name is None else {"tool_calls": [{
+                    "index": 0, "id": "call-" + str(len(requests_seen)), "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]}
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                for chunk, finish in ((delta, None), ({}, "tool_calls" if name else "stop")):
+                    payload = {"id": "fixture", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": chunk, "finish_reason": finish}]}
+                    self.wfile.write(("data: " + json.dumps(payload) + "\n\n").encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        chat = ThreadingHTTPServer(("127.0.0.1", 0), ChatHandler)
+        threading.Thread(target=chat.serve_forever, daemon=True).start()
+        client = ServiceClient(self.root / "video-worker")
+        try:
+            settings = client.call("settings.save_model", name="Chat", model_name="fixture", api_key="chat-key", base_url=f"http://127.0.0.1:{chat.server_port}/v1")
+            client.call("settings.permission", enabled=True)
+            config = client.call("media.config")
+            client.call("media.save", revision=config["revision"], enabled=True,
+                        bindings={"video_generate": {"channel_id": "video-fixture", "model": "agnes-video-2.5-flash", "adapter": "agnes"}},
+                        services=[{"channel_id": "video-fixture", "display_name": "Video", "base_url": self.base, "api_key": "private-video-key"}])
+            cid = client.call("conversation.create")["id"]
+            import uuid
+            client.call("conversation.send", conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                        text="生成一个短片", model_id=settings["selected_model_id"])
+            result = client.wait_run(cid)
+            self.assertEqual(result["run"]["status"], "completed")
+            self.assertIn("视频正在后台生成", json.dumps(result["render_messages"], ensure_ascii=False))
+            def accepted(value):
+                return value.get("event") == "media_task" and value.get("conversation_id") == cid and value["data"].get("remote_id") == "video-2"
+            event = next((value for value in client.events if accepted(value)), None) or client.until(accepted, timeout=5)
+            pending = event["data"]
+            self.assertEqual(pending["run_id"], result["run"]["id"])
+            self.assertEqual(len(requests_seen), 3)
+            self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
+        finally:
+            client.close()
+            chat.shutdown()
+            chat.server_close()
+
+        self.pending = False
+        client = ServiceClient(self.root / "video-worker")
+        try:
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                snapshot = client.call("conversation.get", conversation_id=cid)
+                if snapshot["media_tasks"][0]["status"] == "completed":
+                    break
+                time.sleep(.1)
+            self.assertEqual([task["id"] for task in snapshot["media_tasks"]], [pending["id"]])
+            self.assertEqual(snapshot["media_tasks"][0]["status"], "completed")
+            self.assertEqual(Path(snapshot["media_tasks"][0]["files"][0]).read_bytes(), b"video")
+            self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
+        finally:
+            client.close()
 
 
 class MultimediaServiceTests(unittest.TestCase):

@@ -130,6 +130,7 @@ class DesktopService:
         from core.desktop_messaging import DesktopMessaging
         self.messaging = DesktopMessaging(self)
         threading.Thread(target=self.server.serve_forever, name="desktop-agent-host", daemon=True).start()
+        self.media.recover()
         self.state.recover_runs()
         log.info("service_ready protocol=%s", PROTOCOL_VERSION)
 

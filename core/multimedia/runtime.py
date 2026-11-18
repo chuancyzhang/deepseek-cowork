@@ -1,7 +1,6 @@
 """Multimedia tasks reuse desktop jobs and storage, independently of renderer life."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import logging
@@ -10,11 +9,27 @@ import threading
 import time
 import uuid
 
+from core.desktop_media import ACTIVE, BUSY, RESUMABLE, UNCONFIRMED, has_media_result
+
 from . import ADAPTERS, CAPABILITIES, SKILL_CAPABILITIES, KNOWN_MODELS, configuration, snapshot, validate_binding, binding_error, model_usage
 from .adapters import Adapter, MediaError, safe_message
 
 log = logging.getLogger("multimedia")
-ACTIVE = {"queued", "submitting", "running", "downloading"}
+SUBMIT_BACKOFF = (5, 10, 20)
+DOWNLOAD_BACKOFF = (2, 4, 8)
+
+
+class InvalidMediaRequest(ValueError):
+    pass
+
+
+def tool_snapshot(result):
+    if result["capability"] == "video_generate":
+        if result["status"] in ACTIVE and not result.get("stop_requested"):
+            result["message"] = "视频正在后台处理，聊天任务卡会自动更新，无需查询进度。"
+        elif result["can_retry"]:
+            result["message"] += "用户可在原任务卡重试生成，不需要重新发送需求。"
+    return result
 
 
 class RunLease:
@@ -39,8 +54,15 @@ class RunLease:
         def submit(capability, prompt="", inputs=None, options=None, workspace_dir=None, _context=None):
             if self.closed:
                 raise ValueError("此轮多媒体能力已释放。")
-            profile = self.profiles.get(capability)
-            return self.runtime.submit(capability, prompt, inputs or [], options or {}, profile, workspace_dir, _context or {})
+            try:
+                if capability not in SKILL_CAPABILITIES:
+                    raise InvalidMediaRequest("不支持此多媒体能力。")
+                result = self.runtime.submit(capability, prompt, [] if inputs is None else inputs,
+                                             {} if options is None else options, self.profiles.get(capability), workspace_dir, _context or {})
+                return tool_snapshot(result)
+            except InvalidMediaRequest as exc:
+                message = f"未提交：{exc}"
+                return {"status": "error", "submitted": False, "error": message, "content": message}
 
         def task(task_id="", action="get", wait_seconds=0, _context=None):
             cid = str((_context or {}).get("conversation_id") or (_context or {}).get("session_id") or "")
@@ -61,7 +83,7 @@ class RunLease:
                     break
                 time.sleep(.2)
                 record = self.runtime.get(task_id, cid)
-            return self.runtime.public(record)
+            return tool_snapshot(self.runtime.public(record))
 
         task.__name__ = "media_task"
         return [
@@ -135,6 +157,8 @@ class MediaRuntime:
             recent = next((item for item in records if item["capability"] == kind and all(
                 item.get("profile", {}).get(key) == binding.get(key) for key in ("channel_id", "model", "adapter"))
                 and item.get("profile", {}).get("base_url") == channel.get("base_url")), None)
+            if recent:
+                recent = self.public(recent)
             statuses[kind] = {"label": "已配置，未验证"} if not recent else {
                 "label": "最近调用成功" if recent["status"] == "completed" else "最近调用失败" if recent["status"] in {"failed", "download_failed"} else recent["message"],
                 "message": recent["message"], "updated_at": recent.get("updated_at"), "status": recent["status"]}
@@ -199,12 +223,19 @@ class MediaRuntime:
             return self.save_config(p)
         if method == "media.tasks":
             return [self.public(item) for item in self.host.records(str(p.get("conversation_id") or ""))]
+        cid = str(p.get("conversation_id") or "")
+        if not cid:
+            raise ValueError("缺少对话身份。")
         if method == "media.resume":
-            return self.public(self.resume(str(p["id"]), cid=str(p.get("conversation_id") or ""), remote_id=str(p.get("remote_id") or "")))
+            if p.get("remote_id"):
+                raise ValueError("只使用原任务的服务回执恢复，不接受手填编号。")
+            return self.public(self.resume(str(p["id"]), cid))
+        if method == "media.retry":
+            return self.public(self.retry(str(p["id"]), cid, p.get("updated_at")))
         if method == "media.continue":
-            return self.public(self.continue_pending(str(p["id"]), str(p.get("conversation_id") or "")))
+            return self.public(self.continue_pending(str(p["id"]), cid))
         if method == "media.stop":
-            return self.public(self.stop(str(p["id"]), cid=str(p.get("conversation_id") or "")))
+            return self.public(self.stop(str(p["id"]), cid))
         raise ValueError("不支持此多媒体操作。")
 
     def get(self, identity, cid=""):
@@ -223,6 +254,8 @@ class MediaRuntime:
             latest = self.s.store.get_state("media:" + record["id"], {})
             if latest.get("job_id"):
                 record["job_id"] = latest["job_id"]
+            if latest.get("stop_requested"):
+                record["stop_requested"] = True
             record.update(changes, updated_at=time.time())
             self.s.store.put_state("media:" + record["id"], record)
             self.s.publish({"event": "media_task", "conversation_id": record["conversation_id"], "data": self.public(record)})
@@ -238,6 +271,9 @@ class MediaRuntime:
         root = Path(workspace).resolve()
         if root != self.s.files.workspace(cid):
             raise ValueError("任务工作目录与当前对话不一致。")
+        if (not isinstance(prompt, str) or not isinstance(options, dict) or not isinstance(inputs, list)
+                or not all(isinstance(value, str) and value for value in inputs)):
+            raise InvalidMediaRequest("生成要求、素材或参数格式无效。")
         protected = {str(Path(value).resolve()).casefold() for message in context.get("current_messages_snapshot", [])
                      for key in ("local_only_audio_files", "transcription_only_audio_files")
                      for value in (message.get("meta") or {}).get(key, [])}
@@ -257,16 +293,21 @@ class MediaRuntime:
                 return self.public(previous)
             if not self.host.enabled:
                 raise ValueError("多媒体技能已停用，请启用后开始新任务。")
-            adapter = Adapter(profile) if profile else None
-            prepared = adapter.prepare(capability, prompt, inputs, options, str(root)) if adapter else None
+            try:
+                adapter = Adapter(profile) if profile else None
+                prepared = self.prepare(adapter, request, root) if adapter else None
+            except (ValueError, OSError) as exc:
+                log.info("media_validation_rejected id=%s session=%s capability=%s", identity, cid, capability)
+                raise InvalidMediaRequest(safe_message(exc, (profile or {}).get("api_key", ""))) from None
             destination = root / "media" / identity
             if not destination.resolve().is_relative_to(root):
                 raise ValueError("成果目录不能指向当前工作目录以外的位置。")
             destination.mkdir(parents=True, exist_ok=True)
             record = {"id": identity, "conversation_id": cid, "workspace": str(root), "destination": str(destination),
-                      "fingerprint": fingerprint, "request": request, "profile": {key: value for key, value in (profile or {}).items() if key != "api_key"},
+                      "fingerprint": fingerprint, "request": request, "profile": self.saved_profile(profile) if profile else {},
                       "model": (profile or {}).get("model", ""), "service_name": (profile or {}).get("service_name", ""), "capability": capability,
-                      "run_id": str(context.get("run_id") or context.get("turn_id") or ""),
+                      "run_id": str(context.get("run_id") or context.get("turn_id") or
+                                    getattr(context.get("execution_authorization"), "run_id", "")),
                       "created_at": time.time(), "status": "queued", "message": "等待提交", "files": []}
             if not profile:
                 record.update(status="needs_configuration", message="需求已保留。请在多媒体技能中选择模型，返回后点击继续任务。")
@@ -274,6 +315,10 @@ class MediaRuntime:
             if adapter:
                 self.start(record, adapter, prepared)
             return self.public(self.get(identity))
+
+    @staticmethod
+    def prepare(adapter, request, root):
+        return adapter.prepare(request["capability"], request["prompt"], request["inputs"], request["options"], str(root))
 
     def continue_pending(self, identity, cid):
         with self.lock:
@@ -284,19 +329,14 @@ class MediaRuntime:
                 return record
             if not self.host.enabled:
                 raise ValueError("请先启用多媒体技能。")
-            root = self.s.files.workspace(cid)
-            if root != Path(record["workspace"]).resolve():
-                raise ValueError("对话工作目录已改变，请恢复原目录后继续。")
+            root = self.task_workspace(record)
             profile = snapshot(self.s.config).get(record["capability"])
             if not profile:
                 raise ValueError("请先为此任务配置模型，原需求已保留。")
             adapter = Adapter(profile)
-            request = record["request"]
-            prepared = adapter.prepare(record["capability"], request["prompt"], request["inputs"], request["options"], str(root))
-            self.save(record, profile={key: value for key, value in profile.items() if key != "api_key"},
-                      model=profile["model"], service_name=profile["service_name"], status="queued", message="配置已就绪，等待提交。")
-            self.start(record, adapter, prepared)
-            return self.get(identity)
+            prepared = self.prepare(adapter, record["request"], root)
+            return self.restart_job(record, adapter, prepared, profile=self.saved_profile(profile),
+                                    model=profile["model"], service_name=profile["service_name"])
 
     def start(self, record, adapter, prepared=None):
         identity = record["id"]
@@ -309,54 +349,104 @@ class MediaRuntime:
             def run(job_cancelled, progress):
                 self.execute(record, adapter, prepared, cancelled, job_cancelled, progress)
                 result = self.public(self.get(identity))
-                if result["status"] != "completed":
+                if result["status"] == "completed":
+                    return result
+                if cancelled.is_set() or job_cancelled.is_set():
                     from core.desktop_jobs import JobCancelled
-                    if result["status"] in {"paused", "cancelled"}:
-                        raise JobCancelled(result["message"])
-                    raise MediaError(result["message"])
-                return result
-            def settled(job):
-                try:
-                    current = self.get(identity)
-                    if current["status"] == "queued":
-                        self.save(current, status="cancelled", message="已停止，尚未向服务提交。")
-                finally:
-                    with self.lock:
+                    raise JobCancelled("已保留任务进度。")
+                raise MediaError(result["message"])
+            def settled(_job, job_cancelled):
+                with self.lock:
+                    try:
+                        if cancelled.is_set() or (job_cancelled.is_set() and not job_cancelled.for_shutdown):
+                            current = self.get(identity)
+                            if current["status"] in ACTIVE:
+                                self.pause(current)
+                    finally:
                         self.active.pop(identity, None)
-                    self.host.release()
+                        self.host.release()
             try:
                 job = self.s.jobs.submit(CAPABILITIES[record["capability"]], run, on_settled=settled)
-                # Do not overwrite a newer state if a small task finished immediately.
-                current = self.get(identity)
-                self.save(current, job_id=job["job_id"])
             except BaseException:
                 self.active.pop(identity, None)
                 self.host.release()
-                self.save(self.get(identity), status="cancelled" if prepared is not None else "paused",
-                          message="后台操作未能启动，尚未提交新请求；已有输入与成果记录已保留。")
+                status = "paused" if prepared is None else "not_submitted" if record["capability"] == "video_generate" else "cancelled"
+                self.save(self.get(identity), status=status, message="后台任务未能启动，需求和进度已保留。")
                 raise
+            current = self.get(identity)
+            self.save(current, job_id=job["job_id"])
+
+    def pause(self, record):
+        if has_media_result(record):
+            self.save(record, status="paused", message="已停止等待，可以继续原任务。")
+        elif record["status"] == "queued":
+            self.save(record, status="cancelled", message="已停止，尚未向服务提交。")
+        else:
+            self.save(record, status="unknown", message=UNCONFIRMED)
+
+    @staticmethod
+    def retry_wait(seconds, cancelled, job_cancelled):
+        deadline = time.monotonic() + seconds
+        while not cancelled.is_set() and not job_cancelled.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            cancelled.wait(min(remaining, .25))
+
+    def report_retry(self, record, exc, stage, progress, message, **changes):
+        self.save(record, message=message, error_detail=self.error_detail(exc, stage), **changes)
+        progress(f"{message}（{exc}）")
+
+    @staticmethod
+    def error_detail(exc, stage, secret=""):
+        detail = {"stage": stage, "message": safe_message(exc, secret)}
+        if isinstance(exc, MediaError):
+            if exc.http_status is not None:
+                detail["http_status"] = exc.http_status
+            if exc.code:
+                detail["code"] = exc.code
+            if exc.request_id:
+                detail["request_id"] = exc.request_id
+        return detail
 
     def execute(self, record, adapter, prepared, cancelled, job_cancelled, progress):
         destination = Path(record["destination"])
         stop = lambda: cancelled.is_set() or job_cancelled.is_set()
+        stage = "submit" if prepared is not None else "query"
         try:
             if prepared is not None:
-                if stop():
-                    self.save(record, status="cancelled", message="已停止，尚未向服务提交。")
-                    return
-                self.save(record, status="submitting", message="正在提交…")
-                progress("正在提交多媒体任务…")
-                receipt = adapter.submit(prepared, destination)
+                retries = record.get("submit_retries", 0)
+                while True:
+                    with self.lock:
+                        if stop():
+                            return
+                        self.save(record, status="submitting", message="正在提交…")
+                    progress("正在提交多媒体任务…")
+                    try:
+                        receipt = adapter.submit(prepared, destination)
+                        break
+                    except MediaError as exc:
+                        safe_retry = record["capability"] == "video_generate" and exc.retryable and not exc.uncertain
+                        if not safe_retry or retries >= len(SUBMIT_BACKOFF):
+                            raise
+                        delay = SUBMIT_BACKOFF[retries]
+                        retries += 1
+                        self.report_retry(record, exc, stage, progress,
+                                          f"生成服务繁忙，正在重试（{retries}/{len(SUBMIT_BACKOFF)}）…", status="queued", submit_retries=retries)
+                        self.retry_wait(delay, cancelled, job_cancelled)
                 record.update(receipt)
                 receipt_path = destination / "receipt.json"
                 Adapter.write_bytes(receipt_path, json.dumps(receipt, ensure_ascii=False).encode())
                 self.save(record, receipt=str(receipt_path), status="running" if receipt.get("remote_id") else "downloading",
-                          message="服务已接受，等待生成…" if receipt.get("remote_id") else "正在保存成果…")
+                          message="服务已接受，等待生成…" if receipt.get("remote_id") else "正在保存成果…", error_detail=None)
             if record.get("remote_id") and not record.get("sources"):
+                stage = "query"
                 deadline, errors = time.monotonic() + 600, 0
                 while True:
-                    if stop() or time.monotonic() >= deadline:
-                        self.save(record, status="paused", message="已停止等待；远端生成可能继续，可恢复查询。")
+                    if stop():
+                        return
+                    if time.monotonic() >= deadline:
+                        self.save(record, status="paused", message="生成时间比预期长，可以继续等待原任务。")
                         return
                     try:
                         result = adapter.poll(record["remote_id"])
@@ -365,76 +455,159 @@ class MediaRuntime:
                         if not exc.retryable or errors >= 5:
                             raise
                         errors += 1
-                        self.save(record, message=f"查询暂时失败，正在重试（{errors}/5）…")
-                        progress(record["message"])
-                        cancelled.wait(min(2 ** errors, 30))
+                        self.report_retry(record, exc, stage, progress, "连接暂时中断，正在继续等待…")
+                        self.retry_wait(min(2 ** errors, 30), cancelled, job_cancelled)
                         continue
                     if result["status"] == "failed":
-                        self.save(record, status="failed", message=result["error"])
+                        self.save(record, status="failed", message="服务未能生成成果，需求已保留。",
+                                  error_detail={"stage": stage, "message": result["error"]})
                         return
                     if result["status"] == "generated":
-                        self.save(record, sources=result["sources"], status="downloading", message="生成完成，正在保存成果…")
+                        self.save(record, sources=result["sources"], status="downloading", message="生成完成，正在保存成果…", error_detail=None)
                         break
-                    self.save(record, status="running", progress=result.get("progress"), message="正在生成视频…")
+                    self.save(record, status="running", progress=result.get("progress"), message="正在生成视频…", error_detail=None)
                     progress(record["message"])
-                    cancelled.wait(2)
+                    self.retry_wait(2, cancelled, job_cancelled)
+            stage = "download"
             if record.get("text") is not None:
                 target = destination / "transcript.txt" if record["capability"] == "audio_understand" else destination / "analysis.md"
                 Adapter.write_bytes(target, record["text"].encode("utf-8"))
                 record["files"] = [str(target)]
             for source in record.get("sources", []):
-                if stop():
-                    self.save(record, status="paused", message="成果已生成，已停止下载；可恢复下载。")
-                    return
-                path = adapter.download(source, destination)
+                for attempt in range(len(DOWNLOAD_BACKOFF) + 1):
+                    if stop():
+                        return
+                    try:
+                        path = adapter.download(source, destination)
+                        break
+                    except MediaError as exc:
+                        if not exc.retryable or attempt == len(DOWNLOAD_BACKOFF):
+                            raise
+                        self.report_retry(record, exc, stage, progress, "正在重试保存成果…")
+                        self.retry_wait(DOWNLOAD_BACKOFF[attempt], cancelled, job_cancelled)
                 source["path"] = path
                 if path not in record["files"]:
                     record["files"].append(path)
                 self.save(record, status="downloading", message="正在保存成果…")
             if not record.get("files"):
                 raise MediaError("没有可交付的成果，任务记录已保留。")
-            self.save(record, status="completed", message="已保存到对话工作目录。", progress=100)
+            self.save(record, status="completed", message="已保存到对话工作目录。", progress=100, error_detail=None)
             progress("成果已保存")
         except Exception as exc:
-            status = ("download_failed" if record.get("sources") else "paused" if record.get("remote_id") else
-                      "unknown" if record["status"] == "submitting" and (not isinstance(exc, MediaError) or exc.uncertain) else "failed")
-            reason = safe_message(exc, adapter.profile.get("api_key", ""))
-            suffix = {"unknown": "提交结果未确认，请先核查服务后台，勿重复提交。", "download_failed": "生成成果仍保留，可重试下载。",
-                      "paused": "任务编号已保留，可恢复查询。", "failed": "输入与任务记录已保留。"}[status]
-            self.save(record, status=status, message=reason + " " + suffix)
-            progress(record["message"])
-            log.error("media_task_failed id=%s phase=%s error_type=%s", record["id"], status, type(exc).__name__)
+            detail = self.error_detail(exc, stage, adapter.profile["api_key"])
+            if record.get("sources"):
+                status, message = "download_failed", "成果已生成，但暂未保存到本机。"
+            elif record.get("remote_id"):
+                status, message = "paused", "暂时无法获取生成进度，原任务已保留。"
+            elif stage == "submit" and (not isinstance(exc, MediaError) or exc.uncertain):
+                status, message = "unknown", UNCONFIRMED
+            elif stage == "submit" and isinstance(exc, MediaError) and exc.retryable and record["capability"] == "video_generate":
+                status, message = "not_submitted", BUSY
+            else:
+                status, message = "failed", "服务未能完成任务，需求已保留。"
+            self.save(record, status=status, message=message, error_detail=detail)
+            progress(message)
+            log.warning("media_task_failed id=%s session=%s stage=%s status=%s http_status=%s code=%s request_id=%s error_type=%s",
+                        record["id"], record["conversation_id"], stage, status, detail.get("http_status"), detail.get("code", ""),
+                        detail.get("request_id", ""), type(exc).__name__)
 
-    def resume(self, identity, cid="", remote_id=""):
+    def task_workspace(self, record):
+        root = self.s.files.workspace(record["conversation_id"])
+        destination = Path(record["destination"]).resolve()
+        if root != Path(record["workspace"]).resolve() or destination != root / "media" / record["id"]:
+            raise ValueError("对话工作目录已改变，请恢复原目录后继续该任务。")
+        return root
+
+    def saved_profile(self, profile):
+        return {key: value for key, value in profile.items() if key != "api_key"} | {
+            "connection_identity": self.host.test_identity({**profile, "model_name": profile["model"]})}
+
+    def original_adapter(self, record, *, auto_submit=False):
+        profile = dict(record["profile"])
+        channel = next((item for item in self.s.config.get_model_channels() if item["channel_id"] == profile["channel_id"]), {})
+        if channel.get("base_url") != profile["base_url"]:
+            raise ValueError("原服务已删除或地址改变，请恢复原服务后继续。")
+        profile["api_key"] = channel.get("api_key", "")
+        if auto_submit and profile.get("connection_identity") != self.saved_profile(profile)["connection_identity"]:
+            raise ValueError("无法确认服务凭据与提交时一致，未自动提交。")
+        return Adapter(profile)
+
+    @staticmethod
+    def read_receipt(record):
+        receipt_path = Path(record["destination"]) / "receipt.json"
+        if receipt_path.is_file() and not has_media_result(record):
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if not isinstance(receipt, dict) or not has_media_result(receipt):
+                raise ValueError("无法读取已保存的多媒体回执。")
+            return {key: receipt[key] for key in ("remote_id", "provider_task_id", "sources", "text", "files") if key in receipt}
+        return {}
+
+    def restart_job(self, record, adapter, prepared=None, **changes):
+        status = "queued" if prepared is not None else "downloading" if not record.get("remote_id") or record.get("sources") else "running"
+        self.save(record, status=status, message="正在继续原任务…", stop_requested=False, **changes)
+        self.start(record, adapter, prepared)
+        return self.get(record["id"])
+
+    def recover_interrupted(self, record):
+        identity = record["id"]
+        with self.lock:
+            if identity in self.active:
+                return
+            can_submit = record["status"] == "queued"
+            try:
+                root = self.task_workspace(record)
+                record.update(self.read_receipt(record))
+                if record.get("stop_requested"):
+                    self.pause(record)
+                elif has_media_result(record):
+                    self.restart_job(record, self.original_adapter(record))
+                elif can_submit and self.host.enabled and not record.get("remote_id"):
+                    adapter = self.original_adapter(record, auto_submit=True)
+                    self.restart_job(record, adapter, self.prepare(adapter, record["request"], root))
+                elif can_submit:
+                    self.save(record, status="not_submitted", message="多媒体已停用，尚未提交任务，需求已保留。")
+                else:
+                    self.save(record, status="unknown", message=UNCONFIRMED)
+                log.info("media_recovered id=%s session=%s", identity, record["conversation_id"])
+            except Exception as exc:
+                if identity in self.active:
+                    log.exception("media_recovery_save_failed id=%s", identity)
+                    return
+                if has_media_result(record):
+                    status, message = "paused", "暂时无法继续原任务，已有进度已保留。"
+                elif can_submit:
+                    status, message = "not_submitted", "尚未提交任务，需求已保留。"
+                else:
+                    status, message = "unknown", UNCONFIRMED
+                self.save(record, status=status, message=message, error_detail=self.error_detail(exc, "recovery"))
+                log.warning("media_recovery_failed id=%s session=%s status=%s error_type=%s",
+                            identity, record["conversation_id"], status, type(exc).__name__)
+
+    def retry(self, identity, cid, updated_at):
         with self.lock:
             record = self.get(identity, cid)
-            if identity in self.active or record["status"] == "completed":
+            if identity in self.active or record["status"] != "not_submitted" or record["updated_at"] != updated_at:
                 return record
-            root = self.s.files.workspace(record["conversation_id"])
-            destination = Path(record["destination"]).resolve()
-            if root != Path(record["workspace"]).resolve() or destination != root / "media" / identity:
-                raise ValueError("对话工作目录已改变，请恢复原目录后继续该任务。")
-            receipt_path = destination / "receipt.json"
-            if receipt_path.is_file() and not record.get("remote_id") and not record.get("sources"):
-                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-                record.update({key: receipt[key] for key in ("remote_id", "provider_task_id", "sources", "text", "files") if key in receipt})
-            if remote_id:
-                if record["status"] != "unknown" or record["capability"] != "video_generate":
-                    raise ValueError("只有提交结果未确认的视频任务可以补充远端编号。")
-                if len(remote_id) > 256 or any(ch.isspace() for ch in remote_id):
-                    raise ValueError("远端任务编号无效。")
-                record["remote_id"] = remote_id
-            if not record.get("remote_id") and not record.get("sources") and not record.get("text") and not record.get("files"):
-                raise ValueError("没有可恢复的远端编号或成果，请先核对服务后台；不会重新发起生成。")
-            profile = dict(record["profile"])
-            channel = next((item for item in self.s.config.get_model_channels() if item["channel_id"] == profile["channel_id"]), {})
-            if channel.get("base_url") != profile["base_url"]:
-                raise ValueError("原服务已删除或地址改变，请恢复原服务后继续。")
-            profile["api_key"] = channel.get("api_key", "")
-            adapter = Adapter(profile)
-            self.save(record, status="downloading" if record.get("sources") else "running", message="正在恢复…")
-            self.start(record, adapter)
-            return self.get(identity)
+            if not self.host.enabled:
+                raise ValueError("请先启用多媒体，原需求已保留。")
+            root = self.task_workspace(record)
+            if record.get("remote_id") or has_media_result(record) or self.read_receipt(record):
+                raise ValueError("此任务已有回执，不会重复生成。")
+            adapter = self.original_adapter(record)
+            prepared = self.prepare(adapter, record["request"], root)
+            log.info("media_retry_requested id=%s session=%s", identity, cid)
+            return self.restart_job(record, adapter, prepared, profile=self.saved_profile(adapter.profile), submit_retries=0, error_detail=None)
+
+    def resume(self, identity, cid=""):
+        with self.lock:
+            record = self.get(identity, cid)
+            if identity in self.active or record["status"] not in RESUMABLE:
+                return record
+            self.task_workspace(record)
+            record.update(self.read_receipt(record))
+            if not has_media_result(record):
+                raise ValueError("服务未返回可继续的任务，原需求已保留。")
+            return self.restart_job(record, self.original_adapter(record))
 
     def stop(self, identity, cid=""):
         with self.lock:
@@ -442,6 +615,6 @@ class MediaRuntime:
             event = self.active.get(identity)
             if event and record["status"] in ACTIVE:
                 event.set()
-                self.save(record, message="正在停止等待，已发出的请求将先保存结果；远端生成可能继续。")
+                self.save(record, stop_requested=True, message="正在停止等待，已提交的生成可能继续。")
                 # The worker owns terminal state; a delayed stop never undoes completion.
             return record

@@ -19,9 +19,23 @@ app.whenReady().then(async()=>{
   await load();
   const wav=Buffer.alloc(44+16000*2);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(16000,24);wav.writeUInt32LE(32000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);
   await fs.writeFile(path.join(data,'sample.wav'),wav);
-  const video=await read(`new Promise((resolve,reject)=>{const canvas=document.createElement('canvas');canvas.width=160;canvas.height=90;const context=canvas.getContext('2d'),stream=canvas.captureStream(0),recorder=new MediaRecorder(stream,{mimeType:'video/webm;codecs=vp8'}),parts=[];recorder.ondataavailable=event=>parts.push(event.data);recorder.onerror=reject;recorder.onstop=async()=>{stream.getTracks().forEach(track=>track.stop());const bytes=new Uint8Array(await new Blob(parts).arrayBuffer());resolve(btoa(String.fromCharCode(...bytes)));};context.fillStyle='#aaaaaa';context.fillRect(0,0,160,90);recorder.start();let frame=0;const timer=setInterval(()=>{context.fillStyle=frame%2?'#303030':'#aaaaaa';context.fillRect(0,0,160,90);stream.getVideoTracks()[0].requestFrame();if(++frame===20){clearInterval(timer);recorder.stop();}},80);})`);
-  assert.ok(Buffer.from(video,'base64').length>400,'video fixture contains encoded frames');await fs.writeFile(path.join(data,'sample.webm'),Buffer.from(video,'base64'));
-  const files=[['sample.wav','audio'],['sample.webm','video']].map(([name,kind])=>host.register({id:name,path:path.join(data,name),name,payload:{kind:'preview',preview_kind:kind}}));
+  const video=await read(`new Promise((resolve,reject)=>{
+    const canvas=document.createElement('canvas');canvas.width=640;canvas.height=360;
+    const context=canvas.getContext('2d'),stream=canvas.captureStream(0),mp4=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.42001E');
+    const mimeType=mp4?'video/mp4;codecs=avc1.42001E':'video/webm;codecs=vp8',recorder=new MediaRecorder(stream,{mimeType}),parts=[];
+    recorder.ondataavailable=event=>parts.push(event.data);recorder.onerror=reject;
+    recorder.onstop=async()=>{stream.getTracks().forEach(track=>track.stop());const bytes=new Uint8Array(await new Blob(parts).arrayBuffer());resolve({name:mp4?'日落短片.mp4':'日落短片.webm',base64:btoa(Array.from(bytes,byte=>String.fromCharCode(byte)).join(''))});};
+    const sky=context.createLinearGradient(0,0,0,220);sky.addColorStop(0,'#273959');sky.addColorStop(1,'#ffc075');
+    const sea=context.createLinearGradient(0,180,0,360);sea.addColorStop(0,'#53778c');sea.addColorStop(1,'#233855');
+    let frame=0;
+    const draw=()=>{context.fillStyle=sky;context.fillRect(0,0,640,210);context.fillStyle='#ffe2a0';context.beginPath();context.arc(455,165,45,0,Math.PI*2);context.fill();
+      context.fillStyle=sea;context.fillRect(0,210,640,150);context.strokeStyle='#edba8c';
+      for(let line=0;line<10;line++){const offset=(line*31+frame*4)%75;context.beginPath();context.moveTo(455-offset,222+line*12);context.lineTo(455+offset,222+line*12);context.stroke();}
+      stream.getVideoTracks()[0].requestFrame();};
+    recorder.start();draw();const timer=setInterval(()=>{draw();if(++frame===20){clearInterval(timer);recorder.stop();}},80);
+  })`);
+  const encoded=Buffer.from(video.base64,'base64');assert.ok(encoded.length>400,'video fixture contains encoded frames');await fs.writeFile(path.join(data,video.name),encoded);
+  const files=[['sample.wav','audio'],[video.name,'video']].map(([name,kind])=>host.register({id:name,path:path.join(data,name),name,payload:{kind:'preview',preview_kind:kind}}));
   for(const reload of [false,true]){
     if(reload)await load();
     await read(`window.deliver(${JSON.stringify(files)})`);
@@ -33,5 +47,41 @@ app.whenReady().then(async()=>{
     await read("document.querySelector('.message-media video').pause();document.querySelectorAll('.message-media figcaption button')[1].click()");
     await until("document.querySelector('.file-media-preview video')?.readyState>=1");
   }
+  await load();
+  const task={id:'video-task',conversation_id:'one',capability:'video_generate',created_at:1,files:[],can_resume:false,can_retry:false};
+  const taskUpdate=value=>read('window.deliverTask('+JSON.stringify({...task,...value})+')');
+  await taskUpdate({status:'queued',message:'等待提交',updated_at:1});
+  await until('document.querySelector(".chat-media-tasks [role=status]")?.textContent==="正在准备"');
+  await taskUpdate({status:'running',message:'正在生成视频',updated_at:2});
+  await until('document.querySelector(".chat-media-tasks [role=status]")?.textContent==="正在生成"');
+  await read('window.selectConversation("two")');await until('!document.querySelector(".chat-media-tasks")');
+  await taskUpdate({status:'completed',message:'已保存到对话工作目录',files:[files[1].path],updated_at:3});
+  await read('window.deliver('+JSON.stringify(files)+');window.selectConversation("one");');
+  await until('document.querySelector(".chat-media-tasks [role=status]")?.textContent==="可播放"&&document.querySelector(".chat-media-tasks video")?.readyState>=1');
+  assert.equal(await read('document.querySelectorAll("video").length'),1);
+  assert.equal(await read('document.querySelectorAll(".chat-media-tasks article").length'),1);
+  await read('(()=>{const player=document.querySelector(".chat-media-tasks video");player.muted=true;return player.play();})()');
+  await until('document.querySelector(".chat-media-tasks video").currentTime>0');
+  await read('document.querySelector(".chat-media-tasks video").pause()');
+  if(process.env.COWORK_MEDIA_TEST_SCREENSHOTS){
+    const screenshots=process.env.COWORK_MEDIA_TEST_SCREENSHOTS;
+    await fs.mkdir(screenshots,{recursive:true});
+    window.showInactive();
+    await read('document.querySelector(".message.assistant").hidden=true;document.querySelector(".chat-media-tasks").style.cssText="max-width:780px;margin:24px auto;padding-inline:16px";document.querySelector(".chat-media-tasks video").scrollIntoView({block:"center"});');
+    await new Promise(resolve=>setTimeout(resolve,250));
+    await fs.writeFile(path.join(screenshots,'video-task.png'),(await window.webContents.capturePage()).toPNG());
+  }
+
+  window.setSize(720,640);window.webContents.setZoomFactor(1.25);
+  await read('document.documentElement.dataset.theme="dark"');
+  await taskUpdate({id:'unknown',status:'unknown',message:'服务未确认接单',diagnostic:{stage:'submit',message:'HTTP 503'},updated_at:4});
+  await until('document.querySelectorAll(".chat-media-tasks article").length===2');
+  assert.equal(await read('Boolean(document.querySelector(".chat-media-tasks article:nth-child(2) button,.chat-media-tasks input"))'),false);
+  assert.equal(await read('document.querySelector(".chat-media-tasks article:nth-child(2) details").open'),false);
+  await taskUpdate({id:'busy',status:'not_submitted',message:'生成服务繁忙，需求已保留。',can_retry:true,updated_at:5});
+  await until('document.querySelector(".chat-media-tasks article:nth-child(3) button")?.textContent==="重试生成"');
+  await read('document.querySelector(".chat-media-tasks article:nth-child(3) button").click()');
+  assert.deepEqual(await read('window.mediaActions'),[{id:'busy',conversation_id:'one',updated_at:5}]);
+  assert.ok(await read('document.documentElement.scrollWidth<=innerWidth+1'));
   assert.deepEqual(errors,[]);console.log('MEDIA_PREVIEW_FIXTURE_OK');
 }).then(()=>{clearTimeout(deadline);window?.destroy();app.exit(0);}).catch(error=>{console.error(error);clearTimeout(deadline);window?.destroy();app.exit(1);});

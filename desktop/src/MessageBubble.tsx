@@ -2,9 +2,9 @@ import { createContext, useContext, memo, useRef, useState, useEffect } from 're
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
-import type { FileReference, Message } from './types';
+import type { FileReference, MediaTask, Message } from './types';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
-import {useHostField} from './host/context';
+import {useHost, useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
 import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
@@ -13,10 +13,11 @@ import SnippetPreview from './SnippetPreview';
 import ImageAttachment, {isImageAttachment} from './ImageAttachment';
 import {reviewTitle, type ReviewSummary} from './reviews';
 
-export function MediaResult({file,cid,onFile}:{file:FileReference;cid:string;onFile:(path:string)=>void}) {
+export function MediaResult({file,cid,onFile,onPlayable}:{file:FileReference;cid:string;onFile:(path:string)=>void;onPlayable?:(playable:boolean)=>void}) {
   const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
   useEffect(()=>{let live=true;setUrl('');setFailure('');void window.cowork.call('file.open',{conversation_id:cid,path:file.path}).then(result=>{if(live)setUrl(result.payload.url);}).catch(error=>{if(live)setFailure(error.message);});return()=>{live=false;};},[cid,file.path]);
-  return <figure>{url&&(file.kind==='video'?<video src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={()=>setFailure('此格式无法在应用内播放，请打开文件查看。')}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure&&<p role="alert" className="error-text">{failure}</p>}</figure>;
+  const playbackError = () => {setFailure('此格式无法在应用内播放，请打开文件查看。'); onPlayable?.(false);};
+  return <figure>{url&&(file.kind==='video'?<video src={url} controls preload={onPlayable ? 'auto' : 'metadata'} aria-label={file.name} onLoadedData={()=>onPlayable?.(true)} onError={playbackError}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={playbackError}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure&&<p role="alert" className="error-text">{failure}</p>}</figure>;
 }
 
 function CodeBlock({ children }: { children?: React.ReactNode }) {
@@ -94,6 +95,13 @@ function ViewedImages({cid, callId, images, onFile, onDetails}: {cid: string; ca
   </div>;
 }
 
+function MessageVideo({file, cid, onFile}: {file: FileReference; cid: string; onFile: (path: string) => void}) {
+  const host = useHost();
+  const [tasks] = useHostField<MediaTask[]>(host.sessionKey('media_tasks', cid), []);
+  if (tasks.some(task => task.conversation_id === cid && task.capability === 'video_generate' && task.files?.includes(file.path))) return null;
+  return <MediaResult file={file} cid={cid} onFile={onFile}/>;
+}
+
 const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, active, cid, answerOnly = false }: {
   message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean;
 }) {
@@ -121,7 +129,7 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   return <article id={'message-' + message.id} className={`message ${message.role}`}>
     {imageFiles.length > 0 && <div className="image-attachments">{imageFiles.map((file: any) => <ImageAttachment key={cid + ':' + file.path} cid={cid} file={file} onOpen={onFile}/>)}</div>}
     <div className="message-body" hidden={!text && !otherFiles.length && !references.length && !context.skills?.length && !context.knowledge?.length && message.role === 'user'}>
-    {media.length > 0 && <div className="message-media">{media.map(file => <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
+    {media.length > 0 && <div className="message-media">{media.map(file => file.kind === 'video' ? <MessageVideo key={file.path} file={file} cid={cid} onFile={onFile}/> : <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
     {(references.length > 0 || context.skills?.length > 0 || context.knowledge?.length > 0) && <div className="message-contexts" aria-label="发送时选中的上下文">
       {references.map((ref: any) => <span className="context-chip conversation-chip" key={ref.id || ref.session_id} title={'对话快照：' + ref.title}><MessageSquare size={13}/><span>对话 {ref.title}</span></span>)}
       {context.skills?.map((name: string) => <span className="context-chip skill-chip" key={name} title={name}>{name.startsWith('mcp-server-') ? <Link size={13}/> : <Puzzle size={13}/>}<span>{name.startsWith('mcp-server-') ? '连接器' : '技能'} {name}</span></span>)}
@@ -189,11 +197,12 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
   function toolRow(message: Message, tool: any, result?: Message) {
     const resultObject = result?.result_obj;
     const failed = Boolean(resultObject?.error || ['failed', 'error'].includes(resultObject?.status));
-    const state = result ? failed ? '失败' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成' : running ? '运行中' : '结果未确认';
+    const toolName = tool.function?.name || tool.name || result?.meta?.tool_name;
+    const mediaSnapshot = (toolName === 'media_create' || toolName === 'media_task') && resultObject?.task_id;
+    const state = result ? failed ? '失败' : mediaSnapshot ? '已返回' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成' : running ? '运行中' : '结果未确认';
     let args = tool.function?.arguments ?? tool.arguments ?? tool.args ?? {};
     if (typeof args === 'string') {try {args = JSON.parse(args);} catch {args = {};}}
     const paths = ['path','file_path','filename','file'].flatMap(key => typeof args?.[key] === 'string' ? [args[key]] : []);
-    const toolName = tool.function?.name || tool.name || result?.meta?.tool_name;
     const images = toolName === 'view_image' && result && !failed ? (resultObject?.content_parts || []).filter((part: any) => part.type === 'input_image' && typeof part.path === 'string') : [];
     if (images.length) return <ViewedImages key={tool.id} cid={cid} callId={tool.id} images={images} onFile={onFile} onDetails={() => onAction('tool', {...message, tool_call_id: tool.id})}/>;
     return <div className="process-step tool-step" key={tool.id}><Wrench className="timeline-node" size={14}/><button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><span>{tool.function?.name || tool.name || result?.meta?.tool_name || '工具调用'}</span><small>{state}</small><ChevronRight size={13}/></button>{paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}{failed && <p className="error-text">{toolErrorText(resultObject.error) || '工具执行失败'}</p>}{questions.filter(question => question.callId === tool.id).map(questionRow)}</div>;

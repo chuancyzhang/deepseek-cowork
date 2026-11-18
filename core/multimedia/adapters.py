@@ -1,4 +1,4 @@
-"""Explicit provider contracts; no automatic submit retry or protocol fallback."""
+"""Provider contracts and explicit submission outcomes."""
 from __future__ import annotations
 
 import base64
@@ -16,10 +16,13 @@ MAX_OUTPUT = 512 * 1024 * 1024
 
 
 class MediaError(RuntimeError):
-    def __init__(self, message, *, uncertain=False, retryable=False):
+    def __init__(self, message, *, uncertain=False, retryable=False, http_status=None, code="", request_id=""):
         super().__init__(message)
         self.uncertain = uncertain
         self.retryable = retryable
+        self.http_status = http_status
+        self.code = code
+        self.request_id = request_id
 
 
 def http_url(value):
@@ -85,18 +88,29 @@ class Adapter:
             response = requests.request(method, url, headers=self.headers, timeout=(15, 180),
                                         allow_redirects=method == "GET", **kwargs)
         except requests.RequestException:
-            raise MediaError("服务连接中断或超时。", uncertain=method == "POST", retryable=True) from None
+            raise MediaError("服务连接中断或超时。", uncertain=method == "POST", retryable=method != "POST") from None
         if not 200 <= response.status_code < 300:
-            try:
-                detail = response.json().get("error", {})
-                detail = detail.get("message") if isinstance(detail, dict) else detail
-            except (ValueError, AttributeError):
-                detail = "请检查服务地址、模型权限与请求参数。"
             status = response.status_code
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            error = payload.get("error")
+            fields = error if isinstance(error, dict) else payload
+            code = str(fields.get("code") or "")
+            detail = fields.get("message") or (error if isinstance(error, str) else code)
+            rejected = (method == "POST" and path == "/videos" and self.profile["adapter"] == "agnes"
+                        and status == 503 and code == "video_queue_full"
+                        and not any(payload.get(key) or fields.get(key) for key in ("id", "task_id", "video_id")))
+            request_id = str(response.headers.get("X-Request-ID") or fields.get("request_id") or payload.get("request_id") or "")
+            secret = self.profile["api_key"]
             response.close()
-            raise MediaError(f"服务返回 HTTP {status}：" + safe_message(detail, self.profile["api_key"]),
-                             uncertain=method == "POST" and status >= 500,
-                             retryable=status == 429 or status >= 500)
+            raise MediaError(f"服务返回 HTTP {status}：" + safe_message(detail, secret),
+                             uncertain=method == "POST" and (status == 408 or status >= 500) and not rejected,
+                             retryable=rejected or (method != "POST" and (status in {408, 429} or status >= 500)),
+                             http_status=status, code=code if re.fullmatch(r"[\w.-]{1,80}", code) and secret not in code else "",
+                             request_id=request_id if re.fullmatch(r"[\w.-]{1,120}", request_id) and secret not in request_id else "")
         return response
 
     def json_request(self, method, path, **kwargs):
@@ -148,7 +162,10 @@ class Adapter:
             elif inputs:
                 return {"kind": kind, "body": body, "files": [str(local_input(value, workspace)) for value in inputs]}
         elif kind == "video_generate":
-            seconds = int(options.get("seconds", 5))
+            duration = options.get("seconds", 5)
+            if type(duration) is not int and not (isinstance(duration, str) and duration.strip().isdecimal()):
+                raise ValueError("视频时长须为整数秒。")
+            seconds = int(duration)
             if not 1 <= seconds <= 30:
                 raise ValueError("视频时长须为 1–30 秒，实际范围以模型为准。")
             ratio = str(options.get("aspect_ratio") or "16:9")
@@ -157,7 +174,7 @@ class Adapter:
             if adapter == "agnes":
                 if not 4 <= seconds <= 12:
                     raise ValueError("Agnes 视频时长须为 4–12 秒。")
-                size = options.get("size") or "720P"
+                size = "720P" if options.get("size") is None else str(options["size"]).strip().upper()
                 if profile["model"] == "agnes-video-2.5-flash":
                     if size != "720P":
                         raise ValueError("Agnes Video 2.5 Flash 仅支持 720P 分辨率。")
@@ -261,7 +278,7 @@ class Adapter:
         key = "video_id" if self.profile["adapter"] == "agnes" else "id"
         remote_id = result.get(key)
         if not isinstance(remote_id, str) or not remote_id:
-            raise MediaError(f"创建响应缺少 {key}，请到服务后台核查后填写远端编号恢复查询。", uncertain=True)
+            raise MediaError(f"创建响应缺少 {key}。", uncertain=True)
         return {"remote_id": remote_id, "provider_task_id": str(result.get("id") or remote_id)}
 
     def poll(self, remote_id):
@@ -356,7 +373,8 @@ class Adapter:
                 if not 200 <= response.status_code < 300:
                     status = response.status_code
                     response.close()
-                    raise MediaError(f"成果下载返回 HTTP {status}。", retryable=status == 429 or status >= 500)
+                    raise MediaError(f"成果下载返回 HTTP {status}。", retryable=status in {408, 429} or status >= 500,
+                                     http_status=status)
             except requests.RequestException:
                 raise MediaError("成果下载连接失败。", retryable=True) from None
         with response:

@@ -33,6 +33,7 @@ const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.l
   'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list',
   'workspace.create', 'workspace.attach', 'workspace.attach_data', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
 for (const method of ['project.list', 'project.save', 'project.archive', 'project.restore', 'conversation.search',
+  'sidebar.create_group', 'sidebar.move', 'sidebar.pin_project',
   'conversation.pin', 'conversation.restore', 'conversation.delete', 'conversation.preferences', 'conversation.export',
   'conversation.reference', 'conversation.branch', 'history.prepare', 'history.edit', 'history.delete', 'history.undo',
   'agent.list', 'agent.get', 'agent.send', 'agent.stop', 'agent.resume', 'conversation.receipt', 'conversation.workspace']) allowed.add(method);

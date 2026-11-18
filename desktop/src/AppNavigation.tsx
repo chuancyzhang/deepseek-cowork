@@ -1,4 +1,5 @@
-import {useEffect, useMemo, useRef, useState, type RefObject} from 'react';
+import {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject} from 'react';
+import {createPortal} from 'react-dom';
 import {ArrowUpRight, Bell, ChevronRight, CircleHelp, Folder, FolderPlus, LoaderCircle, MessageSquare, PanelLeft, Search, SquarePen, X} from 'lucide-react';
 import Dialog from './Dialog';
 import {useWorkbench} from './host/Host';
@@ -11,14 +12,16 @@ import './navigation.css';
 
 const call = <T = any,>(method: string, params?: unknown) => window.cowork.call<T>(method, params);
 const menuNames = [['file','文件'],['edit','编辑'],['view','视图'],['help','帮助']] as const;
-const shortcuts = [['新建聊天','Ctrl+N'],['添加项目','Ctrl+O'],['搜索聊天与项目','Ctrl+K'],['显示 / 隐藏侧边栏','Ctrl+Shift+S'],['设置','Ctrl+,'],['保存当前文稿','Ctrl+S']];
+const shortcuts = [['新建聊天','Ctrl+N'],['新建项目','Ctrl+O'],['搜索聊天与项目','Ctrl+K'],['显示 / 隐藏侧边栏','Ctrl+Shift+S'],['设置','Ctrl+,'],['保存当前文稿','Ctrl+S']];
 
 export default function AppNavigation() {
   const c = useWorkbench();
   const [runs] = useHostField<Record<string,Run>>('runs',{});
+  const [sidebarTarget] = useHostField<HTMLDivElement | null>('navigation:sidebarTools',null);
   const [panel,setPanel] = useState<''|'search'|'tasks'|'shortcuts'>('');
   const [menu,setMenu] = useState('');
   const searchTrigger = useRef<HTMLButtonElement>(null), tasksTrigger = useRef<HTMLButtonElement>(null);
+  const toolsTarget = c.sidebar ? sidebarTarget : null;
   const activeRuns = useMemo(() => Object.values(runs).filter(run => isActive(run.status)).sort((a,b) => (a.created_at || 0)-(b.created_at || 0)),[runs]);
   const close = () => setPanel('');
   useEffect(() => {c.host.set('navigation:overlay',Boolean(panel || menu));return () => {c.host.set('navigation:overlay',false);};},[c.host,panel,menu]);
@@ -35,7 +38,12 @@ export default function AppNavigation() {
     close();
     if (action === 'sidebar') c.setSidebar(previous=>!previous);
     else if (action === 'new-chat') await c.newConversation();
-    else if (action === 'add-project') await c.addProject();
+    else if (action === 'add-project') c.addProject();
+    else if (action === 'appearance') {
+      const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      await call('settings.theme', {theme});
+      c.setSettings(previous => previous ? {...previous, theme} : null);
+    }
     else if (action === 'settings' || action === 'updates') await settings(action === 'updates' ? 'update' : undefined);
     else if (action === 'workspace') {
       await c.goRoute('chat');
@@ -71,19 +79,23 @@ export default function AppNavigation() {
     c.host.set<WorkspaceView>(c.host.sessionKey('workspaceView',id),previous=>({...previous || emptyWorkspace(),selected:'tasks',tasksPinned:true,tasksOpen:false,task:{section:'calls',runId:run.id}}));
     c.host.set(c.host.sessionKey('workspaceOpen',id),true);
   }
+  const tools = <div className="navigation-tools">
+    <button ref={tasksTrigger} className={'navigation-tasks icon-button'+(panel==='tasks'?' selected':'')} title="运行任务" aria-label={'运行任务'+(activeRuns.length?'，'+activeRuns.length+' 项进行中':'')} aria-haspopup="dialog" aria-expanded={panel==='tasks'} onClick={()=>setPanel(panel==='tasks'?'':'tasks')}>
+      <Bell size={17}/>{activeRuns.length>0&&<span className="navigation-count" aria-hidden="true">{activeRuns.length > 99 ? '99+' : activeRuns.length}</span>}
+    </button>
+    <button ref={searchTrigger} className="icon-button" title="搜索聊天与项目 · Ctrl+K" aria-label="搜索聊天与项目" aria-haspopup="dialog" aria-expanded={panel==='search'} onClick={()=>setPanel('search')}><Search size={17}/></button>
+  </div>;
   return <>
     <header className={'window-titlebar app-navigation'+(/Windows/i.test(navigator.userAgent)?' windows':'')} aria-label="应用导航">
       <button className="icon-button navigation-sidebar" title="显示 / 隐藏侧边栏 · Ctrl+Shift+S" aria-label={c.sidebar?'收起侧边栏':'展开侧边栏'} aria-expanded={c.sidebar} onClick={()=>c.setSidebar(previous=>!previous)}><PanelLeft size={18}/></button>
       <span className="navigation-divider" aria-hidden="true"/>
       <nav className="application-menus" aria-label="应用菜单">{menuNames.map(([id,label])=><button key={id} aria-haspopup="menu" aria-expanded={menu===id} onMouseDown={event=>event.preventDefault()} onClick={event=>void openMenu(id,event.currentTarget)} onKeyDown={event=>{if(event.key==='ArrowDown'){event.preventDefault();void openMenu(id,event.currentTarget);}}}>{label}</button>)}</nav>
       <div className="navigation-space"/>
-      <div className="navigation-tools">
-        <button ref={tasksTrigger} className={'navigation-tasks icon-button'+(panel==='tasks'?' selected':'')} title="运行任务" aria-label={`运行任务${activeRuns.length?'，'+activeRuns.length+' 项进行中':''}`} aria-haspopup="dialog" aria-expanded={panel==='tasks'} onClick={()=>setPanel(panel==='tasks'?'':'tasks')}><Bell size={17}/>{activeRuns.length>0&&<span className="navigation-count">{activeRuns.length}</span>}</button>
-        <button ref={searchTrigger} className="icon-button" title="搜索聊天与项目 · Ctrl+K" aria-label="搜索聊天与项目" aria-haspopup="dialog" aria-expanded={panel==='search'} onClick={()=>setPanel('search')}><Search size={18}/></button>
-      </div>
+      {!toolsTarget && tools}
     </header>
+    {toolsTarget && createPortal(tools, toolsTarget)}
     {panel==='search'&&<GlobalSearch conversations={c.conversations} projects={c.settings?.projects || []} close={close} onChat={async id=>{close();await c.switchConversation(id);}} onProject={async path=>{close();await c.newConversation(path);}} onAction={command} error={c.error}/>}
-    {panel==='tasks'&&<RunningTasks runs={activeRuns} trigger={tasksTrigger} close={close} open={openRun} background={async()=>{close();await settings('jobs');}}/>}
+    {panel==='tasks'&&<RunningTasks runs={activeRuns} trigger={tasksTrigger} placement={toolsTarget} close={close} open={openRun} background={async()=>{close();await settings('jobs');}}/>}
     {panel==='shortcuts'&&<Dialog title="键盘快捷键" onClose={close} className="navigation-shortcuts"><dl>{shortcuts.map(([label,key])=><div key={key}><dt>{label}</dt><dd><kbd>{key}</kbd></dd></div>)}</dl></Dialog>}
   </>;
 }
@@ -106,7 +118,7 @@ export function GlobalSearch({conversations,projects,close,onChat,onProject,onAc
   const match=(value:string)=>value.toLocaleLowerCase().includes(term.toLocaleLowerCase());
   const archived=(item:Conversation)=>item.meta.archived||projects.some(p=>(p.archived||p.hidden)&&p.path===item.meta.workspace_dir);
   const rows:SearchResult[]=[];
-  if(filter==='all'||filter==='action')for(const [action,title,key] of [['new-chat','新建聊天','Ctrl+N'],['add-project','添加项目…','Ctrl+O']])if(match(title))rows.push({key:action,kind:'操作',title,shortcut:key,run:()=>onAction(action)});
+  if(filter==='all'||filter==='action')for(const [action,title,key] of [['new-chat','新建聊天','Ctrl+N'],['add-project','新建项目…','Ctrl+O']])if(match(title))rows.push({key:action,kind:'操作',title,shortcut:key,run:()=>onAction(action)});
   if(filter==='all'||filter==='chat')for(const item of term?(response?.query===term?response.items:[]):conversations.filter(item=>!archived(item)&&item.has_content!==false).slice(0,5))rows.push({key:item.id,kind:'聊天',title:item.display_title||item.title,detail:[item.meta.project_name|| (item.meta.workspace_source!=='chat'?(item.meta.workspace_dir||'').split(/[\\/]/).pop():''),archived(item)?'已归档':''].filter(Boolean).join(' · '),run:()=>onChat(item.id)});
   if(filter==='all'||filter==='project')for(const project of projects.filter(p=>!p.archived&&!p.hidden&&match(p.name+' '+p.path)))rows.push({key:project.path,kind:'项目',title:project.name,detail:project.path,shortcut:'新建聊天',run:()=>onProject(project.path)});
   const visible=rows.slice(0,limit),active=Math.min(selected,Math.max(0,visible.length-1));
@@ -133,17 +145,24 @@ export function GlobalSearch({conversations,projects,close,onChat,onProject,onAc
   </Dialog>;
 }
 
-function RunningTasks({runs,trigger,close,open,background}:{runs:Run[];trigger:RefObject<HTMLButtonElement|null>;close:()=>void;open:(run:Run,details?:boolean)=>Promise<void>;background:()=>Promise<void>}) {
+function RunningTasks({runs,trigger,placement,close,open,background}:{runs:Run[];trigger:RefObject<HTMLButtonElement|null>;placement:HTMLDivElement|null;close:()=>void;open:(run:Run,details?:boolean)=>Promise<void>;background:()=>Promise<void>}) {
   const root=useRef<HTMLElement>(null);
+  const position = useCallback(() => {
+    const box = trigger.current?.getBoundingClientRect(), element = root.current;
+    if (!box || !element) return;
+    element.style.top = (box.bottom + 8) + 'px';
+    element.style.left = Math.max(12, Math.min(box.right - element.offsetWidth, innerWidth - element.offsetWidth - 12)) + 'px';
+    element.style.maxHeight = Math.max(0, innerHeight - box.bottom - 20) + 'px';
+  }, [trigger]);
+  useLayoutEffect(position, [position, placement, runs.length]);
   useEffect(()=>{
-    const position=()=>{const box=trigger.current?.getBoundingClientRect(),element=root.current;if(box&&element){element.style.top=(box.bottom+8)+'px';element.style.right=Math.max(12,innerWidth-box.right)+'px';}};
-    position();root.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    root.current?.querySelector<HTMLButtonElement>('button')?.focus();
     const dismiss=(event:PointerEvent)=>{if(!root.current?.contains(event.target as Node)&&!trigger.current?.contains(event.target as Node))close();};
     const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();close();trigger.current?.focus();}};
     const blur=()=>close();
     document.addEventListener('pointerdown',dismiss);document.addEventListener('keydown',key);window.addEventListener('resize',position);window.addEventListener('blur',blur);
     return()=>{document.removeEventListener('pointerdown',dismiss);document.removeEventListener('keydown',key);window.removeEventListener('resize',position);window.removeEventListener('blur',blur);};
-  },[]);
+  },[position]);
   return <section className="running-tasks" ref={root} role="dialog" aria-label="运行任务">
     <header><h2>运行任务</h2><span>{runs.length?runs.length+' 项进行中':''}</span><button className="icon-button" aria-label="关闭运行任务" onClick={()=>{close();trigger.current?.focus();}}><X size={17}/></button></header>
     <div className="running-task-list">{runs.length?runs.map(run=><RunningTask key={run.id} run={run} open={open}/>):<p className="navigation-empty">当前没有正在运行的任务</p>}</div>

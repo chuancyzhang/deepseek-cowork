@@ -5,7 +5,7 @@ function applicationMenu({command, exit, logs, guide, recover, reload}) {
   const separator = {type:'separator'};
   return [
     {id:'file', label:'文件', submenu:[
-      item('new-chat','新建聊天','CmdOrCtrl+N'), item('add-project','添加项目…','CmdOrCtrl+O'),
+      item('new-chat','新建聊天','CmdOrCtrl+N'), item('add-project','新建项目…','CmdOrCtrl+O'),
       {...item('export-chat','导出当前聊天…'), enabled:false}, separator,
       {label:'退出应用', click:exit},
     ]},
@@ -16,7 +16,7 @@ function applicationMenu({command, exit, logs, guide, recover, reload}) {
     ]},
     {id:'view', label:'视图', submenu:[
       item('sidebar','显示 / 隐藏侧边栏','CmdOrCtrl+Shift+S'), item('search','搜索聊天与项目','CmdOrCtrl+K'),
-      item('tasks','运行任务'), item('workspace','工作区'), separator,
+      item('tasks','运行任务'), item('workspace','工作区'), item('appearance','切换浅色 / 深色'), separator,
       {label:'放大',role:'zoomIn'}, {label:'缩小',role:'zoomOut'}, {label:'重置缩放',role:'resetZoom'},
       {label:'全屏',role:'togglefullscreen'}, separator,
       {label:'重新载入界面',accelerator:'CmdOrCtrl+R',click:reload},

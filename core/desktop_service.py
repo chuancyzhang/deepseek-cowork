@@ -60,6 +60,8 @@ class DesktopService:
         self.lock = threading.RLock()
         from core.desktop_conversations import ConversationActions
         self.conversations = ConversationActions(self)
+        from core.sidebar_projects import DesktopSidebar
+        self.sidebar = DesktopSidebar(self)
         self.streams = self.state.streams
         self.closing = False
         self.shutdown_complete = False
@@ -97,7 +99,7 @@ class DesktopService:
         from core.desktop_media import DesktopMedia
         self.media = DesktopMedia(self)
         self.conversation_runtime = ConversationRuntime(config=self.config, storage=self.storage, store=self.store,
-            state=self.state, files=self.files, actions=self.conversations, publish=self.publish,
+            state=self.state, files=self.files, actions=self.conversations, sidebar=self.sidebar, publish=self.publish,
             start=self.start_stream, view=self.conversation, request=self.request_agent, model_usage=self.media.model_usage)
         self.settings_api = DesktopSettingsAPI(self.config, self.management.themes, self.publish, self.public_settings, self.store)
         token = uuid.uuid4().hex + uuid.uuid4().hex
@@ -146,6 +148,7 @@ class DesktopService:
         return {"models": models, "selected_model_id": self.config.get_selected_model_id(),
                 "god_mode": self.config.get_god_mode(), "theme": self.management.themes.load_appearance()["mode"],
                 "data_dir": self.config.data_dir, "projects": self.config.get_projects(),
+                "project_workspace_root": self.config.get_project_workspace_root(),
                 "multimedia_enabled": self.media.enabled,
                 "media_capabilities": self.media.configured_capabilities(),
                 "plugin_actions": self.media.actions(),
@@ -239,7 +242,7 @@ class DesktopService:
         p = params or {}
         if not isinstance(p, dict):
             raise ValueError("无效的操作参数。")
-        for domain in (self.workbench, self.conversations, self.conversation_runtime, self.files,
+        for domain in (self.workbench, self.conversations, self.conversation_runtime, self.sidebar, self.files,
                        self.management, self.settings_pages, self.settings_api, self.messaging,
                        self.updates, self.models, self.skillhub, self.connections, self.media, self.reviews, self.creation):
             if method in domain.methods:
@@ -247,7 +250,7 @@ class DesktopService:
         cid = str(p.get("conversation_id") or "")
         if method == "app.bootstrap":
             return {"protocol": PROTOCOL_VERSION, "settings": self.public_settings(),
-                    "conversations": self.store.summarize_conversations(self.storage.list_conversation_summaries(limit=500)),
+                    **self.sidebar.conversation_page(include_sidebar=True),
                     "active_runs": [self.public_run(run) for run in self.store.active_runs()],
                     "last_conversation": self.store.get_state("last_conversation", ""),
                     "home_draft": self.store.versioned_state("draft:", {"text": "", "attachments": []})}

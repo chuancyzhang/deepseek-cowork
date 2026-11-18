@@ -1465,6 +1465,13 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             )
         return conversations
 
+    def pinned_conversation_ids(self):
+        with self._connect() as conn:
+            return [row[0] for row in conn.execute("""
+                SELECT id FROM conversations
+                WHERE CASE WHEN json_valid(meta) THEN json_extract(meta, '$.pinned') END = 1
+            """)]
+
     def list_conversation_summaries(self, limit=None, offset=0, *, conversation_ids=None):
         if conversation_ids is not None:
             conversation_ids = list(dict.fromkeys(conversation_ids))

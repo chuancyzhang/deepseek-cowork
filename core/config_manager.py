@@ -364,6 +364,9 @@ class ConfigManager:
         path = str(self.config.get("chat_workspace_root") or default_dir).strip()
         return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
 
+    def get_project_workspace_root(self):
+        return os.path.join(self.data_dir, "project_workspaces")
+
     def set_chat_workspace_root(self, path):
         normalized = os.path.normpath(os.path.abspath(os.path.expanduser(str(path or "").strip())))
         if not str(path or "").strip():
@@ -1429,12 +1432,20 @@ class ConfigManager:
             projects = [item for item in projects if not item.get("archived") and not item.get("hidden")]
         return json.loads(json.dumps(projects, ensure_ascii=False))
 
-    def set_projects(self, projects):
+    def set_projects(self, projects, *, strict=False):
         normalized = self._normalize_projects(projects)
-        if normalized == self.config.get("projects"):
+        previous = self.config.get("projects", [])
+        if normalized == previous:
             return
         self.config["projects"] = normalized
-        self.save_config()
+        if strict:
+            try:
+                self._write_config_or_raise()
+            except Exception:
+                self.config["projects"] = previous
+                raise
+        else:
+            self.save_config()
 
     def get_mcp_servers(self):
         from .connection_retirement import register_explicit_refs, RetirementError
@@ -1517,7 +1528,7 @@ class ConfigManager:
             clear_mcp_auth_cache()
         self.save_config()
 
-    def upsert_project(self, path, name=None, pinned=None):
+    def upsert_project(self, path, name=None, pinned=None, *, strict=False):
         normalized_path = self._normalize_project_path(path)
         if not normalized_path:
             return None
@@ -1553,7 +1564,7 @@ class ConfigManager:
                 changed = True
             if changed:
                 project["updated_at"] = now
-                self.set_projects(projects)
+                self.set_projects(projects, strict=strict)
             updated = project
             break
         if updated is None:
@@ -1568,7 +1579,7 @@ class ConfigManager:
                 "updated_at": now,
             }
             projects.append(updated)
-            self.set_projects(projects)
+            self.set_projects(projects, strict=strict)
         return json.loads(json.dumps(updated, ensure_ascii=False))
 
     def archive_project(self, path):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import suppress
 import hashlib
 import json
 from datetime import datetime
@@ -132,6 +133,36 @@ class ConversationActions:
         return record, messages, {"hash": canonical_ledger_messages_hash(messages),
             "revision": int(record["meta"].get("history_save_revision") or 0)}
 
+    def save_project(self, params):
+        name = params.get("name")
+        with self.service.lock:
+            managed = not params.get("path")
+            if managed:
+                from core.desktop_reviews import safe_filename
+                try:
+                    name = safe_filename(name)
+                except ValueError as failure:
+                    raise ValueError("请输入可用作文件夹名称的项目名称。") from failure
+                root = Path(self.config.get_project_workspace_root()) / name
+                root.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    root.mkdir()
+                except FileExistsError as failure:
+                    raise ValueError("默认位置已有同名文件夹，请改名或关联该文件夹。") from failure
+            else:
+                root = Path(params["path"]).expanduser().resolve()
+                if not root.is_dir():
+                    raise ValueError("项目目录不存在，请选择现有目录。")
+            try:
+                project = self.config.upsert_project(str(root), name=name, pinned=params.get("pinned"), strict=True)
+            except Exception:
+                if managed:
+                    with suppress(OSError):
+                        root.rmdir()
+                raise
+            log.info("project_saved managed_directory=%s", managed)
+            return project
+
     def dispatch(self, method, p):
         cid = str(p.get("conversation_id") or "")
         if method == "conversation.workspace":
@@ -173,11 +204,7 @@ class ConversationActions:
         if method == "project.list":
             return self.config.get_projects()
         if method == "project.save":
-            root = Path(p["path"]).expanduser().resolve()
-            if not root.is_dir():
-                raise ValueError("项目目录不存在，请选择现有目录。")
-            with self.service.lock:
-                return self.config.upsert_project(str(root), name=p.get("name"), pinned=p.get("pinned"))
+            return self.save_project(p)
         if method in {"project.archive", "project.restore"}:
             with self.service.lock:
                 action = self.config.archive_project if method.endswith("archive") else self.config.restore_project
@@ -217,7 +244,10 @@ class ConversationActions:
                 self.storage.update_conversation_meta(cid, patch)
                 if method == "conversation.preferences":
                     log.info("preferences_saved session=%s keys=%s", cid, sorted(patch))
-                self.service.publish({"event": "conversation_changed", "conversation_id": cid})
+                if method == "conversation.pin":
+                    log.info("conversation_pin_saved session=%s pinned=%s", cid, patch["pinned"])
+                self.service.publish({"event": "conversation_list_changed" if method == "conversation.pin" else "conversation_changed",
+                                      "conversation_id": cid})
                 return {"saved": True, "meta": self.storage.get_conversation_meta(cid)}
         if method == "conversation.export":
             from core.chat_log_export import iter_conversation_export, chat_log_filename
@@ -327,10 +357,11 @@ class ConversationActions:
 class ConversationRuntime:
     methods = frozenset(['conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename', 'conversation.archive', 'conversation.receipt', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond'])
 
-    def __init__(self, *, config, storage, store, state, files, actions, publish, start, view, request, model_usage):
+    def __init__(self, *, config, storage, store, state, files, actions, sidebar, publish, start, view, request, model_usage):
         self.config, self.storage, self.store, self.state = config, storage, store, state
         self.workspace, self.checked_file = files.workspace, files.checked_file
         self.conversations, self.publish, self.start_stream = actions, publish, start
+        self.sidebar = sidebar
         self.conversation, self.request_agent = view, request
         self.model_usage = model_usage
         self.public_run = lambda run: {key: run[key] for key in ("id", "conversation_id", "message_id", "status", "error")} if run else None
@@ -351,8 +382,9 @@ class ConversationRuntime:
             self.store.put_state("last_conversation", cid)
             return self.conversation(cid)
         if method == "conversation.list":
-            return self.store.summarize_conversations(self.storage.list_conversation_summaries(
-                limit=min(500, max(1, int(p.get("limit", 500)))), offset=max(0, int(p.get("offset", 0)))))
+            return self.sidebar.conversation_page(
+                limit=min(500, max(1, int(p.get("limit", 500)))),
+                offset=max(0, int(p.get("offset", 0))), include_sidebar=p.get("sidebar") is True)
         if method == "conversation.get":
             self.store.put_state("last_conversation", cid)
             return self.conversation(cid, before=p.get("before"), limit=p.get("limit", 80))

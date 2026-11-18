@@ -6,6 +6,7 @@ const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(m
 
 export default function BrowserWorkspace({ cid, tab, obscured, error, refresh }: { cid: string; tab: WorkbenchTab; obscured: boolean; error: (message: string) => void; refresh: () => Promise<void> }) {
   const [navigationOverlay] = useHostField('navigation:overlay',false);
+  const [sidebarOverlay] = useHostField('sidebar:overlay', false);
   const [address, setAddress] = useState(tab.url || ''), [busy, setBusy] = useState(false), [previewError, setPreviewError] = useState('');
   const [info, setInfo] = useState({canBack:false,canForward:false,zoom:1}), [find, setFind] = useState(false), [query, setQuery] = useState(''), [matches, setMatches] = useState('');
   const surface = useRef<HTMLDivElement>(null), searchInput = useRef<HTMLInputElement>(null);
@@ -26,14 +27,14 @@ export default function BrowserWorkspace({ cid, tab, obscured, error, refresh }:
     let stopped = false;
     const position = async () => {try {
       const rect = surface.current?.getBoundingClientRect();
-      await call('browser.surface', {conversation_id:cid, tab_id:!obscured && !navigationOverlay && rect ? active : '',bounds:rect ? {x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null});
+      await call('browser.surface', {conversation_id:cid, tab_id:!obscured && !navigationOverlay && !sidebarOverlay && rect ? active : '',bounds:rect ? {x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null});
       if (!stopped) setPreviewError('');
     } catch (failure) {if (!stopped) setPreviewError((failure as Error).message);}};
     const observer = new ResizeObserver(() => {void position();});
     if (surface.current) observer.observe(surface.current);
     void position();
     return () => {stopped=true;observer.disconnect();void call('browser.surface',{tab_id:''}).catch(failure => error(failure.message));};
-  }, [cid, active, tab.owner, tab.status, obscured, navigationOverlay, error]);
+  }, [cid, active, tab.owner, tab.status, obscured, navigationOverlay, sidebarOverlay, error]);
   async function action(method: string, params: any = {}) {
     setBusy(true);
     try {const result = await call(method,{conversation_id:cid,tab_id:active,...params});if(result.ok===false) throw new Error(result.error); if ('zoom' in result) setInfo(result);await refresh();}

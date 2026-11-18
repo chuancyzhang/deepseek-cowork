@@ -1,0 +1,71 @@
+.sidebar-group-heading {
+  display: flex;
+  border-radius: 7px;
+}
+.sidebar-group-heading > button {
+  min-width: 0;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px;
+  justify-content: flex-start;
+  gap: 7px;
+  border-radius: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+.sidebar-group-heading > button > span,
+.sidebar-context-menu button > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-group-members {padding-inline-start: 12px}
+.sidebar-group-members > .history-row .history-select {padding-inline-start: 25px}
+.sidebar-group-form {padding: 3px 2px 7px}
+.sidebar-group-form > div {display: flex; align-items: center; gap: 2px}
+.sidebar-group-form input {width: 100%; min-width: 0; flex: 1; padding: 5px 7px; font-size: 13px}
+.sidebar-group-form .icon-button {width: 26px; height: 29px; flex-shrink: 0}
+.sidebar-group-form p {margin: 5px 3px; overflow-wrap: anywhere}
+.sidebar .project-heading {border-radius: 7px}
+.sidebar .project-heading:hover,
+.sidebar :is(.project-heading, .history-row):has([data-sidebar-more][aria-expanded="true"]) {background: var(--hover)}
+.sidebar :is(.project-heading, .history-row):is(:hover, :focus-within) > .row-more,
+.sidebar .row-more[aria-expanded="true"] {opacity: 1}
+.sidebar :is(.history-select, .project-heading > button:first-child) {user-select: none}
+.sidebar-context-menu {width: 184px; max-width: calc(100vw - 12px); max-height: calc(100vh - 14px); overflow: auto}
+.sidebar-context-menu button {gap: 8px; text-align: left; min-height: 33px; padding: 6px 8px}
+.sidebar-context-menu button[aria-expanded="true"] {background: var(--hover)}
+.sidebar-group-menu {z-index: 151; width: 178px}
+.sidebar-new-group-option {margin-top: 4px; border-top: 1px solid var(--line)}
+.sidebar-dragging, .sidebar-dragging button {cursor: grabbing}
+.sidebar-dragging [data-sidebar-group] {outline: 1px dashed var(--muted); outline-offset: -1px}
+.sidebar-dragging [data-drop-target] {background: var(--hover); outline: 2px solid var(--primary); outline-offset: -2px}
+.sidebar [data-drag-source] {opacity: .5}
+.sidebar-drag-preview {
+  position: fixed;
+  z-index: 155;
+  left: -400px;
+  top: -100px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 6px 16px #0002;
+  pointer-events: none;
+}
+.sidebar-drag-preview > span {overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
+.project-dialog {width: 450px}
+.project-dialog label {display: grid; gap: 6px; font-weight: 500}
+.project-dialog input {width: 100%}
+.project-directory {display: grid; gap: 4px; margin: 14px 0 8px; font-size: 13px; color: var(--muted)}
+.project-directory strong {font-weight: 400; color: var(--text); overflow-wrap: anywhere}
+.project-folder-actions {margin-bottom: 12px; flex-wrap: wrap}
+.project-dialog-actions {justify-content: flex-end; margin-top: 20px}
+@media (pointer: coarse) {
+  .sidebar .row-more {opacity: 1}
+}

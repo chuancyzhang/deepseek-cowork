@@ -1,6 +1,7 @@
 import {useState,useSyncExternalStore} from 'react';
 import {X,RefreshCw,Code2} from 'lucide-react';
 import Dialog from '../Dialog';
+import ProjectDialog from '../ProjectDialog';
 import ThemePreview from '../ThemePreview';
 import {useHostField} from './context';
 import {useWorkbench} from './Host';
@@ -23,6 +24,7 @@ export default function HostRecovery(){
     {notice&&<div className="notice host-notice" role="status"><span>{notice}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setNotice('')}><X size={15}/></button></div>}
     {failure&&<div className="service-error host-error" role="alert"><span>{failure}</span><button onClick={()=>setOpen(true)}>界面恢复</button><button onClick={()=>setFailure('')}>关闭提示</button></div>}
     {ask&&<Dialog title={ask.title} onClose={()=>{setAsk(null);ask.resolve(0);}}><p>{ask.detail}</p><div className="button-row">{ask.choices.map((choice,index)=><button key={choice} autoFocus={index===0} className={index===ask.choices.length-1?'primary':'secondary'} onClick={()=>{setAsk(null);ask.resolve(index);}}>{choice}</button>)}</div></Dialog>}
+    {c.projectDialog !== null && <ProjectDialog root={c.settings?.project_workspace_root} onClose={() => c.setProjectDialog(null)} onSaved={path => void c.projectCreated(path)}/>}
     {c.themePreview&&<ThemePreview candidate={c.themePreview} close={()=>c.setThemePreview(null)} changed={async()=>{const value=await call('themes.preview');c.setThemeCandidate(value.preview);}}/>}
     {open&&<Dialog title="界面恢复与诊断" onClose={()=>setOpen(false)}><p>恢复内置界面只替换界面代码。聊天、后台任务和未保存内容会保留。</p>{c.creationOpen&&c.current?.meta.creation_session&&<button className="secondary" onClick={()=>void c.exitCreation().then(()=>setOpen(false)).catch(reason=>error(reason.message))}>退出创造模式</button>}<div className="button-row"><button className="secondary" onClick={()=>void call('app.logs')}>查看诊断日志</button><button className="primary" disabled={registry.switching} onClick={()=>void registry.recover(saves).then(()=>{setFailure('');setOpen(false);}).catch(reason=>error(reason.message))}>恢复内置界面</button></div>{registry.inventory.plugins.filter(plugin=>!plugin.builtin&&plugin.enabled).map(plugin=><div className="recovery-plugin" key={plugin.id}><span>{plugin.name}</span><button className="secondary" onClick={()=>void registry.disable(plugin.id,saves).catch(reason=>error(reason.message))}>停用</button></div>)}</Dialog>}
     {pluginPreview&&!(c.creationOpen&&c.current?.meta.creation_session&&registry.inventory.modes?.some(item=>item.mode==='creation'&&item.enabled))&&<div className="modal-backdrop"><div className="modal preview-modal"><div className="section-heading"><div><h2>{pluginPreview.name}</h2><p>v{pluginPreview.version} · 独立预览使用示例内容</p></div><button className="icon-button" disabled={registry.switching} aria-label="取消预览" onClick={()=>void closePreview()}><X size={18}/></button></div>

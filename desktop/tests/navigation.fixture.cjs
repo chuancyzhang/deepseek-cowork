@@ -1,12 +1,16 @@
 const electron=require('electron'),Module=require('node:module');
 const {app,Menu,screen}=electron,fs=require('node:fs/promises'),path=require('node:path'),assert=require('node:assert/strict');
 const originalLoad=Module._load;
+let selectedFolder;
+const dialog=Object.create(electron.dialog);
+dialog.showOpenDialog=(...args)=>selectedFolder
+  ? Promise.resolve({canceled:false,filePaths:[selectedFolder]}) : electron.dialog.showOpenDialog(...args);
 app.getVersion=()=>require('../package.json').version;
 class HiddenWindow extends electron.BrowserWindow {
   constructor(options){super({...options,show:false,webPreferences:{...options.webPreferences,offscreen:!process.env.COWORK_NAVIGATION_NATIVE,backgroundThrottling:false}});}
   show(){if(process.env.COWORK_NAVIGATION_NATIVE)super.showInactive();} showInactive(){this.show();}
 }
-Module._load=function(name,...rest){return name==='electron'?{...electron,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
+Module._load=function(name,...rest){return name==='electron'?{...electron,dialog,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
 app.commandLine.appendSwitch('disable-gpu');
 const {Backend}=require('../electron/backend.cjs'),originalCall=Backend.prototype.call;
 let window,backend,slowSearch,fastSearch,searchFailure=false,taskReadRelease,stopFailure=false,browserHost;
@@ -45,6 +49,74 @@ const rpc=(method,params={})=>read(`window.cowork.call(${JSON.stringify(method)}
 const command=id=>Menu.getApplicationMenu().getMenuItemById(id).click();
 const fill=(selector,value)=>read(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
 const snap=async name=>{const output=process.env.COWORK_NAVIGATION_SCREENSHOTS;if(!output)return;await fs.mkdir(output,{recursive:true});window.webContents.invalidate();await delay(120);await fs.writeFile(path.join(output,name+'.png'),(await window.webContents.capturePage()).toPNG());};
+const clickText=(selector,text)=>read('Array.from(document.querySelectorAll('+JSON.stringify(selector)+')).find(button=>button.textContent.trim()==='+JSON.stringify(text)+').click()');
+const openRow=(label)=>read('document.querySelector('+JSON.stringify('[data-sidebar-more][title="'+label+'"]')+').click()');
+async function dragSidebar(selector, label) {
+  const point = (query,text) => read('(()=>{const e=[...document.querySelectorAll('+JSON.stringify(query)+')].find(element=>element.textContent.trim()==='+JSON.stringify(text)+');e.scrollIntoView({block:"nearest"});const r=e.getBoundingClientRect();return {x:Math.floor(r.left+r.width/2),y:Math.floor(r.top+r.height/2)};})()');
+  const source=await point(selector,label), target=await point('[data-sidebar-group] > button','产品研发');
+  const debuggerClient=window.webContents.debugger;
+  debuggerClient.attach('1.3');
+  const input=(type,point,button,buttons)=>debuggerClient.sendCommand('Input.dispatchMouseEvent',{type,...point,button,buttons,clickCount:1});
+  try {
+    await input('mouseMoved',source,'none',0);
+    await input('mousePressed',source,'left',1);
+    await until('!!document.querySelector(".sidebar-drag-preview")');
+    await input('mouseMoved',target,'none',1);
+    await until('!!document.querySelector("[data-drop-target]")');
+    await input('mouseReleased',target,'left',0);
+    await until('!document.querySelector(".sidebar-drag-preview")');
+  } finally {debuggerClient.detach();}
+}
+async function checkSidebar() {
+  await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
+  command('sidebar');await until('document.querySelectorAll(".app-navigation .navigation-tools button").length===2');
+  command('sidebar');await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
+  command('add-project');await until('document.activeElement===document.querySelector(".project-dialog input")');
+  await fill('.project-dialog input','cross-platform-cowork');await snap('new-project');
+  await clickText('.project-dialog button','保存');
+  await until('!!document.querySelector("[title=\\"cross-platform-cowork 项目操作\\"]")');
+  const root=(await rpc('settings.get')).project_workspace_root;
+  assert.equal((await fs.stat(path.join(root,'cross-platform-cowork'))).isDirectory(),true);
+  command('add-project');await until('document.activeElement===document.querySelector(".project-dialog input")');
+  selectedFolder=path.join(process.env.COWORK_APP_DATA_DIR,'客户资料');
+  await fs.mkdir(selectedFolder);
+  await clickText('.project-dialog button','关联本机文件夹…');
+  await until('document.querySelector(".project-dialog input")?.value==="客户资料"');
+  await clickText('.project-dialog button','保存');
+  await until('!!document.querySelector("[title=\\"客户资料 项目操作\\"]")');
+  const projects=await rpc('project.list');
+  assert.equal(projects.find(project=>project.name==='客户资料').path,selectedFolder);
+  selectedFolder=undefined;
+
+  await openRow('cross-platform-cowork 项目操作');
+  await clickText('.sidebar-context-menu button','移到分组');
+  await clickText('.sidebar-group-menu button','新建分组…');
+  await until('document.activeElement===document.querySelector(".sidebar-group-form input")');
+  assert.equal(await read('document.querySelector("dialog[open]")===null'),true);
+  await fill('.sidebar-group-form input','产品研发');
+  await read('document.querySelector(".sidebar-group-form").requestSubmit()');
+  await until('document.querySelector(".sidebar-user-group")?.textContent.includes("cross-platform-cowork")');
+  await dragSidebar('.project-heading > button:first-child','客户资料');
+  await until('document.querySelector(".sidebar-user-group")?.textContent.includes("客户资料")');
+  await dragSidebar('.history-select','检查文件预览问题');
+  await until('document.querySelector(".sidebar-user-group")?.textContent.includes("检查文件预览问题")');
+  await openRow('客户资料 项目操作');await clickText('.sidebar-context-menu button','置顶项目');
+  await until('document.querySelector("[aria-label=置顶]")?.textContent.includes("客户资料")');
+  await openRow('客户资料 项目操作');await clickText('.sidebar-context-menu button','取消置顶');
+  await until('document.querySelector(".sidebar-user-group")?.textContent.includes("客户资料")');
+  await openRow('客户资料 项目操作');await clickText('.sidebar-context-menu button','置顶项目');
+  await openRow('整理项目文档 聊天操作');await clickText('.sidebar-context-menu button','置顶聊天');
+  await until('document.querySelector("[aria-label=置顶]")?.textContent.includes("整理项目文档")');
+  assert.equal(await read('document.querySelector(".conversation-list > section:first-child").getAttribute("aria-label")'),'置顶');
+
+  await openRow('客户资料 项目操作');await clickText('.sidebar-context-menu button','归档项目');
+  await until('!document.querySelector("[aria-label=置顶]")?.textContent.includes("客户资料")');
+  await read('document.querySelector("[title=查看归档]").click()');
+  await openRow('客户资料 项目操作');await snap('project-archive');
+  await clickText('.sidebar-context-menu button','恢复项目');
+  await read('document.querySelector("[title=返回侧栏列表]").click()');
+  await until('document.querySelector("[aria-label=置顶]")?.textContent.includes("客户资料")');
+}
 async function finish(code){clearTimeout(deadline);try{await backend.stop();backend.detach();}catch(error){console.error(error);}window?.destroy();app.exit(code);}
 app.once('browser-window-created',(_event,win)=>{
   window=win;win.webContents.on('console-message',details=>{if(details.level==='error')errors.push(details.message);});
@@ -62,6 +134,8 @@ async function run(){
   const messages=[{id:'user',role:'user',content:'整理项目文档，让新同事能更快上手。'},{id:'answer',role:'assistant',content:'已整理好文档结构，按实际使用顺序分成快速开始、使用指南和开发说明。\n\n原有内容已保留，重复说明合并到对应章节。'}];
   snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages});
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
+  await until('Array.from(document.querySelectorAll(".history-select")).some(button=>button.textContent==="检查文件预览问题")');
+  await checkSidebar();
   command('search');await until('!!document.querySelector(".global-search input")');
   await until('document.activeElement===document.querySelector(".global-search input")');
   await fill('.global-search input','整理项目文档');await until('document.querySelectorAll(".global-search-result").length===1');
@@ -93,6 +167,17 @@ async function run(){
   await fill('.global-search input','文档');await until('document.querySelectorAll(".global-search-result").length>0');await snap('search');
   await read('document.querySelector(".global-search .section-heading button").click()');
   assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'按这个结构继续完善快速开始部分。');
+  await snap('desktop');
+  await openRow('cross-platform-cowork 项目操作');await clickText('.sidebar-context-menu button','移到分组');await snap('sidebar-groups');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
+  await until('!document.querySelector(".sidebar-group-menu")');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
+  await until('!document.querySelector(".sidebar-context-menu")');
+  await read('document.querySelector("[title=更多聊天工具]").click()');
+  await clickText('.header-actions [role=menuitem]','查找当前聊天');
+  await until('document.activeElement===document.querySelector("[aria-label=查找当前聊天]")');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
+  assert.equal(await read('!!document.querySelector(".history-popover")'),false);
   const stamp=Date.now()/1000;
   for(const [record,id,age] of [[review,'review-run',138],[report,'report-run',46]]){
     const run={id,conversation_id:record.id,status:'running',created_at:stamp-age,updated_at:stamp};runs.set(record.id,run);
@@ -124,11 +209,16 @@ async function run(){
   await until('Boolean([...document.querySelectorAll(".workspace-tab")].find(button=>button.textContent.includes("navigation")))');
   await read('[...document.querySelectorAll(".workspace-tab [role=tab]")].find(button=>button.textContent.includes("navigation")).click()');
   await wait(()=>browserHost?.visible?.id===opened.tab.id);
+  await openRow('cross-platform-cowork 项目操作');await wait(()=>browserHost.visible===null);
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
+  await wait(()=>browserHost.visible?.id===opened.tab.id);
   command('search');await until('!!document.querySelector(".global-search input")');await wait(()=>browserHost.visible===null);
   await read('document.querySelector(".global-search .section-heading button").click()');await wait(()=>browserHost.visible?.id===opened.tab.id);
   await read('document.querySelector("[title=收起工作区]").click()');
   window.setSize(1000,720);window.webContents.setZoomFactor(1.25);
-  await rpc('settings.theme',{theme:'dark'});await until('document.documentElement.dataset.theme==="dark"');
+  await rpc('settings.theme',{theme:'light'});await until('document.documentElement.dataset.theme==="light"');
+  command('appearance');await until('document.documentElement.dataset.theme==="dark"');
+  assert.equal(await read('(()=>{const brand=document.querySelector(".brand strong").getBoundingClientRect(),tools=document.querySelector(".brand .navigation-tools").getBoundingClientRect();return tools.left>=brand.right-1&&Math.abs((brand.top+brand.bottom)-(tools.top+tools.bottom))<=2;})()'),true);
   command('search');await until('!!document.querySelector(".global-search input")');await snap('search-dark-scaled');
   assert.equal(await read('document.documentElement.scrollWidth<=innerWidth+1'),true);
   assert.equal(await read('(()=>{const r=document.querySelector(".global-search").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()'),true);

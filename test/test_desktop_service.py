@@ -261,6 +261,65 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.client.call("conversation.send", **params)
         return params
 
+    def test_sidebar_groups_and_pins_persist_without_changing_workspaces(self):
+        client = self.client
+        workspace = Path(self.temp.name) / "project"
+        workspace.mkdir()
+        client.call("project.save", path=str(workspace), pinned=True)
+        project_chat = client.call("conversation.create", workspace_dir=str(workspace))
+        independent = client.call("conversation.create")
+        for chat, name in ((project_chat, "项目聊天"), (independent, "独立聊天")):
+            client.call("conversation.rename", conversation_id=chat["id"], title=name)
+        project = {"kind": "project", "id": str(workspace)}
+        group_id = uuid.uuid4().hex
+        created = client.call("sidebar.create_group", group_id=group_id, name="资料整理", entry=project)
+        self.assertEqual(client.call("sidebar.create_group", group_id=group_id, name="资料整理", entry=project), created)
+        self.assertEqual(next(iter(created["value"]["projects"].values()))["group_id"], group_id)
+        with self.assertRaisesRegex(RuntimeError, "分组已不可用"):
+            client.call("sidebar.move", entry=project, group_id=uuid.uuid4().hex)
+        with self.assertRaisesRegex(RuntimeError, "聊天已不可用"):
+            client.call("sidebar.create_group", group_id=uuid.uuid4().hex, name="无有效成员",
+                        entry={"kind": "chat", "id": "missing"})
+        client.call("sidebar.move", entry={"kind": "chat", "id": project_chat["id"]}, group_id=group_id)
+        client.call("conversation.pin", conversation_id=independent["id"], pinned=True)
+        unpinned = client.call("sidebar.pin_project", path=str(workspace), pinned=False)
+        self.assertEqual(next(iter(unpinned["value"]["projects"].values()))["pinned_at"], 0)
+        pinned = client.call("sidebar.pin_project", path=str(workspace), pinned=True)
+        self.assertGreater(next(iter(pinned["value"]["projects"].values()))["pinned_at"], 0)
+        client.call("project.archive", path=str(workspace))
+        with self.assertRaisesRegex(RuntimeError, "请先从归档恢复"):
+            client.call("sidebar.pin_project", path=str(workspace), pinned=False)
+        client.call("project.restore", path=str(workspace))
+
+        client.close()
+        self.client = ServiceClient(self.temp.name)
+        page = self.client.call("conversation.list", limit=1, sidebar=True)
+        self.assertEqual(page["sidebar"], pinned)
+        self.assertEqual(page["sidebar"]["value"]["groups"], [{"id": group_id, "name": "资料整理"}])
+        self.assertEqual(len(page["conversations"]), 1)
+        summaries = {row["id"]: row for row in page["conversations"] + page["sidebar_conversations"]}
+        self.assertEqual(set(summaries), {independent["id"], project_chat["id"]})
+        self.assertTrue(summaries[independent["id"]]["meta"]["pinned"])
+        self.assertEqual(summaries[independent["id"]]["meta"]["workspace_source"], "chat")
+        self.assertEqual(summaries[project_chat["id"]]["meta"]["workspace_dir"], str(workspace.resolve()))
+        self.assertEqual(self.client.call("app.bootstrap")["sidebar"], pinned)
+
+    def test_project_save_accepts_a_name_or_an_existing_folder(self):
+        root = Path(self.client.call("settings.get")["project_workspace_root"])
+        created = self.client.call("project.save", name="运营资料")
+        self.assertEqual(Path(created["path"]), root / "运营资料")
+        self.assertTrue(Path(created["path"]).is_dir())
+        with self.assertRaisesRegex(RuntimeError, "已有同名文件夹"):
+            self.client.call("project.save", name="运营资料")
+        existing = Path(self.temp.name) / "shared"
+        existing.mkdir()
+        (existing / "notes.txt").write_text("已有资料", encoding="utf-8")
+        associated = self.client.call("project.save", name="客户资料", path=str(existing))
+        self.assertEqual(associated["name"], "客户资料")
+        self.assertEqual(Path(associated["path"]), existing.resolve())
+        self.assertEqual((existing / "notes.txt").read_text(encoding="utf-8"), "已有资料")
+        self.assertEqual({project["name"] for project in self.client.call("project.list")}, {"运营资料", "客户资料"})
+
     def test_automation_uses_real_worker_and_discloses_builtin_guidance_before_first_call(self):
         task = self.client.call("favorites.save", value={"name": "自动分析", "prompt": "AUTOMATION-CHECK 分析销售数据并核对指标口径", "skill_names": ["data-analysis"]})
         result = self.client.call("favorites.run", id=task["id"], request_id="automation-replay")

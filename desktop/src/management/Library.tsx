@@ -5,18 +5,20 @@ import remarkGfm from 'remark-gfm';
 import { Empty, ErrorState, Field, JobProgress } from '../Management';
 import { operation, rpc } from '../managementApi';
 import { useHostField } from '../host/context';
+import {useWorkbench} from '../host/Host';
 import { appendLibraryRows, libraryCollections, librarySpaces } from './libraryCatalog';
 
 const sources = [['local','本地资料库'], ['weknora','WeKnora'], ['tencent-docs','腾讯文档'], ['lexiang','腾讯乐享']];
 function list(value: any): any[] { if (Array.isArray(value)) return value; if (!value || typeof value !== 'object') return []; for (const key of ['data','items','knowledge','files','results','documents','list']) if (value[key]) { const items = list(value[key]); if (items.length) return items; } return []; }
 function title(item: any) {return item?.title || item?.name || item?.file_name || '未命名资料';}
 function date(value: any) {if (!value) return '—'; const d = new Date(typeof value === 'number' && value < 1e12 ? value*1000 : value); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('zh-CN');}
-type Props = { scope?: string; projectsKey: string; projectsChanged: () => Promise<void>; onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
+type Props = { scope?: string; projectsKey: string; onError: (message: string) => void; onReference: (ref: any) => Promise<void>; confirm: (title: string, detail: string, choices: string[]) => Promise<number>; onDirty: (dirty: boolean) => void };
 export default function Library(props: Props) {
   const [source, setSource] = useHostField((props.scope || 'library') + ':source', 'local');
   return <LibrarySource key={source} {...props} source={source} setSource={setSource}/>;
 }
-function LibrarySource({source, setSource, onError, onReference, confirm, projectsKey, projectsChanged, scope = 'library'}: Props & {source: string; setSource: (source: string) => void}) {
+function LibrarySource({source, setSource, onError, onReference, confirm, projectsKey, scope = 'library'}: Props & {source: string; setSource: (source: string) => void}) {
+  const {addProject} = useWorkbench();
   const local = source === 'local', sourceName = sources.find(item => item[0] === source)?.[1] || '';
   const [status, setStatus] = useState<any>(null);
   const [view, setView] = useHostField<any>(scope + ':view:' + source, {catalog:null, collection:null, parents:[], rows:[], page:1, more:false, query:'', searching:false, loaded:false, scroll:0, unavailable:[]});
@@ -113,7 +115,7 @@ function LibrarySource({source, setSource, onError, onReference, confirm, projec
     <section className="library-main" aria-label={sourceName}>
       {connected&&<header className="library-heading"><div><h2>{preview?title(preview):parents.length?title(parents.at(-1)):collection?title(collection):categoryTitle}</h2></div><div className="button-row">
         {!preview&&<button className="icon-button" aria-label="刷新资料" title="刷新资料" disabled={busy} onClick={()=>void (async()=>{await catalogLoad();if(collection||searching)await children(collection,parents,1,searching?query:'');})()}><RefreshCw size={17}/></button>}
-        {!preview&&local&&!publicFiles&&<button className="secondary" onClick={async()=>{try{const path=await rpc('dialog.workspace');if(path){await rpc('project.save',{path});await projectsChanged();}}catch(error){setFailure((error as Error).message);}}}><FolderPlus size={16}/>添加项目</button>}
+        {!preview&&local&&!publicFiles&&<button className="secondary" onClick={() => addProject(false)}><FolderPlus size={16}/>新建项目</button>}
         {!preview&&publicFiles&&<><button className="secondary" disabled={busy} onClick={()=>void openFolder()}><ExternalLink size={16}/>打开文件夹</button><button className="secondary" disabled={busy} onClick={()=>setCreatingFolder(!creatingFolder)}><FolderPlus size={16}/>新建文件夹</button><button className="primary" disabled={busy} onClick={async()=>{try{const paths=await rpc('dialog.choose',{kind:'files'});await importFiles(paths || []);}catch(error){setFailure((error as Error).message);}}}><Plus size={16}/>添加文件</button></>}
         {!preview&&!local&&connected&&<button className="icon-button" title="断开连接" aria-label="断开连接" disabled={busy} onClick={async()=>{if(await confirm('断开'+sourceName+'？','已选资料仍保留，重新连接后可继续使用。',['取消','断开'])===1){await execute('library.logout');await loadStatus();update({catalog:null,collection:null,rows:[],loaded:false});}}}><LogOut size={17}/></button>}
       </div></header>}

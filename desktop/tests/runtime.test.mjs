@@ -1,6 +1,60 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
+import { UsageProjection, generationRates } from '../src/usageMetrics.ts';
+
+const providerEvent = (run_id, type, created_at, status) => ({
+  type: 'observability', run_id, created_at, data: { type, request_id: run_id + ':request:1', status },
+});
+
+test('generation speed uses recorded deltas and replaces snapshots without counting them twice', () => {
+  const projection = new UsageProjection();
+  const run_id = 'speed-run';
+  const events = [
+    providerEvent(run_id, 'provider_request_start', 100),
+    { type: 'thinking', run_id, created_at: 103, delta: '思考' },
+    { type: 'content', run_id, created_at: 104, delta: 'ab' },
+    { type: 'content', run_id, created_at: 105, delta: 'cdefg' },
+    { type: 'content_snapshot', run_id, created_at: 106, content: 'abcdefghi' },
+    { type: 'content_snapshot', run_id, created_at: 107, content: 'abcdefghi' },
+  ];
+  const { request } = projection.project(events, run_id);
+  const rates = generationRates(request, 106);
+  assert.deepEqual(rates.slice(-4), [undefined, 3, 2, 5 / 3]);
+  assert.equal(generationRates(request, 110).at(-1), 0);
+
+  const complete = [
+    ...events,
+    providerEvent(run_id, 'provider_request_finish', 108, 'completed'),
+  ];
+  assert.equal(projection.project(complete, run_id).request, undefined);
+  assert.equal(projection.project([...complete], undefined).lastSpeed, 1);
+  assert.equal(new UsageProjection().project(complete).lastSpeed, 1);
+});
+
+test('a retry or interruption does not replace the previous completed speed', () => {
+  const projection = new UsageProjection();
+  const previous = [
+    providerEvent('earlier', 'provider_request_start', 100),
+    { type: 'content', run_id: 'earlier', created_at: 102, delta: '完成' },
+    providerEvent('earlier', 'provider_request_finish', 104, 'completed'),
+  ];
+  const inProgress = [
+    ...previous,
+    providerEvent('current', 'provider_request_start', 110),
+    { type: 'content', run_id: 'current', created_at: 111, delta: '初次输出' },
+    providerEvent('current', 'provider_retry', 114),
+  ];
+  assert.deepEqual(generationRates(projection.project(inProgress, 'current').request, 115), []);
+  const interrupted = projection.project([
+    ...inProgress,
+    { type: 'thinking', run_id: 'current', created_at: 116, delta: '再试' },
+    providerEvent('current', 'provider_request_finish', 117, 'interrupted'),
+  ], 'current');
+  assert.equal(interrupted.request, undefined);
+  assert.equal(interrupted.lastSpeed, 1);
+  assert.equal(projection.project([]).lastSpeed, undefined);
+});
 
 test('tool error display accepts structured JSON without changing the retained error', () => {
   const error = {code:'bsk_command_failed',message:'no browser is currently connected',exit_code:1};

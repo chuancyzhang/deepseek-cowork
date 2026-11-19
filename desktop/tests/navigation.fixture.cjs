@@ -124,11 +124,84 @@ async function checkProjectActions(original, occupied) {
   await read('document.querySelector('+newChat+').focus()');
   assert.equal(await read('getComputedStyle(document.querySelector('+newChat+')).opacity'),'1');
   await read('(()=>{const button=document.querySelector('+newChat+');button.click();button.click();})()');
-  await until('document.querySelector(".composer-footer button").title==='+JSON.stringify(replacement)+' && document.activeElement===document.querySelector("[aria-label=消息输入]")');
+  await until('document.querySelector(".home-project-trigger")?.title==='+JSON.stringify(replacement)+' && document.activeElement===document.querySelector("[aria-label=消息输入]")');
   assert.equal(await read('document.querySelector('+expand+').getAttribute("aria-expanded")'),'false');
   assert.equal((await rpc('conversation.list')).filter(chat=>chat.meta.workspace_dir===replacement).length,1);
   assert.equal((await rpc('conversation.get',{conversation_id:oldChat.id})).meta.workspace_dir,original);
 }
+async function checkHomeProjectMenu() {
+  await until('document.querySelector(".workbench-home .home-project-trigger")?.textContent==="客户档案"');
+  assert.deepEqual(await read('[...document.querySelectorAll(".home-shortcut-actions button")].map(button=>button.textContent)'),
+    ['金融分析','数据分析','浏览器自动化','创造模式']);
+  assert.equal(await read('Boolean(document.querySelector(".workbench-home .recent-task, .workbench-home .welcome-eyebrow"))'),false);
+  assert.equal(await read('(()=>{const home=document.querySelector(".workbench-home").getBoundingClientRect(),title=document.querySelector(".workbench-home .welcome").getBoundingClientRect(),footer=document.querySelector(".home-composer-footer").getBoundingClientRect();return title.top-home.top>40&&home.bottom-footer.bottom>title.top-home.top;})()'),true);
+  await fill('[aria-label="消息输入"]','');
+  await snap('home');
+  await read('document.querySelector(".home-project-trigger").click()');
+  await until('document.activeElement===document.querySelector(".home-project-search input")');
+  assert.equal(await read('document.querySelector(".home-project-list [aria-pressed=true]").textContent'),'客户档案');
+  await snap('home-projects');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".home-project-menu")&&document.activeElement===document.querySelector(".home-project-trigger")');
+
+  await fill('[aria-label="消息输入"]','切换项目后保留这条草稿');
+  await read('(()=>{const data=new DataTransfer();data.items.add(new File(["示例资料"],"首页草稿.txt",{type:"text/plain"}));document.querySelector("[aria-label=消息输入]").dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:data}));})()');
+  await until('document.querySelector(".composer-contexts")?.textContent.includes("首页草稿.txt")');
+  await read('document.querySelector(".home-project-trigger").click()');
+  await fill('.home-project-search input','cross-platform');
+  await until('document.querySelectorAll(".home-project-list button").length===1');
+  const enterProject = () => read('document.querySelector(".home-project-search input").dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true,cancelable:true}))');
+  const target = (await rpc('project.list')).find(item=>item.name==='cross-platform-cowork').path;
+  assert.equal(path.dirname(target),path.join(process.env.COWORK_APP_DATA_DIR,'project_workspaces'));
+  const parked = target + '-unavailable';
+  await fs.rename(target,parked);
+  try {
+    await enterProject();
+    await until('document.querySelector(".home-project-menu [role=alert]")?.textContent.includes("项目目录不可用")');
+    assert.equal(await read('document.querySelector(".home-project-trigger").textContent'),'客户档案');
+    assert.equal(await read('document.querySelector(".home-project-search input").value'),'cross-platform');
+    assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'切换项目后保留这条草稿');
+  } finally {await fs.rename(parked,target);}
+  await enterProject();
+  await until('document.querySelector(".home-project-trigger")?.textContent==="cross-platform-cowork"&&!document.querySelector(".home-project-menu")');
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'切换项目后保留这条草稿');
+  assert.equal(await read('document.querySelector(".composer-contexts").textContent.includes("首页草稿.txt")'),true);
+  const project=await rpc('conversation.get',{conversation_id:(await rpc('app.bootstrap')).last_conversation});
+  assert.equal(path.basename(project.meta.workspace_dir),'cross-platform-cowork');
+
+  await read('document.querySelector(".home-project-trigger").click()');
+  await clickText('.home-project-menu button','不在项目中工作');
+  await until('document.querySelector(".home-project-trigger")?.textContent==="独立聊天"');
+  const standalone=await rpc('conversation.get',{conversation_id:(await rpc('app.bootstrap')).last_conversation});
+  assert.equal(standalone.meta.workspace_source,'chat');
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'切换项目后保留这条草稿');
+  await read('document.querySelector(".home-project-trigger").click()');
+  await clickText('.home-project-menu button','新建项目');
+  await until('document.activeElement===document.querySelector(".project-dialog input")');
+  await fill('.project-dialog input','首页示例项目');
+  await clickText('.project-dialog button','保存');
+  await until('!document.querySelector(".project-dialog") && document.querySelector(".home-project-trigger")?.textContent==="首页示例项目"');
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'切换项目后保留这条草稿');
+}
+
+async function checkChatHeader() {
+  assert.deepEqual(await read('[...document.querySelectorAll(".chat-header-tools button")].map(button=>[button.getAttribute("aria-label"),button.textContent.trim(),button.hasAttribute("title")])'),
+    [['历史提问','',false],['用量统计','',false],['工作区','',false]]);
+  assert.equal(await read('Boolean(document.querySelector("[title=更多聊天工具]"))'),false);
+  await read('document.querySelector(".chat-header-tools [aria-label=历史提问]").click()');
+  await until('document.querySelector(".history-popover")?.textContent.includes("让新同事能更快上手")');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".history-popover")&&document.activeElement.getAttribute("aria-label")==="历史提问"');
+  await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('Boolean(document.querySelector(".usage-popover"))');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
+  await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
+  await until('!!document.querySelector(".workspace-bar")&&document.querySelector(".chat-header-tools [aria-label=工作区]").getAttribute("aria-expanded")==="true"');
+  await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
+  await until('!document.querySelector(".workspace-bar")');
+}
+
 async function checkSidebar() {
   await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
   command('sidebar');await until('document.querySelectorAll(".app-navigation .navigation-tools button").length===2');
@@ -199,6 +272,7 @@ async function run(){
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
   await until('Array.from(document.querySelectorAll(".history-select")).some(button=>button.textContent==="检查文件预览问题")');
   await checkSidebar();
+  await checkHomeProjectMenu();
   command('search');await until('!!document.querySelector(".global-search input")');
   await until('document.activeElement===document.querySelector(".global-search input")');
   await fill('.global-search input','整理项目文档');await until('document.querySelectorAll(".global-search-result").length===1');
@@ -236,11 +310,7 @@ async function run(){
   await until('!document.querySelector(".sidebar-group-menu")');
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
   await until('!document.querySelector(".sidebar-context-menu")');
-  await read('document.querySelector("[title=更多聊天工具]").click()');
-  await clickText('.header-actions [role=menuitem]','查找当前聊天');
-  await until('document.activeElement===document.querySelector("[aria-label=查找当前聊天]")');
-  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
-  assert.equal(await read('!!document.querySelector(".history-popover")'),false);
+  await checkChatHeader();
   const stamp=Date.now()/1000;
   for(const [record,id,age] of [[review,'review-run',138],[report,'report-run',46]]){
     const run={id,conversation_id:record.id,status:'running',created_at:stamp-age,updated_at:stamp};runs.set(record.id,run);
@@ -295,6 +365,17 @@ async function run(){
   assert.equal(await read('(()=>{const form=document.querySelector(".project-dialog").getBoundingClientRect();const path=document.querySelector(".project-directory-row");return form.left>=0&&form.right<=innerWidth&&form.top>=0&&form.bottom<=innerHeight&&path.scrollWidth<=path.clientWidth+1})()'),true);
   await snap('project-edit-dark-scaled');
   await clickText('.project-dialog button','取消');
+  await until('!document.querySelector(".project-dialog")');
+  await clickText('.history-select','整理项目文档');
+  await until('document.querySelectorAll(".chat-header-tools button").length===3');
+  assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
+  command('new-chat');await until('!!document.querySelector(".workbench-home .home-project-trigger")&&document.activeElement===document.querySelector("[aria-label=消息输入]")');
+  await read('document.querySelector(".home-project-trigger").click()');
+  await until('!!document.querySelector(".home-project-menu")');
+  assert.equal(await read('(()=>{const r=document.querySelector(".home-project-menu").getBoundingClientRect();return r.top>=0&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight&&document.documentElement.scrollWidth<=innerWidth+1;})()'),true);
+  await snap('home-projects-dark-scaled');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".home-project-menu")');
   await read('document.querySelector(".sidebar-utilities button").click()');await until('!!document.querySelector(".management-nav")');
   assert.equal(await read('document.querySelector(".management-nav").textContent.includes("实验")'),false);
   await read('[...document.querySelectorAll(".sidebar-destinations button")].find(e=>e.textContent==="能力").click()');

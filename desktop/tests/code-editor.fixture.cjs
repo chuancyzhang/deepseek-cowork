@@ -26,7 +26,7 @@ app.once('browser-window-created',(_event,win)=>{
 async function run(){
   console.log('EDITOR_DISPLAY',JSON.stringify({native,visible:window.isVisible(),scaleFactor:electron.screen.getDisplayMatching(window.getBounds()).scaleFactor,bounds:window.getBounds()}));
   await until('Boolean(document.querySelector("[aria-label=消息输入]"))');
-  await input('保留这条原草稿');await click('工作区');
+  await input('保留这条原草稿');await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
   await until('Boolean(document.querySelector(".workspace"))');
   const cid=(await rpc('app.bootstrap')).last_conversation,conversation=await rpc('conversation.get',{conversation_id:cid}),workspace=conversation.meta.workspace_dir;
   assert.ok(path.resolve(workspace).startsWith(path.resolve(process.env.COWORK_APP_DATA_DIR)),workspace);

@@ -39,7 +39,7 @@ const snapshot=async name=>{if(!process.env.COWORK_FIX_SCREENSHOTS)return;await 
 const deadline=setTimeout(()=>{console.error('DOCUMENT_TIMEOUT',errors);app.exit(1);},80000);
 app.once('browser-window-created',(_event,win)=>{window=win;win.webContents.on('console-message',details=>{if(details.level==='error')errors.push(details.message);});win.webContents.once('did-finish-load',()=>void run().catch(async error=>{console.error(error.stack,errors);await snapshot('failure');try{const backend=new Backend({root:path.resolve(__dirname,'../..'),dataDir:process.env.COWORK_APP_DATA_DIR,publish:()=>{}});await backend.ready;await backend.stop();backend.detach();}catch{}app.exit(1);}));});
 async function run(){
-  await until('Boolean(document.querySelector("[aria-label=消息输入]"))');await click('工作区');await click('新增页面');await readyEditor();
+  await until('Boolean(document.querySelector("[aria-label=消息输入]"))');await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');await click('新增页面');await readyEditor();
   const cid=(await rpc('conversation.list'))[0].id;
   assert.equal((await rpc('workspace.list',{conversation_id:cid})).files.length,0);
   assert.equal(await frame().executeJavaScript('document.querySelector("#text").hidden'),false);

@@ -58,14 +58,15 @@ function useUsage(events: RuntimeEvent[], activeRunId?: string) {
   return useMemo(() => projection.project(events, activeRunId), [projection, events, activeRunId]);
 }
 
-export function UsageToolbarButton({ events, activeRunId, showRate, open, onClick, buttonRef }: {
-  events: RuntimeEvent[]; activeRunId?: string; showRate?: boolean; open: boolean;
+export function UsageToolbarButton({ events, activeRunId, showRate, open, onClick, buttonRef, iconOnly = false }: {
+  events: RuntimeEvent[]; activeRunId?: string; showRate?: boolean; open: boolean; iconOnly?: boolean;
   onClick: () => void; buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const usage = useUsage(events, showRate ? activeRunId : undefined);
   const rate = useGenerationRates(usage.request).at(-1);
-  return <button ref={buttonRef} className="toolbar-button usage-toolbar-button" title="用量统计" aria-label="用量统计"
-    aria-haspopup="dialog" aria-expanded={open} onClick={onClick}><ChartColumn size={16}/><span>用量统计</span>
+  return <button ref={buttonRef} className={(iconOnly ? 'icon-button' : 'toolbar-button') + ' usage-toolbar-button'}
+    title={iconOnly ? undefined : '用量统计'} aria-label="用量统计"
+    aria-haspopup="dialog" aria-expanded={open} onClick={onClick}><ChartColumn size={16}/>{!iconOnly && <span>用量统计</span>}
     {rate != null && <small className="usage-toolbar-rate">{rate.toFixed(1)} tok/s</small>}</button>;
 }
 

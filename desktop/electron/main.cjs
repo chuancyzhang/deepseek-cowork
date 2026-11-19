@@ -244,6 +244,10 @@ else {
       if (method === 'snippet.start') return snippetHost.start(event.sender,params.token);
       if (method === 'snippet.event') return snippetHost.event(event.sender,params);
       if (method === 'snippet.release') return snippetHost.release(event.sender,params.token);
+      if (method === 'conversation.create' && 'project_path' in params) {
+        const folder = await backend.call('project.folder', {path:params.project_path});
+        return backend.call(method, {workspace_dir:folder.path});
+      }
       if (allowed.has(method)) return backend.call(method, params);
       if (['browser.open', 'browser.navigate', 'browser.close', 'browser.command'].includes(method)) return backend.call(method, params);
       if (method === 'browser.surface') return browserHost.show(params);

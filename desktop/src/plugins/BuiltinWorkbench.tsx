@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore, type RefObject } from 'react';
-import { ArrowUp, Square, Plus, Search, ChartColumn, History, Settings as SettingsIcon, PanelsTopLeft, Folder, FileText, ChevronRight, ChevronDown, X, Copy, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Puzzle, Check, LoaderCircle, Paperclip, ShieldCheck, RefreshCw, ArrowLeft, Download, Code2, BookOpen, Sparkles, ExternalLink } from 'lucide-react';
+import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, Folder, History, LoaderCircle, MoreHorizontal, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
 import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
 import PluginSlot from './PluginSlot';
@@ -15,6 +15,7 @@ import OfficeEditor from '../OfficeEditor';
 import FilePreview from '../FilePreview';
 import Workspace, { emptyWorkspace, type WorkspaceView } from '../Workspace';
 import Composer from '../Composer';
+import HomeComposerFooter from '../HomeComposerFooter';
 import { themeStyle } from '../theme';
 import ThemePreview from '../ThemePreview';
 const Library = lazy(() => import('../management/Library'));
@@ -30,28 +31,46 @@ type Editor = { file: FileSession; text: string; saved: string; plugin: Plugin }
 import {useWorkbench} from '../host/Host';
 import {useHostField} from '../host/context';
 export default function BuiltinWorkbench() {
-  const {projectDialog, sidebarLayout, sidebarConversations, changeSidebar, host, usePluginAction,creationOpen,creationTab,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, showUsage, setShowUsage, headerPanel, setHeaderPanel, messageQuery, setMessageQuery, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, registry, saves} = useWorkbench();
+  const {
+    projectDialog, sidebarLayout, sidebarConversations, changeSidebar, host, usePluginAction,
+    creationOpen, creationTab, enterCreation, exitCreation, settings, setSettings,
+    conversations, hasMoreConversations, runningConversations, current, setCurrent, events, setEvents,
+    route, loading, serviceError, setServiceError, draft, attachments, drafts, sending, sidebar,
+    workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, changeWorkspace,
+    fileTree, editors, setEditors, fileChanged, interaction, setInteraction, ask, historyEdit, setHistoryEdit,
+    historyUndo, setHistoryUndo, olderLoading, pluginPreview, themeCandidate, setThemeCandidate, themePreview,
+    setThemePreview, showUsage, setShowUsage, selectedSkills, showSkills, rename, setRename, title, setTitle,
+    scroll, nearBottom, composer, selectedId, registerEditorFlush, theme, registerLeave, active, error, confirm,
+    setDraft, setAttachments, refreshList, moreConversations, loadOlder, onMessageAction, onMessageFile, addProject,
+    conversationAction, projectAction, saveView, refreshFiles, switchConversation, newConversation, send, stop,
+    recoverSend, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview,
+    activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute,
+    messages, questions, editor, registry,
+  } = useWorkbench();
   const sidebarTools = useCallback((target: HTMLDivElement | null) => {host.set('navigation:sidebarTools', target);}, [host]);
-  const [chatToolsOpen, setChatToolsOpen] = useState(false);
-  const chatToolsTrigger = useRef<HTMLButtonElement>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const historyTrigger = useRef<HTMLButtonElement>(null);
   const usageTrigger = useRef<HTMLButtonElement>(null);
   const chatPanels = useRef<HTMLDivElement>(null);
-  const closeChatPanels = useCallback((focus = false, fromUsage = false) => {
+  const hasMessages = messages.length > 0;
+  const home = !hasMessages && !creationOpen;
+  const closeChatPanels = useCallback((restoreFocus?: 'history' | 'usage') => {
     setShowUsage(false);
-    setHeaderPanel('');
-    if (focus) (fromUsage && usageTrigger.current || chatToolsTrigger.current)?.focus({preventScroll: true});
-  }, [setShowUsage, setHeaderPanel]);
-  useEffect(() => {closeChatPanels(); setMessageQuery('');}, [route, current?.id, closeChatPanels, setMessageQuery]);
+    setShowHistory(false);
+    if (restoreFocus) (restoreFocus === 'usage' ? usageTrigger : historyTrigger).current?.focus({preventScroll: true});
+  }, [setShowUsage]);
+  useEffect(() => {closeChatPanels();}, [route, current?.id, hasMessages, closeChatPanels]);
   useEffect(() => {
-    if (!showUsage && !headerPanel) return;
+    if (!showUsage && !showHistory) return;
     const outside = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (!chatPanels.current?.contains(target) && !chatToolsTrigger.current?.contains(target) && !usageTrigger.current?.contains(target)) closeChatPanels();
+      if (!chatPanels.current?.contains(target) && !historyTrigger.current?.contains(target) && !usageTrigger.current?.contains(target)) closeChatPanels();
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')) {
         event.preventDefault();
-        closeChatPanels(true,showUsage);
+        closeChatPanels(showUsage ? 'usage' : 'history');
       }
     };
     document.addEventListener('pointerdown', outside);
@@ -60,7 +79,7 @@ export default function BuiltinWorkbench() {
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('keydown', escape);
     };
-  }, [showUsage, headerPanel, closeChatPanels]);
+  }, [showUsage, showHistory, closeChatPanels]);
   useSyncExternalStore(registry.subscribe,registry.snapshot);
   const usageToolbar = registry.resolve('toolbar','chat')[0]?.extension;
   const activeRunId = current?.run?.status === 'running' ? current.run.id : undefined;
@@ -77,6 +96,19 @@ export default function BuiltinWorkbench() {
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id)) : undefined;
   const layout = useRef<HTMLDivElement>(null);
   const [, setSettingsTab] = useHostField('management:tab:settings', 'appearance');
+  function toggleUsage() {
+    setShowUsage(!showUsage);
+    setShowHistory(false);
+  }
+  function closeWorkspace() {
+    setWorkspaceOpen(false);
+    setWorkspaceExpanded(false);
+  }
+  async function toggleWorkspace() {
+    if (workspaceOpen) {closeWorkspace(); return;}
+    try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles();}
+    catch (failure) {error((failure as Error).message);}
+  }
   function resizeWorkspace(clientX: number) {
     const box = layout.current?.getBoundingClientRect();
     if (!box) return;
@@ -102,30 +134,46 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       onProjectAction={(action, project) => void projectAction(action, project)} onAction={(action, item) => void conversationAction(action, item)} onMore={moreConversations} hasMore={hasMoreConversations}/>}
     <main style={{'--workspace-width': (workspaceView.width || 46) + '%'} as React.CSSProperties} className={`main-shell ${route === 'chat' && workspaceOpen ? 'chat-workspace' : ''} ${workspaceExpanded && route === 'chat' ? 'workspace-expanded' : ''}`}><header className="app-header"><div className="header-title">{route !== 'chat' && <button className="back-link" onClick={() => void goRoute('chat')}><ArrowLeft size={16}/>返回聊天</button>}
       {route === 'chat' ? rename ? <input autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => setRename(false)} onKeyDown={async e => { if (e.key === 'Escape') setRename(false); if (e.key === 'Enter' && current) { await call('conversation.rename', { conversation_id: current.id, title }); setCurrent({ ...current, title }); await refreshList(); setRename(false); } }}/> : <button className="title-button" title="点击修改标题" onClick={() => { if (current) { setTitle(current.title); setRename(true); } }}>{current?.has_messages || current?.messages?.length ? current.title : ''}</button> : <h1 className="sr-only">{managementNames[route] || '插件与工作台'}</h1>}
-      </div><div className="header-actions">{themeCandidate && !creationOpen && <button className="toolbar-button" title="查看 AI 主题候选" onClick={async () => {try {const value = await call('themes.preview'); setThemeCandidate(value.preview); if (value.preview) setThemePreview(value);} catch (failure) {error((failure as Error).message);}}}><Sparkles size={16}/>主题预览</button>}{route === 'chat' && <>
-      {!workspaceOpen && <button className="toolbar-button" onClick={async () => {try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles();} catch (failure) {error((failure as Error).message);}}}><Folder size={16}/>工作区</button>}
-      {usageToolbar && settings && messages.length > 0 && <UsageToolbarButton key={current?.id} events={events} activeRunId={activeRunId}
-        showRate={usageToolbar.showRate} open={showUsage} buttonRef={usageTrigger} onClick={() => {setShowUsage(!showUsage);setHeaderPanel('');}}/>}
-      {messages.length > 0 && <MoreActions key={current?.id} label="更多聊天工具" triggerRef={chatToolsTrigger} onOpenChange={setChatToolsOpen} actions={[
-        ['查找当前聊天', Search, async () => {setHeaderPanel('search'); setShowUsage(false);}],
-        ['历史提问', History, async () => {setHeaderPanel('history'); setShowUsage(false);}],
-        ...(!usageToolbar ? [['用量统计', ChartColumn, async () => {setShowUsage(true); setHeaderPanel('');}]] as MenuAction[] : []),
-      ]} error={error}/>}
-      </>}
+      </div><div className="header-actions">{themeCandidate && !creationOpen && <button className="toolbar-button" title="查看 AI 主题候选" onClick={async () => {try {const value = await call('themes.preview'); setThemeCandidate(value.preview); if (value.preview) setThemePreview(value);} catch (failure) {error((failure as Error).message);}}}><Sparkles size={16}/>主题预览</button>}
+      {route === 'chat' && <div className="chat-header-tools" role="group" aria-label="聊天工具">
+        {hasMessages && <button ref={historyTrigger} className="icon-button" aria-label="历史提问"
+          aria-haspopup="dialog" aria-expanded={showHistory} onClick={() => {setShowHistory(!showHistory);setShowUsage(false);}}>
+          <History size={16} aria-hidden="true"/>
+        </button>}
+        {hasMessages && settings && (usageToolbar?.showRate
+          ? <UsageToolbarButton key={current?.id} iconOnly events={events} activeRunId={activeRunId} showRate
+            open={showUsage} buttonRef={usageTrigger} onClick={toggleUsage}/>
+          : <button ref={usageTrigger} className="icon-button" aria-label="用量统计" aria-haspopup="dialog"
+            aria-expanded={showUsage} onClick={toggleUsage}><ChartColumn size={16} aria-hidden="true"/></button>)}
+        <button className="icon-button" aria-label="工作区" aria-expanded={workspaceOpen}
+          onClick={() => void toggleWorkspace()}><PanelRight size={16} aria-hidden="true"/></button>
+      </div>}
       </div></header>
       {route === 'chat' && settings && <div className="header-popovers" ref={chatPanels}>{showUsage && <Usage
         key={current?.id}
         events={events}
         activeRunId={activeRunId}
         settings={settings}
-        onClose={() => closeChatPanels(true,true)}
+        onClose={() => closeChatPanels('usage')}
         onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}
-      />} {headerPanel && <section className="history-popover"><div className="navigator-heading"><strong>{headerPanel === 'search' ? '查找当前聊天' : '历史提问'}</strong><button className="icon-button" title="关闭" onClick={() => closeChatPanels(true)}><X size={15}/></button></div>{headerPanel === 'search' && <input autoFocus aria-label="查找当前聊天" placeholder="输入关键词" value={messageQuery} onChange={event => setMessageQuery(event.target.value)}/>}<div>{messages.filter(message => headerPanel === 'history' ? message.role === 'user' : messageQuery.trim() && messageText(message.content).toLowerCase().includes(messageQuery.toLowerCase())).map(message => <button key={message.id} onClick={() => {document.getElementById('message-' + message.id)?.scrollIntoView({block: 'center'}); closeChatPanels(true);}}>{messageText(message.content).slice(0,160)}</button>)}</div>{current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}</section>}</div>}
+      />}
+      {showHistory && <section className="history-popover" role="dialog" aria-label="历史提问">
+        <div className="navigator-heading"><strong>历史提问</strong><button autoFocus className="icon-button"
+          aria-label="关闭历史提问" onClick={() => closeChatPanels('history')}><X size={15}/></button></div>
+        <div>{messages.filter(message => message.role === 'user').map(message => <button key={message.id} onClick={() => {
+          document.getElementById('message-' + message.id)?.scrollIntoView({block: 'center'});
+          closeChatPanels('history');
+        }}>{messageText(message.content).slice(0,160)}</button>)}</div>
+        {current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}
+      </section>}</div>}
       {serviceError && <div className="service-error"><strong>本地服务异常</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
       <PluginSlot kind="page" target={route}>
       {loading ? <div className="loading"><LoaderCircle size={23} className="spin"/><p>正在打开你的工作台…</p></div> : route === 'chat' ? <div ref={layout} className={`work-layout ${workspaceOpen ? 'with-workspace' : ''} ${workspaceExpanded ? 'expanded' : ''}`}>
-        <section className={`conversation ${!messages.length ? 'home-conversation' : ''}`} style={workspaceExpanded && workspaceView.selected !== 'conversation' ? {display:'none'} : undefined}><div className="message-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 120; }}>
-          {!messages.length ? <div className="welcome"><div className="welcome-eyebrow">{creationOpen?"从想法到你的专属界面":"从一个想法，开始今天的工作"}</div><h2>{creationOpen?"想把界面变成什么样？":"今天，想一起完成什么？"}</h2><p>{creationOpen?"选择左侧区域，描述你的想法；生成后预览，再决定是否应用。":"整理资料、分析数据，或把一个想法做出来。"}</p></div> : <div className="messages">
+        <section className={`conversation ${hasMessages ? '' : 'home-conversation'} ${home ? 'workbench-home' : ''}`} style={workspaceExpanded && workspaceView.selected !== 'conversation' ? {display:'none'} : undefined}><div className="message-scroll" ref={scroll} onScroll={() => { if (scroll.current) nearBottom.current = scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight < 120; }}>
+          {!hasMessages ? <div className="welcome">{home ? <h2>今天，想一起完成什么？</h2> : <>
+            <div className="welcome-eyebrow">从想法到你的专属界面</div><h2>想把界面变成什么样？</h2>
+            <p>选择左侧区域，描述你的想法；生成后预览，再决定是否应用。</p>
+          </>}</div> : <div className="messages">
 {current?.has_more && <button className="load-history" disabled={olderLoading} onClick={() => void loadOlder()}>{olderLoading ? <LoaderCircle size={14} className="spin"/> : <ChevronDown size={14}/>}更早的消息</button>}
 {groups.map((group, groupIndex) => { const message = group.messages[0]; return historyEdit?.conversationId === current?.id && historyEdit?.prepared.message.id === message.id ? <div className="message-edit-container" key={message.id}><HistoryEditor conversationId={historyEdit.conversationId} prepared={historyEdit.prepared} onClose={() => setHistoryEdit(null)} onError={error} submit={async value => {
       const result = await drafts.submit(historyEdit.conversationId, {...value,
@@ -146,14 +194,21 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
 <DraftRecovery pending={drafts.needsRecovery(selectedId.current)} busy={sending} recover={retry => void recoverSend(retry)}/>
           {current?.meta.ppt_agent_mode && <p className="muted" role="status">PPT 助手已下线，历史与文件保留。后续消息将通过普通对话处理。</p>}
           <Composer useAction={usePluginAction} modes={registry.inventory.modes} creation={creationOpen && Boolean(current?.meta.creation_session)} enterCreation={enterCreation} exitCreation={exitCreation} conversation={current} conversations={conversations} settings={settings} text={draft} setText={setDraft} attachments={attachments} setAttachments={setAttachments} skills={selectedSkills} active={active} sending={sending} textarea={composer} ensureConversation={ensureConversation} preferences={preferences} send={send} stop={stop} attach={attach} browseLibrary={browseLibrary} openFile={path => void openFile(path).catch(error)} route={next => {if (next === 'settings') setSettingsTab('models'); return goRoute(next);}} error={error}
+            home={home}
             selectModel={async id => {await preferences({selected_model_id: id}); setSettings(await call('settings.select_model', {model_id: id}));}}
             permission={async enabled => {setSettings(await call('settings.permission', {enabled}));}}/>
+          {home && <HomeComposerFooter key={current?.id} conversation={current} projects={settings?.projects || []}
+            disabled={!settings || active || sending || drafts.needsRecovery(selectedId.current)}
+            selectProject={async project => {await newConversation(project?.path, selectedId.current);}}
+            onOpenChange={setProjectMenuOpen} createProject={() => addProject()}
+            startPrompt={text => {setDraft(text); composer.current?.focus();}}
+            enterCreation={registry.inventory.modes?.some(mode => mode.mode === 'creation' && mode.enabled)
+              ? () => void enterCreation().catch(failure => error(failure.message)) : undefined}/>}
         </div>
 
-          {!messages.length && <div className="home-followup"><div className="home-shortcuts">{[['金融分析', '帮我分析这些金融资料。'], ['数据分析', '帮我分析这份数据，找出关键趋势。'], ['浏览器自动化', '帮我在浏览器中完成这个任务。']].map(([label, text]) => <button className="secondary" key={label} onClick={() => {setDraft(text); composer.current?.focus();}}><Sparkles size={16}/>{label}</button>)}</div><div className="recent-heading"><span>继续最近的任务</span><button onClick={() => setSidebar(true)}>查看全部</button></div>{conversations.filter(item => !item.meta.archived && item.id !== current?.id && item.has_content !== false).slice(0,3).map(item => <button key={item.id} className="recent-task" onClick={() => void switchConversation(item.id)}><FileText size={17}/><span>{item.display_title || item.title}<small>{item.meta.project_name || '独立聊天'} · {new Date(item.updated_at * 1000).toLocaleDateString()}</small></span><ChevronRight size={15}/></button>)}<details className="home-options"><summary>工作台选项</summary><button onClick={() => void enterCreation().catch(failure=>error(failure.message))}>创造模式</button></details></div>}
         </section>
         {workspaceOpen && current && <div className="workspace-divider" role="separator" tabIndex={0} aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={100} aria-valuenow={workspaceExpanded ? 100 : workspaceView.width || 46} onPointerDown={event => {event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event => {if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeWorkspace(event.clientX);}} onPointerUp={event => event.currentTarget.releasePointerCapture(event.pointerId)} onKeyDown={event => {if (['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {event.preventDefault(); if (event.key === 'End') setWorkspaceExpanded(true); else {setWorkspaceExpanded(false); changeWorkspace({width: event.key === 'Home' ? 46 : Math.max(25, Math.min(95, (workspaceExpanded ? 100 : workspaceView.width || 46) + (event.key === 'ArrowLeft' ? 5 : -5)))});}}}}/>}
-        {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={() => {setWorkspaceOpen(false); setWorkspaceExpanded(false);}} obscured={Boolean(projectDialog !== null || chatToolsOpen || showUsage || headerPanel || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument} error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} onDirty={() => {}} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={ref => addLibraryReference(ref, current.id)}/></Suspense>} fileContent={<>
+        {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={closeWorkspace} obscured={Boolean(projectDialog || projectMenuOpen || showUsage || showHistory || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument} error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} onDirty={() => {}} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={ref => addLibraryReference(ref, current.id)}/></Suspense>} fileContent={<>
           {editor && !["preview", "html"].includes(editor.file.payload.kind) && <div className="file-toolbar">{fileTools}</div>}
           {editor && fileChanged && <div className="file-update-notice" role="status">文件已更新<button className="text-link" onClick={() => void reloadFile()}>刷新</button></div>}
           {editor?.file.payload.recovery_available && editor.text !== editor.saved && <div className="file-update-notice" role="status">上次未保存的编辑已恢复。请保存恢复副本，再用本机应用继续编辑。</div>}

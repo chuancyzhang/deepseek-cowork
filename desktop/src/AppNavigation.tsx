@@ -7,7 +7,8 @@ import {useHostField} from './host/context';
 import {receiveRun} from './host/conversations';
 import {emptyWorkspace, type WorkspaceView} from './Workspace';
 import {elapsedTime, formatDuration, isActive, mergeEvents, unwrapEvents} from './runtime';
-import type {Conversation, Run, RuntimeEvent} from './types';
+import {chatWorkspace, pathKey, projectPaths} from './projects';
+import type {Conversation, ProjectRecord, Run, RuntimeEvent} from './types';
 import './navigation.css';
 
 const call = <T = any,>(method: string, params?: unknown) => window.cowork.call<T>(method, params);
@@ -101,7 +102,7 @@ export default function AppNavigation() {
 }
 
 type SearchResult = {key:string;kind:string;title:string;detail?:string;shortcut?:string;run:()=>Promise<void>};
-export function GlobalSearch({conversations,projects,close,onChat,onProject,onAction,error}:{conversations:Conversation[];projects:any[];close:()=>void;onChat:(id:string)=>Promise<void>;onProject:(path:string)=>Promise<void>;onAction:(action:string)=>Promise<void>;error:(message:string)=>void}) {
+export function GlobalSearch({conversations,projects,close,onChat,onProject,onAction,error}:{conversations:Conversation[];projects:ProjectRecord[];close:()=>void;onChat:(id:string)=>Promise<void>;onProject:(path:string)=>Promise<void>;onAction:(action:string)=>Promise<void>;error:(message:string)=>void}) {
   const [query,setQuery] = useState(''), [filter,setFilter] = useState('all'), [selected,setSelected] = useState(0), [revision,setRevision]=useState(0);
   const [limit,setLimit] = useState(40);
   const [response,setResponse] = useState<{query:string;items:Conversation[];error?:string}|null>(null);
@@ -116,7 +117,8 @@ export function GlobalSearch({conversations,projects,close,onChat,onProject,onAc
   },[term,chatSearch,revision]);
   const loading=chatSearch&&response?.query!==term, failure=chatSearch&&response?.query===term?response.error:'';
   const match=(value:string)=>value.toLocaleLowerCase().includes(term.toLocaleLowerCase());
-  const archived=(item:Conversation)=>item.meta.archived||projects.some(p=>(p.archived||p.hidden)&&p.path===item.meta.workspace_dir);
+  const archivedPaths = useMemo(() => new Set(projects.filter(project => project.archived || project.hidden).flatMap(projectPaths).map(pathKey)), [projects]);
+  const archived=(item:Conversation)=>item.meta.archived||archivedPaths.has(chatWorkspace(item));
   const rows:SearchResult[]=[];
   if(filter==='all'||filter==='action')for(const [action,title,key] of [['new-chat','新建聊天','Ctrl+N'],['add-project','新建项目…','Ctrl+O']])if(match(title))rows.push({key:action,kind:'操作',title,shortcut:key,run:()=>onAction(action)});
   if(filter==='all'||filter==='chat')for(const item of term?(response?.query===term?response.items:[]):conversations.filter(item=>!archived(item)&&item.has_content!==false).slice(0,5))rows.push({key:item.id,kind:'聊天',title:item.display_title||item.title,detail:[item.meta.project_name|| (item.meta.workspace_source!=='chat'?(item.meta.workspace_dir||'').split(/[\\/]/).pop():''),archived(item)?'已归档':''].filter(Boolean).join(' · '),run:()=>onChat(item.id)});

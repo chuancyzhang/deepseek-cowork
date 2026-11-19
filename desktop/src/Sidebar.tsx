@@ -1,13 +1,13 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type Ref} from 'react';
-import {Archive, BookOpen, Check, ChevronDown, ChevronRight, Folder, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Pin, PinOff, Plus, Settings, Sparkles, SquarePen, Star, Trash2, Undo2, Users, X} from 'lucide-react';
-import type {Conversation, SidebarEntry, SidebarLayout, SidebarMethod} from './types';
+import {Archive, BookOpen, Check, ChevronDown, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Pin, PinOff, Plus, Settings, Sparkles, SquarePen, Star, Trash2, Undo2, Users, X} from 'lucide-react';
+import type {Conversation, ProjectAction, ProjectRecord, SidebarEntry, SidebarLayout, SidebarMethod} from './types';
 import {useHost, useHostField} from './host/context';
 import {UpdateNotice} from './management/Updates';
+import {chatWorkspace, pathKey, projectLayoutPath, projectPaths} from './projects';
 import SidebarMenu, {type MenuAnchor} from './SidebarMenu';
 import {useSidebarDrag} from './sidebarDrag';
 import './sidebar.css';
 
-type ProjectRecord = {path: string; name: string; pinned?: boolean; updated_at?: number; archived?: boolean; hidden?: boolean};
 type Project = ProjectRecord & {sessions: Conversation[]; groupId?: string; pinnedAt: number};
 type Item = {kind: 'chat'; chat: Conversation} | {kind: 'project'; project: Project};
 type Props = {
@@ -20,26 +20,22 @@ type Props = {
   running: Set<string>;
   toolsRef: Ref<HTMLDivElement>;
   onSelect: (id: string) => void;
-  onNew: (workspace?: string) => void;
+  onNew: (workspace?: string) => void | Promise<void>;
   onRoute: (route: string) => void;
   onProject: () => void;
   onAction: (action: string, conversation: Conversation) => void;
   onMore: () => Promise<void>;
   hasMore: boolean;
-  onProjectAction: (action: string, project: ProjectRecord) => void;
+  onProjectAction: (action: ProjectAction, project: ProjectRecord) => void;
   onLayoutAction: (method: SidebarMethod, params: unknown) => Promise<SidebarLayout>;
   onError: (message: string) => void;
 };
 
-const pathKey = (value: string) => /^[a-z]:|\\/i.test(value)
-  ? value.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '') : value.replace(/\/+$/, '');
 const archived = (project?: ProjectRecord) => Boolean(project?.archived || project?.hidden);
 const chatLabel = (chat: Conversation) => chat.display_title || chat.title || '新对话';
 const projectLabel = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) || path;
-const chatProject = (chat: Conversation) => chat.meta.workspace_source === 'chat' || chat.meta.team_space_required
-  ? '' : pathKey(chat.meta.workspace_dir || chat.meta.workspace_path || '');
 const entryOf = (item: Item): SidebarEntry => item.kind === 'project'
-  ? {kind: 'project', id: item.project.path} : {kind: 'chat', id: item.chat.id};
+  ? {kind: 'project', id: projectLayoutPath(item.project)} : {kind: 'chat', id: item.chat.id};
 const entryKey = (entry: SidebarEntry) => entry.kind === 'project' ? 'project:' + pathKey(entry.id) : 'chat:' + entry.id;
 const destinations = [['capabilities', '能力', Sparkles], ['library', '资料库', BookOpen], ['favorites', '常用任务', Star], ['team', '团队空间', Users]] as const;
 
@@ -48,20 +44,22 @@ function organize(conversations: Conversation[], supplemental: Conversation[], c
   for (const chat of supplemental) byId.set(chat.id, chat);
   const chats = [...byId.values()].sort((a, b) => b.updated_at - a.updated_at);
   const projects = new Map<string, Project>();
+  const byWorkspace = new Map<string, Project>();
   const placement = new Map(Object.values(layout?.projects || {}).map(item => [pathKey(item.path), item]));
   const add = (project: ProjectRecord) => {
-    const key = pathKey(project.path);
+    const key = pathKey(projectLayoutPath(project));
     const saved = placement.get(key);
     const pinnedAt = saved?.pinned_at ?? (project.pinned ? project.updated_at || 1 : 0);
     const row = {...project, groupId: saved?.group_id, pinnedAt, sessions: [] as Conversation[]};
     projects.set(key, row);
+    for (const path of projectPaths(project)) byWorkspace.set(pathKey(path), row);
     return row;
   };
   for (const project of configured) add(project);
   for (const chat of chats) {
-    const key = chatProject(chat);
+    const key = chatWorkspace(chat);
     if (!key || chat.has_content === false) continue;
-    let project = projects.get(key);
+    let project = byWorkspace.get(key);
     if (!project && !chat.meta.archived) {
       const path = chat.meta.workspace_dir || chat.meta.workspace_path;
       project = add({path, name: projectLabel(path)});
@@ -71,8 +69,8 @@ function organize(conversations: Conversation[], supplemental: Conversation[], c
   for (const [key, saved] of placement) {
     if (!projects.has(key) && (saved.group_id || saved.pinned_at)) add({path: saved.path, name: projectLabel(saved.path)});
   }
-  const visible = chats.filter(chat => !chat.meta.archived && chat.has_content !== false && !archived(projects.get(chatProject(chat))));
-  const archiveChats = chats.filter(chat => chat.meta.archived && !archived(projects.get(chatProject(chat))));
+  const visible = chats.filter(chat => !chat.meta.archived && chat.has_content !== false && !archived(byWorkspace.get(chatWorkspace(chat))));
+  const archiveChats = chats.filter(chat => chat.meta.archived && !archived(byWorkspace.get(chatWorkspace(chat))));
   const groupById = new Map((layout?.groups || []).map(group => [group.id, {projects: [] as Project[], chats: [] as Conversation[]}]));
   const availableProjects = [...projects.values()].filter(project => !archived(project)).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
   const ungroupedProjects: Project[] = [], recent: Conversation[] = [];
@@ -86,10 +84,10 @@ function organize(conversations: Conversation[], supplemental: Conversation[], c
     else {
       const group = groupById.get(layout?.chats[chat.id] || '');
       if (group) group.chats.push(chat);
-      else if (!projects.has(chatProject(chat))) recent.push(chat);
+      else if (!byWorkspace.has(chatWorkspace(chat))) recent.push(chat);
     }
   }
-  return {byId, projects, visible, archiveChats, groupById, ungroupedProjects, recent,
+  return {byId, projects, byWorkspace, visible, archiveChats, groupById, ungroupedProjects, recent,
     archiveProjects: [...projects.values()].filter(archived),
     pinned: pins.sort((a, b) => b.time - a.time).map(row => row.item)};
 }
@@ -103,13 +101,14 @@ export default function Sidebar(props: Props) {
   const [menu, setMenu] = useState<{item: Item; anchor: MenuAnchor} | null>(null);
   const [draft, setDraft] = useState<{id: string; name: string; entry?: SidebarEntry; error?: string} | null>(null);
   const [saving, setSaving] = useState(false);
+  const [startingProject, setStartingProject] = useHostField('sidebar:startingProject', '');
   const groupInput = useRef<HTMLInputElement>(null);
   const groupAdd = useRef<HTMLButtonElement>(null);
   const changing = useRef(false);
   const model = useMemo(() => organize(props.conversations, props.supplemental, props.projects, props.layout),
     [props.conversations, props.supplemental, props.projects, props.layout]);
   const selected = model.byId.get(props.selected);
-  const selectedGroup = props.layout?.chats[props.selected] || (selected && model.projects.get(chatProject(selected))?.groupId);
+  const selectedGroup = props.layout?.chats[props.selected] || (selected && model.byWorkspace.get(chatWorkspace(selected))?.groupId);
   const groups = props.layout?.groups || [];
   const drag = useSidebarDrag((entry, group) => void move(entry, group), () => setMenu(null));
 
@@ -186,9 +185,16 @@ export default function Sidebar(props: Props) {
   async function pinProject(project: Project) {
     if (changing.current) return;
     changing.current = true;
-    try {await props.onLayoutAction('sidebar.pin_project', {path: project.path, pinned: !project.pinnedAt});}
+    try {await props.onLayoutAction('sidebar.pin_project', {path: projectLayoutPath(project), pinned: !project.pinnedAt});}
     catch (failure) {props.onError('项目置顶未更新：' + (failure as Error).message);}
     finally {changing.current = false;}
+  }
+  async function startProjectChat(project: Project, key: string) {
+    if (host.get('sidebar:startingProject', '')) return;
+    setMenu(null);
+    setStartingProject(key);
+    try {await props.onNew(project.path);}
+    finally {setStartingProject('');}
   }
   function more(item: Item, label: string) {
     return <button className="row-more icon-button" data-sidebar-more title={label} aria-label={label} aria-haspopup="menu"
@@ -215,18 +221,24 @@ export default function Sidebar(props: Props) {
     const item = {kind: 'project', project} as const, entry = entryOf(item), key = entryKey(entry);
     const chats = archive ? project.sessions : project.sessions.filter(chat => !chat.meta.archived && !chat.meta.pinned && !props.layout?.chats[chat.id]);
     const open = expanded[key] ?? chats.some(chat => chat.id === props.selected);
+    const newChatLabel = '在「' + project.name + '」中新建聊天';
     return <section className="project-group" key={key}>
       <div className="project-heading" onContextMenu={event => selectMenu(event, item, true)}
         data-drag-source={drag.dragging && entryKey(drag.dragging.entry) === key ? '' : undefined}>
-        <button title={project.path} aria-expanded={open} onClick={() => setOpen(key, !open)}
+        <button title={project.name + '\n' + project.path} aria-expanded={open} onClick={() => setOpen(key, !open)}
           onPointerDown={event => {if (groups.length && !archive) drag.press(event, {entry, label: project.name});}}>
-          {open ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<Folder size={15}/><span>{project.name}</span>
+          {open ? <FolderOpen size={15}/> : <Folder size={15}/>}<span>{project.name}</span>
         </button>
         {more(item, project.name + ' 项目操作')}
+        {!archive && <button className="project-new-chat icon-button" title={newChatLabel} aria-label={newChatLabel}
+          disabled={Boolean(startingProject)} aria-busy={startingProject === key || undefined} onClick={() => void startProjectChat(project, key)}>
+          {startingProject === key ? <LoaderCircle size={15} className="spin"/> : <SquarePen size={15}/>}
+        </button>}
       </div>
       {open && <div className="project-conversations">
         {chats.slice(0, limit).map(chatRow)}
-        {!archive && !project.sessions.length && <button className="sidebar-empty" onClick={() => props.onNew(project.path)}>在项目中新建聊天</button>}
+        {!archive && !project.sessions.length && <button className="sidebar-empty" disabled={Boolean(startingProject)}
+          onClick={() => void startProjectChat(project, key)}>在项目中新建聊天</button>}
       </div>}
     </section>;
   }
@@ -313,16 +325,23 @@ export default function Sidebar(props: Props) {
     {menu && menuEntry && <SidebarMenu key={entryKey(menuEntry)} anchor={menu.anchor}
       groups={canOrganize ? groups : undefined} currentGroup={currentGroup(menuEntry)}
       onMove={id => closeAction(() => void move(menuEntry, id, true))} onNew={() => beginGroup(menuEntry)} onClose={() => setMenu(null)}
-      first={menuProject ? !archive && <>
-        <button role="menuitem" onClick={() => closeAction(() => void pinProject(menuProject))}>{menuProject.pinnedAt ? <PinOff size={15}/> : <Pin size={15}/>} {menuProject.pinnedAt ? '取消置顶' : '置顶项目'}</button>
-        <button role="menuitem" onClick={() => closeAction(() => props.onNew(menuProject.path))}><SquarePen size={15}/>在项目中新建聊天</button>
+      first={menuProject ? <>
+        <button role="menuitem" onClick={() => closeAction(() => props.onProjectAction('open_folder', menuProject))}><FolderOpen size={15}/>在资源管理器中打开</button>
+        <button role="menuitem" onClick={() => closeAction(() => props.onProjectAction('edit', menuProject))}><Pencil size={15}/>编辑项目</button>
+        {!archive && <>
+          <div className="sidebar-menu-separator" role="separator"/>
+          <button role="menuitem" onClick={() => closeAction(() => void pinProject(menuProject))}>{menuProject.pinnedAt ? <PinOff size={15}/> : <Pin size={15}/>} {menuProject.pinnedAt ? '取消置顶' : '置顶项目'}</button>
+        </>}
       </> : menuChat && <>
         {!archive && <button role="menuitem" onClick={() => closeAction(() => props.onAction('pin', menuChat))}>{menuChat.meta.pinned ? <PinOff size={15}/> : <Pin size={15}/>} {menuChat.meta.pinned ? '取消置顶' : '置顶聊天'}</button>}
         <button role="menuitem" onClick={() => closeAction(() => props.onAction('rename', menuChat))}><Pencil size={15}/>重命名</button>
       </>}
-      last={menuProject ? <button role="menuitem" onClick={() => closeAction(() => props.onProjectAction(archived(menuProject) ? 'restore' : 'archive', menuProject))}>
-        {archived(menuProject) ? <Undo2 size={15}/> : <Archive size={15}/>} {archived(menuProject) ? '恢复项目' : '归档项目'}
-      </button> : menuChat && <>
+      last={menuProject ? <>
+        <div className="sidebar-menu-separator" role="separator"/>
+        <button role="menuitem" onClick={() => closeAction(() => props.onProjectAction(archived(menuProject) ? 'restore' : 'archive', menuProject))}>
+          {archived(menuProject) ? <Undo2 size={15}/> : <Archive size={15}/>} {archived(menuProject) ? '恢复项目' : '归档项目'}
+        </button>
+      </> : menuChat && <>
         <button role="menuitem" onClick={() => closeAction(() => props.onAction(menuChat.meta.archived ? 'restore' : 'archive', menuChat))}>{menuChat.meta.archived ? <Undo2 size={15}/> : <Archive size={15}/>} {menuChat.meta.archived ? '恢复聊天' : '归档聊天'}</button>
         <button role="menuitem" onClick={() => closeAction(() => props.onAction('delete', menuChat))}><Trash2 size={15}/>移到回收站</button>
       </>}/>}

@@ -30,10 +30,15 @@
 .sidebar .project-heading {border-radius: 7px}
 .sidebar .project-heading:hover,
 .sidebar :is(.project-heading, .history-row):has([data-sidebar-more][aria-expanded="true"]) {background: var(--hover)}
-.sidebar :is(.project-heading, .history-row):is(:hover, :focus-within) > .row-more,
+.sidebar .project-new-chat {opacity: 0; flex-shrink: 0}
+.sidebar :is(.project-heading, .history-row):is(:hover, :focus-within) > :is(.row-more, .project-new-chat),
+.sidebar .project-heading:has([data-sidebar-more][aria-expanded="true"]) > .project-new-chat,
+.sidebar .project-new-chat[aria-busy="true"],
 .sidebar .row-more[aria-expanded="true"] {opacity: 1}
 .sidebar :is(.history-select, .project-heading > button:first-child) {user-select: none}
 .sidebar-context-menu {width: 184px; max-width: calc(100vw - 12px); max-height: calc(100vh - 14px); overflow: auto}
+.sidebar-context-menu:has(.sidebar-menu-separator) {width: 208px}
+.sidebar-menu-separator {height: 1px; margin: 4px 6px; background: var(--line)}
 .sidebar-context-menu button {gap: 8px; text-align: left; min-height: 33px; padding: 6px 8px}
 .sidebar-context-menu button[aria-expanded="true"] {background: var(--hover)}
 .sidebar-group-menu {z-index: 151; width: 178px}
@@ -59,13 +64,16 @@
   pointer-events: none;
 }
 .sidebar-drag-preview > span {overflow: hidden; text-overflow: ellipsis; white-space: nowrap}
-.project-dialog {width: 450px}
+.modal.project-dialog {width: min(450px, calc(100% - 32px)); padding: clamp(16px, 3vw, 26px)}
 .project-dialog label {display: grid; gap: 6px; font-weight: 500}
 .project-dialog input {width: 100%}
 .project-directory {display: grid; gap: 4px; margin: 14px 0 8px; font-size: 13px; color: var(--muted)}
 .project-directory strong {font-weight: 400; color: var(--text); overflow-wrap: anywhere}
+.project-directory-row {display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  padding: 5px 6px 5px 10px; border: 1px solid var(--line); border-radius: calc(8px * var(--radius-scale, 1))}
+.project-directory-row .secondary {border-color: transparent; background: transparent}
 .project-folder-actions {margin-bottom: 12px; flex-wrap: wrap}
 .project-dialog-actions {justify-content: flex-end; margin-top: 20px}
 @media (pointer: coarse) {
-  .sidebar .row-more {opacity: 1}
+  .sidebar :is(.row-more, .project-new-chat) {opacity: 1}
 }

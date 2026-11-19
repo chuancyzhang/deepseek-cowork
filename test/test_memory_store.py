@@ -155,6 +155,17 @@ class TestMemoryStore(unittest.TestCase):
         storage.get_conversation_meta = lambda _cid: {"workspace_source": "chat", "workspace_dir": project}
         self.assertFalse(resolve_memory_project(config, project, storage=storage, conversation_id="chat"))
 
+    def test_project_edits_keep_memory_bound_to_the_original_workspace(self):
+        original, replacement, inferred = (os.path.join(self.temp_dir.name, folder) for folder in ("original", "new", "inferred"))
+        config = SimpleNamespace(get_projects=lambda: [
+            {"path": replacement, "previous_paths": [original]},
+            {"path": inferred, "inferred_path": inferred},
+        ])
+        storage = SimpleNamespace(get_conversation_meta=lambda _cid: {"workspace_source": "project", "workspace_dir": original})
+        self.assertEqual(resolve_memory_project(config, original, storage=storage, conversation_id="old"), os.path.normcase(original))
+        self.assertFalse(resolve_memory_project(config, replacement, storage=storage, conversation_id="old"))
+        self.assertFalse(resolve_memory_project(config, inferred))
+
     def test_project_experience_cannot_change_global_memory(self):
         self.store.save_summary("全局事实")
         self.store.update_experience("项目 A 的方法", "workspace", "C:/A")

@@ -7,6 +7,7 @@ import tempfile
 import time
 import uuid
 from core.file_write_locks import file_write_lock
+from core.sidebar_projects import project_paths
 
 
 MEMORY_LAYOUT_VERSION = 2
@@ -28,8 +29,9 @@ def resolve_memory_project(config, workspace_dir, *, storage=None, conversation_
         if bound and normalize_workspace_dir(bound) != workspace:
             return ""
     projects = config.get_projects() if hasattr(config, "get_projects") else []
-    return next((normalize_workspace_dir(item["path"]) for item in projects
-                 if isinstance(item, dict) and normalize_workspace_dir(item.get("path")) == workspace), "")
+    registered = (path for project in projects if isinstance(project, dict) for path in project_paths(project)
+                  if path != project.get("inferred_path"))
+    return workspace if any(normalize_workspace_dir(path) == workspace for path in registered) else ""
 
 
 def memory_project_from_context(context):

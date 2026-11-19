@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.desktop_jobs import JobCancelled
 from core.file_capabilities import file_capability
+from core.sidebar_projects import project_paths
 
 log = logging.getLogger("desktop.library")
 DOCUMENTS = frozenset(".md .markdown .txt .pdf .doc .docx .ppt .pptx .xls .xlsx .csv .tsv .html .htm .png .jpg .jpeg .gif .webp .svg".split())
@@ -83,7 +84,7 @@ class LocalLibrary:
             root = Path(item["path"]).expanduser().resolve()
             key = os.path.normcase(str(root))
             if item.get("archived") or item.get("hidden"):
-                excluded.add(key)
+                excluded.update(os.path.normcase(str(Path(folder).expanduser().resolve())) for folder in project_paths(item))
                 continue
             projects[key] = {"name": item.get("name") or root.name, "path": str(root)}
         for entries in self.s.storage.list_conversations_by_workspace().values():

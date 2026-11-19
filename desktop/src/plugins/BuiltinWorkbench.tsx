@@ -97,7 +97,7 @@ const fileTools = editor && current && <>{editor.file.payload.untitled?<input cl
 
 return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
     {sidebar && <Sidebar conversations={conversations} supplemental={sidebarConversations} layout={sidebarLayout} toolsRef={sidebarTools} onLayoutAction={changeSidebar} onError={error} projects={settings?.projects || []} selected={current?.id || ''} route={route} running={runningConversations}
-      onSelect={id => void switchConversation(id)} onNew={workspace => void newConversation(workspace).catch(failure => error(failure.message))}
+      onSelect={id => void switchConversation(id)} onNew={async workspace => {await newConversation(workspace).catch(failure => error(failure.message));}}
       onRoute={next => void goRoute(next)} onProject={() => void addProject()}
       onProjectAction={(action, project) => void projectAction(action, project)} onAction={(action, item) => void conversationAction(action, item)} onMore={moreConversations} hasMore={hasMoreConversations}/>}
     <main style={{'--workspace-width': (workspaceView.width || 46) + '%'} as React.CSSProperties} className={`main-shell ${route === 'chat' && workspaceOpen ? 'chat-workspace' : ''} ${workspaceExpanded && route === 'chat' ? 'workspace-expanded' : ''}`}><header className="app-header"><div className="header-title">{route !== 'chat' && <button className="back-link" onClick={() => void goRoute('chat')}><ArrowLeft size={16}/>返回聊天</button>}

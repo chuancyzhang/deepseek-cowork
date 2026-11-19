@@ -1,6 +1,7 @@
 """Sidebar organization independent of project workspaces and chat history."""
 
 import logging
+import os
 import time
 from uuid import UUID
 
@@ -9,6 +10,15 @@ log = logging.getLogger("desktop.sidebar")
 PROJECT_LIST_INITIAL_LIMIT = 5
 SIDEBAR_SEARCH_PAGE_SIZE = 50
 SIDEBAR_STATE = "sidebar_layout"
+
+
+def project_paths(project):
+    return (project.get("path"), *project.get("previous_paths", ()))
+
+
+def project_layout_path(project):
+    # The first workspace remains the key used by saved pins and groups.
+    return next(iter(project.get("previous_paths", ())), project["path"])
 
 
 class DesktopSidebar:
@@ -33,25 +43,37 @@ class DesktopSidebar:
         return {"conversations": conversations, "sidebar": sidebar,
                 "sidebar_conversations": self.store.summarize_conversations(extras)}
 
-    def _project(self, path, placements):
+    def find_project(self, path, *, projects=None, placements=None, include_archived_chats=False):
         path = self.config._normalize_project_path(path)
         key = self.config._project_key(path)
         if not key:
-            raise ValueError("请选择有效的项目。")
-        for project in self.config.get_projects():
-            if self.config._project_key(project["path"]) == key:
-                if project["archived"]:
-                    raise ValueError("请先从归档恢复这个项目。")
-                return key, project["path"]
+            return None
+        projects = self.config.get_projects() if projects is None else projects
+        placements = self.read()["value"]["projects"] if placements is None else placements
+        for project in projects:
+            if any(self.config._project_key(folder) == key for folder in project_paths(project)):
+                return project
         if key in placements:
-            return key, placements[key]["path"]
+            path = placements[key]["path"]
+            return {"path": path, "name": os.path.basename(path) or path}
         for record in self.storage.list_conversation_summaries():
             meta = record["meta"]
-            if meta.get("archived") or meta.get("team_space_required") or meta.get("workspace_source") == "chat":
+            if meta.get("team_space_required") or meta.get("workspace_source") in {"chat", "team_space"}:
+                continue
+            if meta.get("archived") and not include_archived_chats:
                 continue
             if self.config._project_key(meta.get("workspace_dir") or meta.get("workspace_path")) == key:
-                return key, path
-        raise ValueError("项目已不在侧栏，请刷新后重试。")
+                return {"path": path, "name": os.path.basename(path) or path}
+        return None
+
+    def _project(self, path, placements):
+        project = self.find_project(path, placements=placements)
+        if not project:
+            raise ValueError("项目已不在侧栏，请刷新后重试。")
+        if project.get("archived"):
+            raise ValueError("请先从归档恢复这个项目。")
+        layout_path = project_layout_path(project)
+        return self.config._project_key(layout_path), layout_path
 
     def _move(self, layout, entry, group_id):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:

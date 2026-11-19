@@ -166,8 +166,9 @@ class Connections:
                 referenced = detail.get("skills") or []
                 if referenced and not p.get("acknowledge_skills"):
                     raise ValueError("此空间引用了指定版本的技能，请核对本机技能或确认本次不使用这些引用。")
+                from core.sidebar_projects import project_paths
                 binding = client.local_store.bind_workspace(client.identity, space, p["directory"],
-                    [item["path"] for item in self.s.config.get_projects(include_hidden=True)])
+                    [folder for project in self.s.config.get_projects() for folder in project_paths(project)])
                 binding["task_context"] = {"space_name": detail["name"], "description": detail["description"],
                     "description_revision": detail["description_revision"], "inputs": [], "skill_references": referenced}
                 client.session()

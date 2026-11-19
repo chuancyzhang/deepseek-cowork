@@ -5,12 +5,15 @@ let selectedFolder;
 const dialog=Object.create(electron.dialog);
 dialog.showOpenDialog=(...args)=>selectedFolder
   ? Promise.resolve({canceled:false,filePaths:[selectedFolder]}) : electron.dialog.showOpenDialog(...args);
+const openedFolders=[];
+const shell=Object.create(electron.shell);
+shell.openPath=async target=>{openedFolders.push(target);return '';};
 app.getVersion=()=>require('../package.json').version;
 class HiddenWindow extends electron.BrowserWindow {
   constructor(options){super({...options,show:false,webPreferences:{...options.webPreferences,offscreen:!process.env.COWORK_NAVIGATION_NATIVE,backgroundThrottling:false}});}
   show(){if(process.env.COWORK_NAVIGATION_NATIVE)super.showInactive();} showInactive(){this.show();}
 }
-Module._load=function(name,...rest){return name==='electron'?{...electron,dialog,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
+Module._load=function(name,...rest){return name==='electron'?{...electron,dialog,shell,BrowserWindow:HiddenWindow}:originalLoad.call(this,name,...rest);};
 app.commandLine.appendSwitch('disable-gpu');
 const {Backend}=require('../electron/backend.cjs'),originalCall=Backend.prototype.call;
 let window,backend,slowSearch,fastSearch,searchFailure=false,taskReadRelease,stopFailure=false,browserHost;
@@ -48,7 +51,16 @@ const wait=async predicate=>{for(let i=0;i<350;i++){if(predicate())return;await 
 const rpc=(method,params={})=>read(`window.cowork.call(${JSON.stringify(method)},${JSON.stringify(params)})`);
 const command=id=>Menu.getApplicationMenu().getMenuItemById(id).click();
 const fill=(selector,value)=>read(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-const snap=async name=>{const output=process.env.COWORK_NAVIGATION_SCREENSHOTS;if(!output)return;await fs.mkdir(output,{recursive:true});window.webContents.invalidate();await delay(120);await fs.writeFile(path.join(output,name+'.png'),(await window.webContents.capturePage()).toPNG());};
+async function snap(name, selector) {
+  const output=process.env.COWORK_NAVIGATION_SCREENSHOTS;
+  if(!output)return;
+  const rect=selector ? await read('(()=>{const r=document.querySelector('+JSON.stringify(selector)+').getBoundingClientRect();return {x:Math.floor(r.left)-24,y:Math.floor(r.top)-24,width:Math.ceil(r.width)+48,height:Math.ceil(r.height)+48};})()') : undefined;
+  await fs.mkdir(output,{recursive:true});
+  window.webContents.invalidate();
+  await delay(120);
+  const image=rect ? await window.webContents.capturePage(rect) : await window.webContents.capturePage();
+  await fs.writeFile(path.join(output,name+'.png'),image.toPNG());
+}
 const clickText=(selector,text)=>read('Array.from(document.querySelectorAll('+JSON.stringify(selector)+')).find(button=>button.textContent.trim()==='+JSON.stringify(text)+').click()');
 const openRow=(label)=>read('document.querySelector('+JSON.stringify('[data-sidebar-more][title="'+label+'"]')+').click()');
 async function dragSidebar(selector, label) {
@@ -66,6 +78,56 @@ async function dragSidebar(selector, label) {
     await input('mouseReleased',target,'left',0);
     await until('!document.querySelector(".sidebar-drag-preview")');
   } finally {debuggerClient.detach();}
+}
+async function checkProjectActions(original, occupied) {
+  const oldChat=await rpc('conversation.create',{workspace_dir:original});
+  await rpc('conversation.rename',{conversation_id:oldChat.id,title:'项目历史记录'});
+  window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:oldChat.id}]);
+  await fill('[aria-label="消息输入"]','保留当前草稿');
+  await openRow('客户资料 项目操作');
+  await clickText('.sidebar-context-menu button','在资源管理器中打开');
+  await wait(()=>openedFolders.includes(original));
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'保留当前草稿');
+
+  await openRow('客户资料 项目操作');
+  await clickText('.sidebar-context-menu button','编辑项目');
+  await until('document.activeElement===document.querySelector(".project-dialog input")');
+  assert.equal(await read('document.querySelector(".project-dialog input").value'),'客户资料');
+  await snap('project-edit','.project-dialog');
+  await fill('.project-dialog input','客户档案');
+  selectedFolder=occupied;
+  await clickText('.project-dialog button','更换…');
+  await until('document.querySelector(".project-directory-row strong").textContent.endsWith("cross-platform-cowork")');
+  await clickText('.project-dialog button','保存');
+  await until('document.querySelector(".project-dialog [role=alert]")?.textContent.includes("已关联其他项目")');
+  assert.equal(await read('document.querySelector(".project-dialog input").value'),'客户档案');
+  await clickText('.project-dialog button','取消');
+  await until('!!document.querySelector("[aria-label=\\"放弃项目修改？\\"][open]")');
+  await clickText('dialog[aria-label="放弃项目修改？"] button','继续编辑');
+  assert.equal(await read('document.querySelector(".project-dialog input").value'),'客户档案');
+  const replacement=path.join(process.env.COWORK_APP_DATA_DIR,'客户档案');
+  await fs.mkdir(replacement);
+  selectedFolder=replacement;
+  await clickText('.project-dialog button','更换…');
+  await until('document.querySelector(".project-directory-row strong").textContent.endsWith("客户档案")');
+  await clickText('.project-dialog button','保存');
+  await until('!document.querySelector(".project-dialog") && document.querySelector("[aria-label=置顶]")?.textContent.includes("客户档案")');
+  selectedFolder=undefined;
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'保留当前草稿');
+
+  const row='.project-group:has([title="客户档案 项目操作"])';
+  const expand=JSON.stringify(row+' .project-heading > button:first-child');
+  const newChat=JSON.stringify(row+' .project-new-chat');
+  await read('document.querySelector('+expand+'+"[aria-expanded=false]")?.click()');
+  await until('document.querySelector('+JSON.stringify(row)+').textContent.includes("项目历史记录")');
+  await read('document.querySelector('+expand+').click()');
+  await read('document.querySelector('+newChat+').focus()');
+  assert.equal(await read('getComputedStyle(document.querySelector('+newChat+')).opacity'),'1');
+  await read('(()=>{const button=document.querySelector('+newChat+');button.click();button.click();})()');
+  await until('document.querySelector(".composer-footer button").title==='+JSON.stringify(replacement)+' && document.activeElement===document.querySelector("[aria-label=消息输入]")');
+  assert.equal(await read('document.querySelector('+expand+').getAttribute("aria-expanded")'),'false');
+  assert.equal((await rpc('conversation.list')).filter(chat=>chat.meta.workspace_dir===replacement).length,1);
+  assert.equal((await rpc('conversation.get',{conversation_id:oldChat.id})).meta.workspace_dir,original);
 }
 async function checkSidebar() {
   await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
@@ -116,6 +178,7 @@ async function checkSidebar() {
   await clickText('.sidebar-context-menu button','恢复项目');
   await read('document.querySelector("[title=返回侧栏列表]").click()');
   await until('document.querySelector("[aria-label=置顶]")?.textContent.includes("客户资料")');
+  await checkProjectActions(projects.find(project=>project.name==='客户资料').path,path.join(root,'cross-platform-cowork'));
 }
 async function finish(code){clearTimeout(deadline);try{await backend.stop();backend.detach();}catch(error){console.error(error);}window?.destroy();app.exit(code);}
 app.once('browser-window-created',(_event,win)=>{
@@ -210,7 +273,9 @@ async function run(){
   await read('[...document.querySelectorAll(".workspace-tab [role=tab]")].find(button=>button.textContent.includes("navigation")).click()');
   await wait(()=>browserHost?.visible?.id===opened.tab.id);
   await openRow('cross-platform-cowork 项目操作');await wait(()=>browserHost.visible===null);
-  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));');
+  await clickText('.sidebar-context-menu button','编辑项目');await until('!!document.querySelector(".project-dialog[open]")');
+  assert.equal(browserHost.visible,null);
+  await clickText('.project-dialog button','取消');
   await wait(()=>browserHost.visible?.id===opened.tab.id);
   command('search');await until('!!document.querySelector(".global-search input")');await wait(()=>browserHost.visible===null);
   await read('document.querySelector(".global-search .section-heading button").click()');await wait(()=>browserHost.visible?.id===opened.tab.id);
@@ -224,6 +289,12 @@ async function run(){
   assert.equal(await read('(()=>{const r=document.querySelector(".global-search").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()'),true);
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".app-navigation button")];return buttons.every(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth})})()'),true);
   await read('document.querySelector(".global-search .section-heading button").click()');
+  await openRow('cross-platform-cowork 项目操作');
+  await clickText('.sidebar-context-menu button','编辑项目');
+  await until('!!document.querySelector(".project-dialog[open]")');
+  assert.equal(await read('(()=>{const form=document.querySelector(".project-dialog").getBoundingClientRect();const path=document.querySelector(".project-directory-row");return form.left>=0&&form.right<=innerWidth&&form.top>=0&&form.bottom<=innerHeight&&path.scrollWidth<=path.clientWidth+1})()'),true);
+  await snap('project-edit-dark-scaled');
+  await clickText('.project-dialog button','取消');
   await read('document.querySelector(".sidebar-utilities button").click()');await until('!!document.querySelector(".management-nav")');
   assert.equal(await read('document.querySelector(".management-nav").textContent.includes("实验")'),false);
   await read('[...document.querySelectorAll(".sidebar-destinations button")].find(e=>e.textContent==="能力").click()');

@@ -12,6 +12,7 @@ import time
 import uuid
 
 from core.conversation_integrity import canonical_ledger_messages_hash
+from core.sidebar_projects import project_paths
 
 log = logging.getLogger("desktop.conversations")
 PREFERENCE_KEYS = frozenset({"selected_model_id", "selected_skill_names", "conversation_agent", "knowledge_refs",
@@ -21,7 +22,7 @@ PREFERENCE_KEYS = frozenset({"selected_model_id", "selected_skill_names", "conve
 
 
 class ConversationActions:
-    methods = frozenset({"project.list", "project.save", "project.archive", "project.restore", "conversation.search",
+    methods = frozenset({"project.list", "project.save", "project.edit", "project.folder", "project.archive", "project.restore", "conversation.search",
         "conversation.pin", "conversation.restore", "conversation.delete", "conversation.preferences", "conversation.export",
         "conversation.reference", "conversation.branch", "history.prepare", "history.edit", "history.delete", "history.undo",
         "agent.list", "agent.get", "agent.send", "agent.stop", "agent.resume", "conversation.workspace", "task.inspect", "task.context", "visualization.get", "visualization.state"})
@@ -163,6 +164,68 @@ class ConversationActions:
             log.info("project_saved managed_directory=%s", managed)
             return project
 
+    def edit_project(self, params):
+        log.info("project_edit_requested")
+        try:
+            with self.service.lock:
+                projects = self.config.get_projects()
+                source, path, name = (params.get(key) for key in ("original_path", "path", "name"))
+                if not all(isinstance(value, str) and value.strip() for value in (source, path, name)):
+                    raise ValueError("请输入项目名称并选择工作目录。")
+                name = name.strip()
+                key = self.config._project_key
+                project = self.service.sidebar.find_project(source, projects=projects)
+                if project and key(path) == key(project["path"]) and name == project["name"]:
+                    log.info("project_edit_already_saved")
+                    return projects
+                if (not project or key(source) != key(project["path"])
+                        or params.get("original_name", project["name"]) != project["name"]):
+                    raise ValueError("项目已变化，请重新打开编辑窗口。")
+                if len(name) > 60 and name != project["name"]:
+                    raise ValueError("请输入 1 至 60 个字符的项目名称。")
+                old_path = project["path"]
+                next_path = old_path
+                if key(path) != key(old_path):
+                    folder = Path(path).expanduser().resolve()
+                    if not folder.is_dir():
+                        raise ValueError("工作目录不存在，请选择现有文件夹。")
+                    next_path = str(folder)
+                moved = key(old_path) != key(next_path)
+                if moved:
+                    own_paths = {key(folder) for folder in project_paths(project)}
+                    if key(next_path) not in own_paths and self.service.sidebar.find_project(
+                            next_path, projects=projects, include_archived_chats=True):
+                        raise ValueError("此目录已关联其他项目，请选择另一个文件夹。")
+                    previous = project.setdefault("previous_paths", [])
+                    if key(old_path) not in {key(folder) for folder in previous}:
+                        previous.append(old_path)
+                if project not in projects:
+                    project["inferred_path"] = old_path
+                    projects.append(project)
+                project.update(name=name, path=next_path, updated_at=int(time.time()))
+                self.config.set_projects(projects, strict=True)
+                log.info("project_edit_saved directory_changed=%s", moved)
+                return self.config.get_projects()
+        except Exception as failure:
+            log.warning("project_edit_failed error_type=%s", type(failure).__name__)
+            raise
+
+    def project_folder(self, path):
+        log.info("project_folder_requested")
+        try:
+            with self.service.lock:
+                project = self.service.sidebar.find_project(path) if isinstance(path, str) else None
+                if not project:
+                    raise ValueError("项目已不在侧栏，请刷新后重试。")
+                folder = Path(project["path"])
+                if not folder.is_dir():
+                    raise ValueError("项目目录不可用，请恢复目录或在「编辑项目」中更换工作目录。")
+                log.info("project_folder_resolved")
+                return {"path": str(folder)}
+        except Exception as failure:
+            log.warning("project_folder_failed error_type=%s", type(failure).__name__)
+            raise
+
     def dispatch(self, method, p):
         cid = str(p.get("conversation_id") or "")
         if method == "conversation.workspace":
@@ -205,6 +268,10 @@ class ConversationActions:
             return self.config.get_projects()
         if method == "project.save":
             return self.save_project(p)
+        if method == "project.edit":
+            return self.edit_project(p)
+        if method == "project.folder":
+            return self.project_folder(p.get("path"))
         if method in {"project.archive", "project.restore"}:
             with self.service.lock:
                 action = self.config.archive_project if method.endswith("archive") else self.config.restore_project
@@ -214,11 +281,14 @@ class ConversationActions:
         if method == "conversation.search":
             query = str(p.get("query") or "")
             identities = self.storage.search_conversations(query, limit=min(200, int(p.get("limit", 50))))
-            project_paths = {Path(project["path"]).resolve() for project in self.config.get_projects() if query.casefold() in project["name"].casefold()}
-            if project_paths:
+            matched_paths = {self.config._project_key(folder) for project in self.config.get_projects()
+                             if query.casefold() in project["name"].casefold() for folder in project_paths(project)}
+            if matched_paths:
                 for record in self.storage.list_conversation_summaries():
-                    path = record["meta"].get("workspace_dir")
-                    if path and Path(path).resolve() in project_paths:
+                    meta = record["meta"]
+                    path = meta.get("workspace_dir") or meta.get("workspace_path")
+                    if (path and not meta.get("team_space_required") and meta.get("workspace_source") not in {"chat", "team_space"}
+                            and self.config._project_key(path) in matched_paths):
                         identities.append(record["id"])
             return self.store.summarize_conversations(self.storage.list_conversation_summaries(conversation_ids=identities))
         if method in {"conversation.pin", "conversation.restore", "conversation.delete", "conversation.preferences"}:

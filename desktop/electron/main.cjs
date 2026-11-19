@@ -33,7 +33,7 @@ const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.l
   'conversation.archive', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond',
   'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list',
   'workspace.create', 'workspace.attach', 'workspace.attach_data', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
-for (const method of ['project.list', 'project.save', 'project.archive', 'project.restore', 'conversation.search',
+for (const method of ['project.list', 'project.save', 'project.edit', 'project.archive', 'project.restore', 'conversation.search',
   'sidebar.create_group', 'sidebar.move', 'sidebar.pin_project',
   'conversation.pin', 'conversation.restore', 'conversation.delete', 'conversation.preferences', 'conversation.export',
   'conversation.reference', 'conversation.branch', 'history.prepare', 'history.edit', 'history.delete', 'history.undo',
@@ -203,6 +203,18 @@ else {
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
       if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
       if (method === 'library.read_result' || (method === 'library.read' && params.source === 'local')) return fileHost.register(await backend.call(method, params));
+      if (method === 'project.open_folder') {
+        const folder = await backend.call('project.folder', params);
+        try {
+          const failure = await shell.openPath(folder.path);
+          if (failure) throw new Error(failure);
+          console.info('project_folder_opened');
+          return {opened: true};
+        } catch {
+          console.warn('project_folder_open_failed');
+          throw new Error('无法打开项目目录，请确认该文件夹可访问后重试。');
+        }
+      }
       if (method === 'library.open_folder' && params.source === 'local') {
         const item = await backend.call('library.folder', params);
         const failure = await shell.openPath(item.path);
@@ -248,7 +260,8 @@ else {
         return result.canceled ? null : result.filePath;
       }
       if (method === 'dialog.workspace') {
-        const result = await dialog.showOpenDialog(window, { title: '选择工作目录', properties: ['openDirectory', 'createDirectory'] });
+        const defaultPath = typeof params.default_path === 'string' && path.isAbsolute(params.default_path) ? params.default_path : undefined;
+        const result = await dialog.showOpenDialog(window, { title: '选择工作目录', defaultPath, properties: ['openDirectory', 'createDirectory'] });
         return result.canceled ? null : result.filePaths[0];
       }
       if (method === 'dialog.attach') {

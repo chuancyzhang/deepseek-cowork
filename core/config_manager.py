@@ -42,6 +42,7 @@ from .mcp_client import (
     normalize_mcp_transport,
 )
 from .im_gateway_config import normalize_im_gateway_config
+from .sidebar_projects import project_paths
 from .variable_store import VariableStore
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -697,7 +698,7 @@ class ConfigManager:
         name = str(source.get("name") or "").strip()
         if not name:
             name = os.path.basename(path.rstrip(os.sep)) or path
-        return {
+        result = {
             "path": path,
             "name": name,
             "pinned": bool(source.get("pinned", False)),
@@ -707,6 +708,21 @@ class ConfigManager:
             "created_at": int(source.get("created_at") or time.time()),
             "updated_at": int(source.get("updated_at") or time.time()),
         }
+        previous = source.get("previous_paths")
+        if isinstance(previous, list):
+            paths = {}
+            for folder in previous:
+                if isinstance(folder, str) and (normalized := self._normalize_project_path(folder)):
+                    paths.setdefault(self._project_key(normalized), normalized)
+            if paths:
+                result["previous_paths"] = list(paths.values())
+        inferred = self._project_key(source.get("inferred_path"))
+        if inferred:
+            # Sidebar edits alone do not register an inferred workspace for memory.
+            original = next((folder for folder in project_paths(result) if self._project_key(folder) == inferred), None)
+            if original:
+                result["inferred_path"] = original
+        return result
 
     def _normalize_projects(self, value):
         if not isinstance(value, list):
@@ -1538,6 +1554,8 @@ class ConfigManager:
         updated = None
         for project in projects:
             if self._project_key(project.get("path")) != key:
+                if any(self._project_key(folder) == key for folder in project.get("previous_paths", ())):
+                    raise ValueError("此目录已关联其他项目，请编辑该项目或选择另一个文件夹。")
                 continue
             changed = False
             if name is not None:
@@ -1550,6 +1568,9 @@ class ConfigManager:
                 if bool(project.get("pinned")) != next_pinned:
                     project["pinned"] = next_pinned
                     changed = True
+            if self._project_key(project.get("inferred_path")) == key:
+                del project["inferred_path"]
+                changed = True
             if bool(project.get("archived")):
                 project["archived"] = False
                 changed = True
@@ -1591,7 +1612,7 @@ class ConfigManager:
         changed = False
         now = int(time.time())
         for project in projects:
-            if self._project_key(project.get("path")) != key:
+            if all(self._project_key(folder) != key for folder in project_paths(project)):
                 continue
             project["archived"] = True
             project["archived_at"] = now
@@ -1627,7 +1648,7 @@ class ConfigManager:
         key = self._project_key(normalized_path)
         changed = False
         for project in projects:
-            if self._project_key(project.get("path")) != key:
+            if all(self._project_key(folder) != key for folder in project_paths(project)):
                 continue
             project["archived"] = False
             project["archived_at"] = 0

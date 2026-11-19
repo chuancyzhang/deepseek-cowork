@@ -427,8 +427,10 @@ def test_local_library_aggregates_projects_and_keeps_file_scope(tmp_path):
 
     # A project derived from chat history must not reappear after archival,
     # even when its directory is unavailable. Restoring it reuses its identity.
-    service.config.get_projects = lambda: [{'path':str(first),'name':'项目一','archived':True}]
-    service.storage.list_conversations_by_workspace = lambda: {str(first):[{'workspace_dir':str(first)}]}
+    service.config.get_projects = lambda: [{'path':str(first),'name':'项目一','archived':True,'previous_paths':[str(second)]}]
+    service.storage.list_conversations_by_workspace = lambda: {
+        str(folder):[{'workspace_dir':str(folder)}] for folder in (first, second)
+    }
     assert library.projects() == []
     with pytest.raises(ValueError, match='不在资料库'):
         library.checked(pid)

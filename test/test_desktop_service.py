@@ -320,6 +320,68 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertEqual((existing / "notes.txt").read_text(encoding="utf-8"), "已有资料")
         self.assertEqual({project["name"] for project in self.client.call("project.list")}, {"运营资料", "客户资料"})
 
+    def test_project_edit_preserves_chat_workspaces_and_sidebar_placement(self):
+        client = self.client
+        original, target, occupied = (Path(self.temp.name, folder) for folder in ("project", "replacement", "occupied"))
+        for directory in (original, target, occupied):
+            directory.mkdir()
+        notes = original / "notes.txt"
+        notes.write_text("已有资料", encoding="utf-8")
+        client.call("project.save", name="原项目", path=str(original))
+        client.call("project.save", name="其他项目", path=str(occupied))
+        chat = client.call("conversation.create", workspace_dir=str(original))
+        client.call("conversation.rename", conversation_id=chat["id"], title="原项目聊天")
+        group_id = uuid.uuid4().hex
+        client.call("sidebar.create_group", group_id=group_id, name="资料整理", entry={"kind": "project", "id": str(original)})
+        placement = client.call("sidebar.pin_project", path=str(original), pinned=True)
+        before = client.call("project.list")
+        params = {"original_path": str(original), "original_name": "原项目", "name": "编辑后的项目"}
+        with self.assertRaisesRegex(RuntimeError, "已关联其他项目"):
+            client.call("project.edit", **params, path=str(occupied))
+        with self.assertRaisesRegex(RuntimeError, "工作目录不存在"):
+            client.call("project.edit", **params, path=str(target / "missing"))
+        self.assertEqual(client.call("project.list"), before)
+        self.assertEqual(client.call("project.folder", path=str(original))["path"], str(original))
+        with self.assertRaisesRegex(RuntimeError, "不在侧栏"):
+            client.call("project.folder", path=str(Path(self.temp.name)))
+
+        projects = client.call("project.edit", **params, path=str(target))
+        project = next(item for item in projects if item["name"] == "编辑后的项目")
+        self.assertEqual(project["path"], str(target))
+        self.assertEqual(project["previous_paths"], [str(original)])
+        self.assertEqual(client.call("project.edit", **params, path=str(target)), projects)
+        self.assertEqual(client.call("project.folder", path=str(target))["path"], str(target))
+        with self.assertRaisesRegex(RuntimeError, "项目已变化"):
+            client.call("project.edit", **params, path=str(original))
+        with self.assertRaisesRegex(RuntimeError, "已关联其他项目"):
+            client.call("project.save", name="重复关联", path=str(original))
+        self.assertEqual(notes.read_text(encoding="utf-8"), "已有资料")
+
+        client.close()
+        self.client = client = ServiceClient(self.temp.name)
+        self.assertEqual(client.call("project.list"), projects)
+        self.assertEqual(client.call("app.bootstrap")["sidebar"], placement)
+        self.assertEqual(client.call("conversation.get", conversation_id=chat["id"])["meta"]["workspace_dir"], str(original))
+        self.assertIn(chat["id"], {item["id"] for item in client.call("conversation.search", query="编辑后的项目")})
+        layout = client.call("sidebar.pin_project", path=str(target), pinned=False)["value"]
+        self.assertEqual(list(layout["projects"].values()), [{"path": str(original), "group_id": group_id, "pinned_at": 0}])
+        client.call("project.archive", path=str(target))
+        self.assertTrue(next(item for item in client.call("project.list") if item["path"] == str(target))["archived"])
+        self.assertEqual(client.call("project.folder", path=str(target))["path"], str(target))
+
+    def test_inferred_project_can_be_renamed_when_its_folder_is_unavailable(self):
+        folder = Path(self.temp.name, "inferred")
+        self.client.call("conversation.create", workspace_dir=str(folder))
+        folder.rmdir()
+        self.assertEqual(self.client.call("project.list"), [])
+        with self.assertRaisesRegex(RuntimeError, "目录不可用"):
+            self.client.call("project.folder", path=str(folder))
+        project, = self.client.call("project.edit", original_path=str(folder), original_name="inferred",
+                                    name="旧项目资料", path=str(folder))
+        self.assertEqual(project["inferred_path"], str(folder))
+        self.assertEqual(project["name"], "旧项目资料")
+        self.assertFalse(folder.exists())
+
     def test_automation_uses_real_worker_and_discloses_builtin_guidance_before_first_call(self):
         task = self.client.call("favorites.save", value={"name": "自动分析", "prompt": "AUTOMATION-CHECK 分析销售数据并核对指标口径", "skill_names": ["data-analysis"]})
         result = self.client.call("favorites.run", id=task["id"], request_id="automation-replay")

@@ -175,7 +175,7 @@ npm --prefix desktop run package:win
 
 如果默认输出目录中的程序正在使用，先设置 `$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')` 再构建，避免覆盖运行中的安装目录。该目录同时接收完整程序、ZIP 和清单；不要直接覆盖员工正在使用的安装目录。
 
-输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。打包检查排除用户数据与 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
+输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。ZIP 内顶层目录为 `Cowork`，成员路径最多 185 个 UTF-16 代码单元，为资源管理器的目标目录留出余量。打包排除用户数据、Python 字节码缓存和 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器按应用结构识别新旧包，也兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v

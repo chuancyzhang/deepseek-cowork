@@ -43,6 +43,7 @@ class DesktopModels:
                 try:
                     if method == "models.discover":
                         from core.llm.gateway_catalog import catalog_record, new_catalog_model
+                        progress("正在获取模型…")
                         records = list_available_models(channel.get("provider_type", "openai"), channel["base_url"], channel["api_key"])
                         identity = channel.get("channel_id") or uuid.uuid4().hex
                         result = {"models": [new_catalog_model(record if "provider_type" in record else catalog_record(record, default_provider=channel.get("provider_type", "openai")), identity, channel["base_url"]) for record in records]}
@@ -124,10 +125,17 @@ class DesktopModels:
                         result = account.discover(keys[key])
                         session["results"][key] = result
                         records.extend({"key_id": key, "key_name": keys[key]["name"], **record} for record in result["records"])
-                    return {"records": records}
+                    from core.llm.gateway_accounts import gateway_channel_id
+                    existing_models = {item["channel_id"]: {model["model_name"] for model in item["models"]}
+                                       for item in self.s.config.get_model_channels()}
+                    available = []
+                    for record in records:
+                        channel_id = gateway_channel_id(session["results"][record["key_id"]]["source"], record["provider_type"])
+                        if record["id"] not in existing_models.get(channel_id, ()):
+                            available.append(record)
+                    return {"records": available}
                 if method == "models.account_save":
                     from core.llm.gateway_accounts import channels_from_selection
-                    from core.llm.gateway_catalog import reconcile_catalog
                     selected = {tuple(item) for item in p.get("selected", [])}
                     channels = channels_from_selection(session["results"], selected, str(p.get("name") or account.site_url))
                     if not channels:
@@ -140,7 +148,8 @@ class DesktopModels:
                                 names = {item["model_name"] for item in old["models"]}
                                 channel["models"] = [*old["models"], *(item for item in channel["models"] if item["model_name"] not in names)]
                             current = [item for item in current if item["channel_id"] != channel["channel_id"]] + [channel]
-                        self.s.config.set_model_channels(current, self.s.config.get_selected_model_id())
+                        self.s.config.set_model_channels(current)
+                    self.s.publish({"event": "settings_changed"})
                     return self.s.public_settings()
                 raise ValueError("不支持的账号操作。")
             finally:

@@ -10,8 +10,9 @@ import time
 import uuid
 
 from core.desktop_media import ACTIVE, BUSY, RESUMABLE, UNCONFIRMED, has_media_result
+from core.desktop_settings import DesktopSettings
 
-from . import ADAPTERS, CAPABILITIES, SKILL_CAPABILITIES, KNOWN_MODELS, configuration, snapshot, validate_binding, binding_error, model_usage
+from . import ADAPTERS, CAPABILITIES, SKILL_CAPABILITIES, KNOWN_MODELS, configuration, snapshot, validate_binding, binding_error, binding_options, default_adapter, model_usage
 from .adapters import Adapter, MediaError, safe_message
 
 log = logging.getLogger("multimedia")
@@ -120,9 +121,10 @@ class MediaRuntime:
     def bind_run(self):
         return RunLease(self, snapshot(self.s.config))
 
-    def validate(self, p):
+    def validate(self, p, channels=None):
         """Local draft checks only: never persist, submit, or probe a provider."""
-        channels = {item["channel_id"]: item for item in self.s.config.get_model_channels()}
+        channel_records = self.s.config.get_model_channels() if channels is None else channels
+        channels = {item["channel_id"]: item for item in channel_records}
         for item in p.get("services", []):
             if item.get("channel_id") not in channels:
                 channels[item.get("channel_id")] = item
@@ -138,22 +140,21 @@ class MediaRuntime:
         return result
 
     def config(self):
-        from core.desktop_settings import DesktopSettings
         value = configuration(self.s.config)
         visible = {key: item for key, item in value["bindings"].items() if key in SKILL_CAPABILITIES}
         source_channels = self.s.config.get_model_channels()
         channels = [{key: item[key] for key in ("channel_id", "display_name", "base_url", "provider_type")}
-                    | {"configured": bool(item["api_key"]), "models": [model["model_name"] for model in item["models"]]}
+                    | {"configured": bool(item["api_key"]), "adapter": default_adapter(item["base_url"])}
                     for item in source_channels]
         records = self.host.records()
-        checks = self.validate({"bindings": visible})
+        checks = self.validate({"bindings": visible}, source_channels)
         statuses = {}
         for kind, binding in visible.items():
-            channel = next((item for item in channels if item["channel_id"] == binding.get("channel_id")), {})
-            reason = checks[kind]["message"]
+            reason = checks.get(kind, {}).get("message", "当前配置无效，请更换模型。")
             if reason:
                 statuses[kind] = {"label": "配置需修正", "message": reason, "valid": False}
                 continue
+            channel = next((item for item in channels if item["channel_id"] == binding.get("channel_id")), {})
             recent = next((item for item in records if item["capability"] == kind and all(
                 item.get("profile", {}).get(key) == binding.get(key) for key in ("channel_id", "model", "adapter"))
                 and item.get("profile", {}).get("base_url") == channel.get("base_url")), None)
@@ -163,55 +164,77 @@ class MediaRuntime:
                 "label": "最近调用成功" if recent["status"] == "completed" else "最近调用失败" if recent["status"] in {"failed", "download_failed"} else recent["message"],
                 "message": recent["message"], "updated_at": recent.get("updated_at"), "status": recent["status"]}
         return {"enabled": value["enabled"], "bindings": visible, "channels": channels, "adapters": ADAPTERS,
+                "options": binding_options(source_channels, visible),
                 "known_models": KNOWN_MODELS, "binding_status": statuses,
-                "revision": DesktopSettings.revision(value), "tasks": [self.public(item) for item in self.host.records()]}
+                "revision": self.config_revision(value, source_channels), "tasks": [self.public(item) for item in records]}
+
+    @staticmethod
+    def config_revision(value, channels):
+        return DesktopSettings.revision([value, [
+            [item["channel_id"], item["base_url"], item["display_name"], item["provider_type"], bool(item["api_key"]),
+             [model["model_name"] for model in item["models"]]]
+            for item in channels
+        ]])
 
     def save_config(self, p):
+        config = self.s.config
+        log.info("media_configuration_save_requested")
+        try:
+            with self.host.lock, config.batch_save():
+                current = configuration(config)
+                channels = config.get_model_channels()
+                if p.get("revision") != self.config_revision(current, channels):
+                    raise ValueError("多媒体配置已更新，当前编辑已保留。请重新载入后合并。")
+                raw_bindings = p.get("bindings", {})
+                if not isinstance(raw_bindings, dict) or set(raw_bindings) - set(SKILL_CAPABILITIES):
+                    raise ValueError("此技能仅支持图片生成、视频生成和视频理解。")
+                bindings = {kind: binding for kind, binding in raw_bindings.items() if binding != {}}
+                enabled = p.get("enabled", current["enabled"]) is True
+                if enabled and not bindings:
+                    raise ValueError("请至少选择一个模型后保存并启用。")
+                binding_issues = {}
+                new_services = p.get("services", [])
+                by_id = {item["channel_id"]: item for item in channels}
+                for value in new_services:
+                    identity = str(value.get("channel_id") or "")
+                    if not identity:
+                        raise ValueError("新服务缺少标识。")
+                    if identity in by_id:
+                        raise ValueError("服务标识已存在，请在模型与服务中编辑。")
+                    from .adapters import http_url
+                    base = http_url(str(value.get("base_url") or "").strip())
+                    name, key = str(value.get("display_name") or "").strip(), str(value.get("api_key") or "").strip()
+                    if not name or not key:
+                        raise ValueError("请填写服务名称与 API Key。")
+                    service = {"channel_id": identity, "display_name": name, "base_url": base,
+                               "api_key": key, "provider_type": "openai", "models": []}
+                    channels.append(service)
+                    by_id[identity] = service
+                for kind, value in bindings.items():
+                    try:
+                        binding = validate_binding(kind, value)
+                        channel = by_id.get(binding["channel_id"])
+                        if reason := binding_error(kind, binding, channel):
+                            raise ValueError(reason)
+                        bindings[kind] = binding
+                    except ValueError as error:
+                        binding_issues[kind] = str(error)
+                if binding_issues:
+                    log.info("media_configuration_invalid bindings=%s", sorted(binding_issues))
+                    return {"saved": False, "binding_issues": binding_issues}
+                if new_services:
+                    config.set_model_channels(channels)
+                retained = {kind: value for kind, value in current["bindings"].items() if kind not in SKILL_CAPABILITIES}
+                values = config.get_skill_config("multimedia")
+                config.set_skill_config("multimedia", {**values, "bindings": json.dumps({**retained, **bindings}, ensure_ascii=False)})
+                config.set_skill_enabled("multimedia", enabled)
+        except Exception as error:
+            log.warning("media_configuration_save_failed error_type=%s", type(error).__name__)
+            raise
+        log.info("media_configuration_saved bindings=%s enabled=%s", sorted(bindings), enabled)
+        self.s.management.skill_change("updated", ["multimedia"])
+        self.s.publish({"event": "settings_changed"})
         with self.host.lock:
-            current = self.config()
-            if p.get("revision") != current["revision"]:
-                raise ValueError("多媒体配置已更新，当前编辑已保留。请重新载入后合并。")
-            bindings = {key: validate_binding(key, value) for key, value in p.get("bindings", {}).items()}
-            bindings = {key: value for key, value in bindings.items() if value}
-            if set(bindings) - set(SKILL_CAPABILITIES):
-                raise ValueError("此技能仅支持图片生成、视频生成和视频理解。")
-            enabled = p.get("enabled", current["enabled"]) is True
-            if enabled and not bindings:
-                raise ValueError("请至少选择一个模型后保存并启用。")
-            channels = self.s.config.get_model_channels()
-            # Credentials always use the host's existing protected model channels.
-            for value in p.get("services", []):
-                identity = str(value.get("channel_id") or "")
-                if not identity:
-                    raise ValueError("新服务缺少标识。")
-                previous = next((item for item in channels if item["channel_id"] == identity), None)
-                if previous:
-                    raise ValueError("服务标识已存在，请在模型与服务中编辑。")
-                from .adapters import http_url
-                base = http_url(str(value.get("base_url") or "").strip())
-                name, key = str(value.get("display_name") or "").strip(), str(value.get("api_key") or "").strip()
-                if not name or not key:
-                    raise ValueError("请填写服务名称与 API Key。")
-                channels.append({"channel_id": identity, "display_name": name, "base_url": base,
-                                 "api_key": key, "provider_type": "openai", "models": []})
-            by_id = {item["channel_id"]: item for item in channels}
-            for kind, binding in bindings.items():
-                channel = by_id.get(binding["channel_id"])
-                if not channel or channel["provider_type"] != "openai":
-                    raise ValueError("请选择 OpenAI 兼容服务。")
-                reason = binding_error(kind, binding, channel)
-                if reason:
-                    raise ValueError(reason)
-                Adapter({**binding, "base_url": channel["base_url"], "api_key": channel["api_key"]})
-            with self.s.config.batch_save():
-                if p.get("services"):
-                    self.s.config.set_model_channels(channels, self.s.config.get_selected_model_id())
-                retained = {key: value for key, value in configuration(self.s.config)["bindings"].items() if key not in SKILL_CAPABILITIES}
-                self.s.config.set_skill_config("multimedia", {"bindings": json.dumps({**retained, **bindings}, ensure_ascii=False)})
-                self.s.config.set_skill_enabled("multimedia", enabled)
-            log.info("media_configuration_saved bindings=%s", sorted(bindings))
-            self.s.management.skill_change("updated", ["multimedia"])
-            self.s.publish({"event": "settings_changed"})
             return self.config()
 
     def dispatch(self, method, p):

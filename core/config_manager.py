@@ -427,10 +427,8 @@ class ConfigManager:
         if legacy_provider_configs != self.config.get("model_provider_configs"):
             self.config["model_provider_configs"] = legacy_provider_configs
             updated = True
-        if not str(self.config.get("selected_model_id") or "").startswith("enterprise:") and not self._get_profile_from_configs(
-            normalized_channels,
-            self.config.get("selected_model_id"),
-        ):
+        selected = str(self.config.get("selected_model_id") or "").strip()
+        if selected and not selected.startswith("enterprise:") and not self._get_profile_from_configs(normalized_channels, selected):
             self.config["selected_model_id"] = self._first_model_id(normalized_channels)
             updated = True
         normalized_agent_profiles = self._normalize_agent_profiles(
@@ -1120,13 +1118,10 @@ class ConfigManager:
         self.config["model_provider_configs"] = self._provider_configs_from_channels(normalized_channels)
         if selected_model_id is not None:
             self.config["selected_model_id"] = str(selected_model_id or "").strip()
-        if (not str(self.config.get("selected_model_id") or "").startswith("enterprise:")
-                and not self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id"))):
+        selected = self.config.get("selected_model_id") or ""
+        if selected and not selected.startswith("enterprise:") and not self._get_profile_from_configs(normalized_channels, selected):
             self.config["selected_model_id"] = self._first_model_id(normalized_channels)
-        self._sync_legacy_model_fields(
-            save=False,
-            profile=self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id")),
-        )
+        self._sync_legacy_model_fields(save=False)
         self.save_config()
 
     def get_model_provider_configs(self):
@@ -1271,7 +1266,10 @@ class ConfigManager:
 
     def get_model_profile(self, model_id=None):
         configs = self.get_model_channels()
-        selected_id = str(model_id or self.config.get("selected_model_id") or "").strip()
+        default_id = str(self.config.get("selected_model_id") or "").strip()
+        selected_id = str(model_id or default_id).strip()
+        if not selected_id:
+            return None
         if selected_id.startswith("enterprise:"):
             from core.enterprise_client import EnterpriseStore
             return next((p for p in EnterpriseStore(self.data_dir).profiles() if p["id"] == selected_id),
@@ -1280,7 +1278,7 @@ class ConfigManager:
         profile = self._get_profile_from_configs(configs, selected_id)
         if profile:
             return profile
-        return self._get_profile_from_configs(configs, self._first_model_id(configs))
+        return self._get_profile_from_configs(configs, self._first_model_id(configs)) if default_id else None
 
     def get_selected_model_id(self):
         profile = self.get_model_profile(self.config.get("selected_model_id"))
@@ -1288,7 +1286,7 @@ class ConfigManager:
 
     def set_selected_model_id(self, model_id):
         profile = self.get_model_profile(model_id)
-        if not profile:
+        if not profile or profile["id"] != model_id:
             return False
         self.config["selected_model_id"] = profile["id"]
         self._sync_legacy_model_fields(save=False)
@@ -1324,8 +1322,7 @@ class ConfigManager:
 
     def _sync_legacy_model_fields(self, save=True, profile=None):
         profile = profile or self.get_model_profile(self.config.get("selected_model_id"))
-        if not profile:
-            return False
+        profile = profile or {"id": "", "provider_type": "openai"}
         updates = {
             "selected_model_id": profile.get("id"),
             "llm_provider": profile.get("provider_type") or profile.get("provider", "openai"),

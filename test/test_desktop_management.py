@@ -1,6 +1,7 @@
 """Domain parity and reliability through the real Qt-blocked desktop process."""
 import json
 from pathlib import Path
+import pytest
 import tempfile
 import unittest
 import uuid
@@ -234,7 +235,7 @@ class ManagementTests(unittest.TestCase):
         self.assertNotIn("secret-fixture-1234", json.dumps(c.call("variables.list")))
         cid = c.call("conversation.create")["id"]
         identity = uuid.uuid4().hex
-        with self.assertRaisesRegex(RuntimeError, "API Key"):
+        with self.assertRaisesRegex(RuntimeError, "所选模型已不可用"):
             c.call("conversation.send", conversation_id=cid, request_id=identity, message_id=uuid.uuid4().hex, text="保留此输入", model_id="missing")
         receipt = c.call("conversation.receipt", conversation_id=cid, request_id=identity)
         self.assertTrue(receipt["rejected"])
@@ -387,6 +388,94 @@ def test_config_save_failure_preserves_disk_and_memory(tmp_path, monkeypatch):
         pass
     assert config.get("fixture") == "original"
     assert Path(config.config_path).read_bytes() == before
+
+
+def test_channel_delete_confirms_impact_and_keeps_an_explicit_empty_default(tmp_path):
+    client = ServiceClient(tmp_path)
+    base = "https://apihub.agnes-ai.com/v1"
+    try:
+        selected = client.call("settings.save_model", channel_id="media-chat", name="Agnes", model_name="chat",
+                               base_url=base, api_key="delete-channel-secret")["selected_model_id"]
+        stale_editor = next(item for item in client.call("settings.channels") if item["channel_id"] == "media-chat")
+        fallback = client.call("settings.save_model", channel_id="fallback", name="Other", model_name="chat",
+                               base_url="https://other.example/v1", api_key="other-key")["selected_model_id"]
+        client.call("settings.select_model", model_id=selected)
+        media = client.call("media.config")
+        saved = client.call("media.save", revision=media["revision"], enabled=True, bindings={
+            "image_generate": {"channel_id": "media-chat", "model": "agnes-image-2.5-flash", "adapter": "agnes"},
+            "video_understand": {"channel_id": "fallback", "model": "understand", "adapter": "openai"},
+        })
+        conversation = client.call("conversation.create")
+        cid = conversation["id"]
+        before = client.call("conversation.get", conversation_id=cid)
+        preview = client.call("settings.channel_delete_preview", channel_id="media-chat")
+        assert preview["removes_default"] and not preview["disable_media"]
+        assert preview["media"] == ["图片生成"]
+        assert [item["id"] for item in preview["replacements"]] == [fallback]
+        assert "delete-channel-secret" not in json.dumps(preview)
+        with pytest.raises(RuntimeError, match="新的默认模型"):
+            client.call("settings.channel_delete", channel_id="media-chat", revision=preview["revision"])
+        client.call("settings.select_model", model_id=fallback)
+        with pytest.raises(RuntimeError, match="已有变化"):
+            client.call("settings.channel_delete", channel_id="media-chat", revision=preview["revision"], replacement_model_id=fallback)
+        client.call("settings.select_model", model_id=selected)
+        result = client.call("settings.channel_delete", channel_id="media-chat", revision=preview["revision"], replacement_model_id=fallback)
+        assert result["selected_model_id"] == fallback
+        assert all(item["channel_id"] != "media-chat" for item in client.call("settings.channels"))
+        with pytest.raises(RuntimeError, match="服务已删除"):
+            client.call("settings.channel_save", value=stale_editor, existing=True)
+        remaining = client.call("media.config")
+        assert remaining["enabled"] and remaining["bindings"] == {"video_understand": saved["bindings"]["video_understand"]}
+        with pytest.raises(RuntimeError, match="所选模型已不可用"):
+            client.call("conversation.send", conversation_id=cid, model_id=selected,
+                        request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex, text="不要换到其他服务发送")
+        after = client.call("conversation.get", conversation_id=cid)
+        assert after["messages"] == before["messages"] and after["meta"] == before["meta"]
+        assert "delete-channel-secret" not in (tmp_path / "config.json").read_text(encoding="utf-8")
+        preview = client.call("settings.channel_delete_preview", channel_id="fallback")
+        assert preview["removes_default"] and not preview["replacements"] and preview["disable_media"]
+        result = client.call("settings.channel_delete", channel_id="fallback", revision=preview["revision"])
+        assert not result["selected_model_id"] and not result["multimedia_enabled"]
+        assert not client.call("media.config")["bindings"]
+    finally:
+        client.close()
+    client = ServiceClient(tmp_path)
+    try:
+        assert not client.call("settings.get")["selected_model_id"]
+        assert not client.call("media.config")["enabled"]
+        assert [item["channel_id"] for item in client.call("settings.channels")] == ["deepseek-official-channel"]
+    finally:
+        client.close()
+
+
+def test_channel_delete_rolls_back_when_config_write_fails(tmp_path, monkeypatch):
+    from core.desktop_config import DesktopConfigManager
+    from core.desktop_management import Management
+    from core.desktop_media import DesktopMedia
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("COWORK_APP_DATA_DIR", str(tmp_path))
+    config = DesktopConfigManager(migrate_legacy=False)
+    channel = config.get_model_channels()[0]
+    channel["api_key"] = "local-fixture"
+    config.set_model_channels([channel], channel["models"][0]["id"])
+    config.set_skill_config("multimedia", {"bindings": json.dumps({
+        "video_generate": {"channel_id":channel["channel_id"], "model":"video", "adapter":"openai"},
+    })})
+    config.set_skill_enabled("multimedia", True)
+    events = []
+    service = SimpleNamespace(config=config, publish=events.append)
+    service.media = DesktopMedia(service)
+    management = Management(service)
+    preview = management.dispatch("settings.channel_delete_preview", {"channel_id":channel["channel_id"]})
+    before = Path(config.config_path).read_bytes()
+    monkeypatch.setattr(config, "_write_config_or_raise", lambda: (_ for _ in ()).throw(OSError("disk fixture")))
+    with pytest.raises(OSError, match="disk fixture"):
+        management.dispatch("settings.channel_delete", {"channel_id":channel["channel_id"], "revision":preview["revision"]})
+    assert Path(config.config_path).read_bytes() == before
+    assert management.dispatch("settings.channel_delete_preview", {"channel_id": channel["channel_id"]}) == preview
+    assert not events
+
 
 def test_local_library_aggregates_projects_and_keeps_file_scope(tmp_path):
     import threading

@@ -96,6 +96,10 @@ export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
   function update(next: FormDraft) {setEntry(next);persist(next);}
   function change(next: any) { update({...entry,value:next}); }
+  function rebase(next: any, baseline: any) {
+    update({...entry,value:next,saved:baseline});
+    onDirty(!sameFormValue(next,baseline));
+  }
   function done(next = value) {
     let remaining = false;
     setEntry(previous=>{
@@ -105,7 +109,7 @@ export function useFormDraft(key: string, initial: any, onDirty: (dirty: boolean
       persist(result);return result;
     });onDirty(remaining);
   }
-  return { value, saved, change, done, dirty, recovery:entry.recovery,
+  return { value, saved, change, rebase, done, dirty, recovery:entry.recovery,
     restore: () => {update(restoreFormRecovery(entry));console.info('form_draft_restored', {form:key});},
     discardRecovery: () => {const {recovery,...next}=entry;update(next);console.info('form_draft_discarded', {form:key});},
     reset: () => {update({...entry,value:saved});onDirty(false);} };

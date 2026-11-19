@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Check, KeyRound, Plus, RefreshCw } from 'lucide-react';
+import { ArrowRight, KeyRound, Plus, RefreshCw } from 'lucide-react';
 import { ErrorState, Field, JobProgress, PageHead } from '../Management';
 import { operation, rpc } from '../managementApi';
 import type { Settings } from '../types';
+import ModelSelection from './ModelSelection';
 
 export default function GatewaySetup({ back, saved, confirm }: {back: () => void; saved: (value: Settings) => void; confirm: (title: string, detail: string, choices: string[]) => Promise<number>}) {
   const [url, setUrl] = useState(''), [platform, setPlatform] = useState('auto'), [account, setAccount] = useState<any>(null);
@@ -36,7 +37,15 @@ export default function GatewaySetup({ back, saved, confirm }: {back: () => void
       {!keys.length && <p className="muted">还没有可用密钥，可以在下方创建。</p>}{keys.map(key => <label className="model-choice" key={key.id}><input type="checkbox" disabled={!key.usable || busy} checked={chosenKeys.includes(key.id)} onChange={() => setChosenKeys(toggle(chosenKeys,key.id))}/><KeyRound size={17}/><div><strong>{key.name}</strong><small>{key.group_name} · {key.quota_label} · {key.reason || '可用'}</small></div></label>)}
       <details className="settings-section"><summary>创建 DeepSeek Cowork 专用密钥</summary><div className="form-grid"><Field label="密钥名称"><input value={keyName} onChange={event => setKeyName(event.target.value)}/></Field><Field label="分组"><select value={group} onChange={event => setGroup(event.target.value)}><option value="">默认分组</option>{groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field><Field label="有效天数" help="0 表示不过期"><input type="number" min={0} value={days} onChange={event => setDays(+event.target.value)}/></Field><Field label="额度" help="0 表示不另设密钥额度上限；计价遵循站点规则"><input type="number" min={0} value={quota} onChange={event => setQuota(+event.target.value)}/></Field></div>
         <div className="button-row"><button className="secondary" disabled={busy} onClick={async () => {if (await confirm('创建站点密钥？', `将在 ${account.site_url} 创建“${keyName}”，权限与额度按上方设置。`, ['取消','创建']) === 1) await run('models.account_create_key', {name:keyName,group,days,quota}, async result => {await loadKeys();setChosenKeys([result.id]);});}}><Plus size={15}/>创建</button><button className="secondary" disabled={busy} onClick={() => void run('models.account_reconcile', {}, async result => {await loadKeys();setChosenKeys([result.id]);})}>核对创建结果</button></div></details>
-      <button className="primary" disabled={busy || !chosenKeys.length} onClick={() => void run('models.account_discover', {keys:chosenKeys}, result => {setRecords(result.records);setChosen(result.records.filter((item:any) => !item.discovery?.unsupported_reason).map((item:any) => JSON.stringify([item.key_id,item.id])));setStage('models');})}>获取所选密钥的模型</button></>
-    : <><Field label="服务名称"><input value={name} onChange={event => setName(event.target.value)}/></Field><div className="model-selection">{records.map(record => {const identity=JSON.stringify([record.key_id,record.id]);return <label className="model-choice" key={identity}><input type="checkbox" checked={chosen.includes(identity)} disabled={busy || Boolean(record.discovery?.unsupported_reason)} onChange={() => setChosen(toggle(chosen,identity))}/><div><strong>{record.display_name || record.id}</strong><small>{record.key_name} · {record.api_protocol} {record.discovery?.unsupported_reason || record.discovery?.metadata_warning || ''}</small></div></label>;})}</div><div className="button-row"><button className="secondary" disabled={busy} onClick={() => setStage('keys')}>重新选择密钥</button><button className="primary" disabled={busy || !chosen.length} onClick={() => void run('models.account_save', {name,selected:chosen.map(item => JSON.parse(item))}, result => {saved(result);back();})}><Check size={16}/>添加所选模型</button></div></>}
+      <button className="primary" disabled={busy || !chosenKeys.length} onClick={() => void run('models.account_discover', {keys:chosenKeys}, result => {setRecords(result.records);setChosen([]);setStage('models');})}>获取所选密钥的模型</button></>
+    : <><Field label="服务名称"><input value={name} disabled={busy} onChange={event => setName(event.target.value)}/></Field>
+      <ModelSelection choices={records.map(record => ({
+        key:JSON.stringify([record.key_id,record.id]), name:record.display_name || record.id,
+        detail:[record.key_name, record.discovery?.unsupported_reason || record.discovery?.metadata_warning].filter(Boolean).join(' · '),
+        disabled:Boolean(record.discovery?.unsupported_reason),
+      }))} selected={chosen} onChange={setChosen} disabled={busy}
+        cancel={<button className="secondary" disabled={busy} onClick={() => setStage('keys')}>重新选择密钥</button>}
+        onAdd={keys => void run('models.account_save', {name, selected:keys.map(key => JSON.parse(key))}, result => {saved(result);back();})}/>
+    </>}
   </>;
 }

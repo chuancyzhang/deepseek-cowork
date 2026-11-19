@@ -660,6 +660,48 @@ class MultimediaTests(unittest.TestCase):
 
 
 class MultimediaServiceTests(unittest.TestCase):
+    def test_incompatible_saved_binding_can_be_replaced_then_unbound(self):
+        from core.desktop_config import DesktopConfigManager
+
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            with patch("core.config_manager.get_app_data_dir", return_value=directory):
+                config = DesktopConfigManager(migrate_legacy=False)
+            channels = config.get_model_channels()
+            channels.extend([
+                {"channel_id": "agnes", "display_name": "Agnes", "api_key": "test-key",
+                 "base_url": "https://apihub.agnes-ai.com/v1", "models": [
+                     {"model_name": "agnes-image-2.1-flash"}, {"model_name": "agnes-image-2.5-flash"},
+                     {"model_name": "agnes-video-2.5"}, {"model_name": "agnes-video-2.5-flash"},
+                 ]},
+                {"channel_id": "video", "display_name": "Video", "api_key": "test-key",
+                 "base_url": "https://ark.cn-beijing.volces.com/api/v3", "models": [{"model_name": "video-demo"}]},
+            ])
+            config.set_model_channels(channels)
+            invalid = {"channel_id": "agnes", "model": "agnes-image-2.5-flash", "adapter": "openai"}
+            config.set_skill_config("multimedia", {"bindings": json.dumps({"video_understand": invalid})})
+            config.set_skill_enabled("multimedia", True)
+            client = ServiceClient(directory)
+            try:
+                data = client.call("media.config")
+                self.assertFalse(data["binding_status"]["video_understand"]["valid"])
+                self.assertIn("图片生成", data["binding_status"]["video_understand"]["message"])
+                self.assertNotIn("agnes-image-2.1-flash", {item["model"] for item in data["options"]["video_generate"]})
+                self.assertNotIn("agnes-video-2.5", {item["model"] for item in data["options"]["image_generate"]})
+                options = data["options"]["video_understand"]
+                replacement = {"channel_id": "video", "model": "video-demo", "adapter": "ark"}
+                self.assertEqual(options, [replacement])
+                rejected = client.call("media.save", revision=data["revision"], bindings=data["bindings"])
+                self.assertFalse(rejected["saved"])
+                self.assertIn("video_understand", rejected["binding_issues"])
+                self.assertEqual(client.call("media.config")["bindings"], data["bindings"])
+                data = client.call("media.save", revision=data["revision"], bindings={"video_understand": replacement})
+                self.assertEqual(data["bindings"]["video_understand"], replacement)
+                data = client.call("media.save", revision=data["revision"], enabled=False, bindings={})
+                self.assertFalse(data["enabled"])
+                self.assertEqual(data["bindings"], {})
+            finally:
+                client.close()
+
     def test_legacy_configuration_migrates_once_and_explicit_skill_state_wins(self):
         from core.desktop_config import DesktopConfigManager
         from core.multimedia import configuration
@@ -709,8 +751,8 @@ class MultimediaServiceTests(unittest.TestCase):
             try:
                 self.assertFalse(client.call("settings.get")["multimedia_enabled"])
                 self.assertEqual(client.call("media.config")["bindings"], {})
-                page = client.call("settings.page", page="experiments")
-                self.assertNotIn("multimedia", page["values"])
+                with self.assertRaisesRegex(RuntimeError, "设置页面不存在"):
+                    client.call("settings.page", page="experiments")
                 skill = next(item for item in client.call("skills.inventory") if item["name"] == "multimedia")
                 self.assertFalse(skill["enabled"])
                 self.assertEqual(skill["source_type"], "bundled_plugin")

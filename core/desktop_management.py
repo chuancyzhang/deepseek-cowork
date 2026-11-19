@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from pathlib import Path
 import threading
@@ -26,6 +27,7 @@ class Management:
         "themes.list", "themes.resolve", "themes.activate", "themes.appearance", "themes.delete",
         "themes.import", "themes.export", "themes.preview", "themes.commit_preview", "themes.discard_preview", "themes.fonts", "settings.general",
         "settings.delete_model", "settings.channels", "settings.channel_save",
+        "settings.channel_delete_preview", "settings.channel_delete",
     })
 
     def __init__(self, service):
@@ -63,6 +65,62 @@ class Management:
     def dispatch(self, method, p):
         with self.lock:
             return self._dispatch(method, p)
+
+    def channel_deletion(self, channel_id):
+        from core.desktop_settings import DesktopSettings
+        from core.multimedia import CAPABILITIES, SKILL_CAPABILITIES, configuration
+
+        channels = self.config.get_model_channels()
+        channel = next((item for item in channels if item["channel_id"] == channel_id), None)
+        if channel is None:
+            raise ValueError("服务已不存在，请刷新列表。")
+        media = configuration(self.config)
+        affected = [kind for kind, binding in media["bindings"].items()
+                    if isinstance(binding, dict) and binding.get("channel_id") == channel_id]
+        bindings = {kind: binding for kind, binding in media["bindings"].items() if kind not in affected}
+        disable_media = bool(affected and media["enabled"] and not any(bindings.get(kind) for kind in SKILL_CAPABILITIES))
+        selected = self.config.get_selected_model_id()
+        removes_default = any(model["id"] == selected for model in channel["models"])
+        replacements = [
+            {"id": profile["id"], "label": f'{profile["channel_display_name"]} · {profile["display_name"]}'}
+            for profile in self.config.iter_model_profiles()
+            if profile["channel_id"] != channel_id and profile.get("api_key")
+            and self.s.media.model_usage(profile, bindings=media["bindings"])["chat_supported"] is not False
+        ] if removes_default else []
+        impact = {"channel_id": channel_id, "name": channel["display_name"], "model_count": len(channel["models"]),
+                  "configured": bool(channel["api_key"]), "media": [CAPABILITIES[kind] for kind in affected if kind in SKILL_CAPABILITIES],
+                  "disable_media": disable_media, "removes_default": removes_default, "replacements": replacements}
+        impact["revision"] = DesktopSettings.revision([channel, selected, media, impact])
+        return impact, channels, bindings, affected
+
+    def delete_channel(self, channel_id, params):
+        log.info("model_channel_delete_requested channel=%s", channel_id)
+        try:
+            with self.s.media.lock:
+                with self.config.batch_save():
+                    impact, channels, bindings, affected = self.channel_deletion(channel_id)
+                    if params.get("revision") != impact["revision"]:
+                        raise ValueError("服务或关联配置已有变化，请重新核对后删除。")
+                    replacement = str(params.get("replacement_model_id") or "")
+                    candidates = {item["id"] for item in impact["replacements"]}
+                    if (candidates or replacement) and replacement not in candidates:
+                        raise ValueError("请选择新的默认模型。")
+                    self.config.set_model_channels([item for item in channels if item["channel_id"] != channel_id],
+                                                   replacement if impact["removes_default"] else None)
+                    if affected:
+                        values = self.config.get_skill_config("multimedia")
+                        self.config.set_skill_config("multimedia", {**values, "bindings": json.dumps(bindings, ensure_ascii=False)})
+                    if impact["disable_media"]:
+                        self.config.set_skill_enabled("multimedia", False)
+                self.s.media.reconcile()
+        except Exception as error:
+            log.warning("model_channel_delete_failed channel=%s error_type=%s", channel_id, type(error).__name__)
+            raise
+        log.info("model_channel_deleted channel=%s models=%s media=%s", channel_id, impact["model_count"], affected)
+        if affected:
+            self.skill_change("updated", ["multimedia"])
+        self.s.publish({"event": "settings_changed"})
+        return self.s.public_settings()
 
     def _dispatch(self, method, p):
         action = method.split(".")[1]
@@ -285,23 +343,34 @@ class Management:
             return {key: self.config.get(key) for key in permitted}
         if method == "settings.channels":
             return [{**channel, "api_key": "", "configured": bool(channel.get("api_key"))} for channel in self.config.get_model_channels()]
+        if method == "settings.channel_delete_preview":
+            with self.s.media.lock:
+                return self.channel_deletion(str(p.get("channel_id") or ""))[0]
+        if method == "settings.channel_delete":
+            return self.delete_channel(str(p.get("channel_id") or ""), p)
         if method == "settings.channel_save":
-            channels = self.config.get_model_channels()
             value = p["value"]
             identity = value.get("channel_id") or uuid.uuid4().hex
-            previous = next((item for item in channels if item["channel_id"] == identity), {})
             if not str(value.get("display_name") or "").strip() or not str(value.get("base_url") or "").startswith(("https://", "http://")):
                 raise ValueError("请填写服务名称和有效的 HTTP 或 HTTPS 地址。")
             if not isinstance(value.get("models"), list) or any(not str(model.get("model_name") or "").strip() for model in value["models"]):
                 raise ValueError("请填写每个模型的标识。")
-            value = {**previous, **value, "channel_id": identity, "api_key": value.get("api_key") or previous.get("api_key", "")}
-            self.config.set_model_channels([item for item in channels if item["channel_id"] != identity] + [value], self.config.get_selected_model_id())
+            with self.config.batch_save():
+                channels = self.config.get_model_channels()
+                previous = next((item for item in channels if item["channel_id"] == identity), {})
+                if p.get("existing") and not previous:
+                    raise ValueError("服务已删除，当前编辑已保留。")
+                value = {**previous, **value, "channel_id": identity, "api_key": value.get("api_key") or previous.get("api_key", "")}
+                self.config.set_model_channels([value if item["channel_id"] == identity else item for item in channels] + ([] if previous else [value]))
+            self.s.publish({"event": "settings_changed"})
             return self.s.public_settings()
         if method == "settings.delete_model":
-            channels = self.config.get_model_channels()
-            for channel in channels:
-                channel["models"] = [model for model in channel.get("models", []) if model["id"] != p["id"]]
-            self.config.set_model_channels(channels, self.config.get_selected_model_id())
+            with self.config.batch_save():
+                channels = self.config.get_model_channels()
+                for channel in channels:
+                    channel["models"] = [model for model in channel.get("models", []) if model["id"] != p["id"]]
+                self.config.set_model_channels(channels)
+            self.s.publish({"event": "settings_changed"})
             return self.s.public_settings()
         raise ValueError("不支持的管理操作。")
 

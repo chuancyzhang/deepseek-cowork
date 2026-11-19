@@ -29,7 +29,9 @@ from scripts.bundled_runtime_checks import (  # noqa: E402
 )
 
 
-ARCHIVE_ROOT = "DeepSeek Cowork-win32-x64"
+DIST_ROOT = "DeepSeek Cowork-win32-x64"
+ARCHIVE_ROOT = "Cowork"
+MAX_ARCHIVE_PATH_UNITS = 185
 SERVICE_DIR = "resources/service"
 DEFAULT_CONFIG_PATH = SERVICE_DIR + "/_internal/config.json"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
@@ -156,6 +158,20 @@ def _relative_files(dist_dir: Path) -> list[Path]:
     )
 
 
+def _is_python_cache(path: Path) -> bool:
+    return path.suffix.lower() in {".pyc", ".pyo"} or "__pycache__" in {part.lower() for part in path.parts}
+
+
+def _release_entries(files: list[Path]):
+    entries = []
+    for relative in files:
+        archive_name = PurePosixPath(ARCHIVE_ROOT, *relative.parts).as_posix()
+        if len(archive_name.encode("utf-16-le")) // 2 > MAX_ARCHIVE_PATH_UNITS:
+            raise PackageAuditError(f"ZIP entry exceeds the Windows path budget ({MAX_ARCHIVE_PATH_UNITS}): {archive_name}")
+        entries.append((relative, archive_name))
+    return entries
+
+
 def _forbidden_reason(relative: Path) -> str:
     path = relative.as_posix()
     lowered = path.lower()
@@ -179,7 +195,7 @@ def _forbidden_reason(relative: Path) -> str:
         return "Removed built-in Skill is still bundled; rebuild the desktop distribution"
     if "/web/editors/dist/" in "/" + lowered and lowered.endswith(".map"):
         return "editor source map"
-    if "/__pycache__/" in f"/{lowered}/" or lowered.endswith((".pyc", ".pyo")):
+    if _is_python_cache(relative):
         return "Python cache file"
     if lowered.startswith("resources/service/_internal/python_env/lib/site-packages/pythonwin/"):
         return "PythonWin IDE runtime"
@@ -380,6 +396,7 @@ def audit_distribution(dist_dir: Path) -> dict:
     if forbidden:
         detail = "; ".join(f"{item['path']} ({item['reason']})" for item in forbidden[:20])
         raise PackageAuditError(f"Forbidden packaged files found: {detail}")
+    entries = _release_entries(files)
 
     default_config = dist_dir / DEFAULT_CONFIG_PATH
     if default_config.exists():
@@ -404,7 +421,11 @@ def audit_distribution(dist_dir: Path) -> dict:
         git_runtime = validate_git_bundle(dist_dir / "resources/service/_internal/git_bash_env")
         ripgrep_runtime = validate_ripgrep_bundle(dist_dir / "resources/service/_internal/ripgrep_env")
         print("[Packaging] Checking bundled Python documents and data analysis…", flush=True)
-        python_runtime = validate_python_bundle(dist_dir / "resources/service/_internal/python_env")
+        python_root = dist_dir / "resources/service/_internal/python_env"
+        python_runtime = validate_python_bundle(python_root)
+        generated = [path for path in _relative_files(python_root) if _is_python_cache(path)]
+        if generated:
+            raise ValueError(f"Bundled Python verification created bytecode in the release directory: {generated[0]}")
         print("[Packaging] Bundled Python checks passed.", flush=True)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise PackageAuditError(str(exc)) from exc
@@ -438,6 +459,7 @@ def audit_distribution(dist_dir: Path) -> dict:
         "total_bytes": total_bytes,
         "total_mb": round(total_bytes / 1024 / 1024, 2),
         "file_count": len(files),
+        "max_archive_path_units": max(len(name.encode("utf-16-le")) // 2 for _, name in entries),
         "components": ordered_components,
         "required_paths": list(REQUIRED_PATHS),
         "editor_assets": editor_assets,
@@ -477,8 +499,8 @@ def create_deterministic_zip(dist_dir: Path, output_path: Path) -> str:
             compresslevel=9,
             allowZip64=True,
         ) as archive:
-            for relative in _relative_files(dist_dir):
-                archive_name = str(PurePosixPath(ARCHIVE_ROOT, *relative.parts))
+            files = [path for path in _relative_files(dist_dir) if not _is_python_cache(path)]
+            for relative, archive_name in _release_entries(files):
                 with (dist_dir / relative).open("rb") as source:
                     with archive.open(_zip_info(archive_name), "w", force_zip64=True) as destination:
                         shutil.copyfileobj(source, destination, length=1024 * 1024)
@@ -545,7 +567,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dist-dir",
         type=Path,
-        default=ROOT / "desktop/out" / ARCHIVE_ROOT,
+        default=ROOT / "desktop/out" / DIST_ROOT,
     )
     parser.add_argument(
         "--output",

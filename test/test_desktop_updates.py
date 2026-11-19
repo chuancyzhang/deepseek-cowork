@@ -18,7 +18,7 @@ from core.platform_runtime import platform_runtime
 from core.update_coordinator import UpdateCoordinator, UpdateWorker, load_prepared, prepare_online
 
 
-def desktop_zip(path, version=APP_VERSION, connection=None, extra=None):
+def desktop_zip(path, version=APP_VERSION, connection=None, extra=None, root="Cowork"):
     identity = {"schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": version}
     files = {"deepseek-cowork.exe": b"fixture", "resources/app.asar": b"interface",
              "resources/service/cowork-service.exe": b"service", "desktop-release.json": json.dumps(identity).encode()}
@@ -27,7 +27,7 @@ def desktop_zip(path, version=APP_VERSION, connection=None, extra=None):
     files.update(extra or {})
     with zipfile.ZipFile(path, "w") as archive:
         for name, contents in files.items():
-            archive.writestr("DeepSeek Cowork-win32-x64/" + name, contents)
+            archive.writestr(root + "/" + name, contents)
     return {"schema_version": 1, "app_layout": "electron", "target_os": "windows", "arch": "x64", "version": version,
             "filename": f"cowork-desktop-v{version}-windows-x64.zip", "size": path.stat().st_size,
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "notes": "更新说明"}
@@ -38,9 +38,10 @@ def wait(coordinator):
         assert worker.join(10), "update worker did not finish"
 
 
-def test_local_same_version_uses_owned_copy_and_restores_offline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("archive_root", ["Cowork", "DeepSeek Cowork-win32-x64"])
+def test_local_same_version_uses_owned_copy_and_restores_offline(tmp_path, monkeypatch, archive_root):
     package = tmp_path / "任意文件名.zip"
-    manifest = desktop_zip(package)
+    manifest = desktop_zip(package, root=archive_root)
     (tmp_path / "latest-desktop-windows-x64.json").write_text(json.dumps(manifest))
     root = tmp_path / "cache"
     result = updater.prepare_desktop_local(str(package), str(root), APP_VERSION, None, threading.Event(), None)

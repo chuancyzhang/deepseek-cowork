@@ -252,7 +252,8 @@ class DesktopSettingsAPI:
             self.config.set_model_channels(channels, model_id)
             return self.public_settings()
         if method == "settings.select_model":
-            self.config.set_selected_model_id(p["model_id"])
+            if not self.config.set_selected_model_id(p["model_id"]):
+                raise ValueError("模型已不可用，请重新选择。")
             return self.public_settings()
         if method == "settings.permission":
             self.config.set_god_mode(bool(p["enabled"]))

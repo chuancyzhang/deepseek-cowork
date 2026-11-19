@@ -22,31 +22,69 @@ ADAPTERS = {
 KNOWN_MODELS = {
     # https://agnes-ai.com/zh-Hans/docs/agnes-image-20-flash
     "agnes-image-2.0-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成", "adapter": "agnes"},
+    "agnes-image-2.1-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成", "adapter": "agnes"},
     # https://agnes-ai.com/zh-Hans/docs/agnes-image-25-flash
     "agnes-image-2.5-flash": {"capabilities": ["image_generate"], "chat_supported": False, "purpose_label": "图片生成", "adapter": "agnes"},
+    "agnes-video-2.5": {"capabilities": ["video_generate"], "chat_supported": False, "purpose_label": "视频生成", "adapter": "agnes"},
     # https://agnes-ai.com/zh-Hans/docs/agnes-video-25-flash
     "agnes-video-2.5-flash": {"capabilities": ["video_generate"], "chat_supported": False, "purpose_label": "视频生成", "adapter": "agnes"},
 }
 
 def model_usage(profile, bindings):
-    agnes = urlsplit(profile.get("base_url", "")).hostname == "apihub.agnes-ai.com" or any(
+    agnes = default_adapter(profile.get("base_url")) == "agnes" or any(
         item.get("adapter") == "agnes" and item.get("channel_id") == profile.get("channel_id") for item in bindings.values())
     return copy.deepcopy(KNOWN_MODELS.get(profile.get("model_name"), {})) if agnes else {}
+
+
+def default_adapter(base_url):
+    try:
+        hostname = urlsplit(str(base_url or "")).hostname
+    except ValueError:
+        return "openai"
+    return {"apihub.agnes-ai.com": "agnes", "ark.cn-beijing.volces.com": "ark"}.get(hostname, "openai")
 
 
 def binding_error(kind, binding, channel):
     if not channel or not channel.get("api_key"):
         return "服务不可用或尚未填写 API Key。"
+    if channel.get("provider_type", "openai") != "openai":
+        return "请选择 OpenAI 兼容服务。"
     known = model_usage({**channel, "model_name": binding.get("model")}, {kind: binding})
     if known and kind not in known["capabilities"]:
         return "此模型用于" + known["purpose_label"] + "，不能绑定为" + CAPABILITIES[kind] + "。"
     if known and binding.get("adapter") != "agnes":
         return "此 Agnes 模型需要 Agnes 接入预设，请修改后保存。"
+    from .adapters import api_root
     try:
         validate_binding(kind, binding)
+        api_root({**binding, "base_url": channel.get("base_url", "")})
     except ValueError as error:
         return str(error)
     return ""
+
+
+def binding_options(channels, bindings):
+    options = {kind: [] for kind in SKILL_CAPABILITIES}
+    for channel in channels:
+        if not channel["api_key"] or channel["provider_type"] != "openai":
+            continue
+        channel_id = channel["channel_id"]
+        models = list(dict.fromkeys(model["model_name"] for model in channel["models"]))
+        adapter = default_adapter(channel["base_url"])
+        for kind, choices in options.items():
+            current = bindings.get(kind) or {}
+            if not isinstance(current, dict):
+                current = {}
+            same_channel = current.get("channel_id") == channel_id
+            current_model = current.get("model") if same_channel else None
+            candidates = [*models, current_model] if current_model and current_model not in models else models
+            for model in candidates:
+                candidate = {"channel_id": channel_id, "model": model, "adapter": adapter}
+                if current_model == model and not binding_error(kind, current, channel):
+                    choices.append(current)
+                elif not binding_error(kind, candidate, channel):
+                    choices.append(candidate)
+    return options
 
 
 def validate_binding(kind, value):

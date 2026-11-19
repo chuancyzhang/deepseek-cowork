@@ -298,6 +298,9 @@ class PackageReleaseTests(unittest.TestCase):
 
             first_hash = package_release.create_deterministic_zip(dist, first)
             os.utime(dist / "deepseek-cowork.exe", None)
+            cache = dist / "resources/service/_internal/python_env/Lib/__pycache__/demo.cpython-314.pyc"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(b"rebuildable bytecode")
             second_hash = package_release.create_deterministic_zip(dist, second)
 
             self.assertEqual(first_hash, second_hash)
@@ -305,11 +308,24 @@ class PackageReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(first) as archive:
                 names = archive.namelist()
                 self.assertTrue(names)
-                self.assertTrue(all(name.startswith(package_release.ARCHIVE_ROOT + "/") for name in names))
+                self.assertIn("Cowork/deepseek-cowork.exe", names)
+                self.assertTrue(all(name.startswith("Cowork/") and "__pycache__" not in name for name in names))
                 self.assertEqual(
                     archive.getinfo(names[0]).date_time,
                     package_release.FIXED_ZIP_TIMESTAMP,
                 )
+
+    def test_path_budget_counts_windows_utf16_units_and_preserves_existing_zip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dist = self._create_minimal_dist(root)
+            long_name = dist / ("𠀀" * 90 + ".txt")
+            long_name.write_text("fixture", encoding="utf-8")
+            output = root / "existing.zip"
+            output.write_bytes(b"previous release")
+            with self.assertRaisesRegex(package_release.PackageAuditError, "Windows path budget"):
+                package_release.create_deterministic_zip(dist, output)
+            self.assertEqual(output.read_bytes(), b"previous release")
 
     def test_package_release_writes_json_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:

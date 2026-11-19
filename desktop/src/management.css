@@ -105,6 +105,17 @@ body{font-family:var(--font-family);font-size:calc(14px * var(--font-scale))}
 
 
 .model-selection{max-height:330px;overflow:auto;margin:16px 0}.model-choice{display:flex;align-items:center;gap:12px;padding:12px 4px;border-bottom:1px solid var(--border-subtle,var(--border))}.model-choice small{display:block;color:var(--muted);margin-top:4px}.model-choice>div{min-width:0;overflow-wrap:anywhere}
+.model-service>.section-heading{gap:8px;flex-wrap:wrap;margin-bottom:8px}.model-service-title{min-width:0;overflow-wrap:anywhere}
+.model-service .model-row{gap:8px;padding:6px 0;min-height:44px}.model-service .model-row>div{min-width:0;overflow-wrap:anywhere}.model-service .model-row .error-text{color:var(--error)}
+.model-service-menu{position:relative;flex:none}.model-service-menu-items{position:absolute;inset:auto 0 auto auto;z-index:5;padding:4px;min-width:100px;border:1px solid var(--line);border-radius:8px;background:var(--bg);box-shadow:0 4px 16px #0001}
+.model-service-menu-items>button{width:100%;justify-content:flex-start;white-space:nowrap;padding:8px 10px;border-radius:6px}
+.native-dialog.model-service-delete p{margin:0 0 12px;overflow-wrap:anywhere}.model-service-delete label{display:grid;gap:6px}.model-service-delete select{min-width:0;width:100%}
+.model-service-delete>.button-row{justify-content:flex-end;margin-top:16px}.model-service-delete .delete-service-confirm:not(:disabled){background:var(--error);color:var(--on-primary)}
+.model-catalog{margin-block:16px}.model-catalog>.section-heading{margin-bottom:0;gap:8px;flex-wrap:wrap}
+.model-catalog .model-selection{margin:6px 0 12px}.model-catalog .model-choice{padding:8px;min-height:38px;cursor:pointer}
+.model-catalog .model-choice:hover,.model-catalog .model-choice:has(input:checked){background:var(--hover)}
+.model-catalog .model-choice>span{min-width:0;overflow-wrap:anywhere}.model-catalog .model-choice input{width:16px;height:16px;flex:0 0 16px;margin:0;padding:0;accent-color:var(--primary)}
+.model-catalog-actions{justify-content:flex-end;flex-wrap:wrap}
 
 
 .theme-preview-dialog{width:min(850px,90vw)}.theme-preview-dialog .theme-live-preview{min-height:300px;margin:18px 0;max-height:55vh;overflow:auto}.theme-preview-name{display:flex;gap:12px;align-items:center;margin:15px 0}.theme-preview-name input{flex:1;min-width:0}

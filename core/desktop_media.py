@@ -95,6 +95,9 @@ class DesktopMedia:
     def dispatch(self, method, p):
         runtime = self.acquire(existing=True)
         try:
+            if method in {"media.config", "media.validate"}:
+                with self.lock:
+                    return runtime.dispatch(method, p)
             return runtime.dispatch(method, p)
         finally:
             self.release()
@@ -121,7 +124,7 @@ class DesktopMedia:
             self.s.config.set("model_connection_tests", records)
         return result
 
-    def model_usage(self, profile):
+    def model_usage(self, profile, *, bindings=None):
         from core.llm.gateway_catalog import ENDPOINTS
         tested = self.connection_test(profile)
         if tested and tested["success"]:
@@ -129,12 +132,14 @@ class DesktopMedia:
         identity = hashlib.sha256(json.dumps([profile.get(key) for key in ("channel_id", "base_url", "model_name")]).encode()).hexdigest()
         with self.lock:
             known = copy.deepcopy(self.s.config.get("model_usage", {}))
-            if self.enabled:
+            if bindings is not None or self.enabled:
                 from core.multimedia import model_usage, configuration
-                fact = model_usage(profile, configuration(self.s.config)["bindings"])
-                if fact and known.get(identity) != fact:
-                    known[identity] = fact
-                    self.s.config.set("model_usage", known)
+                current = configuration(self.s.config)["bindings"] if bindings is None else bindings
+                if fact := model_usage(profile, current):
+                    if bindings is None and known.get(identity) != fact:
+                        known[identity] = fact
+                        self.s.config.set("model_usage", known)
+                    return fact
             if known.get(identity):
                 return copy.deepcopy(known[identity])
         endpoints = (profile.get("discovery") or {}).get("endpoints") or []

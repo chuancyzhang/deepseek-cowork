@@ -445,6 +445,10 @@ def discover_saved_gateway(source, api_key, *, base_url, cancelled=None):
         account.close()
 
 
+def gateway_channel_id(source, provider):
+    return f"{source['service_id']}-{source['key_id']}-{provider}"
+
+
 def channels_from_selection(results, selected, display_name):
     """Resolve UI selection to ordinary channels, keeping credentials separate."""
     channels = []
@@ -455,7 +459,7 @@ def channels_from_selection(results, selected, display_name):
                        and record["provider_type"] == provider and not record["discovery"].get("unsupported_reason")]
             if not records:
                 continue
-            channel_id = f"{source['service_id']}-{key_id}-{provider}"
+            channel_id = gateway_channel_id(source, provider)
             url = source["site_url"] + ("/v1" if provider == "openai" else "")
             channels.append({"channel_id": channel_id, "display_name": display_name, "provider_type": provider,
                              "base_url": url, "api_key": result["key"], "gateway_source": source,

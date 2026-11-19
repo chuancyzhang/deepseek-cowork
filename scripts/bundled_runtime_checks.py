@@ -101,7 +101,7 @@ from jupyter_client import AsyncKernelManager
 from jupyter_client.kernelspec import KernelSpecManager
 with tempfile.TemporaryDirectory() as temporary:
     spec = pathlib.Path(temporary) / 'cowork-python'; spec.mkdir()
-    (spec / 'kernel.json').write_text(json.dumps({'argv': [sys.executable, '-m', 'ipykernel_launcher', '-f', '{connection_file}'], 'display_name': 'Cowork Python', 'language': 'python'}), encoding='utf-8')
+    (spec / 'kernel.json').write_text(json.dumps({'argv': [sys.executable, '-B', '-m', 'ipykernel_launcher', '-f', '{connection_file}'], 'display_name': 'Cowork Python', 'language': 'python'}), encoding='utf-8')
     notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell('print(6 * 7)')])
     manager = AsyncKernelManager(kernel_name='cowork-python', kernel_spec_manager=KernelSpecManager(kernel_dirs=[temporary]))
     NotebookClient(notebook, km=manager, timeout=15, force_raise_errors=True).execute(cleanup_kc=True)
@@ -127,7 +127,8 @@ def validate_python_bundle(root: Path) -> dict:
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="probe-", dir=scratch) as directory:
         env.update(TEMP=directory, TMP=directory, MPLCONFIGDIR=directory,
-                   APPDATA=directory, LOCALAPPDATA=directory, USERPROFILE=directory)
+                   APPDATA=directory, LOCALAPPDATA=directory, USERPROFILE=directory,
+                   PYTHONDONTWRITEBYTECODE="1")
         result = subprocess.run(
             [str(root / "python.exe"), "-I", "-B", "-X", "utf8", "-c", PYTHON_BUNDLE_PROBE, json.dumps(versions)],
             cwd=directory, env=env, stdin=subprocess.DEVNULL, capture_output=True,

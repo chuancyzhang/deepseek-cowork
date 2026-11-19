@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ChevronRight, Copy, Download, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { Check, ChevronRight, Copy, Download, Ellipsis, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Empty, ErrorState, Field, JobProgress, PageHead, useFormDraft } from '../Management';
 import { operation, rpc } from '../managementApi';
 import GatewaySetup from './GatewaySetup';
+import ModelSelection from './ModelSelection';
+import Dialog from '../Dialog';
 import { ThemeSample } from '../ThemePreview';
 import type { Settings } from '../types';
 import { useHostField } from '../host/context';
@@ -23,44 +25,168 @@ export default function Preferences(props: Props) {
 function Models(props: Props) {
   const { settings, updateSettings, onError, confirm } = props;
   const [channels, setChannels] = useState<any[]>([]), [edit, setEdit] = useState<any>(null), [failure, setFailure] = useState('');
-  const [accountSetup, setAccountSetup] = useState(false);
-  const reload = useCallback(() => Promise.all([rpc('settings.channels'),rpc('settings.get')]).then(([channels,settings])=>{setChannels(channels);updateSettings(settings);}).catch(error => setFailure(error.message)), [updateSettings]);
-  useEffect(() => { void reload(); }, [reload]);
+  const [accountSetup, setAccountSetup] = useState(false), [loading, setLoading] = useState(true);
+  const [menu, setMenu] = useState(''), [checking, setChecking] = useState(''), [deletion, setDeletion] = useState<ChannelDeletion | null>(null);
+  const pendingLoad = useRef(0);
+  const reload = useCallback(async () => {
+    const request = ++pendingLoad.current;
+    try {
+      const [channels, settings] = await Promise.all([rpc('settings.channels'), rpc('settings.get')]);
+      if (request === pendingLoad.current) {setChannels(channels);updateSettings(settings);setFailure('');}
+    } catch (error) {if (request === pendingLoad.current) setFailure((error as Error).message);}
+    finally {if (request === pendingLoad.current) setLoading(false);}
+  }, [updateSettings]);
+  useEffect(() => {void reload();return () => {pendingLoad.current++;};}, [reload]);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const deleteFocus = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const closeOutside = (event: PointerEvent) => {if (!menuRef.current?.contains(event.target as Node)) setMenu('');};
+    const close = () => setMenu('');
+    document.addEventListener('pointerdown', closeOutside);
+    window.addEventListener('blur', close);
+    return () => {document.removeEventListener('pointerdown', closeOutside);window.removeEventListener('blur', close);};
+  }, [menu]);
+  async function previewDeletion(channelId: string, trigger: HTMLButtonElement | null) {
+    deleteFocus.current = trigger;
+    setMenu('');setChecking(channelId);
+    try {setDeletion(await rpc<ChannelDeletion>('settings.channel_delete_preview', {channel_id:channelId}));}
+    catch (error) {onError((error as Error).message);await reload();}
+    finally {setChecking('');}
+  }
+  function closeDeletion() {
+    setDeletion(null);
+    requestAnimationFrame(() => deleteFocus.current?.focus());
+  }
   if (accountSetup) return <GatewaySetup back={() => {setAccountSetup(false); void reload();}} saved={updateSettings} confirm={confirm}/>;
   if (edit) return <ModelForm {...props} item={edit} back={() => { setEdit(null); void reload(); }}/>;
-  return <><PageHead compact title="模型与服务" detail="在熟悉的服务中选择模型。企业模型会随登录状态同步。"><button className="secondary" onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
+  const byId = new Map(settings?.models.map(model => [model.id, model]));
+  return <><PageHead compact title="模型与服务"><button className="secondary" disabled={Boolean(checking)} onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" disabled={Boolean(checking)} onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
     {failure && <ErrorState message={failure} retry={() => void reload()}/>}
-    {!settings?.models.length && <Empty title="连接第一个模型" detail="填写服务地址和 API Key 后，即可开始对话。"/>}
-    {channels.map(channel => <section className="settings-section" key={channel.channel_id}><div className="section-heading"><h3>{channel.display_name}</h3><button className="secondary" onClick={() => setEdit(channel)}><Pencil size={15}/>编辑服务</button></div>
-      {channel.models.map((model: any) => <div className="model-row" key={model.id}><div><strong>{model.display_name || model.model_name}</strong><small>{model.model_name} · {channel.configured ? '已配置凭据' : '需要 API Key'}</small><small>{settings?.models.find(item=>item.id===model.id)?.connection_test?.message || '尚未测试对话接口'}</small><small>能力：{settings?.models.find(item=>item.id===model.id)?.purpose_label || '服务未提供能力声明'}</small></div>
-        {settings?.selected_model_id === model.id ? <span className="subtle-badge"><Check size={12}/>当前使用</span> : <button className="secondary" onClick={async () => { try { updateSettings(await rpc('settings.select_model', { model_id: model.id })); } catch (error) { onError((error as Error).message); } }}>使用</button>}
-        <button className="icon-button" title="删除模型" onClick={async () => { if (await confirm('删除这个模型？', '已有对话仍然保留，可以选择其他模型继续。', ['取消', '删除']) === 1) { try { updateSettings(await rpc('settings.delete_model', { id: model.id })); await reload(); } catch (error) { onError((error as Error).message); } } }}><Trash2 size={16}/></button>
-      </div>)}</section>)}
+    {loading && !channels.length && <p className="muted" role="status">正在读取服务…</p>}
+    {!loading && !failure && !channels.length && !settings?.models.length && <Empty title="连接第一个模型" detail="填写服务地址和 API Key 后，即可开始对话。"/>}
+    {channels.map(channel => {
+      const open = menu === channel.channel_id;
+      return <section className="settings-section model-service" key={channel.channel_id}>
+        <div className="section-heading"><div className="model-service-title"><h3>{channel.display_name}</h3>
+          {!channel.configured && <small className="muted">需要 API Key</small>}
+        </div><div className="button-row">
+          <button className="secondary" disabled={Boolean(checking)} onClick={() => {setMenu('');setEdit(channel);}}><Pencil size={15}/>编辑服务</button>
+          <div className="model-service-menu" ref={open ? menuRef : undefined} onBlur={event => {if (!event.currentTarget.contains(event.relatedTarget)) setMenu('');}}
+            onKeyDown={event => {if (open && event.key === 'Escape') {event.stopPropagation();setMenu('');event.currentTarget.querySelector('button')?.focus();}}}>
+            <button className="icon-button" title="服务操作" aria-label={channel.display_name + ' 服务操作'} aria-expanded={open}
+              disabled={Boolean(checking)} onClick={() => setMenu(open ? '' : channel.channel_id)}>
+              {checking === channel.channel_id ? <LoaderCircle size={16} className="spin"/> : <Ellipsis size={17}/>}
+            </button>
+            {open && <div className="model-service-menu-items"><button className="error-text" onClick={() => void previewDeletion(channel.channel_id, menuRef.current?.querySelector('button') || null)}>删除服务</button></div>}
+          </div>
+        </div></div>
+        {!channel.models.length && <p className="muted">还没有模型</p>}
+        {channel.models.map((model: any) => {
+          const status = byId.get(model.id), name = model.display_name || model.model_name;
+          return <div className="model-row" key={model.id}><div><strong>{name}</strong>
+            {name !== model.model_name && <small>{model.model_name}</small>}
+            {status?.connection_test?.success === false && <small className="error-text">{status.connection_test.message}</small>}
+          </div>
+            {settings?.selected_model_id === model.id ? <span className="subtle-badge"><Check size={12}/>当前使用</span>
+              : status?.chat_supported === false ? <small>{status.purpose_label}</small>
+              : channel.configured ? <button className="secondary" onClick={async () => {try {updateSettings(await rpc('settings.select_model', {model_id:model.id}));} catch (error) {onError((error as Error).message);}}}>使用</button> : <span/>}
+            <button className="icon-button" title="删除模型" aria-label={`删除模型 ${name}`} onClick={async () => {
+              if (await confirm('删除这个模型？', '已有对话仍然保留，可以选择其他模型继续。', ['取消', '删除']) !== 1) return;
+              try {updateSettings(await rpc('settings.delete_model', {id:model.id}));await reload();} catch (error) {onError((error as Error).message);}
+            }}><Trash2 size={16}/></button>
+          </div>;
+        })}
+      </section>;
+    })}
     {settings?.models.filter(model => model.id.startsWith('enterprise:')).map(model => <div className="model-row" key={model.id}><div><strong>{model.display_name}</strong><small>{model.channel_display_name}</small></div><button className="secondary" onClick={async () => updateSettings(await rpc('settings.select_model', { model_id: model.id }))}>使用</button></div>)}
     <button className="secondary" onClick={async () => { try { const value = await rpc('dialog.import_settings'); if (value) { updateSettings(value); await reload(); } } catch (error) { onError((error as Error).message); } }}><Download size={15}/>导入模型设置</button>
+    {deletion && <DeleteChannel preview={deletion} close={closeDeletion} saved={async (settings) => {updateSettings(settings);setDeletion(null);await reload();}}/>}
   </>;
+}
+
+type ChannelDeletion = {
+  channel_id: string; name: string; model_count: number; configured: boolean; media: string[]; disable_media: boolean;
+  removes_default: boolean; replacements: {id: string; label: string}[]; revision: string;
+};
+
+function DeleteChannel({preview, close, saved}: {preview: ChannelDeletion; close: () => void; saved: (settings: Settings) => Promise<void>}) {
+  const [impact, setImpact] = useState(preview), [replacement, setReplacement] = useState('');
+  const [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
+  async function remove() {
+    setBusy(true);setFailure('');
+    try {
+      await saved(await rpc('settings.channel_delete', {channel_id:impact.channel_id, revision:impact.revision, replacement_model_id:replacement}));
+    } catch (error) {setFailure((error as Error).message);}
+    finally {setBusy(false);}
+  }
+  async function refresh() {
+    setBusy(true);
+    try {setImpact(await rpc('settings.channel_delete_preview', {channel_id:impact.channel_id}));setReplacement('');setFailure('');}
+    catch (error) {setFailure((error as Error).message);}
+    finally {setBusy(false);}
+  }
+  return <Dialog title={`删除服务「${impact.name}」？`} className="model-service-delete" onClose={() => {if (!busy) close();}}>
+    <p>{`从本机移除服务、${impact.model_count} 个模型${impact.configured ? '和 API Key' : ''}。聊天记录和已生成文件保留。`}</p>
+    {impact.media.length > 0 && <p>{impact.disable_media ? '该服务的多媒体配置会移除，多媒体将停用。' : impact.media.join('、') + '将变为未配置。'} 未完成的多媒体任务可能无法继续查询。</p>}
+    {impact.removes_default && (impact.replacements.length ? <Field label="新的默认模型">
+      <select value={replacement} disabled={busy} onChange={event => setReplacement(event.target.value)}>
+        <option value="" disabled>选择模型</option>{impact.replacements.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+      </select>
+    </Field> : <p>删除后将没有默认模型。</p>)}
+    {failure && <><ErrorState message={failure}/><button type="button" className="text-link" disabled={busy} onClick={() => void refresh()}>重新核对</button></>}
+    <div className="button-row"><button className="secondary" autoFocus disabled={busy} onClick={close}>取消</button>
+      <button className="primary delete-service-confirm" disabled={busy || Boolean(failure) || Boolean(impact.replacements.length && !replacement)} onClick={() => void remove()}>{busy ? '处理中…' : '删除'}</button>
+    </div>
+  </Dialog>;
 }
 
 function ModelForm({ item, back, onDirty, updateSettings, confirm }: Props & { item: any; back: () => void }) {
   const form = useFormDraft('channel:' + (item.channel_id || 'new'), { display_name: '', base_url: '', provider_type: 'openai', api_key: '', ...item }, onDirty, ['api_key']);
   const v = form.value, set = (key: string, value: any) => form.change({ ...v, [key]: value });
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
-  const [job, setJob] = useState<any>(null), [catalog, setCatalog] = useState<any[]>([]), [chosen, setChosen] = useState<string[]>([]), [testResult, setTestResult] = useState('');
-  async function discover() {setBusy(true);setFailure('');try {const result=await operation('models.discover',{channel:v},setJob);setCatalog(result.models);setChosen(result.models.filter((model:any)=>!v.models.some((existing:any)=>existing.model_name===model.model_name)).map((model:any)=>model.model_name));}catch(error){setFailure((error as Error).message);}finally{setBusy(false);setJob(null);}}
+  const [job, setJob] = useState<any>(null), [catalog, setCatalog] = useState<any[] | null>(null), [chosen, setChosen] = useState<string[]>([]), [testResult, setTestResult] = useState('');
+  const names = new Set<string>(v.models.map((model: any) => model.model_name?.trim()));
+  const available = (catalog || []).filter(model => !names.has(model.model_name));
+  const getModelsRef = useRef<HTMLButtonElement>(null), saveRef = useRef<HTMLButtonElement>(null);
+  const catalogRef = useRef<HTMLDivElement>(null);
+  const focusAfterCatalog = useRef<'get' | 'save' | null>(null);
+  useEffect(() => {
+    if (catalog || !focusAfterCatalog.current) return;
+    (focusAfterCatalog.current === 'save' ? saveRef : getModelsRef).current?.focus();
+    focusAfterCatalog.current = null;
+  }, [catalog]);
+  useEffect(() => {
+    if (catalog && !busy) catalogRef.current?.querySelector('button')?.focus();
+  }, [catalog,busy]);
+  function closeCatalog(focus: 'get' | 'save') {focusAfterCatalog.current = focus;setCatalog(null);setChosen([]);}
+  async function discover() {
+    setBusy(true);setFailure('');
+    try {
+      const result = await operation('models.discover', {channel:v}, setJob);
+      setCatalog([...new Map<string, any>(result.models.map((model: any) => [model.model_name, model])).values()]);
+      setChosen([]);
+    } catch (error) {setFailure((error as Error).message);}
+    finally {setBusy(false);setJob(null);}
+  }
   const latestValue=useRef(v);latestValue.current=v;
   async function test(model:any) {const tested=v;setBusy(true);setFailure('');setTestResult('');try{await operation('models.test',{channel:tested,model},setJob);setTestResult(latestValue.current===tested?(model.display_name || model.model_name)+'：对话接口测试通过':'测试已完成，配置已修改，请重新测试。');updateSettings(await rpc('settings.get'));}catch(error){setFailure((error as Error).message);}finally{setBusy(false);setJob(null);}}
   useEffect(()=>setTestResult(''),[v]);
   const add = () => set('models', [...v.models, { id: crypto.randomUUID(), display_name: '', model_name: '', api_protocol: 'chat_completions', supports_vision: false }]);
   const changeModel = (index: number, values: any) => set('models', v.models.map((model: any, i: number) => i === index ? { ...model, ...values } : model));
   async function leave() { if (!form.dirty || await confirm('保留编辑草稿？', '普通字段会保留。API Key 不写入草稿，下次需要重新填写。', ['继续编辑', '返回']) === 1) back(); }
-  return <><PageHead title={item.channel_id ? '编辑模型服务' : '添加模型服务'} back={() => void leave()}/><form className="detail-form" onSubmit={async e => { e.preventDefault(); setBusy(true); setFailure(''); try {
-    updateSettings(await rpc('settings.channel_save', { value: v })); form.done(); back();
+  return <><PageHead title={item.channel_id ? '编辑模型服务' : '添加模型服务'} back={() => void leave()}/><form className="detail-form" onSubmit={async e => { e.preventDefault(); if (busy || catalog) return; setBusy(true); setFailure(''); try {
+    updateSettings(await rpc('settings.channel_save', {value:v, existing:Boolean(item.channel_id)}));form.done();back();
   } catch (error) { setFailure((error as Error).message); } finally { setBusy(false); } }}><div className="form-grid">
     <Field label="服务名称"><input required value={v.display_name} onChange={e => set('display_name', e.target.value)}/></Field><Field label="服务类型"><select value={v.provider_type} onChange={e => set('provider_type', e.target.value)}><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option></select></Field>
     <Field label="接口地址" wide><input type="url" required value={v.base_url} onChange={e => set('base_url', e.target.value)} placeholder="https://api.deepseek.com"/></Field>
     <Field label="API Key" wide help={item.configured ? '留空保留现有凭据。' : undefined}><input type="password" autoComplete="off" required={!item.configured} value={v.api_key} onChange={e => set('api_key', e.target.value)}/></Field>
-  </div><JobProgress job={job}/><div className="section-heading"><h3>可用模型</h3><div className="button-row"><button type="button" className="secondary" disabled={busy} onClick={() => void discover()}><RefreshCw size={15}/>获取模型</button><button type="button" className="secondary" onClick={add}><Plus size={15}/>手动添加</button></div></div>
-  {catalog.length > 0 && <section className="settings-section"><div className="model-selection">{catalog.map(model=><label className="model-choice" key={model.model_name}><input type="checkbox" checked={chosen.includes(model.model_name)} onChange={()=>setChosen(previous=>previous.includes(model.model_name)?previous.filter(name=>name!==model.model_name):[...previous,model.model_name])}/><span>{model.model_name}</span></label>)}</div><div className="button-row"><button type="button" className="secondary" onClick={()=>setCatalog([])}>取消</button><button type="button" className="secondary" onClick={()=>{set('models',[...v.models,...catalog.filter(model=>chosen.includes(model.model_name)&&!v.models.some((existing:any)=>existing.model_name===model.model_name))]);setCatalog([]);}}>添加所选模型</button></div></section>}
+  </div><JobProgress job={job}/>
+  {catalog ? <div ref={catalogRef}><ModelSelection choices={available.map(model => ({key:model.model_name, name:model.model_name}))} disabled={busy} selected={chosen} onChange={setChosen}
+    cancel={<button type="button" className="secondary" onClick={() => closeCatalog('get')}>取消</button>}
+    onAdd={keys => {const picked = new Set(keys);set('models',[...v.models,...available.filter(model => picked.has(model.model_name))]);closeCatalog('save');}}/></div>
+    : <div className="section-heading"><h3>可用模型</h3><div className="button-row"><button ref={getModelsRef} type="button" className="secondary" disabled={busy} onClick={() => void discover()}><RefreshCw size={15}/>获取模型</button><button type="button" className="secondary" onClick={add}><Plus size={15}/>手动添加</button></div></div>}
+  <div hidden={Boolean(catalog)}>
   {v.models.map((model: any, index: number) => <fieldset className="model-config" key={model.id}><legend>{model.display_name || model.model_name || '新模型'}</legend><div className="form-grid">
     <Field label="显示名称"><input value={model.display_name || ''} onChange={e => changeModel(index, { display_name: e.target.value })}/></Field><Field label="模型标识"><input required value={model.model_name} onChange={e => changeModel(index, { model_name: e.target.value })}/></Field>
     <Field label="接口协议"><select value={model.api_protocol || 'chat_completions'} onChange={e => changeModel(index, { api_protocol: e.target.value })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option><option value="anthropic">Anthropic Messages</option></select></Field>
@@ -70,7 +196,7 @@ function ModelForm({ item, back, onDirty, updateSettings, confirm }: Props & { i
     <details className="wide"><summary>上下文与生成设置</summary><div className="form-grid"><Field label="上下文上限"><input type="number" min={1} value={model.context_length || ''} onChange={e => changeModel(index, { context_length: e.target.value ? +e.target.value : undefined })}/></Field><Field label="最大输出"><input type="number" min={1} value={model.max_tokens || ''} onChange={e => changeModel(index, { max_tokens: e.target.value ? +e.target.value : undefined })}/></Field><Field label="温度"><input type="number" min={0} max={2} step={.1} value={model.temperature ?? ''} onChange={e => changeModel(index, { temperature: e.target.value ? +e.target.value : undefined })}/></Field></div></details>
   </div><div className="button-row"><button type="button" className="secondary" disabled={busy} onClick={() => void test(model)}>测试当前配置</button><button type="button" className="secondary" onClick={() => set('models', v.models.filter((_: any, i: number) => i !== index))}><Trash2 size={15}/>移除</button></div></fieldset>)}
   {testResult && <p role="status">{testResult}</p>}
-  {failure && <ErrorState message={failure}/>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button className="primary" disabled={busy}><Check size={16}/>保存服务</button></div></form></>;
+  {failure && <ErrorState message={failure}/>}<div className="form-actions"><button type="button" className="secondary" onClick={() => void leave()}>返回</button><button ref={saveRef} className="primary" disabled={busy || Boolean(catalog)}><Check size={16}/>保存服务</button></div></div></form></>;
 }
 
 function AppearanceEntry(){const c=useWorkbench();return <><PageHead compact title="外观与阅读" detail="在创造模式中统一设计主题、阅读样式和工作台。"/><button className="primary" onClick={()=>void c.enterCreation('themes').catch(reason=>c.error(reason.message))}>打开创造模式</button></>;}

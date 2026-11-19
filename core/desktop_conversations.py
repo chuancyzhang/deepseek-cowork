@@ -495,7 +495,10 @@ class ConversationRuntime:
                 if existing["conversation_id"] != cid or accepted.get("input_hash") != input_hash:
                     raise ValueError("请求标识已用于另一条消息，请重新发送。")
                 return {"accepted": True, "run": self.public_run(existing), "draft": self.store.versioned_state("draft:" + cid)}
-            profile = self.config.get_model_profile(p.get("model_id"))
+            requested_model = str(p.get("model_id") or "").strip()
+            profile = self.config.get_model_profile(requested_model)
+            if requested_model and (not profile or profile["id"] != requested_model):
+                raise ValueError("所选模型已不可用，请在输入区重新选择。输入与附件已保留。")
             if not profile or not profile.get("api_key"):
                 raise ValueError("请先在“模型与服务”中填写 API Key，或导入现有设置。输入内容已保留。")
             usage = self.model_usage(profile)
@@ -602,7 +605,7 @@ class ConversationRuntime:
                 raise ValueError("任务不属于当前对话。补充内容已保留。")
             accepted = json.loads(run["payload"])
             profile = self.config.get_model_profile(accepted["model_id"])
-            if not profile:
+            if not profile or profile["id"] != accepted["model_id"]:
                 raise ValueError("本轮模型配置已不可用，请停止后重新选择模型。补充内容已保留。")
             preferences = accepted.get("preferences") or {}
             from core.desktop_submission import user_payload

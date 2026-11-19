@@ -34,6 +34,7 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", kwargs["env"])
             self.assertNotIn("PYTHONHOME", kwargs["env"])
             self.assertNotIn("site-packages", kwargs["env"]["PATH"])
+            self.assertEqual(kwargs["env"]["PYTHONDONTWRITEBYTECODE"], "1")
 
     def test_data_analysis_versions_reject_incomplete_lock(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -55,6 +55,8 @@ module.exports = [
   "mcp.test",
   "settings.channel_save",
   "settings.channels",
+  "settings.channel_delete_preview",
+  "settings.channel_delete",
   "settings.delete_model",
   "settings.general",
   "skills.configure",
